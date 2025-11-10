@@ -106,7 +106,7 @@ impl Directory for OpLogDirectory {
                 id: child_node_id,
                 node_type: child_node_type,
             };
-            let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
+            let node_ref = NodeRef::new(Arc::new(Mutex::new(node)));
 
             let name_bound = name;
             let child_node_id_bound = format!("{}", child_node_id);
@@ -244,7 +244,7 @@ impl Directory for OpLogDirectory {
                         id: child_node_id,
                         node_type: child_node_type,
                     };
-                    let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
+                    let node_ref = NodeRef::new(Arc::new(Mutex::new(node)));
                     entry_results.push(Ok((name, node_ref)));
                 }
                 Err(e) => {

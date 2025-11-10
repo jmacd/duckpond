@@ -385,10 +385,10 @@ impl crate::query::QueryableFile for OpLogFile {
     /// instead of duplicating DataFusion setup logic.
     async fn as_table_provider(
         &self,
-        node_id: tinyfs::NodeID,
-        part_id: tinyfs::NodeID,
-        state: &crate::persistence::State,
-    ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError>
+        node_id: NodeID,
+        part_id: NodeID,
+        state: &State,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError>
     {
         log::info!(
             "📋 DELEGATING OpLogFile to create_listing_table_provider: node_id={}, part_id={}",
@@ -405,7 +405,7 @@ impl crate::query::QueryableFile for OpLogFile {
 pub async fn create_table_provider_for_multiple_urls(
     urls: Vec<String>,
     tx: &mut crate::transaction_guard::TransactionGuard<'_>,
-) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
     log::info!(
         "📋 CREATING TableProvider for multiple URLs: {} files",
         urls.len()

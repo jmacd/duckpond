@@ -108,7 +108,7 @@ impl DynamicDirDirectory {
 
     /// Create a DirHandle from this dynamic directory
     pub fn create_handle(self) -> DirHandle {
-        tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+        DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 
     /// Create a node for a specific entry using its configured factory
@@ -160,7 +160,7 @@ impl DynamicDirDirectory {
         id_bytes.extend_from_slice(&config_bytes);
         let node_id = tinyfs::NodeID::from_content(&id_bytes);
 
-        let node_ref = tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
+        let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
             id: node_id,
             node_type,
         })));

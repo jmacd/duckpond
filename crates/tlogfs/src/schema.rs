@@ -39,7 +39,7 @@ impl ExtendedAttributes {
 
     /// Set timestamp column name (defaults to "Timestamp" if not set)
     pub fn set_timestamp_column(&mut self, column_name: &str) -> &mut Self {
-        self.attributes.insert(
+        _ = self.attributes.insert(
             duckpond::TIMESTAMP_COLUMN.to_string(),
             column_name.to_string(),
         );
@@ -62,11 +62,11 @@ impl ExtendedAttributes {
         max_override: Option<i64>,
     ) -> &mut Self {
         if let Some(min) = min_override {
-            self.attributes
+            _ = self.attributes
                 .insert(duckpond::MIN_TEMPORAL_OVERRIDE.to_string(), min.to_string());
         }
         if let Some(max) = max_override {
-            self.attributes
+            _ = self.attributes
                 .insert(duckpond::MAX_TEMPORAL_OVERRIDE.to_string(), max.to_string());
         }
         self
@@ -92,7 +92,7 @@ impl ExtendedAttributes {
 
     /// Set/get raw attributes (for future extensibility)
     pub fn set_raw(&mut self, key: &str, value: &str) -> &mut Self {
-        self.attributes.insert(key.to_string(), value.to_string());
+        _ = self.attributes.insert(key.to_string(), value.to_string());
         self
     }
 
@@ -103,7 +103,7 @@ impl ExtendedAttributes {
 
     /// Create from a HashMap of arbitrary attributes
     #[must_use]
-    pub fn from_map(attributes: std::collections::HashMap<String, String>) -> Self {
+    pub fn from_map(attributes: HashMap<String, String>) -> Self {
         Self { attributes }
     }
 }

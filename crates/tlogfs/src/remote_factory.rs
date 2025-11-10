@@ -902,7 +902,7 @@ async fn create_backup_bundle(
                 .ok_or_else(|| TLogFSError::ArrowMessage("Delta log is empty".to_string()))?;
 
             let commit_value =
-                serde_json::from_str::<serde_json::Value>(last_line).map_err(|e| {
+                serde_json::from_str::<Value>(last_line).map_err(|e| {
                     TLogFSError::ArrowMessage(format!("Failed to parse Delta log JSON: {}", e))
                 })?;
 
@@ -1601,7 +1601,7 @@ pub fn extract_txn_seq_from_bundle(files: &[ExtractedFile]) -> Result<i64, TLogF
         .last()
         .ok_or_else(|| TLogFSError::ArrowMessage("Delta commit log is empty".to_string()))?;
 
-    let commit_value = serde_json::from_str::<serde_json::Value>(last_line).map_err(|e| {
+    let commit_value = serde_json::from_str::<Value>(last_line).map_err(|e| {
         TLogFSError::ArrowMessage(format!("Failed to parse Delta commit log JSON: {}", e))
     })?;
 

@@ -95,7 +95,7 @@ impl TemplateDirectory {
     /// Create a DirHandle from this template directory
     #[must_use]
     pub fn create_handle(self) -> tinyfs::DirHandle {
-        tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+        tinyfs::DirHandle::new(Arc::new(Mutex::new(Box::new(self))))
     }
 }
 
@@ -130,7 +130,7 @@ impl Directory for TemplateDirectory {
                 let template_file =
                     TemplateFile::new(template_content, self.context.clone(), captured);
 
-                let node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
+                let node_ref = NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
                     node_type: tinyfs::NodeType::File(template_file.create_handle()),
                 })));
@@ -197,7 +197,7 @@ impl Directory for TemplateDirectory {
                 let template_file =
                     TemplateFile::new(template_content, self.context.clone(), captured);
 
-                let new_node_ref = tinyfs::NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
+                let new_node_ref = NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
                     id: tinyfs::NodeID::generate(),
                     node_type: tinyfs::NodeType::File(template_file.create_handle()),
                 })));
@@ -405,7 +405,7 @@ fn create_template_directory(
     config: Value,
     context: FactoryContext,
 ) -> TinyFSResult<tinyfs::DirHandle> {
-    let spec: TemplateSpec = serde_json::from_value(config)
+    let spec: TemplateSpec = from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
 
     let template_dir = TemplateDirectory::new(spec, context.clone());
@@ -497,8 +497,8 @@ fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
 }
 
 fn tmpl_to_json(
-    value: &tera::Value,
-    _: &std::collections::HashMap<String, tera::Value>,
+    value: &Value,
+    _: &HashMap<String, Value>,
 ) -> Result<Value, Error> {
     debug!("to_json filter called with value: {:?}", value);
     let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
@@ -511,7 +511,7 @@ fn tmpl_to_json(
         "null".to_string()
     });
     debug!("to_json filter returning: {}", json_string);
-    Ok(tera::Value::String(json_string))
+    Ok(Value::String(json_string))
 }
 
 /// Count the number of levels in an error chain

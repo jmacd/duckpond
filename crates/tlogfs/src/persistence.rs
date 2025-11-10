@@ -53,16 +53,16 @@ pub struct State {
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
     /// Transaction-scoped cache for dynamic nodes
     dynamic_node_cache:
-        Arc<std::sync::Mutex<std::collections::HashMap<DynamicNodeKey, tinyfs::NodeType>>>,
+        Arc<std::sync::Mutex<HashMap<DynamicNodeKey, NodeType>>>,
     /// Template variables for CLI variable expansion - mutable shared state
-    template_variables: Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
+    template_variables: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
     /// Cache for TableProvider instances to avoid repeated ListingTable creation and schema inference
     /// Key: (node_id, part_id, version_selection) -> TableProvider with temporal filtering
     table_provider_cache: Arc<
         std::sync::Mutex<
-            std::collections::HashMap<
+            HashMap<
                 TableProviderKey,
-                std::sync::Arc<dyn datafusion::catalog::TableProvider>,
+                Arc<dyn datafusion::catalog::TableProvider>,
             >,
         >,
     >,
@@ -279,7 +279,7 @@ impl OpLogPersistence {
                 .initialize_root_directory()
                 .await?;
 
-            tx.commit().await.map_err(TLogFSError::TinyFS)?;
+            _ = tx.commit().await.map_err(TLogFSError::TinyFS)?;
         } else {
             // Opening existing table - load last_txn_seq from Delta commit metadata
             // This is the authoritative source (not the control table, which is Steward's)
@@ -480,7 +480,7 @@ impl OpLogPersistence {
     ) -> Result<Vec<(String, String, i64)>, TLogFSError> {
         // Create SessionContext and register the oplog table
         let ctx = SessionContext::new();
-        ctx.register_table("oplog", Arc::new(self.table.clone()))
+        _ = ctx.register_table("oplog", Arc::new(self.table.clone()))
             .map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to register oplog table: {}", e))
             })?;
@@ -642,7 +642,7 @@ impl State {
         node_id: NodeID,
         part_id: NodeID,
         content_ref: crate::file_writer::ContentRef,
-        file_type: tinyfs::EntryType,
+        file_type: EntryType,
         metadata: crate::file_writer::FileMetadata,
     ) -> Result<(), TLogFSError> {
         self.inner
@@ -722,7 +722,7 @@ impl PersistenceLayer for State {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-    ) -> TinyFSResult<std::path::PathBuf> {
+    ) -> TinyFSResult<PathBuf> {
         self.inner
             .lock()
             .await
@@ -734,7 +734,7 @@ impl PersistenceLayer for State {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-        target: &std::path::Path,
+        target: &Path,
     ) -> TinyFSResult<()> {
         self.inner
             .lock()
@@ -768,7 +768,7 @@ impl PersistenceLayer for State {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-        target: &std::path::Path,
+        target: &Path,
     ) -> TinyFSResult<NodeType> {
         self.inner
             .lock()
@@ -929,7 +929,7 @@ impl PersistenceLayer for State {
 impl State {
     /// Track a directory as created in this transaction (for deferred storage decision)
     pub async fn track_created_directory(&self, node_id: NodeID) {
-        self.inner.lock().await.created_directories.insert(node_id);
+        _ = self.inner.lock().await.created_directories.insert(node_id);
     }
 
     /// Get the shared DataFusion SessionContext
@@ -951,7 +951,7 @@ impl State {
 
     /// Get cached dynamic node by key (for dynamic directory factory)
     #[must_use]
-    pub fn get_dynamic_node_cache(&self, key: &DynamicNodeKey) -> Option<tinyfs::NodeType> {
+    pub fn get_dynamic_node_cache(&self, key: &DynamicNodeKey) -> Option<NodeType> {
         self.dynamic_node_cache
             .lock()
             .expect("Failed to acquire dynamic node cache lock")
@@ -960,8 +960,8 @@ impl State {
     }
 
     /// Set cached dynamic node by key (for dynamic directory factory)
-    pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: tinyfs::NodeType) {
-        self.dynamic_node_cache
+    pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: NodeType) {
+        _ = self.dynamic_node_cache
             .lock()
             .expect("Failed to acquire dynamic node cache lock")
             .insert(key, value);
@@ -972,7 +972,7 @@ impl State {
     pub fn get_table_provider_cache(
         &self,
         key: &TableProviderKey,
-    ) -> Option<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+    ) -> Option<Arc<dyn datafusion::catalog::TableProvider>> {
         self.table_provider_cache
             .lock()
             .expect("Failed to acquire table provider cache lock")
@@ -984,9 +984,9 @@ impl State {
     pub fn set_table_provider_cache(
         &self,
         key: TableProviderKey,
-        value: std::sync::Arc<dyn datafusion::catalog::TableProvider>,
+        value: Arc<dyn datafusion::catalog::TableProvider>,
     ) {
-        self.table_provider_cache
+        _ = self.table_provider_cache
             .lock()
             .expect("Failed to acquire table provider cache lock")
             .insert(key, value);
@@ -998,8 +998,8 @@ impl State {
     pub async fn get_temporal_overrides_for_node_id(
         &self,
         // @@@ weird choices
-        node_id: &tinyfs::NodeID,
-        part_id: tinyfs::NodeID,
+        node_id: &NodeID,
+        part_id: NodeID,
     ) -> Result<Option<(i64, i64)>, TLogFSError> {
         debug!(
             "🔍 TEMPORAL: Looking up temporal overrides for node_id: {node_id}, part_id: {part_id}"
@@ -1155,7 +1155,7 @@ impl InnerState {
 
         // Register the fundamental delta_table for direct DeltaTable queries
         debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
-        ctx.register_table("delta_table", Arc::new(table.clone()))
+        _ = ctx.register_table("delta_table", Arc::new(table.clone()))
             .map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to register delta_table: {}", e))
             })?;
@@ -1177,7 +1177,7 @@ impl InnerState {
     /// This registers the TinyFS ObjectStore which requires a State reference
     async fn complete_session_setup(
         &self,
-        state: &crate::persistence::State,
+        state: &State,
     ) -> Result<(), TLogFSError> {
         // Register the TinyFS ObjectStore with the context
         let _object_store =
@@ -1204,7 +1204,7 @@ impl InnerState {
         let root_entry = OplogEntry::new_inline(
             root_node_id,
             root_node_id,
-            tinyfs::EntryType::DirectoryPhysical,
+            EntryType::DirectoryPhysical,
             now,
             1, // First version of root directory node
             content,
@@ -1242,7 +1242,7 @@ impl InnerState {
         node_id: NodeID,
         part_id: NodeID,
         result: crate::large_files::HybridWriterResult,
-        entry_type: tinyfs::EntryType,
+        entry_type: EntryType,
     ) -> Result<(), TLogFSError> {
         let entry = if result.size < crate::large_files::LARGE_FILE_THRESHOLD {
             // Small file: store content directly in Delta Lake
@@ -1263,7 +1263,7 @@ impl InnerState {
             let now = Utc::now().timestamp_micros();
 
             match entry_type {
-                tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
+                EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
                     // For FileSeries, extract temporal metadata from Parquet content
                     use super::schema::{
                         ExtendedAttributes, detect_timestamp_column,
@@ -1331,7 +1331,7 @@ impl InnerState {
 
                     // Create extended attributes with timestamp column info
                     let mut extended_attrs = ExtendedAttributes::default();
-                    extended_attrs.set_timestamp_column(&time_col);
+                    _ = extended_attrs.set_timestamp_column(&time_col);
 
                     // Create large FileSeries entry with temporal metadata and size
                     OplogEntry::new_large_file_series(
@@ -1372,7 +1372,7 @@ impl InnerState {
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],
-        entry_type: tinyfs::EntryType,
+        entry_type: EntryType,
     ) -> Result<(), TLogFSError> {
         use crate::large_files::should_store_as_large_file;
 
@@ -1399,7 +1399,7 @@ impl InnerState {
         node_id: NodeID,
         part_id: NodeID,
         content: &[u8],
-        entry_type: tinyfs::EntryType,
+        entry_type: EntryType,
     ) -> Result<(), TLogFSError> {
         let now = Utc::now().timestamp_micros();
         let entry = OplogEntry::new_small_file(
@@ -1495,7 +1495,7 @@ impl InnerState {
         // Get the next version number for this node
         let next_version = self.get_next_version_for_node(node_id, part_id).await?; // First, read the Parquet data to extract temporal metadata
         let bytes = Bytes::from(content.to_vec());
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
             .map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to create Parquet reader: {}", e))
             })?
@@ -1538,7 +1538,7 @@ impl InnerState {
 
         // Create extended attributes with timestamp column info
         let mut extended_attrs = ExtendedAttributes::default();
-        extended_attrs.set_timestamp_column(&time_col);
+        _ = extended_attrs.set_timestamp_column(&time_col);
 
         // Store the FileSeries using the unified hybrid writer pattern
         use crate::large_files::should_store_as_large_file;
@@ -1670,7 +1670,7 @@ impl InnerState {
             }
         } else {
             Err(TLogFSError::NodeNotFound {
-                path: std::path::PathBuf::from(format!("File {node_id} not found")),
+                path: PathBuf::from(format!("File {node_id} not found")),
             })
         }
     }
@@ -1754,7 +1754,7 @@ impl InnerState {
         node_id: NodeID,
         part_id: NodeID,
         content_ref: crate::file_writer::ContentRef,
-        file_type: tinyfs::EntryType,
+        file_type: EntryType,
         metadata: crate::file_writer::FileMetadata,
     ) -> Result<(), TLogFSError> {
         debug!(
@@ -1762,7 +1762,7 @@ impl InnerState {
         );
 
         // Create OplogEntry from content reference
-        let now = chrono::Utc::now().timestamp_micros();
+        let now = Utc::now().timestamp_micros();
 
         // Get proper version number for this node
         // Check if there's already an entry for this node in this transaction
@@ -1794,8 +1794,8 @@ impl InnerState {
             crate::file_writer::ContentRef::Small(content) => {
                 // Small file: store content inline
                 match file_type {
-                    tinyfs::EntryType::FileSeriesPhysical
-                    | tinyfs::EntryType::FileSeriesDynamic => {
+                    EntryType::FileSeriesPhysical
+                    | EntryType::FileSeriesDynamic => {
                         // FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series {
@@ -1805,9 +1805,9 @@ impl InnerState {
                             } => {
                                 use crate::schema::ExtendedAttributes;
                                 let mut extended_attrs = ExtendedAttributes::default();
-                                extended_attrs.set_timestamp_column(&timestamp_column);
+                                _ = extended_attrs.set_timestamp_column(&timestamp_column);
 
-                                super::schema::OplogEntry::new_file_series(
+                                OplogEntry::new_file_series(
                                     part_id,
                                     node_id,
                                     now,
@@ -1828,7 +1828,7 @@ impl InnerState {
                     }
                     _ => {
                         // Regular small file
-                        super::schema::OplogEntry::new_small_file(
+                        OplogEntry::new_small_file(
                             part_id, node_id, file_type, now,
                             version, // Use proper version counter
                             content, txn_seq,
@@ -1839,8 +1839,8 @@ impl InnerState {
             crate::file_writer::ContentRef::Large(sha256, size) => {
                 // Large file: store reference
                 match file_type {
-                    tinyfs::EntryType::FileSeriesPhysical
-                    | tinyfs::EntryType::FileSeriesDynamic => {
+                    EntryType::FileSeriesPhysical
+                    | EntryType::FileSeriesDynamic => {
                         // Large FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series {
@@ -1850,9 +1850,9 @@ impl InnerState {
                             } => {
                                 use crate::schema::ExtendedAttributes;
                                 let mut extended_attrs = ExtendedAttributes::default();
-                                extended_attrs.set_timestamp_column(&timestamp_column);
+                                _ = extended_attrs.set_timestamp_column(&timestamp_column);
 
-                                super::schema::OplogEntry::new_large_file_series(
+                                OplogEntry::new_large_file_series(
                                     part_id,
                                     node_id,
                                     now,
@@ -1875,7 +1875,7 @@ impl InnerState {
                     }
                     _ => {
                         // Regular large file
-                        super::schema::OplogEntry::new_large_file(
+                        OplogEntry::new_large_file(
                             part_id,
                             node_id,
                             file_type,
@@ -1950,7 +1950,7 @@ impl InnerState {
         // Process in forward order so later entries (newer transactions) take precedence
         for entry in all_entries {
             if !seen_names.contains(&entry.name) {
-                seen_names.insert(entry.name.clone());
+                _ = seen_names.insert(entry.name.clone());
                 if matches!(
                     entry.operation_type,
                     OperationType::Insert | OperationType::Update
@@ -2117,7 +2117,7 @@ impl InnerState {
                 let record = OplogEntry::new_inline(
                     part_id,
                     part_id,
-                    tinyfs::EntryType::DirectoryPhysical,
+                    EntryType::DirectoryPhysical,
                     now,
                     version,
                     content_bytes,
@@ -2150,7 +2150,7 @@ impl InnerState {
             let record = OplogEntry::new_inline(
                 node_id,
                 node_id,
-                tinyfs::EntryType::DirectoryPhysical,
+                EntryType::DirectoryPhysical,
                 now,
                 version,
                 Vec::new(), // 0 bytes for truly empty directory
@@ -2190,7 +2190,7 @@ impl InnerState {
 
         // Add directory operation for parent
         let directory_op =
-            DirectoryOperation::InsertWithType(node_id, tinyfs::EntryType::DirectoryDynamic);
+            DirectoryOperation::InsertWithType(node_id, EntryType::DirectoryDynamic);
         self.update_directory_entry(part_id, &name, directory_op)
             .await
             .map_err(TLogFSError::TinyFS)?;
@@ -2203,7 +2203,7 @@ impl InnerState {
         &mut self,
         part_id: NodeID,
         name: String,
-        file_type: tinyfs::EntryType,
+        file_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<NodeID, TLogFSError> {
@@ -2315,7 +2315,7 @@ impl InnerState {
             })?;
 
         let entry = match entry_type {
-            tinyfs::EntryType::DirectoryDynamic => OplogEntry::new_dynamic_directory(
+            EntryType::DirectoryDynamic => OplogEntry::new_dynamic_directory(
                 part_id,
                 node_id,
                 now,
@@ -2445,7 +2445,7 @@ impl InnerState {
                 node_factory::create_directory_node(node_id, state)
             } else {
                 // Node doesn't exist in database or pending transactions
-                Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!(
+                Err(tinyfs::Error::NotFound(PathBuf::from(format!(
                     "Node {} not found",
                     node_id_str
                 ))))
@@ -2485,7 +2485,7 @@ impl InnerState {
             } else {
                 // Node doesn't exist
                 Err(TLogFSError::TinyFS(tinyfs::Error::NotFound(
-                    std::path::PathBuf::from(format!("Node {} not found", node_id_str)),
+                    PathBuf::from(format!("Node {} not found", node_id_str)),
                 )))
             }
         }
@@ -2503,7 +2503,7 @@ impl InnerState {
 
         // Create OplogEntry based on node type
         let (file_type, content) = match node_type {
-            tinyfs::NodeType::File(file_handle) => {
+            NodeType::File(file_handle) => {
                 let file_content = tinyfs::buffer_helpers::read_file_to_vec(file_handle)
                     .await
                     .map_err(|e| tinyfs::Error::Other(format!("File content error: {}", e)))?;
@@ -2540,7 +2540,7 @@ impl InnerState {
 
                 (metadata.entry_type, file_content)
             }
-            tinyfs::NodeType::Directory(_) => {
+            NodeType::Directory(_) => {
                 // Check if this directory has pending operations in this transaction
                 // If so, skip creating an empty entry - flush_directory_operations will create v0 with content
                 // This matches the file pattern where empty content is skipped
@@ -2558,15 +2558,15 @@ impl InnerState {
                     "TRANSACTION: store_node() - directory {} is empty leaf, creating 0-byte entry",
                     node_id
                 );
-                (tinyfs::EntryType::DirectoryPhysical, Vec::new())
+                (EntryType::DirectoryPhysical, Vec::new())
             }
-            tinyfs::NodeType::Symlink(symlink_handle) => {
+            NodeType::Symlink(symlink_handle) => {
                 let target = symlink_handle
                     .readlink()
                     .await
                     .map_err(|e| tinyfs::Error::Other(format!("Symlink readlink error: {}", e)))?;
                 let target_bytes = target.to_string_lossy().as_bytes().to_vec();
-                (tinyfs::EntryType::Symlink, target_bytes)
+                (EntryType::Symlink, target_bytes)
             }
         };
 
@@ -2631,11 +2631,11 @@ impl InnerState {
             match entry.operation_type {
                 OperationType::Insert | OperationType::Update => {
                     if let Ok(child_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                        current_state.insert(entry.name, (child_id, entry.entry_type));
+                        _ = current_state.insert(entry.name, (child_id, entry.entry_type));
                     }
                 }
                 OperationType::Delete => {
-                    current_state.remove(&entry.name);
+                    _ = current_state.remove(&entry.name);
                 }
             }
         }
@@ -2647,28 +2647,28 @@ impl InnerState {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-    ) -> TinyFSResult<std::path::PathBuf> {
+    ) -> TinyFSResult<PathBuf> {
         let records = self
             .query_records(part_id, node_id)
             .await
             .map_err(error_utils::to_tinyfs_error)?;
 
         if let Some(record) = records.first() {
-            if record.file_type == tinyfs::EntryType::Symlink {
+            if record.file_type == EntryType::Symlink {
                 let content = record.content.clone().ok_or_else(|| {
                     tinyfs::Error::Other("Symlink content is missing".to_string())
                 })?;
                 let target_str = String::from_utf8(content).map_err(|e| {
                     tinyfs::Error::Other(format!("Invalid UTF-8 in symlink target: {}", e))
                 })?;
-                Ok(std::path::PathBuf::from(target_str))
+                Ok(PathBuf::from(target_str))
             } else {
                 Err(tinyfs::Error::Other(
                     "Expected symlink node type".to_string(),
                 ))
             }
         } else {
-            Err(tinyfs::Error::NotFound(std::path::PathBuf::from(format!(
+            Err(tinyfs::Error::NotFound(PathBuf::from(format!(
                 "Symlink {node_id} not found"
             ))))
         }
@@ -2678,10 +2678,10 @@ impl InnerState {
         &mut self,
         node_id: NodeID,
         part_id: NodeID,
-        target: &std::path::Path,
+        target: &Path,
     ) -> TinyFSResult<()> {
         let symlink_handle = tinyfs::memory::MemorySymlink::new_handle(target.to_path_buf());
-        let node_type = tinyfs::NodeType::Symlink(symlink_handle);
+        let node_type = NodeType::Symlink(symlink_handle);
         self.store_node(node_id, part_id, &node_type).await
     }
 
@@ -2689,7 +2689,7 @@ impl InnerState {
         &mut self,
         node_id: NodeID,
         part_id: NodeID,
-        entry_type: tinyfs::EntryType,
+        entry_type: EntryType,
         state: State,
     ) -> TinyFSResult<NodeType> {
         // Create file node in memory only - no immediate persistence
@@ -2708,7 +2708,7 @@ impl InnerState {
         &mut self,
         node_id: NodeID,
         part_id: NodeID,
-        target: &std::path::Path,
+        target: &Path,
         state: State,
     ) -> TinyFSResult<NodeType> {
         // Store the target immediately
@@ -2722,7 +2722,7 @@ impl InnerState {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-    ) -> TinyFSResult<tinyfs::NodeMetadata> {
+    ) -> TinyFSResult<NodeMetadata> {
         let node_id_str = node_id.to_string();
         let part_id_str = part_id.to_string();
 
@@ -2833,7 +2833,7 @@ impl InnerState {
         );
 
         // All operations must now include node type - no legacy conversion
-        dir_ops.insert(entry_name.to_string(), operation);
+        _ = dir_ops.insert(entry_name.to_string(), operation);
         Ok(())
     }
 
@@ -2842,7 +2842,7 @@ impl InnerState {
         &self,
         node_id: NodeID,
         part_id: NodeID,
-    ) -> TinyFSResult<Vec<tinyfs::FileVersionInfo>> {
+    ) -> TinyFSResult<Vec<FileVersionInfo>> {
         debug!("list_file_versions called for node_id={node_id}, part_id={part_id}");
         let mut records = self
             .query_records(part_id, node_id)
@@ -2873,8 +2873,8 @@ impl InnerState {
                     if let (Some(min_time), Some(max_time)) =
                         (record.min_event_time, record.max_event_time)
                     {
-                        metadata.insert("min_event_time".to_string(), min_time.to_string());
-                        metadata.insert("max_event_time".to_string(), max_time.to_string());
+                        _ = metadata.insert("min_event_time".to_string(), min_time.to_string());
+                        _ = metadata.insert("max_event_time".to_string(), max_time.to_string());
                     }
                     if let Some(attrs) = &record.extended_attributes {
                         metadata.insert("extended_attributes".to_string(), attrs.clone());
@@ -2884,7 +2884,7 @@ impl InnerState {
                     None
                 };
 
-                tinyfs::FileVersionInfo {
+		FileVersionInfo {
                     version: logical_version,
                     timestamp: record.timestamp,
                     size: size as u64, // Cast back to u64 for tinyfs interface
@@ -2919,7 +2919,7 @@ impl InnerState {
                     .into_iter()
                     .find(|record| record.version == v as i64)
                     .ok_or_else(|| {
-                        tinyfs::Error::NotFound(std::path::PathBuf::from(format!(
+                        tinyfs::Error::NotFound(PathBuf::from(format!(
                             "Version {} of file {} not found",
                             v, node_id
                         )))
@@ -2928,7 +2928,7 @@ impl InnerState {
             None => {
                 // Return latest version (last record after sorting by timestamp ASC)
                 records.into_iter().last().ok_or_else(|| {
-                    tinyfs::Error::NotFound(std::path::PathBuf::from(format!(
+                    tinyfs::Error::NotFound(PathBuf::from(format!(
                         "No versions of file {} found",
                         node_id
                     )))
@@ -2949,7 +2949,7 @@ impl InnerState {
                     tinyfs::Error::Other(format!("Error searching for large file: {}", e))
                 })?
                 .ok_or_else(|| {
-                    tinyfs::Error::NotFound(std::path::PathBuf::from(format!(
+                    tinyfs::Error::NotFound(PathBuf::from(format!(
                         "Large file with SHA256 {} not found",
                         sha256
                     )))
@@ -3110,7 +3110,7 @@ impl InnerState {
         &mut self,
         part_id: NodeID,
         name: String,
-        file_type: tinyfs::EntryType,
+        file_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> TinyFSResult<NodeID> {
@@ -3129,7 +3129,7 @@ mod serialization {
     /// Generic serialization function for Arrow IPC format
     pub fn serialize_to_arrow_ipc<T>(items: &[T]) -> Result<Vec<u8>, TLogFSError>
     where
-        T: Clone + crate::schema::ForArrow + serde::Serialize,
+        T: Clone + ForArrow + serde::Serialize,
     {
         let batch = serde_arrow::to_record_batch(&T::for_arrow(), &items.to_vec())?;
 
@@ -3260,10 +3260,10 @@ mod node_factory {
         node_id: NodeID,
         part_id: NodeID,
         state: State,
-        _target: &std::path::Path, // @@@ WHY UNUSED?
+        _target: &Path, // @@@ WHY UNUSED?
     ) -> Result<NodeType, tinyfs::Error> {
-        let oplog_symlink = super::super::symlink::OpLogSymlink::new(node_id, part_id, state);
-        let symlink_handle = super::super::symlink::OpLogSymlink::create_handle(oplog_symlink);
+        let oplog_symlink = OpLogSymlink::new(node_id, part_id, state);
+        let symlink_handle = OpLogSymlink::create_handle(oplog_symlink);
         Ok(NodeType::Symlink(symlink_handle))
     }
 
@@ -3288,22 +3288,22 @@ mod node_factory {
 
         // Handle static nodes (traditional TLogFS nodes)
         match oplog_entry.file_type {
-            tinyfs::EntryType::FileDataPhysical
-            | tinyfs::EntryType::FileDataDynamic
-            | tinyfs::EntryType::FileTablePhysical
-            | tinyfs::EntryType::FileTableDynamic
-            | tinyfs::EntryType::FileSeriesPhysical
-            | tinyfs::EntryType::FileSeriesDynamic => {
+            EntryType::FileDataPhysical
+            | EntryType::FileDataDynamic
+            | EntryType::FileTablePhysical
+            | EntryType::FileTableDynamic
+            | EntryType::FileSeriesPhysical
+            | EntryType::FileSeriesDynamic => {
                 let oplog_file = crate::file::OpLogFile::new(node_id, part_id, state);
                 let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
                 Ok(NodeType::File(file_handle))
             }
-            tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
+            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => {
                 let oplog_dir = OpLogDirectory::new(node_id, state);
                 let dir_handle = OpLogDirectory::create_handle(oplog_dir);
                 Ok(NodeType::Directory(dir_handle))
             }
-            tinyfs::EntryType::Symlink => {
+            EntryType::Symlink => {
                 let oplog_symlink = OpLogSymlink::new(node_id, part_id, state);
                 let symlink_handle = OpLogSymlink::create_handle(oplog_symlink);
                 Ok(NodeType::Symlink(symlink_handle))
@@ -3343,7 +3343,7 @@ mod node_factory {
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
-            tinyfs::EntryType::DirectoryDynamic => {
+            EntryType::DirectoryDynamic => {
                 let dir_handle = FactoryRegistry::create_directory(
                     factory_type,
                     config_content,

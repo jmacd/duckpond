@@ -166,7 +166,7 @@ impl FactoryContext {
     pub async fn create_cache_key(
         &self,
         entry_name: &str,
-    ) -> Result<crate::persistence::DynamicNodeKey, crate::TLogFSError> {
+    ) -> Result<crate::persistence::DynamicNodeKey, TLogFSError> {
         Ok(crate::persistence::DynamicNodeKey::new(
             self.parent_node_id,
             entry_name.to_string(),
@@ -193,7 +193,7 @@ pub struct DynamicFactory {
 
     pub validate_config: fn(config: &[u8]) -> TinyFSResult<Value>,
 
-    pub try_as_queryable: Option<fn(&dyn tinyfs::File) -> Option<&dyn QueryableFile>>,
+    pub try_as_queryable: Option<fn(&dyn File) -> Option<&dyn QueryableFile>>,
 
     pub initialize: Option<
         fn(

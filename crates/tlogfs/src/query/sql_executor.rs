@@ -71,7 +71,7 @@ pub async fn execute_sql_on_file<'a>(
                                 ))
                             })?;
                         match parent_node_path.1 {
-                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                            Lookup::Found(parent_node) => parent_node.id().await,
                             _ => tinyfs::NodeID::root(),
                         }
                     };
@@ -178,7 +178,7 @@ pub async fn get_file_schema(
                                 ))
                             })?;
                         match parent_node_path.1 {
-                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                            Lookup::Found(parent_node) => parent_node.id().await,
                             _ => tinyfs::NodeID::root(),
                         }
                     };

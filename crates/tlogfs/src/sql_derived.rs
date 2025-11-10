@@ -48,7 +48,7 @@ use tokio::io::AsyncWrite;
 
 /// Helper function to convert a File trait object to QueryableFile trait object
 /// Uses both the factory registry system and direct type checking for non-factory types
-pub fn try_as_queryable_file(file: &dyn tinyfs::File) -> Option<&dyn QueryableFile> {
+pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn QueryableFile> {
     use crate::factory::DYNAMIC_FACTORIES;
     use crate::file::OpLogFile;
     use crate::temporal_reduce::TemporalReduceSqlFile;
@@ -132,7 +132,7 @@ impl SqlDerivedFile {
 
     #[must_use]
     pub fn create_handle(self) -> FileHandle {
-        tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+        FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 
     // Create ListingTable using TinyFS ObjectStore from the provided SessionContext
@@ -158,7 +158,7 @@ impl SqlDerivedFile {
         Vec<(
             tinyfs::NodeID,
             tinyfs::NodeID,
-            Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>,
+            Arc<tokio::sync::Mutex<Box<dyn File>>>,
         )>,
     > {
         // STEP 1: Build TinyFS from State (transaction context from FactoryContext)
@@ -515,7 +515,7 @@ impl SqlDerivedFile {
         queryable_files: &[(
             tinyfs::NodeID,
             tinyfs::NodeID,
-            Arc<tokio::sync::Mutex<Box<dyn tinyfs::File>>>,
+            Arc<tokio::sync::Mutex<Box<dyn File>>>,
         )],
     ) -> Result<String, crate::error::TLogFSError> {
         use std::collections::hash_map::DefaultHasher;
@@ -548,7 +548,7 @@ impl SqlDerivedFile {
 
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
-impl crate::query::QueryableFile for SqlDerivedFile {
+impl QueryableFile for SqlDerivedFile {
     /// Create TableProvider for SqlDerivedFile using DataFusion's ViewTable
     ///
     /// This approach creates a ViewTable that wraps the SqlDerivedFile's SQL query,
@@ -558,7 +558,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
         node_id: tinyfs::NodeID,
         part_id: tinyfs::NodeID,
         state: &crate::persistence::State,
-    ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError>
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError>
     {
         // Check cache first for SqlDerivedFile ViewTable
         let cache_key = crate::persistence::TableProviderKey::new(
@@ -591,7 +591,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
         );
 
         // Create mapping from user pattern names to unique internal table names
-        let mut table_mappings = std::collections::HashMap::new();
+        let mut table_mappings = HashMap::new();
 
         // Register each pattern as a table in the session context
         for (pattern_name, pattern) in &self.get_config().patterns {
@@ -599,12 +599,12 @@ impl crate::query::QueryableFile for SqlDerivedFile {
             // since source files can be created by factories (Dynamic) or direct uploads (Physical)
             let entry_types = match self.get_mode() {
                 SqlDerivedMode::Table => vec![
-                    tinyfs::EntryType::FileTablePhysical,
-                    tinyfs::EntryType::FileTableDynamic,
+                    EntryType::FileTablePhysical,
+                    EntryType::FileTableDynamic,
                 ],
                 SqlDerivedMode::Series => vec![
-                    tinyfs::EntryType::FileSeriesPhysical,
-                    tinyfs::EntryType::FileSeriesDynamic,
+                    EntryType::FileSeriesPhysical,
+                    EntryType::FileSeriesDynamic,
                 ],
             };
             debug!(
@@ -893,7 +893,7 @@ impl crate::query::QueryableFile for SqlDerivedFile {
         );
 
         let view_table = ViewTable::new(logical_plan, Some(effective_sql));
-        let table_provider = std::sync::Arc::new(view_table);
+        let table_provider = Arc::new(view_table);
 
         // Cache the ViewTable for future reuse
         state.set_table_provider_cache(cache_key, table_provider.clone());
@@ -917,7 +917,7 @@ mod tests {
     fn get_string_array(
         batch: &arrow::record_batch::RecordBatch,
         column_index: usize,
-    ) -> std::sync::Arc<arrow::array::StringArray> {
+    ) -> Arc<arrow::array::StringArray> {
         use arrow::datatypes::DataType;
         use arrow_cast::cast;
 
@@ -946,7 +946,7 @@ mod tests {
         // Get table provider
         let state_ref = tx_guard.state()?;
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state_ref)
+            .as_table_provider(NodeID::root(), NodeID::root(), &state_ref)
             .await?;
 
         debug!("execute_sql_derived_direct: Got table provider");
@@ -1837,7 +1837,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state)
+            .as_table_provider(NodeID::root(), NodeID::root(), &state)
             .await
             .unwrap();
 
@@ -1897,7 +1897,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state)
+            .as_table_provider(NodeID::root(), NodeID::root(), &state)
             .await
             .unwrap();
 
@@ -1960,7 +1960,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state)
+            .as_table_provider(NodeID::root(), NodeID::root(), &state)
             .await
             .unwrap();
 
@@ -2028,7 +2028,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::NodeID::root(), tinyfs::NodeID::root(), &state)
+            .as_table_provider(NodeID::root(), NodeID::root(), &state)
             .await
             .unwrap();
 
@@ -3070,7 +3070,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Get the file we just created
-        let fs = tinyfs::FS::new(state.clone()).await.unwrap();
+        let fs = FS::new(state.clone()).await.unwrap();
         let root_node = fs.root().await.unwrap();
         let file_lookup = root_node.resolve_path("/test_data.parquet").await.unwrap();
 
@@ -3228,7 +3228,7 @@ query: ""
             let debug_state = tx_guard.state().unwrap();
 
             // Now test the pattern matching and QueryableFile access
-            let fs = tinyfs::FS::new(debug_state.clone()).await.unwrap();
+            let fs = FS::new(debug_state.clone()).await.unwrap();
             let root_node = fs.root().await.unwrap();
             let pattern_matches = root_node
                 .collect_matches("/sensors/wildcard_test/*")

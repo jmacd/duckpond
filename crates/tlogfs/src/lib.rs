@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 //! TLogFS - A filesystem implementation using Delta Lake for storage
 //!
 //! Set RUST_LOG environment variable to control logging:
@@ -6,16 +8,16 @@
 //! - RUST_LOG=debug - detailed diagnostics
 //! - RUST_LOG=tlogfs=debug - debug only tlogfs crate
 
-// Core schema and data structures
+/// Core schema and data structures
 pub mod schema;
 
-// Delta Lake integration
+/// Delta Lake integration
 pub mod delta;
 
-// Large file storage utilities
+/// Large file storage utilities
 pub mod large_files;
 
-// Persistence layer implementation
+/// Persistence layer implementation
 pub mod persistence;
 
 // Transaction guard implementation

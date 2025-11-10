@@ -119,7 +119,7 @@ pub struct TemporalReduceConfig {
 pub struct TemporalReduceSqlFile {
     config: TemporalReduceConfig,
     duration: Duration,
-    source_node: tinyfs::NodeRef,
+    source_node: NodeRef,
     source_path: String, // For SQL pattern reference
     context: FactoryContext,
     // Lazy-initialized actual SQL file
@@ -131,7 +131,7 @@ impl TemporalReduceSqlFile {
     pub fn new(
         config: TemporalReduceConfig,
         duration: Duration,
-        source_node: tinyfs::NodeRef,
+        source_node: NodeRef,
         source_path: String,
         context: FactoryContext,
     ) -> Self {
@@ -189,7 +189,7 @@ impl TemporalReduceSqlFile {
         // Get the file handle from the node and access the file - following CLI pattern
         let node_guard = self.source_node.lock().await;
         let table_provider = match &node_guard.node_type {
-            tinyfs::NodeType::File(file_handle) => {
+            NodeType::File(file_handle) => {
                 let file_arc = file_handle.get_file().await;
                 let file_guard = file_arc.lock().await;
 
@@ -369,15 +369,15 @@ impl tinyfs::File for TemporalReduceSqlFile {
 
 #[async_trait]
 impl tinyfs::Metadata for TemporalReduceSqlFile {
-    async fn metadata(&self) -> tinyfs::Result<tinyfs::NodeMetadata> {
+    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
         // Return lightweight metadata without expensive schema discovery
         // This allows list operations to be fast - schema discovery is deferred
         // until actual content access (as_table_provider, async_reader, etc.)
-        Ok(tinyfs::NodeMetadata {
+        Ok(NodeMetadata {
             version: 1,
             size: None,   // Unknown until SQL is generated and data computed
             sha256: None, // Unknown until SQL is generated and data computed
-            entry_type: tinyfs::EntryType::FileSeriesDynamic, // Temporal reduce always creates series files
+            entry_type: EntryType::FileSeriesDynamic, // Temporal reduce always creates series files
             timestamp: 0,                                     // Use epoch time for dynamic content
         })
     }
@@ -608,7 +608,7 @@ impl TemporalReduceDirectory {
     }
 
     /// Get source node by path from discovered source files
-    async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<tinyfs::NodeRef> {
+    async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<NodeRef> {
         let fs = tinyfs::FS::new(self.context.state.clone())
             .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
@@ -656,8 +656,8 @@ impl TemporalReduceDirectory {
 
     /// Create a DirHandle from this temporal reduce directory
     #[must_use]
-    pub fn create_handle(self) -> tinyfs::DirHandle {
-        tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+    pub fn create_handle(self) -> DirHandle {
+        DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 }
 
@@ -668,7 +668,7 @@ impl Directory for TemporalReduceDirectory {
         let source_files = self.discover_source_files().await?;
 
         // Group source files by output_name - reuse same logic as entries()
-        let mut sites = std::collections::HashMap::new();
+        let mut sites = HashMap::new();
         for (source_path, output_name) in source_files {
             sites.insert(output_name, source_path);
         }
@@ -709,7 +709,7 @@ impl Directory for TemporalReduceDirectory {
         };
 
         // Group source files by output_name to create directory structure
-        let mut sites = std::collections::HashMap::new();
+        let mut sites = HashMap::new();
         for (source_path, output_name) in source_files {
             sites.insert(output_name, source_path);
         }
@@ -1134,7 +1134,7 @@ in_pattern: "/hydrovu/*"
             .unwrap();
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
-        let context = crate::factory::FactoryContext::new(state, tinyfs::NodeID::root());
+        let context = FactoryContext::new(state, tinyfs::NodeID::root());
 
         // Create the directory
         let directory = TemporalReduceDirectory::new(config, context).unwrap();

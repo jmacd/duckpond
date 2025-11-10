@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 //! Steward - Secondary filesystem for monitoring and post-commit actions
 //!
 //! The steward manages a primary "data" filesystem and a secondary "control" filesystem,

@@ -550,7 +550,7 @@ mod tests {
 
         // Now extract just the metadata without decompressing all files
         let extracted_metadata =
-            super::extract_bundle_metadata(store.clone(), &bundle_path).await?;
+            extract_bundle_metadata(store.clone(), &bundle_path).await?;
 
         // Verify the extracted metadata matches what we created
         // NOTE: compressed_size won't match because it's set after the bundle is written,

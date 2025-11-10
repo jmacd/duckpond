@@ -200,7 +200,7 @@ impl TestEnvironment {
     pub async fn transaction<F, Fut, T>(&mut self, f: F) -> TestResult<T>
     where
         F: FnOnce(&mut TransactionGuard<'_>) -> Fut,
-        Fut: std::future::Future<Output = TestResult<T>>,
+        Fut: Future<Output = TestResult<T>>,
     {
         let mut guard = self.persistence.begin_test().await?;
         let result = f(&mut guard).await?;
