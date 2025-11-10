@@ -1,11 +1,10 @@
 //! Schema definitions for Arrow integration
 
-use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
+use arrow::datatypes::{DataType, FieldRef, TimeUnit};
 use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Trait for converting data structures to Arrow and Delta Lake schemas
 ///

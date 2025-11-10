@@ -142,7 +142,7 @@ impl FS {
     pub async fn create_directory(&self) -> Result<NodeRef> {
         let id = NodeID::generate();
         let node_type = self.persistence.create_directory_node(id).await?;
-        let node = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node { node_type, id })));
+        let node = NodeRef::new(Arc::new(Mutex::new(Node { node_type, id })));
         Ok(node)
     }
 

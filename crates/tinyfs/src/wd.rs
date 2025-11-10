@@ -1,8 +1,6 @@
 use crate::EntryType;
 use crate::dir::*;
 use crate::error::*;
-use crate::file::*;
-use crate::fs::*;
 use crate::glob::*;
 use crate::node::*;
 use crate::symlink::*;
@@ -14,11 +12,11 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::dir::Directory;
 use crate::file::File;
+use crate::fs::FS;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -95,10 +93,7 @@ impl WD {
         T: Into<NodeType>,
     {
         let node_type = node_creator().into();
-        let node = self
-            .fs
-            .create_node(NodeID::root(), node_type)
-            .await?;
+        let node = self.fs.create_node(NodeID::root(), node_type).await?;
         self.dref.insert(name.to_string(), node.clone()).await?;
         Ok(NodePath {
             node,
@@ -514,7 +509,7 @@ impl WD {
                                     NodeType::Symlink(ref link) => {
                                         let (newsz, relp) =
                                             crate::path::normalize(link.readlink().await?, &stack)?;
-                                        if depth >= symlink::SYMLINK_LOOP_LIMIT {
+                                        if depth >= SYMLINK_LOOP_LIMIT {
                                             return Err(Error::symlink_loop(
                                                 link.readlink().await?,
                                             ));
@@ -1279,9 +1274,7 @@ mod tests {
             .expect("Failed to create test_dir");
 
         // Now resolve the parent of "/test_dir" which should be "/"
-        let parent_path = Path::new("/test_dir")
-            .parent()
-            .unwrap_or(Path::new("/"));
+        let parent_path = Path::new("/test_dir").parent().unwrap_or(Path::new("/"));
 
         let (parent_wd, parent_lookup) = root
             .resolve_path(parent_path)

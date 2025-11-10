@@ -150,11 +150,7 @@ pub mod convenience {
 /// A simple buffering async writer that executes a closure on completion
 pub struct SimpleBufferedWriter<F>
 where
-    F: FnOnce(
-            Vec<u8>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
-        + Send,
+    F: FnOnce(Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>> + Send,
 {
     buffer: Vec<u8>,
     completion_fn: Option<F>,
@@ -163,11 +159,7 @@ where
 
 impl<F> SimpleBufferedWriter<F>
 where
-    F: FnOnce(
-            Vec<u8>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
-        + Send,
+    F: FnOnce(Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>> + Send,
 {
     pub fn new(completion_fn: F) -> Self {
         Self {
@@ -180,10 +172,7 @@ where
 
 impl<F> AsyncWrite for SimpleBufferedWriter<F>
 where
-    F: FnOnce(
-            Vec<u8>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
+    F: FnOnce(Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
         + Send
         + 'static,
 {
@@ -192,7 +181,7 @@ where
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-	// @@@ WHAT UNSAFE
+        // @@@ WHAT UNSAFE
         let this = unsafe { self.get_unchecked_mut() };
         this.buffer.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
@@ -206,7 +195,7 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-	// @@@ WHAT UNSAFE
+        // @@@ WHAT UNSAFE
         let this = unsafe { self.get_unchecked_mut() };
 
         // Start the completion task if not already started

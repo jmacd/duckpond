@@ -1,6 +1,5 @@
 use crate::async_helpers::convenience;
 use crate::error::Result;
-use crate::fs::FS;
 use crate::memory::new_fs;
 use crate::wd::*;
 use async_trait::async_trait;

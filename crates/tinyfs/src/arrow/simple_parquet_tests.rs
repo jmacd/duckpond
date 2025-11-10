@@ -3,7 +3,7 @@
 use crate::EntryType;
 use crate::arrow::SimpleParquetExt;
 use crate::memory::new_fs;
-use arrow_array::{RecordBatch, record_batch};
+use arrow_array::record_batch;
 
 #[tokio::test]
 async fn test_parquet_roundtrip() -> Result<(), Box<dyn std::error::Error>> {

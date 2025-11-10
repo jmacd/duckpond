@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
-use tokio::sync::Mutex;
 
 /// Trait that combines AsyncRead and AsyncSeek for random access file operations
 pub trait AsyncReadSeek: AsyncRead + AsyncSeek + Send + Unpin {}

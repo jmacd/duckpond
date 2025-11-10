@@ -2,7 +2,6 @@ use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use crate::EntryType;
 use crate::dir::Pathed;

@@ -8,7 +8,6 @@ use futures::stream::{self, Stream};
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 /// Represents a directory backed by a BTreeMap
 /// This implementation stores directory entries in memory and is suitable for

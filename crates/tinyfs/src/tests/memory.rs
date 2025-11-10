@@ -1,6 +1,5 @@
 use super::super::memory::new_fs;
 use crate::error::Error;
-use crate::fs::FS;
 use crate::path::normalize;
 use crate::path::strip_root;
 
@@ -389,9 +388,7 @@ impl crate::wd::Visitor<Vec<u8>> for FileContentVisitor {
         let reader = file_node.async_reader().await?;
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await
-            .map_err(|e| {
-                Error::Other(format!("Failed to read file content: {}", e))
-            })?;
+            .map_err(|e| Error::Other(format!("Failed to read file content: {}", e)))?;
         self.contents.push(content.clone());
         Ok(content)
     }

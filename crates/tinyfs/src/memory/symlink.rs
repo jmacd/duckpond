@@ -5,7 +5,6 @@ use crate::symlink::{Handle, Symlink};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 /// Represents a symbolic link to another path
 /// This implementation stores the target path in memory and is suitable for

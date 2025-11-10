@@ -6,7 +6,7 @@ use crate::EntryType;
 use crate::arrow::{ForArrow, ParquetExt};
 use crate::memory::new_fs;
 use arrow::datatypes::{DataType, Field, FieldRef};
-use arrow_array::{RecordBatch, record_batch};
+use arrow_array::record_batch;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

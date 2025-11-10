@@ -1,5 +1,4 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
+#![allow(missing_docs)]
 
 pub mod arrow;
 pub mod async_helpers; // New helper module for reducing duplication

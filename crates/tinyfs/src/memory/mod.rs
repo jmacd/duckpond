@@ -20,11 +20,6 @@ pub use file::MemoryFile;
 pub use persistence::MemoryPersistence;
 pub use symlink::MemorySymlink;
 
-use crate::error::{Error, Result};
-use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
 /// Create a new memory-based filesystem using the persistence layer architecture
 pub async fn new_fs() -> super::FS {
     let memory_persistence = MemoryPersistence::default();
