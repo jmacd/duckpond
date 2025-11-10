@@ -173,6 +173,7 @@ impl<F> AsyncWrite for SimpleBufferedWriter<F>
 where
     F: FnOnce(Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
         + Send
+        + Unpin
         + 'static,
 {
     fn poll_write(
@@ -203,11 +204,11 @@ where
                 this.completion_rx = Some(rx);
 
                 // Spawn the completion task
-                // @@@ WHAT IS LOST HERE? WHAT?
-                let _ = tokio::spawn(async move {
+                // We intentionally drop the JoinHandle as we track completion via the oneshot channel
+                drop(tokio::spawn(async move {
                     let result = completion_fn(buffer).await;
                     _ = tx.send(result);
-                });
+                }));
             } else {
                 // Empty buffer or already completed
                 return Poll::Ready(Ok(()));
