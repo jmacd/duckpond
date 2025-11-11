@@ -1,4 +1,7 @@
 // Dynamic factory registration system using linkme
+// linkme uses #[link_section] which is considered unsafe by rustc
+#![allow(unsafe_code)]
+
 use crate::TLogFSError;
 use crate::persistence::State;
 use crate::query::queryable_file::QueryableFile;
@@ -212,6 +215,9 @@ pub struct DynamicFactory {
 }
 
 /// Distributed slice containing all registered factories
+/// linkme's distributed_slice uses #[link_section] which is considered unsafe
+#[allow(unsafe_code)]
+#[allow(clippy::declare_interior_mutable_const)]
 #[distributed_slice]
 pub static DYNAMIC_FACTORIES: [DynamicFactory];
 
@@ -346,6 +352,7 @@ macro_rules! register_dynamic_factory {
         validate: $validate_fn:expr
     ) => {
         paste::paste! {
+        #[allow(unsafe_code)] // linkme's distributed_slice uses #[link_section]
         #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
         static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
             name: $name,
@@ -376,6 +383,7 @@ macro_rules! register_dynamic_factory {
                 Box::pin(async move { $file_fn(config, context) })
             }
 
+            #[allow(unsafe_code)] // linkme's distributed_slice uses #[link_section]
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,
@@ -407,6 +415,7 @@ macro_rules! register_dynamic_factory {
                 Box::pin(async move { $file_fn(config, context) })
             }
 
+            #[allow(unsafe_code)] // linkme's distributed_slice uses #[link_section]
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,
@@ -461,6 +470,7 @@ macro_rules! register_executable_factory {
                 Box::pin($execute_fn(config, context, ctx))
             }
 
+            #[allow(unsafe_code)] // linkme's distributed_slice uses #[link_section]
             #[linkme::distributed_slice($crate::factory::DYNAMIC_FACTORIES)]
             static [<FACTORY_ $name:snake:upper>]: $crate::factory::DynamicFactory = $crate::factory::DynamicFactory {
                 name: $name,

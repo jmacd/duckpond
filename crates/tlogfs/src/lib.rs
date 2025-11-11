@@ -1,3 +1,4 @@
+#![allow(tail_expr_drop_order)]
 #![allow(missing_docs)]
 
 //! TLogFS - A filesystem implementation using Delta Lake for storage

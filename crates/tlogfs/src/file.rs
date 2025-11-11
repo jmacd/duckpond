@@ -158,6 +158,10 @@ struct OpLogFileWriter {
     entry_type: tinyfs::EntryType, // Store the original entry type
 }
 
+// OpLogFileWriter is Unpin because all its fields are Unpin
+// (Pin<Box<T>> is Unpin even though the T inside may not be)
+impl Unpin for OpLogFileWriter {}
+
 impl OpLogFileWriter {
     fn new(
         state: State,
@@ -221,7 +225,7 @@ impl AsyncWrite for OpLogFileWriter {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
         if this.completed {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -233,7 +237,7 @@ impl AsyncWrite for OpLogFileWriter {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
         if this.completed {
             Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -248,7 +252,7 @@ impl AsyncWrite for OpLogFileWriter {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
 
         if this.completed {
             return Poll::Ready(Ok(()));
