@@ -263,7 +263,7 @@ impl Ship {
         // Create steward transaction guard
         let tx = self.begin_write(meta).await?;
 
-        let result = f(&tx, &*tx).await;
+        let result = f(&tx, &tx).await;
 
         match result {
             Ok(value) => {
@@ -316,7 +316,7 @@ impl Ship {
         // Begin transaction replay with specific sequence number
         let tx = self.begin_transaction_replay(txn_meta).await?;
 
-        let result = f(&tx, &*tx).await;
+        let result = f(&tx, &tx).await;
 
         match result {
             Ok(value) => {
@@ -334,6 +334,7 @@ impl Ship {
     }
 
     /// Get a reference to the control table for querying pond settings
+    #[must_use]
     pub fn control_table(&self) -> &ControlTable {
         &self.control_table
     }
@@ -402,12 +403,12 @@ impl Ship {
             self.data_persistence
                 .begin_write(&txn_meta)
                 .await
-                .map_err(|e| StewardError::DataInit(e))?
+                .map_err(StewardError::DataInit)?
         } else {
             self.data_persistence
                 .begin_read(&txn_meta)
                 .await
-                .map_err(|e| StewardError::DataInit(e))?
+                .map_err(StewardError::DataInit)?
         };
 
         let vars_value: Value = meta
@@ -500,7 +501,7 @@ impl Ship {
             .data_persistence
             .begin_write(txn_meta)
             .await
-            .map_err(|e| StewardError::DataInit(e))?;
+            .map_err(StewardError::DataInit)?;
 
         let vars_value: Value = txn_meta
             .user
@@ -894,7 +895,7 @@ mod tests {
             // SIMULATE CRASH HERE - don't call commit_control_metadata()
             // This leaves data committed but control metadata missing
 
-            println!("✅ Simulated crash after data commit");
+            debug!("✅ Simulated crash after data commit");
         } // Ship drops here, simulating crash
 
         // SECOND: Create a new ship (simulating restart) and test recovery
@@ -906,11 +907,11 @@ mod tests {
             // Recovery should be needed because control metadata is missing
             let recovery_result = match ship.check_recovery_needed().await {
                 Err(StewardError::RecoveryNeeded { txn_meta }) => {
-                    println!(
+                    debug!(
                         "✅ Detected recovery needed for seq={}, txn_id: {}",
                         txn_meta.txn_seq, txn_meta.user.txn_id
                     );
-                    println!("✅ Recovery metadata: {:?}", txn_meta);
+                    debug!("✅ Recovery metadata: {:?}", txn_meta);
                     // Perform actual recovery
                     ship.recover().await.expect("Recovery should succeed")
                 }
@@ -948,7 +949,7 @@ mod tests {
                 .await
                 .expect("Failed to commit read transaction");
 
-            println!("✅ Recovery completed successfully");
+            debug!("✅ Recovery completed successfully");
         }
     }
 
@@ -1083,7 +1084,7 @@ mod tests {
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH: Don't record control metadata
-            println!("✅ Simulated crash after data commit");
+            debug!("✅ Simulated crash after data commit");
         }
 
         // Step 3: Recovery after crash using production code
@@ -1102,11 +1103,11 @@ mod tests {
 
             let recovered_txn_meta =
                 if let Err(StewardError::RecoveryNeeded { txn_meta }) = check_result {
-                    println!(
+                    debug!(
                         "Should need recovery for seq={}, txn_id: {}",
                         txn_meta.txn_seq, txn_meta.user.txn_id
                     );
-                    println!("Recovery metadata: {:?}", txn_meta);
+                    debug!("Recovery metadata: {:?}", txn_meta);
                     txn_meta
                 } else {
                     panic!("Expected RecoveryNeeded error, got: {:?}", check_result);
@@ -1252,7 +1253,7 @@ mod tests {
             .await
             .expect("Failed to commit steward transaction");
 
-        println!("✅ New transaction API works with proper sequencing via steward guard commit");
+        debug!("✅ New transaction API works with proper sequencing via steward guard commit");
     }
 
     #[tokio::test]
@@ -1452,7 +1453,7 @@ mod tests {
         for (node_id, _part_id, version) in records.iter() {
             node_versions
                 .entry(node_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(*version);
         }
 

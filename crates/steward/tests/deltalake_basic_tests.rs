@@ -7,13 +7,14 @@ use deltalake::DeltaOps;
 use deltalake::protocol::SaveMode;
 use std::sync::Arc;
 use tempfile::tempdir;
+use log::debug;
 
 #[tokio::test]
 async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {
     let temp_dir = tempdir()?;
     let table_uri = temp_dir.path().to_string_lossy().to_string();
 
-    println!("Creating Delta table at: {}", table_uri);
+    debug!("Creating Delta table at: {}", table_uri);
 
     // Step 1: Create first batch of data
     let schema = Arc::new(Schema::new(vec![
@@ -36,7 +37,7 @@ async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {
         .with_save_mode(SaveMode::ErrorIfExists)
         .await?;
 
-    println!("After first write - table version: {:?}", table.version());
+    debug!("After first write - table version: {:?}", table.version());
     let first_version = table.version();
 
     // Step 3: Add second batch using the SAME table handle
@@ -53,7 +54,7 @@ async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {
         .with_save_mode(SaveMode::Append)
         .await?;
 
-    println!("After second write - table version: {:?}", table.version());
+    debug!("After second write - table version: {:?}", table.version());
     let second_version = table.version();
 
     // The table handle should see its own committed changes immediately
@@ -69,7 +70,7 @@ async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {
 
     // Step 4: Test with fresh table handle - should also see all commits
     let fresh_table = deltalake::open_table(&table_uri).await?;
-    println!("Fresh table version: {:?}", fresh_table.version());
+    debug!("Fresh table version: {:?}", fresh_table.version());
 
     assert_eq!(
         fresh_table.version(),
@@ -85,7 +86,7 @@ async fn test_multiple_separate_table_handles() -> Result<()> {
     let temp_dir = tempdir()?;
     let table_uri = temp_dir.path().to_string_lossy().to_string();
 
-    println!("Testing separate table handles at: {}", table_uri);
+    debug!("Testing separate table handles at: {}", table_uri);
 
     // Create schema and first batch
     let schema = Arc::new(Schema::new(vec![
@@ -108,11 +109,11 @@ async fn test_multiple_separate_table_handles() -> Result<()> {
         .with_save_mode(SaveMode::ErrorIfExists)
         .await?;
 
-    println!("Table1 after write: version {:?}", table1.version());
+    debug!("Table1 after write: version {:?}", table1.version());
 
     // Create second handle AFTER the first commit
     let table2 = deltalake::open_table(&table_uri).await?;
-    println!("Table2 opened: version {:?}", table2.version());
+    debug!("Table2 opened: version {:?}", table2.version());
 
     // Both should see the same version
     assert_eq!(
@@ -135,14 +136,14 @@ async fn test_multiple_separate_table_handles() -> Result<()> {
         .with_save_mode(SaveMode::Append)
         .await?;
 
-    println!("Table2 after write: version {:?}", table2.version());
+    debug!("Table2 after write: version {:?}", table2.version());
 
     // The first handle should NOT automatically see the second commit
-    println!("Table1 version after table2 commit: {:?}", table1.version());
+    debug!("Table1 version after table2 commit: {:?}", table1.version());
 
     // But if we refresh table1, it should see the new version
     let table1_refreshed = deltalake::open_table(&table_uri).await?;
-    println!("Table1 refreshed: version {:?}", table1_refreshed.version());
+    debug!("Table1 refreshed: version {:?}", table1_refreshed.version());
 
     assert_eq!(
         table2.version(),
@@ -158,7 +159,7 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
     let temp_dir = tempdir()?;
     let table_uri = temp_dir.path().to_string_lossy().to_string();
 
-    println!("Testing transaction sequence numbering at: {:?}", table_uri);
+    debug!("Testing transaction sequence numbering at: {:?}", table_uri);
 
     let schema = Arc::new(Schema::new(vec![Field::new(
         "tx_id",
@@ -192,7 +193,7 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
         });
 
         let current_table = table.as_ref().unwrap();
-        println!(
+        debug!(
             "Transaction {} committed - table version: {:?}",
             tx_id,
             current_table.version()
@@ -207,11 +208,11 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
 
         // Immediately reading the table should show the correct version
         let current_version = current_table.version();
-        println!("  Immediate read shows version: {:?}", current_version);
+        debug!("  Immediate read shows version: {:?}", current_version);
 
         // Create a fresh handle - should also see the latest version
         let fresh_table = deltalake::open_table(&table_uri).await?;
-        println!("  Fresh handle shows version: {:?}", fresh_table.version());
+        debug!("  Fresh handle shows version: {:?}", fresh_table.version());
         assert_eq!(
             fresh_table.version(),
             current_version,
@@ -243,7 +244,7 @@ async fn test_deltalake_handle_sees_own_commits() -> Result<()> {
         .with_save_mode(SaveMode::ErrorIfExists)
         .await?;
 
-    println!("After step 1 - version: {:?}", table.version());
+    debug!("After step 1 - version: {:?}", table.version());
     // Note: Delta Lake versions start from 0, so first commit is version 0
 
     // Immediately commit step 2 using the same handle
@@ -257,16 +258,16 @@ async fn test_deltalake_handle_sees_own_commits() -> Result<()> {
         .with_save_mode(SaveMode::Append)
         .await?;
 
-    println!("After step 2 - version: {:?}", table.version());
+    debug!("After step 2 - version: {:?}", table.version());
     // After second commit, should be version 1
 
     // The handle should immediately see the latest version
     let current_version = table.version();
-    println!("Current version after step 2: {:?}", current_version);
+    debug!("Current version after step 2: {:?}", current_version);
 
     // A fresh handle should also see the same version
     let fresh_table = deltalake::open_table(&table_uri).await?;
-    println!("Fresh handle version: {:?}", fresh_table.version());
+    debug!("Fresh handle version: {:?}", fresh_table.version());
     assert_eq!(
         fresh_table.version(),
         current_version,

@@ -228,7 +228,7 @@ mod tests {
             init_command(&ship_context, None, None).await?;
 
             Ok(Self {
-                temp_dir: temp_dir,
+                temp_dir,
                 ship_context,
                 pond_path,
             })

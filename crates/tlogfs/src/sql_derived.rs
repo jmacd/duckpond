@@ -1030,7 +1030,7 @@ mod tests {
         .unwrap();
 
         // Commit this transaction so the source file is visible to subsequent reads
-        _ = tx_guard.commit_test().await.unwrap();
+        tx_guard.commit_test().await.unwrap();
     }
 
     /// Helper function to set up test environment with FileTable data
@@ -1139,7 +1139,7 @@ mod tests {
         }
 
         // Commit this transaction so the source file is visible to subsequent reads
-        _ = tx_guard.commit_test().await.unwrap();
+        tx_guard.commit_test().await.unwrap();
     }
 
     /// Helper function to set up multi-version FileSeries test data
@@ -1211,7 +1211,7 @@ mod tests {
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
     }
 
@@ -1338,7 +1338,7 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
 
         {
@@ -1386,7 +1386,7 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
 
         // Now test pattern matching across both files
@@ -1423,7 +1423,7 @@ query: ""
 
         // Check that we have the right data ordered by reading DESC
         use arrow::array::Int32Array;
-        let locations = get_string_array(&result_batch, 0);
+        let locations = get_string_array(result_batch, 0);
         let readings = result_batch
             .column(1)
             .as_any()
@@ -1437,7 +1437,7 @@ query: ""
         assert_eq!(locations.value(1), "Building C");
         assert_eq!(readings.value(1), 90);
 
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1501,7 +1501,7 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
 
         {
@@ -1555,7 +1555,7 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
 
         // Now test recursive pattern matching across all nested files
@@ -1619,7 +1619,7 @@ query: ""
         assert_eq!(locations.value(1), "Building B");
         assert_eq!(readings.value(1), 110);
 
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1731,7 +1731,7 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
 
         // Test multiple patterns combining files from different directories

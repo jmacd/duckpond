@@ -19,10 +19,6 @@ pub use guard::StewardTransactionGuard;
 pub use ship::Ship;
 pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
 
-/// Pond identity metadata - immutable information about the pond's origin
-/// This metadata is created once when the pond is initialized and preserved across replicas
-/// This is a MESS! Look at consolidating with PondTxnMetadata.
-
 /// Recovery command result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryResult {
@@ -74,11 +70,13 @@ pub enum StewardError {
 }
 
 /// Get the data filesystem path under the pond
+#[must_use]
 pub fn get_data_path(pond_path: &Path) -> PathBuf {
     pond_path.join("data")
 }
 
 /// Get the control filesystem path under the pond
+#[must_use]
 pub fn get_control_path(pond_path: &Path) -> PathBuf {
     pond_path.join("control")
 }

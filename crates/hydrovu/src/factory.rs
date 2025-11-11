@@ -94,7 +94,7 @@ async fn initialize_hydrovu(config: Value, context: FactoryContext) -> Result<()
     // Create directory structure now that lock is released
     create_directory_structure(&parsed_config, &context)
         .await
-        .map_err(|e| TLogFSError::TinyFS(e))?;
+        .map_err(TLogFSError::TinyFS)?;
 
     Ok(())
 }
@@ -187,7 +187,7 @@ async fn execute_collect(
     // Create filesystem from state
     let fs = tinyfs::FS::new(context.state.clone())
         .await
-        .map_err(|e| TLogFSError::TinyFS(e))?;
+        .map_err(TLogFSError::TinyFS)?;
 
     // Run collection within the existing transaction
     let result = collector

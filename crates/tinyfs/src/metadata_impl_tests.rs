@@ -6,7 +6,7 @@ mod metadata_tests {
 
     #[tokio::test]
     async fn test_memory_file_metadata() {
-        let file_handle = MemoryFile::new_handle(b"test content".to_vec());
+        let file_handle = MemoryFile::new_handle(b"test content");
         let metadata = file_handle.metadata().await.unwrap();
 
         assert_eq!(metadata.entry_type, EntryType::FileDataPhysical);

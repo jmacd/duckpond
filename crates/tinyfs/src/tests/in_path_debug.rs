@@ -1,35 +1,36 @@
 #[cfg(test)]
 mod in_path_tests {
+    use log::debug;
     use crate::Lookup;
     use crate::memory::new_fs;
 
     #[tokio::test]
     async fn test_in_path_root_directory() {
-        println!("Starting test_in_path_root_directory");
+        debug!("Starting test_in_path_root_directory");
 
         // Create a simple in-memory filesystem
         let fs = new_fs().await;
         let root = fs.root().await.unwrap();
 
-        println!("Created filesystem and got root");
+        debug!("Created filesystem and got root");
 
         // Test in_path with root directory "/"
-        println!("About to call in_path with '/'");
+        debug!("About to call in_path with '/'");
 
         let result = root
             .in_path("/", |_wd, lookup| async move {
-                println!("Inside in_path callback!");
-                println!("  lookup variant: {:?}", std::mem::discriminant(&lookup));
+                debug!("Inside in_path callback!");
+                debug!("  lookup variant: {:?}", std::mem::discriminant(&lookup));
 
                 match lookup {
                     Lookup::Found(node_path) => {
-                        println!("  Found: path = {:?}", node_path.path);
+                        debug!("  Found: path = {:?}", node_path.path);
                     }
                     Lookup::NotFound(parent_path, name) => {
-                        println!("  NotFound: parent = {:?}, name = '{}'", parent_path, name);
+                        debug!("  NotFound: parent = {:?}, name = '{}'", parent_path, name);
                     }
                     Lookup::Empty(node_path) => {
-                        println!("  Empty: path = {:?}", node_path.path);
+                        debug!("  Empty: path = {:?}", node_path.path);
                     }
                 }
 
@@ -37,17 +38,17 @@ mod in_path_tests {
             })
             .await;
 
-        println!("in_path call completed");
+        debug!("in_path call completed");
 
         match result {
-            Ok(()) => println!("✅ Test passed"),
-            Err(e) => println!("❌ Test failed: {}", e),
+            Ok(()) => debug!("✅ Test passed"),
+            Err(e) => debug!("❌ Test failed: {}", e),
         }
     }
 
     #[tokio::test]
     async fn test_in_path_simple_paths() {
-        println!("Starting test_in_path_simple_paths");
+        debug!("Starting test_in_path_simple_paths");
 
         // Create a simple in-memory filesystem
         let fs = new_fs().await;
@@ -57,11 +58,11 @@ mod in_path_tests {
         let test_paths = vec![".", "nonexistent", "nonexistent/file"];
 
         for path in test_paths {
-            println!("Testing path: '{}'", path);
+            debug!("Testing path: '{}'", path);
 
             let result = root
                 .in_path(path, |_wd, lookup| async move {
-                    println!(
+                    debug!(
                         "  Result for '{}': {:?}",
                         path,
                         std::mem::discriminant(&lookup)
@@ -71,8 +72,8 @@ mod in_path_tests {
                 .await;
 
             match result {
-                Ok(()) => println!("  ✅ Path '{}' completed", path),
-                Err(e) => println!("  ❌ Path '{}' failed: {}", path, e),
+                Ok(()) => debug!("  ✅ Path '{}' completed", path),
+                Err(e) => debug!("  ❌ Path '{}' failed: {}", path, e),
             }
         }
     }

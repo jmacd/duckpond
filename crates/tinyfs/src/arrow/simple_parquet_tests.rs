@@ -4,6 +4,7 @@ use crate::EntryType;
 use crate::arrow::SimpleParquetExt;
 use crate::memory::new_fs;
 use arrow_array::record_batch;
+use log::debug;
 
 #[tokio::test]
 async fn test_parquet_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,8 +59,8 @@ async fn test_parquet_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     assert_eq!(original_ages, read_ages);
 
-    println!("✅ Parquet roundtrip test successful!");
-    println!(
+    debug!("✅ Parquet roundtrip test successful!");
+    debug!(
         "   Written and read {} rows with {} columns",
         read_batch.num_rows(),
         read_batch.num_columns()
@@ -90,8 +91,8 @@ async fn test_parquet_with_entry_type() -> Result<(), Box<dyn std::error::Error>
     let read_batch = wd.read_parquet(test_path).await?;
     assert_eq!(batch.num_rows(), read_batch.num_rows());
 
-    println!("✅ Parquet entry type test successful!");
-    println!("   Note: Entry type verification requires additional metadata APIs");
+    debug!("✅ Parquet entry type test successful!");
+    debug!("   Note: Entry type verification requires additional metadata APIs");
 
     Ok(())
 }

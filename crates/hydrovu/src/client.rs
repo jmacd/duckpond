@@ -73,6 +73,7 @@ impl Client {
     }
 
     /// Fetch data for a location with full pagination support and optional record limit
+    #[allow(clippy::print_stderr)]
     pub(crate) async fn fetch_location_data(
         &self,
         location_id: i64,

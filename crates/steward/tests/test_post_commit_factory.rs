@@ -5,6 +5,7 @@ use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
 use tinyfs::{FS, PersistenceLayer};
 use tlogfs::{FactoryContext, FactoryRegistry};
+use log::debug;
 
 /// Test that post-commit factories are discovered and executed after a write transaction
 #[tokio::test]
@@ -18,7 +19,7 @@ async fn test_post_commit_factory_execution() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
     // Transaction 1: Set up a post-commit factory
-    println!("=== Setting up post-commit factory ===");
+    debug!("=== Setting up post-commit factory ===");
     let tx1 = ship
         .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
@@ -58,14 +59,14 @@ repeat_count: 3
     let context1 = FactoryContext::new(state1.clone(), parent_node_id);
     FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context1).await?;
 
-    println!("DEBUG: About to commit tx1...");
+    debug!("DEBUG: About to commit tx1...");
 
     // Commit - this should NOT trigger post-commit yet (no data written)
     _ = tx1.commit().await?;
-    println!("✅ Post-commit config created (tx1 committed)");
+    debug!("✅ Post-commit config created (tx1 committed)");
 
     // Verify the config was actually created by reading it back
-    println!("\n=== Verifying config was created ===");
+    debug!("\n=== Verifying config was created ===");
     let verify_tx = ship
         .begin_read(&PondUserMetadata::new(vec!["verify".to_string()]))
         .await?;
@@ -75,14 +76,14 @@ repeat_count: 3
 
     // Check /etc exists
     match verify_root.resolve_path("/etc").await {
-        Ok(_) => println!("✓ /etc exists"),
-        Err(e) => println!("✗ /etc does NOT exist: {}", e),
+        Ok(_) => debug!("✓ /etc exists"),
+        Err(e) => debug!("✗ /etc does NOT exist: {}", e),
     }
 
     // Check /etc/system.d exists
     match verify_root.resolve_path("/etc/system.d").await {
-        Ok(_) => println!("✓ /etc/system.d exists"),
-        Err(e) => println!("✗ /etc/system.d does NOT exist: {}", e),
+        Ok(_) => debug!("✓ /etc/system.d exists"),
+        Err(e) => debug!("✗ /etc/system.d does NOT exist: {}", e),
     }
 
     // Try to resolve the specific file
@@ -92,16 +93,16 @@ repeat_count: 3
     {
         Ok((_, lookup)) => match lookup {
             tinyfs::Lookup::Found(_) => {
-                println!("✓ /etc/system.d/test-post-commit.yaml EXISTS via resolve_path!")
+                debug!("✓ /etc/system.d/test-post-commit.yaml EXISTS via resolve_path!")
             }
-            tinyfs::Lookup::NotFound(_, _) => println!(
+            tinyfs::Lookup::NotFound(_, _) => debug!(
                 "✗ /etc/system.d/test-post-commit.yaml not found (path resolved but file doesn't exist)"
             ),
             tinyfs::Lookup::Empty(_) => {
-                println!("✗ /etc/system.d/test-post-commit.yaml empty path")
+                debug!("✗ /etc/system.d/test-post-commit.yaml empty path")
             }
         },
-        Err(e) => println!(
+        Err(e) => debug!(
             "✗ Failed to resolve /etc/system.d/test-post-commit.yaml: {}",
             e
         ),
@@ -109,12 +110,12 @@ repeat_count: 3
 
     // Check for files in /etc/system.d
     let matches = verify_root.collect_matches("/etc/system.d/*").await?;
-    println!(
+    debug!(
         "✓ Found {} file(s) in /etc/system.d/ via collect_matches",
         matches.len()
     );
     for (node_path, captures) in &matches {
-        println!(
+        debug!(
             "  - {} (captures: {:?})",
             node_path.path().display(),
             captures
@@ -124,7 +125,7 @@ repeat_count: 3
     _ = verify_tx.commit().await?;
 
     // Transaction 2: Write some data to trigger post-commit factory execution
-    println!("\n=== Triggering post-commit via data write ===");
+    debug!("\n=== Triggering post-commit via data write ===");
     let tx2 = ship
         .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
@@ -146,15 +147,15 @@ repeat_count: 3
     writer.shutdown().await?;
 
     // Commit - this SHOULD trigger post-commit factory execution
-    println!("Committing transaction (should trigger post-commit)...");
+    debug!("Committing transaction (should trigger post-commit)...");
     _ = tx2.commit().await?;
-    println!("✅ Transaction committed, post-commit should have executed");
+    debug!("✅ Transaction committed, post-commit should have executed");
 
     // Verify the test factory was executed by checking the result file it creates
     // The test-executor factory writes to /tmp/test-executor-result-{parent_node_id}.txt
     let result_path = format!(
         "/tmp/test-executor-result-{}.txt",
-        parent_node_id.to_string()
+        parent_node_id
     );
 
     // Give a small delay for file write to complete
@@ -162,8 +163,8 @@ repeat_count: 3
 
     match std::fs::read_to_string(&result_path) {
         Ok(content) => {
-            println!("\n=== Post-commit factory result ===");
-            println!("{}", content);
+            debug!("\n=== Post-commit factory result ===");
+            debug!("{}", content);
 
             // Verify the content contains expected elements
             assert!(
@@ -179,17 +180,17 @@ repeat_count: 3
                 "Should have run in ControlWriter mode"
             );
 
-            println!("✅ Post-commit factory executed successfully!");
+            debug!("✅ Post-commit factory executed successfully!");
 
             // Cleanup
             let _ = std::fs::remove_file(&result_path);
         }
         Err(e) => {
-            println!("⚠️  Result file not found: {}", e);
-            println!(
+            debug!("⚠️  Result file not found: {}", e);
+            debug!(
                 "This is expected if post-commit execution hasn't been fully implemented yet."
             );
-            println!("Once implemented, this test should pass.");
+            debug!("Once implemented, this test should pass.");
         }
     }
 
@@ -246,7 +247,7 @@ repeat_count: 1
     _ = tx1.commit().await?;
 
     // Now do a read-only transaction using the transact helper
-    println!("\n=== Executing read-only transaction ===");
+    debug!("\n=== Executing read-only transaction ===");
     ship.transact(
         &PondUserMetadata::new(vec!["test".to_string(), "read-only".to_string()]),
         |_tx, fs| {
@@ -266,8 +267,8 @@ repeat_count: 1
     )
     .await?;
 
-    println!("✅ Read-only transaction completed");
-    println!("Post-commit factories should NOT have executed (read-only, no version change)");
+    debug!("✅ Read-only transaction completed");
+    debug!("Post-commit factories should NOT have executed (read-only, no version change)");
 
     Ok(())
 }
@@ -281,7 +282,7 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
     let mut ship = Ship::create_pond(&pond_path).await?;
 
     // Create multiple post-commit configs
-    println!("=== Creating multiple post-commit configs ===");
+    debug!("=== Creating multiple post-commit configs ===");
     let tx1 = ship
         .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
@@ -331,10 +332,10 @@ repeat_count: 1
     }
 
     _ = tx1.commit().await?;
-    println!("✅ Multiple configs created");
+    debug!("✅ Multiple configs created");
 
     // Trigger post-commit with a data write
-    println!("\n=== Triggering post-commit ===");
+    debug!("\n=== Triggering post-commit ===");
     let tx2 = ship
         .begin_write(&PondUserMetadata::new(vec![
             "test".to_string(),
@@ -352,7 +353,7 @@ repeat_count: 1
     writer.shutdown().await?;
 
     _ = tx2.commit().await?;
-    println!("✅ Transaction committed, multiple post-commit factories should execute in order");
+    debug!("✅ Transaction committed, multiple post-commit factories should execute in order");
 
     Ok(())
 }

@@ -9,6 +9,7 @@ use arrow::datatypes::{DataType, Field, FieldRef};
 use arrow_array::record_batch;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use log::debug;
 
 /// Test data structure that implements ForArrow
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -68,8 +69,8 @@ async fn test_full_parquet_roundtrip_with_forarrow() -> Result<(), Box<dyn std::
         assert_eq!(original, read);
     }
 
-    println!("✅ Full ParquetExt ForArrow roundtrip successful!");
-    println!(
+    debug!("✅ Full ParquetExt ForArrow roundtrip successful!");
+    debug!(
         "   Processed {} records with mixed nullable/non-nullable fields",
         read_data.len()
     );
@@ -143,8 +144,8 @@ async fn test_low_level_recordbatch_operations() -> Result<(), Box<dyn std::erro
         .unwrap();
     assert_eq!(original_prices, read_prices);
 
-    println!("✅ Low-level RecordBatch operations successful!");
-    println!(
+    debug!("✅ Low-level RecordBatch operations successful!");
+    debug!(
         "   Verified schema and data integrity for {} rows",
         read_batch.num_rows()
     );
@@ -161,7 +162,7 @@ async fn test_large_dataset_batching() -> Result<(), Box<dyn std::error::Error>>
     // Create a large dataset (more than DEFAULT_BATCH_SIZE = 1000)
     let large_data: Vec<TestRecord> = (0..2500)
         .map(|i| TestRecord {
-            id: i as i64,
+            id: i,
             name: format!("User_{}", i),
             score: if i % 3 == 0 {
                 None
@@ -193,12 +194,12 @@ async fn test_large_dataset_batching() -> Result<(), Box<dyn std::error::Error>>
     let none_count_read = read_data.iter().filter(|r| r.score.is_none()).count();
     assert_eq!(none_count_original, none_count_read);
 
-    println!("✅ Large dataset batching successful!");
-    println!(
+    debug!("✅ Large dataset batching successful!");
+    debug!(
         "   Processed {} records with automatic batching",
         read_data.len()
     );
-    println!(
+    debug!(
         "   Nullable field handling: {} None values preserved",
         none_count_read
     );
@@ -243,8 +244,8 @@ async fn test_entry_type_integration() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(test_data, table_data);
     assert_eq!(test_data, data_data);
 
-    println!("✅ Entry type integration successful!");
-    println!("   Verified FileTable and FileData entry types work correctly");
+    debug!("✅ Entry type integration successful!");
+    debug!("   Verified FileTable and FileData entry types work correctly");
 
     Ok(())
 }

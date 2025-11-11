@@ -50,27 +50,32 @@ impl<'a> StewardTransactionGuard<'a> {
     }
 
     /// Get the transaction ID
+    #[must_use]
     pub fn txn_meta(&self) -> &PondTxnMetadata {
         &self.txn_meta
     }
 
     /// Get the transaction type
+    #[must_use]
     pub fn transaction_type(&self) -> TransactionType {
         self.transaction_type
     }
 
     /// Check if this is a write transaction
+    #[must_use]
     pub fn is_write_transaction(&self) -> bool {
         self.transaction_type == TransactionType::Write
     }
 
     /// Check if this is a read transaction
+    #[must_use]
     pub fn is_read_transaction(&self) -> bool {
         self.transaction_type == TransactionType::Read
     }
 
     /// Get access to the control table for querying transaction metadata
     /// This allows accessing control table data without violating borrow rules
+    #[must_use]
     pub fn control_table(&self) -> &ControlTable {
         self.control_table
     }

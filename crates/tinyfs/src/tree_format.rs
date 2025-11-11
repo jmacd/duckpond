@@ -140,6 +140,7 @@ impl fmt::Display for TreeNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use log::debug;
 
     #[test]
     fn test_simple_tree() {
@@ -189,7 +190,7 @@ mod tests {
             .with_child(TreeNode::new("b").with_child(TreeNode::new("b1")));
 
         let output = format_tree(&root);
-        println!("Output:\n{}", output);
+        debug!("Output:\n{}", output);
 
         // Verify structure with tee connectors
         assert!(output.contains("├─┬ a"));

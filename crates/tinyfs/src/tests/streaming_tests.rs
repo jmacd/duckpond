@@ -270,10 +270,10 @@ async fn test_memory_bounded_large_parquet() -> Result<()> {
     _ = reader.read_to_end(&mut buffer).await.unwrap();
     let bytes = Bytes::from(buffer);
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-    let mut stream_reader = builder.build().unwrap();
+    let stream_reader = builder.build().unwrap();
 
     let mut total_rows = 0;
-    while let Some(batch) = stream_reader.next() {
+    for batch in stream_reader {
         let batch = batch.unwrap();
         total_rows += batch.num_rows();
     }

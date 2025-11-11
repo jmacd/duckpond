@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::memory::new_fs;
 use crate::wd::*;
 use async_trait::async_trait;
+use log::debug;
 
 /// Test visitor that collects just the basenames of matching files
 struct BaseNameVisitor {
@@ -76,7 +77,7 @@ async fn test_double_wildcard_root_bug() {
     let mut results = visitor.results;
     results.sort();
 
-    println!("Found items with '/**': {:?}", results);
+    debug!("Found items with '/**': {:?}", results);
 
     // Should find all files at root and in subdirectories
     assert!(
@@ -114,7 +115,7 @@ async fn test_double_wildcard_root_bug() {
     let mut results2 = visitor2.results;
     results2.sort();
 
-    println!("Found items with '/**/*.txt': {:?}", results2);
+    debug!("Found items with '/**/*.txt': {:?}", results2);
 
     // This should work and find all txt files including root level ones
     assert!(!results2.is_empty(), "Comparison pattern should work");
@@ -124,7 +125,7 @@ async fn test_double_wildcard_root_bug() {
         5,
         "/**/*.txt should find all 5 .txt files (root + subdirs)"
     );
-    println!(
+    debug!(
         "Success: Found {} txt files with '/**/*.txt', expected 5",
         results2.len()
     );
@@ -165,7 +166,7 @@ async fn test_double_wildcard_non_root() {
     let mut results = visitor.results;
     results.sort();
 
-    println!("Found items with 'testdir/**': {:?}", results);
+    debug!("Found items with 'testdir/**': {:?}", results);
 
     // Should find all files in testdir and subdirectories
     assert!(
@@ -218,7 +219,7 @@ async fn test_single_double_wildcard_patterns() {
             .await
             .unwrap();
 
-        println!("{}: {:?}", description, visitor.results);
+        debug!("{}: {:?}", description, visitor.results);
 
         // Each pattern should find some results
         assert!(
@@ -256,39 +257,39 @@ async fn test_trailing_slash_behavior() {
         .unwrap();
 
     // Test different trailing slash patterns
-    println!("=== Testing trailing slash patterns ===");
+    debug!("=== Testing trailing slash patterns ===");
 
     // Test 1: /** vs /**/
     let results1 = root.collect_matches("/**").await.unwrap();
     let results2 = root.collect_matches("/**/").await.unwrap();
-    println!("/** found {} items", results1.len());
-    println!("/**/ found {} items", results2.len());
+    debug!("/** found {} items", results1.len());
+    debug!("/**/ found {} items", results2.len());
 
     // Test 2: /subdir1 vs /subdir1/
     let results3 = root.collect_matches("/subdir1").await.unwrap();
     let results4 = root.collect_matches("/subdir1/").await.unwrap();
-    println!("/subdir1 found {} items", results3.len());
-    println!("/subdir1/ found {} items", results4.len());
+    debug!("/subdir1 found {} items", results3.len());
+    debug!("/subdir1/ found {} items", results4.len());
 
     // Test 3: /subdir1/* vs /subdir1/*/
     let results5 = root.collect_matches("/subdir1/*").await.unwrap();
     let results6 = root.collect_matches("/subdir1/*/").await.unwrap();
-    println!("/subdir1/* found {} items", results5.len());
-    println!("/subdir1/*/ found {} items", results6.len());
+    debug!("/subdir1/* found {} items", results5.len());
+    debug!("/subdir1/*/ found {} items", results6.len());
 
     // Test 4: /**/*.txt vs /**/*.txt/
     let results7 = root.collect_matches("/**/*.txt").await.unwrap();
     let results8 = root.collect_matches("/**/*.txt/").await.unwrap();
-    println!("/**/*.txt found {} items", results7.len());
-    println!("/**/*.txt/ found {} items", results8.len());
+    debug!("/**/*.txt found {} items", results7.len());
+    debug!("/**/*.txt/ found {} items", results8.len());
 
     // Print actual results for inspection
     for (i, (node, captured)) in results1.iter().enumerate() {
-        println!("/**[{}]: {} (captured: {:?})", i, node.basename(), captured);
+        debug!("/**[{}]: {} (captured: {:?})", i, node.basename(), captured);
     }
 
     for (i, (node, captured)) in results2.iter().enumerate() {
-        println!(
+        debug!(
             "/**/[{}]: {} (captured: {:?})",
             i,
             node.basename(),
@@ -297,7 +298,7 @@ async fn test_trailing_slash_behavior() {
     }
 
     for (i, (node, captured)) in results3.iter().enumerate() {
-        println!(
+        debug!(
             "/subdir1[{}]: {} (captured: {:?})",
             i,
             node.basename(),
@@ -306,7 +307,7 @@ async fn test_trailing_slash_behavior() {
     }
 
     for (i, (node, captured)) in results4.iter().enumerate() {
-        println!(
+        debug!(
             "/subdir1/[{}]: {} (captured: {:?})",
             i,
             node.basename(),

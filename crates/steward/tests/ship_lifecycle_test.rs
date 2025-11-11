@@ -3,6 +3,7 @@
 use anyhow::Result;
 use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
+use log::debug;
 
 /// Test that a Ship can be properly dropped and a new Ship opened on the same pond
 #[tokio::test]
@@ -36,7 +37,7 @@ async fn test_ship_drop_and_reopen() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to execute transaction after reopen: {}", e))?;
 
-    println!("✅ Ship drop and reopen works correctly");
+    debug!("✅ Ship drop and reopen works correctly");
     Ok(())
 }
 
@@ -73,6 +74,6 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("Failed to execute second transaction: {}", e))?;
 
-    println!("✅ Multiple transactions on same Ship instance work correctly");
+    debug!("✅ Multiple transactions on same Ship instance work correctly");
     Ok(())
 }

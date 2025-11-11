@@ -441,6 +441,7 @@ impl ControlTable {
     /// Get the Arrow schema for the control table
     /// Schema matches TransactionRecord structure
     /// Partitioned by record_category: "metadata" for configuration, "transaction" for txn records
+    #[must_use]
     pub fn arrow_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             // Partition key - separates metadata from transaction records (like tlogfs directory partitions)
@@ -661,22 +662,26 @@ impl ControlTable {
     }
 
     /// Get access to the underlying Delta table for querying
+    #[must_use]
     pub fn table(&self) -> &DeltaTable {
         &self.table
     }
 
     /// Get the shared SessionContext for querying control table
     /// Use this for all queries - no need to create new contexts
+    #[must_use]
     pub fn session_context(&self) -> Arc<SessionContext> {
         Arc::clone(&self.session_context)
     }
 
     /// Get pond metadata (cached)
+    #[must_use]
     pub fn pond_metadata(&self) -> &PondMetadata {
         &self.pond_metadata
     }
 
     /// Get factory modes (cached)
+    #[must_use]
     pub fn factory_modes(&self) -> &HashMap<String, String> {
         &self.factory_modes
     }
@@ -983,6 +988,7 @@ impl ControlTable {
     }
 
     /// Get factory execution mode (from cache)
+    #[must_use]
     pub fn get_factory_mode(&self, factory_name: &str) -> Option<String> {
         self.factory_modes.get(factory_name).cloned()
     }
@@ -1027,11 +1033,13 @@ impl ControlTable {
     }
 
     /// Get a control table setting (from cache)
+    #[must_use]
     pub fn get_setting(&self, key: &str) -> Option<String> {
         self.settings.get(key).cloned()
     }
 
     /// Get all settings (from cache)
+    #[must_use]
     pub fn settings(&self) -> &HashMap<String, String> {
         &self.settings
     }
@@ -1071,6 +1079,7 @@ impl ControlTable {
     }
 
     /// Print pond banner showing metadata
+    #[allow(clippy::print_stdout)]
     pub fn print_banner(&self) {
         println!();
         pond_metadata_banner(&self.pond_metadata);
@@ -1086,6 +1095,7 @@ impl ControlTable {
     }
 
     /// Get pond metadata (from cache)
+    #[must_use]
     pub fn get_pond_metadata(&self) -> &PondMetadata {
         &self.pond_metadata
     }
@@ -1277,12 +1287,13 @@ impl ControlTable {
 }
 
 /// Format pond metadata as a banner for display
+#[allow(clippy::print_stdout)]
 pub fn pond_metadata_banner(data: &PondMetadata) {
     let datetime = DateTime::from_timestamp(
         data.birth_timestamp / 1_000_000,
         ((data.birth_timestamp % 1_000_000) * 1000) as u32,
     )
-    .unwrap_or_else(|| Utc::now());
+    .unwrap_or_else(Utc::now);
 
     let created_str = datetime.format("%Y-%m-%d %H:%M:%S UTC").to_string();
 

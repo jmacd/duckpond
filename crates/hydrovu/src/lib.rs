@@ -121,10 +121,10 @@ impl HydroVuCollector {
             let result = self.collect_device(&device, state, fs).await?;
             total_records += result.records_collected;
 
-            if let Some(final_ts) = result.final_timestamp {
-                if final_ts > 0 {
-                    _ = final_timestamps.insert(device.id, final_ts);
-                }
+            if let Some(final_ts) = result.final_timestamp
+                && final_ts > 0
+            {
+                _ = final_timestamps.insert(device.id, final_ts);
             }
 
             // Create summary for this device
@@ -267,14 +267,12 @@ impl HydroVuCollector {
                 if let (Some(min_str), Some(max_str)) = (
                     metadata.get("min_event_time"),
                     metadata.get("max_event_time"),
-                ) {
-                    if let (Ok(min_time), Ok(max_time)) =
-                        (min_str.parse::<i64>(), max_str.parse::<i64>())
-                    {
-                        debug!("Version {i}: temporal range {min_time}..{max_time}");
-                        max_timestamp =
-                            Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
-                    }
+                ) && let (Ok(min_time), Ok(max_time)) =
+                    (min_str.parse::<i64>(), max_str.parse::<i64>())
+                {
+                    debug!("Version {i}: temporal range {min_time}..{max_time}");
+                    max_timestamp =
+                        Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
                 }
             } else {
                 debug!("Record {i}: no temporal range");
@@ -334,8 +332,7 @@ impl HydroVuCollector {
             .await
             .map_err(|e| {
                 // Concise error - detailed diagnostics already printed to stderr by client
-                steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::other(
                     format!(
                         "HydroVu API failed for device '{}' (location {}): {}",
                         device.name, device_id, e
@@ -391,8 +388,7 @@ impl HydroVuCollector {
         // Step 3: Store data in filesystem within same transaction
         let schema = HydroVuCollector::create_arrow_schema_from_wide_records(&wide_records)
             .map_err(|e| {
-                steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::other(
                     format!("Schema error: {e}"),
                 )))
             })?;
@@ -404,16 +400,14 @@ impl HydroVuCollector {
         let record_batch =
             HydroVuCollector::convert_wide_records_to_arrow(&wide_records, &schema, device_id)
                 .map_err(|e| {
-                    steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::other(
                         e.to_string(),
                     )))
                 })?;
 
         // Serialize to Parquet bytes
         let parquet_bytes = HydroVuCollector::serialize_to_parquet(record_batch).map_err(|e| {
-            steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::other(
                 e.to_string(),
             )))
         })?;
