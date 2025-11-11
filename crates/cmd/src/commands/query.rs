@@ -50,7 +50,7 @@ pub async fn query_command(
         FROM delta_table
         WHERE file_type != 'Directory'
     ";
-    session_context
+    _ = session_context
         .sql(create_nodes_view)
         .await
         .map_err(|e| anyhow!("Failed to create nodes view: {}", e))?
@@ -59,7 +59,7 @@ pub async fn query_command(
         .map_err(|e| anyhow!("Failed to execute CREATE VIEW for nodes: {}", e))?;
 
     // Register shorter alias for convenience - use CREATE VIEW instead of duplicate table registration
-    session_context
+    _ = session_context
         .sql("CREATE VIEW oplog AS SELECT * FROM delta_table")
         .await
         .map_err(|e| anyhow!("Failed to create oplog view: {}", e))?
@@ -94,7 +94,7 @@ pub async fn query_command(
             }
 
             // Use DataFusion's built-in pretty formatting
-            let formatted = datafusion::arrow::util::pretty::pretty_format_batches(&batches)
+            let formatted = arrow::util::pretty::pretty_format_batches(&batches)
                 .map_err(|e| anyhow!("Failed to format results as table: {}", e))?;
             println!("{}", formatted);
         }

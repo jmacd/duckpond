@@ -343,7 +343,7 @@ async fn read_and_verify_derived_data(
         };
 
     // Commit transaction
-    tx.commit().await?;
+    _ = tx.commit().await?;
 
     let read_time = read_start.elapsed();
 
@@ -379,7 +379,7 @@ async fn read_and_verify_derived_data(
 
             for i in 0..timestamps.len() {
                 if let Some(ts) = timestamps.value(i).into() {
-                    read_timestamps.insert(ts);
+                    _ = read_timestamps.insert(ts);
                 }
             }
         } else {
@@ -400,7 +400,7 @@ async fn read_and_verify_derived_data(
 
         for i in 0..timestamps.len() {
             if let Some(ts) = timestamps.value(i).into() {
-                expected_timestamps.insert(ts);
+                _ = expected_timestamps.insert(ts);
             }
         }
     }
@@ -573,7 +573,7 @@ async fn read_and_verify_data(
 
             let mut expected_timestamps = std::collections::HashSet::new();
             for i in 0..expected_ts_col.len() {
-                expected_timestamps.insert(expected_ts_col.value(i));
+                _ = expected_timestamps.insert(expected_ts_col.value(i));
             }
 
             // Extract all timestamps from read batches (multiple batches due to streaming)
@@ -586,7 +586,7 @@ async fn read_and_verify_data(
                     .unwrap();
 
                 for i in 0..read_ts_col.len() {
-                    read_timestamps.insert(read_ts_col.value(i));
+                    _ = read_timestamps.insert(read_ts_col.value(i));
                 }
             }
 

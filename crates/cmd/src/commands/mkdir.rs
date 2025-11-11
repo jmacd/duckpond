@@ -81,7 +81,7 @@ pub async fn mkdir_command(
                             }
                         } else {
                             // Directory doesn't exist, create it
-                            root.create_dir_path(&current_path).await.map_err(|e| {
+                            _ = root.create_dir_path(&current_path).await.map_err(|e| {
                                 steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
                             })?;
                         }
@@ -124,7 +124,7 @@ pub async fn mkdir_command(
                     }
 
                     // Now create the directory - this should not fail if parents exist
-                    root.create_dir_path(&path_for_closure).await.map_err(|e| {
+                    _ = root.create_dir_path(&path_for_closure).await.map_err(|e| {
                         steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
                     })?;
                 }
@@ -201,7 +201,7 @@ mod tests {
                 }
             };
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
             result
         }
 
@@ -228,7 +228,7 @@ mod tests {
                 writer.shutdown().await
             };
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
             result.map_err(|e| anyhow::anyhow!("Failed to write file content: {}", e))?;
             Ok(())
         }
@@ -263,7 +263,7 @@ mod tests {
                 Ok(files)
             };
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
             result
         }
     }

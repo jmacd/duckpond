@@ -61,14 +61,14 @@ async fn create_test_config(
 
     // Create parent directory first
     if parent_path != "/" {
-        root.create_dir_path(parent_path).await?;
+        _ = root.create_dir_path(parent_path).await?;
     }
 
     // Resolve parent after creation
     let (parent_wd, _) = root.resolve_path(parent_path).await?;
     let parent_node_id = parent_wd.node_path().id().await;
 
-    state
+    _ = state
         .create_dynamic_file_node(
             parent_node_id,
             path.rsplit('/').next().unwrap().to_string(),
@@ -82,7 +82,7 @@ async fn create_test_config(
     let context = FactoryContext::new(state.clone(), parent_node_id);
     FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context).await?;
 
-    tx.commit().await?;
+    _ = tx.commit().await?;
     Ok(())
 }
 
@@ -101,7 +101,7 @@ repeat_count: 3
         .expect("Failed to create test config");
 
     // Verify the config was created - simple check that it doesn't error
-    create_test_config(&ship_context, "/configs/test1", config_yaml)
+    _ = create_test_config(&ship_context, "/configs/test1", config_yaml)
         .await
         .expect_err("Should fail on duplicate path");
 }
@@ -132,7 +132,8 @@ repeat_count: 5
     let root = fs.root().await.expect("Failed to get root");
 
     // Create parent directory and config node
-    root.create_dir_path("/configs")
+    _ = root
+        .create_dir_path("/configs")
         .await
         .expect("Failed to create configs dir");
     let (parent_wd, _) = root
@@ -141,7 +142,7 @@ repeat_count: 5
         .expect("Failed to resolve configs");
     let parent_node_id = parent_wd.node_path().id().await;
 
-    state
+    _ = state
         .create_dynamic_file_node(
             parent_node_id,
             "test3".to_string(),
@@ -167,7 +168,7 @@ repeat_count: 5
     .await
     .expect("Failed to execute factory");
 
-    tx.commit().await.expect("Failed to commit transaction");
+    _ = tx.commit().await.expect("Failed to commit transaction");
 
     println!("Successfully created and executed in single transaction!");
 }

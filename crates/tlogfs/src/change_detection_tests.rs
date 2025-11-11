@@ -40,15 +40,18 @@ async fn test_detect_changes_from_commit() -> Result<(), TLogFSError> {
         let root = tx.root().await.map_err(|e| TLogFSError::TinyFS(e))?;
 
         // Create test directories (simpler than files for this test)
-        _ = root.create_dir_path("/test_data")
+        _ = root
+            .create_dir_path("/test_data")
             .await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
-        _ = root.create_dir_path("/test_data/subdir1")
+        _ = root
+            .create_dir_path("/test_data/subdir1")
             .await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
-        _ = root.create_dir_path("/test_data/subdir2")
+        _ = root
+            .create_dir_path("/test_data/subdir2")
             .await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
@@ -110,7 +113,8 @@ async fn test_detect_changes_multiple_commits() -> Result<(), TLogFSError> {
         let tx = persistence.begin_test().await?;
         let root = tx.root().await.map_err(|e| TLogFSError::TinyFS(e))?;
 
-        _ = root.create_dir_path("/data1")
+        _ = root
+            .create_dir_path("/data1")
             .await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
@@ -125,11 +129,13 @@ async fn test_detect_changes_multiple_commits() -> Result<(), TLogFSError> {
         let tx = persistence.begin_test().await?;
         let root = tx.root().await.map_err(|e| TLogFSError::TinyFS(e))?;
 
-        _ = root.create_dir_path("/data2")
+        _ = root
+            .create_dir_path("/data2")
             .await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 
-        _ = root.create_dir_path("/data3")
+        _ = root
+            .create_dir_path("/data3")
             .await
             .map_err(|e| TLogFSError::TinyFS(e))?;
 

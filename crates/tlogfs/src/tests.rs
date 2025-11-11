@@ -78,7 +78,8 @@ async fn test_transaction_guard_read_after_create() {
 
         let root = tx.root().await.expect("Failed to get root directory");
 
-        _ = root.create_dir_path("/txn")
+        _ = root
+            .create_dir_path("/txn")
             .await
             .expect("Failed to create /txn directory");
 
@@ -500,8 +501,12 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     );
 
     // Store the large file
-    _ = tinyfs::async_helpers::convenience::create_file_path(&wd, "/large_test.dat", &large_content)
-        .await?;
+    _ = tinyfs::async_helpers::convenience::create_file_path(
+        &wd,
+        "/large_test.dat",
+        &large_content,
+    )
+    .await?;
     tx.commit_test().await?;
 
     println!("✅ Large file stored successfully");

@@ -23,7 +23,8 @@ where
         .await
         .map_err(|e| anyhow!("Failed to access data filesystem: {}", e))?;
 
-    tx.commit()
+    _ = tx
+        .commit()
         .await
         .map_err(|e| anyhow!("Failed to commit read transaction: {}", e))?;
 
@@ -184,7 +185,7 @@ async fn show_brief_mode(
                 file_versions: file_versions.value(i) as usize,
                 path_name: None,
             };
-            partition_map.insert(part_id, stats);
+            _ = partition_map.insert(part_id, stats);
         }
     }
 
@@ -368,7 +369,7 @@ async fn query_transaction_commands(
                 Vec::new()
             };
 
-            command_map.insert(txn_seq, args);
+            _ = command_map.insert(txn_seq, args);
         }
     }
 
@@ -420,12 +421,12 @@ async fn show_detailed_mode(
         let node_id = node_path.id().await;
         let path = node_path.path();
         let node_id_str = node_id.to_string();
-        path_map.insert(node_id_str, path.to_string_lossy().to_string());
+        _ = path_map.insert(node_id_str, path.to_string_lossy().to_string());
     }
 
     // Also add the root directory
     let root_node_id = root.node_path().id().await;
-    path_map.insert(root_node_id.to_string(), "/".to_string());
+    _ = path_map.insert(root_node_id.to_string(), "/".to_string());
 
     // Query ALL operations in a single query, ordered by transaction (newest first)
     // This is vastly more efficient than querying each transaction separately (was 79 queries!)
@@ -465,8 +466,7 @@ async fn show_detailed_mode(
             })?;
 
         // Group rows by txn_seq within this batch
-        let mut current_txn_rows: std::collections::HashMap<i64, Vec<usize>> =
-            std::collections::HashMap::new();
+        let mut current_txn_rows: HashMap<i64, Vec<usize>> = HashMap::new();
         for row_idx in 0..batch.num_rows() {
             let txn_seq = txn_seqs.value(row_idx);
             current_txn_rows
@@ -509,7 +509,7 @@ async fn show_detailed_mode(
                 {
                     for i in 0..part_id_array.len() {
                         if !part_id_array.is_null(i) {
-                            part_ids.insert(part_id_array.value(i).to_string());
+                            _ = part_ids.insert(part_id_array.value(i).to_string());
                         }
                     }
                 }
@@ -528,7 +528,7 @@ async fn show_detailed_mode(
                 {
                     for i in 0..node_id_array.len() {
                         if !node_id_array.is_null(i) {
-                            node_ids.insert(node_id_array.value(i).to_string());
+                            _ = node_ids.insert(node_id_array.value(i).to_string());
                         }
                     }
                 }
@@ -540,10 +540,10 @@ async fn show_detailed_mode(
         for id_hex in part_ids.iter().chain(node_ids.iter()) {
             // Parse hex string as UUID and format with hyphens
             if let Ok(uuid) = id_hex.parse::<uuid7::Uuid>() {
-                unique_uuids.insert(uuid.to_string());
+                _ = unique_uuids.insert(uuid.to_string());
             } else {
                 // If parsing fails, use the original hex string
-                unique_uuids.insert(id_hex.clone());
+                _ = unique_uuids.insert(id_hex.clone());
             }
         }
         let unique_ids: Vec<String> = unique_uuids.into_iter().collect();
@@ -909,7 +909,7 @@ mod tests {
                     .root()
                     .await
                     .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                tinyfs::async_helpers::convenience::create_file_path(
+                _ = tinyfs::async_helpers::convenience::create_file_path(
                     &data_root,
                     "/example.txt",
                     b"test content for show",

@@ -558,8 +558,7 @@ impl QueryableFile for SqlDerivedFile {
         node_id: tinyfs::NodeID,
         part_id: tinyfs::NodeID,
         state: &crate::persistence::State,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError>
-    {
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
         // Check cache first for SqlDerivedFile ViewTable
         let cache_key = crate::persistence::TableProviderKey::new(
             node_id,
@@ -598,14 +597,12 @@ impl QueryableFile for SqlDerivedFile {
             // FIXED: After EntryType refactor, we need to search for BOTH Physical and Dynamic variants
             // since source files can be created by factories (Dynamic) or direct uploads (Physical)
             let entry_types = match self.get_mode() {
-                SqlDerivedMode::Table => vec![
-                    EntryType::FileTablePhysical,
-                    EntryType::FileTableDynamic,
-                ],
-                SqlDerivedMode::Series => vec![
-                    EntryType::FileSeriesPhysical,
-                    EntryType::FileSeriesDynamic,
-                ],
+                SqlDerivedMode::Table => {
+                    vec![EntryType::FileTablePhysical, EntryType::FileTableDynamic]
+                }
+                SqlDerivedMode::Series => {
+                    vec![EntryType::FileSeriesPhysical, EntryType::FileSeriesDynamic]
+                }
             };
             debug!(
                 "🔍 SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_types: {:?})",
@@ -794,21 +791,22 @@ impl QueryableFile for SqlDerivedFile {
                         unique_table_name,
                         Arc::as_ptr(&ctx)
                     );
-                    _ = ctx.register_table(
-                        datafusion::sql::TableReference::bare(unique_table_name.as_str()),
-                        listing_table_provider,
-                    )
-                    .map_err(|e| {
-                        log::error!(
-                            "❌ SQL-DERIVED: Failed to register table '{}': {}",
-                            unique_table_name,
-                            e
-                        );
-                        crate::error::TLogFSError::ArrowMessage(format!(
-                            "Failed to register table '{}': {}",
-                            unique_table_name, e
-                        ))
-                    })?;
+                    _ = ctx
+                        .register_table(
+                            datafusion::sql::TableReference::bare(unique_table_name.as_str()),
+                            listing_table_provider,
+                        )
+                        .map_err(|e| {
+                            log::error!(
+                                "❌ SQL-DERIVED: Failed to register table '{}': {}",
+                                unique_table_name,
+                                e
+                            );
+                            crate::error::TLogFSError::ArrowMessage(format!(
+                                "Failed to register table '{}': {}",
+                                unique_table_name, e
+                            ))
+                        })?;
                     debug!(
                         "✅ SQL-DERIVED: Successfully registered table '{}' (user pattern: '{}') in SessionContext",
                         unique_table_name, pattern_name
@@ -2485,7 +2483,8 @@ query: ""
 
             _ = root.create_dir_path("/hydrovu").await.unwrap();
             _ = root.create_dir_path("/hydrovu/devices").await.unwrap();
-            _ = root.create_dir_path("/hydrovu/devices/station_a")
+            _ = root
+                .create_dir_path("/hydrovu/devices/station_a")
                 .await
                 .unwrap();
             let mut writer = root
@@ -2599,7 +2598,8 @@ query: ""
                 _ = writer.close().unwrap();
             }
 
-            _ = root.create_dir_path("/hydrovu/devices/station_b")
+            _ = root
+                .create_dir_path("/hydrovu/devices/station_b")
                 .await
                 .unwrap();
             let mut writer = root
@@ -2963,7 +2963,8 @@ query: ""
 
                         // Execute the temporal-reduce query using the proper public API
                         let ctx = state.session_context().await.unwrap();
-                        _ = ctx.register_table("temporal_reduce_table", table_provider)
+                        _ = ctx
+                            .register_table("temporal_reduce_table", table_provider)
                             .unwrap();
 
                         // Execute query to get results
@@ -3182,7 +3183,8 @@ query: ""
 
             // Store as base sensor data using TinyFS Arrow integration - create parent directories
             _ = root.create_dir_path("/sensors").await.unwrap();
-            _ = root.create_dir_path("/sensors/wildcard_test")
+            _ = root
+                .create_dir_path("/sensors/wildcard_test")
                 .await
                 .unwrap();
 
@@ -3383,7 +3385,8 @@ query: ""
 
                         // Execute the temporal-reduce query using the proper public API
                         let ctx = state.session_context().await.unwrap();
-                        _ = ctx.register_table("wildcard_temporal_table", table_provider)
+                        _ = ctx
+                            .register_table("wildcard_temporal_table", table_provider)
                             .unwrap();
 
                         // Execute query to get results

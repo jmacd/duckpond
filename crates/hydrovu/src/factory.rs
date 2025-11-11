@@ -114,12 +114,12 @@ async fn create_directory_structure(
     // Create base HydroVu directory
     let hydrovu_path = &config.hydrovu_path;
     log::debug!("Creating HydroVu base directory: {}", hydrovu_path);
-    root.create_dir_path(hydrovu_path).await?;
+    _ = root.create_dir_path(hydrovu_path).await?;
 
     // Create devices directory
     let devices_path = format!("{}/devices", config.hydrovu_path);
     log::debug!("Creating devices directory: {}", devices_path);
-    root.create_dir_path(&devices_path).await?;
+    _ = root.create_dir_path(&devices_path).await?;
 
     // Create directory for each configured device
     for device in &config.devices {
@@ -131,7 +131,7 @@ async fn create_directory_structure(
             device_path,
             device_name
         );
-        root.create_dir_path(&device_path).await?;
+        _ = root.create_dir_path(&device_path).await?;
     }
 
     log::debug!("HydroVu directory structure created successfully");

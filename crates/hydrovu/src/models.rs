@@ -93,7 +93,7 @@ impl WideRecord {
         location_readings: &LocationReadings,
         units: &BTreeMap<String, String>,
         parameters: &BTreeMap<String, String>,
-        device: &crate::HydroVuDevice, // Add device for scope information
+        device: &HydroVuDevice, // Add device for scope information
     ) -> anyhow::Result<Vec<Self>> {
         use std::collections::BTreeSet;
 
@@ -139,7 +139,7 @@ impl WideRecord {
 
                 let column_name = format!("{}.{}.{}", device.scope, param_name, unit_name);
 
-                parameter_values.insert(column_name, value);
+                _ = parameter_values.insert(column_name, value);
             }
 
             wide_records.push(WideRecord {

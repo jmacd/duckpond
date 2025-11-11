@@ -151,7 +151,7 @@ impl Ship {
         // Create an empty data Delta table structure (schema + _delta_log/, but no data)
         // Bundles will be replayed through replay_transaction() which writes to this table
         debug!("Creating empty data table structure at {}", data_path_str);
-        let data_persistence = tlogfs::OpLogPersistence::create_empty(&data_path_str)
+        let data_persistence = OpLogPersistence::create_empty(&data_path_str)
             .await
             .map_err(StewardError::DataInit)?;
 
@@ -208,7 +208,7 @@ impl Ship {
 
         // Initialize data filesystem - automatically creates root directory if create_new=true
         let data_persistence =
-            tlogfs::OpLogPersistence::open_or_create(&data_path_str, create_new, txn_metadata)
+            OpLogPersistence::open_or_create(&data_path_str, create_new, txn_metadata)
                 .await
                 .map_err(StewardError::DataInit)?;
 
@@ -255,7 +255,7 @@ impl Ship {
             &'a StewardTransactionGuard<'a>,
             &'a tinyfs::FS,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
+            Box<dyn Future<Output = Result<R, StewardError>> + Send + 'a>,
         >,
     {
         debug!("Beginning scoped transaction {:?}", meta);
@@ -268,7 +268,7 @@ impl Ship {
         match result {
             Ok(value) => {
                 // Success - commit using steward guard (ensures proper sequencing)
-                tx.commit().await?;
+                _ = tx.commit().await?;
                 Ok(value)
             }
             Err(e) => {
@@ -305,7 +305,7 @@ impl Ship {
             &'a StewardTransactionGuard<'a>,
             &'a tinyfs::FS,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<R, StewardError>> + Send + 'a>,
+            Box<dyn Future<Output = Result<R, StewardError>> + Send + 'a>,
         >,
     {
         debug!(
@@ -321,7 +321,7 @@ impl Ship {
         match result {
             Ok(value) => {
                 // Success - commit using steward guard (ensures proper sequencing)
-                tx.commit().await?;
+                _ = tx.commit().await?;
                 Ok(value)
             }
             Err(e) => {
@@ -662,7 +662,7 @@ impl Ship {
                     .root()
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                data_root
+                _ = data_root
                     .create_dir_path("/data")
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -770,7 +770,7 @@ mod tests {
                     .root()
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                tinyfs::async_helpers::convenience::create_file_path(
+                _ = tinyfs::async_helpers::convenience::create_file_path(
                     &root,
                     "/test.txt",
                     b"test content",
@@ -809,7 +809,7 @@ mod tests {
                     .root()
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                tinyfs::async_helpers::convenience::create_file_path(
+                _ = tinyfs::async_helpers::convenience::create_file_path(
                     &data_root,
                     "/test.txt",
                     b"test content",
@@ -868,7 +868,7 @@ mod tests {
             let data_root = tx.root().await.expect("Failed to get data root");
 
             // Modify data during the transaction
-            tinyfs::async_helpers::convenience::create_file_path(
+            _ = tinyfs::async_helpers::convenience::create_file_path(
                 &data_root,
                 "/file1.txt",
                 b"content1",
@@ -943,7 +943,8 @@ mod tests {
                 .await
                 .expect("File should exist after recovery");
             assert_eq!(file_content, b"content1");
-            tx.commit()
+            _ = tx
+                .commit()
                 .await
                 .expect("Failed to commit read transaction");
 
@@ -970,7 +971,7 @@ mod tests {
                         .root()
                         .await
                         .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    tinyfs::async_helpers::convenience::create_file_path(
+                    _ = tinyfs::async_helpers::convenience::create_file_path(
                         &data_root,
                         &format!("/file{}.txt", i),
                         format!("content{}", i).as_bytes(),
@@ -1055,7 +1056,7 @@ mod tests {
                 let data_root = tx.root().await.expect("Failed to get data root");
 
                 // Do actual file operation
-                tinyfs::async_helpers::convenience::create_file_path(
+                _ = tinyfs::async_helpers::convenience::create_file_path(
                     &data_root,
                     "/dest.txt",
                     b"copied content",
@@ -1156,7 +1157,8 @@ mod tests {
                 .await
                 .expect("Failed to read file content");
             assert_eq!(file_content, b"copied content");
-            tx.commit()
+            _ = tx
+                .commit()
                 .await
                 .expect("Failed to commit read transaction");
         }
@@ -1185,7 +1187,7 @@ mod tests {
                         .root()
                         .await
                         .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    data_root
+                    _ = data_root
                         .create_dir_path(&format!("/dir{}", i))
                         .await
                         .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -1234,7 +1236,7 @@ mod tests {
 
         // Perform some work
         let root = tx.root().await.expect("Failed to get root");
-        tinyfs::async_helpers::convenience::create_file_path(
+        _ = tinyfs::async_helpers::convenience::create_file_path(
             &root,
             "/test_file.txt",
             b"test content",
@@ -1245,7 +1247,8 @@ mod tests {
         // The commit step demonstrates the borrow checker challenge
         // ship.commit_transaction(tx).await - this would fail due to borrow checker
         // Instead, we rely on the steward guard's commit method which has the proper sequencing
-        tx.commit()
+        _ = tx
+            .commit()
             .await
             .expect("Failed to commit steward transaction");
 
@@ -1278,7 +1281,7 @@ mod tests {
                     .root()
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                tinyfs::async_helpers::convenience::create_file_path(
+                _ = tinyfs::async_helpers::convenience::create_file_path(
                     &root,
                     "/file1.txt",
                     b"content1",
@@ -1307,7 +1310,7 @@ mod tests {
                     .root()
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                tinyfs::async_helpers::convenience::create_file_path(
+                _ = tinyfs::async_helpers::convenience::create_file_path(
                     &root,
                     "/file2.txt",
                     b"content2",
@@ -1393,19 +1396,24 @@ mod tests {
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
                 // Create nested directory structure: /a/b/c and /a/d/e
-                root.create_dir_path("/a")
+                _ = root
+                    .create_dir_path("/a")
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                root.create_dir_path("/a/b")
+                _ = root
+                    .create_dir_path("/a/b")
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                root.create_dir_path("/a/b/c")
+                _ = root
+                    .create_dir_path("/a/b/c")
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                root.create_dir_path("/a/d")
+                _ = root
+                    .create_dir_path("/a/d")
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                root.create_dir_path("/a/d/e")
+                _ = root
+                    .create_dir_path("/a/d/e")
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 

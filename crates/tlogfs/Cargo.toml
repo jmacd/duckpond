@@ -11,6 +11,9 @@ categories.workspace = true
 keywords.workspace = true
 description.workspace = true
 
+[lib]
+doctest = false
+
 [features]
 # Test helpers - enables commit_test() method for integration tests
 test-helpers = []

@@ -99,7 +99,8 @@ impl ExportSet {
             *self = ExportSet::Map(HashMap::new());
         }
         if let ExportSet::Map(map) = self {
-            map.entry(captures[0].clone())
+            _ = map
+                .entry(captures[0].clone())
                 .and_modify(|e| {
                     e.insert_with_schema(&captures[1..], output.clone(), schema);
                 })
@@ -168,7 +169,7 @@ fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
         (ExportSet::Map(mut base_map), ExportSet::Map(other_map)) => {
             // Merge maps recursively
             for (key, other_set) in other_map {
-                base_map
+                _ = base_map
                     .entry(key)
                     .and_modify(|existing| {
                         *existing =
@@ -181,15 +182,15 @@ fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
         (ExportSet::Files(base_leaf), ExportSet::Map(other_map)) => {
             // Convert Files to Map and merge
             let mut new_map = HashMap::new();
-            new_map.insert("files".to_string(), Box::new(ExportSet::Files(base_leaf)));
+            _ = new_map.insert("files".to_string(), Box::new(ExportSet::Files(base_leaf)));
             for (key, other_set) in other_map {
-                new_map.insert(key, other_set);
+                _ = new_map.insert(key, other_set);
             }
             ExportSet::Map(new_map)
         }
         (ExportSet::Map(mut base_map), ExportSet::Files(other_leaf)) => {
             // Add Files to Map
-            base_map.insert("files".to_string(), Box::new(ExportSet::Files(other_leaf)));
+            _ = base_map.insert("files".to_string(), Box::new(ExportSet::Files(other_leaf)));
             ExportSet::Map(base_map)
         }
     }
@@ -348,7 +349,7 @@ impl ExportSummary {
         } else {
             // Create new export set for this pattern
             let export_set = ExportSet::construct(results);
-            self.pattern_results.insert(pattern.to_string(), export_set);
+            _ = self.pattern_results.insert(pattern.to_string(), export_set);
         }
     }
 }
@@ -616,7 +617,7 @@ async fn export_pond_data(
     }
 
     // Commit transaction
-    stx_guard.commit().await?;
+    _ = stx_guard.commit().await?;
 
     Ok(export_summary)
 }
@@ -735,7 +736,7 @@ fn extract_timestamps_from_path(
 
     let components = relative_path.components();
     // Start with empty HashMap - only populated when temporal parts are actually found
-    let mut temporal_parts = std::collections::HashMap::new();
+    let mut temporal_parts = HashMap::new();
 
     // Parse temporal partition directories like "year=2024/month=7"
     let mut parsed_parts = Vec::new();
@@ -761,7 +762,7 @@ fn extract_timestamps_from_path(
                             relative_path.display(), part_name, part_value_str, e
                         ))?;
 
-                    temporal_parts.insert(part_name, part_value);
+                    _ = temporal_parts.insert(part_name, part_value);
                     parsed_parts.push(part_name);
                     log::debug!("🕐 Parsed temporal part: {}={}", part_name, part_value);
                 }
@@ -785,16 +786,16 @@ fn extract_timestamps_from_path(
     // Year and month are always required if any temporal parsing occurred
     // Day defaults to 1, time components default to 0
     if !temporal_parts.contains_key("day") {
-        temporal_parts.insert("day", 1);
+        _ = temporal_parts.insert("day", 1);
     }
     if !temporal_parts.contains_key("hour") {
-        temporal_parts.insert("hour", 0);
+        _ = temporal_parts.insert("hour", 0);
     }
     if !temporal_parts.contains_key("minute") {
-        temporal_parts.insert("minute", 0);
+        _ = temporal_parts.insert("minute", 0);
     }
     if !temporal_parts.contains_key("second") {
-        temporal_parts.insert("second", 0);
+        _ = temporal_parts.insert("second", 0);
     }
 
     // Build start time
@@ -815,16 +816,12 @@ fn extract_timestamps_from_path(
 }
 
 /// Calculate end time by properly incrementing the last temporal part using chrono date arithmetic
-fn calculate_end_time(
-    parts: &std::collections::HashMap<&str, i32>,
-    last_part: &str,
-) -> Result<i64> {
+fn calculate_end_time(parts: &HashMap<&str, i32>, last_part: &str) -> Result<i64> {
     use chrono::{Datelike, TimeZone, Utc};
 
     let year = *parts
         .get("year")
-        .ok_or_else(|| anyhow::anyhow!("Missing year in temporal path for end time calculation"))?
-        as i32;
+        .ok_or_else(|| anyhow::anyhow!("Missing year in temporal path for end time calculation"))?;
     let month = *parts
         .get("month")
         .ok_or_else(|| anyhow::anyhow!("Missing month in temporal path for end time calculation"))?
@@ -922,12 +919,12 @@ fn calculate_end_time(
 }
 
 /// Build UTC timestamp from temporal parts (matches original build_utc function)
-fn build_utc_timestamp(parts: &std::collections::HashMap<&str, i32>) -> Result<i64> {
+fn build_utc_timestamp(parts: &HashMap<&str, i32>) -> Result<i64> {
     use chrono::{TimeZone, Utc};
 
     let year = *parts
         .get("year")
-        .ok_or_else(|| anyhow::anyhow!("Missing year in temporal path"))? as i32;
+        .ok_or_else(|| anyhow::anyhow!("Missing year in temporal path"))?;
     let month = *parts
         .get("month")
         .ok_or_else(|| anyhow::anyhow!("Missing month in temporal path"))? as u32;
@@ -1211,7 +1208,7 @@ async fn export_target(
         std::path::Path::new(output_dir).join(&target.output_name)
     } else {
         // Use captures to build hierarchical directory structure
-        let mut path = std::path::PathBuf::from(output_dir);
+        let mut path = PathBuf::from(output_dir);
         for capture in &target.captures {
             path = path.join(capture);
         }
@@ -1437,10 +1434,10 @@ async fn execute_direct_copy_query(
                 .map_err(|e| anyhow::anyhow!("Failed to get metadata: {}", e))?;
 
             match metadata.entry_type {
-                tinyfs::EntryType::FileTablePhysical
-                | tinyfs::EntryType::FileTableDynamic
-                | tinyfs::EntryType::FileSeriesPhysical
-                | tinyfs::EntryType::FileSeriesDynamic => {
+                EntryType::FileTablePhysical
+                | EntryType::FileTableDynamic
+                | EntryType::FileSeriesPhysical
+                | EntryType::FileSeriesDynamic => {
                     let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 
@@ -1453,7 +1450,7 @@ async fn execute_direct_copy_query(
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to resolve parent path: {}", e))?;
                         match parent_node_path.1 {
-                            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+                            Lookup::Found(parent_node) => parent_node.id().await,
                             _ => tinyfs::NodeID::root(),
                         }
                     };
@@ -1531,17 +1528,18 @@ async fn execute_direct_copy_query(
 
                         drop(file_guard);
 
-                        ctx.register_table(
-                            datafusion::sql::TableReference::bare(unique_table_name),
-                            table_provider,
-                        )
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to register table '{}': {}",
-                                unique_table_name,
-                                e
+                        _ = ctx
+                            .register_table(
+                                datafusion::sql::TableReference::bare(unique_table_name),
+                                table_provider,
                             )
-                        })?;
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to register table '{}': {}",
+                                    unique_table_name,
+                                    e
+                                )
+                            })?;
                     } else {
                         return Err(anyhow::anyhow!(
                             "File does not implement QueryableFile trait"
@@ -1668,7 +1666,7 @@ async fn export_raw_file(
             if let Ok(file_handle) = node_ref.as_file() {
                 let mut reader = file_handle.async_reader().await?;
                 let mut content = Vec::new();
-                reader.read_to_end(&mut content).await?;
+                _ = reader.read_to_end(&mut content).await?;
 
                 // Export as raw data
                 std::fs::write(&output_path, &content)?;
@@ -1758,13 +1756,13 @@ mod tests {
     #[test]
     fn test_date_arithmetic_month_rollover() {
         // Test the specific bug case: December 2024 should roll to January 2025
-        let mut parts = std::collections::HashMap::new();
-        parts.insert("year", 2024);
-        parts.insert("month", 12);
-        parts.insert("day", 1);
-        parts.insert("hour", 0);
-        parts.insert("minute", 0);
-        parts.insert("second", 0);
+        let mut parts = HashMap::new();
+        _ = parts.insert("year", 2024);
+        _ = parts.insert("month", 12);
+        _ = parts.insert("day", 1);
+        _ = parts.insert("hour", 0);
+        _ = parts.insert("minute", 0);
+        _ = parts.insert("second", 0);
 
         let end_time = calculate_end_time(&parts, "month").unwrap();
 
@@ -1785,13 +1783,13 @@ mod tests {
     #[test]
     fn test_date_arithmetic_various_rollovers() {
         // Test year rollover
-        let mut parts = std::collections::HashMap::new();
-        parts.insert("year", 2024);
-        parts.insert("month", 1);
-        parts.insert("day", 1);
-        parts.insert("hour", 0);
-        parts.insert("minute", 0);
-        parts.insert("second", 0);
+        let mut parts = HashMap::new();
+        _ = parts.insert("year", 2024);
+        _ = parts.insert("month", 1);
+        _ = parts.insert("day", 1);
+        _ = parts.insert("hour", 0);
+        _ = parts.insert("minute", 0);
+        _ = parts.insert("second", 0);
 
         let end_time = calculate_end_time(&parts, "year").unwrap();
         let expected = chrono::Utc
@@ -1801,7 +1799,7 @@ mod tests {
         assert_eq!(end_time, expected, "Year rollover failed");
 
         // Test regular month increment (non-December)
-        parts.insert("month", 11);
+        _ = parts.insert("month", 11);
         let end_time = calculate_end_time(&parts, "month").unwrap();
         let expected = chrono::Utc
             .with_ymd_and_hms(2024, 12, 1, 0, 0, 0)
@@ -1810,8 +1808,8 @@ mod tests {
         assert_eq!(end_time, expected, "Regular month increment failed");
 
         // Test day rollover (uses chrono's automatic handling)
-        parts.insert("month", 1);
-        parts.insert("day", 31);
+        _ = parts.insert("month", 1);
+        _ = parts.insert("day", 31);
         let end_time = calculate_end_time(&parts, "day").unwrap();
         let expected = chrono::Utc
             .with_ymd_and_hms(2024, 2, 1, 0, 0, 0)

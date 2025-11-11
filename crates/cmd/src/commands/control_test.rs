@@ -80,13 +80,13 @@ impl TestSetup {
 
                 // Create /test directory if it doesn't exist
                 if !root.exists("/test").await {
-                    root.create_dir_path("/test").await.map_err(|e| {
+                    _ = root.create_dir_path("/test").await.map_err(|e| {
                         steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
                     })?;
                 }
 
                 // Create a simple file to make this a write transaction
-                tinyfs::async_helpers::convenience::create_file_path(
+                _ = tinyfs::async_helpers::convenience::create_file_path(
                     &root,
                     &format!("/test/{}.txt", desc),
                     format!("Test data for {}", desc).as_bytes(),
@@ -1065,9 +1065,13 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
             // Write the test file with known content
-            tinyfs::async_helpers::convenience::create_file_path(&root, &path, content.as_bytes())
-                .await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &root,
+                &path,
+                content.as_bytes(),
+            )
+            .await
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
             Ok(())
         })

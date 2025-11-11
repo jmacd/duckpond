@@ -60,7 +60,7 @@ async fn copy_single_file_to_directory_with_name(
         .map_err(|e| format!("Failed to create destination writer: {}", e))?;
 
     // Stream copy with 64KB buffer for memory efficiency
-    tokio::io::copy(&mut source_file, &mut dest_writer)
+    _ = tokio::io::copy(&mut source_file, &mut dest_writer)
         .await
         .map_err(|e| format!("Failed to stream file content: {}", e))?;
 
@@ -163,7 +163,7 @@ pub async fn copy_command(
                         // Directory doesn't exist but user wants to copy into directory
                         // Create the directory first
                         let clean_dest = dest.trim_end_matches('/');
-                        root.create_dir_path(clean_dest).await
+                        _ = root.create_dir_path(clean_dest).await
                             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
                         // Now resolve the destination again (should work now)
@@ -291,7 +291,7 @@ mod tests {
             let file = std::fs::File::create(&file_path)?;
             let mut writer = ArrowWriter::try_new(file, batch.schema(), None)?;
             writer.write(&batch)?;
-            writer.close()?;
+            _ = writer.close()?;
 
             Ok(file_path)
         }
@@ -321,7 +321,7 @@ mod tests {
                 Err(e) => return Err(e.into()),
             };
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
             Ok(exists)
         }
 
@@ -337,10 +337,10 @@ mod tests {
             let mut content = Vec::new();
             {
                 let mut reader = root.async_reader_path(path).await?;
-                reader.read_to_end(&mut content).await?;
+                _ = reader.read_to_end(&mut content).await?;
             }
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
             Ok(content)
         }
 
@@ -365,7 +365,7 @@ mod tests {
                 anyhow::anyhow!("File {} does not exist or wrong type: {}", path, e)
             })?;
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
             Ok(())
         }
     }

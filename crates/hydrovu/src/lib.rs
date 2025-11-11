@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 mod client;
 mod models;
 
@@ -121,7 +123,7 @@ impl HydroVuCollector {
 
             if let Some(final_ts) = result.final_timestamp {
                 if final_ts > 0 {
-                    final_timestamps.insert(device.id, final_ts);
+                    _ = final_timestamps.insert(device.id, final_ts);
                 }
             }
 
@@ -494,7 +496,7 @@ impl HydroVuCollector {
         records: &[WideRecord],
         schema: &arrow_schema::Schema,
         device_id: i64, // Used for logging only, not stored in data
-    ) -> Result<arrow_array::RecordBatch> {
+    ) -> Result<RecordBatch> {
         if records.is_empty() {
             return Err(anyhow::anyhow!("Cannot convert empty records to Arrow"));
         }
@@ -510,7 +512,7 @@ impl HydroVuCollector {
             let field_name = field.name();
             // Skip the timestamp field
             if field_name != "timestamp" {
-                param_builders.insert(field_name.clone(), Float64Builder::new());
+                _ = param_builders.insert(field_name.clone(), Float64Builder::new());
             }
         }
 
@@ -582,7 +584,7 @@ impl HydroVuCollector {
     }
 
     /// Serialize Arrow RecordBatch to Parquet bytes
-    fn serialize_to_parquet(record_batch: arrow_array::RecordBatch) -> Result<Vec<u8>> {
+    fn serialize_to_parquet(record_batch: RecordBatch) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
         {
             let cursor = Cursor::new(&mut buffer);
@@ -593,7 +595,7 @@ impl HydroVuCollector {
                 .write(&record_batch)
                 .context("Failed to write RecordBatch to Parquet")?;
 
-            writer.close().context("Failed to close Parquet writer")?;
+            _ = writer.close().context("Failed to close Parquet writer")?;
         }
 
         let buffer_size = buffer.len();

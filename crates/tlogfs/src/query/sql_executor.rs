@@ -83,17 +83,18 @@ pub async fn execute_sql_on_file<'a>(
                             .as_table_provider(node_id, part_id, &state)
                             .await?;
                         drop(file_guard);
-			
-                        _ = ctx.register_table(
-                            datafusion::sql::TableReference::bare("series"),
-                            table_provider,
-                        )
-                        .map_err(|e| {
-                            TLogFSError::ArrowMessage(format!(
-                                "Failed to register table 'series': {}",
-                                e
-                            ))
-                        })?;
+
+                        _ = ctx
+                            .register_table(
+                                datafusion::sql::TableReference::bare("series"),
+                                table_provider,
+                            )
+                            .map_err(|e| {
+                                TLogFSError::ArrowMessage(format!(
+                                    "Failed to register table 'series': {}",
+                                    e
+                                ))
+                            })?;
                     } else {
                         return Err(TLogFSError::ArrowMessage(
                             "File does not implement QueryableFile trait".to_string(),

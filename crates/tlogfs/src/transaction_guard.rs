@@ -132,7 +132,9 @@ impl<'a> TransactionGuard<'a> {
         );
         let result = self.persistence.commit(metadata).await;
 
-        result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e))).map(|_| ())
+        result
+            .map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
+            .map(|_| ())
     }
 
     /// Commit with test metadata using explicit sequence number - for multi-commit tests

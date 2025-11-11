@@ -392,8 +392,7 @@ impl crate::query::QueryableFile for OpLogFile {
         node_id: NodeID,
         part_id: NodeID,
         state: &State,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError>
-    {
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
         log::info!(
             "📋 DELEGATING OpLogFile to create_listing_table_provider: node_id={}, part_id={}",
             node_id,

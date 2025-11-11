@@ -28,7 +28,8 @@ where
 
     match describe_command_impl(&mut tx, ship_context, pattern).await {
         Ok(output) => {
-            tx.commit()
+            _ = tx
+                .commit()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
             handler(output);
@@ -159,7 +160,7 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
 
     match describe_file_series_schema_impl(&mut tx, path).await {
         Ok(schema_info) => {
-            tx.commit().await?;
+            _ = tx.commit().await?;
             Ok(schema_info)
         }
         Err(e) => Err(tx.abort(&e).await.into()),
@@ -194,7 +195,7 @@ async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> R
 
     match describe_file_table_schema_impl(&mut tx, path).await {
         Ok(schema_info) => {
-            tx.commit().await?;
+            _ = tx.commit().await?;
             Ok(schema_info)
         }
         Err(e) => Err(tx.abort(&e).await.into()),

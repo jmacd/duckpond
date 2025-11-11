@@ -62,11 +62,13 @@ impl ExtendedAttributes {
         max_override: Option<i64>,
     ) -> &mut Self {
         if let Some(min) = min_override {
-            _ = self.attributes
+            _ = self
+                .attributes
                 .insert(duckpond::MIN_TEMPORAL_OVERRIDE.to_string(), min.to_string());
         }
         if let Some(max) = max_override {
-            _ = self.attributes
+            _ = self
+                .attributes
                 .insert(duckpond::MAX_TEMPORAL_OVERRIDE.to_string(), max.to_string());
         }
         self

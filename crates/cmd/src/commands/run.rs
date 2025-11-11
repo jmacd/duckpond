@@ -46,7 +46,7 @@ pub async fn run_command(
     .await
     {
         Ok(()) => {
-            tx.commit().await?;
+            _ = tx.commit().await?;
             log::debug!("Configuration executed successfully");
             println!("✓ Execution complete");
             Ok(())
@@ -108,7 +108,7 @@ async fn run_command_impl(
             .with_context(|| format!("Failed to open file: {}", config_path))?;
 
         let mut buffer = Vec::new();
-        reader
+        _ = reader
             .read_to_end(&mut buffer)
             .await
             .with_context(|| format!("Failed to read file: {}", config_path))?;

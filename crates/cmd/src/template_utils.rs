@@ -7,6 +7,22 @@ use anyhow::Result;
 use std::collections::HashMap;
 use tera::{Tera, Value};
 
+#[cfg(test)]
+#[allow(unsafe_code)]
+fn env_set_var(key: impl AsRef<std::ffi::OsStr>, value: impl AsRef<std::ffi::OsStr>) {
+    unsafe {
+        std::env::set_var(key, value);
+    }
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+fn env_remove_var(key: impl AsRef<std::ffi::OsStr>) {
+    unsafe {
+        std::env::remove_var(key);
+    }
+}
+
 /// Expand a YAML configuration file using Tera templates
 ///
 /// This function takes YAML content as a string and applies Tera template expansion
@@ -153,8 +169,8 @@ count: {{ item_count }}
 "#;
 
         let mut vars = HashMap::new();
-        vars.insert("device_name".to_string(), "TestDevice".to_string());
-        vars.insert("item_count".to_string(), "42".to_string());
+        _ = vars.insert("device_name".to_string(), "TestDevice".to_string());
+        _ = vars.insert("item_count".to_string(), "42".to_string());
 
         let result = expand_yaml_template(yaml, &vars).unwrap();
         assert!(result.contains("TestDevice"));
@@ -163,11 +179,7 @@ count: {{ item_count }}
 
     #[test]
     fn test_expand_yaml_with_env_function() {
-        // Set a test environment variable
-        // SAFETY: This is safe in tests as we control the execution environment
-        unsafe {
-            std::env::set_var("TEST_ENV_VAR", "test_value");
-        }
+        env_set_var("TEST_ENV_VAR", "test_value");
 
         let yaml = r#"
 api_key: "{{ env(name='TEST_ENV_VAR') }}"
@@ -178,19 +190,13 @@ api_key: "{{ env(name='TEST_ENV_VAR') }}"
         assert!(result.contains("test_value"));
 
         // Clean up
-        // SAFETY: This is safe in tests as we control the execution environment
-        unsafe {
-            std::env::remove_var("TEST_ENV_VAR");
-        }
+        env_remove_var("TEST_ENV_VAR");
     }
 
     #[test]
     fn test_expand_yaml_with_env_default() {
         // Make sure the variable doesn't exist
-        // SAFETY: This is safe in tests as we control the execution environment
-        unsafe {
-            std::env::remove_var("NONEXISTENT_VAR");
-        }
+        env_remove_var("NONEXISTENT_VAR");
 
         let yaml = r#"
 value: "{{ env(name='NONEXISTENT_VAR', default='fallback') }}"
@@ -204,10 +210,7 @@ value: "{{ env(name='NONEXISTENT_VAR', default='fallback') }}"
     #[test]
     fn test_expand_yaml_env_missing_error() {
         // Make sure the variable doesn't exist
-        // SAFETY: This is safe in tests as we control the execution environment
-        unsafe {
-            std::env::remove_var("MISSING_VAR");
-        }
+        env_remove_var("MISSING_VAR");
 
         let yaml = r#"
 value: "{{ env(name='MISSING_VAR') }}"
@@ -223,10 +226,7 @@ value: "{{ env(name='MISSING_VAR') }}"
 
     #[test]
     fn test_expand_yaml_combined() {
-        // SAFETY: This is safe in tests as we control the execution environment
-        unsafe {
-            std::env::set_var("TEST_SECRET", "secret123");
-        }
+        env_set_var("TEST_SECRET", "secret123");
 
         let yaml = r#"
 client_id: "{{ client_id }}"
@@ -237,9 +237,9 @@ devices:
 "#;
 
         let mut vars = HashMap::new();
-        vars.insert("client_id".to_string(), "my-client".to_string());
-        vars.insert("device_1".to_string(), "Device1".to_string());
-        vars.insert("device_2".to_string(), "Device2".to_string());
+        _ = vars.insert("client_id".to_string(), "my-client".to_string());
+        _ = vars.insert("device_1".to_string(), "Device1".to_string());
+        _ = vars.insert("device_2".to_string(), "Device2".to_string());
 
         let result = expand_yaml_template(yaml, &vars).unwrap();
         assert!(result.contains("my-client"));
@@ -247,10 +247,7 @@ devices:
         assert!(result.contains("Device1"));
         assert!(result.contains("Device2"));
 
-        // SAFETY: This is safe in tests as we control the execution environment
-        unsafe {
-            std::env::remove_var("TEST_SECRET");
-        }
+        env_remove_var("TEST_SECRET");
     }
 
     #[test]

@@ -11,6 +11,9 @@ categories.workspace = true
 keywords.workspace = true
 description.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow = { workspace = true }
 arrow = { workspace = true }

@@ -540,7 +540,7 @@ impl ControlTable {
 
         let session_context = Arc::new(session_context);
 
-        session_context
+        _ = session_context
             .register_table("transactions", Arc::new(table.clone()))
             .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
 
@@ -612,7 +612,7 @@ impl ControlTable {
 
         let session_context = Arc::new(session_context);
 
-        session_context
+        _ = session_context
             .register_table("transactions", Arc::new(table.clone()))
             .map_err(|e| StewardError::ControlTable(format!("Failed to register table: {}", e)))?;
 
@@ -719,10 +719,9 @@ impl ControlTable {
             .pond_id
             .clone();
 
-        let pond_id =
-            std::str::FromStr::from_str(&pond_id_str).map_err(|e: uuid7::ParseError| {
-                StewardError::ControlTable(format!("Invalid pond_id UUID: {}", e))
-            })?;
+        let pond_id = FromStr::from_str(&pond_id_str).map_err(|e: uuid7::ParseError| {
+            StewardError::ControlTable(format!("Invalid pond_id UUID: {}", e))
+        })?;
 
         // For now, just return a PondMetadata with the pond_id
         // TODO: Store full birth metadata in a special record or derive from first transaction
@@ -849,13 +848,15 @@ impl ControlTable {
         self.table = table;
 
         // Re-register table with SessionContext to see new version
-        self.session_context
+        _ = self
+            .session_context
             .deregister_table("transactions")
             .map_err(|e| {
                 StewardError::ControlTable(format!("Failed to deregister table: {}", e))
             })?;
 
-        self.session_context
+        _ = self
+            .session_context
             .register_table("transactions", Arc::new(self.table.clone()))
             .map_err(|e| {
                 StewardError::ControlTable(format!("Failed to re-register table: {}", e))
@@ -943,7 +944,8 @@ impl ControlTable {
         mode: &str,
     ) -> Result<(), StewardError> {
         // Update cached factory_modes
-        self.factory_modes
+        _ = self
+            .factory_modes
             .insert(factory_name.to_string(), mode.to_string());
 
         // Write a special record to persist the change in the metadata partition
@@ -988,7 +990,7 @@ impl ControlTable {
     /// Set a control table setting (persisted configuration)
     pub async fn set_setting(&mut self, key: &str, value: &str) -> Result<(), StewardError> {
         // Update cached settings
-        self.settings.insert(key.to_string(), value.to_string());
+        _ = self.settings.insert(key.to_string(), value.to_string());
 
         // Write a special record to persist the change in the metadata partition
         // Use factory_name="settings" to distinguish from factory_mode records

@@ -533,7 +533,7 @@ impl<'a> StewardTransactionGuard<'a> {
             .await
             .map_err(StewardError::DataInit)?;
 
-        let fs = tinyfs::FS::new(discovery_tx.state()?)
+        let fs = FS::new(discovery_tx.state()?)
             .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
@@ -555,7 +555,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 debug!("Failed to resolve /etc/system.d: {}", e);
                 // Post-commit transaction with no factories found
                 // Metadata was already provided at begin(), just commit
-                discovery_tx
+                _ = discovery_tx
                     .commit()
                     .await
                     .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -646,7 +646,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Commit the post-commit discovery transaction
         // Metadata was already provided at begin()
-        discovery_tx
+        _ = discovery_tx
             .commit()
             .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
@@ -683,7 +683,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Open a new read transaction for factory execution
         // Use self.txn_seq + 1 to read the data that was just committed
-        let metadata = tlogfs::PondTxnMetadata::new(
+        let metadata = PondTxnMetadata::new(
             self.txn_meta.txn_seq + 1,
             tlogfs::PondUserMetadata::new(vec![
                 "internal".to_string(),
@@ -719,7 +719,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Commit the post-commit factory execution transaction
         // Metadata was already provided at begin()
-        factory_tx
+        _ = factory_tx
             .commit()
             .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;

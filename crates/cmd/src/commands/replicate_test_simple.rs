@@ -113,7 +113,8 @@ impl SimpleReplicationTest {
         let control_table = ship.control_table();
         let ctx = SessionContext::new();
 
-        ctx.register_table("transactions", Arc::new(control_table.table().clone()))
+        _ = ctx
+            .register_table("transactions", Arc::new(control_table.table().clone()))
             .map_err(|e| anyhow::anyhow!("Failed to register table: {}", e))?;
 
         let sql = r#"
@@ -172,7 +173,8 @@ impl SimpleReplicationTest {
         let ctx = SessionContext::new();
 
         // Register control table
-        ctx.register_table("transactions", Arc::new(control_table.table().clone()))
+        _ = ctx
+            .register_table("transactions", Arc::new(control_table.table().clone()))
             .map_err(|e| anyhow::anyhow!("Failed to register transactions table: {}", e))?;
 
         // Get transaction count
@@ -206,7 +208,8 @@ impl SimpleReplicationTest {
 
         // Query oplog entries (nodes created/modified)
         let data_table = persistence.table();
-        ctx.register_table("oplog", Arc::new(data_table.clone()))
+        _ = ctx
+            .register_table("oplog", Arc::new(data_table.clone()))
             .map_err(|e| anyhow::anyhow!("Failed to register oplog table: {}", e))?;
 
         // Count nodes by file_type
@@ -248,7 +251,7 @@ impl SimpleReplicationTest {
             for i in 0..batch.num_rows() {
                 let file_type = file_types.value(i).to_string();
                 let count = counts.value(i);
-                nodes_by_type.insert(file_type, count);
+                _ = nodes_by_type.insert(file_type, count);
             }
         }
 

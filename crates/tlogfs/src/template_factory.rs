@@ -496,10 +496,7 @@ fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
     }
 }
 
-fn tmpl_to_json(
-    value: &Value,
-    _: &HashMap<String, Value>,
-) -> Result<Value, Error> {
+fn tmpl_to_json(value: &Value, _: &HashMap<String, Value>) -> Result<Value, Error> {
     debug!("to_json filter called with value: {:?}", value);
     let json_string = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
         // EXPLICIT BUSINESS LOGIC: Template rendering should not fail due to JSON serialization

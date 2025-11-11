@@ -901,10 +901,9 @@ async fn create_backup_bundle(
                 .last()
                 .ok_or_else(|| TLogFSError::ArrowMessage("Delta log is empty".to_string()))?;
 
-            let commit_value =
-                serde_json::from_str::<Value>(last_line).map_err(|e| {
-                    TLogFSError::ArrowMessage(format!("Failed to parse Delta log JSON: {}", e))
-                })?;
+            let commit_value = serde_json::from_str::<Value>(last_line).map_err(|e| {
+                TLogFSError::ArrowMessage(format!("Failed to parse Delta log JSON: {}", e))
+            })?;
 
             // Delta log format: {"commitInfo": {"operation": "...", "operationMetrics": {...}, ... "pond_txn": {...}}}
             let commit_info = commit_value.get("commitInfo").ok_or_else(|| {

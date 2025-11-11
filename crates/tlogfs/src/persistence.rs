@@ -52,19 +52,13 @@ pub struct State {
     /// TinyFS ObjectStore instance - shared with SessionContext
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
     /// Transaction-scoped cache for dynamic nodes
-    dynamic_node_cache:
-        Arc<std::sync::Mutex<HashMap<DynamicNodeKey, NodeType>>>,
+    dynamic_node_cache: Arc<std::sync::Mutex<HashMap<DynamicNodeKey, NodeType>>>,
     /// Template variables for CLI variable expansion - mutable shared state
     template_variables: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
     /// Cache for TableProvider instances to avoid repeated ListingTable creation and schema inference
     /// Key: (node_id, part_id, version_selection) -> TableProvider with temporal filtering
     table_provider_cache: Arc<
-        std::sync::Mutex<
-            HashMap<
-                TableProviderKey,
-                Arc<dyn datafusion::catalog::TableProvider>,
-            >,
-        >,
+        std::sync::Mutex<HashMap<TableProviderKey, Arc<dyn datafusion::catalog::TableProvider>>>,
     >,
 }
 
@@ -480,7 +474,8 @@ impl OpLogPersistence {
     ) -> Result<Vec<(String, String, i64)>, TLogFSError> {
         // Create SessionContext and register the oplog table
         let ctx = SessionContext::new();
-        _ = ctx.register_table("oplog", Arc::new(self.table.clone()))
+        _ = ctx
+            .register_table("oplog", Arc::new(self.table.clone()))
             .map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to register oplog table: {}", e))
             })?;
@@ -718,11 +713,7 @@ impl PersistenceLayer for State {
         self.inner.lock().await.exists_node(node_id, part_id).await
     }
 
-    async fn load_symlink_target(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> TinyFSResult<PathBuf> {
+    async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<PathBuf> {
         self.inner
             .lock()
             .await
@@ -961,7 +952,8 @@ impl State {
 
     /// Set cached dynamic node by key (for dynamic directory factory)
     pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: NodeType) {
-        _ = self.dynamic_node_cache
+        _ = self
+            .dynamic_node_cache
             .lock()
             .expect("Failed to acquire dynamic node cache lock")
             .insert(key, value);
@@ -986,7 +978,8 @@ impl State {
         key: TableProviderKey,
         value: Arc<dyn datafusion::catalog::TableProvider>,
     ) {
-        _ = self.table_provider_cache
+        _ = self
+            .table_provider_cache
             .lock()
             .expect("Failed to acquire table provider cache lock")
             .insert(key, value);
@@ -1155,7 +1148,8 @@ impl InnerState {
 
         // Register the fundamental delta_table for direct DeltaTable queries
         debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
-        _ = ctx.register_table("delta_table", Arc::new(table.clone()))
+        _ = ctx
+            .register_table("delta_table", Arc::new(table.clone()))
             .map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to register delta_table: {}", e))
             })?;
@@ -1175,10 +1169,7 @@ impl InnerState {
 
     /// Complete SessionContext setup after State is available
     /// This registers the TinyFS ObjectStore which requires a State reference
-    async fn complete_session_setup(
-        &self,
-        state: &State,
-    ) -> Result<(), TLogFSError> {
+    async fn complete_session_setup(&self, state: &State) -> Result<(), TLogFSError> {
         // Register the TinyFS ObjectStore with the context
         let _object_store =
             crate::file_table::register_tinyfs_object_store(&self.session_context, state.clone())
@@ -1794,8 +1785,7 @@ impl InnerState {
             crate::file_writer::ContentRef::Small(content) => {
                 // Small file: store content inline
                 match file_type {
-                    EntryType::FileSeriesPhysical
-                    | EntryType::FileSeriesDynamic => {
+                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
                         // FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series {
@@ -1839,8 +1829,7 @@ impl InnerState {
             crate::file_writer::ContentRef::Large(sha256, size) => {
                 // Large file: store reference
                 match file_type {
-                    EntryType::FileSeriesPhysical
-                    | EntryType::FileSeriesDynamic => {
+                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
                         // Large FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series {
@@ -2189,8 +2178,7 @@ impl InnerState {
         self.records.push(entry);
 
         // Add directory operation for parent
-        let directory_op =
-            DirectoryOperation::InsertWithType(node_id, EntryType::DirectoryDynamic);
+        let directory_op = DirectoryOperation::InsertWithType(node_id, EntryType::DirectoryDynamic);
         self.update_directory_entry(part_id, &name, directory_op)
             .await
             .map_err(TLogFSError::TinyFS)?;
@@ -2484,9 +2472,9 @@ impl InnerState {
                 Ok(record.factory.clone())
             } else {
                 // Node doesn't exist
-                Err(TLogFSError::TinyFS(tinyfs::Error::NotFound(
-                    PathBuf::from(format!("Node {} not found", node_id_str)),
-                )))
+                Err(TLogFSError::TinyFS(tinyfs::Error::NotFound(PathBuf::from(
+                    format!("Node {} not found", node_id_str),
+                ))))
             }
         }
     }
@@ -2643,11 +2631,7 @@ impl InnerState {
         Ok(current_state)
     }
 
-    async fn load_symlink_target(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> TinyFSResult<PathBuf> {
+    async fn load_symlink_target(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<PathBuf> {
         let records = self
             .query_records(part_id, node_id)
             .await
@@ -2718,11 +2702,7 @@ impl InnerState {
         node_factory::create_symlink_node(node_id, part_id, state, target)
     }
 
-    async fn metadata(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> TinyFSResult<NodeMetadata> {
+    async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeMetadata> {
         let node_id_str = node_id.to_string();
         let part_id_str = part_id.to_string();
 
@@ -2884,7 +2864,7 @@ impl InnerState {
                     None
                 };
 
-		FileVersionInfo {
+                FileVersionInfo {
                     version: logical_version,
                     timestamp: record.timestamp,
                     size: size as u64, // Cast back to u64 for tinyfs interface

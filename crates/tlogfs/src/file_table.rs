@@ -512,7 +512,8 @@ pub(crate) async fn register_tinyfs_object_store(
     // Register with SessionContext
     let url = url::Url::parse("tinyfs:///")
         .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse tinyfs URL: {}", e)))?;
-    _ = ctx.runtime_env()
+    _ = ctx
+        .runtime_env()
         .object_store_registry
         .register_store(&url, object_store.clone());
 

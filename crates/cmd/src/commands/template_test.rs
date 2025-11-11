@@ -89,7 +89,7 @@ mod tests {
                     .map_err(|e| anyhow::anyhow!("Failed to shutdown template writer: {}", e))?;
             }
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
 
             // Create config that references the pond path
             let config_path = self.temp_dir.path().join("template_config.yaml");
@@ -136,7 +136,7 @@ mod tests {
                     writer.shutdown().await
                 };
 
-                tx.commit().await?;
+                _ = tx.commit().await?;
                 result
                     .map_err(|e| anyhow::anyhow!("Failed to write template file content: {}", e))?;
             }
@@ -162,7 +162,7 @@ mod tests {
                 root.exists(pond_path).await
             };
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
             Ok(result)
         }
     }
@@ -384,13 +384,13 @@ mod tests {
             writer.flush().await?;
             writer.shutdown().await?;
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
         }
 
         // Create a ShipContext with template variables
         let mut variables = std::collections::HashMap::new();
-        variables.insert("name".to_string(), "DuckPond".to_string());
-        variables.insert(
+        _ = variables.insert("name".to_string(), "DuckPond".to_string());
+        _ = variables.insert(
             "message".to_string(),
             "Template variables work!".to_string(),
         );

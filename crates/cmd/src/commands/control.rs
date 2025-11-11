@@ -586,7 +586,7 @@ async fn execute_sync(
 
     match execute_sync_impl(&mut tx, control_table).await {
         Ok(()) => {
-            tx.commit().await?;
+            _ = tx.commit().await?;
             log::info!("✓ Sync operation completed");
             Ok(())
         }
@@ -653,7 +653,7 @@ async fn execute_sync_impl(
             .with_context(|| format!("Failed to open file: {}", remote_path))?;
 
         let mut buffer = Vec::new();
-        reader
+        _ = reader
             .read_to_end(&mut buffer)
             .await
             .with_context(|| format!("Failed to read file: {}", remote_path))?;

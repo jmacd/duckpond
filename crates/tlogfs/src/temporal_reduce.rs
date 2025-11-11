@@ -378,7 +378,7 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
             size: None,   // Unknown until SQL is generated and data computed
             sha256: None, // Unknown until SQL is generated and data computed
             entry_type: EntryType::FileSeriesDynamic, // Temporal reduce always creates series files
-            timestamp: 0,                                     // Use epoch time for dynamic content
+            timestamp: 0, // Use epoch time for dynamic content
         })
     }
 }

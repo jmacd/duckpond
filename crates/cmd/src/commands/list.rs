@@ -40,7 +40,8 @@ where
     };
 
     // Commit the transaction before processing results
-    tx.commit()
+    _ = tx
+        .commit()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
 
@@ -128,7 +129,8 @@ mod tests {
                 writer.shutdown().await
             };
 
-            tx.commit()
+            _ = tx
+                .commit()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
             result.map_err(|e| anyhow::anyhow!("Failed to write file content: {}", e))?;
@@ -151,7 +153,8 @@ mod tests {
                 root.create_dir_path(path).await.map(|_| ())
             };
 
-            tx.commit()
+            _ = tx
+                .commit()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
             result.map_err(|e| anyhow::anyhow!("Failed to create directory: {}", e))?;

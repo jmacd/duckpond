@@ -37,7 +37,7 @@ pub async fn cat_command(
 
     match result {
         Ok(()) => {
-            tx.commit().await?;
+            _ = tx.commit().await?;
             Ok(())
         }
         Err(e) => {
@@ -645,7 +645,7 @@ mod tests {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))?;
 
-        tx.commit().await?;
+        _ = tx.commit().await?;
 
         // Verify it starts with PAR1 magic bytes
         assert!(
@@ -797,13 +797,13 @@ mod tests {
                 .async_reader_path("test_series.parquet")
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to open file for reading: {}", e))?;
-            reader
+            _ = reader
                 .read_to_end(&mut file_content)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))?;
         }
 
-        tx.commit().await?;
+        _ = tx.commit().await?;
 
         // Verify PAR1 magic bytes
         assert!(file_content.len() > 4, "File should be larger than 4 bytes");

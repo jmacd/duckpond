@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use anyhow::Result;
 use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
@@ -29,8 +31,8 @@ async fn test_post_commit_factory_execution() -> Result<()> {
     let root1 = fs1.root().await?;
 
     // Create /etc first, then /etc/system.d/ directory
-    root1.create_dir_path("/etc").await?;
-    root1.create_dir_path("/etc/system.d").await?;
+    _ = root1.create_dir_path("/etc").await?;
+    _ = root1.create_dir_path("/etc/system.d").await?;
     let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
     let parent_node_id = match lookup {
         tinyfs::Lookup::Found(node_path) => node_path.id().await,
@@ -42,7 +44,7 @@ async fn test_post_commit_factory_execution() -> Result<()> {
 repeat_count: 3
 "#;
 
-    state1
+    _ = state1
         .create_dynamic_file_node(
             parent_node_id,
             "test-post-commit.yaml".to_string(),
@@ -59,7 +61,7 @@ repeat_count: 3
     println!("DEBUG: About to commit tx1...");
 
     // Commit - this should NOT trigger post-commit yet (no data written)
-    tx1.commit().await?;
+    _ = tx1.commit().await?;
     println!("✅ Post-commit config created (tx1 committed)");
 
     // Verify the config was actually created by reading it back
@@ -119,7 +121,7 @@ repeat_count: 3
         );
     }
 
-    verify_tx.commit().await?;
+    _ = verify_tx.commit().await?;
 
     // Transaction 2: Write some data to trigger post-commit factory execution
     println!("\n=== Triggering post-commit via data write ===");
@@ -135,7 +137,7 @@ repeat_count: 3
     let root2 = fs2.root().await?;
 
     // Write a simple file to trigger a real data commit
-    root2.create_dir_path("/data").await?;
+    _ = root2.create_dir_path("/data").await?;
     let mut writer = root2.async_writer_path("/data/trigger.txt").await?;
     use tokio::io::AsyncWriteExt;
     writer
@@ -145,7 +147,7 @@ repeat_count: 3
 
     // Commit - this SHOULD trigger post-commit factory execution
     println!("Committing transaction (should trigger post-commit)...");
-    tx2.commit().await?;
+    _ = tx2.commit().await?;
     println!("✅ Transaction committed, post-commit should have executed");
 
     // Verify the test factory was executed by checking the result file it creates
@@ -217,8 +219,8 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
     let fs1 = FS::new(state1.clone()).await?;
     let root1 = fs1.root().await?;
 
-    root1.create_dir_path("/etc").await?;
-    root1.create_dir_path("/etc/system.d").await?;
+    _ = root1.create_dir_path("/etc").await?;
+    _ = root1.create_dir_path("/etc/system.d").await?;
     let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
     let parent_node_id = match lookup {
         tinyfs::Lookup::Found(node_path) => node_path.id().await,
@@ -229,7 +231,7 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
 repeat_count: 1
 "#;
 
-    state1
+    _ = state1
         .create_dynamic_file_node(
             parent_node_id,
             "test-no-execute.yaml".to_string(),
@@ -241,7 +243,7 @@ repeat_count: 1
 
     let context1 = FactoryContext::new(state1.clone(), parent_node_id);
     FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context1).await?;
-    tx1.commit().await?;
+    _ = tx1.commit().await?;
 
     // Now do a read-only transaction using the transact helper
     println!("\n=== Executing read-only transaction ===");
@@ -291,8 +293,8 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
     let fs1 = FS::new(state1.clone()).await?;
     let root1 = fs1.root().await?;
 
-    root1.create_dir_path("/etc").await?;
-    root1.create_dir_path("/etc/system.d").await?;
+    _ = root1.create_dir_path("/etc").await?;
+    _ = root1.create_dir_path("/etc/system.d").await?;
     let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
     let parent_node_id = match lookup {
         tinyfs::Lookup::Found(node_path) => node_path.id().await,
@@ -314,7 +316,7 @@ repeat_count: 1
             message
         );
 
-        state1
+        _ = state1
             .create_dynamic_file_node(
                 parent_node_id,
                 filename.to_string(),
@@ -328,7 +330,7 @@ repeat_count: 1
         FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context).await?;
     }
 
-    tx1.commit().await?;
+    _ = tx1.commit().await?;
     println!("✅ Multiple configs created");
 
     // Trigger post-commit with a data write
@@ -349,7 +351,7 @@ repeat_count: 1
     writer.write_all(b"trigger").await?;
     writer.shutdown().await?;
 
-    tx2.commit().await?;
+    _ = tx2.commit().await?;
     println!("✅ Transaction committed, multiple post-commit factories should execute in order");
 
     Ok(())

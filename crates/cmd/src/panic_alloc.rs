@@ -19,6 +19,7 @@ impl PanicOnLargeAlloc {
     }
 }
 
+#[allow(unsafe_code)]
 unsafe impl GlobalAlloc for PanicOnLargeAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.size() > self.max_size {

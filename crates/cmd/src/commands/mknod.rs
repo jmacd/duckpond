@@ -101,7 +101,7 @@ async fn mknod_impl(
     let root = fs.root().await?;
 
     // Check what the factory supports and use the appropriate creation method
-    let factory = tlogfs::factory::FactoryRegistry::get_factory(factory_type)
+    let factory = FactoryRegistry::get_factory(factory_type)
         .ok_or_else(|| anyhow!("Unknown factory type: {}", factory_type))?;
 
     // Determine what type of node to create based on factory capabilities
@@ -192,7 +192,7 @@ async fn mknod_impl(
     let context = tlogfs::factory::FactoryContext::new(state, parent_node_id);
 
     // Run factory initialization if it exists (e.g., create directories)
-    tlogfs::factory::FactoryRegistry::initialize(factory_type, &config_bytes, context)
+    FactoryRegistry::initialize(factory_type, &config_bytes, context)
         .await
         .map_err(|e| anyhow!("Factory initialization failed: {}", e))?;
 
@@ -274,7 +274,7 @@ template_file: "{}"
                 root.exists(pond_path).await
             };
 
-            tx.commit().await?;
+            _ = tx.commit().await?;
             Ok(result)
         }
     }

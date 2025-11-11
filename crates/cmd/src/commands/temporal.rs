@@ -156,7 +156,8 @@ pub async fn detect_overlaps_command(
 
             // Register table with unique name including version
             let table_name = format!("file_{}_{}", origin_id, version_info.version);
-            ctx.register_table(&table_name, table_provider)
+            _ = ctx
+                .register_table(&table_name, table_provider)
                 .map_err(|e| anyhow!("Failed to register table '{}': {}", table_name, e))?;
 
             // Query this individual table provider to get its statistics
@@ -291,7 +292,7 @@ pub async fn detect_overlaps_command(
     let mut origin_to_path = HashMap::new();
     let mut origin_id = 0;
     for (path_str, _node_id, _part_id) in file_info.iter() {
-        origin_to_path.insert(origin_id, path_str.clone());
+        _ = origin_to_path.insert(origin_id, path_str.clone());
         origin_id += 1;
     }
 
@@ -705,7 +706,7 @@ fn print_overlap_details(analysis: &OverlapAnalysis) {
 fn format_timestamp(timestamp_ms: i64) -> String {
     // Convert milliseconds to seconds for DateTime
     let timestamp_secs = timestamp_ms / 1000;
-    let naive_datetime = chrono::DateTime::from_timestamp(timestamp_secs, 0);
+    let naive_datetime = DateTime::from_timestamp(timestamp_secs, 0);
 
     match naive_datetime {
         Some(dt) => {
@@ -728,12 +729,12 @@ pub async fn set_temporal_bounds_command(
     }
 
     // Parse temporal bounds if provided
-    let mut extended_attrs = std::collections::HashMap::new();
+    let mut extended_attrs = HashMap::new();
 
     if let Some(min_str) = min_bound {
         let timestamp = parse_timestamp_millis(&min_str)?;
         debug!("Setting min temporal override: {timestamp}");
-        extended_attrs.insert(
+        _ = extended_attrs.insert(
             "duckpond.min_temporal_override".to_string(),
             timestamp.to_string(),
         );
@@ -742,7 +743,7 @@ pub async fn set_temporal_bounds_command(
     if let Some(max_str) = max_bound {
         let timestamp = parse_timestamp_millis(&max_str)?;
         debug!("Setting max temporal override: {timestamp}");
-        extended_attrs.insert(
+        _ = extended_attrs.insert(
             "duckpond.max_temporal_override".to_string(),
             timestamp.to_string(),
         );
@@ -756,7 +757,7 @@ pub async fn set_temporal_bounds_command(
 pub async fn set_extended_attributes_command(
     ship_context: &ShipContext,
     target_path: String,
-    attributes: std::collections::HashMap<String, String>,
+    attributes: HashMap<String, String>,
 ) -> Result<()> {
     let mut ship = ship_context.open_pond().await?;
     let transaction = ship
@@ -815,7 +816,7 @@ pub async fn set_extended_attributes_command(
 
     debug!("Completed FileSeries write with extended attributes");
 
-    transaction.commit().await?;
+    _ = transaction.commit().await?;
 
     debug!("Created metadata-only FileSeries version with extended attributes");
 
@@ -840,13 +841,12 @@ fn parse_timestamp_millis(timestamp_str: &str) -> Result<i64> {
     for format in &formats {
         // Try parsing as naive datetime first, then assume UTC
         if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(timestamp_str, format) {
-            let utc_dt =
-                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive_dt, chrono::Utc);
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc);
             return Ok(utc_dt.timestamp_millis());
         }
 
         // Try parsing as datetime with timezone
-        if let Ok(dt) = chrono::DateTime::parse_from_str(timestamp_str, format) {
+        if let Ok(dt) = DateTime::parse_from_str(timestamp_str, format) {
             return Ok(dt.timestamp_millis());
         }
     }
@@ -854,8 +854,7 @@ fn parse_timestamp_millis(timestamp_str: &str) -> Result<i64> {
     // Try parsing date-only format and assume 00:00:00 UTC
     if let Ok(date) = chrono::NaiveDate::parse_from_str(timestamp_str, "%Y-%m-%d") {
         let naive_dt = date.and_hms_opt(0, 0, 0).unwrap();
-        let utc_dt =
-            chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive_dt, chrono::Utc);
+        let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc);
         return Ok(utc_dt.timestamp_millis());
     }
 
