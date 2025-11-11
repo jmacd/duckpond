@@ -319,7 +319,7 @@ impl TemporalReduceSqlFile {
             let sql_config = SqlDerivedConfig {
                 patterns: {
                     let mut patterns = HashMap::new();
-                    patterns.insert(pattern_name.clone(), self.source_path.clone());
+                    _ = patterns.insert(pattern_name.clone(), self.source_path.clone());
                     patterns
                 },
                 query: Some(sql_query.clone()),
@@ -670,7 +670,7 @@ impl Directory for TemporalReduceDirectory {
         // Group source files by output_name - reuse same logic as entries()
         let mut sites = HashMap::new();
         for (source_path, output_name) in source_files {
-            sites.insert(output_name, source_path);
+            _ = sites.insert(output_name, source_path);
         }
 
         // Look for the requested site directory name
@@ -711,7 +711,7 @@ impl Directory for TemporalReduceDirectory {
         // Group source files by output_name to create directory structure
         let mut sites = HashMap::new();
         for (source_path, output_name) in source_files {
-            sites.insert(output_name, source_path);
+            _ = sites.insert(output_name, source_path);
         }
 
         // Create a directory entry for each unique output_name (site)
@@ -926,7 +926,7 @@ fn validate_temporal_reduce_config(config: &[u8]) -> TinyFSResult<Value> {
     if let Some(resolutions) = config_value.get("resolutions").and_then(|r| r.as_array()) {
         for resolution in resolutions {
             if let Some(res_str) = resolution.as_str() {
-                humantime::parse_duration(res_str).map_err(|e| {
+                _ = humantime::parse_duration(res_str).map_err(|e| {
                     tinyfs::Error::Other(format!("Invalid resolution '{}': {}", res_str, e))
                 })?;
             }

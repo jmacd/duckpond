@@ -262,7 +262,7 @@ impl BundleBuilder {
         self.metadata.compressed_size = compressed_buffer.len() as u64;
         let bytes = Bytes::from(compressed_buffer);
 
-        store
+        _ = store
             .put(path, bytes.into())
             .await
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to upload bundle: {}", e)))?;
@@ -355,7 +355,7 @@ pub async fn extract_bundle_metadata(
 
         // Read the metadata JSON
         let mut metadata_json = String::new();
-        entry
+        _ = entry
             .read_to_string(&mut metadata_json)
             .await
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read metadata: {}", e)))?;

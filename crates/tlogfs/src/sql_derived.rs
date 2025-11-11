@@ -219,7 +219,7 @@ impl SqlDerivedFile {
                 .map(|(path, captures)| {
                     let mut capture_map = HashMap::new();
                     for (i, capture) in captures.into_iter().enumerate() {
-                        capture_map.insert(i.to_string(), capture);
+                        _ = capture_map.insert(i.to_string(), capture);
                     }
                     (path, capture_map)
                 })
@@ -662,7 +662,7 @@ impl QueryableFile for SqlDerivedFile {
                     unique_table_name, pattern_name, deterministic_name
                 );
 
-                table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
+                _ = table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
 
                 // Create table provider using QueryableFile trait - handles both OpLogFile and SqlDerivedFile
                 let listing_table_provider = if queryable_files.len() == 1 {
@@ -794,7 +794,7 @@ impl QueryableFile for SqlDerivedFile {
                         unique_table_name,
                         Arc::as_ptr(&ctx)
                     );
-                    ctx.register_table(
+                    _ = ctx.register_table(
                         datafusion::sql::TableReference::bare(unique_table_name.as_str()),
                         listing_table_provider,
                     )
@@ -1017,7 +1017,7 @@ mod tests {
             let cursor = Cursor::new(&mut parquet_buffer);
             let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
             writer.write(&batch).unwrap();
-            writer.close().unwrap();
+            _ = writer.close().unwrap();
         }
 
         // Create the source data file using TinyFS convenience API
@@ -1032,7 +1032,7 @@ mod tests {
         .unwrap();
 
         // Commit this transaction so the source file is visible to subsequent reads
-        tx_guard.commit_test().await.unwrap();
+        _ = tx_guard.commit_test().await.unwrap();
     }
 
     /// Helper function to set up test environment with FileTable data
@@ -1079,7 +1079,7 @@ mod tests {
             let cursor = Cursor::new(&mut parquet_buffer);
             let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
             writer.write(&batch).unwrap();
-            writer.close().unwrap();
+            _ = writer.close().unwrap();
         }
 
         let buffer_len = parquet_buffer.len();
@@ -1141,7 +1141,7 @@ mod tests {
         }
 
         // Commit this transaction so the source file is visible to subsequent reads
-        tx_guard.commit_test().await.unwrap();
+        _ = tx_guard.commit_test().await.unwrap();
     }
 
     /// Helper function to set up multi-version FileSeries test data
@@ -1197,7 +1197,7 @@ mod tests {
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             // Write to the SAME path for all versions - TLogFS will handle versioning
@@ -1213,7 +1213,7 @@ mod tests {
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
     }
 
@@ -1328,7 +1328,7 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer1);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch1).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             let mut writer = root
@@ -1340,7 +1340,7 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
 
         {
@@ -1376,7 +1376,7 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer2);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch2).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             let mut writer = root
@@ -1388,7 +1388,7 @@ query: ""
             writer.flush().await.unwrap();
             writer.shutdown().await.unwrap();
 
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
 
         // Now test pattern matching across both files
@@ -1399,7 +1399,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("sensor_data".to_string(), "/sensor_data*.parquet".to_string());
+                _ = map.insert("sensor_data".to_string(), "/sensor_data*.parquet".to_string());
                 map
             },
             query: Some("SELECT location, reading FROM sensor_data WHERE reading > 85 ORDER BY reading DESC".to_string()),
@@ -1439,7 +1439,7 @@ query: ""
         assert_eq!(locations.value(1), "Building C");
         assert_eq!(readings.value(1), 90);
 
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1482,12 +1482,12 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer_a);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch_a).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             // Create directory first, then file
-            root.create_dir_path("/sensors").await.unwrap();
-            root.create_dir_path("/sensors/building_a").await.unwrap();
+            _ = root.create_dir_path("/sensors").await.unwrap();
+            _ = root.create_dir_path("/sensors/building_a").await.unwrap();
             let mut writer = root
                 .async_writer_path_with_type(
                     "/sensors/building_a/data.parquet",
@@ -1503,7 +1503,7 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
 
         {
@@ -1538,10 +1538,10 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer_b);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch_b).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
-            root.create_dir_path("/sensors/building_b").await.unwrap();
+            _ = root.create_dir_path("/sensors/building_b").await.unwrap();
             let mut writer = root
                 .async_writer_path_with_type(
                     "/sensors/building_b/data.parquet",
@@ -1557,7 +1557,7 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
 
         // Now test recursive pattern matching across all nested files
@@ -1568,7 +1568,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("data".to_string(), "/**/data.parquet".to_string());
+                _ = map.insert("data".to_string(), "/**/data.parquet".to_string());
                 map
             },
             query: Some(
@@ -1621,7 +1621,7 @@ query: ""
         assert_eq!(locations.value(1), "Building B");
         assert_eq!(readings.value(1), 110);
 
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1665,10 +1665,10 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch_metrics).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
-            root.create_dir_path("/metrics").await.unwrap();
+            _ = root.create_dir_path("/metrics").await.unwrap();
             let mut writer = root
                 .async_writer_path_with_type("/metrics/data.parquet", EntryType::FileTablePhysical)
                 .await
@@ -1717,10 +1717,10 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch_logs).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
-            root.create_dir_path("/logs").await.unwrap();
+            _ = root.create_dir_path("/logs").await.unwrap();
             let mut writer = root
                 .async_writer_path_with_type("/logs/info.parquet", EntryType::FileTablePhysical)
                 .await
@@ -1733,7 +1733,7 @@ query: ""
             // Add a small delay to ensure the async writer background task completes
             tokio::task::yield_now().await;
 
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
 
         // Test multiple patterns combining files from different directories
@@ -1744,8 +1744,8 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("metrics".to_string(), "/metrics/*.parquet".to_string());
-                map.insert("logs".to_string(), "/logs/*.parquet".to_string());
+                _ = map.insert("metrics".to_string(), "/metrics/*.parquet".to_string());
+                _ = map.insert("logs".to_string(), "/logs/*.parquet".to_string());
                 map
             },
             query: Some("SELECT * FROM metrics UNION ALL SELECT * FROM logs".to_string()),
@@ -1801,7 +1801,7 @@ query: ""
         assert!(found_metrics, "Should have found metrics data");
         assert!(found_logs, "Should have found logs data");
 
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1822,7 +1822,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert(
+                _ = map.insert(
                     "sensor_data".to_string(),
                     "/sensor_data.parquet".to_string(),
                 );
@@ -1843,7 +1843,7 @@ query: ""
 
         // Get session context and query the ViewTable directly
         let ctx = state.session_context().await.unwrap();
-        ctx.register_table("test_table", table_provider).unwrap();
+        _ = ctx.register_table("test_table", table_provider).unwrap();
 
         // Execute query to get results
         let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
@@ -1863,7 +1863,7 @@ query: ""
         assert_eq!(schema.field(1).name(), "location");
         assert_eq!(schema.field(2).name(), "reading");
 
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1885,7 +1885,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("sensor_data".to_string(), "/sensor_data.parquet".to_string());
+                _ = map.insert("sensor_data".to_string(), "/sensor_data.parquet".to_string());
                 map
             },
             query: Some("SELECT location, reading * 1.5 as adjusted_reading FROM sensor_data WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string()),
@@ -1903,7 +1903,7 @@ query: ""
 
         // Get session context and query the ViewTable directly
         let ctx = state.session_context().await.unwrap();
-        ctx.register_table("test_table", table_provider).unwrap();
+        _ = ctx.register_table("test_table", table_provider).unwrap();
 
         // Execute query to get results
         let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
@@ -1926,7 +1926,7 @@ query: ""
         assert_eq!(schema.field(1).name(), "adjusted_reading");
 
         // This transaction is read-only, so just let it end without committing
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1948,7 +1948,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("multi_sensor_data".to_string(), "/multi_sensor_data.parquet".to_string());
+                _ = map.insert("multi_sensor_data".to_string(), "/multi_sensor_data.parquet".to_string());
                 map
             },
             query: Some("SELECT location, reading FROM multi_sensor_data WHERE reading > 75 ORDER BY reading DESC".to_string()),
@@ -1966,7 +1966,7 @@ query: ""
 
         // Get session context and query the ViewTable directly
         let ctx = state.session_context().await.unwrap();
-        ctx.register_table("test_table", table_provider).unwrap();
+        _ = ctx.register_table("test_table", table_provider).unwrap();
 
         // Execute query to get results
         let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
@@ -1988,7 +1988,7 @@ query: ""
         assert_eq!(schema.field(0).name(), "location");
         assert_eq!(schema.field(1).name(), "reading");
 
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -2009,7 +2009,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert(
+                _ = map.insert(
                     "multi_sensor_data".to_string(),
                     "/multi_sensor_data.parquet".to_string(),
                 );
@@ -2034,7 +2034,7 @@ query: ""
 
         // Get session context and query the ViewTable directly
         let ctx = state.session_context().await.unwrap();
-        ctx.register_table("test_table", table_provider).unwrap();
+        _ = ctx.register_table("test_table", table_provider).unwrap();
 
         // Execute query to get results
         let dataframe = ctx.sql("SELECT * FROM test_table").await.unwrap();
@@ -2075,7 +2075,7 @@ query: ""
         assert_eq!(sensor_ids.value(6), 131); // Third version (after 111,112,113,121,122,123)
         assert_eq!(locations.value(6), "Building 3");
 
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -2097,7 +2097,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("data".to_string(), "/data.parquet".to_string());
+                _ = map.insert("data".to_string(), "/data.parquet".to_string());
                 map
             },
             query: Some("SELECT name, value * 2 as doubled_value FROM data WHERE value > 150 ORDER BY doubled_value DESC".to_string()),
@@ -2156,7 +2156,7 @@ query: ""
         assert_eq!(doubled_values.value(2), 400);
 
         // This transaction is read-only, so just let it end without committing
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     /// Test SQL-derived chain functionality and document predicate pushdown limitations
@@ -2301,7 +2301,7 @@ query: ""
             let first_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
-                    map.insert("data".to_string(), "/data.parquet".to_string());
+                    _ = map.insert("data".to_string(), "/data.parquet".to_string());
                     map
                 },
                 query: Some("SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value".to_string()),
@@ -2329,7 +2329,7 @@ query: ""
                     for batch in &first_result_batches {
                         writer.write(batch).unwrap();
                     }
-                    writer.close().unwrap();
+                    _ = writer.close().unwrap();
                 }
                 parquet_buffer
             };
@@ -2346,7 +2346,7 @@ query: ""
             .unwrap();
 
             // Commit to make the intermediate file visible
-            tx_guard_mut.commit_test().await.unwrap();
+            _ = tx_guard_mut.commit_test().await.unwrap();
         }
 
         // Second transaction: Create the second SQL-derived node that chains from the first
@@ -2358,7 +2358,7 @@ query: ""
             let second_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
-                    map.insert("intermediate".to_string(), "/intermediate.parquet".to_string());
+                    _ = map.insert("intermediate".to_string(), "/intermediate.parquet".to_string());
                     map
                 },
                 query: Some("SELECT name, adjusted_value * 2 as final_value FROM intermediate WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string()),
@@ -2407,7 +2407,7 @@ query: ""
 
             // Bob would be (200 + 50) * 2 = 500, but excluded because 250 is not > 250
 
-            tx_guard_mut.commit_test().await.unwrap();
+            _ = tx_guard_mut.commit_test().await.unwrap();
         }
 
         // ## Observations from This Test
@@ -2480,12 +2480,12 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
                 writer.write(&batch).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
-            root.create_dir_path("/hydrovu").await.unwrap();
-            root.create_dir_path("/hydrovu/devices").await.unwrap();
-            root.create_dir_path("/hydrovu/devices/station_a")
+            _ = root.create_dir_path("/hydrovu").await.unwrap();
+            _ = root.create_dir_path("/hydrovu/devices").await.unwrap();
+            _ = root.create_dir_path("/hydrovu/devices/station_a")
                 .await
                 .unwrap();
             let mut writer = root
@@ -2501,7 +2501,7 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
 
         // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity
@@ -2540,7 +2540,7 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
                 writer.write(&batch).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             // Write new version to same path - TLogFS handles versioning
@@ -2557,7 +2557,7 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
 
         // Create File B: timestamps 1-6 with columns: timestamp, pressure
@@ -2596,10 +2596,10 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
                 writer.write(&batch).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
-            root.create_dir_path("/hydrovu/devices/station_b")
+            _ = root.create_dir_path("/hydrovu/devices/station_b")
                 .await
                 .unwrap();
             let mut writer = root
@@ -2615,7 +2615,7 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            tx_guard.commit_test().await.unwrap();
+            _ = tx_guard.commit_test().await.unwrap();
         }
 
         // Test SQL-derived factory with wildcard pattern (like our successful HydroVu config)
@@ -2627,8 +2627,8 @@ query: ""
             patterns: {
                 let mut map = HashMap::new();
                 // Use separate patterns like in our successful HydroVu config
-                map.insert("sensor_a".to_string(), "/hydrovu/devices/**/SensorA*.series".to_string());
-                map.insert("pressure_b".to_string(), "/hydrovu/devices/**/PressureB*.series".to_string());
+                _ = map.insert("sensor_a".to_string(), "/hydrovu/devices/**/SensorA*.series".to_string());
+                _ = map.insert("pressure_b".to_string(), "/hydrovu/devices/**/PressureB*.series".to_string());
                 map
             },
             // Use COALESCE pattern like in our fixed HydroVu config to ensure non-nullable timestamps
@@ -2748,7 +2748,7 @@ query: ""
             }
         }
 
-        tx_guard_mut.commit_test().await.unwrap();
+        _ = tx_guard_mut.commit_test().await.unwrap();
     }
 
     /// Test temporal-reduce over sql-derived over parquet
@@ -2834,12 +2834,12 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
                 writer.write(&batch).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             // Store as base sensor data - explicitly create parent directories to validate part_id handling
-            root.create_dir_path("/sensors").await.unwrap();
-            root.create_dir_path("/sensors/stations").await.unwrap();
+            _ = root.create_dir_path("/sensors").await.unwrap();
+            _ = root.create_dir_path("/sensors/stations").await.unwrap();
 
             use tinyfs::async_helpers::convenience;
             let _base_file = convenience::create_file_path_with_type(
@@ -2864,7 +2864,7 @@ query: ""
             let config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
-                    map.insert("series".to_string(), "/sensors/stations/all_data.series".to_string());
+                    _ = map.insert("series".to_string(), "/sensors/stations/all_data.series".to_string());
                     map
                 },
                 query: Some("SELECT timestamp, temperature, humidity FROM series WHERE station_id = 'BDock' ORDER BY timestamp".to_string()),
@@ -2963,7 +2963,7 @@ query: ""
 
                         // Execute the temporal-reduce query using the proper public API
                         let ctx = state.session_context().await.unwrap();
-                        ctx.register_table("temporal_reduce_table", table_provider)
+                        _ = ctx.register_table("temporal_reduce_table", table_provider)
                             .unwrap();
 
                         // Execute query to get results
@@ -3098,7 +3098,7 @@ query: ""
 
                     // Test that we can register it with DataFusion (simulating "cat" command behavior)
                     let ctx = state.session_context().await.unwrap();
-                    ctx.register_table("test_table", table_provider).unwrap();
+                    _ = ctx.register_table("test_table", table_provider).unwrap();
 
                     log::debug!(
                         "✅ OpLogFile successfully detected as QueryableFile and registered with DataFusion"
@@ -3181,8 +3181,8 @@ query: ""
             .unwrap();
 
             // Store as base sensor data using TinyFS Arrow integration - create parent directories
-            root.create_dir_path("/sensors").await.unwrap();
-            root.create_dir_path("/sensors/wildcard_test")
+            _ = root.create_dir_path("/sensors").await.unwrap();
+            _ = root.create_dir_path("/sensors/wildcard_test")
                 .await
                 .unwrap();
 
@@ -3383,7 +3383,7 @@ query: ""
 
                         // Execute the temporal-reduce query using the proper public API
                         let ctx = state.session_context().await.unwrap();
-                        ctx.register_table("wildcard_temporal_table", table_provider)
+                        _ = ctx.register_table("wildcard_temporal_table", table_provider)
                             .unwrap();
 
                         // Execute query to get results
@@ -3471,7 +3471,7 @@ query: ""
             let tx_guard = persistence.begin_test().await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
-            root.create_dir_path("/test").await.unwrap();
+            _ = root.create_dir_path("/test").await.unwrap();
 
             use arrow::array::{Int32Array, TimestampMillisecondArray};
             use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -3503,7 +3503,7 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch_physical).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             let mut writer = root
@@ -3552,7 +3552,7 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch_dynamic).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             let mut writer = root
@@ -3575,7 +3575,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert("data".to_string(), "/test/*.series".to_string());
+                _ = map.insert("data".to_string(), "/test/*.series".to_string());
                 map
             },
             query: Some("SELECT * FROM data ORDER BY timestamp".to_string()),
@@ -3616,7 +3616,7 @@ query: ""
             let tx_guard = persistence.begin_test().await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
-            root.create_dir_path("/Sensors").await.unwrap();
+            _ = root.create_dir_path("/Sensors").await.unwrap();
 
             use arrow::array::{Int32Array, TimestampMillisecondArray};
             use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -3647,7 +3647,7 @@ query: ""
                 let cursor = Cursor::new(&mut parquet_buffer);
                 let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
                 writer.write(&batch).unwrap();
-                writer.close().unwrap();
+                _ = writer.close().unwrap();
             }
 
             let mut writer = root
@@ -3673,7 +3673,7 @@ query: ""
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
-                map.insert(
+                _ = map.insert(
                     "TempData".to_string(),
                     "/Sensors/Temperature.series".to_string(),
                 );

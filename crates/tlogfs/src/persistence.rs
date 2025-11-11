@@ -609,7 +609,7 @@ impl State {
             "📝 STATE: Before add_export_data: keys = {:?}",
             variables.keys().collect::<Vec<_>>()
         );
-        variables.insert("export".to_string(), export_data.clone());
+        _ = variables.insert("export".to_string(), export_data.clone());
         debug!(
             "📝 STATE: After add_export_data: keys = {:?}",
             variables.keys().collect::<Vec<_>>()
@@ -2877,7 +2877,7 @@ impl InnerState {
                         _ = metadata.insert("max_event_time".to_string(), max_time.to_string());
                     }
                     if let Some(attrs) = &record.extended_attributes {
-                        metadata.insert("extended_attributes".to_string(), attrs.clone());
+                        _ = metadata.insert("extended_attributes".to_string(), attrs.clone());
                     }
                     Some(metadata)
                 } else {
@@ -3367,7 +3367,7 @@ mod node_factory {
                 .dynamic_node_cache
                 .lock()
                 .expect("Failed to acquire dynamic node cache lock");
-            cache.insert(cache_key, node_type.clone());
+            _ = cache.insert(cache_key, node_type.clone());
         }
 
         Ok(node_type)

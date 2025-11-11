@@ -78,7 +78,7 @@ async fn test_transaction_guard_read_after_create() {
 
         let root = tx.root().await.expect("Failed to get root directory");
 
-        root.create_dir_path("/txn")
+        _ = root.create_dir_path("/txn")
             .await
             .expect("Failed to create /txn directory");
 
@@ -139,7 +139,7 @@ async fn test_single_version_file_series_write_read() -> Result<(), Box<dyn std:
         // Create test directory if it doesn't exist
         if !wd.exists(std::path::Path::new("test")).await {
             println!("Creating test directory...");
-            wd.create_dir_path("test").await?;
+            _ = wd.create_dir_path("test").await?;
         }
 
         // Create test data as a RecordBatch with proper timestamp column (integer milliseconds)
@@ -500,7 +500,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     );
 
     // Store the large file
-    tinyfs::async_helpers::convenience::create_file_path(&wd, "/large_test.dat", &large_content)
+    _ = tinyfs::async_helpers::convenience::create_file_path(&wd, "/large_test.dat", &large_content)
         .await?;
     tx.commit_test().await?;
 
@@ -528,10 +528,10 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
 
     // Test: Seek to middle and read 50 bytes (verifying AsyncSeek works)
     let middle_pos = (expected_size / 2) as u64;
-    reader.seek(std::io::SeekFrom::Start(middle_pos)).await?;
+    _ = reader.seek(std::io::SeekFrom::Start(middle_pos)).await?;
 
     let mut middle_buffer = vec![0u8; 50];
-    reader.read_exact(&mut middle_buffer).await?;
+    _ = reader.read_exact(&mut middle_buffer).await?;
 
     println!(
         "✅ Successfully seeked to position {} and read 50 bytes",
@@ -583,7 +583,7 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     println!("Creating small file with {} bytes", expected_size);
 
     // Store the small file
-    tinyfs::async_helpers::convenience::create_file_path(&wd, "/small_test.txt", small_content)
+    _ = tinyfs::async_helpers::convenience::create_file_path(&wd, "/small_test.txt", small_content)
         .await?;
     tx.commit_test().await?;
 
@@ -601,15 +601,15 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
 
     // Test: Read entire content
     let mut buffer = vec![0u8; expected_size];
-    reader.read_exact(&mut buffer).await?;
+    _ = reader.read_exact(&mut buffer).await?;
 
     println!("✅ Successfully read {} bytes", expected_size);
     assert_eq!(&buffer, small_content, "Content should match exactly");
 
     // Test: Seek to start and read first 5 bytes
-    reader.seek(std::io::SeekFrom::Start(0)).await?;
+    _ = reader.seek(std::io::SeekFrom::Start(0)).await?;
     let mut start_buffer = vec![0u8; 5];
-    reader.read_exact(&mut start_buffer).await?;
+    _ = reader.read_exact(&mut start_buffer).await?;
 
     println!("✅ Successfully seeked to start and read first 5 bytes");
     assert_eq!(&start_buffer, b"Hello", "First 5 bytes should be 'Hello'");
@@ -664,7 +664,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
 
         // Create test directory if it doesn't exist
         if !wd.exists(std::path::Path::new("test")).await {
-            wd.create_dir_path("test").await?;
+            _ = wd.create_dir_path("test").await?;
         }
 
         // Create batch with timestamps as proper Unix epoch seconds (not milliseconds)
@@ -795,11 +795,11 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         // Set temporal overrides using extended attributes on the path
         // Note: bounds need to be in milliseconds since that's the internal representation
         let mut attributes = HashMap::new();
-        attributes.insert(
+        _ = attributes.insert(
             duckpond::MIN_TEMPORAL_OVERRIDE.to_string(),
             "10000".to_string(),
         ); // 10 seconds = 10000 ms
-        attributes.insert(
+        _ = attributes.insert(
             duckpond::MAX_TEMPORAL_OVERRIDE.to_string(),
             "20000".to_string(),
         ); // 20 seconds = 20000 ms
@@ -882,11 +882,11 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
 
         // Create devices directory
         println!("Creating /devices directory...");
-        wd1.create_dir_path("devices").await?;
+        _ = wd1.create_dir_path("devices").await?;
 
         // Create sensor subdirectory
         println!("Creating /devices/sensor_123 directory...");
-        wd1.create_dir_path("devices/sensor_123").await?;
+        _ = wd1.create_dir_path("devices/sensor_123").await?;
 
         // Write first version of series
         let batch1 = record_batch!(
@@ -895,7 +895,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         )?;
 
         println!("Writing FIRST version of series...");
-        wd1.create_series_from_batch(series_path, &batch1, Some("timestamp")).await?;
+        _ = wd1.create_series_from_batch(series_path, &batch1, Some("timestamp")).await?;
 
         println!("Committing transaction 2...");
         tx1.commit_test().await?;
@@ -927,7 +927,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
             let props = parquet::file::properties::WriterProperties::builder().build();
             let mut writer = ArrowWriter::try_new(cursor, batch2.schema(), Some(props))?;
             writer.write(&batch2)?;
-            writer.close()?;
+            _ = writer.close()?;
         }
 
         // Get writer for existing file - THIS SHOULD NOT UPDATE THE DIRECTORY

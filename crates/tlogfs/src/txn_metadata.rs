@@ -97,8 +97,8 @@ mod tests {
     #[test]
     fn test_metadata_roundtrip() {
         let mut vars = HashMap::new();
-        vars.insert("user".to_string(), "admin".to_string());
-        vars.insert("host".to_string(), "prod1".to_string());
+        _ = vars.insert("user".to_string(), "admin".to_string());
+        _ = vars.insert("host".to_string(), "prod1".to_string());
 
         let original = PondTxnMetadata::new(
             4,
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn test_metadata_format() {
         let mut vars = HashMap::new();
-        vars.insert("env".to_string(), "test".to_string());
+        _ = vars.insert("env".to_string(), "test".to_string());
 
         let metadata = PondTxnMetadata::new(
             5,

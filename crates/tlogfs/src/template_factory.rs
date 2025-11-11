@@ -138,7 +138,7 @@ impl Directory for TemplateDirectory {
                 // Cache the node
                 {
                     let mut cache = self.node_cache.lock().await;
-                    cache.insert(filename.to_string(), node_ref.clone());
+                    _ = cache.insert(filename.to_string(), node_ref.clone());
                 }
 
                 return Ok(Some(node_ref));
@@ -173,7 +173,7 @@ impl Directory for TemplateDirectory {
             if seen_names.contains(&expanded_name) {
                 continue;
             }
-            seen_names.insert(expanded_name.clone());
+            _ = seen_names.insert(expanded_name.clone());
 
             debug!(
                 "TemplateDirectory::entries - creating entry {expanded_name} from pattern match"
@@ -205,7 +205,7 @@ impl Directory for TemplateDirectory {
                 // Cache the node
                 {
                     let mut cache = self.node_cache.lock().await;
-                    cache.insert(expanded_name.clone(), new_node_ref.clone());
+                    _ = cache.insert(expanded_name.clone(), new_node_ref.clone());
                 }
 
                 new_node_ref
@@ -258,7 +258,7 @@ impl TemplateDirectory {
             })?;
 
         let mut contents = String::new();
-        reader.read_to_string(&mut contents).await.map_err(|e| {
+        _ = reader.read_to_string(&mut contents).await.map_err(|e| {
             tinyfs::Error::Other(format!(
                 "Failed to read template file '{}': {}",
                 template_path, e
@@ -478,7 +478,7 @@ fn tmpl_group(args: &HashMap<String, Value>) -> Result<Value, Error> {
                         let value = from_value::<String>(idk.clone())?;
 
                         // Check mapped.get(value)
-                        mapped
+                        _ = mapped
                             .entry(&value)
                             .and_modify(|e| {
                                 e.as_array_mut().expect("is an array").push(item.clone())

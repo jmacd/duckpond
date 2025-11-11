@@ -83,8 +83,8 @@ pub async fn execute_sql_on_file<'a>(
                             .as_table_provider(node_id, part_id, &state)
                             .await?;
                         drop(file_guard);
-
-                        ctx.register_table(
+			
+                        _ = ctx.register_table(
                             datafusion::sql::TableReference::bare("series"),
                             table_provider,
                         )

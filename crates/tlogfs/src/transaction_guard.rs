@@ -84,7 +84,7 @@ impl<'a> TransactionGuard<'a> {
     ) -> Result<std::sync::Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {
         let state = self.state()?;
         // Ensure SessionContext and ObjectStore are initialized
-        state.session_context().await?;
+        _ = state.session_context().await?;
         state
             .object_store()
             .ok_or_else(|| TLogFSError::ArrowMessage("ObjectStore not initialized".to_string()))
@@ -125,15 +125,14 @@ impl<'a> TransactionGuard<'a> {
     ///
     /// **Should only be used in test code.**
     #[cfg(test)]
-    pub async fn commit_test(self) -> TinyFSResult<Option<()>> {
-        // Ignore provided metadata, use test defaults
+    pub async fn commit_test(self) -> TinyFSResult<()> {
         let metadata = PondTxnMetadata::new(
             2,
             PondUserMetadata::new(vec!["test".to_string(), "transaction".to_string()]),
         );
         let result = self.persistence.commit(metadata).await;
 
-        result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
+        result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e))).map(|_| ())
     }
 
     /// Commit with test metadata using explicit sequence number - for multi-commit tests

@@ -496,14 +496,14 @@ pub fn build_object_store(
 
                 // Credentials
                 if !config.key.as_declassified().is_empty() {
-                    options.insert(
+                    _ = options.insert(
                         "aws_access_key_id".to_string(),
                         config.key.as_declassified().to_string(),
                     );
                 }
 
                 if !config.secret.as_declassified().is_empty() {
-                    options.insert(
+                    _ = options.insert(
                         "aws_secret_access_key".to_string(),
                         config.secret.as_declassified().to_string(),
                     );
@@ -512,11 +512,11 @@ pub fn build_object_store(
                 // Region (optional, can be inferred from credentials)
                 if !config.region.is_empty() {
                     log::info!("   Region: {}", config.region);
-                    options.insert("aws_region".to_string(), config.region.clone());
+                    _ = options.insert("aws_region".to_string(), config.region.clone());
                 }
 
                 // Connection timeouts
-                options.insert("timeout".to_string(), "30s".to_string());
+                _ = options.insert("timeout".to_string(), "30s".to_string());
 
                 let final_url = url::Url::parse(&format!("s3://{}", bucket)).map_err(|e| {
                     TLogFSError::TinyFS(tinyfs::Error::Other(format!(
@@ -1446,7 +1446,7 @@ pub async fn extract_bundle(bundle_data: &[u8]) -> Result<Vec<ExtractedFile>, TL
 
         // Read file contents
         let mut data = Vec::new();
-        entry
+        _ = entry
             .read_to_end(&mut data)
             .await
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read file data: {}", e)))?;
@@ -1524,7 +1524,7 @@ pub async fn apply_parquet_files(
 
         // Write file data to object store
         let bytes = bytes::Bytes::copy_from_slice(&file.data);
-        object_store
+        _ = object_store
             .put(&dest_path, bytes.into())
             .await
             .map_err(|e| {
@@ -1684,7 +1684,7 @@ mod tests {
 
             // Create an empty file (we're just testing path scanning)
             let empty_data = bytes::Bytes::from_static(b"");
-            store
+            _ = store
                 .put(&bundle_path, empty_data.into())
                 .await
                 .map_err(|e| {
@@ -1743,7 +1743,7 @@ mod tests {
         for version in &[1, 3] {
             let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
             let empty_data = bytes::Bytes::from_static(b"");
-            store
+            _ = store
                 .put(&bundle_path, empty_data.into())
                 .await
                 .map_err(|e| {
@@ -1761,7 +1761,7 @@ mod tests {
 
         for path in invalid_paths {
             let empty_data = bytes::Bytes::from_static(b"");
-            store
+            _ = store
                 .put(&Path::from(path), empty_data.into())
                 .await
                 .map_err(|e| {
@@ -1797,7 +1797,7 @@ mod tests {
         for version in &[100, 999, 1000] {
             let bundle_path = Path::from(format!("pond-{}-bundle-{:06}.tar.zst", pond_id, version));
             let empty_data = bytes::Bytes::from_static(b"");
-            store
+            _ = store
                 .put(&bundle_path, empty_data.into())
                 .await
                 .map_err(|e| {
@@ -1839,7 +1839,7 @@ mod tests {
             "pond-{}-bundle-{:06}.tar.zst",
             pond_metadata.pond_id, version
         ));
-        builder.write_to_store(store.clone(), &bundle_path).await?;
+        _ = builder.write_to_store(store.clone(), &bundle_path).await?;
 
         Ok(())
     }

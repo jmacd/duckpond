@@ -191,7 +191,7 @@ impl DynamicDirDirectory {
             // Cache it
             {
                 let mut cache = self.entry_cache.write().await;
-                cache.insert(entry_name.to_string(), node_ref.clone());
+                _ = cache.insert(entry_name.to_string(), node_ref.clone());
             }
 
             Ok(Some(node_ref))
