@@ -1787,10 +1787,10 @@ query: ""
             let sensor_id = sensor_ids.value(i);
             let location = locations.value(i);
 
-            if sensor_id >= 401 && sensor_id <= 402 {
+            if (401..=402).contains(&sensor_id) {
                 found_metrics = true;
                 assert!(location.contains("Metrics"));
-            } else if sensor_id >= 501 && sensor_id <= 502 {
+            } else if (501..=502).contains(&sensor_id) {
                 found_logs = true;
                 assert!(location.contains("Log Server"));
             }
@@ -1799,7 +1799,7 @@ query: ""
         assert!(found_metrics, "Should have found metrics data");
         assert!(found_logs, "Should have found logs data");
 
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1861,7 +1861,7 @@ query: ""
         assert_eq!(schema.field(1).name(), "location");
         assert_eq!(schema.field(2).name(), "reading");
 
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1924,7 +1924,7 @@ query: ""
         assert_eq!(schema.field(1).name(), "adjusted_reading");
 
         // This transaction is read-only, so just let it end without committing
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -1986,7 +1986,7 @@ query: ""
         assert_eq!(schema.field(0).name(), "location");
         assert_eq!(schema.field(1).name(), "reading");
 
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -2073,7 +2073,7 @@ query: ""
         assert_eq!(sensor_ids.value(6), 131); // Third version (after 111,112,113,121,122,123)
         assert_eq!(locations.value(6), "Building 3");
 
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     #[tokio::test]
@@ -2136,7 +2136,7 @@ query: ""
 
         // Check data - ORDER BY should be preserved with direct table provider scanning
         use arrow::array::Int64Array;
-        let names = get_string_array(&result_batch, 0);
+        let names = get_string_array(result_batch, 0);
         let doubled_values = result_batch
             .column(1)
             .as_any()
@@ -2154,7 +2154,7 @@ query: ""
         assert_eq!(doubled_values.value(2), 400);
 
         // This transaction is read-only, so just let it end without committing
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     /// Test SQL-derived chain functionality and document predicate pushdown limitations
@@ -2344,7 +2344,7 @@ query: ""
             .unwrap();
 
             // Commit to make the intermediate file visible
-            _ = tx_guard_mut.commit_test().await.unwrap();
+            tx_guard_mut.commit_test().await.unwrap();
         }
 
         // Second transaction: Create the second SQL-derived node that chains from the first
@@ -2390,7 +2390,7 @@ query: ""
 
             // Check data - should be ordered by final_value DESC
             use arrow::array::Int64Array;
-            let names = get_string_array(&result_batch, 0);
+            let names = get_string_array(result_batch, 0);
             let final_values = result_batch
                 .column(1)
                 .as_any()
@@ -2405,7 +2405,7 @@ query: ""
 
             // Bob would be (200 + 50) * 2 = 500, but excluded because 250 is not > 250
 
-            _ = tx_guard_mut.commit_test().await.unwrap();
+            tx_guard_mut.commit_test().await.unwrap();
         }
 
         // ## Observations from This Test
@@ -2500,7 +2500,7 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
 
         // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity
@@ -2556,7 +2556,7 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
 
         // Create File B: timestamps 1-6 with columns: timestamp, pressure
@@ -2615,7 +2615,7 @@ query: ""
             writer.shutdown().await.unwrap();
 
             tokio::task::yield_now().await;
-            _ = tx_guard.commit_test().await.unwrap();
+            tx_guard.commit_test().await.unwrap();
         }
 
         // Test SQL-derived factory with wildcard pattern (like our successful HydroVu config)
@@ -2748,7 +2748,7 @@ query: ""
             }
         }
 
-        _ = tx_guard_mut.commit_test().await.unwrap();
+        tx_guard_mut.commit_test().await.unwrap();
     }
 
     /// Test temporal-reduce over sql-derived over parquet

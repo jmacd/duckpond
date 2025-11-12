@@ -1869,7 +1869,7 @@ mod tests {
         let bundle_data = download_bundle(&store, &test_pond_metadata(), 1).await?;
 
         // Verify we got some data
-        assert!(bundle_data.len() > 0, "Bundle should not be empty");
+        assert!(!bundle_data.is_empty(), "Bundle should not be empty");
 
         Ok(())
     }

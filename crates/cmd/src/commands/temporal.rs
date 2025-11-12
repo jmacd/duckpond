@@ -68,30 +68,29 @@ pub async fn detect_overlaps_command(
         for (node_path, _captured) in matches {
             let node_ref = node_path.borrow().await;
 
-            if let Ok(file_node) = node_ref.as_file() {
-                if let Ok(metadata) = file_node.metadata().await {
-                    if metadata.entry_type.is_series_file() {
-                        let path_str = node_path.path().to_string_lossy().to_string();
+            if let Ok(file_node) = node_ref.as_file()
+                && let Ok(metadata) = file_node.metadata().await
+                && metadata.entry_type.is_series_file()
+            {
+                let path_str = node_path.path().to_string_lossy().to_string();
 
-                        // Use resolve_path to get both the parent directory and lookup result
-                        let (parent_wd, lookup) = tinyfs_root
-                            .resolve_path(&path_str)
-                            .await
-                            .map_err(|e| anyhow!("Failed to resolve path {}: {}", path_str, e))?;
+                // Use resolve_path to get both the parent directory and lookup result
+                let (parent_wd, lookup) = tinyfs_root
+                    .resolve_path(&path_str)
+                    .await
+                    .map_err(|e| anyhow!("Failed to resolve path {}: {}", path_str, e))?;
 
-                        match lookup {
-                            tinyfs::Lookup::Found(found_node) => {
-                                let node_guard = found_node.borrow().await;
-                                let node_id = node_guard.id();
-                                let part_id = parent_wd.node_path().id().await;
-                                drop(node_guard);
+                match lookup {
+                    tinyfs::Lookup::Found(found_node) => {
+                        let node_guard = found_node.borrow().await;
+                        let node_id = node_guard.id();
+                        let part_id = parent_wd.node_path().id().await;
+                        drop(node_guard);
 
-                                file_info.push((path_str, node_id, part_id));
-                            }
-                            _ => {
-                                return Err(anyhow!("File not found: {}", path_str));
-                            }
-                        }
+                        file_info.push((path_str, node_id, part_id));
+                    }
+                    _ => {
+                        return Err(anyhow!("File not found: {}", path_str));
                     }
                 }
             }
@@ -99,7 +98,7 @@ pub async fn detect_overlaps_command(
     }
 
     if file_info.is_empty() {
-        println!("No FileSeries files found matching the specified patterns");
+        debug!("No FileSeries files found matching the specified patterns");
         return Ok(());
     }
 
@@ -108,9 +107,8 @@ pub async fn detect_overlaps_command(
 
     // Create a UNION query to get all data from all versions sorted by timestamp
     let mut union_parts = Vec::new();
-    let mut origin_id = 0;
 
-    for (path_str, node_id, part_id) in file_info.iter() {
+    for (origin_id, (path_str, node_id, part_id)) in file_info.iter().enumerate() {
         // Get all versions of this file using node_id and part_id
         let all_versions = fs
             .list_file_versions(*node_id, *part_id)
@@ -131,7 +129,7 @@ pub async fn detect_overlaps_command(
         let version_count = versions.len();
         debug!("Creating table providers for {path_str} with {version_count} versions");
 
-        println!("\nAnalyzing {}: {} versions", path_str, version_count);
+        debug!("\nAnalyzing {}: {} versions", path_str, version_count);
 
         for version_info in versions {
             let version = version_info.version;
@@ -176,20 +174,21 @@ pub async fn detect_overlaps_command(
             // Extract and print the statistics
             if let Some(batch) = stats_batches.first() {
                 if batch.num_rows() > 0 {
-                    let row_count_col = batch.column_by_name("row_count").unwrap();
-                    let min_ts_col = batch.column_by_name("min_ts").unwrap();
-                    let max_ts_col = batch.column_by_name("max_ts").unwrap();
+                    let row_count_col = batch.column_by_name("row_count").expect("ok");
+                    let min_ts_col = batch.column_by_name("min_ts").expect("ok");
+                    let max_ts_col = batch.column_by_name("max_ts").expect("ok");
 
                     let row_count = row_count_col
                         .as_any()
                         .downcast_ref::<arrow::array::Int64Array>()
-                        .unwrap()
+                        .expect("ok")
                         .value(0);
 
                     // Handle potential null timestamps (empty tables)
                     let min_ts_str = if min_ts_col.is_null(0) {
                         "NULL".to_string()
                     } else {
+			// @@@ This was not planned
                         match min_ts_col.data_type() {
                             arrow::datatypes::DataType::Timestamp(
                                 arrow::datatypes::TimeUnit::Millisecond,
@@ -198,7 +197,7 @@ pub async fn detect_overlaps_command(
                                 let min_ts = min_ts_col
                                     .as_any()
                                     .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                                    .unwrap()
+                                    .expect("ok")
                                     .value(0);
                                 format_timestamp(min_ts)
                             }
@@ -209,7 +208,7 @@ pub async fn detect_overlaps_command(
                                 let min_ts = min_ts_col
                                     .as_any()
                                     .downcast_ref::<arrow::array::TimestampSecondArray>()
-                                    .unwrap()
+                                    .expect("ok")
                                     .value(0);
                                 format_timestamp(min_ts * 1000)
                             }
@@ -228,7 +227,7 @@ pub async fn detect_overlaps_command(
                                 let max_ts = max_ts_col
                                     .as_any()
                                     .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                                    .unwrap()
+                                    .expect("ok")
                                     .value(0);
                                 format_timestamp(max_ts)
                             }
@@ -239,7 +238,7 @@ pub async fn detect_overlaps_command(
                                 let max_ts = max_ts_col
                                     .as_any()
                                     .downcast_ref::<arrow::array::TimestampSecondArray>()
-                                    .unwrap()
+                                    .expect("ok")
                                     .value(0);
                                 format_timestamp(max_ts * 1000)
                             }
@@ -247,12 +246,12 @@ pub async fn detect_overlaps_command(
                         }
                     };
 
-                    println!(
+                    debug!(
                         "    Version {}: {} rows, {} to {}",
                         version, row_count, min_ts_str, max_ts_str
                     );
                 } else {
-                    println!("    Version {}: 0 rows (empty)", version);
+                    debug!("    Version {}: 0 rows (empty)", version);
                 }
             }
 
@@ -262,7 +261,6 @@ pub async fn detect_overlaps_command(
                 origin_id, version_info.version, path_str, table_name
             ));
         }
-        origin_id += 1;
     }
 
     // Create simple query: just timestamp and metadata, sorted by timestamp
@@ -284,16 +282,14 @@ pub async fn detect_overlaps_command(
         .map_err(|e| anyhow!("Failed to collect query results: {}", e))?;
 
     if all_batches.is_empty() {
-        println!("No data found in specified patterns");
+        debug!("No data found in specified patterns");
         return Ok(());
     }
 
     // Create origin-to-path mapping for output
     let mut origin_to_path = HashMap::new();
-    let mut origin_id = 0;
-    for (path_str, _node_id, _part_id) in file_info.iter() {
-        _ = origin_to_path.insert(origin_id, path_str.clone());
-        origin_id += 1;
+    for (origin_id, (path_str, _node_id, _part_id)) in file_info.iter().enumerate() {
+        _ = origin_to_path.insert(origin_id as i64, path_str.clone());
     }
 
     // Analyze the combined batches for overlaps
@@ -510,7 +506,7 @@ fn analyze_timeline(data_points: &[(i64, i64)]) -> Vec<TimelineSegment> {
                         // Add overlap
                         timeline.push(TimelineSegment::Overlap {
                             start_timestamp: prev_timestamp,
-                            end_timestamp: overlap_points.last().unwrap().0,
+                            end_timestamp: overlap_points.last().expect("ok").0,
                             points: overlap_points,
                         });
 
@@ -547,6 +543,7 @@ fn analyze_timeline(data_points: &[(i64, i64)]) -> Vec<TimelineSegment> {
 }
 
 /// Print overlap analysis summary
+#[allow(clippy::print_stdout)]
 fn print_overlap_summary(analysis: &OverlapAnalysis) {
     println!("Temporal Overlap Analysis Summary");
     println!("================================");
@@ -675,6 +672,7 @@ fn print_overlap_summary(analysis: &OverlapAnalysis) {
 }
 
 /// Print detailed overlap analysis
+#[allow(clippy::print_stdout)]
 fn print_overlap_details(analysis: &OverlapAnalysis) {
     print_overlap_summary(analysis);
 
@@ -710,8 +708,7 @@ fn format_timestamp(timestamp_ms: i64) -> String {
 
     match naive_datetime {
         Some(dt) => {
-            let utc_dt: DateTime<Utc> = dt.into();
-            utc_dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+            dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
         }
         None => format!("Invalid timestamp: {}", timestamp_ms),
     }
@@ -824,7 +821,7 @@ pub async fn set_extended_attributes_command(
 }
 
 pub fn parse_timestamp_seconds(timestamp_str: &str) -> Result<i64> {
-    return parse_timestamp_millis(timestamp_str).map(|x| x / 1000);
+    parse_timestamp_millis(timestamp_str).map(|x| x / 1000)
 }
 
 /// Parse human-readable timestamp to milliseconds since Unix epoch
@@ -853,7 +850,7 @@ fn parse_timestamp_millis(timestamp_str: &str) -> Result<i64> {
 
     // Try parsing date-only format and assume 00:00:00 UTC
     if let Ok(date) = chrono::NaiveDate::parse_from_str(timestamp_str, "%Y-%m-%d") {
-        let naive_dt = date.and_hms_opt(0, 0, 0).unwrap();
+        let naive_dt = date.and_hms_opt(0, 0, 0).expect("ok");
         let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc);
         return Ok(utc_dt.timestamp_millis());
     }

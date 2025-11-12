@@ -4,6 +4,7 @@ use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
 use tlogfs::factory::ExecutionContext;
 use tokio::io::AsyncReadExt;
+use log::{debug, error};
 
 /// Execute a run configuration
 pub async fn run_command(
@@ -48,7 +49,7 @@ pub async fn run_command(
         Ok(()) => {
             _ = tx.commit().await?;
             log::debug!("Configuration executed successfully");
-            println!("✓ Execution complete");
+            debug!("✓ Execution complete");
             Ok(())
         }
         Err(e) => Err(tx.abort(&e).await.into()),
@@ -159,11 +160,11 @@ async fn run_command_impl(
     .await
     .map_err(|e| {
         // Print the underlying error details before wrapping
-        eprintln!("Factory '{}' execution error: {}", factory_name, e);
+        error!("Factory '{}' execution error: {}", factory_name, e);
         // Print the full error chain if available
         use std::error::Error as StdError;
         if let Some(source) = StdError::source(&e) {
-            eprintln!("Caused by: {}", source);
+            error!("Caused by: {}", source);
         }
         e
     })

@@ -55,6 +55,7 @@ pub enum ExportSet {
 
 impl ExportSet {
     /// Construct hierarchical export set from capture groups, outputs, and schema
+    #[must_use]
     pub fn construct_with_schema(
         inputs: Vec<(Vec<String>, ExportOutput)>,
         schema: TemplateSchema,
@@ -67,6 +68,7 @@ impl ExportSet {
     }
 
     /// Construct hierarchical export set from capture groups and outputs (legacy compatibility)
+    #[must_use]
     pub fn construct(inputs: Vec<(Vec<String>, ExportOutput)>) -> Self {
         // For backwards compatibility with raw file exports that don't have schema
         let empty_schema = TemplateSchema { fields: vec![] };
@@ -120,6 +122,7 @@ impl ExportSet {
 
     /// Filter export set to only include entries matching the given capture path
     /// This is used to provide target-specific context based on pattern captures
+    #[must_use]
     pub fn filter_by_captures(&self, target_captures: &[String]) -> ExportSet {
         match self {
             ExportSet::Empty => ExportSet::Empty,
@@ -250,12 +253,12 @@ fn find_first_parquet_file(dir: &std::path::Path) -> Result<PathBuf> {
             let entry = entry.ok()?;
             let path = entry.path();
 
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "parquet") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "parquet") {
                 return Some(path);
-            } else if path.is_dir() {
-                if let Some(found) = find_parquet_recursive(&path) {
-                    return Some(found);
-                }
+            } else if path.is_dir()
+                && let Some(found) = find_parquet_recursive(&path)
+            {
+                return Some(found);
             }
         }
         None
@@ -311,9 +314,9 @@ fn parse_field_name(field_name: &str) -> Result<TemplateField> {
         ));
     }
 
-    let agg = parts.pop().unwrap().to_string();
-    let unit = parts.pop().unwrap().to_string();
-    let name = parts.pop().unwrap().to_string();
+    let agg = parts.pop().expect("ok").to_string();
+    let unit = parts.pop().expect("ok").to_string();
+    let name = parts.pop().expect("ok").to_string();
     let instrument = parts.join(".");
 
     Ok(TemplateField {
@@ -325,18 +328,12 @@ fn parse_field_name(field_name: &str) -> Result<TemplateField> {
 }
 
 /// Export summary for managing metadata across multiple patterns (for display/reporting only)
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 pub struct ExportSummary {
     pub pattern_results: HashMap<String, ExportSet>,
 }
 
 impl ExportSummary {
-    pub fn new() -> Self {
-        Self {
-            pattern_results: HashMap::new(),
-        }
-    }
-
     pub fn add_export_results(&mut self, pattern: &str, results: Vec<(Vec<String>, ExportOutput)>) {
         // Get existing export set or create empty one
         let existing = self.pattern_results.get_mut(pattern);
@@ -380,7 +377,7 @@ pub async fn export_command(
 
     // Log parsed timestamp information if time ranges are provided
     if start_time_str.is_some() || end_time_str.is_some() {
-        println!("🕐 Temporal filtering enabled:");
+        debug!("🕐 Temporal filtering enabled:");
 
         if let Some(start_str) = &start_time_str {
             match parse_timestamp_seconds(start_str) {
@@ -426,7 +423,6 @@ pub async fn export_command(
                 }
             }
         }
-        println!();
     }
 
     // Phase 2: Core export logic
@@ -463,7 +459,7 @@ async fn export_pond_data(
     temporal: &str,
     export_range: ExportRange,
 ) -> Result<ExportSummary> {
-    let mut export_summary = ExportSummary::new();
+    let mut export_summary = ExportSummary::default();
     let temporal_parts = parse_temporal_parts(temporal);
 
     // Create output directory
@@ -481,7 +477,7 @@ async fn export_pond_data(
                 .with_vars(template_variables),
         )
         .await?;
-    let mut tx_guard = stx_guard.transaction_guard()?;
+    let tx_guard = stx_guard.transaction_guard()?;
 
     // Track results from previous stage to pass as context to next stage
     let mut previous_stage_results = ExportSet::Empty;
@@ -495,7 +491,7 @@ async fn export_pond_data(
         );
 
         // Find all files matching this stage's pattern
-        let export_targets = discover_export_targets(&mut tx_guard, pattern.clone()).await?;
+        let export_targets = discover_export_targets(tx_guard, pattern.clone()).await?;
         log::info!(
             "🔍 STAGE {}: Found {} targets matching pattern",
             stage_idx + 1,
@@ -573,7 +569,7 @@ async fn export_pond_data(
 
             // CORE EXPORT: This is where each target gets exported (parquet files, templates, etc.)
             let (target_metadata, target_schema) = export_target(
-                &mut tx_guard,
+                tx_guard,
                 &target,
                 output_dir,
                 &temporal_parts,
@@ -626,7 +622,7 @@ async fn export_pond_data(
 fn print_export_start(patterns: &[String], output_dir: &str, temporal: &str) {
     // Print pattern processing (matches original "export {} ..." format)
     for pattern in patterns {
-        println!("export {} ...", pattern);
+        debug!("export {} ...", pattern);
     }
 
     // Optional debug info (only shown with debug logging)
@@ -641,22 +637,22 @@ fn print_export_results(output_dir: &str, export_summary: &ExportSummary) {
     // Count total files (matches original behavior)
     let total_files = count_exported_files(output_dir);
 
-    println!("📁 Files exported to: {}", output_dir);
+    debug!("📁 Files exported to: {}", output_dir);
 
     // Show detailed export results (matches original behavior)
     if !export_summary.pattern_results.is_empty() {
-        println!("\n📊 Export Context Summary:");
-        println!("========================");
-        println!("📁 Output Directory: {}", output_dir);
-        println!("📄 Total Files Exported: {}", total_files);
-        println!("📋 Metadata by Pattern:");
+        debug!("\n📊 Export Context Summary:");
+        debug!("========================");
+        debug!("📁 Output Directory: {}", output_dir);
+        debug!("📄 Total Files Exported: {}", total_files);
+        debug!("📋 Metadata by Pattern:");
 
         for (pattern, export_set) in &export_summary.pattern_results {
-            println!("  🎯 Pattern: {}", pattern);
-            print_export_set(&export_set, "    ");
+            debug!("  🎯 Pattern: {}", pattern);
+            print_export_set(export_set, "    ");
         }
     } else {
-        println!("  (No export metadata collected)");
+        debug!("  (No export metadata collected)");
     }
 }
 
@@ -742,30 +738,30 @@ fn extract_timestamps_from_path(
     let mut parsed_parts = Vec::new();
 
     for component in components {
-        if let Some(dir_name) = component.as_os_str().to_str() {
-            if dir_name.contains('=') {
-                let parts: Vec<&str> = dir_name.split('=').collect();
-                if parts.len() == 2 {
-                    let part_name = parts[0];
-                    let part_value_str = parts[1];
+        if let Some(dir_name) = component.as_os_str().to_str()
+            && dir_name.contains('=')
+        {
+            let parts: Vec<&str> = dir_name.split('=').collect();
+            if parts.len() == 2 {
+                let part_name = parts[0];
+                let part_value_str = parts[1];
 
-                    // Validate that this is a known temporal part
-                    if !["year", "month", "day", "hour", "minute", "second"].contains(&part_name) {
-                        log::debug!("🕐 Ignoring unknown temporal part: {}", part_name);
-                        continue;
-                    }
+                // Validate that this is a known temporal part
+                if !["year", "month", "day", "hour", "minute", "second"].contains(&part_name) {
+                    log::debug!("🕐 Ignoring unknown temporal part: {}", part_name);
+                    continue;
+                }
 
-                    // Parse the value, failing fast on invalid formats
-                    let part_value = part_value_str.parse::<i32>()
+                // Parse the value, failing fast on invalid formats
+                let part_value = part_value_str.parse::<i32>()
                         .map_err(|e| anyhow::anyhow!(
                             "Invalid temporal partition value in path '{}': '{}={}' - value must be an integer: {}", 
                             relative_path.display(), part_name, part_value_str, e
                         ))?;
 
-                    _ = temporal_parts.insert(part_name, part_value);
-                    parsed_parts.push(part_name);
-                    log::debug!("🕐 Parsed temporal part: {}={}", part_name, part_value);
-                }
+                _ = temporal_parts.insert(part_name, part_value);
+                parsed_parts.push(part_name);
+                log::debug!("🕐 Parsed temporal part: {}={}", part_name, part_value);
             }
         }
     }
@@ -950,7 +946,7 @@ fn build_utc_timestamp(parts: &HashMap<&str, i32>) -> Result<i64> {
     }
 
     // Validate month range
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err(anyhow::anyhow!(
             "Invalid month {} in temporal path. Expected month between 1-12",
             month
@@ -981,14 +977,12 @@ fn count_exported_files(output_dir: &str) -> usize {
     fn count_files_recursive(dir: &std::path::Path) -> usize {
         let mut count = 0;
         if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        count += count_files_recursive(&path);
-                    } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
-                        count += 1;
-                    }
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    count += count_files_recursive(&path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
+                    count += 1;
                 }
             }
         }
@@ -1229,7 +1223,7 @@ async fn export_target(
             export_queryable_file(
                 tx_guard,
                 target,
-                output_path.to_str().unwrap(),
+                output_path.to_str().expect("utf8"),
                 temporal_parts,
                 output_dir,
                 export_range,
@@ -1240,7 +1234,7 @@ async fn export_target(
             export_raw_file(
                 tx_guard,
                 target,
-                output_path.to_str().unwrap(),
+                output_path.to_str().expect("utf8"),
                 output_dir,
                 export_set,
             )
@@ -1292,7 +1286,7 @@ async fn export_queryable_file(
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("ok")
             .as_nanos()
     );
 
@@ -1315,7 +1309,7 @@ async fn export_queryable_file(
     log::debug!("  📂 Exporting to: {}", export_path.display());
 
     // Create output directory
-    std::fs::create_dir_all(&export_path).map_err(|e| {
+    std::fs::create_dir_all(export_path).map_err(|e| {
         anyhow::anyhow!(
             "Failed to create export directory {}: {}",
             export_path.display(),
@@ -1328,7 +1322,7 @@ async fn export_queryable_file(
         &target.pond_path,
         &user_sql_query,
         &unique_table_name,
-        &export_path,
+	export_path,
         temporal_parts,
         tx_guard,
         export_range,
@@ -1345,7 +1339,7 @@ async fn export_queryable_file(
     // We need to compute relative paths from the base_output_dir (not export_path)
     // to include capture groups in the relative path
     let base_output_path = std::path::Path::new(base_output_dir);
-    let exported_files = discover_exported_files(&export_path, base_output_path)?;
+    let exported_files = discover_exported_files(export_path, base_output_path)?;
     log::debug!(
         "📄 Discovered {} exported files for {}",
         exported_files.len(),
@@ -1353,7 +1347,7 @@ async fn export_queryable_file(
     );
 
     // Read schema from first parquet file (fail fast if no schema available)
-    let schema = read_parquet_schema(&export_path).await.map_err(|e| {
+    let schema = read_parquet_schema(export_path).await.map_err(|e| {
         anyhow::anyhow!(
             "Failed to read schema from exported parquet files in {}: {}",
             export_path.display(),
@@ -1669,7 +1663,7 @@ async fn export_raw_file(
                 _ = reader.read_to_end(&mut content).await?;
 
                 // Export as raw data
-                std::fs::write(&output_path, &content)?;
+                std::fs::write(output_path, &content)?;
                 log::debug!("  💾 Exported raw data: {}", output_path.display());
 
                 // Try to discover any temporal information from the output path structure
@@ -1708,10 +1702,10 @@ async fn export_raw_file(
 fn print_export_set(export_set: &ExportSet, indent: &str) {
     match export_set {
         ExportSet::Empty => {
-            println!("{}(no files)", indent);
+            debug!("{}(no files)", indent);
         }
         ExportSet::Files(leaf) => {
-            println!("{}📄 {} exported files:", indent, leaf.files.len());
+            debug!("{}📄 {} exported files:", indent, leaf.files.len());
             for file_output in &leaf.files {
                 let start_str = if let Some(start) = file_output.start_time {
                     match chrono::DateTime::from_timestamp(start, 0) {
@@ -1729,7 +1723,7 @@ fn print_export_set(export_set: &ExportSet, indent: &str) {
                 } else {
                     "N/A".to_string()
                 };
-                println!(
+                debug!(
                     "{}  📄 {} (🕐 {} → {})",
                     indent,
                     file_output.file.display(),
@@ -1739,9 +1733,9 @@ fn print_export_set(export_set: &ExportSet, indent: &str) {
             }
         }
         ExportSet::Map(map) => {
-            println!("{}🗂️  {} capture groups:", indent, map.len());
+            debug!("{}🗂️  {} capture groups:", indent, map.len());
             for (key, nested_set) in map {
-                println!("{}  📁 '{}' wildcard capture:", indent, key);
+                debug!("{}  📁 '{}' wildcard capture:", indent, key);
                 print_export_set(nested_set, &format!("{}    ", indent));
             }
         }

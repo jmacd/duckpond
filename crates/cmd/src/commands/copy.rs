@@ -2,14 +2,12 @@ use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
 
 async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
-    let entry_type = match format {
+    match format {
         "data" => Ok(tinyfs::EntryType::FileDataPhysical),
         "table" => Ok(tinyfs::EntryType::FileTablePhysical),
         "series" => Ok(tinyfs::EntryType::FileSeriesPhysical),
         _ => Err(anyhow!("Invalid format '{}'", format)),
-    };
-
-    entry_type
+    }
 }
 
 // STREAMING COPY: Copy multiple files to directory using proper context
@@ -140,7 +138,7 @@ pub async fn copy_command(
                                 let source = &sources[0];
 
                                 // Use the same logic as directory copying, just with the specific filename
-                                copy_single_file_to_directory_with_name(&source, &dest_wd, &name, &format).await
+                                copy_single_file_to_directory_with_name(source, &dest_wd, &name, &format).await
                                     .map_err(|e| steward::StewardError::DataInit(
                                         tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to copy file: {}", e)))
                                     ))?;
@@ -206,8 +204,6 @@ mod tests {
 
     /// Test setup helper - creates pond and host files for copy testing
     struct TestSetup {
-        #[allow(dead_code)]
-        temp_dir: TempDir,
         pond_path: std::path::PathBuf,
         host_files_dir: std::path::PathBuf,
         ship_context: ShipContext,
@@ -236,7 +232,6 @@ mod tests {
             init_command(&ship_context, None, None).await?;
 
             Ok(TestSetup {
-                temp_dir,
                 pond_path,
                 host_files_dir,
                 ship_context,

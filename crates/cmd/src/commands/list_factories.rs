@@ -4,6 +4,7 @@ use log::debug;
 use tlogfs::factory::FactoryRegistry;
 
 /// List all available dynamic node factories
+#[allow(clippy::print_stdout)]
 pub async fn list_factories_command() -> Result<()> {
     debug!("Listing available dynamic factories");
 

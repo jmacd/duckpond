@@ -130,7 +130,7 @@ async fn describe_command_impl(
             file_info.metadata.size.unwrap_or(0)
         ));
         output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     Ok(output)
@@ -268,8 +268,6 @@ mod tests {
     struct TestSetup {
         temp_dir: TempDir,
         ship_context: ShipContext,
-        #[allow(dead_code)]
-        pond_path: PathBuf,
     }
 
     impl TestSetup {
@@ -288,7 +286,6 @@ mod tests {
             Ok(TestSetup {
                 temp_dir,
                 ship_context,
-                pond_path,
             })
         }
 

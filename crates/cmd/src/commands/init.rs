@@ -171,7 +171,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
 
         // Convert pond metadata to tlogfs format for download
         let tlogfs_metadata = tlogfs::factory::PondMetadata {
-            pond_id: pond_metadata_for_restore.pond_id.clone(),
+            pond_id: pond_metadata_for_restore.pond_id,
             birth_timestamp: pond_metadata_for_restore.birth_timestamp,
             birth_hostname: pond_metadata_for_restore.birth_hostname.clone(),
             birth_username: pond_metadata_for_restore.birth_username.clone(),
@@ -255,7 +255,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
                     // This directly copies the commit log, preserving the original txn_seq
                     tlogfs::remote_factory::apply_parquet_files(&mut table, &files)
                         .await
-                        .map_err(|e| steward::StewardError::DataInit(e))?;
+                        .map_err(steward::StewardError::DataInit)?;
 
                     let delta_version = table.version().unwrap_or(0);
                     log::info!(

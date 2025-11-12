@@ -39,13 +39,13 @@ async fn show_filesystem_transactions(
     // Get data persistence from the transaction guard
     let persistence = tx
         .data_persistence()
-        .map_err(|e| steward::StewardError::DataInit(e))?;
+        .map_err(steward::StewardError::DataInit)?;
 
     // Get commit history from the filesystem
     let commit_history = persistence
         .get_commit_history(None)
         .await
-        .map_err(|e| steward::StewardError::DataInit(e))?;
+        .map_err(steward::StewardError::DataInit)?;
 
     if commit_history.is_empty() {
         return Ok("No transactions found in this filesystem.".to_string());
@@ -242,7 +242,7 @@ async fn show_brief_mode(
     }
 
     // Format the output
-    output.push_str("\n");
+    output.push('\n');
     output.push_str(
         "╔════════════════════════════════════════════════════════════════════════════╗\n",
     );
@@ -252,7 +252,7 @@ async fn show_brief_mode(
     output.push_str(
         "╚════════════════════════════════════════════════════════════════════════════╝\n",
     );
-    output.push_str("\n");
+    output.push('\n');
 
     output.push_str(&format!(
         "  Transactions       : {}\n",
@@ -262,7 +262,7 @@ async fn show_brief_mode(
         "  Delta Lake Version : {}\n",
         table.version().unwrap_or(0)
     ));
-    output.push_str("\n");
+    output.push('\n');
 
     output.push_str("  Storage Statistics\n");
     output.push_str("  ──────────────────\n");
@@ -272,7 +272,7 @@ async fn show_brief_mode(
         format_byte_size(total_parquet_bytes)
     ));
     output.push_str(&format!("  Partitions         : {}\n", partition_map.len()));
-    output.push_str("\n");
+    output.push('\n');
 
     // Sort partitions by total rows
     let mut partition_vec: Vec<_> = partition_map.into_iter().collect();
@@ -294,7 +294,7 @@ async fn show_brief_mode(
             stats.total_rows, stats.directory_rows, stats.distinct_files, stats.file_versions
         ));
     }
-    output.push_str("\n");
+    output.push('\n');
 
     Ok(output)
 }
@@ -469,19 +469,13 @@ async fn show_detailed_mode(
         let mut current_txn_rows: HashMap<i64, Vec<usize>> = HashMap::new();
         for row_idx in 0..batch.num_rows() {
             let txn_seq = txn_seqs.value(row_idx);
-            current_txn_rows
-                .entry(txn_seq)
-                .or_insert_with(Vec::new)
-                .push(row_idx);
+            current_txn_rows.entry(txn_seq).or_default().push(row_idx);
         }
 
         // Create a separate batch for each transaction
         for (txn_seq, row_indices) in current_txn_rows {
             let txn_batch = batch.slice(row_indices[0], row_indices.len());
-            txn_batches
-                .entry(txn_seq)
-                .or_insert_with(Vec::new)
-                .push(txn_batch);
+            txn_batches.entry(txn_seq).or_default().push(txn_batch);
         }
     }
 
@@ -556,12 +550,12 @@ async fn show_detailed_mode(
         ));
 
         // Display command if available
-        if let Some(cli_args) = command_map.get(txn_seq) {
-            if !cli_args.is_empty() {
-                output.push_str(&format!("  Command: {}\n", cli_args.join(" ")));
-            }
+        if let Some(cli_args) = command_map.get(txn_seq)
+            && !cli_args.is_empty()
+        {
+            output.push_str(&format!("  Command: {}\n", cli_args.join(" ")));
         }
-        output.push_str("\n");
+        output.push('\n');
 
         // Format operations for this transaction
         let formatted_ops = format_operations_from_batches(batches_for_txn.clone(), &path_map)?;
@@ -762,7 +756,7 @@ fn format_operations_from_batches(
                 .map(|entry| format!("{} → {}", entry.name, format_node_id(&entry.child_node_id)))
                 .collect();
 
-            let part_entry = partition_groups.entry(part_id).or_insert_with(Vec::new);
+            let part_entry = partition_groups.entry(part_id).or_default();
             part_entry.push((operation, entry_strings));
         }
     }
@@ -830,13 +824,10 @@ mod tests {
     use super::*;
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
-    use std::path::PathBuf;
     use tempfile::TempDir;
     struct TestSetup {
         _temp_dir: TempDir,
         ship_context: ShipContext,
-        #[allow(dead_code)] // Needed for test infrastructure
-        pond_path: PathBuf,
     }
 
     impl TestSetup {
@@ -856,7 +847,6 @@ mod tests {
             Ok(TestSetup {
                 _temp_dir: temp_dir,
                 ship_context,
-                pond_path,
             })
         }
     }

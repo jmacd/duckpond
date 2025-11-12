@@ -106,7 +106,7 @@ pub async fn mkdir_command(
                         // Check if parent exists
                         if !root.exists(parent_path).await {
                             return Err(steward::StewardError::DataInit(
-                                tlogfs::TLogFSError::TinyFS(tinyfs::Error::not_found(&format!(
+                                tlogfs::TLogFSError::TinyFS(tinyfs::Error::not_found(format!(
                                     "Parent directory '{}' does not exist",
                                     parent_path
                                 ))),
@@ -144,14 +144,11 @@ mod tests {
     use super::*;
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     struct TestSetup {
         _temp_dir: TempDir,
         ship_context: ShipContext,
-        #[allow(dead_code)] // Needed for test infrastructure
-        pond_path: PathBuf,
     }
 
     impl TestSetup {
@@ -171,7 +168,6 @@ mod tests {
             Ok(TestSetup {
                 _temp_dir: temp_dir,
                 ship_context,
-                pond_path,
             })
         }
 

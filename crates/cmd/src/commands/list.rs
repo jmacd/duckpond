@@ -73,15 +73,9 @@ mod tests {
     use super::*;
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
 
     struct TestSetup {
-        #[allow(dead_code)] // Needed for test infrastructure
-        temp_dir: TempDir,
         ship_context: ShipContext,
-        #[allow(dead_code)] // Needed for test infrastructure
-        pond_path: PathBuf,
     }
 
     impl TestSetup {
@@ -97,9 +91,7 @@ mod tests {
             init_command(&ship_context, None, None).await?;
 
             Ok(Self {
-                temp_dir,
                 ship_context,
-                pond_path,
             })
         }
 

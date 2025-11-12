@@ -10,7 +10,6 @@ use cmd::commands::show::show_command;
 use cmd::common::ShipContext;
 use log::{debug, info, warn};
 use peak_alloc::PeakAlloc;
-use serde_yaml;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use steward::Ship;
@@ -292,7 +291,7 @@ async fn read_and_verify_derived_data(
     // PROPER IMPLEMENTATION: Use cat command pattern with correct transaction handling
     let (read_batches, actual_row_count) =
         if let Some((first_derived_path, _)) = derived_matches.first() {
-            let actual_path = first_derived_path.path.to_str().unwrap();
+            let actual_path = first_derived_path.path.to_str().expect("ok");
             debug!("✅ Found derived file at actual path: {}", actual_path);
 
             // STREAMING SQL INTERFACE: Use same approach as cat command for file:series
@@ -325,7 +324,7 @@ async fn read_and_verify_derived_data(
                 debug!(
                     "Streamed derived batch {} with {} rows (total: {})",
                     batch_count,
-                    collected_batches.last().unwrap().num_rows(),
+                    collected_batches.last().expect("ok").num_rows(),
                     total_rows
                 );
             }

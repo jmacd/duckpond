@@ -15,28 +15,14 @@ use uuid7::Uuid;
 /// Simple test setup
 struct SimpleReplicationTest {
     source_pond: PathBuf,
-    #[allow(dead_code)]
-    replica_pond: PathBuf,
-    #[allow(dead_code)]
-    backups_path: PathBuf,
-    _source_temp: TempDir,
-    _replica_temp: TempDir,
-    _backups_temp: TempDir,
 }
 
 impl SimpleReplicationTest {
     fn new() -> Result<Self> {
         let source_temp = TempDir::new()?;
-        let replica_temp = TempDir::new()?;
-        let backups_temp = TempDir::new()?;
 
         Ok(Self {
             source_pond: source_temp.path().to_path_buf(),
-            replica_pond: replica_temp.path().to_path_buf(),
-            backups_path: backups_temp.path().to_path_buf(),
-            _source_temp: source_temp,
-            _replica_temp: replica_temp,
-            _backups_temp: backups_temp,
         })
     }
 

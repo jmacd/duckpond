@@ -538,16 +538,3 @@ fn print_error_chain(err: &dyn std::error::Error) {
     }
 }
 
-/// Alternative: collect error chain as strings for more complex formatting
-#[allow(dead_code)]
-fn collect_error_chain(err: &dyn std::error::Error) -> Vec<String> {
-    let mut chain = vec![err.to_string()];
-    let mut source = err.source();
-
-    while let Some(err) = source {
-        chain.push(err.to_string());
-        source = err.source();
-    }
-
-    chain
-}

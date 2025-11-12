@@ -43,7 +43,7 @@ pub async fn mknod_command(
 
     // Validate the factory and configuration early, get processed config
     let validated_config =
-        FactoryRegistry::validate_config(factory_type, &config_bytes).map_err(|e| {
+        FactoryRegistry::validate_config(factory_type, config_bytes).map_err(|e| {
             anyhow!(
                 "Invalid configuration for factory '{}': {}",
                 factory_type,
@@ -211,8 +211,6 @@ mod tests {
     struct TestSetup {
         temp_dir: TempDir,
         ship_context: ShipContext,
-        #[allow(dead_code)]
-        pond_path: PathBuf,
     }
 
     impl TestSetup {
@@ -230,7 +228,6 @@ mod tests {
             Ok(Self {
                 temp_dir,
                 ship_context,
-                pond_path,
             })
         }
 

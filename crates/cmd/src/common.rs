@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use chrono;
 use log::debug;
 use tinyfs::EntryType;
 
@@ -24,6 +23,7 @@ pub struct ShipContext {
 
 impl ShipContext {
     /// Create a new ShipContext from CLI parsing
+    #[must_use]
     pub fn new(pond_path: Option<PathBuf>, original_args: Vec<String>) -> Self {
         Self {
             pond_path,
@@ -33,6 +33,7 @@ impl ShipContext {
     }
 
     /// Create a new ShipContext with template variables from CLI parsing
+    #[must_use]
     pub fn with_variables(
         pond_path: Option<PathBuf>,
         original_args: Vec<String>,
@@ -100,6 +101,7 @@ pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<Pat
 /// Core function to format a u64 ID value with friendly hex formatting
 /// Shows exactly 4, 8, 12, or 16 hex digits based on the magnitude of the ID
 /// 0000-FFFF -> 4 digits, 00010000-FFFFFFFF -> 8 digits, etc.
+#[must_use]
 pub fn format_id_value(id_value: u64) -> String {
     if id_value <= 0xFFFF {
         // 0-65535: show as exactly 4 hex digits
@@ -124,7 +126,9 @@ const UUID_SHORT_LENGTH: usize = 12;
 /// For UUID7 strings, shows last 12 hex characters (rightmost block)
 /// For hex strings, shows appropriate number of digits based on magnitude
 /// Always wraps the result in square brackets for consistency
+#[must_use]
 pub fn format_node_id(node_id: &str) -> String {
+    // @@@ YUCK Use Uuid, fail, do not fallback
     // Check if this looks like a UUID7 (contains hyphens)
     let id_str = if node_id.contains('-') {
         // UUID7 format - take last UUID_SHORT_LENGTH hex characters (rightmost block)
@@ -138,14 +142,14 @@ pub fn format_node_id(node_id: &str) -> String {
         }
     } else {
         // Hex format - parse as hex and format based on magnitude
-        let id_value = u64::from_str_radix(node_id, 16).unwrap_or(0);
-        format_id_value(id_value)
+	panic!("unhandled code path");
     };
 
     format!("[{}]", id_str)
 }
 
 /// Helper function to format file sizes
+#[must_use]
 pub fn format_file_size(size: u64) -> String {
     if size >= 1024 * 1024 {
         format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
@@ -167,6 +171,7 @@ pub struct FileInfo {
 
 impl FileInfo {
     /// Format in DuckPond-specific style showing meaningful metadata
+    #[must_use]
     pub fn format_duckpond_style(&self) -> String {
         let type_symbol = match self.metadata.entry_type {
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "📁",
@@ -187,7 +192,7 @@ impl FileInfo {
             timestamp_us / 1_000_000,
             ((timestamp_us % 1_000_000) * 1000) as u32,
         )
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).expect("ok"));
 
         let time_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -214,6 +219,7 @@ pub struct FileInfoVisitor {
 }
 
 impl FileInfoVisitor {
+    #[must_use]
     pub fn new(show_all: bool) -> Self {
         Self { show_all }
     }

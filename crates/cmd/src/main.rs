@@ -179,15 +179,6 @@ enum Commands {
         #[arg(num_args = 0..)]
         args: Vec<String>,
     },
-    /// Execute SQL queries against pond metadata
-    Query {
-        /// SQL query to execute
-        #[arg(long)]
-        sql: Option<String>,
-        /// Output format [default: table] [possible values: table, csv, count]
-        #[arg(long, default_value = "table")]
-        format: String,
-    },
     /// Detect temporal overlaps using complete time series data analysis
     DetectOverlaps {
         /// Series file patterns to analyze (e.g., "/sensors/*.series")
@@ -339,13 +330,6 @@ async fn main() -> Result<()> {
         }
         Commands::ListFactories => commands::list_factories_command().await,
         Commands::Run { path, args } => commands::run_command(&ship_context, &path, args).await,
-        Commands::Query { sql, format } => {
-            if let Some(sql_query) = sql {
-                commands::query_command(&ship_context, &sql_query, &format).await
-            } else {
-                Err(anyhow::anyhow!("Either --sql or --show must be specified"))
-            }
-        }
         Commands::DetectOverlaps {
             patterns,
             verbose,

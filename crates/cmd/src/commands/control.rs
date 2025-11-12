@@ -4,12 +4,45 @@
 //! - Transaction lifecycle (begin, data_committed, completed, failed)
 //! - Post-commit factory execution (pending, started, completed, failed)
 //! - Error messages and duration metrics
+#![allow(clippy::print_stdout)]
 
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
-use arrow::array::{Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray};
 use tlogfs::factory::ExecutionContext;
 use tokio::io::AsyncReadExt;
+use serde::Deserialize;
+
+/// Recent transaction record from control table query
+#[derive(Debug, Deserialize)]
+struct RecentTransaction {
+    txn_seq: i64,
+    txn_id: String,
+    transaction_type: String,
+    cli_args: Option<String>,
+    started_at: Option<i64>,
+    final_state: Option<String>,
+    ended_at: Option<i64>,
+    error_message: Option<String>,
+    duration_ms: Option<i64>,
+}
+
+/// Transaction detail record from control table query
+#[derive(Debug, Deserialize)]
+struct TransactionDetail {
+    txn_seq: i64,
+    txn_id: String,
+    record_type: String,
+    timestamp: i64,
+    transaction_type: String,
+    cli_args: Option<String>,
+    data_fs_version: Option<i64>,
+    error_message: Option<String>,
+    duration_ms: Option<i64>,
+    parent_txn_seq: Option<i64>,
+    execution_seq: Option<i32>,
+    factory_name: Option<String>,
+    config_path: Option<String>,
+}
 
 /// Control command modes
 #[derive(Debug, Clone)]
@@ -125,135 +158,70 @@ async fn show_recent_transactions(
         return Ok(());
     }
 
+    // Deserialize batches into structs using serde_arrow
+    let mut transactions = Vec::new();
+    for batch in &batches {
+        let batch_txns: Vec<RecentTransaction> = serde_arrow::from_record_batch(batch)
+            .map_err(|e| anyhow!("Failed to deserialize transaction records: {}", e))?;
+        transactions.extend(batch_txns);
+    }
+
     // Format output
-    for batch in batches {
-        if batch.num_rows() == 0 {
-            continue;
-        }
-
-        let txn_seqs = batch
-            .column_by_name("txn_seq")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let txn_ids = batch
-            .column_by_name("txn_id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let txn_types = batch
-            .column_by_name("transaction_type")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let cli_args_col = batch
-            .column_by_name("cli_args")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let started_at_col = batch
-            .column_by_name("started_at")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .unwrap();
-        let final_states = batch
-            .column_by_name("final_state")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let ended_at_col = batch
-            .column_by_name("ended_at")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .unwrap();
-        let error_messages = batch
-            .column_by_name("error_message")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let durations = batch
-            .column_by_name("duration_ms")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-
-        for i in 0..batch.num_rows() {
-            let txn_seq = txn_seqs.value(i);
-            let txn_id = txn_ids.value(i);
-            let txn_type = txn_types.value(i);
-
-            // Extract CLI args from JSON string
-            let cli_args = if !cli_args_col.is_null(i) {
-                let json_str = cli_args_col.value(i);
-                match serde_json::from_str::<Vec<String>>(json_str) {
-                    Ok(args) => args.join(" "),
-                    Err(_) => "<invalid JSON>".to_string(),
-                }
-            } else {
-                "<no command>".to_string()
-            };
-
-            // Format timestamps
-            let started_at = if !started_at_col.is_null(i) {
-                format_timestamp(started_at_col.value(i))
-            } else {
-                "<unknown>".to_string()
-            };
-
-            let ended_at = if !ended_at_col.is_null(i) {
-                format_timestamp(ended_at_col.value(i))
-            } else {
-                "incomplete".to_string()
-            };
-
-            // Status indicator
-            let status = if final_states.is_null(i) {
-                "INCOMPLETE".to_string()
-            } else {
-                match final_states.value(i) {
-                    "data_committed" => "COMMITTED".to_string(),
-                    "completed" => "COMPLETED".to_string(),
-                    "failed" => "FAILED".to_string(),
-                    _ => "UNKNOWN".to_string(),
-                }
-            };
-
-            // Duration
-            let duration_str = if !durations.is_null(i) {
-                format!("{}ms", durations.value(i))
-            } else {
-                "N/A".to_string()
-            };
-
-            println!(
-                "┌─ Transaction {} ({}) ─────────────────────────────",
-                txn_seq, txn_type
-            );
-            println!("│  Status       : {}", status);
-            println!("│  UUID         : {}", txn_id);
-            println!("│  Started      : {}", started_at);
-            println!("│  Ended        : {}", ended_at);
-            println!("│  Duration     : {}", duration_str);
-            println!("│  Command      : {}", cli_args);
-
-            // Show error if present
-            if !error_messages.is_null(i) {
-                let error = error_messages.value(i);
-                println!("│  Error        : {}", truncate_error(error));
+    for txn in transactions {
+        // Extract CLI args from JSON string
+        let cli_args = if let Some(json_str) = &txn.cli_args {
+            match serde_json::from_str::<Vec<String>>(json_str) {
+                Ok(args) => args.join(" "),
+                Err(_) => "<invalid JSON>".to_string(),
             }
+        } else {
+            "<no command>".to_string()
+        };
 
-            println!("└────────────────────────────────────────────────────────────────");
-            println!();
+        // Format timestamps
+        let started_at = txn
+            .started_at
+            .map(format_timestamp)
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        let ended_at = txn
+            .ended_at
+            .map(format_timestamp)
+            .unwrap_or_else(|| "incomplete".to_string());
+
+        // Status indicator
+        let status = match txn.final_state.as_deref() {
+            Some("data_committed") => "COMMITTED",
+            Some("completed") => "COMPLETED",
+            Some("failed") => "FAILED",
+            Some(_) => "UNKNOWN",
+            None => "INCOMPLETE",
+        };
+
+        // Duration
+        let duration_str = txn
+            .duration_ms
+            .map(|d| format!("{}ms", d))
+            .unwrap_or_else(|| "N/A".to_string());
+
+        println!(
+            "┌─ Transaction {} ({}) ─────────────────────────────",
+            txn.txn_seq, txn.transaction_type
+        );
+        println!("│  Status       : {}", status);
+        println!("│  UUID         : {}", txn.txn_id);
+        println!("│  Started      : {}", started_at);
+        println!("│  Ended        : {}", ended_at);
+        println!("│  Duration     : {}", duration_str);
+        println!("│  Command      : {}", cli_args);
+
+        // Show error if present
+        if let Some(error) = &txn.error_message {
+            println!("│  Error        : {}", truncate_error(error));
         }
+
+        println!("└────────────────────────────────────────────────────────────────");
+        println!();
     }
 
     Ok(())
@@ -319,239 +287,132 @@ async fn show_transaction_detail(
         return Ok(());
     }
 
+    // Deserialize batches into structs using serde_arrow
+    let mut details = Vec::new();
+    for batch in &batches {
+        let batch_details: Vec<TransactionDetail> = serde_arrow::from_record_batch(batch)
+            .map_err(|e| anyhow!("Failed to deserialize transaction detail records: {}", e))?;
+        details.extend(batch_details);
+    }
+
     // Track whether we're showing main transaction or post-commit tasks
     let mut in_post_commit = false;
 
-    for batch in batches {
-        if batch.num_rows() == 0 {
-            continue;
+    for detail in details {
+        let current_txn_seq = detail.txn_seq;
+        let txn_id = &detail.txn_id;
+        let record_type = detail.record_type.as_str();
+        let timestamp = format_timestamp(detail.timestamp);
+        let txn_type = &detail.transaction_type;
+        let is_post_commit = detail.parent_txn_seq.is_some();
+
+        // Section header for post-commit tasks
+        if is_post_commit && !in_post_commit {
+            in_post_commit = true;
+            println!(
+                "\n═══ POST-COMMIT TASKS ═══════════════════════════════════════════════\n"
+            );
         }
 
-        let txn_seqs = batch
-            .column_by_name("txn_seq")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let txn_ids = batch
-            .column_by_name("txn_id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let record_types = batch
-            .column_by_name("record_type")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let timestamps_col = batch
-            .column_by_name("timestamp")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .unwrap();
-        let txn_types = batch
-            .column_by_name("transaction_type")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let cli_args_col = batch
-            .column_by_name("cli_args")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let data_fs_versions = batch
-            .column_by_name("data_fs_version")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let error_messages = batch
-            .column_by_name("error_message")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let durations = batch
-            .column_by_name("duration_ms")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let parent_txn_seqs = batch
-            .column_by_name("parent_txn_seq")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let execution_seqs = batch
-            .column_by_name("execution_seq")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let factory_names = batch
-            .column_by_name("factory_name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let config_paths = batch
-            .column_by_name("config_path")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
+        match record_type {
+            "begin" => {
+                // Extract CLI args from JSON string
+                let cli_args = if let Some(json_str) = &detail.cli_args {
+                    match serde_json::from_str::<Vec<String>>(json_str) {
+                        Ok(args) => args.join(" "),
+                        Err(_) => "<invalid JSON>".to_string(),
+                    }
+                } else {
+                    "<no command>".to_string()
+                };
 
-        for i in 0..batch.num_rows() {
-            let current_txn_seq = txn_seqs.value(i);
-            let txn_id = txn_ids.value(i);
-            let record_type = record_types.value(i);
-            let timestamp = format_timestamp(timestamps_col.value(i));
-            let txn_type = txn_types.value(i);
-            let is_post_commit = !parent_txn_seqs.is_null(i);
-
-            // Section header for post-commit tasks
-            if is_post_commit && !in_post_commit {
-                in_post_commit = true;
                 println!(
-                    "\n═══ POST-COMMIT TASKS ═══════════════════════════════════════════════\n"
+                    "┌─ BEGIN {} Transaction ──────────────────────────────────",
+                    txn_type
+                );
+                println!("│  Sequence     : {}", current_txn_seq);
+                println!("│  UUID         : {}", txn_id);
+                println!("│  Timestamp    : {}", timestamp);
+                println!("│  Command      : {}", cli_args);
+                println!("└────────────────────────────────────────────────────────────────");
+            }
+            "data_committed" => {
+                let version = detail.data_fs_version.unwrap_or(0);
+                let duration = detail
+                    .duration_ms
+                    .map(|d| format!("{}ms", d))
+                    .unwrap_or_else(|| "N/A".to_string());
+                println!(
+                    "│  ✓ DATA COMMITTED at {} (version {}, duration: {})",
+                    timestamp, version, duration
                 );
             }
-
-            match record_type {
-                "begin" => {
-                    // Extract CLI args from JSON string
-                    let cli_args = if !cli_args_col.is_null(i) {
-                        let json_str = cli_args_col.value(i);
-                        match serde_json::from_str::<Vec<String>>(json_str) {
-                            Ok(args) => args.join(" "),
-                            Err(_) => "<invalid JSON>".to_string(),
-                        }
-                    } else {
-                        "<no command>".to_string()
-                    };
-
-                    println!(
-                        "┌─ BEGIN {} Transaction ──────────────────────────────────",
-                        txn_type
-                    );
-                    println!("│  Sequence     : {}", current_txn_seq);
-                    println!("│  UUID         : {}", txn_id);
-                    println!("│  Timestamp    : {}", timestamp);
-                    println!("│  Command      : {}", cli_args);
-                    println!("└────────────────────────────────────────────────────────────────");
-                }
-                "data_committed" => {
-                    let version = if !data_fs_versions.is_null(i) {
-                        data_fs_versions.value(i)
-                    } else {
-                        0
-                    };
-                    let duration = if !durations.is_null(i) {
-                        format!("{}ms", durations.value(i))
-                    } else {
-                        "N/A".to_string()
-                    };
-                    println!(
-                        "│  ✓ DATA COMMITTED at {} (version {}, duration: {})",
-                        timestamp, version, duration
-                    );
-                }
-                "completed" => {
-                    let duration = if !durations.is_null(i) {
-                        format!("{}ms", durations.value(i))
-                    } else {
-                        "N/A".to_string()
-                    };
-                    println!("│  ✓ COMPLETED at {} (duration: {})", timestamp, duration);
-                }
-                "failed" => {
-                    let duration = if !durations.is_null(i) {
-                        format!("{}ms", durations.value(i))
-                    } else {
-                        "N/A".to_string()
-                    };
-                    let error = if !error_messages.is_null(i) {
-                        error_messages.value(i)
-                    } else {
-                        "<no error message>"
-                    };
-                    println!("│  ✗ FAILED at {} (duration: {})", timestamp, duration);
-                    println!("│  Error: {}", error);
-                }
-                "post_commit_pending" => {
-                    let _exec_seq = if !execution_seqs.is_null(i) {
-                        execution_seqs.value(i)
-                    } else {
-                        0
-                    };
-                    let factory = if !factory_names.is_null(i) {
-                        factory_names.value(i)
-                    } else {
-                        "<unknown>"
-                    };
-                    let config = if !config_paths.is_null(i) {
-                        config_paths.value(i)
-                    } else {
-                        "<unknown>"
-                    };
-                    println!(
-                        "┌─ POST-COMMIT TASK #{} PENDING ──────────────────────────────",
-                        _exec_seq
-                    );
-                    println!("│  Factory      : {}", factory);
-                    println!("│  Config       : {}", config);
-                    println!("│  Timestamp    : {}", timestamp);
-                }
-                "post_commit_started" => {
-                    let _exec_seq = if !execution_seqs.is_null(i) {
-                        execution_seqs.value(i)
-                    } else {
-                        0
-                    };
-                    println!("│  ▶ STARTED at {}", timestamp);
-                }
-                "post_commit_completed" => {
-                    let _exec_seq = if !execution_seqs.is_null(i) {
-                        execution_seqs.value(i)
-                    } else {
-                        0
-                    };
-                    let duration = if !durations.is_null(i) {
-                        format!("{}ms", durations.value(i))
-                    } else {
-                        "N/A".to_string()
-                    };
-                    println!("│  ✓ COMPLETED at {} (duration: {})", timestamp, duration);
-                    println!("└────────────────────────────────────────────────────────────────");
-                }
-                "post_commit_failed" => {
-                    let _exec_seq = if !execution_seqs.is_null(i) {
-                        execution_seqs.value(i)
-                    } else {
-                        0
-                    };
-                    let duration = if !durations.is_null(i) {
-                        format!("{}ms", durations.value(i))
-                    } else {
-                        "N/A".to_string()
-                    };
-                    let error = if !error_messages.is_null(i) {
-                        error_messages.value(i)
-                    } else {
-                        "<no error message>"
-                    };
-                    println!("│  ✗ FAILED at {} (duration: {})", timestamp, duration);
-                    println!("│  Error: {}", error);
-                    println!("└────────────────────────────────────────────────────────────────");
-                }
-                _ => {
-                    println!("│  {} at {}", record_type, timestamp);
-                }
+            "completed" => {
+                let duration = detail
+                    .duration_ms
+                    .map(|d| format!("{}ms", d))
+                    .unwrap_or_else(|| "N/A".to_string());
+                println!("│  ✓ COMPLETED at {} (duration: {})", timestamp, duration);
+            }
+            "failed" => {
+                let duration = detail
+                    .duration_ms
+                    .map(|d| format!("{}ms", d))
+                    .unwrap_or_else(|| "N/A".to_string());
+                let error = detail
+                    .error_message
+                    .as_deref()
+                    .unwrap_or("<no error message>");
+                println!("│  ✗ FAILED at {} (duration: {})", timestamp, duration);
+                println!("│  Error: {}", error);
+            }
+            "post_commit_pending" => {
+                let _exec_seq = detail.execution_seq.unwrap_or(0);
+                let factory = detail
+                    .factory_name
+                    .as_deref()
+                    .unwrap_or("<unknown>");
+                let config = detail
+                    .config_path
+                    .as_deref()
+                    .unwrap_or("<unknown>");
+                println!(
+                    "┌─ POST-COMMIT TASK #{} PENDING ──────────────────────────────",
+                    _exec_seq
+                );
+                println!("│  Factory      : {}", factory);
+                println!("│  Config       : {}", config);
+                println!("│  Timestamp    : {}", timestamp);
+            }
+            "post_commit_started" => {
+                let _exec_seq = detail.execution_seq.unwrap_or(0);
+                println!("│  ▶ STARTED at {}", timestamp);
+            }
+            "post_commit_completed" => {
+                let _exec_seq = detail.execution_seq.unwrap_or(0);
+                let duration = detail
+                    .duration_ms
+                    .map(|d| format!("{}ms", d))
+                    .unwrap_or_else(|| "N/A".to_string());
+                println!("│  ✓ COMPLETED at {} (duration: {})", timestamp, duration);
+                println!("└────────────────────────────────────────────────────────────────");
+            }
+            "post_commit_failed" => {
+                let _exec_seq = detail.execution_seq.unwrap_or(0);
+                let duration = detail
+                    .duration_ms
+                    .map(|d| format!("{}ms", d))
+                    .unwrap_or_else(|| "N/A".to_string());
+                let error = detail
+                    .error_message
+                    .as_deref()
+                    .unwrap_or("<no error message>");
+                println!("│  ✗ FAILED at {} (duration: {})", timestamp, duration);
+                println!("│  Error: {}", error);
+                println!("└────────────────────────────────────────────────────────────────");
+            }
+            _ => {
+                println!("│  {} at {}", record_type, timestamp);
             }
         }
     }

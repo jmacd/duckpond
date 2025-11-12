@@ -12,6 +12,7 @@ use tempfile::TempDir;
 use tinyfs::{FS, PersistenceLayer};
 use tlogfs::factory::ExecutionContext;
 use tlogfs::{FactoryContext, FactoryRegistry};
+use log::debug;
 
 /// Helper to create a test ship and workspace
 async fn setup_test_ship() -> (ShipContext, TempDir) {
@@ -71,7 +72,7 @@ async fn create_test_config(
     _ = state
         .create_dynamic_file_node(
             parent_node_id,
-            path.rsplit('/').next().unwrap().to_string(),
+            path.rsplit('/').next().expect("ok").to_string(),
             tinyfs::EntryType::FileDataDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
@@ -115,7 +116,7 @@ message: "Execute test"
 repeat_count: 5
 "#;
 
-    println!("Creating and executing config in single transaction...");
+    debug!("Creating and executing config in single transaction...");
 
     // Do BOTH create and execute in a SINGLE transaction (following system patterns)
     let mut ship = ship_context.open_pond().await.expect("Failed to open pond");
@@ -170,7 +171,7 @@ repeat_count: 5
 
     _ = tx.commit().await.expect("Failed to commit transaction");
 
-    println!("Successfully created and executed in single transaction!");
+    debug!("Successfully created and executed in single transaction!");
 }
 
 #[tokio::test]

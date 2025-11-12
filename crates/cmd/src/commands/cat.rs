@@ -49,6 +49,7 @@ pub async fn cat_command(
 }
 
 /// Internal implementation of cat command
+#[allow(clippy::print_stdout)]
 async fn cat_impl(
     tx: &mut steward::StewardTransactionGuard<'_>,
     path: &str,
@@ -103,6 +104,7 @@ async fn cat_impl(
         let formatted = format_query_results(&batches)
             .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", path, e))?;
 
+	// @@@ Buffering whole content?
         if let Some(output_buffer) = output {
             output_buffer.push_str(&formatted);
         } else {
@@ -191,11 +193,7 @@ mod tests {
 
     /// Test setup helper - creates pond and returns context for testing
     struct TestSetup {
-        #[allow(dead_code)] // Needed for test infrastructure
-        temp_dir: TempDir,
         pond_path: std::path::PathBuf,
-        #[allow(dead_code)] // Needed for test infrastructure
-        ship_context: ShipContext,
         test_content: String,
     }
 
@@ -221,9 +219,7 @@ mod tests {
                 "timestamp,value\n2024-01-01T00:00:00Z,42.0\n2024-01-01T01:00:00Z,43.5\n";
 
             Ok(TestSetup {
-                temp_dir,
                 pond_path,
-                ship_context,
                 test_content: test_content.to_string(),
             })
         }
@@ -470,7 +466,7 @@ mod tests {
             "Cat command DataFusion output should exactly match baseline formatting"
         );
 
-        println!("✅ DataFusion SQL output matches baseline!");
+        debug!("✅ DataFusion SQL output matches baseline!");
 
         Ok(())
     }
