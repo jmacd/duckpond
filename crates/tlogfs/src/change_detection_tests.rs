@@ -5,6 +5,7 @@
 
 use crate::remote_factory::detect_changes_from_delta_log;
 use crate::{OpLogPersistence, TLogFSError};
+use log::debug;
 
 /// Helper to create a test pond path
 fn test_pond_path() -> String {
@@ -37,55 +38,55 @@ async fn test_detect_changes_from_commit() -> Result<(), TLogFSError> {
     // Begin a transaction and write some data
     {
         let tx = persistence.begin_test().await?;
-        let root = tx.root().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        let root = tx.root().await.map_err(TLogFSError::TinyFS)?;
 
         // Create test directories (simpler than files for this test)
         _ = root
             .create_dir_path("/test_data")
             .await
-            .map_err(|e| TLogFSError::TinyFS(e))?;
+            .map_err(TLogFSError::TinyFS)?;
 
         _ = root
             .create_dir_path("/test_data/subdir1")
             .await
-            .map_err(|e| TLogFSError::TinyFS(e))?;
+            .map_err(TLogFSError::TinyFS)?;
 
         _ = root
             .create_dir_path("/test_data/subdir2")
             .await
-            .map_err(|e| TLogFSError::TinyFS(e))?;
+            .map_err(TLogFSError::TinyFS)?;
 
         // Commit the transaction
-        tx.commit_test().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        tx.commit_test().await.map_err(TLogFSError::TinyFS)?;
     }
 
     // Get the Delta table
     let table = persistence.table();
     let current_version = table.version().unwrap_or(0);
 
-    println!("Current Delta table version: {}", current_version);
+    debug!("Current Delta table version: {}", current_version);
 
     // Detect changes from the current version
     let changeset = detect_changes_from_delta_log(table, current_version).await?;
 
     // Verify we detected some files (Parquet files for the directories)
-    println!("Detected changes:");
-    println!("  Added files: {}", changeset.added.len());
-    println!("  Removed files: {}", changeset.removed.len());
-    println!("  Total bytes added: {}", changeset.total_bytes_added());
+    debug!("Detected changes:");
+    debug!("  Added files: {}", changeset.added.len());
+    debug!("  Removed files: {}", changeset.removed.len());
+    debug!("  Total bytes added: {}", changeset.total_bytes_added());
 
     // We should have at least one file added (directory metadata creates Parquet files)
     assert!(
-        changeset.added.len() > 0,
+        !changeset.added.is_empty(),
         "Expected to detect at least one added file"
     );
 
     // Print details of added files
     for (i, file_change) in changeset.added.iter().enumerate() {
-        println!("\nFile {}:", i + 1);
-        println!("  Parquet path: {}", file_change.parquet_path);
-        println!("  Size: {} bytes", file_change.size);
-        println!("  Part ID: {:?}", file_change.part_id);
+        debug!("\nFile {}:", i + 1);
+        debug!("  Parquet path: {}", file_change.parquet_path);
+        debug!("  Size: {} bytes", file_change.size);
+        debug!("  Part ID: {:?}", file_change.part_id);
     }
 
     // Clean up
@@ -106,49 +107,49 @@ async fn test_detect_changes_multiple_commits() -> Result<(), TLogFSError> {
     // So our first user transaction should be txn_seq=2
 
     let version0 = persistence.table().version().unwrap_or(0);
-    println!("Version after pond creation: {}", version0);
+    debug!("Version after pond creation: {}", version0);
 
     // Commit 1: Create initial directories (txn_seq=2)
     {
         let tx = persistence.begin_test().await?;
-        let root = tx.root().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        let root = tx.root().await.map_err(TLogFSError::TinyFS)?;
 
         _ = root
             .create_dir_path("/data1")
             .await
-            .map_err(|e| TLogFSError::TinyFS(e))?;
+            .map_err(TLogFSError::TinyFS)?;
 
-        tx.commit_test().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        tx.commit_test().await.map_err(TLogFSError::TinyFS)?;
     }
 
     let version1 = persistence.table().version().unwrap_or(0);
-    println!("Version after commit 1: {}", version1);
+    debug!("Version after commit 1: {}", version1);
 
     // Commit 2: Add more directories (txn_seq=3)
     {
         let tx = persistence.begin_test().await?;
-        let root = tx.root().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        let root = tx.root().await.map_err(TLogFSError::TinyFS)?;
 
         _ = root
             .create_dir_path("/data2")
             .await
-            .map_err(|e| TLogFSError::TinyFS(e))?;
+            .map_err(TLogFSError::TinyFS)?;
 
         _ = root
             .create_dir_path("/data3")
             .await
-            .map_err(|e| TLogFSError::TinyFS(e))?;
+            .map_err(TLogFSError::TinyFS)?;
 
-        tx.commit_test().await.map_err(|e| TLogFSError::TinyFS(e))?;
+        tx.commit_test().await.map_err(TLogFSError::TinyFS)?;
     }
 
     let version2 = persistence.table().version().unwrap_or(0);
-    println!("Version after commit 2: {}", version2);
+    debug!("Version after commit 2: {}", version2);
 
     // Detect changes in commit 1
     let changeset1 = detect_changes_from_delta_log(persistence.table(), version1).await?;
-    println!("\nCommit 1 changes:");
-    println!(
+    debug!("\nCommit 1 changes:");
+    debug!(
         "  Added: {} files ({} bytes)",
         changeset1.added.len(),
         changeset1.total_bytes_added()
@@ -156,8 +157,8 @@ async fn test_detect_changes_multiple_commits() -> Result<(), TLogFSError> {
 
     // Detect changes in commit 2
     let changeset2 = detect_changes_from_delta_log(persistence.table(), version2).await?;
-    println!("\nCommit 2 changes:");
-    println!(
+    debug!("\nCommit 2 changes:");
+    debug!(
         "  Added: {} files ({} bytes)",
         changeset2.added.len(),
         changeset2.total_bytes_added()
@@ -188,6 +189,5 @@ fn test_part_id_extraction_documented() {
     // It extracts the UUID from parts[1] through parts[5] to reconstruct
     // a NodeID from the Parquet filename.
 
-    println!("Part ID extraction is handled by private function in remote_factory");
-    assert!(true, "This test documents the functionality");
+    debug!("Part ID extraction is handled by private function in remote_factory");
 }

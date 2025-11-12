@@ -11,7 +11,7 @@ pub async fn describe_command<F>(
     mut handler: F,
 ) -> Result<()>
 where
-    F: FnMut(String),
+    F: FnMut(&str),
 {
     log::debug!("describe_command called with pattern {pattern}");
 
@@ -32,7 +32,7 @@ where
                 .commit()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-            handler(output);
+            handler(&output);
             Ok(())
         }
         Err(e) => Err(tx.abort(&e).await.into()),
@@ -342,7 +342,7 @@ mod tests {
         async fn describe_output(&self, pattern: &str) -> Result<String> {
             let mut output = String::new();
             describe_command(&self.ship_context, pattern, |s| {
-                output.push_str(&s);
+                output.push_str(s);
             })
             .await?;
             Ok(output)

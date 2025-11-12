@@ -221,6 +221,11 @@ enum Commands {
     },
 }
 
+#[allow(clippy::print_stdout)]
+fn print_handler(output: &str) {
+    print!("{}", output);
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Capture original command line arguments before clap parsing for transaction metadata
@@ -235,7 +240,7 @@ async fn main() -> Result<()> {
 
     // Create the ship context with global variables
     let ship_context = if cli.variables.is_empty() {
-        ShipContext::new(cli.pond.clone(), original_args.clone())
+        ShipContext::new(cli.pond.as_ref(), original_args.clone())
     } else {
         let variables_map: std::collections::HashMap<String, String> =
             cli.variables.into_iter().collect();
@@ -257,9 +262,7 @@ async fn main() -> Result<()> {
 
         // Read-only commands that use ShipContext for consistency
         Commands::Show { mode } => {
-            commands::show_command(&ship_context, &mode, |output| {
-                print!("{}", output);
-            })
+            commands::show_command(&ship_context, &mode, print_handler)
             .await
         }
         Commands::Control { command } => {
@@ -280,15 +283,11 @@ async fn main() -> Result<()> {
             commands::control_command(&ship_context, control_mode).await
         }
         Commands::List { pattern, all } => {
-            commands::list_command(&ship_context, &pattern, all, |output| {
-                print!("{}", output);
-            })
+            commands::list_command(&ship_context, &pattern, all, print_handler)
             .await
         }
         Commands::Describe { pattern } => {
-            commands::describe_command(&ship_context, &pattern, |output| {
-                print!("{}", output);
-            })
+            commands::describe_command(&ship_context, &pattern, print_handler)
             .await
         }
         Commands::Cat {
@@ -352,7 +351,7 @@ async fn main() -> Result<()> {
             commands::export_command(
                 &ship_context,
                 &pattern,
-                &dir.to_string_lossy().to_string(),
+                &dir.to_string_lossy(),
                 &temporal,
                 start_time,
                 end_time,

@@ -9,7 +9,7 @@ pub async fn list_command<F>(
     mut handler: F,
 ) -> Result<()>
 where
-    F: FnMut(String),
+    F: FnMut(&str),
 {
     let mut ship = ship_context.open_pond().await?;
 
@@ -62,7 +62,7 @@ where
     file_results.sort_by(|a, b| a.path.cmp(&b.path));
 
     for file_info in file_results {
-        handler(file_info.format_duckpond_style());
+        handler(&file_info.format_duckpond_style());
     }
 
     Ok(())
@@ -73,6 +73,7 @@ mod tests {
     use super::*;
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
+    use log::debug;
 
     struct TestSetup {
         ship_context: ShipContext,
@@ -85,7 +86,7 @@ mod tests {
 
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
-            let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
+            let ship_context = ShipContext::new(Some(&pond_path), init_args.clone());
 
             // Initialize the pond
             init_command(&ship_context, None, None).await?;
@@ -170,7 +171,7 @@ mod tests {
 
         let mut results = Vec::new();
         list_command(&setup.ship_context, "test.txt", false, |output| {
-            results.push(output)
+            results.push(output.to_string())
         })
         .await
         .expect("List command failed");
@@ -209,21 +210,21 @@ mod tests {
         // First, let's try listing all files to see what's actually there
         let mut all_results = Vec::new();
         list_command(&setup.ship_context, "*", false, |output| {
-            all_results.push(output)
+            all_results.push(output.to_string())
         })
         .await
         .expect("List all command failed");
 
-        println!("All files found with '*': {:?}", all_results);
+        debug!("All files found with '*': {:?}", all_results);
 
         let mut results = Vec::new();
         list_command(&setup.ship_context, "file*", false, |output| {
-            results.push(output)
+            results.push(output.to_string())
         })
         .await
         .expect("List command failed");
 
-        println!("Files found with 'file*': {:?}", results);
+        debug!("Files found with 'file*': {:?}", results);
 
         assert_eq!(results.len(), 3);
 
@@ -256,7 +257,7 @@ mod tests {
 
         let mut results = Vec::new();
         list_command(&setup.ship_context, "testdir", false, |output| {
-            results.push(output)
+            results.push(output.to_string())
         })
         .await
         .expect("List command failed");
@@ -308,7 +309,7 @@ mod tests {
 
         let mut results = Vec::new();
         list_command(&setup.ship_context, "**/*.txt", false, |output| {
-            results.push(output)
+            results.push(output.to_string())
         })
         .await
         .expect("List command failed");
@@ -344,7 +345,7 @@ mod tests {
         // Test without show_all - should only see visible file
         let mut results = Vec::new();
         list_command(&setup.ship_context, "*", false, |output| {
-            results.push(output)
+            results.push(output.to_string())
         })
         .await
         .expect("List command failed");
@@ -355,7 +356,7 @@ mod tests {
         // Test with show_all - should see both files
         let mut results_all = Vec::new();
         list_command(&setup.ship_context, "*", true, |output| {
-            results_all.push(output)
+            results_all.push(output.to_string())
         })
         .await
         .expect("List command with show_all failed");
@@ -377,7 +378,7 @@ mod tests {
 
         let mut results = Vec::new();
         list_command(&setup.ship_context, "*.nonexistent", false, |output| {
-            results.push(output)
+            results.push(output.to_string())
         })
         .await
         .expect("List command failed");

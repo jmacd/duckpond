@@ -40,20 +40,16 @@ pub struct TestRecordBatchBuilder {
     humidity: Vec<f64>,
 }
 
-impl TestRecordBatchBuilder {
+impl Default for TestRecordBatchBuilder {
     /// Create a new builder with current timestamp as base
-    pub fn new() -> Self {
-        let base_time = Utc::now().timestamp_millis();
-        Self {
-            base_time,
-            timestamps: Vec::new(),
-            sensor_ids: Vec::new(),
-            temperatures: Vec::new(),
-            humidity: Vec::new(),
-        }
+    fn default() -> Self {
+	Self::with_base_time(Utc::now().timestamp_millis())
     }
+}
 
+impl TestRecordBatchBuilder {
     /// Create a new builder with a specific base timestamp
+    #[must_use]
     pub fn with_base_time(base_time: i64) -> Self {
         Self {
             base_time,
@@ -65,6 +61,7 @@ impl TestRecordBatchBuilder {
     }
 
     /// Add a sensor reading with offset from base time
+    #[must_use]
     pub fn add_reading(
         mut self,
         offset_ms: i64,
@@ -80,7 +77,7 @@ impl TestRecordBatchBuilder {
     }
 
     /// Add a simple reading with auto-incrementing sensor ID
-    pub fn add_simple_reading(self, offset_ms: i64, temperature: f64) -> Self {
+    #[must_use]    pub fn add_simple_reading(self, offset_ms: i64, temperature: f64) -> Self {
         let sensor_id = format!("sensor{}", self.sensor_ids.len() + 1);
         self.add_reading(offset_ms, &sensor_id, temperature, 45.0 + temperature * 0.5)
     }
@@ -115,7 +112,7 @@ impl TestRecordBatchBuilder {
     }
 
     /// Standard sensor schema used across tests
-    pub fn standard_sensor_schema() -> Arc<Schema> {
+    #[must_use]    pub fn standard_sensor_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new(
                 "timestamp",
@@ -130,7 +127,7 @@ impl TestRecordBatchBuilder {
 
     /// Create a simple 4-reading test batch (common pattern)
     pub fn default_test_batch() -> TestResult<(RecordBatch, i64, i64)> {
-        Self::new()
+        Self::default()
             .add_reading(0, "sensor1", 23.5, 45.2)
             .add_reading(1000, "sensor1", 24.1, 46.8)
             .add_reading(2000, "sensor2", 22.8, 44.1)
@@ -210,32 +207,6 @@ impl TestEnvironment {
             .map_err(|e| TestError::General(format!("Failed to commit transaction: {}", e)))?;
         Ok(result)
     }
-
-    // Store test FileSeries with metadata (common pattern)
-    // pub async fn store_test_file_series(
-    //     &self,
-    //     content: &[u8],
-    //     min_time: i64,
-    //     max_time: i64,
-    //     timestamp_column: &str,
-    // ) -> TestResult<(NodeID, NodeID)> {
-    //     let node_id = NodeID::generate();
-    //     let part_id = NodeID::generate();
-
-    //     self.persistence
-    //         .store_file_series_with_metadata(node_id, part_id, content, min_time, max_time, timestamp_column)
-    //         .await
-    //         .map_err(|e| TestError::General(format!("Failed to store FileSeries: {}", e)))?;
-
-    //     Ok((node_id, part_id))
-    // }
-}
-
-/// Default implementation for convenient usage
-impl Default for TestRecordBatchBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[cfg(test)]
@@ -279,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_builder_pattern() {
-        let result = TestRecordBatchBuilder::new()
+        let result = TestRecordBatchBuilder::default()
             .add_simple_reading(0, 25.0)
             .add_simple_reading(1000, 26.0)
             .build_batch();

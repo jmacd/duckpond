@@ -106,12 +106,12 @@ async fn test_transaction_guard_read_after_create() {
             .await
             .expect("Failed to get /txn directory");
 
-        println!("✅ Successfully accessed /txn directory in new transaction");
+        debug!("✅ Successfully accessed /txn directory in new transaction");
 
         // Don't commit - this is a read-only transaction
     }
 
-    println!("✅ Read-after-create test completed successfully");
+    debug!("✅ Read-after-create test completed successfully");
 }
 
 /// Test for single version file:series write/read operations using TinyFS on TLogFS
@@ -120,18 +120,18 @@ async fn test_transaction_guard_read_after_create() {
 async fn test_single_version_file_series_write_read() -> Result<(), Box<dyn std::error::Error>> {
     // Use a timeout to prevent hanging - if this times out, we know there's a hang issue
     let test_result = timeout(Duration::from_secs(30), async {
-        println!("=== Starting Single Version File:Series Test ===");
+        debug!("=== Starting Single Version File:Series Test ===");
 
         let store_path = test_dir();
 
         // Create TLogFS persistence layer
-        println!("Creating persistence layer...");
+        debug!("Creating persistence layer...");
         let mut persistence = OpLogPersistence::create_test(&store_path).await?;
 
         let series_path = "test/single_series.series";
 
         // Begin transaction for write
-        println!("Beginning transaction...");
+        debug!("Beginning transaction...");
         let tx = persistence.begin_test().await?;
 
         // Get working directory
@@ -139,7 +139,7 @@ async fn test_single_version_file_series_write_read() -> Result<(), Box<dyn std:
 
         // Create test directory if it doesn't exist
         if !wd.exists(std::path::Path::new("test")).await {
-            println!("Creating test directory...");
+            debug!("Creating test directory...");
             _ = wd.create_dir_path("test").await?;
         }
 
@@ -158,42 +158,42 @@ async fn test_single_version_file_series_write_read() -> Result<(), Box<dyn std:
             )
         )?;
 
-        println!("Created RecordBatch with {} rows", batch.num_rows());
+        debug!("Created RecordBatch with {} rows", batch.num_rows());
 
         // Write the series using create_series_from_batch - this is where hanging might occur
-        println!("Writing series using create_series_from_batch...");
+        debug!("Writing series using create_series_from_batch...");
         let (min_time, max_time) = wd
             .create_series_from_batch(series_path, &batch, Some("timestamp"))
             .await?;
 
-        println!(
+        debug!(
             "Series written successfully. Time range: {} to {}",
             min_time, max_time
         );
 
         // Commit transaction
-        println!("Committing transaction...");
+        debug!("Committing transaction...");
         tx.commit_test().await?;
-        println!("Transaction committed successfully");
+        debug!("Transaction committed successfully");
 
         // Create a new transaction to verify the file exists and can be read
-        println!("Starting new transaction for read...");
+        debug!("Starting new transaction for read...");
         let tx2 = persistence.begin_test().await?;
         let wd2 = tx2.root().await?;
 
         // Verify the file exists
         let file_exists = wd2.exists(std::path::Path::new(series_path)).await;
-        println!("File exists after commit: {}", file_exists);
+        debug!("File exists after commit: {}", file_exists);
 
         if !file_exists {
             return Err("File does not exist after commit".into());
         }
 
         // Read back the file
-        println!("Reading file back...");
+        debug!("Reading file back...");
         let read_batch = wd2.read_table_as_batch(series_path).await?;
 
-        println!(
+        debug!(
             "Successfully read RecordBatch with {} rows, {} columns",
             read_batch.num_rows(),
             read_batch.num_columns()
@@ -204,7 +204,7 @@ async fn test_single_version_file_series_write_read() -> Result<(), Box<dyn std:
         assert_eq!(read_batch.num_columns(), 3, "Should have 3 columns");
 
         // Don't need to commit read transaction
-        println!("=== All Tests Passed Successfully ===");
+        debug!("=== All Tests Passed Successfully ===");
         Ok(())
     })
     .await;
@@ -223,47 +223,47 @@ async fn test_single_version_file_series_write_read() -> Result<(), Box<dyn std:
 #[tokio::test]
 async fn test_minimal_single_version_write_only() -> Result<(), Box<dyn std::error::Error>> {
     let test_result = timeout(Duration::from_secs(15), async {
-        println!("=== Minimal Single Version Write Test ===");
+        debug!("=== Minimal Single Version Write Test ===");
 
         let store_path = test_dir();
 
-        println!("Creating persistence layer...");
+        debug!("Creating persistence layer...");
         let mut persistence = OpLogPersistence::create_test(&store_path).await?;
 
-        println!("Starting transaction...");
+        debug!("Starting transaction...");
         let tx = persistence.begin_test().await?;
 
-        println!("Getting working directory...");
+        debug!("Getting working directory...");
         let wd = tx.root().await?;
 
-        println!("Creating minimal batch...");
+        debug!("Creating minimal batch...");
         let batch = record_batch!(
             ("timestamp", Int64, [1704067200000_i64]),
             ("value", Float64, [1.0_f64])
         )?;
 
-        println!("About to call create_series_from_batch - this may hang...");
+        debug!("About to call create_series_from_batch - this may hang...");
         let result = wd
             .create_series_from_batch("minimal.series", &batch, Some("timestamp"))
             .await;
 
         match result {
             Ok((min_time, max_time)) => {
-                println!(
+                debug!(
                     "create_series_from_batch succeeded: {} to {}",
                     min_time, max_time
                 );
-                println!("Committing transaction...");
+                debug!("Committing transaction...");
                 tx.commit_test().await?;
-                println!("Transaction committed successfully!");
+                debug!("Transaction committed successfully!");
             }
             Err(e) => {
-                println!("create_series_from_batch failed: {}", e);
+                debug!("create_series_from_batch failed: {}", e);
                 return Err(e.into());
             }
         }
 
-        println!("Minimal write test completed successfully!");
+        debug!("Minimal write test completed successfully!");
         Ok(())
     })
     .await;
@@ -281,7 +281,7 @@ async fn test_minimal_single_version_write_only() -> Result<(), Box<dyn std::err
 /// Test specifically for temporal metadata extraction from single version series
 #[tokio::test]
 async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Testing Single Version Series Temporal Metadata ===");
+    debug!("=== Testing Single Version Series Temporal Metadata ===");
 
     let store_path = test_dir();
     let mut persistence = OpLogPersistence::create_test(&store_path).await?;
@@ -300,7 +300,7 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
         ("value", Float64, [10.0_f64, 20.0_f64, 30.0_f64])
     )?;
 
-    println!(
+    debug!(
         "Created batch with timestamps: [{}, {}, {}]",
         1704067200000_i64, 1704070800000_i64, 1704074400000_i64
     );
@@ -310,16 +310,16 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
         .create_series_from_batch("temporal_test.series", &batch, Some("timestamp"))
         .await?;
 
-    println!("Extracted temporal range: {} to {}", min_time, max_time);
+    debug!("Extracted temporal range: {} to {}", min_time, max_time);
 
     // The temporal metadata should reflect the actual timestamps, not be 0,0
     if min_time == 0 && max_time == 0 {
-        println!(
+        debug!(
             "⚠️  WARNING: Temporal metadata extraction returned 0,0 - this indicates a problem"
         );
-        println!("   Expected: min_time = 1704067200000, max_time = 1704074400000");
+        debug!("   Expected: min_time = 1704067200000, max_time = 1704074400000");
     } else {
-        println!("✅ Temporal metadata extracted successfully");
+        debug!("✅ Temporal metadata extracted successfully");
         assert_eq!(
             min_time, 1704067200000_i64,
             "Min time should match first timestamp"
@@ -345,7 +345,7 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
     let read_batch = wd2.read_table_as_batch("temporal_test.series").await?;
     assert_eq!(read_batch.num_rows(), 3, "Should read back 3 rows");
 
-    println!("✅ Temporal metadata test completed");
+    debug!("✅ Temporal metadata test completed");
     Ok(())
 }
 
@@ -353,7 +353,7 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn test_single_version_series_storage_investigation() -> Result<(), Box<dyn std::error::Error>>
 {
-    println!("=== Investigating Single Version Series Storage ===");
+    debug!("=== Investigating Single Version Series Storage ===");
 
     let store_path = test_dir();
     let mut persistence = OpLogPersistence::create_test(&store_path).await?;
@@ -368,38 +368,38 @@ async fn test_single_version_series_storage_investigation() -> Result<(), Box<dy
         ("value", Float64, [42.0_f64])
     )?;
 
-    println!("Writing single-row series...");
+    debug!("Writing single-row series...");
 
     // Write series and capture result
     let (min_time, max_time) = wd
         .create_series_from_batch("investigation.series", &batch, Some("timestamp"))
         .await?;
-    println!(
+    debug!(
         "create_series_from_batch returned: ({}, {})",
         min_time, max_time
     );
 
     // Before commit, let's see what we can discover about the node structure
     let metadata = wd.metadata_for_path("investigation.series").await?;
-    println!("File metadata before commit:");
-    println!("  entry_type: {:?}", metadata.entry_type);
-    println!("  size: {:?}", metadata.size);
+    debug!("File metadata before commit:");
+    debug!("  entry_type: {:?}", metadata.entry_type);
+    debug!("  size: {:?}", metadata.size);
 
     // Check if we can read the raw file content
     let raw_data = wd.read_file_path_to_vec("investigation.series").await?;
-    println!("Raw file size: {} bytes", raw_data.len());
+    debug!("Raw file size: {} bytes", raw_data.len());
 
     if raw_data.len() >= 4 {
-        println!("File magic bytes: {:?}", &raw_data[0..4]);
+        debug!("File magic bytes: {:?}", &raw_data[0..4]);
         if &raw_data[0..4] == b"PAR1" {
-            println!("✅ File is valid Parquet");
+            debug!("✅ File is valid Parquet");
         } else {
-            println!("❌ File is not Parquet format");
+            debug!("❌ File is not Parquet format");
         }
     }
 
     // Commit the transaction
-    println!("Committing transaction...");
+    debug!("Committing transaction...");
     tx.commit_test().await?;
 
     // Investigate post-commit state
@@ -407,20 +407,20 @@ async fn test_single_version_series_storage_investigation() -> Result<(), Box<dy
     let wd2 = tx2.root().await?;
 
     let post_commit_metadata = wd2.metadata_for_path("investigation.series").await?;
-    println!("File metadata after commit:");
-    println!("  entry_type: {:?}", post_commit_metadata.entry_type);
-    println!("  size: {:?}", post_commit_metadata.size);
+    debug!("File metadata after commit:");
+    debug!("  entry_type: {:?}", post_commit_metadata.entry_type);
+    debug!("  size: {:?}", post_commit_metadata.size);
 
     // Try to read as RecordBatch
     let read_batch = wd2.read_table_as_batch("investigation.series").await?;
-    println!(
+    debug!(
         "Read batch: {} rows, {} columns",
         read_batch.num_rows(),
         read_batch.num_columns()
     );
 
     // Check the actual data values
-    println!(
+    debug!(
         "Schema: {:?}",
         read_batch
             .schema()
@@ -430,14 +430,14 @@ async fn test_single_version_series_storage_investigation() -> Result<(), Box<dy
             .collect::<Vec<_>>()
     );
 
-    println!("✅ Storage investigation completed");
+    debug!("✅ Storage investigation completed");
     Ok(())
 }
 
 /// Summary test documenting the current state of single version file:series operations
 #[tokio::test]
 async fn test_single_version_series_summary() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Single Version File:Series - Current Status Summary ===");
+    debug!("=== Single Version File:Series - Current Status Summary ===");
 
     let store_path = test_dir();
     let mut persistence = OpLogPersistence::create_test(&store_path).await?;
@@ -456,22 +456,22 @@ async fn test_single_version_series_summary() -> Result<(), Box<dyn std::error::
         .await?;
     tx.commit_test().await?;
 
-    println!("FINDINGS:");
-    println!("✅ No hanging issues - operations complete successfully");
-    println!("✅ File storage works correctly - Parquet format preserved");
-    println!("✅ Data integrity maintained - all rows and columns readable");
-    println!("✅ Entry type correctly set to FileSeries");
-    println!(
+    debug!("FINDINGS:");
+    debug!("✅ No hanging issues - operations complete successfully");
+    debug!("✅ File storage works correctly - Parquet format preserved");
+    debug!("✅ Data integrity maintained - all rows and columns readable");
+    debug!("✅ Entry type correctly set to FileSeries");
+    debug!(
         "❌ Temporal metadata extraction broken - returns (0, 0) instead of actual timestamp range"
     );
-    println!("");
-    println!("EXPECTED: min_time = 1704067200000, max_time = 1704070800000");
-    println!("ACTUAL:   min_time = {}, max_time = {}", min_time, max_time);
-    println!("");
-    println!("RECOMMENDATION:");
-    println!("  - Investigate temporal metadata extraction in create_series_from_batch");
-    println!("  - Check if timestamp column parsing logic is working correctly");
-    println!("  - Verify that min/max extraction from Arrow arrays is functional");
+    debug!("");
+    debug!("EXPECTED: min_time = 1704067200000, max_time = 1704070800000");
+    debug!("ACTUAL:   min_time = {}, max_time = {}", min_time, max_time);
+    debug!("");
+    debug!("RECOMMENDATION:");
+    debug!("  - Investigate temporal metadata extraction in create_series_from_batch");
+    debug!("  - Check if timestamp column parsing logic is working correctly");
+    debug!("  - Verify that min/max extraction from Arrow arrays is functional");
 
     Ok(())
 }
@@ -483,7 +483,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     use crate::large_files::LARGE_FILE_THRESHOLD;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    println!("=== Testing Streaming Async Reader (Large File) ===");
+    debug!("=== Testing Streaming Async Reader (Large File) ===");
 
     let store_path = test_dir();
     let mut persistence = OpLogPersistence::create_test(&store_path).await?;
@@ -495,7 +495,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     let large_content = vec![42u8; LARGE_FILE_THRESHOLD + 1000]; // Slightly larger than threshold
     let expected_size = large_content.len();
 
-    println!(
+    debug!(
         "Creating large file with {} bytes (threshold is {})",
         expected_size, LARGE_FILE_THRESHOLD
     );
@@ -509,7 +509,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     .await?;
     tx.commit_test().await?;
 
-    println!("✅ Large file stored successfully");
+    debug!("✅ Large file stored successfully");
 
     // Now test streaming reader - this should NOT load the entire file into memory
     let tx2 = persistence.begin_test().await?;
@@ -518,14 +518,14 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     let file_node = wd2.get_node_path("/large_test.dat").await?;
     let file_handle = file_node.borrow().await.as_file()?;
 
-    println!("Getting async reader for large file...");
+    debug!("Getting async reader for large file...");
     let mut reader = file_handle.async_reader().await?;
 
     // Test: Read only first 100 bytes (streaming approach)
     let mut buffer = vec![0u8; 100];
     let bytes_read = reader.read_exact(&mut buffer).await?;
 
-    println!(
+    debug!(
         "✅ Successfully read {} bytes from start of file",
         bytes_read
     );
@@ -538,7 +538,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     let mut middle_buffer = vec![0u8; 50];
     _ = reader.read_exact(&mut middle_buffer).await?;
 
-    println!(
+    debug!(
         "✅ Successfully seeked to position {} and read 50 bytes",
         middle_pos
     );
@@ -550,7 +550,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
 
     // Test: Seek to end and verify size
     let end_pos = reader.seek(std::io::SeekFrom::End(0)).await?;
-    println!("✅ File end position: {} bytes", end_pos);
+    debug!("✅ File end position: {} bytes", end_pos);
     assert_eq!(
         end_pos as usize, expected_size,
         "File size should match expected size"
@@ -558,11 +558,11 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
 
     tx2.commit_test().await?;
 
-    println!("SUCCESS: Streaming reader works correctly for large files");
-    println!("  - No memory loading of entire file");
-    println!("  - AsyncRead works for partial reads");
-    println!("  - AsyncSeek works for random access");
-    println!("  - File size detection works correctly");
+    debug!("SUCCESS: Streaming reader works correctly for large files");
+    debug!("  - No memory loading of entire file");
+    debug!("  - AsyncRead works for partial reads");
+    debug!("  - AsyncSeek works for random access");
+    debug!("  - File size detection works correctly");
 
     Ok(())
 }
@@ -573,7 +573,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
 async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    println!("=== Testing Streaming Async Reader (Small File) ===");
+    debug!("=== Testing Streaming Async Reader (Small File) ===");
 
     let store_path = test_dir();
     let mut persistence = OpLogPersistence::create_test(&store_path).await?;
@@ -585,14 +585,14 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     let small_content = b"Hello, World! This is a small test file with some content.";
     let expected_size = small_content.len();
 
-    println!("Creating small file with {} bytes", expected_size);
+    debug!("Creating small file with {} bytes", expected_size);
 
     // Store the small file
     _ = tinyfs::async_helpers::convenience::create_file_path(&wd, "/small_test.txt", small_content)
         .await?;
     tx.commit_test().await?;
 
-    println!("✅ Small file stored successfully");
+    debug!("✅ Small file stored successfully");
 
     // Now test streaming reader with small file (stored inline in Delta Lake)
     let tx2 = persistence.begin_test().await?;
@@ -601,14 +601,14 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     let file_node = wd2.get_node_path("/small_test.txt").await?;
     let file_handle = file_node.borrow().await.as_file()?;
 
-    println!("Getting async reader for small file...");
+    debug!("Getting async reader for small file...");
     let mut reader = file_handle.async_reader().await?;
 
     // Test: Read entire content
     let mut buffer = vec![0u8; expected_size];
     _ = reader.read_exact(&mut buffer).await?;
 
-    println!("✅ Successfully read {} bytes", expected_size);
+    debug!("✅ Successfully read {} bytes", expected_size);
     assert_eq!(&buffer, small_content, "Content should match exactly");
 
     // Test: Seek to start and read first 5 bytes
@@ -616,12 +616,12 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     let mut start_buffer = vec![0u8; 5];
     _ = reader.read_exact(&mut start_buffer).await?;
 
-    println!("✅ Successfully seeked to start and read first 5 bytes");
+    debug!("✅ Successfully seeked to start and read first 5 bytes");
     assert_eq!(&start_buffer, b"Hello", "First 5 bytes should be 'Hello'");
 
     // Test: Seek to end and verify size
     let end_pos = reader.seek(std::io::SeekFrom::End(0)).await?;
-    println!("✅ File end position: {} bytes", end_pos);
+    debug!("✅ File end position: {} bytes", end_pos);
     assert_eq!(
         end_pos as usize, expected_size,
         "File size should match expected size"
@@ -629,11 +629,11 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
 
     tx2.commit_test().await?;
 
-    println!("SUCCESS: Streaming reader works correctly for small files");
-    println!("  - Small files use inline storage (Cursor over Vec<u8>)");
-    println!("  - AsyncRead works for partial reads");
-    println!("  - AsyncSeek works for random access");
-    println!("  - File size detection works correctly");
+    debug!("SUCCESS: Streaming reader works correctly for small files");
+    debug!("  - Small files use inline storage (Cursor over Vec<u8>)");
+    debug!("  - AsyncRead works for partial reads");
+    debug!("  - AsyncSeek works for random access");
+    debug!("  - File size detection works correctly");
 
     Ok(())
 }
@@ -649,18 +649,18 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     use futures::stream::StreamExt;
     use std::collections::HashMap;
 
-    println!("=== Starting Temporal Bounds Test ===");
+    debug!("=== Starting Temporal Bounds Test ===");
 
     let store_path = test_dir();
 
     // Create TLogFS persistence layer
-    println!("Creating persistence layer...");
+    debug!("Creating persistence layer...");
     let mut persistence = OpLogPersistence::create_test(&store_path).await?;
 
     let series_path = "test/temporal_series.series";
 
     // Transaction 1: Create file series with all data points (simulating the combined data from multiple versions)
-    println!(
+    debug!(
         "Creating file series with points at T=1,10,11,12,13,14,15,16,17,18,19,50 (12 points total)..."
     );
     {
@@ -736,13 +736,13 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         let (min_time, max_time) = wd
             .create_series_from_batch(series_path, &batch, Some("timestamp"))
             .await?;
-        println!("Series created. Time range: {} to {}", min_time, max_time);
+        debug!("Series created. Time range: {} to {}", min_time, max_time);
 
         tx.commit_test().await?;
     }
 
     // Transaction 3: Query the series before setting temporal bounds - should return 12 rows
-    println!("Querying series before temporal bounds...");
+    debug!("Querying series before temporal bounds...");
     {
         let mut tx = persistence.begin_test().await?;
         let wd = tx.root().await?;
@@ -768,7 +768,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
             }
         }
 
-        println!("Count before temporal bounds: {}", total_count);
+        debug!("Count before temporal bounds: {}", total_count);
         assert_eq!(
             total_count, 12,
             "Should have 12 total rows before temporal bounds"
@@ -778,7 +778,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     }
 
     // Transaction 4: Set temporal bounds to [10000, 20000] ms using empty version approach
-    println!("Setting temporal bounds to [10000, 20000] ms (10-20 seconds) using empty version...");
+    debug!("Setting temporal bounds to [10000, 20000] ms (10-20 seconds) using empty version...");
     {
         let tx = persistence.begin_test().await?;
         let wd = tx.root().await?;
@@ -795,7 +795,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         writer.flush().await?;
         writer.shutdown().await?;
 
-        println!("Created empty version for metadata");
+        debug!("Created empty version for metadata");
 
         // Set temporal overrides using extended attributes on the path
         // Note: bounds need to be in milliseconds since that's the internal representation
@@ -811,12 +811,12 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
 
         wd.set_extended_attributes(series_path, attributes).await?;
 
-        println!("Temporal bounds set to [10000, 20000] milliseconds (10-20 seconds)");
+        debug!("Temporal bounds set to [10000, 20000] milliseconds (10-20 seconds)");
         tx.commit_test().await?;
     }
 
     // Transaction 5: Query the series after setting temporal bounds - should return 10 rows
-    println!("Querying series after temporal bounds...");
+    debug!("Querying series after temporal bounds...");
     {
         let mut tx = persistence.begin_test().await?;
         let wd = tx.root().await?;
@@ -842,7 +842,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
             }
         }
 
-        println!("Count after temporal bounds: {}", total_count);
+        debug!("Count after temporal bounds: {}", total_count);
         assert_eq!(
             total_count, 10,
             "Should have 10 rows after temporal bounds [10000, 20000] ms (excluding T=1s and T=50s)"
@@ -851,13 +851,13 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         // Don't commit this read-only transaction
     }
 
-    println!("SUCCESS: Temporal bounds test completed");
-    println!(
+    debug!("SUCCESS: Temporal bounds test completed");
+    debug!(
         "  - Created file series with data points at T=1,10,11,12,13,14,15,16,17,18,19,50 seconds"
     );
-    println!("  - Verified initial count of 12 rows");
-    println!("  - Set temporal bounds to [10000, 20000] ms (10-20 seconds)");
-    println!("  - Verified filtered count of 10 rows (excluded T=1s and T=50s)");
+    debug!("  - Verified initial count of 12 rows");
+    debug!("  - Set temporal bounds to [10000, 20000] ms (10-20 seconds)");
+    debug!("  - Verified filtered count of 10 rows (excluded T=1s and T=50s)");
 
     Ok(())
 }
@@ -869,28 +869,28 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
 #[tokio::test]
 async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn std::error::Error>>
 {
-    println!("=== Testing Multiple Series Appends - Directory Update Check ===");
+    debug!("=== Testing Multiple Series Appends - Directory Update Check ===");
 
     let test_result = timeout(Duration::from_secs(30), async {
         let store_path = test_dir();
 
         // Create TLogFS persistence layer
-        println!("Creating persistence layer...");
+        debug!("Creating persistence layer...");
         let mut persistence = OpLogPersistence::create_test(&store_path).await?;
 
         let series_path = "devices/sensor_123/data.series";
 
         // === TRANSACTION 2: Create directory structure and initial file ===
-        println!("\n=== Transaction 2: Create directory and first version ===");
+        debug!("\n=== Transaction 2: Create directory and first version ===");
         let tx1 = persistence.begin_test().await?;
         let wd1 = tx1.root().await?;
 
         // Create devices directory
-        println!("Creating /devices directory...");
+        debug!("Creating /devices directory...");
         _ = wd1.create_dir_path("devices").await?;
 
         // Create sensor subdirectory
-        println!("Creating /devices/sensor_123 directory...");
+        debug!("Creating /devices/sensor_123 directory...");
         _ = wd1.create_dir_path("devices/sensor_123").await?;
 
         // Write first version of series
@@ -899,20 +899,20 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
             ("value", Float64, [10.5_f64, 20.3_f64])
         )?;
 
-        println!("Writing FIRST version of series...");
+        debug!("Writing FIRST version of series...");
         _ = wd1.create_series_from_batch(series_path, &batch1, Some("timestamp")).await?;
 
-        println!("Committing transaction 2...");
+        debug!("Committing transaction 2...");
         tx1.commit_test().await?;
 
         // === TRANSACTION 3: Append to existing series (SHOULD NOT UPDATE DIRECTORY) ===
-        println!("\n=== Transaction 3: Append to existing series ===");
+        debug!("\n=== Transaction 3: Append to existing series ===");
         let tx2 = persistence.begin_test().await?;
         let wd2 = tx2.root().await?;
 
         // Verify file exists
         let file_exists = wd2.exists(std::path::Path::new(series_path)).await;
-        println!("File exists before append: {}", file_exists);
+        debug!("File exists before append: {}", file_exists);
         assert!(file_exists, "File should exist from transaction 1");
 
         // Append more data using async_writer_path_with_type
@@ -921,7 +921,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
             ("value", Float64, [15.8_f64, 25.1_f64])
         )?;
 
-        println!("Appending SECOND version using async_writer...");
+        debug!("Appending SECOND version using async_writer...");
 
         // Serialize batch to parquet
         use std::io::Cursor;
@@ -945,11 +945,11 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         writer.write_all(&buffer).await?;
         writer.shutdown().await?;
 
-        println!("Committing transaction 3...");
+        debug!("Committing transaction 3...");
         tx2.commit_test().await?;
 
         // === TRANSACTION 4: Verify that TX3 only created 1 oplog entry (the file) ===
-        println!("\n=== Transaction 4: Verify physical layer - checking oplog entries per transaction ===");
+        debug!("\n=== Transaction 4: Verify physical layer - checking oplog entries per transaction ===");
         let mut tx3 = persistence.begin_test().await?;
 
         let ctx = tx3.session_context().await?;
@@ -969,8 +969,8 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
             total_entries += batch.num_rows();
         }
 
-        println!("\n=== OpLog Analysis ===");
-        println!("Total oplog entries: {}", total_entries);
+        debug!("\n=== OpLog Analysis ===");
+        debug!("Total oplog entries: {}", total_entries);
 
         // Expected: TX1(1 root) + TX2(3 dirs + 1 file) + TX3(1 file) = 6 entries
         // If we have 7+, there are unnecessary writes
@@ -986,10 +986,10 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         let dir_versions_df = ctx.sql(dir_versions_sql).await?;
         let dir_versions_results = dir_versions_df.collect().await?;
 
-        println!("\n=== Directory Version Counts ===");
+        debug!("\n=== Directory Version Counts ===");
         let mut max_versions = 0;
         for batch in &dir_versions_results {
-            println!("Directories tracked: {} unique directories", batch.num_rows());
+            debug!("Directories tracked: {} unique directories", batch.num_rows());
             max_versions = std::cmp::max(max_versions, batch.num_rows());
         }
 
@@ -1008,18 +1008,18 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
             }
         }
 
-        println!("Total directory entries in oplog: {}", total_dir_entries);
+        debug!("Total directory entries in oplog: {}", total_dir_entries);
 
         // THE KEY CHECK: We created 3 directories, so should have exactly 3 directory entries
         // If we have 4+, it means one or more directories were updated unnecessarily
         let expected_dir_entries = 4; // root (v1 empty, v2 with devices), devices (v1), sensor_123 (v1)
 
-        println!("\n=== Verification Result ===");
-        println!("Expected directory entries: {}", expected_dir_entries);
-        println!("Actual directory entries: {}", total_dir_entries);
+        debug!("\n=== Verification Result ===");
+        debug!("Expected directory entries: {}", expected_dir_entries);
+        debug!("Actual directory entries: {}", total_dir_entries);
 
         // Count rows per transaction to verify each transaction wrote the expected number
-        println!("\n=== Per-Transaction Row Counts ===");
+        debug!("\n=== Per-Transaction Row Counts ===");
 
         // TX1 (bootstrap): Should write 1 row (root v1)
         let tx1_sql = "SELECT COUNT(*) as count FROM delta_table WHERE txn_seq = 1";
@@ -1036,7 +1036,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         } else {
             0
         };
-        println!("TX1 (bootstrap): {} row(s)", tx1_count);
+        debug!("TX1 (bootstrap): {} row(s)", tx1_count);
 
         // TX2 (create structure): Should write 4 rows (root v2, devices v1, sensor_123 v1, file v1)
         let tx2_sql = "SELECT COUNT(*) as count FROM delta_table WHERE txn_seq = 2";
@@ -1053,7 +1053,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         } else {
             0
         };
-        println!("TX2 (create structure): {} row(s)", tx2_count);
+        debug!("TX2 (create structure): {} row(s)", tx2_count);
 
         // TX3 (file append): Should write EXACTLY 1 row (file v2 only, NO directory update)
         let tx3_sql = "SELECT COUNT(*) as count FROM delta_table WHERE txn_seq = 3";
@@ -1070,36 +1070,36 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         } else {
             0
         };
-        println!("TX3 (file append): {} row(s)", tx3_count);
+        debug!("TX3 (file append): {} row(s)", tx3_count);
 
         // THE CRITICAL CHECK: TX3 should write exactly 1 row
         if tx3_count != 1 {
-            println!("\n🐛 BUG DETECTED IN TX3!");
-            println!("TX3 (file append) wrote {} records when it should write exactly 1", tx3_count);
-            println!("Expected: 1 row (file v2 only)");
-            println!("Actual: {} row(s)", tx3_count);
-            println!("\nWhen appending to a file:series, we should NOT update the parent directory.");
+            debug!("\n🐛 BUG DETECTED IN TX3!");
+            debug!("TX3 (file append) wrote {} records when it should write exactly 1", tx3_count);
+            debug!("Expected: 1 row (file v2 only)");
+            debug!("Actual: {} row(s)", tx3_count);
+            debug!("\nWhen appending to a file:series, we should NOT update the parent directory.");
             panic!("Test failed: TX3 wrote {} records instead of 1", tx3_count);
         }
 
-        println!("✅ PASS: TX3 wrote exactly 1 record (file version only, no directory update)");
+        debug!("✅ PASS: TX3 wrote exactly 1 record (file version only, no directory update)");
 
         // Also check: TX3 should create exactly 1 entry (the file v2)
         // Total should be: 1 (root v1) + 4 (TX2: root v2, devices, sensor_123, file v1) + 1 (TX3: file v2) = 6
         // But if bug exists: 1 + 4 + 2 (file v2 + unnecessary dir update) = 7+
 
-        println!("Total oplog entries: {}", total_entries);
-        println!("Expected total: 6 (1 root init + 4 structure creation + 1 file append)");
+        debug!("Total oplog entries: {}", total_entries);
+        debug!("Expected total: 6 (1 root init + 4 structure creation + 1 file append)");
 
         // Verify we have the expected number of directory entries
         assert_eq!(total_dir_entries, expected_dir_entries,
             "Expected {} directory entries (root v1 empty, root v2 with devices, devices v1, sensor_123 v1), but found {}",
             expected_dir_entries, total_dir_entries);
 
-        println!("\n✅ TEST PASSED!");
-        println!("- TX3 (file append) wrote exactly 1 row (file version only)");
-        println!("- No unnecessary directory updates during file append");
-        println!("- Root directory correctly has 2 versions (v1 empty, v2 when devices added)");
+        debug!("\n✅ TEST PASSED!");
+        debug!("- TX3 (file append) wrote exactly 1 row (file version only)");
+        debug!("- No unnecessary directory updates during file append");
+        debug!("- Root directory correctly has 2 versions (v1 empty, v2 when devices added)");
 
         Ok(())
     }).await;

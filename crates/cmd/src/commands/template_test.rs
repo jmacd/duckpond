@@ -6,6 +6,7 @@ mod tests {
     use crate::common::ShipContext;
     use anyhow::Result;
     use std::fs;
+    use log::debug;
     use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::io::AsyncWriteExt;
@@ -222,8 +223,8 @@ mod tests {
 
         // The output should contain the template content with date function rendered
         // We can't check exact date, but we can check that template rendering occurred
-        println!("Template output content: {}", output);
-        println!("Template cat result: {:?}", cat_result);
+        debug!("Template output content: {}", output);
+        debug!("Template cat result: {:?}", cat_result);
 
         // Check that the output contains expected template structure
         assert!(
@@ -421,7 +422,7 @@ mod tests {
         );
 
         // The output should contain the template content with variables expanded
-        println!("Template output with variables: {}", output);
+        debug!("Template output with variables: {}", output);
         assert!(
             output.contains("Hello DuckPond!"),
             "Template should expand name variable"

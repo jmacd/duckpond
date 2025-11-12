@@ -26,7 +26,7 @@ impl TestSetup {
 
         // Create ship context for initialization
         let init_args = vec!["pond".to_string(), "init".to_string()];
-        let ship_context = ShipContext::new(Some(pond_path.clone()), init_args);
+        let ship_context = ShipContext::new(Some(&pond_path), init_args);
 
         // Initialize pond
         init_command(&ship_context, None, None).await?;
@@ -1432,7 +1432,7 @@ async fn test_replica_preserves_transaction_sequences() {
                     })?;
 
                     state.initialize_root_directory().await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::from(e))
+                        steward::StewardError::DataInit(e)
                     })?;
 
                     Ok(())

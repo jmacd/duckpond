@@ -8,9 +8,11 @@ use crate::common::ShipContext;
 use anyhow::Result;
 use datafusion::prelude::SessionContext;
 use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid7::Uuid;
+use log::debug;
 
 /// Simple test setup
 struct SimpleReplicationTest {
@@ -48,13 +50,13 @@ impl SimpleReplicationTest {
 
     /// Compare two ponds to verify they have the same identity
     async fn compare_pond_identity(
-        pond1_path: &PathBuf,
-        pond2_path: &PathBuf,
+        pond1_path: &Path,
+        pond2_path: &Path,
     ) -> Result<(Uuid, Uuid, bool)> {
-        let ship1 = ShipContext::new(Some(pond1_path.clone()), vec!["pond".to_string()])
+        let ship1 = ShipContext::new(Some(&pond1_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
-        let ship2 = ShipContext::new(Some(pond2_path.clone()), vec!["pond".to_string()])
+        let ship2 = ShipContext::new(Some(&pond2_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
 
@@ -66,21 +68,21 @@ impl SimpleReplicationTest {
         let matches = metadata1 == metadata2;
 
         Ok((
-            metadata1.pond_id.clone(),
-            metadata2.pond_id.clone(),
+            metadata1.pond_id,
+            metadata2.pond_id,
             matches,
         ))
     }
 
     /// Compare transaction sequences between two ponds
     async fn compare_transaction_sequences(
-        pond1_path: &PathBuf,
-        pond2_path: &PathBuf,
+	pond1_path: &Path,
+        pond2_path: &Path,
     ) -> Result<(i64, i64)> {
-        let ship1 = ShipContext::new(Some(pond1_path.clone()), vec!["pond".to_string()])
+        let ship1 = ShipContext::new(Some(&pond1_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
-        let ship2 = ShipContext::new(Some(pond2_path.clone()), vec!["pond".to_string()])
+        let ship2 = ShipContext::new(Some(&pond2_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
 
@@ -91,8 +93,8 @@ impl SimpleReplicationTest {
     }
 
     /// Query transaction records from a pond
-    async fn get_transaction_records(pond_path: &PathBuf) -> Result<Vec<(i64, String)>> {
-        let ship = ShipContext::new(Some(pond_path.clone()), vec!["pond".to_string()])
+    async fn get_transaction_records(pond_path: &Path) -> Result<Vec<(i64, String)>> {
+        let ship = ShipContext::new(Some(&pond_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
 
@@ -150,8 +152,8 @@ impl SimpleReplicationTest {
     }
 
     /// Get comprehensive statistics about a pond's structure
-    async fn get_pond_stats(pond_path: &PathBuf) -> Result<PondStats, anyhow::Error> {
-        let ship = ShipContext::new(Some(pond_path.clone()), vec!["pond".to_string()])
+    async fn get_pond_stats(pond_path: &Path) -> Result<PondStats, anyhow::Error> {
+        let ship = ShipContext::new(Some(&pond_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
 
@@ -306,7 +308,7 @@ async fn test_simple_pond_creation() -> Result<()> {
 
     // Get initial stats
     let stats_initial = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;
-    println!(
+    debug!(
         "Initial stats: txn_count={}, node_count={}, partitions={}",
         stats_initial.transaction_count,
         stats_initial.total_node_count,
@@ -323,7 +325,7 @@ async fn test_simple_pond_creation() -> Result<()> {
 
     // Get updated stats
     let stats_after = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;
-    println!(
+    debug!(
         "After writes: txn_count={}, node_count={}, partitions={}",
         stats_after.transaction_count, stats_after.total_node_count, stats_after.partition_count
     );
@@ -430,7 +432,7 @@ async fn test_query_transaction_records() -> Result<()> {
 
     // Verify transaction sequences are sequential (use DISTINCT to avoid counting multiple records per txn)
     let txn_seqs: Vec<i64> = records.iter().map(|(seq, _)| *seq).collect();
-    let mut unique_seqs: Vec<i64> = txn_seqs.iter().copied().collect();
+    let mut unique_seqs: Vec<i64> = txn_seqs.to_vec();
     unique_seqs.sort();
     unique_seqs.dedup();
 
@@ -474,8 +476,8 @@ async fn test_pond_structural_statistics() -> Result<()> {
     let stats = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;
 
     // Debug: print what we got
-    println!("Pond stats: {:?}", stats);
-    println!("Nodes by type: {:?}", stats.nodes_by_type);
+    debug!("Pond stats: {:?}", stats);
+    debug!("Nodes by type: {:?}", stats.nodes_by_type);
 
     // Verify we have multiple transactions (init + 2 mkdir + 2 copy = 5)
     assert!(

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -24,9 +25,9 @@ pub struct ShipContext {
 impl ShipContext {
     /// Create a new ShipContext from CLI parsing
     #[must_use]
-    pub fn new(pond_path: Option<PathBuf>, original_args: Vec<String>) -> Self {
+    pub fn new<P: AsRef<Path>>(pond_path: Option<P>, original_args: Vec<String>) -> Self {
         Self {
-            pond_path,
+            pond_path: pond_path.map(|p| p.as_ref().to_path_buf()),
             original_args,
             template_variables: HashMap::new(),
         }
@@ -96,26 +97,6 @@ pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<Pat
         .map_err(|_| anyhow!("POND environment variable not set"))
         .map(PathBuf::from)?;
     Ok(pond_base)
-}
-
-/// Core function to format a u64 ID value with friendly hex formatting
-/// Shows exactly 4, 8, 12, or 16 hex digits based on the magnitude of the ID
-/// 0000-FFFF -> 4 digits, 00010000-FFFFFFFF -> 8 digits, etc.
-#[must_use]
-pub fn format_id_value(id_value: u64) -> String {
-    if id_value <= 0xFFFF {
-        // 0-65535: show as exactly 4 hex digits
-        format!("{:04X}", id_value)
-    } else if id_value <= 0xFFFFFFFF {
-        // 65536-4294967295: show as exactly 8 hex digits
-        format!("{:08X}", id_value)
-    } else if id_value <= 0xFFFFFFFFFFFF {
-        // Show as exactly 12 hex digits
-        format!("{:012X}", id_value)
-    } else {
-        // Show as exactly 16 hex digits
-        format!("{:016X}", id_value)
-    }
 }
 
 /// Number of hex characters to show when shortening UUID7 values

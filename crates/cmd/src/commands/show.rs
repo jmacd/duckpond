@@ -9,7 +9,7 @@ const TRANSACTION_LABEL: &str = "Transaction";
 /// Show pond contents with a closure for handling output
 pub async fn show_command<F>(ship_context: &ShipContext, mode: &str, mut handler: F) -> Result<()>
 where
-    F: FnMut(String),
+    F: FnMut(&str),
 {
     let mut ship = ship_context.open_pond().await?;
 
@@ -28,7 +28,7 @@ where
         .await
         .map_err(|e| anyhow!("Failed to commit read transaction: {}", e))?;
 
-    handler(result);
+    handler(&result);
     Ok(())
 }
 
@@ -825,6 +825,8 @@ mod tests {
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
     use tempfile::TempDir;
+    use log::debug;
+    
     struct TestSetup {
         _temp_dir: TempDir,
         ship_context: ShipContext,
@@ -857,14 +859,14 @@ mod tests {
 
         let mut results = Vec::new();
         show_command(&setup.ship_context, "detailed", |output| {
-            results.push(output);
+            results.push(output.to_string());
         })
         .await
         .expect("Show command failed");
 
         // Should have at least the pond initialization transaction
         assert!(
-            results.len() >= 1,
+            !results.is_empty(),
             "Should have at least initialization transaction"
         );
 
@@ -917,13 +919,13 @@ mod tests {
 
         // Capture show command output
         let mut captured_output = String::new();
-        show_command(&ship_context, "detailed", |output: String| {
-            captured_output.push_str(&output);
+        show_command(&ship_context, "detailed", |output: &str| {
+            captured_output.push_str(output);
         })
         .await
         .expect("Show command should work");
 
-        println!("Show command output:\n{}", captured_output);
+        debug!("Show command output:\n{}", captured_output);
 
         // Test the new transaction sequence based format:
 
