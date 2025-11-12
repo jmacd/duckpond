@@ -87,7 +87,6 @@ utilities = { path = "crates/utilities" }
 uuid7 = { version = "1.0", features = ["serde"] }
 zstd = "0.13.2"
 
-
 [workspace.lints.rust]
 # General compatibility lints
 rust_2018_idioms = { level = "warn", priority = -1 }
@@ -95,6 +94,7 @@ rust_2021_compatibility = { level = "warn", priority = -1 }
 rust_2024_compatibility = { level = "warn", priority = -1 }
 future_incompatible = { level = "warn", priority = -1 }
 nonstandard_style = { level = "warn", priority = -1 }
+
 
 # Strict safety & quality standards
 missing_docs = "deny"
@@ -139,6 +139,9 @@ too_many_arguments = "allow"
 type_complexity = "allow"
 wrong_self_convention = "allow"
 module_name_repetitions = "allow"
+
+# TODO: fix this one
+uninlined_format_args = "allow"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
