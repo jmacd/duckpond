@@ -7,12 +7,12 @@ use crate::commands::init_command;
 use crate::common::ShipContext;
 use anyhow::Result;
 use datafusion::prelude::SessionContext;
-use std::path::PathBuf;
+use log::debug;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid7::Uuid;
-use log::debug;
 
 /// Simple test setup
 struct SimpleReplicationTest {
@@ -67,16 +67,12 @@ impl SimpleReplicationTest {
         // Check if identity matches
         let matches = metadata1 == metadata2;
 
-        Ok((
-            metadata1.pond_id,
-            metadata2.pond_id,
-            matches,
-        ))
+        Ok((metadata1.pond_id, metadata2.pond_id, matches))
     }
 
     /// Compare transaction sequences between two ponds
     async fn compare_transaction_sequences(
-	pond1_path: &Path,
+        pond1_path: &Path,
         pond2_path: &Path,
     ) -> Result<(i64, i64)> {
         let ship1 = ShipContext::new(Some(&pond1_path), vec!["pond".to_string()])

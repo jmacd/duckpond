@@ -5,8 +5,8 @@ mod tests {
     use crate::commands::mknod::mknod_command;
     use crate::common::ShipContext;
     use anyhow::Result;
-    use std::fs;
     use log::debug;
+    use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::io::AsyncWriteExt;

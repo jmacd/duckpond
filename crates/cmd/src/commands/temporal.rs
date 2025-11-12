@@ -188,7 +188,7 @@ pub async fn detect_overlaps_command(
                     let min_ts_str = if min_ts_col.is_null(0) {
                         "NULL".to_string()
                     } else {
-			// @@@ This was not planned
+                        // @@@ This was not planned
                         match min_ts_col.data_type() {
                             arrow::datatypes::DataType::Timestamp(
                                 arrow::datatypes::TimeUnit::Millisecond,
@@ -707,9 +707,7 @@ fn format_timestamp(timestamp_ms: i64) -> String {
     let naive_datetime = DateTime::from_timestamp(timestamp_secs, 0);
 
     match naive_datetime {
-        Some(dt) => {
-            dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-        }
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         None => format!("Invalid timestamp: {}", timestamp_ms),
     }
 }

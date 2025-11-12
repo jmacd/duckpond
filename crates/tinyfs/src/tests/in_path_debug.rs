@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod in_path_tests {
-    use log::debug;
     use crate::Lookup;
     use crate::memory::new_fs;
+    use log::debug;
 
     #[tokio::test]
     async fn test_in_path_root_directory() {

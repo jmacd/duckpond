@@ -6,13 +6,13 @@
 //! 3. Verify output files and behavior
 
 use cmd::common::ShipContext;
+use log::debug;
 use std::collections::HashMap;
 use steward::PondUserMetadata;
 use tempfile::TempDir;
 use tinyfs::{FS, PersistenceLayer};
 use tlogfs::factory::ExecutionContext;
 use tlogfs::{FactoryContext, FactoryRegistry};
-use log::debug;
 
 /// Helper to create a test ship and workspace
 async fn setup_test_ship() -> (ShipContext, TempDir) {

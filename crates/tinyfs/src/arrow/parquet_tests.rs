@@ -7,9 +7,9 @@ use crate::arrow::{ForArrow, ParquetExt};
 use crate::memory::new_fs;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use arrow_array::record_batch;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use log::debug;
 
 /// Test data structure that implements ForArrow
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

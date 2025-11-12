@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -123,7 +123,7 @@ pub fn format_node_id(node_id: &str) -> String {
         }
     } else {
         // Hex format - parse as hex and format based on magnitude
-	panic!("unhandled code path");
+        panic!("unhandled code path");
     };
 
     format!("[{}]", id_str)

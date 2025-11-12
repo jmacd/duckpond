@@ -43,7 +43,7 @@ pub struct TestRecordBatchBuilder {
 impl Default for TestRecordBatchBuilder {
     /// Create a new builder with current timestamp as base
     fn default() -> Self {
-	Self::with_base_time(Utc::now().timestamp_millis())
+        Self::with_base_time(Utc::now().timestamp_millis())
     }
 }
 
@@ -77,7 +77,8 @@ impl TestRecordBatchBuilder {
     }
 
     /// Add a simple reading with auto-incrementing sensor ID
-    #[must_use]    pub fn add_simple_reading(self, offset_ms: i64, temperature: f64) -> Self {
+    #[must_use]
+    pub fn add_simple_reading(self, offset_ms: i64, temperature: f64) -> Self {
         let sensor_id = format!("sensor{}", self.sensor_ids.len() + 1);
         self.add_reading(offset_ms, &sensor_id, temperature, 45.0 + temperature * 0.5)
     }
@@ -112,7 +113,8 @@ impl TestRecordBatchBuilder {
     }
 
     /// Standard sensor schema used across tests
-    #[must_use]    pub fn standard_sensor_schema() -> Arc<Schema> {
+    #[must_use]
+    pub fn standard_sensor_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new(
                 "timestamp",

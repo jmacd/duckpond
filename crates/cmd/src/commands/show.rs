@@ -824,9 +824,9 @@ mod tests {
     use super::*;
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
-    use tempfile::TempDir;
     use log::debug;
-    
+    use tempfile::TempDir;
+
     struct TestSetup {
         _temp_dir: TempDir,
         ship_context: ShipContext,

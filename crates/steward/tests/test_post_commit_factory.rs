@@ -1,11 +1,11 @@
 #![allow(missing_docs)]
 
 use anyhow::Result;
+use log::debug;
 use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
 use tinyfs::{FS, PersistenceLayer};
 use tlogfs::{FactoryContext, FactoryRegistry};
-use log::debug;
 
 /// Test that post-commit factories are discovered and executed after a write transaction
 #[tokio::test]
@@ -153,10 +153,7 @@ repeat_count: 3
 
     // Verify the test factory was executed by checking the result file it creates
     // The test-executor factory writes to /tmp/test-executor-result-{parent_node_id}.txt
-    let result_path = format!(
-        "/tmp/test-executor-result-{}.txt",
-        parent_node_id
-    );
+    let result_path = format!("/tmp/test-executor-result-{}.txt", parent_node_id);
 
     // Give a small delay for file write to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -187,9 +184,7 @@ repeat_count: 3
         }
         Err(e) => {
             debug!("⚠️  Result file not found: {}", e);
-            debug!(
-                "This is expected if post-commit execution hasn't been fully implemented yet."
-            );
+            debug!("This is expected if post-commit execution hasn't been fully implemented yet.");
             debug!("Once implemented, this test should pass.");
         }
     }

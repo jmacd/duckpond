@@ -2,9 +2,9 @@
 
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
+use log::{debug, error};
 use tlogfs::factory::ExecutionContext;
 use tokio::io::AsyncReadExt;
-use log::{debug, error};
 
 /// Execute a run configuration
 pub async fn run_command(

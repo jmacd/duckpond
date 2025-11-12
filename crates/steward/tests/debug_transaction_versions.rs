@@ -1,9 +1,9 @@
 #![allow(missing_docs)]
 
 use anyhow::Result;
+use log::debug;
 use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
-use log::debug;
 
 /// Test to debug Delta Lake version numbering and control filesystem transaction correspondence
 #[tokio::test]

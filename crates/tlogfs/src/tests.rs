@@ -314,9 +314,7 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
 
     // The temporal metadata should reflect the actual timestamps, not be 0,0
     if min_time == 0 && max_time == 0 {
-        debug!(
-            "⚠️  WARNING: Temporal metadata extraction returned 0,0 - this indicates a problem"
-        );
+        debug!("⚠️  WARNING: Temporal metadata extraction returned 0,0 - this indicates a problem");
         debug!("   Expected: min_time = 1704067200000, max_time = 1704074400000");
     } else {
         debug!("✅ Temporal metadata extracted successfully");

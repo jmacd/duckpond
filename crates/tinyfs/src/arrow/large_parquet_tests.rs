@@ -6,9 +6,9 @@
 use crate::arrow::{ForArrow, ParquetExt};
 use crate::{EntryType, memory::new_fs};
 use arrow::datatypes::{DataType, Field, FieldRef};
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use log::debug;
 
 /// The 64 KiB threshold for large file storage (copied from tlogfs)
 const LARGE_FILE_THRESHOLD: usize = 64 * 1024;

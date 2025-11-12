@@ -262,8 +262,7 @@ async fn main() -> Result<()> {
 
         // Read-only commands that use ShipContext for consistency
         Commands::Show { mode } => {
-            commands::show_command(&ship_context, &mode, print_handler)
-            .await
+            commands::show_command(&ship_context, &mode, print_handler).await
         }
         Commands::Control { command } => {
             let control_mode = match command {
@@ -283,12 +282,10 @@ async fn main() -> Result<()> {
             commands::control_command(&ship_context, control_mode).await
         }
         Commands::List { pattern, all } => {
-            commands::list_command(&ship_context, &pattern, all, print_handler)
-            .await
+            commands::list_command(&ship_context, &pattern, all, print_handler).await
         }
         Commands::Describe { pattern } => {
-            commands::describe_command(&ship_context, &pattern, print_handler)
-            .await
+            commands::describe_command(&ship_context, &pattern, print_handler).await
         }
         Commands::Cat {
             path,

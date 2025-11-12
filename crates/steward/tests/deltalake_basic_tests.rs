@@ -5,9 +5,9 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use deltalake::DeltaOps;
 use deltalake::protocol::SaveMode;
+use log::debug;
 use std::sync::Arc;
 use tempfile::tempdir;
-use log::debug;
 
 #[tokio::test]
 async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {

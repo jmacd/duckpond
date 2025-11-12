@@ -1,9 +1,9 @@
 #![allow(missing_docs)]
 
 use anyhow::Result;
+use log::debug;
 use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
-use log::debug;
 
 /// Test that a Ship can be properly dropped and a new Ship opened on the same pond
 #[tokio::test]

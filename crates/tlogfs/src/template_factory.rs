@@ -537,4 +537,3 @@ fn print_error_chain(err: &dyn std::error::Error) {
         level += 1;
     }
 }
-

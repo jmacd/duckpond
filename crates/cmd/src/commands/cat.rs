@@ -104,7 +104,7 @@ async fn cat_impl(
         let formatted = format_query_results(&batches)
             .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", path, e))?;
 
-	// @@@ Buffering whole content?
+        // @@@ Buffering whole content?
         if let Some(output_buffer) = output {
             output_buffer.push_str(&formatted);
         } else {
@@ -182,7 +182,6 @@ async fn stream_file_to_stdout(
     }
     Ok(())
 }
-
 
 /// Format RecordBatch results as a pretty-printed string with row summary
 ///

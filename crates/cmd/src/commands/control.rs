@@ -8,9 +8,9 @@
 
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
+use serde::Deserialize;
 use tlogfs::factory::ExecutionContext;
 use tokio::io::AsyncReadExt;
-use serde::Deserialize;
 
 /// Recent transaction record from control table query
 #[derive(Debug, Deserialize)]
@@ -309,9 +309,7 @@ async fn show_transaction_detail(
         // Section header for post-commit tasks
         if is_post_commit && !in_post_commit {
             in_post_commit = true;
-            println!(
-                "\n═══ POST-COMMIT TASKS ═══════════════════════════════════════════════\n"
-            );
+            println!("\n═══ POST-COMMIT TASKS ═══════════════════════════════════════════════\n");
         }
 
         match record_type {
@@ -368,14 +366,8 @@ async fn show_transaction_detail(
             }
             "post_commit_pending" => {
                 let _exec_seq = detail.execution_seq.unwrap_or(0);
-                let factory = detail
-                    .factory_name
-                    .as_deref()
-                    .unwrap_or("<unknown>");
-                let config = detail
-                    .config_path
-                    .as_deref()
-                    .unwrap_or("<unknown>");
+                let factory = detail.factory_name.as_deref().unwrap_or("<unknown>");
+                let config = detail.config_path.as_deref().unwrap_or("<unknown>");
                 println!(
                     "┌─ POST-COMMIT TASK #{} PENDING ──────────────────────────────",
                     _exec_seq
