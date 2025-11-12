@@ -207,6 +207,7 @@ mod tests {
         pond_path: std::path::PathBuf,
         host_files_dir: std::path::PathBuf,
         ship_context: ShipContext,
+        _temp_dir: TempDir,
     }
 
     impl TestSetup {
@@ -235,6 +236,7 @@ mod tests {
                 pond_path,
                 host_files_dir,
                 ship_context,
+                _temp_dir: temp_dir,
             })
         }
 

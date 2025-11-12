@@ -77,6 +77,7 @@ mod tests {
 
     struct TestSetup {
         ship_context: ShipContext,
+        _temp_dir: tempfile::TempDir,
     }
 
     impl TestSetup {
@@ -93,6 +94,7 @@ mod tests {
 
             Ok(Self {
                 ship_context,
+                _temp_dir: temp_dir,
             })
         }
 

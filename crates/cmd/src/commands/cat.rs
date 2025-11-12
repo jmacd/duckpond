@@ -242,6 +242,7 @@ mod tests {
     struct TestSetup {
         pond_path: std::path::PathBuf,
         test_content: String,
+        _temp_dir: TempDir,
     }
 
     impl TestSetup {
@@ -268,6 +269,7 @@ mod tests {
             Ok(TestSetup {
                 pond_path,
                 test_content: test_content.to_string(),
+                _temp_dir: temp_dir,
             })
         }
 
