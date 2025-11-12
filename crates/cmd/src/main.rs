@@ -1,15 +1,57 @@
+#![allow(missing_docs)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use common::ShipContext;
+use panic_alloc::PanicOnLargeAlloc;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-mod common;
 mod commands;
+mod common;
+mod panic_alloc;
+mod template_utils;
 
-use common::{FilesystemChoice, ShipContext};
+// External modules
+use hydrovu as _;
+
+#[global_allocator]
+static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);
+
+/// Control table subcommands
+#[derive(Debug, Subcommand)]
+enum ControlCommand {
+    /// Show recent transactions with summary status
+    Recent {
+        /// Number of recent transactions to show
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+    /// Show detailed lifecycle for a specific transaction
+    Detail {
+        /// Transaction sequence number
+        #[arg(long)]
+        txn_seq: i64,
+    },
+    /// Show incomplete operations (for recovery)
+    Incomplete,
+    /// Sync with remote: retry failed pushes OR pull new bundles
+    Sync,
+    /// Show pond configuration (ID, factory modes, metadata, settings)
+    ShowConfig,
+    /// Set a configuration value
+    SetConfig {
+        /// Configuration key
+        key: String,
+        /// Configuration value
+        value: String,
+    },
+}
 
 /// Parse a single key-value pair
-fn parse_key_value<T, U>(s: &str) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+fn parse_key_value<T, U>(
+    s: &str,
+) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
 where
     T: FromStr,
     T::Err: std::error::Error + Send + Sync + 'static,
@@ -29,11 +71,11 @@ struct Cli {
     /// Pond path override (defaults to POND env var)
     #[arg(long, global = true)]
     pond: Option<PathBuf>,
-    
+
     /// Template variables in key=value format (can be repeated)
     #[arg(long = "var", short = 'v', global = true, value_parser = parse_key_value::<String, String>)]
     variables: Vec<(String, String)>,
-    
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -41,14 +83,27 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new pond
-    Init,
+    Init {
+        /// Initialize from remote backup (path to restore config YAML)
+        #[arg(long)]
+        from_backup: Option<PathBuf>,
+        /// Initialize from base64-encoded replication config (from 'pond run /etc/system.d/10-remote replicate')
+        #[arg(long, conflicts_with = "from_backup")]
+        config: Option<String>,
+    },
     /// Recover from crash by checking and restoring transaction metadata
     Recover,
     /// Show pond contents
     Show {
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
+        /// Display mode: brief (summary stats), concise (1 line per tx), or detailed (full dump)
+        #[arg(long, short = 'm', default_value = "brief")]
+        mode: String,
+    },
+    /// Query control table for transaction status, post-commit execution, or manual replica sync
+    /// Control table operations and pond configuration
+    Control {
+        #[command(subcommand)]
+        command: ControlCommand,
     },
     /// List files and directories (ls -l style)
     List {
@@ -58,26 +113,17 @@ enum Commands {
         /// Show all files including hidden ones
         #[arg(short, long)]
         all: bool,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
     },
     /// Describe file schemas and types
     Describe {
         /// Pattern to match (supports wildcards, defaults to "**/*")
         #[arg(default_value = "**/*")]
         pattern: String,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
     },
     /// Read a file from the pond
     Cat {
         /// File path to read
         path: String,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
         /// Display mode [default: raw] [possible values: raw, table]
         #[arg(long, default_value = "raw")]
         display: String,
@@ -98,8 +144,8 @@ enum Commands {
         sources: Vec<String>,
         /// Destination path in pond (file name or directory)
         dest: String,
-        /// Format handling [default: auto] [possible values: auto, data, table, series]
-        #[arg(long, default_value = "auto")]
+        /// Format handling [possible values: data, table, series]
+        #[arg(long, default_value = "data")]
         format: String,
     },
     /// Create a directory in the pond
@@ -125,31 +171,18 @@ enum Commands {
     },
     /// List available dynamic node factories
     ListFactories,
-    /// HydroVu water sensor data collection
-    #[command(subcommand)]
-    Hydrovu(commands::HydroVuCommands),
-    /// Execute SQL queries against pond metadata
-    Query {
-        /// SQL query to execute
-        #[arg(long)]
-        sql: Option<String>,
-        /// Output format [default: table] [possible values: table, csv, count]
-        #[arg(long, default_value = "table")]
-        format: String,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
-        /// Show predefined system state queries instead of custom SQL
-        #[arg(long)]
-        show: bool,
+    /// Execute a run configuration (e.g., hydrovu collector)
+    Run {
+        /// Path to the configuration file to execute
+        path: String,
+        /// Additional arguments to pass to the factory (e.g., subcommands like 'replicate', 'list-bundles')
+        #[arg(num_args = 0..)]
+        args: Vec<String>,
     },
     /// Detect temporal overlaps using complete time series data analysis
     DetectOverlaps {
         /// Series file patterns to analyze (e.g., "/sensors/*.series")
         patterns: Vec<String>,
-        /// Which filesystem to access
-        #[arg(long, short = 'f', default_value = "data")]
-        filesystem: FilesystemChoice,
         /// Show detailed overlap analysis with row-level data
         #[arg(long)]
         verbose: bool,
@@ -188,6 +221,11 @@ enum Commands {
     },
 }
 
+#[allow(clippy::print_stdout)]
+fn print_handler(output: &str) {
+    print!("{}", output);
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Capture original command line arguments before clap parsing for transaction metadata
@@ -202,82 +240,126 @@ async fn main() -> Result<()> {
 
     // Create the ship context with global variables
     let ship_context = if cli.variables.is_empty() {
-        ShipContext::new(cli.pond.clone(), original_args.clone())
+        ShipContext::new(cli.pond.as_ref(), original_args.clone())
     } else {
-        let variables_map: std::collections::HashMap<String, String> = cli.variables.into_iter().collect();
+        let variables_map: std::collections::HashMap<String, String> =
+            cli.variables.into_iter().collect();
         ShipContext::with_variables(cli.pond.clone(), original_args.clone(), variables_map)
     };
 
-    match cli.command {
-        Commands::Init => {
-            // Init command creates new pond
-            commands::init_command(&ship_context).await
+    let result = match cli.command {
+        Commands::Init {
+            from_backup,
+            config,
+        } => {
+            // Init command creates new pond (optionally from backup or base64 config)
+            commands::init_command(&ship_context, from_backup.as_deref(), config.as_deref()).await
         }
         Commands::Recover => {
             // Recover command works with potentially damaged pond, handle specially
             commands::recover_command(&ship_context).await
         }
-        
+
         // Read-only commands that use ShipContext for consistency
-        Commands::Show { filesystem } => {
-            commands::show_command(&ship_context, filesystem, |output| {
-                print!("{}", output);
-            }).await
+        Commands::Show { mode } => {
+            commands::show_command(&ship_context, &mode, print_handler).await
         }
-        Commands::List { pattern, all, filesystem } => {
-            commands::list_command(&ship_context, &pattern, all, filesystem, |output| {
-                print!("{}", output);
-            }).await
+        Commands::Control { command } => {
+            let control_mode = match command {
+                ControlCommand::Recent { limit } => {
+                    commands::control::ControlMode::Recent { limit }
+                }
+                ControlCommand::Detail { txn_seq } => {
+                    commands::control::ControlMode::Detail { txn_seq }
+                }
+                ControlCommand::Incomplete => commands::control::ControlMode::Incomplete,
+                ControlCommand::Sync => commands::control::ControlMode::Sync,
+                ControlCommand::ShowConfig => commands::control::ControlMode::ShowConfig,
+                ControlCommand::SetConfig { key, value } => {
+                    commands::control::ControlMode::SetConfig { key, value }
+                }
+            };
+            commands::control_command(&ship_context, control_mode).await
         }
-        Commands::Describe { pattern, filesystem } => {
-            commands::describe_command(&ship_context, &pattern, filesystem, |output| {
-                print!("{}", output);
-            }).await
+        Commands::List { pattern, all } => {
+            commands::list_command(&ship_context, &pattern, all, print_handler).await
         }
-        Commands::Cat { path, filesystem, display, time_start, time_end, query } => {
-            commands::cat_command(&ship_context, &path, filesystem, &display, None, time_start, time_end, query.as_deref()).await
+        Commands::Describe { pattern } => {
+            commands::describe_command(&ship_context, &pattern, print_handler).await
         }
-        
+        Commands::Cat {
+            path,
+            display,
+            time_start,
+            time_end,
+            query,
+        } => {
+            commands::cat_command(
+                &ship_context,
+                &path,
+                &display,
+                None,
+                time_start,
+                time_end,
+                query.as_deref(),
+            )
+            .await
+        }
+
         // Write commands that use scoped transactions
-        Commands::Copy { sources, dest, format } => {
-            commands::copy_command(&ship_context, &sources, &dest, &format).await
-        }
+        Commands::Copy {
+            sources,
+            dest,
+            format,
+        } => commands::copy_command(&ship_context, &sources, &dest, &format).await,
         Commands::Mkdir { path, parents } => {
             commands::mkdir_command(&ship_context, &path, parents).await
         }
-        Commands::Mknod { factory_type, path, config_path, overwrite } => {
-            commands::mknod_command(&ship_context, &factory_type, &path, &config_path, overwrite).await
+        Commands::Mknod {
+            factory_type,
+            path,
+            config_path,
+            overwrite,
+        } => {
+            commands::mknod_command(&ship_context, &factory_type, &path, &config_path, overwrite)
+                .await
         }
-        Commands::ListFactories => {
-            commands::list_factories_command().await
-        }
-        Commands::Hydrovu(hydrovu_cmd) => {
-            commands::hydrovu_command(&ship_context, &hydrovu_cmd).await
-        }
-        Commands::Query { sql, format, filesystem, show } => {
-            if show {
-                commands::query_show_command(&ship_context, &filesystem).await
-            } else if let Some(sql_query) = sql {
-                commands::query_command(&ship_context, &filesystem, &sql_query, &format).await
-            } else {
-                Err(anyhow::anyhow!("Either --sql or --show must be specified"))
-            }
-        }
-        Commands::DetectOverlaps { patterns, filesystem, verbose, format } => {
-            commands::detect_overlaps_command(&ship_context, &filesystem, &patterns, verbose, &format).await
-        }
-        Commands::SetTemporalBounds { pattern, min_time, max_time } => {
+        Commands::ListFactories => commands::list_factories_command().await,
+        Commands::Run { path, args } => commands::run_command(&ship_context, &path, args).await,
+        Commands::DetectOverlaps {
+            patterns,
+            verbose,
+            format,
+        } => commands::detect_overlaps_command(&ship_context, &patterns, verbose, &format).await,
+        Commands::SetTemporalBounds {
+            pattern,
+            min_time,
+            max_time,
+        } => {
             commands::set_temporal_bounds_command(&ship_context, pattern, min_time, max_time).await
         }
-        Commands::Export { pattern, dir, temporal, start_time, end_time } => {
+        Commands::Export {
+            pattern,
+            dir,
+            temporal,
+            start_time,
+            end_time,
+        } => {
             commands::export_command(
                 &ship_context,
                 &pattern,
-                &dir.to_string_lossy().to_string(),
+                &dir.to_string_lossy(),
                 &temporal,
                 start_time,
                 end_time,
-            ).await
+            )
+            .await
         }
-    }
+    };
+
+    // Log peak memory usage
+    let peak_mem = PEAK_ALLOC.peak_usage_as_mb();
+    log::info!("Peak memory usage: {:.2} MB", peak_mem);
+
+    result
 }

@@ -1,3 +1,3 @@
 pub mod record;
 
-pub use record::{Record, ForArrow};
+pub use record::{ForArrow, Record};

@@ -1,11 +1,11 @@
 use crate::models::{Location, LocationReadings, Names};
 use anyhow::{Context, Result, anyhow};
+use log::debug;
 use oauth2::{
     AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl, basic::BasicClient,
     reqwest::async_http_client,
 };
 use std::time::Duration;
-use log::{debug, info};
 
 const BASE_URL: &str = "https://www.hydrovu.com";
 const TIMEOUT_SECONDS: u64 = 60;
@@ -73,6 +73,7 @@ impl Client {
     }
 
     /// Fetch data for a location with full pagination support and optional record limit
+    #[allow(clippy::print_stderr)]
     pub(crate) async fn fetch_location_data(
         &self,
         location_id: i64,
@@ -93,10 +94,13 @@ impl Client {
             // Build request with optional pagination token
             let mut request = self.http_client.get(&base_url).bearer_auth(&self.token);
 
-            if let Some(ref token) = next_page_token {
+            let pagination_header = if let Some(ref token) = next_page_token {
                 debug!("Using pagination token for page {page_count}: {token}");
                 request = request.header("x-isi-start-page", token);
-            }
+                format!("x-isi-start-page: {}", token)
+            } else {
+                "(none - initial request)".to_string()
+            };
 
             let response = request
                 .send()
@@ -109,11 +113,71 @@ impl Client {
                     .text()
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
-                return Err(anyhow!(
-                    "HTTP {} error from {}: {}",
-                    status,
+
+                // Print detailed error message to stderr (once)
+                eprintln!(
+                    "╔══════════════════════════════════════════════════════════════════════════════╗\n\
+                     ║ HydroVu API Request Failed - Server Error                                   ║\n\
+                     ╚══════════════════════════════════════════════════════════════════════════════╝\n\
+                     \n\
+                     REQUEST DETAILS:\n\
+                     ────────────────────────────────────────────────────────────────────────────────\n\
+                     URL:              {}\n\
+                     Method:           GET\n\
+                     Authorization:    Bearer <token>\n\
+                     Pagination:       {}\n\
+                     \n\
+                     QUERY PARAMETERS:\n\
+                     ────────────────────────────────────────────────────────────────────────────────\n\
+                     Location ID:      {}\n\
+                     Start Time:       {} (Unix timestamp)\n\
+                     Start Date:       {}\n\
+                     \n\
+                     PAGINATION STATE:\n\
+                     ────────────────────────────────────────────────────────────────────────────────\n\
+                     Current Page:     {}\n\
+                     Points Fetched:   {} / {} (limit)\n\
+                     \n\
+                     RESPONSE:\n\
+                     ────────────────────────────────────────────────────────────────────────────────\n\
+                     Status:           HTTP {}\n\
+                     Body:\n\
+                     {}\n\
+                     \n\
+                     ╔══════════════════════════════════════════════════════════════════════════════╗\n\
+                     ║ ACTION REQUIRED                                                              ║\n\
+                     ╚══════════════════════════════════════════════════════════════════════════════╝\n\
+                     \n\
+                     This is a server-side error (HTTP 500). Please report to HydroVu support:\n\
+                     \n\
+                     1. Copy the COMPLETE error message above\n\
+                     2. Include the exact request URL and parameters\n\
+                     3. Include the timestamp range: {} onwards\n\
+                     4. Include the location ID: {}\n\
+                     5. Contact: https://www.hydrovu.com/support\n\
+                     \n\
+                     The error occurred while fetching page {} of the results.\n",
                     base_url,
-                    error_text
+                    pagination_header,
+                    location_id,
+                    start_time,
+                    crate::utc2date(start_time).unwrap_or_else(|_| "invalid date".to_string()),
+                    page_count,
+                    total_points,
+                    stop_at_points,
+                    status,
+                    error_text,
+                    crate::utc2date(start_time).unwrap_or_else(|_| "invalid date".to_string()),
+                    location_id,
+                    page_count
+                );
+
+                // Return a concise error summary for the error chain
+                return Err(anyhow!(
+                    "HTTP {} from HydroVu API (location {}, page {})",
+                    status,
+                    location_id,
+                    page_count
                 ));
             }
 
@@ -140,7 +204,7 @@ impl Client {
                 .sum();
 
             total_points += page_points;
-            info!(
+            debug!(
                 "Page {page_count} for location {location_id}: {page_points} points (total: {total_points})"
             );
 
@@ -169,17 +233,17 @@ impl Client {
 
             // Continue if we have a next page token and haven't hit limit, otherwise break
             if next_page_token.is_none() {
-                info!("No more pages available for location {location_id}");
+                debug!("No more pages available for location {location_id}");
                 break;
             } else if total_points >= stop_at_points {
-                info!("Reached point limit ({stop_at_points}) for location {location_id}");
+                debug!("Reached point limit ({stop_at_points}) for location {location_id}");
                 break;
             } else {
                 debug!("Continuing to next page for location {location_id}...");
             }
         }
 
-        info!(
+        debug!(
             "Completed fetch for location {location_id}: {page_count} pages, {total_points} total points"
         );
         all_data.ok_or_else(|| anyhow!("No data received from API"))

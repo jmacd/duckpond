@@ -1,0 +1,10 @@
+# Local backup configuration
+
+url: "file:///tmp/pond-backups"
+compression_level: 3
+
+#url: "s3://my-duckpond-backups"
+#region: "us-east-1"
+#key: "AKIAIOSFODNN7EXAMPLE"
+#secret: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+

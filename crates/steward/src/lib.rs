@@ -1,25 +1,23 @@
+#![allow(missing_docs)]
+
 //! Steward - Secondary filesystem for monitoring and post-commit actions
 //!
 //! The steward manages a primary "data" filesystem and a secondary "control" filesystem,
 //! both implemented using tlogfs. It sequences post-commit actions and maintains
 //! transaction metadata in the control filesystem.
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use serde::{Deserialize, Serialize};
 
-mod ship;
+mod control_table;
 mod guard;
+mod ship;
 
-pub use ship::Ship;
+pub use control_table::ControlTable;
 pub use guard::StewardTransactionGuard;
-
-/// Transaction descriptor containing command information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TxDesc {
-    pub txn_id: String,
-    pub args: Vec<String>,
-}
+pub use ship::Ship;
+pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
 
 /// Recovery command result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,48 +28,40 @@ pub struct RecoveryResult {
     pub was_needed: bool,
 }
 
-impl TxDesc {
-    /// Create a new transaction descriptor from command arguments
-    pub fn new(txn_id: &str, args: Vec<String>) -> Self {
-        Self { txn_id: txn_id.into(), args }
-    }
-    
-    /// Get the command name (first argument)
-    pub fn command_name(&self) -> Option<&str> {
-        self.args.first().map(|s| s.as_str())
-    }
-    
-    /// Serialize to JSON string for storage in /txn/* files
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
-    }
-    
-    /// Deserialize from JSON string
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum StewardError {
-    #[error("Failed to initialize data filesystem: {0}")]
+    #[error("TinyFS error: {0}")]
     DataInit(#[from] tlogfs::TLogFSError),
-    
-    #[error("Failed to initialize control filesystem: {0}")]
-    ControlInit(tlogfs::TLogFSError),
-    
+
+    #[error("Control table error: {0}")]
+    ControlTable(String),
+
+    #[error("Transaction aborted: {0}")]
+    Aborted(String),
+
     #[error("Transaction sequence mismatch: expected {expected}, found {actual}")]
-    TransactionSequenceMismatch { expected: u64, actual: u64 },
-    
-    #[error("Recovery needed: missing transaction file /txn/{txn_id}. Run 'recover' command.")]
-    RecoveryNeeded { txn_id: String, tx_desc: TxDesc },
-    
+    TransactionSequenceMismatch { expected: i64, actual: i64 },
+
+    #[error("Recovery needed: incomplete transaction {txn_meta:?}. Run 'recover' command.")]
+    RecoveryNeeded { txn_meta: PondTxnMetadata },
+
+    #[error(
+        "Transaction mode violation: write transaction made no changes (should have been read transaction)"
+    )]
+    WriteTransactionNoChanges,
+
+    #[error("Transaction mode violation: read transaction attempted to write data")]
+    ReadTransactionAttemptedWrite,
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
-    
+
+    #[error("uuid7 parse error: {0}")]
+    Uuid(#[from] uuid7::ParseError),
+
     #[error("Delta Lake error: {0}")]
     DeltaLake(String),
 
@@ -80,11 +70,13 @@ pub enum StewardError {
 }
 
 /// Get the data filesystem path under the pond
+#[must_use]
 pub fn get_data_path(pond_path: &Path) -> PathBuf {
     pond_path.join("data")
 }
 
 /// Get the control filesystem path under the pond
+#[must_use]
 pub fn get_control_path(pond_path: &Path) -> PathBuf {
     pond_path.join("control")
 }

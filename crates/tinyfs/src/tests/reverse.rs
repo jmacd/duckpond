@@ -1,18 +1,18 @@
+use futures::stream::{self, Stream};
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use futures::stream::{self, Stream};
 
+use super::super::memory::new_fs;
+use crate::async_helpers::convenience;
 use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
 use crate::fs::FS;
-use crate::async_helpers::convenience;
 use crate::node::NodeRef;
 use crate::node::NodeType;
 use std::collections::BTreeSet;
-use super::super::memory::new_fs;
 
 pub struct ReverseDirectory {
     fs: FS,
@@ -28,7 +28,10 @@ impl ReverseDirectory {
     }
 
     pub fn new_handle<P: AsRef<Path>>(fs: FS, target_path: P) -> DirectoryHandle {
-        DirectoryHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(Self::new(fs, target_path)))))
+        DirectoryHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(Self::new(
+            fs,
+            target_path,
+        )))))
     }
 }
 
@@ -49,7 +52,9 @@ impl Directory for ReverseDirectory {
         Err(error::Error::immutable(name))
     }
 
-    async fn entries(&self) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<(String, NodeRef)>> + Send>>> {
+    async fn entries(
+        &self,
+    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<(String, NodeRef)>> + Send>>> {
         let root = self.fs.root().await?;
         let dir = root.open_dir_path(&self.target_path).await?;
         let mut dir_stream = dir.read_dir().await?;
@@ -76,8 +81,8 @@ impl crate::Metadata for ReverseDirectory {
             version: 1,
             size: None,
             sha256: None,
-            entry_type: crate::EntryType::Directory,
-	    timestamp: 0, // TODO	    
+            entry_type: crate::EntryType::DirectoryDynamic,
+            timestamp: 0, // TODO
         })
     }
 }
@@ -91,16 +96,23 @@ async fn test_reverse_directory() {
     // Create a filesystem with some test files
     let fs = new_fs().await;
     let root = fs.root().await.unwrap();
-    root.create_dir_path("/1").await.unwrap();
-    convenience::create_file_path(&root, "/1/hello.txt", b"Hello World")
-        .await.unwrap();
-    convenience::create_file_path(&root, "/1/test.bin", b"Binary Data")
-        .await.unwrap();
+    _ = root.create_dir_path("/1").await.unwrap();
+    _ = convenience::create_file_path(&root, "/1/hello.txt", b"Hello World")
+        .await
+        .unwrap();
+    _ = convenience::create_file_path(&root, "/1/test.bin", b"Binary Data")
+        .await
+        .unwrap();
 
-    root.create_node_path("/2", || {
-        Ok(NodeType::Directory(ReverseDirectory::new_handle(fs.clone(), "/1")))
-    })
-    .await.unwrap();
+    _ = root
+        .create_node_path("/2", || {
+            Ok(NodeType::Directory(ReverseDirectory::new_handle(
+                fs.clone(),
+                "/1",
+            )))
+        })
+        .await
+        .unwrap();
 
     // Try to access the reversed filenames through the reverse directory
     let result1 = root.read_file_path_to_vec("/2/txt.olleh").await.unwrap();
@@ -118,10 +130,12 @@ async fn test_reverse_directory() {
     while let Some(np) = dir_stream.next().await {
         let file_node = np.borrow().await.as_file().unwrap();
         let reader = file_node.async_reader().await.unwrap();
-        let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader).await.unwrap();
+        let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
+            .await
+            .unwrap();
         actual.push((np.basename(), content));
     }
-    
+
     let actual: BTreeSet<_> = actual.into_iter().collect();
 
     let expected = BTreeSet::from([

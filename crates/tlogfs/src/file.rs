@@ -1,13 +1,16 @@
-use tinyfs::{File, Metadata, NodeMetadata, persistence::PersistenceLayer, NodeID, AsyncReadSeek, Error as TinyFSError};
 use crate::persistence::State;
-use std::sync::Arc;
-use std::pin::Pin;
-use std::future::Future;
 use async_trait::async_trait;
+use log::debug;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use tinyfs::{
+    AsyncReadSeek, Error as TinyFSError, File, Metadata, NodeID, NodeMetadata,
+    persistence::PersistenceLayer,
+};
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
-use log::debug;
 
 /// TLogFS file with transaction-integrated state management
 /// - Integrates write state with Delta Lake transaction lifecycle
@@ -16,13 +19,13 @@ use log::debug;
 pub struct OpLogFile {
     /// Unique node identifier for this file
     node_id: NodeID,
-    
+
     /// Parent directory node ID (for persistence operations)
     part_id: NodeID,
-    
+
     /// Reference to persistence layer (single source of truth)
     state: State,
-    
+
     /// Transaction-bound write state
     transaction_state: Arc<RwLock<TransactionWriteState>>,
 }
@@ -35,12 +38,9 @@ enum TransactionWriteState {
 
 impl OpLogFile {
     /// Create new file instance with persistence layer dependency injection
-    pub fn new(
-        node_id: NodeID,
-        part_id: NodeID,
-        state: State,
-    ) -> Self {
-        debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {part_id}");        
+    #[must_use]
+    pub fn new(node_id: NodeID, part_id: NodeID, state: State) -> Self {
+        debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {part_id}");
         Self {
             node_id,
             part_id,
@@ -48,18 +48,21 @@ impl OpLogFile {
             transaction_state: Arc::new(RwLock::new(TransactionWriteState::Ready)),
         }
     }
-    
+
     /// Get the node ID for this file
+    #[must_use]
     pub fn get_node_id(&self) -> NodeID {
         self.node_id
     }
-    
+
     /// Get the part ID (parent directory node ID) for this file
+    #[must_use]
     pub fn get_part_id(&self) -> NodeID {
         self.part_id
     }
-    
+
     /// Create a file handle for TinyFS integration
+    #[must_use]
     pub fn create_handle(oplog_file: OpLogFile) -> tinyfs::FileHandle {
         tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(oplog_file))))
     }
@@ -79,52 +82,65 @@ impl File for OpLogFile {
         // Check transaction state
         let state = self.transaction_state.read().await;
         if let TransactionWriteState::WritingInTransaction = *state {
-            return Err(tinyfs::Error::Other("File is being written in active transaction".to_string()));
+            return Err(tinyfs::Error::Other(
+                "File is being written in active transaction".to_string(),
+            ));
         }
         drop(state);
-        
+
         debug!("OpLogFile::async_reader() - creating streaming reader via persistence layer");
-        
+
         // Use streaming async reader instead of loading entire file into memory
-        let reader = self.state.async_file_reader(self.node_id.clone(), self.part_id.clone()).await
-                   .map_err(|e| TinyFSError::Other(e.to_string()))?;
+        let reader = self
+            .state
+            .async_file_reader(self.node_id, self.part_id)
+            .await
+            .map_err(|e| TinyFSError::Other(e.to_string()))?;
 
         debug!("OpLogFile::async_reader() - created streaming reader successfully");
-        
+
         Ok(reader)
     }
-    
+
     async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send + 'static>>> {
-         // Acquire write lock and check for recursive writes
-        // The main threat model here is preventing recursive scenarios where 
-        // a dynamically synthesized file evaluation tries to write a file 
+        // Acquire write lock and check for recursive writes
+        // The main threat model here is preventing recursive scenarios where
+        // a dynamically synthesized file evaluation tries to write a file
         // that is already being written in the same execution context
         let mut state = self.transaction_state.write().await;
         match *state {
             TransactionWriteState::WritingInTransaction => {
-                return Err(tinyfs::Error::Other("File is already being written in this transaction".to_string()));
+                return Err(tinyfs::Error::Other(
+                    "File is already being written in this transaction".to_string(),
+                ));
             }
             TransactionWriteState::Ready => {
                 *state = TransactionWriteState::WritingInTransaction;
             }
         }
         drop(state);
-        
+
         debug!("OpLogFile::async_writer()");
-        
+
         // Get the current entry type from metadata to preserve it
         let metadata = self.state.metadata(self.node_id, self.part_id).await?;
         let entry_type = metadata.entry_type;
-        
+
         // Create a simple buffering writer that will store content via persistence layer
         let persistence = self.state.clone();
-        let node_id = self.node_id.clone(); 
-        let part_id = self.part_id.clone();
+        let node_id = self.node_id;
+        let part_id = self.part_id;
         let transaction_state = self.transaction_state.clone();
-        
-        Ok(Box::pin(OpLogFileWriter::new(persistence, node_id, part_id, transaction_state, entry_type)))
+
+        Ok(Box::pin(OpLogFileWriter::new(
+            persistence,
+            node_id,
+            part_id,
+            transaction_state,
+            entry_type,
+        )))
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -142,13 +158,17 @@ struct OpLogFileWriter {
     entry_type: tinyfs::EntryType, // Store the original entry type
 }
 
+// OpLogFileWriter is Unpin because all its fields are Unpin
+// (Pin<Box<T>> is Unpin even though the T inside may not be)
+impl Unpin for OpLogFileWriter {}
+
 impl OpLogFileWriter {
     fn new(
-        state: State, 
-        node_id: NodeID, 
-	part_id: NodeID,
+        state: State,
+        node_id: NodeID,
+        part_id: NodeID,
         transaction_state: Arc<RwLock<TransactionWriteState>>,
-        entry_type: tinyfs::EntryType
+        entry_type: tinyfs::EntryType,
     ) -> Self {
         Self {
             buffer: Vec::new(),
@@ -166,6 +186,30 @@ impl OpLogFileWriter {
 impl Drop for OpLogFileWriter {
     fn drop(&mut self) {
         if !self.completed {
+            // 🚨 CRITICAL: Writer was dropped without calling shutdown()!
+            // This means the file data was buffered but NEVER PERSISTED to Delta Lake.
+            // The file metadata exists, but attempting to read will fail with
+            // "No non-empty versions found for file"
+
+            let bytes_lost = self.buffer.len();
+            if bytes_lost > 0 {
+                // PANIC on data loss - this is a programming error that MUST be fixed
+                panic!(
+                    "🚨 DATA LOSS: OpLogFileWriter dropped without shutdown()! \
+                    {} bytes of data were buffered but will NOT be persisted to Delta Lake. \
+                    You MUST call writer.shutdown().await? before dropping the writer. \
+                    Pattern: writer.write_all(...).await?; writer.flush().await?; writer.shutdown().await?;",
+                    bytes_lost
+                );
+            }
+
+            // Even if no data was written, warn about improper shutdown
+            log::warn!(
+                "⚠️  OpLogFileWriter dropped without shutdown() - no data was written, \
+                but this indicates improper AsyncWrite usage. \
+                Always call writer.shutdown().await? even for empty files."
+            );
+
             // Reset transaction state on drop (panic safety)
             if let Ok(mut state) = self.transaction_state.try_write() {
                 *state = TransactionWriteState::Ready;
@@ -181,11 +225,11 @@ impl AsyncWrite for OpLogFileWriter {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
         if this.completed {
             return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe, 
-                "Writer already completed"
+                std::io::ErrorKind::BrokenPipe,
+                "Writer already completed",
             )));
         }
         this.buffer.extend_from_slice(buf);
@@ -193,51 +237,58 @@ impl AsyncWrite for OpLogFileWriter {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
         if this.completed {
             Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
-                "Writer already completed"
+                "Writer already completed",
             )))
         } else {
             Poll::Ready(Ok(()))
         }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        let this = unsafe { self.get_unchecked_mut() };
-        
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let this = self.get_mut();
+
         if this.completed {
             return Poll::Ready(Ok(()));
         }
-        
+
         // Create completion future if not already created
         if this.completion_future.is_none() {
             let content = std::mem::take(&mut this.buffer);
             let mut state = this.state.clone();
-            let node_id = this.node_id.clone();
-            let part_id = this.part_id.clone();
+            let node_id = this.node_id;
+            let part_id = this.part_id;
             let transaction_state = this.transaction_state.clone();
-            let entry_type = this.entry_type.clone(); // Capture entry type
-            
+            let entry_type = this.entry_type;
+
             let content_len = content.len();
             let entry_type_debug = format!("{:?}", entry_type);
-            debug!("OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type_debug}");
-            
-            debug!("OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional");
-            
+            debug!(
+                "OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type_debug}"
+            );
+
+            debug!(
+                "OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional"
+            );
+
             let future = Box::pin(async move {
                 // Phase 4: Use new FileWriter architecture instead of old update methods
                 // Get the OpLogPersistence to access transaction guard API
                 let result = async {
                     // Use the new FileWriter pattern through transaction guard API
                     state.store_file_content_ref(
-                        node_id, 
-                        part_id, 
+                        node_id,
+                        part_id,
                         crate::file_writer::ContentRef::Small(content.clone()),
                         entry_type,
                         match entry_type {
-                            tinyfs::EntryType::FileSeries => {
+                            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                                 // Special case: Handle empty FileSeries (0 bytes) for metadata-only versions
                                 if content.is_empty() {
                                     debug!("OpLogFileWriter::poll_shutdown() - creating empty FileSeries for metadata-only version");
@@ -252,18 +303,17 @@ impl AsyncWrite for OpLogFileWriter {
                                     let reader = Cursor::new(content.clone());
                                     match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
                                         Ok(metadata) => metadata,
-                                        Err(_) => {
-                                            // Fallback to default metadata if extraction fails
-                                            crate::file_writer::FileMetadata::Series {
-                                                min_timestamp: 0,
-                                                max_timestamp: 0,
-                                                timestamp_column: "timestamp".to_string(),
-                                            }
+                                        Err(e) => {
+                                            // FAIL-FAST: Temporal metadata extraction failure is a data integrity issue
+                                            return Err(tinyfs::Error::Other(format!(
+                                                "Failed to extract temporal metadata from FileSeries content: {}. \
+                                                This indicates corrupted or incompatible data format.", e
+                                            )));
                                         }
                                     }
                                 }
                             }
-                            tinyfs::EntryType::FileTable => {
+                            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
                                 // For FileTable, extract schema
                                 use std::io::Cursor;
                                 let reader = Cursor::new(content);
@@ -285,30 +335,42 @@ impl AsyncWrite for OpLogFileWriter {
                     ).await
                         .map_err(|e| tinyfs::Error::Other(format!("FileWriter storage failed: {}", e)))
                 }.await;
-                
+
                 match result {
                     Ok(_) => {
-                        if entry_type == tinyfs::EntryType::FileSeries {
-                            debug!("OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture");
+                        if entry_type.is_series_file() {
+                            debug!(
+                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture"
+                            );
                         } else {
-                            debug!("OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture");
+                            debug!(
+                                "OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture"
+                            );
                         }
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        debug!("OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error_str}");
+                        debug!(
+                            "OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error_str}"
+                        );
                     }
                 }
-                
+
                 // Reset transaction state
                 let mut state = transaction_state.write().await;
                 *state = TransactionWriteState::Ready;
             });
             this.completion_future = Some(future);
         }
-        
+
         // Poll the completion future
-        match this.completion_future.as_mut().unwrap().as_mut().poll(cx) {
+        match this
+            .completion_future
+            .as_mut()
+            .expect("@@@ unsafe")
+            .as_mut()
+            .poll(cx)
+        {
             Poll::Ready(()) => {
                 this.completed = true;
                 Poll::Ready(Ok(()))
@@ -322,16 +384,20 @@ impl AsyncWrite for OpLogFileWriter {
 #[async_trait]
 impl crate::query::QueryableFile for OpLogFile {
     /// Create TableProvider for OpLogFile by delegating to existing logic
-    /// 
+    ///
     /// Follows anti-duplication: reuses existing create_listing_table_provider
     /// instead of duplicating DataFusion setup logic.
     async fn as_table_provider(
         &self,
-        node_id: tinyfs::NodeID,
-        part_id: tinyfs::NodeID,
-        state: &crate::persistence::State,
-    ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-        log::info!("📋 DELEGATING OpLogFile to create_listing_table_provider: node_id={}, part_id={}", node_id, part_id);
+        node_id: NodeID,
+        part_id: NodeID,
+        state: &State,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+        log::info!(
+            "📋 DELEGATING OpLogFile to create_listing_table_provider: node_id={}, part_id={}",
+            node_id,
+            part_id
+        );
         // Delegate to existing create_listing_table_provider - no duplication
         crate::file_table::create_listing_table_provider(node_id, part_id, state).await
     }
@@ -342,20 +408,23 @@ impl crate::query::QueryableFile for OpLogFile {
 pub async fn create_table_provider_for_multiple_urls(
     urls: Vec<String>,
     tx: &mut crate::transaction_guard::TransactionGuard<'_>,
-) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-    log::info!("📋 CREATING TableProvider for multiple URLs: {} files", urls.len());
-    use crate::file_table::{create_table_provider, TableProviderOptions};
+) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+    log::info!(
+        "📋 CREATING TableProvider for multiple URLs: {} files",
+        urls.len()
+    );
+    use crate::file_table::{TableProviderOptions, create_table_provider};
     use tinyfs::NodeID;
-    
+
     // Use dummy node IDs since we're providing explicit URLs
     let dummy_node_id = NodeID::root();
     let dummy_part_id = NodeID::root();
-    
+
     let options = TableProviderOptions {
         additional_urls: urls,
         ..Default::default()
     };
-    
+
     let state = tx.state()?;
     create_table_provider(dummy_node_id, dummy_part_id, &state, options).await
 }

@@ -2,9 +2,9 @@
 use crate::persistence::State;
 use async_trait::async_trait;
 use futures::Stream;
+use log::debug;
 use std::pin::Pin;
 use std::sync::Arc;
-use log::debug;
 use tinyfs::{
     DirHandle, Directory, Metadata, NodeID, NodeMetadata, NodeRef,
     persistence::{DirectoryOperation, PersistenceLayer},
@@ -16,12 +16,8 @@ use tokio::sync::Mutex;
 /// - Simple delegation to persistence layer
 /// - Proper separation of concerns
 pub struct OpLogDirectory {
-    /// Unique node identifier for this directory
+    /// Unique node identifier for this directory, same partition ID.
     node_id: NodeID,
-
-    /// Parent directory node ID (for partition lookup)
-    /// For dynamic dirs, this will != node_id.
-    part_id: NodeID,
 
     /// Reference to persistence layer (single source of truth)
     state: State,
@@ -29,26 +25,65 @@ pub struct OpLogDirectory {
 
 impl OpLogDirectory {
     /// Create new directory instance with persistence layer dependency injection
-    pub fn new(node_id: NodeID, part_id: NodeID, state: State) -> Self {
-        debug!("directory node {node_id} part {part_id}");
+    #[must_use]
+    pub fn new(node_id: NodeID, state: State) -> Self {
+        debug!("directory node/part {node_id}");
 
-        Self {
-            node_id,
-            part_id,
-            state,
-        }
+        Self { node_id, state }
     }
 
     /// Create a DirHandle from this directory
+    #[must_use]
     pub fn create_handle(self) -> DirHandle {
         DirHandle::new(Arc::new(Mutex::new(Box::new(self))))
+    }
+
+    /// Determine the correct partition ID for a child based on its comprehensive EntryType
+    ///
+    /// CRITICAL: EntryType is now comprehensive - it includes both the access method
+    /// (directory, file, symlink) AND whether the node is physical or dynamic.
+    /// This allows partition determination WITHOUT querying OplogEntry.factory.
+    ///
+    /// Partition Rules:
+    /// - DirectoryPhysical: uses child_node_id as part_id (creates own partition)
+    /// - All other types: use self.node_id as part_id (parent's partition)
+    ///   - DirectoryDynamic: parent's partition
+    ///   - All files (physical/dynamic): parent's partition
+    ///   - Symlinks: parent's partition
+    fn get_child_partition_id(
+        &self,
+        child_node_id: NodeID,
+        entry_type: &tinyfs::EntryType,
+    ) -> tinyfs::Result<NodeID> {
+        match entry_type {
+            tinyfs::EntryType::DirectoryPhysical => {
+                // Physical directories create their own partition
+                debug!(
+                    "Physical directory {}, creating own partition",
+                    child_node_id
+                );
+                Ok(child_node_id)
+            }
+            _ => {
+                // Everything else uses parent's partition:
+                // - Dynamic directories
+                // - All files (physical and dynamic)
+                // - Symlinks
+                debug!(
+                    "Node {} (type: {}), using parent partition",
+                    child_node_id,
+                    entry_type.as_str()
+                );
+                Ok(self.node_id)
+            }
+        }
     }
 }
 
 #[async_trait]
 impl Metadata for OpLogDirectory {
     async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
-        self.state.metadata(self.node_id, self.part_id).await
+        self.state.metadata(self.node_id, self.node_id).await
     }
 }
 
@@ -58,30 +93,11 @@ impl Directory for OpLogDirectory {
         let name_bound = name;
         debug!("get {name_bound} via persistence layer");
 
-        // Get current directory node ID
-        // let node_id = self
-        //     .parse_node_id()
-        //     .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
         // Use enhanced query that returns node type
         if let Some((child_node_id, entry_type)) =
             self.state.query_directory_entry(self.node_id, name).await?
         {
-            let part_id = match entry_type {
-                tinyfs::EntryType::Directory => {
-
-		    // @@@ This is dumb
-                    match self
-                        .state
-                        .get_dynamic_node_config(child_node_id, self.node_id)
-                        .await
-                    {
-                        Ok(Some(_)) => self.node_id,
-                        _ => child_node_id,
-                    }
-                }
-                _ => self.node_id, // Files and symlinks use parent's partition
-            };
+            let part_id = self.get_child_partition_id(child_node_id, &entry_type)?;
             // Load node from correct partition
             let child_node_type = self.state.load_node(child_node_id, part_id).await?;
 
@@ -90,10 +106,10 @@ impl Directory for OpLogDirectory {
                 id: child_node_id,
                 node_type: child_node_type,
             };
-            let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
+            let node_ref = NodeRef::new(Arc::new(Mutex::new(node)));
 
             let name_bound = name;
-            let child_node_id_bound = format!("{:?}", child_node_id);
+            let child_node_id_bound = format!("{}", child_node_id);
             debug!("get '{name_bound}' found child with node_id: {child_node_id_bound}");
             Ok(Some(node_ref))
         } else {
@@ -122,46 +138,11 @@ impl Directory for OpLogDirectory {
         };
 
         // Store the child node first (if not already stored)
-        // For static directories, they should use their own node_id as part_id (create their own partition)
-        // For dynamic directories, they should use the parent's node_id as part_id (no separate partition)
-        // For files and symlinks, they should use the parent's node_id as part_id
-        let part_id = match &child_node_type {
-            tinyfs::NodeType::Directory(_) => {
-                // Check if this is a dynamic directory by looking for factory configuration
-                // Dynamic directories should not create their own partitions
-                let child_node_id_str = child_node_id.to_hex_string();
-                match self
-                    .state
-                    .get_dynamic_node_config(child_node_id, self.node_id)
-                    .await
-                {
-		    // @@@ This is a pattern repeating
-                    Ok(Some(_)) => {
-                        // Dynamic directory - use parent's partition
-                        debug!("Directory::insert - detected dynamic directory {child_node_id_str}, using parent partition");
-                        self.node_id
-                    }
-                    _ => {
-                        // Static directory - create own partition
-                        debug!("Directory::insert - detected static directory {child_node_id_str}, creating own partition");
-                        child_node_id
-                    }
-                }
-            }
-            _ => self.node_id, // Files and symlinks use parent's partition
-        };
-
-        let already_exists = self.state.exists_node(child_node_id, part_id).await?;
-        if !already_exists {
-            self.state
-                .store_node(child_node_id, part_id, &child_node_type)
-                .await?;
-        }
-
-        // Determine node type for directory entry by using the actual entry type stored in NodeType
+        // Determine comprehensive entry type including physical/dynamic distinction
         let entry_type = match &child_node_type {
             tinyfs::NodeType::File(handle) => {
-                // Query the file handle's metadata to get the entry type
+                // Query the file handle's metadata to get the comprehensive entry type
+                // (includes physical/dynamic distinction)
                 handle
                     .metadata()
                     .await
@@ -170,21 +151,53 @@ impl Directory for OpLogDirectory {
                     })?
                     .entry_type
             }
-            tinyfs::NodeType::Directory(_) => tinyfs::EntryType::Directory,
+            tinyfs::NodeType::Directory(_) => {
+                // For directories being inserted via insert(), they are physical directories
+                // Dynamic directories are created through create_dynamic_directory path
+                // and don't go through OpLogDirectory::insert()
+                tinyfs::EntryType::DirectoryPhysical
+            }
             tinyfs::NodeType::Symlink(_) => tinyfs::EntryType::Symlink,
         };
+
+        let part_id = self.get_child_partition_id(child_node_id, &entry_type)?;
+
+        let already_exists = self.state.exists_node(child_node_id, part_id).await?;
+        if !already_exists {
+            // For directories: Track as created but don't store yet
+            // This avoids creating empty v0 when the directory will be populated in the same transaction
+            // flush_directory_operations() will create the entry with content if the directory gets populated
+            // Truly empty leaf directories will be handled at commit time
+            match &entry_type {
+                tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
+                    debug!(
+                        "OpLogDirectory::insert - directory {} tracked as created (deferred storage)",
+                        child_node_id
+                    );
+                    self.state.track_created_directory(child_node_id).await;
+                }
+                _ => {
+                    // Files and symlinks store immediately
+                    self.state
+                        .store_node(child_node_id, part_id, &child_node_type)
+                        .await?;
+                }
+            }
+        }
 
         self.state
             .update_directory_entry(
                 self.node_id,
                 &name,
-                DirectoryOperation::InsertWithType(child_node_id, entry_type.clone()),
+                DirectoryOperation::InsertWithType(child_node_id, entry_type),
             )
             .await?;
 
         let name_bound = &name;
         let node_type_bound = entry_type.as_str();
-        debug!("OpLogDirectory::insert('{name_bound}') - completed via persistence layer with node_type: {node_type_bound}");
+        debug!(
+            "OpLogDirectory::insert('{name_bound}') - completed via persistence layer with node_type: {node_type_bound}"
+        );
         Ok(())
     }
 
@@ -209,30 +222,18 @@ impl Directory for OpLogDirectory {
 
         for (name, (child_node_id, entry_type)) in entries_with_types {
             // Load each child node using deterministic partition selection
-            let part_id = match entry_type {
-                tinyfs::EntryType::Directory => {
-		    // @@@ AGAIN
-                    // Check if this is a dynamic directory
-                    // Dynamic directories are stored in parent's partition, static directories in their own
-                    let child_node_id_str = child_node_id.to_hex_string();
-                    match self
-                        .state
-                        .get_dynamic_node_config(child_node_id, self.node_id)
-                        .await
-                    {
-                        Ok(Some(_)) => {
-                            // Dynamic directory - use parent's partition
-                            debug!("Directory::entries - loading dynamic directory {child_node_id_str} from parent partition");
-                            self.node_id
-                        }
-                        _ => {
-                            // Static directory - use own partition
-                            debug!("Directory::entries - loading static directory {child_node_id_str} from own partition");
-                            child_node_id
-                        }
-                    }
+            let part_id = match self.get_child_partition_id(child_node_id, &entry_type) {
+                Ok(part_id) => part_id,
+                Err(e) => {
+                    let child_node_hex = child_node_id.to_string();
+                    let error_msg = format!(
+                        "Failed to determine partition for {}: {}",
+                        child_node_hex, e
+                    );
+                    debug!("Directory::entries - {}", error_msg);
+                    entry_results.push(Err(tinyfs::Error::Other(error_msg)));
+                    continue;
                 }
-                _ => self.node_id, // Files and symlinks use parent's partition
             };
 
             // Load node from correct partition
@@ -243,23 +244,23 @@ impl Directory for OpLogDirectory {
                         id: child_node_id,
                         node_type: child_node_type,
                     };
-                    let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(node)));
+                    let node_ref = NodeRef::new(Arc::new(Mutex::new(node)));
                     entry_results.push(Ok((name, node_ref)));
                 }
                 Err(e) => {
-                    let child_node_hex = child_node_id.to_hex_string();
+                    let child_node_hex = child_node_id.to_string();
                     let error_msg = format!("{}", e);
                     debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}");
-                    
+
                     // Create a clearer error for data integrity issues
-                    let integrity_error = tinyfs::Error::NotFound(
-                        std::path::PathBuf::from(format!(
+                    let integrity_error = tinyfs::Error::NotFound(std::path::PathBuf::from(
+                        format!(
                             "DATA INTEGRITY ISSUE: Directory '{}' contains reference to nonexistent node {}. \
                             This indicates metadata corruption where directory entries point to deleted or missing nodes. \
-                            Original error: {}", 
+                            Original error: {}",
                             name, child_node_hex, error_msg
-                        ))
-                    );
+                        ),
+                    ));
                     entry_results.push(Err(integrity_error));
                 }
             }

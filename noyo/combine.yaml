@@ -6,8 +6,12 @@ entries:
         vulink: "/hydrovu/devices/**/BDockVulink.series"
         at500: "/hydrovu/devices/**/BDockAT500.series"
       query: |
-        SELECT * FROM vulink 
-        NATURAL FULL OUTER JOIN at500 
+        SELECT 
+          COALESCE(vulink.timestamp, at500.timestamp) AS timestamp,
+          vulink.* EXCLUDE (timestamp),
+          at500.* EXCLUDE (timestamp)
+        FROM vulink 
+        FULL OUTER JOIN at500 ON vulink.timestamp = at500.timestamp
         ORDER BY timestamp
 
   - name: "Silver"  
@@ -17,8 +21,12 @@ entries:
         vulink: "/hydrovu/devices/**/SilverVulink*.series"
         at500: "/hydrovu/devices/**/SilverAT500.series"
       query: |
-        SELECT * FROM vulink
-        NATURAL FULL OUTER JOIN at500
+        SELECT 
+          COALESCE(vulink.timestamp, at500.timestamp) AS timestamp,
+          vulink.* EXCLUDE (timestamp),
+          at500.* EXCLUDE (timestamp)
+        FROM vulink
+        FULL OUTER JOIN at500 ON vulink.timestamp = at500.timestamp
         ORDER BY timestamp
 
   - name: "Princess"
@@ -28,6 +36,10 @@ entries:
         vulink: "/hydrovu/devices/**/PrincessVulink.series"
         at500: "/hydrovu/devices/**/PrincessAT500.series"
       query: |
-        SELECT * FROM vulink 
-        NATURAL FULL OUTER JOIN at500 
+        SELECT 
+          COALESCE(vulink.timestamp, at500.timestamp) AS timestamp,
+          vulink.* EXCLUDE (timestamp),
+          at500.* EXCLUDE (timestamp)
+        FROM vulink 
+        FULL OUTER JOIN at500 ON vulink.timestamp = at500.timestamp
         ORDER BY timestamp

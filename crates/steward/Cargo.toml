@@ -2,24 +2,46 @@
 name = "steward"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[lib]
+doctest = false
 
 [dependencies]
 anyhow = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
+arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 datafusion = { workspace = true }
+datafusion-functions-json = { workspace = true }
 deltalake = { workspace = true }
 log = { workspace = true }
+object_store = { workspace = true }
 serde = { workspace = true }
+serde_arrow = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
 tokio = { workspace = true }
+utilities = { workspace = true }
 uuid7 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio-test = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+
+[lints]
+workspace = true

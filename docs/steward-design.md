@@ -2,327 +2,575 @@
 
 ## Overview
 
-The Steward crate provides serialized commit coordination and post-commit action management for DuckPond's dual-filesystem architecture. It ensures atomicity and consistency across both data and control filesystems while enabling extensible post-commit hooks for operations like replication.
+The Steward crate provides transaction coordination and audit trail management for DuckPond. It ensures atomicity and consistency for data operations while maintaining a complete audit log of all transactions through a Delta Lake control table.
 
 ## Core Purpose
 
-Steward exists to solve the problem of **coordinated transactional commits across two independent Delta Lake instances** while providing **serialized post-commit action execution**. This enables:
+Steward coordinates transactions between the tlogfs persistence layer and application logic while maintaining comprehensive audit trails. This enables:
 
-1. **Atomic dual-filesystem operations** - Ensures both data and control filesystems remain consistent
-2. **Serialized commit sequencing** - Prevents race conditions in concurrent environments  
-3. **Post-commit hook infrastructure** - Enables replication, notification, and other follow-up actions
-4. **Crash recovery** - Maintains consistency even after system failures
+1. **Transaction sequence management** - Ensures write transactions increment sequences atomically, read transactions provide snapshot isolation
+2. **Read/Write separation** - Distinguishes transactions that modify data from those that only query
+3. **Complete audit trail** - Records every transaction (successful or failed) in the control table for monitoring and debugging
+4. **Post-commit factory execution** - Runs background tasks after successful data commits
+5. **Crash recovery** - Marks incomplete transactions during recovery for audit completeness
 
 ## Architecture Components
 
-### Ship - The Main Orchestrator
+### Ship - The Transaction Coordinator
 
-The `Ship` struct is the central coordinator managing:
+The `Ship` struct coordinates transactions and maintains sequence state:
 
 ```rust
 pub struct Ship {
-    /// Primary filesystem for user data
-    data_fs: FS,
-    /// Secondary filesystem for steward control and transaction metadata
-    control_fs: FS,
-    /// Direct access to data persistence layer for metadata operations
+    /// Data persistence layer (tlogfs) - authoritative source for transaction sequences
     data_persistence: OpLogPersistence,
+    /// Control table for audit trail and transaction lifecycle tracking
+    control_table: ControlTable,
+    /// Cached last write sequence (synchronized from data_persistence)
+    last_write_seq: AtomicI64,
     /// Path to the pond root
     pond_path: String,
-    /// Current transaction descriptor (if any)
-    current_tx_desc: Option<TxDesc>,
 }
 ```
 
-### Dual Filesystem Model
+### Single Data Layer with Control Table
 
-**Data Filesystem (`data_fs`)**:
-- Contains user data and application objects
-- Backed by Delta Lake at `{pond}/data/`
-- Generates the primary transaction sequence via Delta Lake versions
-- Each commit creates a new Delta Lake version (0, 1, 2, ...)
+**Data Persistence (tlogfs/Delta Lake)**:
+- Contains all user data backed by Delta Lake at `{pond}/data/`
+- **Authoritative source** for transaction sequences via Delta Lake commit metadata
+- Each write transaction creates a new Delta Lake version with metadata: `{"pond_txn": {txn_seq, txn_id, args, vars}}`
+- Read transactions provide snapshot isolation without creating new versions
 
-**Control Filesystem (`control_fs`)**:
-- Contains transaction metadata and steward configuration
-- Backed by Delta Lake at `{pond}/control/`
-- Stores transaction descriptors at `/txn/{version}`
-- Enables crash recovery and audit trails
+**Control Table (Delta Lake)**:
+- Separate Delta Lake table at `{pond}/control/` for audit trail
+- Records **every transaction** (read and write, successful and failed)
+- Tracks transaction lifecycle: begin → outcome (data_committed | completed | failed)
+- Enables monitoring, debugging, and compliance auditing
+- Post-commit task tracking for background factory executions
 
 ### Transaction Coordination Protocol
 
-#### Commit Sequence
+#### Transaction Types
+
+**Write Transactions**:
+- Increment the transaction sequence: `txn_seq = last_write_seq + 1`
+- Commit to Delta Lake with metadata containing txn_seq, txn_id, args, vars
+- Create a new Delta Lake table version
+- Recorded in control table with `data_fs_version`
+
+**Read Transactions**:
+- Reuse the last write sequence: `txn_seq = last_write_seq` (for snapshot isolation)
+- Do NOT commit to Delta Lake or create new versions
+- Provide read atomicity by snapshotting at a specific sequence
+- Recorded in control table with `based_on_seq` to show which version was read
+
+#### Write Transaction Sequence
 
 1. **Begin Transaction**
    ```rust
-   ship.begin_transaction_with_args(args).await?;
+   let options = TransactionOptions::write(args);
+   let tx = ship.begin_transaction(options).await?;
    ```
-   - Stores transaction descriptor with command arguments
-   - Begins transaction on data filesystem
+   - Allocates next sequence: `txn_seq = last_write_seq + 1`
+   - Creates UUID7 transaction identifier
+   - Records "begin" in control table with transaction type
+   - Calls `data_persistence.begin_write(txn_seq, metadata)`
 
 2. **Perform Operations**
    ```rust
-   let root = ship.data_fs().root().await?;
+   let root = tx.root().await?;
    root.create_file_path("/example.txt", b"content").await?;
    ```
    - Execute filesystem operations within the transaction
 
-3. **Coordinated Commit**
+3. **Commit**
    ```rust
-   ship.commit_transaction().await?;
+   tx.commit().await?;
    ```
-   - Commits data filesystem WITH recovery metadata
-   - Reads committed Delta Lake version
-   - Records transaction metadata in control filesystem
-   - Future: Executes post-commit hooks
+   - Commits to Delta Lake with metadata in commit
+   - Control table records "data_committed" with new `data_fs_version`
+   - Runs post-commit factories if configured
 
-#### Version Mapping
+#### Read Transaction Sequence
 
-The system uses Delta Lake versions directly to avoid off-by-one errors:
+1. **Begin Transaction**
+   ```rust
+   let options = TransactionOptions::read(args);
+   let tx = ship.begin_transaction(options).await?;
+   ```
+   - Reuses current sequence: `txn_seq = last_write_seq`
+   - Records "begin" in control table with `based_on_seq`
+   - Calls `data_persistence.begin_read(txn_seq, metadata)`
 
-- **First commit**: Delta Lake version 0 → `/txn/0`
-- **Second commit**: Delta Lake version 1 → `/txn/1`  
-- **Third commit**: Delta Lake version 2 → `/txn/2`
+2. **Perform Queries**
+   ```rust
+   let ctx = tx.session_context().await?;
+   let df = ctx.sql("SELECT * FROM my_table").await?;
+   ```
+   - Execute read-only operations with snapshot isolation
 
-This eliminates artificial sequence number mapping and reduces complexity.
+3. **Complete**
+   ```rust
+   tx.commit().await?;  // Returns None
+   ```
+   - Does NOT commit to Delta Lake
+   - Control table records "completed" (no version bump)
+   - Provides consistent read view at `based_on_seq`
+
+### Transaction Sequencing
+
+**tlogfs is Authoritative**:
+- On pond open, tlogfs loads `last_txn_seq` from Delta Lake commit metadata
+- Ship synchronizes: `last_write_seq = data_persistence.last_txn_seq()`
+- Single source of truth eliminates sequence drift
+
+**Sequence Validation**:
+- Write transactions: tlogfs validates `txn_seq == last + 1`
+- Read transactions: tlogfs validates `txn_seq == last`
+- Violations return errors before any operations execute
+
+**Test Convenience**:
+- Production code: `begin_write(txn_seq, metadata)` or `begin_read(txn_seq, metadata)`
+- Tests: `begin_test()` auto-increments sequence (no parameters needed)
+
+### Transaction Metadata
+
+**PondTxnMetadata** (provided at begin):
+```rust
+pub struct PondTxnMetadata {
+    pub txn_id: String,                  // UUID7 for recovery/debugging
+    pub args: Vec<String>,               // CLI arguments
+    pub vars: HashMap<String, String>,   // Key/value parameters
+}
+```
+
+**DeltaCommitMetadata** (stored in Delta Lake commits):
+```rust
+pub struct DeltaCommitMetadata {
+    pub txn_seq: i64,                    // Injected at commit time
+    pub txn_id: String,
+    pub args: Vec<String>,
+    pub vars: HashMap<String, String>,
+}
+```
+
+The `txn_seq` is added during commit, allowing tlogfs to load the authoritative sequence on pond open.
+
+### Control Table Audit Trail
+
+The control table records **every transaction** for complete audit visibility:
+
+**TransactionRecord Schema**:
+```rust
+pub struct TransactionRecord {
+    txn_seq: i64,                      // Transaction sequence
+    txn_id: String,                    // UUID7 identifier
+    based_on_seq: Option<i64>,         // For reads: which version
+    record_type: String,               // "begin" | "data_committed" | "completed" | "failed"
+    timestamp: i64,                    // Microseconds since epoch
+    transaction_type: String,          // "read" | "write" | "post_commit"
+    cli_args: Vec<String>,             // CLI arguments
+    environment: HashMap<String, String>, // Variables
+    data_fs_version: Option<i64>,      // Delta version (writes only)
+    error_message: Option<String>,     // For failures
+    duration_ms: Option<i64>,          // Execution time
+    
+    // Post-commit task tracking
+    parent_txn_seq: Option<i64>,       // Triggering transaction
+    execution_seq: Option<i32>,        // Factory execution order
+    factory_name: Option<String>,      // Factory that executed
+    config_path: Option<String>,       // Config file path
+}
+```
+
+**Transaction Lifecycle**:
+
+1. **record_begin()** - Called when transaction starts
+   - Records txn_seq, txn_id, transaction_type ("read" or "write")
+   - For reads: includes `based_on_seq` to show snapshot version
+   - Captures CLI args and environment variables
+   - Records start timestamp
+
+2. **Outcome Recording** - One of three possibilities:
+
+   **record_data_committed()** - Write transaction succeeded
+   - Writes new `data_fs_version` (Delta Lake table version)
+   - Records `duration_ms` for performance monitoring
+
+   **record_completed()** - Read transaction succeeded (or idempotent write)
+   - No version bump
+   - Records duration for monitoring
+
+   **record_failed()** - Transaction failed
+   - Captures `error_message` with failure details
+   - Records duration until failure
+
+**Querying Transaction History**:
+
+```sql
+-- View recent transaction activity
+SELECT txn_seq, txn_id, record_type, transaction_type, 
+       data_fs_version, error_message, duration_ms
+FROM control_table
+ORDER BY timestamp DESC
+LIMIT 20;
+
+-- Check for failures
+SELECT txn_seq, txn_id, error_message, duration_ms
+FROM control_table
+WHERE record_type = 'failed'
+ORDER BY timestamp DESC;
+
+-- Monitor read vs write activity
+SELECT transaction_type, COUNT(*) as count
+FROM control_table
+WHERE record_type = 'begin'
+GROUP BY transaction_type;
+
+-- Track post-commit background tasks
+SELECT parent_txn_seq, factory_name, record_type, error_message
+FROM control_table
+WHERE parent_txn_seq IS NOT NULL
+ORDER BY parent_txn_seq, execution_seq;
+```
 
 ### Crash Recovery System
 
+Crash recovery identifies incomplete transactions in the control table and marks them as "completed" with a recovery flag.
+
 #### Recovery Detection
-
-```rust
-ship.check_recovery_needed().await?;
-```
-
-Compares Delta Lake versions against control filesystem metadata:
-- If Delta Lake is at version N but `/txn/N` is missing → recovery needed
-- Detects partial commits where data committed but metadata recording failed
-
-#### Recovery Process
 
 ```rust
 let result = ship.recover().await?;
 ```
 
-1. **Scan for gaps**: Check versions 0 through current for missing `/txn/{version}` files
-2. **Extract metadata**: Retrieve steward metadata from Delta Lake commit info
-3. **Reconstruct control records**: Create missing `/txn/{version}` files
-4. **Verify consistency**: Ensure all commits have corresponding metadata
+Scans the control table for transactions with "begin" records but no outcome record:
+- Query for `record_type = 'begin'` without matching commit/completed/failed
+- Indicates crash occurred between transaction start and outcome recording
+- Returns list of incomplete transactions with their sequences and IDs
 
-#### Metadata Embedding
+#### Recovery Process
 
-During commit, steward embeds recovery metadata in Delta Lake commits:
+For each incomplete transaction:
+1. **Mark as recovered**: Call `record_completed(txn_seq, txn_id, 0)` with zero duration
+2. **Distinguish from normal**: Recovery records can be identified by zero or very low duration
+3. **Preserve audit trail**: Incomplete transactions remain visible in control table history
+4. **Resume operations**: After recovery, pond is ready for normal transactions
 
-```rust
-let tx_metadata = HashMap::from([
-    ("steward_tx_args", serde_json::Value::String(tx_desc.to_json()?)),
-    ("steward_recovery_needed", serde_json::Value::Bool(true)),
-    ("steward_timestamp", serde_json::Value::Number(timestamp)),
-]);
-```
+Recovery is automatic on pond open and ensures the control table audit trail is complete.
 
-This enables complete recovery of transaction context even after crashes.
+## Post-Commit Factory System
 
-## Transaction Descriptors
+Post-commit factories execute background tasks after successful write transactions.
 
-### TxDesc Structure
+### Factory Discovery and Execution
 
-```rust
-pub struct TxDesc {
-    pub args: Vec<String>,
-    // Additional metadata fields...
-}
-```
+After a write transaction commits successfully, Steward:
 
-Contains:
-- **Command arguments**: Original CLI args that triggered the transaction
-- **Timestamps**: For audit and debugging
-- **Recovery flags**: Crash recovery state tracking
+1. **Discovers factories** from `/etc/system.d/*` configuration files
+2. **Filters by mode**: Only executes factories with `mode: "push"` (skips "pull" mode)
+3. **Executes in order**: Runs factories sequentially based on config file names (e.g., `10-validate`, `20-replicate`)
+4. **Tracks in control table**: Records pending, started, completed, and failed states
 
-### Metadata Storage
+### Factory Lifecycle Tracking
 
-Transaction metadata is stored as JSON in control filesystem:
-
-```
-/control/_delta_log/           # Delta Lake metadata
-/control/txn/0                 # Transaction 0 metadata (JSON)
-/control/txn/1                 # Transaction 1 metadata (JSON)
-/control/txn/2                 # Transaction 2 metadata (JSON)
-```
-
-Example `/txn/0` content:
-```json
-{
-  "args": ["pond", "init"],
-  "timestamp": 1691234567890,
-  "command_name": "pond"
-}
-```
-
-## Post-Commit Hook Architecture (Future)
-
-### Design Intent
-
-Post-commit hooks will execute AFTER successful dual-filesystem commit:
+Each factory execution creates control table records:
 
 ```rust
-// Future implementation
-impl Ship {
-    async fn commit_transaction(&mut self) -> Result<(), StewardError> {
-        // 1. Commit data filesystem with metadata
-        self.commit_data_fs_with_metadata(tx_metadata).await?;
-        
-        // 2. Get committed version
-        let version = self.get_committed_transaction_version().await?;
-        
-        // 3. Record control metadata
-        self.record_transaction_metadata(version).await?;
-        
-        // 4. Execute post-commit hooks (FUTURE)
-        self.execute_post_commit_hooks(version).await?;
-        
-        Ok(())
-    }
-}
+// Before execution
+record_post_commit_pending(parent_txn_seq, execution_seq, factory_name, config_path)
+
+// When starting
+record_post_commit_started(txn_seq, txn_id)
+
+// On success
+record_post_commit_completed(txn_seq, txn_id, duration_ms)
+
+// On failure  
+record_post_commit_failed(txn_seq, txn_id, error_message, duration_ms)
 ```
 
-### Hook Types
+**Control Table Fields**:
+- `parent_txn_seq`: The write transaction that triggered this factory
+- `execution_seq`: Ordinal in factory list (1, 2, 3...)
+- `factory_name`: Name from factory configuration
+- `config_path`: Path to config file (e.g., `/etc/system.d/10-validate`)
 
-**Replication Hooks**:
-- Trigger replication of data filesystem changes
-- Ensure remote systems stay synchronized
-- Handle replication failures and retries
+### Factory Transaction Model
 
-**Notification Hooks**:  
-- Send change notifications to external systems
-- Update search indices or caches
-- Trigger downstream processing pipelines
+Each factory execution runs in its own **write transaction**:
+- Gets next sequence: `txn_seq = last_write_seq + 1`
+- Has its own `txn_id` (UUID7)
+- Commits to Delta Lake if it modifies data
+- Recorded with `transaction_type = "post_commit"`
 
-**Audit Hooks**:
-- Log detailed change information
-- Update compliance systems
-- Generate change reports
+This enables factories to:
+- Make data modifications (e.g., validation tables, metrics)
+- Chain additional factory executions
+- Participate in the full audit trail
 
-### Hook Ordering and Failure Handling
+### Factory Configuration Example
 
-Hooks will execute in dependency order with failure isolation:
-- **Serialized execution**: One hook at a time to prevent conflicts
-- **Failure isolation**: Hook failures don't affect other hooks
-- **Retry mechanisms**: Failed hooks can be retried with exponential backoff
-- **Hook metadata**: Track hook execution state in control filesystem
+```yaml
+# /etc/system.d/10-validate
+name: "validation"
+mode: "push"  # Execute on post-commit
+command: ["pond", "validate", "--all"]
+```
+
+Factories with `mode: "pull"` are skipped during post-commit execution.
 
 ## Integration with DuckPond
 
 ### CLI Integration
 
-Commands use steward for all filesystem modifications:
+Commands use Steward's transaction API for all data operations:
 
 ```rust
-// pond init
-let ship = Ship::initialize_new_pond(&pond_path, args).await?;
+// pond init - creates pond with root transaction
+let ship = Ship::initialize_pond(&pond_path, args).await?;
 
-// pond copy file1 file2  
+// pond write operations - use write transactions
 let mut ship = Ship::open_existing_pond(&pond_path).await?;
-ship.begin_transaction_with_args(args).await?;
-// ... perform copy operation ...
-ship.commit_transaction().await?;
+let options = TransactionOptions::write(args);
+let tx = ship.begin_transaction(options).await?;
+// ... perform write operations ...
+tx.commit().await?;
+
+// pond query operations - use read transactions
+let options = TransactionOptions::read(args);
+let tx = ship.begin_transaction(options).await?;
+let ctx = tx.session_context().await?;
+// ... execute queries ...
+tx.commit().await?;  // Returns None, no Delta commit
+```
+
+### Convenience Methods
+
+**transact()** - Scoped write transaction:
+```rust
+ship.transact(args, |tx, fs| {
+    Box::pin(async move {
+        let root = fs.root().await?;
+        root.create_file_path("/data.txt", b"content").await?;
+        Ok(())  // Auto-commits on success
+    })
+}).await?;
+```
+
+**transact_with_session()** - Scoped transaction with DataFusion SQL:
+```rust
+ship.transact_with_session(args, |tx, fs, ctx| {
+    Box::pin(async move {
+        ctx.sql("CREATE TABLE foo AS SELECT * FROM bar").await?;
+        Ok(())
+    })
+}).await?;
 ```
 
 ### Factory System Integration
 
-Dynamic filesystem objects work within steward transactions:
+Dynamic filesystem objects work within transactions:
 - **CSV directories**: Present CSV files as queryable Arrow tables
 - **SQL-derived nodes**: Computed from other filesystem data
 - **Hostmount directories**: Mirror host filesystem paths
 
-All factory-generated objects participate in the transaction system.
+All factory-generated objects participate in the transaction system and can trigger post-commit executions.
 
 ## Error Handling and Edge Cases
 
-### Empty Transactions
+### Read Transaction Validation
 
-Transactions with no filesystem operations are rejected:
-```
-Error: Cannot commit transaction with no filesystem operations
+If a transaction marked as "read" attempts to write data, it fails:
+```rust
+Error: ReadTransactionAttemptedWrite
 ```
 
-This prevents spurious version increments and maintains clean audit trails.
+The control table records this as a "failed" transaction with the error message.
+
+### Idempotent Write Operations
+
+Write transactions that make no changes (e.g., `mkdir -p` for existing directory) are allowed:
+- Commit returns `Ok(None)` instead of `Ok(Some(()))`
+- Control table records "completed" instead of "data_committed"
+- No Delta Lake version created
+- Prevents spurious version increments
 
 ### Concurrent Access
 
-While individual transactions are atomic, concurrent steward instances are not currently supported. Future versions may add distributed locking.
+Steward uses an atomic counter (`AtomicI64`) for sequence allocation:
+- Write transactions atomically increment: `fetch_add(1, Ordering::SeqCst)`
+- Read transactions atomically read: `load(Ordering::SeqCst)`
+- Delta Lake commits are serialized by the underlying storage layer
+
+Future versions may add distributed locking for multi-host coordination.
 
 ### Storage Backend Failures
 
-Delta Lake storage failures are propagated as `StewardError::DeltaLake` errors, allowing callers to implement appropriate retry logic.
+Delta Lake storage failures propagate as errors, allowing retry logic:
+- `StewardError::DataInit` - tlogfs/Delta Lake errors
+- `StewardError::ControlTable` - Control table recording errors
+
+Transaction guards auto-rollback on drop if not committed.
 
 ## Performance Considerations
 
 ### Transaction Overhead
 
-Each transaction requires:
-- **Data filesystem commit**: Delta Lake write with metadata
-- **Version lookup**: Fresh Delta Lake table read
-- **Control filesystem commit**: Metadata file write
+Each write transaction involves:
+- **Sequence allocation**: Atomic increment (microseconds)
+- **Control table begin record**: Single Delta Lake append (milliseconds)
+- **Data operations**: Application-specific work
+- **Delta Lake commit**: With metadata (milliseconds to seconds depending on data size)
+- **Control table outcome record**: Single Delta Lake append (milliseconds)
 
-This overhead is acceptable for command-level transactions but may need optimization for high-frequency operations.
+Read transactions skip Delta commit but still record lifecycle in control table.
+
+### Control Table Growth
+
+The control table grows with every transaction:
+- **Linear growth**: 2 records per write transaction (begin + outcome)
+- **2 records per read**: Begin + completed
+- **Compaction**: Future versions may implement retention policies for old records
+- **Query performance**: Indexed by timestamp and txn_seq for efficient queries
 
 ### Recovery Performance
 
-Recovery scanning is linear in the number of versions:
-- **O(n) scan**: Check each version for missing metadata
-- **Batching opportunities**: Future versions could batch recovery operations
+Recovery scans control table for incomplete transactions:
+- **O(n) query**: Single SQL query for unmatched "begin" records
+- **Efficient**: Control table is separate Delta Lake table, doesn't scan data
+- **Typically fast**: Only incomplete transactions need marking
 
 ## Testing Strategy
 
 ### Unit Tests
 
-- **Transaction lifecycle**: Begin, operate, commit sequences
-- **Version mapping**: Delta Lake version to metadata file mapping
-- **Error conditions**: Empty transactions, missing metadata
+- **Transaction lifecycle**: Begin, commit sequences for read and write
+- **Read/write separation**: Validate read transactions cannot write
+- **Sequence validation**: Ensure proper increment and reuse logic
+- **Control table recording**: Verify all transaction states recorded
+- **Idempotent operations**: Test no-op write behavior
 
 ### Integration Tests
 
-- **Crash recovery**: Simulate failures at various points
-- **Dual filesystem consistency**: Verify both filesystems stay synchronized
+- **Crash recovery**: Simulate incomplete transactions and verify recovery
+- **Post-commit factories**: Test factory discovery and execution
+- **SessionContext access**: Verify DataFusion SQL within transactions
 - **Command integration**: Test with actual CLI commands
 
-### Delta Lake Tests
+### Test Convenience Features
 
-Dedicated tests verify Delta Lake version behavior:
-- **Version numbering**: Confirm versions start at 0 and increment
-- **Handle consistency**: Verify committed changes are immediately visible
-- **Fresh handle behavior**: Confirm new handles see all commits
+**Automatic sequencing**:
+```rust
+// Production code
+let metadata = PondTxnMetadata::new(txn_id, args, vars);
+let tx = persistence.begin_write(txn_seq, metadata).await?;
+
+// Test code (auto-increments)
+let tx = persistence.begin_test().await?;
+tx.commit_test().await?;
+```
+
+Tests use `begin_test()` with no parameters for automatic sequence management.
+
+## Monitoring and Observability
+
+### Transaction Metrics
+
+Query the control table for operational metrics:
+
+**Success rate**:
+```sql
+SELECT 
+    COUNT(CASE WHEN record_type IN ('data_committed', 'completed') THEN 1 END) as success,
+    COUNT(CASE WHEN record_type = 'failed' THEN 1 END) as failed
+FROM control_table
+WHERE timestamp > current_timestamp - INTERVAL '1 hour';
+```
+
+**Average duration by type**:
+```sql
+SELECT transaction_type, AVG(duration_ms) as avg_duration_ms
+FROM control_table
+WHERE record_type IN ('data_committed', 'completed', 'failed')
+GROUP BY transaction_type;
+```
+
+**Post-commit factory performance**:
+```sql
+SELECT factory_name, 
+       COUNT(*) as executions,
+       AVG(duration_ms) as avg_duration,
+       COUNT(CASE WHEN record_type = 'post_commit_failed' THEN 1 END) as failures
+FROM control_table
+WHERE parent_txn_seq IS NOT NULL
+GROUP BY factory_name
+ORDER BY avg_duration DESC;
+```
+
+### Pond Identity
+
+Each pond has immutable identity metadata stored in control table properties:
+
+```rust
+pub struct PondMetadata {
+    pond_id: String,           // UUID v7
+    birth_timestamp: i64,      // Creation time
+    birth_hostname: String,    // Where created
+    birth_username: String,    // Who created
+}
+```
+
+This enables tracking pond lineage across replicas and environments.
 
 ## Future Enhancements
 
 ### Distributed Coordination
 
-Add support for multiple concurrent steward instances:
-- **Distributed locking**: Prevent concurrent modifications
-- **Consensus protocols**: Ensure consistent ordering across instances
+Support for multiple concurrent Steward instances:
+- **Distributed sequence allocation**: Coordinate sequence numbers across hosts
+- **Consensus protocols**: Ensure consistent ordering in multi-writer scenarios
+- **Lock-free algorithms**: Optimize for high-concurrency environments
 
-### Advanced Hook System
+### Advanced Factory System
 
-- **Hook dependencies**: Define execution order requirements
-- **Conditional hooks**: Execute based on transaction content
-- **Hook rollback**: Undo hook effects on failure
+- **Factory dependencies**: Define execution order and prerequisites
+- **Conditional execution**: Run factories based on transaction content (e.g., only if specific paths modified)
+- **Factory rollback**: Undo factory effects on subsequent failures
+- **Factory retries**: Configurable retry policies with exponential backoff
+- **Factory chaining**: Factories that trigger other factories
+
+### Control Table Enhancements
+
+- **Retention policies**: Automatically archive or delete old transaction records
+- **Compaction strategies**: Optimize control table performance as it grows
+- **Replication tracking**: Record which replicas have received which transactions
+- **Change capture**: Detailed diffs of what each transaction modified
 
 ### Performance Optimizations  
 
-- **Batch operations**: Group multiple operations into single transactions
-- **Lazy recovery**: Delay recovery until next write operation
-- **Metadata caching**: Cache frequently accessed metadata
+- **Batch operations**: Group multiple operations into single transaction
+- **Parallel factories**: Execute independent post-commit tasks concurrently
+- **Lazy control table writes**: Buffer control records for batch writes
+- **Sequence number caching**: Reduce atomic operations in high-frequency scenarios
 
-### Monitoring and Observability
+### Enhanced Monitoring
 
-- **Transaction metrics**: Commit rates, failure rates, recovery frequency
-- **Hook performance**: Execution times and failure patterns
-- **Storage utilization**: Delta Lake growth patterns
+- **Real-time dashboards**: Live transaction activity visualization
+- **Alerting**: Notifications for failed transactions or slow factories
+- **Anomaly detection**: Identify unusual transaction patterns
+- **Performance profiling**: Detailed timing breakdown of transaction phases
 
 ## Conclusion
 
-The Steward architecture provides a robust foundation for coordinated transactional operations across dual Delta Lake instances. Its design prioritizes correctness and recoverability while laying groundwork for future extensibility through post-commit hooks.
+The Steward architecture provides comprehensive transaction coordination with complete audit trails for DuckPond. Key design principles:
 
-The elimination of artificial sequence number mapping and direct use of Delta Lake versions reduces complexity and potential for off-by-one errors. The comprehensive crash recovery system ensures data integrity even in failure scenarios.
+1. **tlogfs is authoritative** - Single source of truth for transaction sequences via Delta Lake metadata
+2. **Read/write separation** - Clear semantics for data modification vs. queries with snapshot isolation
+3. **Complete audit trail** - Control table records every transaction lifecycle for monitoring and compliance
+4. **Post-commit factories** - Extensible background task execution after successful writes
+5. **Crash recovery** - Automatic detection and marking of incomplete transactions
 
-This architecture enables DuckPond to provide ACID guarantees across its complex filesystem operations while maintaining the flexibility needed for advanced features like replication and external system integration.
+The architecture eliminates sequence drift by loading authoritative sequences from Delta Lake on pond open. The control table provides comprehensive visibility into transaction history, enabling monitoring, debugging, and compliance tracking without requiring external logging systems.
+
+This design enables DuckPond to provide ACID guarantees with full observability while maintaining the flexibility needed for advanced features like replication, validation, and external system integration.

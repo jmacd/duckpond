@@ -1,18 +1,18 @@
 // Phase 2 TLogFS Schema Implementation - Abstraction Consolidation
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
-use serde::{Deserialize, Serialize};
-use tinyfs::NodeID;
-use std::sync::Arc;
 use datafusion::common::Result;
-use std::collections::HashMap;
-use log::debug;
 use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
-use sha2::{Sha256, Digest};
+use log::debug;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tinyfs::NodeID;
 
 /// Extended attributes - immutable metadata set at file creation
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ExtendedAttributes {
     /// Simple key → String value mapping
     pub attributes: HashMap<String, String>,
@@ -26,70 +26,86 @@ pub mod duckpond {
 }
 
 impl ExtendedAttributes {
-    pub fn new() -> Self {
-        Self { attributes: HashMap::new() }
-    }
-    
     /// Create from JSON string (for reading from OplogEntry)
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         let attributes: HashMap<String, String> = serde_json::from_str(json)?;
         Ok(Self { attributes })
     }
-    
+
     /// Serialize to JSON string (for storing in OplogEntry)
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(&self.attributes)
     }
-    
+
     /// Set timestamp column name (defaults to "Timestamp" if not set)
     pub fn set_timestamp_column(&mut self, column_name: &str) -> &mut Self {
-        self.attributes.insert(duckpond::TIMESTAMP_COLUMN.to_string(), column_name.to_string());
+        _ = self.attributes.insert(
+            duckpond::TIMESTAMP_COLUMN.to_string(),
+            column_name.to_string(),
+        );
         self
     }
-    
+
     /// Get timestamp column name with default fallback
+    #[must_use]
     pub fn timestamp_column(&self) -> &str {
-        self.attributes.get(duckpond::TIMESTAMP_COLUMN)
+        self.attributes
+            .get(duckpond::TIMESTAMP_COLUMN)
             .map(|s| s.as_str())
-            .unwrap_or("Timestamp")  // Default column name
+            .unwrap_or("Timestamp") // Default column name
     }
-    
+
     /// Set temporal overrides (convenience method for setting both min/max)
-    pub fn set_temporal_overrides(&mut self, min_override: Option<i64>, max_override: Option<i64>) -> &mut Self {
+    pub fn set_temporal_overrides(
+        &mut self,
+        min_override: Option<i64>,
+        max_override: Option<i64>,
+    ) -> &mut Self {
         if let Some(min) = min_override {
-            self.attributes.insert(duckpond::MIN_TEMPORAL_OVERRIDE.to_string(), min.to_string());
+            _ = self
+                .attributes
+                .insert(duckpond::MIN_TEMPORAL_OVERRIDE.to_string(), min.to_string());
         }
         if let Some(max) = max_override {
-            self.attributes.insert(duckpond::MAX_TEMPORAL_OVERRIDE.to_string(), max.to_string());
+            _ = self
+                .attributes
+                .insert(duckpond::MAX_TEMPORAL_OVERRIDE.to_string(), max.to_string());
         }
         self
     }
-    
+
     /// Get temporal overrides from extended attributes
+    #[must_use]
     pub fn temporal_overrides(&self) -> Option<(i64, i64)> {
-        let min = self.attributes.get(duckpond::MIN_TEMPORAL_OVERRIDE)
+        let min = self
+            .attributes
+            .get(duckpond::MIN_TEMPORAL_OVERRIDE)
             .and_then(|s| s.parse::<i64>().ok());
-        let max = self.attributes.get(duckpond::MAX_TEMPORAL_OVERRIDE)
+        let max = self
+            .attributes
+            .get(duckpond::MAX_TEMPORAL_OVERRIDE)
             .and_then(|s| s.parse::<i64>().ok());
-        
+
         match (min, max) {
             (Some(min), Some(max)) => Some((min, max)),
             _ => None,
         }
     }
-    
+
     /// Set/get raw attributes (for future extensibility)
     pub fn set_raw(&mut self, key: &str, value: &str) -> &mut Self {
-        self.attributes.insert(key.to_string(), value.to_string());
+        _ = self.attributes.insert(key.to_string(), value.to_string());
         self
     }
-    
+
+    #[must_use]
     pub fn get_raw(&self, key: &str) -> Option<&str> {
         self.attributes.get(key).map(|s| s.as_str())
     }
-    
-    /// Create from a HashMap of arbitrary attributes  
-    pub fn from_map(attributes: std::collections::HashMap<String, String>) -> Self {
+
+    /// Create from a HashMap of arbitrary attributes
+    #[must_use]
+    pub fn from_map(attributes: HashMap<String, String>) -> Self {
         Self { attributes }
     }
 }
@@ -100,35 +116,54 @@ pub fn extract_temporal_range_from_batch(
     batch: &arrow::record_batch::RecordBatch,
     time_column: &str,
 ) -> Result<(i64, i64), crate::error::TLogFSError> {
-    use arrow::datatypes::{DataType, TimeUnit};
     use arrow::array::{Array, TimestampSecondArray};
-    
-    let time_array = batch
-        .column_by_name(time_column)
-        .ok_or_else(|| crate::error::TLogFSError::ArrowMessage(
-            format!("Time column '{}' not found in batch", time_column)
-        ))?;
-    
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    let time_array = batch.column_by_name(time_column).ok_or_else(|| {
+        crate::error::TLogFSError::ArrowMessage(format!(
+            "Time column '{}' not found in batch",
+            time_column
+        ))
+    })?;
+
     // Handle different timestamp types
     match time_array.data_type() {
         DataType::Timestamp(TimeUnit::Second, _) => {
-            let array = time_array.as_any().downcast_ref::<TimestampSecondArray>()
-                .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
+            let array = time_array
+                .as_any()
+                .downcast_ref::<TimestampSecondArray>()
+                .ok_or_else(|| {
+                    crate::error::TLogFSError::ArrowMessage(
+                        "Failed to downcast timestamp array".to_string(),
+                    )
+                })?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
             // Keep original units
             Ok((min, max))
         }
         DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            let array = time_array.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
+            let array = time_array
+                .as_any()
+                .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                .ok_or_else(|| {
+                    crate::error::TLogFSError::ArrowMessage(
+                        "Failed to downcast timestamp array".to_string(),
+                    )
+                })?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
             Ok((min, max))
         }
         DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            let array = time_array.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-                .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast timestamp array".to_string()))?;
+            let array = time_array
+                .as_any()
+                .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                .ok_or_else(|| {
+                    crate::error::TLogFSError::ArrowMessage(
+                        "Failed to downcast timestamp array".to_string(),
+                    )
+                })?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
             // Keep microseconds - maintain native precision
@@ -136,25 +171,41 @@ pub fn extract_temporal_range_from_batch(
         }
         DataType::Int64 => {
             // Handle raw int64 timestamps
-            let array = time_array.as_any().downcast_ref::<arrow::array::Int64Array>()
-                .ok_or_else(|| crate::error::TLogFSError::ArrowMessage("Failed to downcast int64 array".to_string()))?;
+            let array = time_array
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .ok_or_else(|| {
+                    crate::error::TLogFSError::ArrowMessage(
+                        "Failed to downcast int64 array".to_string(),
+                    )
+                })?;
             let min = array.iter().flatten().min().unwrap_or(0);
             let max = array.iter().flatten().max().unwrap_or(0);
             Ok((min, max))
         }
-        _ => Err(crate::error::TLogFSError::ArrowMessage(
-            format!("Unsupported timestamp type: {:?}", time_array.data_type())
-        ))
+        _ => Err(crate::error::TLogFSError::ArrowMessage(format!(
+            "Unsupported timestamp type: {:?}",
+            time_array.data_type()
+        ))),
     }
 }
 
 /// Auto-detect timestamp column with priority order
-pub fn detect_timestamp_column(schema: &arrow::datatypes::Schema) -> Result<String, crate::error::TLogFSError> {
+pub fn detect_timestamp_column(
+    schema: &arrow::datatypes::Schema,
+) -> Result<String, crate::error::TLogFSError> {
     use arrow::datatypes::DataType;
-    
+
     // Priority order for auto-detection
-    let candidates = ["timestamp", "Timestamp", "event_time", "time", "ts", "datetime"];
-    
+    let candidates = [
+        "timestamp",
+        "Timestamp",
+        "event_time",
+        "time",
+        "ts",
+        "datetime",
+    ];
+
     for candidate in candidates {
         if let Some(field) = schema.column_with_name(candidate) {
             match field.1.data_type() {
@@ -165,13 +216,14 @@ pub fn detect_timestamp_column(schema: &arrow::datatypes::Schema) -> Result<Stri
             }
         }
     }
-    
+
     Err(crate::error::TLogFSError::ArrowMessage(
-        "No timestamp column found in schema".to_string()
+        "No timestamp column found in schema".to_string(),
     ))
 }
 
 /// Compute SHA256 for any content (small or large files)
+#[must_use]
 pub fn compute_sha256(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
@@ -183,6 +235,7 @@ pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
 
     /// Default implementation that converts Arrow schema to Delta Lake schema
+    #[must_use]
     fn for_delta() -> Vec<DeltaStructField> {
         let afs = Self::for_arrow();
 
@@ -234,7 +287,7 @@ pub struct OplogEntry {
     /// File size in bytes (Some() for all files, None for directories/symlinks)
     /// NOTE: Uses i64 instead of u64 to match Delta Lake protocol (Java ecosystem legacy)
     pub size: Option<i64>,
-    
+
     // NEW: Event time metadata for efficient temporal queries (FileSeries support)
     /// Minimum timestamp from data column for fast SQL range queries
     /// Some() for FileSeries entries, None for other entry types
@@ -255,6 +308,10 @@ pub struct OplogEntry {
 
     /// Factory type for dynamic files/directories ("tlogfs" for static, "hostmount" for hostmount dynamic dir, etc)
     pub factory: Option<String>,
+
+    /// Transaction sequence number from Steward
+    /// This links OpLog records to transaction sequences for chronological ordering
+    pub txn_seq: i64,
 }
 
 impl ForArrow for OplogEntry {
@@ -265,17 +322,13 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("file_type", DataType::Utf8, false)),
             Arc::new(Field::new(
                 "timestamp",
-                DataType::Timestamp(
-                    TimeUnit::Microsecond,
-                    Some("UTC".into()),
-                ),
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
                 false,
             )),
             Arc::new(Field::new("version", DataType::Int64, false)),
             Arc::new(Field::new("content", DataType::Binary, true)), // Now nullable for large files
             Arc::new(Field::new("sha256", DataType::Utf8, true)), // New field for large file checksums
             Arc::new(Field::new("size", DataType::Int64, true)), // File size in bytes (Int64 to match Delta Lake protocol)
-            
             // NEW: Temporal metadata fields for FileSeries support
             Arc::new(Field::new("min_event_time", DataType::Int64, true)), // Min timestamp from data for fast queries
             Arc::new(Field::new("max_event_time", DataType::Int64, true)), // Max timestamp from data for fast queries
@@ -283,35 +336,39 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("max_override", DataType::Int64, true)), // Manual override for temporal bounds
             Arc::new(Field::new("extended_attributes", DataType::Utf8, true)), // JSON-encoded application metadata
             Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
+            Arc::new(Field::new("txn_seq", DataType::Int64, false)), // Transaction sequence number from Steward (required)
         ]
     }
 }
 
 impl OplogEntry {
     /// Create Arrow schema for OplogEntry
+    #[must_use]
     pub fn create_schema() -> Arc<arrow::datatypes::Schema> {
         Arc::new(arrow::datatypes::Schema::new(Self::for_arrow()))
     }
-    
+
     /// Create entry for small file (<= threshold)
+    #[must_use]
     pub fn new_small_file(
-        part_id: NodeID, 
-        node_id: NodeID, 
+        part_id: NodeID,
+        node_id: NodeID,
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
-        content: Vec<u8>
+        content: Vec<u8>,
+        txn_seq: i64,
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type,
             timestamp,
             version,
             content: Some(content.clone()),
             sha256: Some(compute_sha256(&content)), // NEW: Always compute SHA256
-            size: Some(size as i64), // Cast to i64 to match Delta Lake protocol
+            size: Some(size as i64),                // Cast to i64 to match Delta Lake protocol
             // Temporal metadata - None for non-series files
             min_event_time: None,
             max_event_time: None,
@@ -319,22 +376,26 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            txn_seq,
         }
     }
-    
+
     /// Create entry for large file (> threshold)
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_large_file(
-        part_id: NodeID, 
-        node_id: NodeID, 
+        part_id: NodeID,
+        node_id: NodeID,
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
         sha256: String,
         size: i64,
+        txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type,
             timestamp,
             version,
@@ -348,21 +409,24 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            txn_seq,
         }
     }
-    
+
     /// Create entry for non-file types (directories, symlinks) - always inline
+    #[must_use]
     pub fn new_inline(
         part_id: NodeID,
         node_id: NodeID,
         file_type: tinyfs::EntryType,
         timestamp: i64,
         version: i64,
-        content: Vec<u8>
+        content: Vec<u8>,
+        txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
             file_type,
             timestamp,
             version,
@@ -376,21 +440,26 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            txn_seq,
         }
     }
-    
+
     /// Check if this entry represents a large file (based on content absence)
+    #[must_use]
     pub fn is_large_file(&self) -> bool {
         self.content.is_none() && self.file_type.is_file()
     }
-    
+
     /// Get file size (guaranteed for files, None for directories/symlinks)
+    #[must_use]
     pub fn file_size(&self) -> Option<i64> {
         self.size
     }
-    
+
     /// Create entry for FileSeries with temporal metadata extraction
     /// This is the specialized constructor for time series data
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_file_series(
         part_id: NodeID,
         node_id: NodeID,
@@ -400,12 +469,13 @@ impl OplogEntry {
         min_event_time: i64,
         max_event_time: i64,
         extended_attributes: ExtendedAttributes,
+        txn_seq: i64,
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
-            file_type: tinyfs::EntryType::FileSeries,
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
+            file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
             content: Some(content.clone()),
@@ -417,26 +487,30 @@ impl OplogEntry {
             min_override: None, // No overrides by default
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
-            factory: None,
+            factory: None, // Physical file, no factory
+            txn_seq,
         }
     }
-    
+
     /// Create entry for large FileSeries (> threshold) with temporal metadata
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_large_file_series(
         part_id: NodeID,
         node_id: NodeID,
         timestamp: i64,
         version: i64,
         sha256: String,
-        size: i64,  // Changed from u64 to i64 to match Delta Lake protocol
+        size: i64, // Changed from u64 to i64 to match Delta Lake protocol
         min_event_time: i64,
         max_event_time: i64,
         extended_attributes: ExtendedAttributes,
+        txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
-            file_type: tinyfs::EntryType::FileSeries,
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
+            file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
             content: None,
@@ -448,39 +522,46 @@ impl OplogEntry {
             min_override: None, // No overrides by default
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
-            factory: None,
+            factory: None, // Physical file, no factory
+            txn_seq,
         }
     }
-    
+
     /// Get extended attributes if present
+    #[must_use]
     pub fn get_extended_attributes(&self) -> Option<ExtendedAttributes> {
-        self.extended_attributes.as_ref()
+        self.extended_attributes
+            .as_ref()
             .and_then(|json| ExtendedAttributes::from_json(json).ok())
     }
-    
+
     /// Check if this entry is a FileSeries with temporal metadata
+    #[must_use]
     pub fn is_series_file(&self) -> bool {
-        self.file_type == tinyfs::EntryType::FileSeries
+        self.file_type.is_series_file()
     }
-    
+
     /// Get temporal range for series files
+    #[must_use]
     pub fn temporal_range(&self) -> Option<(i64, i64)> {
         match (self.min_event_time, self.max_event_time) {
             (Some(min), Some(max)) => Some((min, max)),
             _ => None,
         }
     }
-    
+
     /// Get temporal overrides if set
+    #[must_use]
     pub fn temporal_overrides(&self) -> Option<(i64, i64)> {
         match (self.min_override, self.max_override) {
             (Some(min), Some(max)) => Some((min, max)),
             _ => None,
         }
     }
-    
+
     /// Get effective temporal range (overrides take precedence over auto-detected range)
     /// This is the key method for temporal overlap detection and resolution
+    #[must_use]
     pub fn effective_temporal_range(&self) -> Option<(i64, i64)> {
         // Use overrides if available, otherwise fall back to auto-detected range
         if let Some(overrides) = self.temporal_overrides() {
@@ -489,20 +570,21 @@ impl OplogEntry {
             self.temporal_range()
         }
     }
-    
+
     /// Set temporal overrides (for command-line tools)
     pub fn set_temporal_overrides(&mut self, min_override: Option<i64>, max_override: Option<i64>) {
         self.min_override = min_override;
         self.max_override = max_override;
     }
-    
+
     /// Clear temporal overrides (reset to auto-detected bounds)
     pub fn clear_temporal_overrides(&mut self) {
         self.min_override = None;
         self.max_override = None;
     }
-    
+
     /// Extract consolidated metadata
+    #[must_use]
     pub fn metadata(&self) -> tinyfs::NodeMetadata {
         tinyfs::NodeMetadata {
             version: self.version as u64,
@@ -512,9 +594,10 @@ impl OplogEntry {
             timestamp: self.timestamp,
         }
     }
-    
+
     /// Create entry for dynamic directory with factory type and configuration
     /// This is the primary constructor for dynamic nodes as described in the plan
+    #[must_use]
     pub fn new_dynamic_directory(
         part_id: NodeID,
         node_id: NodeID,
@@ -522,11 +605,12 @@ impl OplogEntry {
         version: i64,
         factory_type: &str,
         config_content: Vec<u8>,
+        txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
-            file_type: tinyfs::EntryType::Directory,
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
+            file_type: tinyfs::EntryType::DirectoryDynamic, // Use comprehensive type
             timestamp,
             version,
             content: Some(config_content), // Configuration stored in content field
@@ -538,10 +622,13 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
+            txn_seq,
         }
     }
-    
+
     /// Create entry for dynamic file with factory type and configuration
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_dynamic_file(
         part_id: NodeID,
         node_id: NodeID,
@@ -550,11 +637,26 @@ impl OplogEntry {
         version: i64,
         factory_type: &str,
         config_content: Vec<u8>,
+        txn_seq: i64,
     ) -> Self {
+        // Convert physical file type to dynamic variant
+        let dynamic_file_type = match file_type {
+            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
+                tinyfs::EntryType::FileDataDynamic
+            }
+            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
+                tinyfs::EntryType::FileTableDynamic
+            }
+            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
+                tinyfs::EntryType::FileSeriesDynamic
+            }
+            _ => file_type, // Leave other types unchanged (though should only be file types)
+        };
+
         Self {
-            part_id: part_id.to_hex_string(),
-            node_id: node_id.to_hex_string(),
-            file_type,
+            part_id: part_id.to_string(),
+            node_id: node_id.to_string(),
+            file_type: dynamic_file_type,
             timestamp,
             version,
             content: Some(config_content), // Configuration stored in content field
@@ -566,25 +668,72 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
+            txn_seq,
         }
     }
-    
+
     /// Check if this entry is a dynamic node (has factory type)
+    #[must_use]
     pub fn is_dynamic(&self) -> bool {
         self.factory.is_some() && self.factory.as_ref() != Some(&"tlogfs".to_string())
     }
-    
+
     /// Get factory type if this is a dynamic node
+    #[must_use]
     pub fn factory_type(&self) -> Option<&str> {
-        self.factory.as_ref().map(|s| s.as_str())
+        self.factory.as_deref()
     }
-    
+
     /// Get factory configuration content if this is a dynamic node
+    #[must_use]
     pub fn factory_config(&self) -> Option<&[u8]> {
         if self.is_dynamic() {
-            self.content.as_ref().map(|v| v.as_slice())
+            self.content.as_deref()
         } else {
             None
+        }
+    }
+
+    /// Get comprehensive EntryType that includes physical/dynamic distinction
+    /// This is the authoritative method for determining the complete entry type
+    /// including whether the node is factory-based or not.
+    #[must_use]
+    pub fn comprehensive_entry_type(&self) -> tinyfs::EntryType {
+        let is_dynamic = self.is_dynamic();
+
+        match self.file_type {
+            tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
+                // Directory: check factory field to determine physical vs dynamic
+                if is_dynamic {
+                    tinyfs::EntryType::DirectoryDynamic
+                } else {
+                    tinyfs::EntryType::DirectoryPhysical
+                }
+            }
+            tinyfs::EntryType::Symlink => tinyfs::EntryType::Symlink,
+
+            // Files: check factory field and preserve base format
+            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
+                if is_dynamic {
+                    tinyfs::EntryType::FileDataDynamic
+                } else {
+                    tinyfs::EntryType::FileDataPhysical
+                }
+            }
+            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
+                if is_dynamic {
+                    tinyfs::EntryType::FileTableDynamic
+                } else {
+                    tinyfs::EntryType::FileTablePhysical
+                }
+            }
+            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
+                if is_dynamic {
+                    tinyfs::EntryType::FileSeriesDynamic
+                } else {
+                    tinyfs::EntryType::FileSeriesPhysical
+                }
+            }
         }
     }
 }
@@ -598,26 +747,37 @@ pub struct VersionedDirectoryEntry {
     pub child_node_id: String,
     /// Type of operation
     pub operation_type: OperationType,
-    /// Type of node (file, directory, or symlink) @@@ Call it entry_type
-    pub node_type: tinyfs::EntryType,
+    /// Comprehensive entry type (includes physical/dynamic distinction)
+    /// This field contains ALL information needed to determine partition assignment
+    pub entry_type: tinyfs::EntryType,
 }
 
 impl VersionedDirectoryEntry {
     /// Create a new directory entry with EntryType (convenience constructor)
-    pub fn new(name: String, child_node_id: Option<NodeID>, operation_type: OperationType, entry_type: tinyfs::EntryType) -> Self {
+    #[must_use]
+    pub fn new(
+        name: String,
+        child_node_id: Option<NodeID>,
+        operation_type: OperationType,
+        entry_type: tinyfs::EntryType,
+    ) -> Self {
         Self {
             name,
             child_node_id: child_node_id
-		.map(|x| x.to_hex_string())
-		.unwrap_or("".to_string()),
+		.map(|x| x.to_string())
+		.unwrap_or_else(|| {
+		    // FAIL-FAST: Empty node IDs indicate architectural confusion
+		    panic!("VersionedDirectoryEntry created with None node_id - this indicates a fundamental API misuse. Operation: {:?}", operation_type)
+		}),
             operation_type,
-            node_type: entry_type,
+            entry_type,
         }
     }
-    
-    /// Get the node type as an EntryType (Copy trait makes this simple)
+
+    /// Get the entry type (Copy trait makes this simple)
+    #[must_use]
     pub fn entry_type(&self) -> tinyfs::EntryType {
-        self.node_type
+        self.entry_type
     }
 }
 
@@ -635,13 +795,15 @@ impl ForArrow for VersionedDirectoryEntry {
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
             Arc::new(Field::new("operation_type", DataType::Utf8, false)),
-            Arc::new(Field::new("node_type", DataType::Utf8, false)),
+            Arc::new(Field::new("entry_type", DataType::Utf8, false)),
         ]
     }
 }
 
 /// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
-pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>) -> Result<Vec<u8>, crate::error::TLogFSError> {
+pub fn encode_versioned_directory_entries(
+    entries: &Vec<VersionedDirectoryEntry>,
+) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
     let entry_count = entries.len();
@@ -654,10 +816,12 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
 
     // Use serde_arrow consistently for both empty and non-empty cases
     let batch = serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?;
-    
+
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
-    debug!("encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns");
+    debug!(
+        "encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns"
+    );
 
     let mut buffer = Vec::new();
     let options = IpcWriteOptions::default();
@@ -665,8 +829,44 @@ pub fn encode_versioned_directory_entries(entries: &Vec<VersionedDirectoryEntry>
         StreamWriter::try_new_with_options(&mut buffer, batch.schema().as_ref(), options)?;
     writer.write(&batch)?;
     writer.finish()?;
-    
+
     let buffer_len = buffer.len();
     debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes");
     Ok(buffer)
+}
+
+/// Decode VersionedDirectoryEntry records from Arrow IPC bytes
+pub fn decode_versioned_directory_entries(
+    content: &[u8],
+) -> Result<Vec<VersionedDirectoryEntry>, crate::error::TLogFSError> {
+    use arrow::ipc::reader::StreamReader;
+
+    // Handle empty directories (0 bytes of content)
+    if content.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    debug!(
+        "decode_versioned_directory_entries() - processing {} bytes",
+        content.len()
+    );
+
+    let mut reader = StreamReader::try_new(std::io::Cursor::new(content), None).map_err(|e| {
+        crate::error::TLogFSError::ArrowMessage(format!("Failed to create IPC StreamReader: {}", e))
+    })?;
+
+    if let Some(batch_result) = reader.next() {
+        let batch = batch_result.map_err(|e| {
+            crate::error::TLogFSError::ArrowMessage(format!("Failed to read IPC batch: {}", e))
+        })?;
+
+        let entries: Vec<VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+        debug!(
+            "decode_versioned_directory_entries() - decoded {} entries",
+            entries.len()
+        );
+        Ok(entries)
+    } else {
+        Ok(Vec::new())
+    }
 }

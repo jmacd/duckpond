@@ -1,5 +1,7 @@
 hydrovu_path: "/hydrovu"
 max_points_per_run: 10000
+client_id: "{{ env(name='HYDRO_KEY_ID') }}"
+client_secret: "{{ env(name='HYDRO_KEY_VALUE') }}"
 devices:
   - name:  BDockVulink
     scope: Vulink

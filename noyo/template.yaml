@@ -4,10 +4,10 @@ entries:
     config:
       in_pattern: "/reduced/single_param/**/*.series"
       out_pattern: "param=$0.md"
-      template_file: data.md.tmpl
+      template_file: "/etc/data.md.tmpl"
   - name: "sites"
     factory: "template"
     config:
       in_pattern: "/reduced/single_site/**/*.series"
       out_pattern: "site=$0.md"
-      template_file: data.md.tmpl
+      template_file: "/etc/data.md.tmpl"

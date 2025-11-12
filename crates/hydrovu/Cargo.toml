@@ -2,6 +2,17 @@
 name = "hydrovu"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[lib]
+doctest = false
 
 [dependencies]
 # Workspace dependencies
@@ -11,24 +22,31 @@ arrow-array.workspace = true
 arrow-cast.workspace = true
 arrow-schema.workspace = true
 chrono.workspace = true
+clap.workspace = true
+data_privacy.workspace = true
+data_privacy_macros.workspace = true
 datafusion.workspace = true
 futures.workspace = true
+linkme.workspace = true
+log.workspace = true
 oauth2.workspace = true
 parquet.workspace = true
+paste.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-log.workspace = true
+steward.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
-uuid7.workspace = true
 tinyfs.workspace = true
 tlogfs.workspace = true
-steward.workspace = true
 url.workspace = true
+uuid7.workspace = true
 
 [dev-dependencies]
-warp.workspace = true
 datafusion.workspace = true
+
+[lints]
+workspace = true

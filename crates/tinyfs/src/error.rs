@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Represents errors that can occur in filesystem operations
+/// TODO: thiserror
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     NotFound(PathBuf),
@@ -19,16 +20,20 @@ pub enum Error {
     SymlinkLoop(PathBuf),
     VisitLoop(PathBuf),
     Borrow(String), // TODO: should be BorrowMutError
-    
+
     /// General error with custom message
     /// @@@ How to Box?
     Other(String),
+
+    InvalidConfig(String),
 
     /// Component contains multiple wildcards (only one '*' is allowed)
     MultipleWildcards(String),
 
     /// Path component could not be converted to string
     InvalidComponent(PathBuf),
+
+    Internal(String),
 }
 
 impl Error {
@@ -60,6 +65,7 @@ impl Error {
         Error::ParentPathInvalid(path.as_ref().to_path_buf())
     }
 
+    #[must_use]
     pub fn empty_path() -> Self {
         Error::EmptyPath
     }
@@ -89,6 +95,11 @@ impl Error {
     pub fn invalid_component<P: AsRef<Path>>(p: P) -> Self {
         Error::InvalidComponent(p.as_ref().into())
     }
+
+    /// Create an InvalidComponent error from a path-like value
+    pub fn internal<S: Into<String>>(s: S) -> Self {
+        Error::Internal(s.into())
+    }
 }
 
 impl From<BorrowMutError> for Error {
@@ -97,8 +108,9 @@ impl From<BorrowMutError> for Error {
     }
 }
 
+// @@@ ARGH use thiserror
 impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::NotFound(path) => write!(f, "Path not found: {}", path.display()),
             Error::NotADirectory(path) => write!(f, "Not a directory: {}", path.display()),
@@ -122,8 +134,10 @@ impl std::fmt::Display for Error {
             Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),
             Error::Borrow(err) => write!(f, "Object being modified: {}", err),
             Error::Other(msg) => write!(f, "Error: {}", msg),
+            Error::InvalidConfig(msg) => write!(f, "Invalid config: {}", msg),
             Error::MultipleWildcards(part) => write!(f, "Multiple wildcards: {}", part),
             Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
+            Error::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }
 }

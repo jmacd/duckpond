@@ -5,46 +5,49 @@ use std::path::PathBuf;
 pub enum TLogFSError {
     #[error("Delta Lake error: {0}")]
     Delta(#[from] deltalake::DeltaTableError),
-    
+
+    #[error("Clap error: {0}")]
+    Clap(#[from] clap::Error),
+
     #[error("Parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
-    
+
     #[error("TinyFS error: {0}")]
     TinyFS(#[from] tinyfs::Error),
-    
+
     #[error("DataFusion error: {0}")]
     DataFusion(#[from] datafusion::error::DataFusionError),
-    
+
     #[error("Path not found: {path}")]
     NodeNotFound { path: PathBuf }, // @@@ PathNotFound
 
     #[error("Path exists: {path}")]
     PathExists { path: PathBuf },
-    
+
     #[error("Transaction error: {message}")]
     Transaction { message: String },
-    
+
     #[error("Missing data")]
     Missing,
-    
+
     #[error("Commit error: {message}")]
     Commit { message: String },
-    
+
     #[error("Restore error: {message}")]
     Restore { message: String },
-    
+
     #[error("Arrow error: {0}")]
     ArrowSchema(#[from] arrow_schema::ArrowError),
-    
+
     #[error("Arrow error: {0}")]
     ArrowMessage(String),
-    
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_arrow::Error),
-    
+
     #[error("Large file not found: {sha256} at path {path}")]
     LargeFileNotFound {
         sha256: String,
@@ -52,11 +55,10 @@ pub enum TLogFSError {
         #[source]
         source: std::io::Error,
     },
-    
-    #[error("Large file integrity check failed: expected {expected}, got {actual}")]
-    LargeFileIntegrityError {
-        expected: String,
-        actual: String,
-    },
-}
 
+    #[error("Large file integrity check failed: expected {expected}, got {actual}")]
+    LargeFileIntegrityError { expected: String, actual: String },
+
+    #[error("Internal error: {0}")]
+    Internal(String),
+}

@@ -1,126 +1,575 @@
 use anyhow::{Result, anyhow};
-use arrow_array::{StringArray, BinaryArray, Array};
-use chrono::{DateTime, Utc, Datelike};
-use log::debug;
 
-use crate::common::{FilesystemChoice, parse_directory_content as parse_directory_entries, format_node_id, ShipContext};
-use tinyfs::EntryType;
+use crate::common::{ShipContext, format_node_id};
+use utilities::banner;
+
+/// Label for transaction sequence in detailed view headers
+const TRANSACTION_LABEL: &str = "Transaction";
 
 /// Show pond contents with a closure for handling output
-pub async fn show_command<F>(ship_context: &ShipContext, filesystem: FilesystemChoice, mut handler: F) -> Result<()>
+pub async fn show_command<F>(ship_context: &ShipContext, mode: &str, mut handler: F) -> Result<()>
 where
-    F: FnMut(String),
+    F: FnMut(&str),
 {
-    // For now, only support data filesystem - control filesystem access would require different API  
-    if filesystem == FilesystemChoice::Control {
-        return Err(anyhow!("Control filesystem access not yet implemented for show command"));
-    }
-
     let mut ship = ship_context.open_pond().await?;
-    
-    // Use transaction for consistent filesystem access
-    let result = ship.transact(
-        vec!["show".to_string()], 
-        |tx, fs| Box::pin(async move {
-            show_filesystem_transactions(&tx, fs).await
-        })
-    ).await.map_err(|e| anyhow!("Failed to access data filesystem: {}. Run 'pond init' first.", e))?;
 
-    handler(result);
+    // Use read transaction for consistent filesystem access (show is read-only)
+    let mut tx = ship
+        .begin_read(&steward::PondUserMetadata::new(vec!["show".to_string()]))
+        .await
+        .map_err(|e| anyhow!("Failed to begin read transaction: {}", e))?;
+
+    let result = show_filesystem_transactions(&mut tx, mode)
+        .await
+        .map_err(|e| anyhow!("Failed to access data filesystem: {}", e))?;
+
+    _ = tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit read transaction: {}", e))?;
+
+    handler(&result);
     Ok(())
 }
 
 async fn show_filesystem_transactions(
-    tx: &steward::StewardTransactionGuard<'_>,
-    _fs: &tinyfs::FS
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    mode: &str,
 ) -> Result<String, steward::StewardError> {
     // Get data persistence from the transaction guard
-    let persistence = tx.data_persistence()
-        .map_err(|e| steward::StewardError::DataInit(e))?;
-    
+    let persistence = tx
+        .data_persistence()
+        .map_err(steward::StewardError::DataInit)?;
+
     // Get commit history from the filesystem
-    let commit_history = persistence.get_commit_history(None).await
-        .map_err(|e| steward::StewardError::DataInit(e))?;
-    
+    let commit_history = persistence
+        .get_commit_history(None)
+        .await
+        .map_err(steward::StewardError::DataInit)?;
+
     if commit_history.is_empty() {
         return Ok("No transactions found in this filesystem.".to_string());
     }
-    
-    let mut output = String::new();
-    
-    for commit_info in commit_history.iter() {
-        let timestamp = commit_info.timestamp.unwrap_or(0);
-        
-        // Extract transaction metadata from commit info (stored in "pond_txn" field)
-        let (tx_id, tx_metadata) = match commit_info.info.get("pond_txn") {
-            Some(pond_txn_value) => {
-                // Parse the pond_txn JSON object
-                if let Some(obj) = pond_txn_value.as_object() {
-                    let txn_id = obj.get("txn_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let args = obj.get("args").and_then(|v| v.as_str()).unwrap_or("no args");
-                    (txn_id.to_string(), format!(" (Command: {})", args))
-                } else {
-                    (timestamp.to_string(), " (Invalid pond_txn format)".to_string())
-                }
-            }
-            None => (timestamp.to_string(), " (No metadata)".to_string()),
-        };
-        
-        output.push_str(&format!("=== Transaction {} {} ===\n", tx_id, tx_metadata));
-        
-        // Load the operations that were added in this specific transaction
-        match load_operations_from_commit_info(&commit_info, persistence.store_path()).await {
-            Ok((operations, version_num)) => {
-                // Show commit information with version if available
-                if let Some(timestamp) = &commit_info.timestamp {
-                    if let Some(version) = version_num {
-                        output.push_str(&format!("  Delta Lake Version: {} ({})\n", version, format_timestamp(*timestamp)));
-                    } else {
-                        output.push_str(&format!("  Delta Lake Timestamp: {} ({})\n", format_timestamp(*timestamp), timestamp));
-                    }
-                } else if let Some(version) = version_num {
-                    output.push_str(&format!("  Delta Lake Version: {}\n", version));
-                }
-                
-                if operations.len() > 1 { // More than just the "Total files" line
-                    for op in operations {
-                        output.push_str(&format!("    {}\n", op));
-                    }
-                } else {
-                    // If no specific operations found, indicate this 
-                    output.push_str("    (No operation details available for this transaction)\n");
-                }
-            }
-            Err(e) => {
-                output.push_str(&format!("    (Error reading operations: {})\n", e));
-            }
-        }
-        output.push_str("\n");
+
+    // Get pond path from persistence for control table access (clone to avoid borrow issues)
+    let store_path = persistence.store_path().to_string_lossy().to_string();
+    let pond_path = std::path::Path::new(&store_path)
+        .parent()
+        .ok_or_else(|| steward::StewardError::Dyn("Invalid store path".into()))?
+        .to_path_buf();
+
+    // Route to appropriate display mode
+    match mode {
+        "brief" => show_brief_mode(&commit_history, &store_path, &pond_path, tx).await,
+        "detailed" => show_detailed_mode(&commit_history, &store_path, &pond_path, tx).await,
+        _ => Err(steward::StewardError::Dyn(
+            format!(
+                "Invalid mode '{}'. Use 'brief', 'concise', or 'detailed'.",
+                mode
+            )
+            .into(),
+        )),
     }
-    
+}
+
+/// Show brief summary statistics about the pond
+async fn show_brief_mode(
+    commit_history: &[deltalake::kernel::CommitInfo],
+    store_path: &str,
+    _pond_path: &std::path::Path,
+    tx: &mut steward::StewardTransactionGuard<'_>,
+) -> Result<String, steward::StewardError> {
+    use std::collections::HashMap;
+
+    let mut output = String::new();
+
+    // Access control table through transaction guard (uses Ship's cached instance)
+    let control_table = tx.control_table();
+
+    control_table.print_banner();
+
+    // Get DataFusion session context from the existing transaction guard
+    let session_ctx = tx.session_context().await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to get session context: {}", e).into())
+    })?;
+
+    // Query partition statistics using SQL against the pre-registered delta_table
+    let partition_stats_sql = "
+        SELECT 
+            part_id,
+            COUNT(*) as total_rows,
+            SUM(CASE WHEN file_type = 'directory' THEN 1 ELSE 0 END) as directory_rows,
+            COUNT(DISTINCT CASE WHEN file_type != 'directory' THEN node_id ELSE NULL END) as distinct_files,
+            SUM(CASE WHEN file_type != 'directory' THEN 1 ELSE 0 END) as file_version_rows
+        FROM delta_table
+        GROUP BY part_id
+    ";
+
+    let df = session_ctx.sql(partition_stats_sql).await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to query partition stats: {}", e).into())
+    })?;
+
+    let batches = df.collect().await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to collect partition stats: {}", e).into())
+    })?;
+
+    // Parse the results into our PartitionStats structure
+    let mut partition_map: HashMap<String, PartitionStats> = HashMap::new();
+
+    use arrow::array::{Array, Int64Array, StringArray};
+    use arrow::datatypes::DataType;
+    use arrow_cast::cast;
+
+    for batch in batches {
+        // Cast part_id from Dictionary to plain Utf8 if needed
+        let part_id_col = batch
+            .column_by_name("part_id")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing part_id column".into()))?;
+        let part_id_string_col = match part_id_col.data_type() {
+            DataType::Utf8 => part_id_col.clone(),
+            _ => cast(part_id_col.as_ref(), &DataType::Utf8).map_err(|e| {
+                steward::StewardError::Dyn(format!("Failed to cast part_id to Utf8: {}", e).into())
+            })?,
+        };
+        let part_ids = part_id_string_col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn(
+                    format!(
+                        "Failed to downcast part_id column. Actual type: {:?}",
+                        part_id_col.data_type()
+                    )
+                    .into(),
+                )
+            })?;
+        let total_rows = batch
+            .column_by_name("total_rows")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing total_rows column".into()))?
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast total_rows column".into())
+            })?;
+        let directory_rows = batch
+            .column_by_name("directory_rows")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing directory_rows column".into()))?
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast directory_rows column".into())
+            })?;
+        let distinct_files = batch
+            .column_by_name("distinct_files")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing distinct_files column".into()))?
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast distinct_files column".into())
+            })?;
+        let file_versions = batch
+            .column_by_name("file_version_rows")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing file_version_rows column".into()))?
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast file_versions column".into())
+            })?;
+
+        for i in 0..batch.num_rows() {
+            let part_id = part_ids.value(i).to_string();
+            let stats = PartitionStats {
+                total_rows: total_rows.value(i) as usize,
+                directory_rows: directory_rows.value(i) as usize,
+                distinct_files: distinct_files.value(i) as usize,
+                file_versions: file_versions.value(i) as usize,
+                path_name: None,
+            };
+            _ = partition_map.insert(part_id, stats);
+        }
+    }
+
+    // Get aggregate file statistics from Delta Lake metadata
+    let table = deltalake::open_table(store_path).await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to open Delta table: {}", e).into())
+    })?;
+
+    let snapshot = table
+        .snapshot()
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to get snapshot: {}", e).into()))?;
+
+    let log_store = table.log_store();
+    let mut file_stream = snapshot.file_actions_iter(&*log_store);
+
+    use futures::stream::StreamExt;
+
+    let mut total_parquet_files = 0;
+    let mut total_parquet_bytes: i64 = 0;
+
+    while let Some(add_result) = file_stream.next().await {
+        if let Ok(add_action) = add_result {
+            total_parquet_files += 1;
+            total_parquet_bytes += add_action.size;
+        }
+    }
+
+    // Resolve partition paths by traversing TinyFS
+    log::debug!("Resolving partition paths via TinyFS...");
+    let root = tx
+        .root()
+        .await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to get root: {}", e).into()))?;
+
+    let matches = root.collect_matches("**/*").await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to collect matches: {}", e).into())
+    })?;
+
+    // Build path map from all matched entries
+    for (node_path, _captured) in matches {
+        let node_id = node_path.id().await;
+        let path = node_path.path();
+        let node_id_str = node_id.to_string();
+
+        if let Some(stats) = partition_map.get_mut(&node_id_str) {
+            stats.path_name = Some(path.to_string_lossy().to_string());
+        }
+    }
+
+    // Also add the root directory
+    let root_node_id = root.node_path().id().await;
+    if let Some(stats) = partition_map.get_mut(&root_node_id.to_string()) {
+        stats.path_name = Some("/".to_string());
+    }
+
+    // Format the output
+    output.push('\n');
+    output.push_str(
+        "╔════════════════════════════════════════════════════════════════════════════╗\n",
+    );
+    output.push_str(
+        "║                            POND SUMMARY                                    ║\n",
+    );
+    output.push_str(
+        "╚════════════════════════════════════════════════════════════════════════════╝\n",
+    );
+    output.push('\n');
+
+    output.push_str(&format!(
+        "  Transactions       : {}\n",
+        commit_history.len()
+    ));
+    output.push_str(&format!(
+        "  Delta Lake Version : {}\n",
+        table.version().unwrap_or(0)
+    ));
+    output.push('\n');
+
+    output.push_str("  Storage Statistics\n");
+    output.push_str("  ──────────────────\n");
+    output.push_str(&format!("  Parquet Files      : {}\n", total_parquet_files));
+    output.push_str(&format!(
+        "  Total Size         : {}\n",
+        format_byte_size(total_parquet_bytes)
+    ));
+    output.push_str(&format!("  Partitions         : {}\n", partition_map.len()));
+    output.push('\n');
+
+    // Sort partitions by total rows
+    let mut partition_vec: Vec<_> = partition_map.into_iter().collect();
+    partition_vec.sort_by(|a, b| b.1.total_rows.cmp(&a.1.total_rows));
+
+    // Show all partitions with detailed breakdown
+    output.push_str("  Partitions (by row count)\n");
+    output.push_str("  ─────────────────────────\n");
+    for (part_id, stats) in partition_vec.iter() {
+        let path_display = stats.path_name.as_deref().unwrap_or("<unknown>");
+
+        output.push_str(&format!(
+            "\n  {} {}\n",
+            format_node_id(part_id),
+            path_display
+        ));
+        output.push_str(&format!(
+            "    {} rows ({} dir, {} files, {} versions)\n",
+            stats.total_rows, stats.directory_rows, stats.distinct_files, stats.file_versions
+        ));
+    }
+    output.push('\n');
+
     Ok(output)
 }
 
-/// Format a Unix timestamp as a human-readable date string
-/// Handles both seconds and milliseconds timestamps
-fn format_timestamp(timestamp: i64) -> String {
-    // Try as seconds first, then milliseconds if the result is unreasonable
-    let dt_seconds = DateTime::<Utc>::from_timestamp(timestamp, 0);
-    let dt_millis = DateTime::<Utc>::from_timestamp(timestamp / 1000, ((timestamp % 1000) * 1_000_000) as u32);
-    
-    // Use seconds if it gives a reasonable date (between 1970 and 2100)
-    // Otherwise try milliseconds
-    match dt_seconds {
-        Some(dt) if dt.year() >= 1970 && dt.year() <= 2100 => {
-            dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-        },
-        _ => match dt_millis {
-            Some(dt) if dt.year() >= 1970 && dt.year() <= 2100 => {
-                dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-            },
-            _ => format!("{} (invalid timestamp)", timestamp)
+#[derive(Default)]
+struct PartitionStats {
+    total_rows: usize,
+    directory_rows: usize,
+    distinct_files: usize,
+    file_versions: usize,
+    path_name: Option<String>,
+}
+
+/// Query control table for transaction commands
+async fn query_transaction_commands(
+    control_table: &steward::ControlTable,
+) -> Result<std::collections::HashMap<i64, Vec<String>>, steward::StewardError> {
+    use arrow::array::{Array, Int64Array, StringArray};
+    use std::collections::HashMap;
+
+    // Use control table's SessionContext (following tlogfs pattern)
+    let ctx = control_table.session_context();
+
+    // Query for begin records which have the cli_args (stored as JSON string)
+    // Only include WRITE transactions - read transactions don't modify pond state
+    let df = ctx
+        .sql(
+            "SELECT txn_seq, cli_args 
+         FROM transactions 
+         WHERE record_type = 'begin' AND transaction_type = 'write'
+         ORDER BY txn_seq",
+        )
+        .await
+        .map_err(|e| {
+            steward::StewardError::Dyn(format!("Failed to query commands: {}", e).into())
+        })?;
+
+    let batches = df.collect().await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to collect command results: {}", e).into())
+    })?;
+
+    let mut command_map: HashMap<i64, Vec<String>> = HashMap::new();
+
+    for batch in batches {
+        let txn_seq_col = batch
+            .column_by_name("txn_seq")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing txn_seq column".into()))?;
+        let txn_seqs = txn_seq_col
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast txn_seq".into()))?;
+
+        let cli_args_col = batch
+            .column_by_name("cli_args")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing cli_args column".into()))?;
+        let cli_args_strings = cli_args_col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast cli_args".into()))?;
+
+        for i in 0..batch.num_rows() {
+            let txn_seq = txn_seqs.value(i);
+
+            // Parse JSON string into Vec<String>
+            let args = if !cli_args_strings.is_null(i) {
+                let json_str = cli_args_strings.value(i);
+                serde_json::from_str::<Vec<String>>(json_str).unwrap_or_else(|e| {
+                    log::warn!("Failed to parse cli_args JSON for txn {}: {}", txn_seq, e);
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
+
+            _ = command_map.insert(txn_seq, args);
         }
     }
+
+    Ok(command_map)
+}
+
+/// Show detailed transaction log using transaction sequences
+async fn show_detailed_mode(
+    _commit_history: &[deltalake::kernel::CommitInfo],
+    _store_path: &str,
+    _pond_path: &std::path::Path,
+    tx: &mut steward::StewardTransactionGuard<'_>,
+) -> Result<String, steward::StewardError> {
+    use std::collections::HashMap;
+
+    let mut output = String::new();
+
+    // Access control table through transaction guard (uses Ship's cached instance)
+    let control_table = tx.control_table();
+
+    control_table.print_banner();
+
+    // Query control table for transaction commands
+    // Build a map of txn_seq -> cli_args
+    let command_map = query_transaction_commands(control_table).await?;
+
+    // Get session context from the existing transaction guard (no need to create a new one)
+    let session_ctx = tx.session_context().await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to get session context: {}", e).into())
+    })?;
+
+    // Build path map by traversing TinyFS (same as brief mode)
+    log::debug!("Resolving partition paths via TinyFS...");
+    let mut path_map: HashMap<String, String> = HashMap::new();
+
+    // Access TinyFS root through the Steward transaction guard (it derefs to FS)
+    let fs: &tinyfs::FS = &*tx;
+    let root = fs
+        .root()
+        .await
+        .map_err(|e| steward::StewardError::Dyn(format!("Failed to get root: {}", e).into()))?;
+
+    let matches = root.collect_matches("**/*").await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to collect matches: {}", e).into())
+    })?;
+
+    // Build path map from all matched entries
+    for (node_path, _captured) in matches {
+        let node_id = node_path.id().await;
+        let path = node_path.path();
+        let node_id_str = node_id.to_string();
+        _ = path_map.insert(node_id_str, path.to_string_lossy().to_string());
+    }
+
+    // Also add the root directory
+    let root_node_id = root.node_path().id().await;
+    _ = path_map.insert(root_node_id.to_string(), "/".to_string());
+
+    // Query ALL operations in a single query, ordered by transaction (newest first)
+    // This is vastly more efficient than querying each transaction separately (was 79 queries!)
+    let all_ops_sql = "
+        SELECT txn_seq, part_id, node_id, file_type, version, timestamp, size, content, factory
+        FROM delta_table
+        ORDER BY txn_seq DESC, part_id, node_id, version
+    ";
+
+    let df = session_ctx.sql(all_ops_sql).await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to query operations: {}", e).into())
+    })?;
+
+    let batches = df.collect().await.map_err(|e| {
+        steward::StewardError::Dyn(format!("Failed to collect operations: {}", e).into())
+    })?;
+
+    if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
+        return Ok("No transactions found.\n".to_string());
+    }
+
+    // Group batches by transaction sequence
+    use arrow::array::{Array, Int64Array};
+    use std::collections::BTreeMap;
+
+    let mut txn_batches: BTreeMap<i64, Vec<arrow::record_batch::RecordBatch>> = BTreeMap::new();
+
+    for batch in batches {
+        let txn_seq_col = batch
+            .column_by_name("txn_seq")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing txn_seq column".into()))?;
+        let txn_seqs = txn_seq_col
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast txn_seq column".into())
+            })?;
+
+        // Group rows by txn_seq within this batch
+        let mut current_txn_rows: HashMap<i64, Vec<usize>> = HashMap::new();
+        for row_idx in 0..batch.num_rows() {
+            let txn_seq = txn_seqs.value(row_idx);
+            current_txn_rows.entry(txn_seq).or_default().push(row_idx);
+        }
+
+        // Create a separate batch for each transaction
+        for (txn_seq, row_indices) in current_txn_rows {
+            let txn_batch = batch.slice(row_indices[0], row_indices.len());
+            txn_batches.entry(txn_seq).or_default().push(txn_batch);
+        }
+    }
+
+    // Format output for each transaction (in descending order)
+    for (txn_seq, batches_for_txn) in txn_batches.iter().rev() {
+        // Extract unique PartIDs and NodeIDs for the header
+        use arrow::array::StringArray;
+        use arrow::datatypes::DataType;
+        use std::collections::BTreeSet;
+
+        let mut part_ids: BTreeSet<String> = BTreeSet::new();
+        let mut node_ids: BTreeSet<String> = BTreeSet::new();
+
+        for batch in batches_for_txn.iter() {
+            // Extract part_id column
+            if let Some(part_id_col) = batch.column_by_name("part_id") {
+                let part_id_string_col = match part_id_col.data_type() {
+                    DataType::Utf8 => part_id_col.clone(),
+                    _ => arrow_cast::cast(part_id_col.as_ref(), &DataType::Utf8).map_err(|e| {
+                        steward::StewardError::Dyn(format!("Failed to cast part_id: {}", e).into())
+                    })?,
+                };
+                if let Some(part_id_array) =
+                    part_id_string_col.as_any().downcast_ref::<StringArray>()
+                {
+                    for i in 0..part_id_array.len() {
+                        if !part_id_array.is_null(i) {
+                            _ = part_ids.insert(part_id_array.value(i).to_string());
+                        }
+                    }
+                }
+            }
+
+            // Extract node_id column
+            if let Some(node_id_col) = batch.column_by_name("node_id") {
+                let node_id_string_col = match node_id_col.data_type() {
+                    DataType::Utf8 => node_id_col.clone(),
+                    _ => arrow_cast::cast(node_id_col.as_ref(), &DataType::Utf8).map_err(|e| {
+                        steward::StewardError::Dyn(format!("Failed to cast node_id: {}", e).into())
+                    })?,
+                };
+                if let Some(node_id_array) =
+                    node_id_string_col.as_any().downcast_ref::<StringArray>()
+                {
+                    for i in 0..node_id_array.len() {
+                        if !node_id_array.is_null(i) {
+                            _ = node_ids.insert(node_id_array.value(i).to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collect unique UUIDs and format with hyphens using uuid7's to_string()
+        let mut unique_uuids: BTreeSet<String> = BTreeSet::new();
+        for id_hex in part_ids.iter().chain(node_ids.iter()) {
+            // Parse hex string as UUID and format with hyphens
+            if let Ok(uuid) = id_hex.parse::<uuid7::Uuid>() {
+                _ = unique_uuids.insert(uuid.to_string());
+            } else {
+                // If parsing fails, use the original hex string
+                _ = unique_uuids.insert(id_hex.clone());
+            }
+        }
+        let unique_ids: Vec<String> = unique_uuids.into_iter().collect();
+
+        // Format transaction banner using reusable formatter
+        output.push_str(&banner::format_transaction_banner(
+            TRANSACTION_LABEL,
+            *txn_seq,
+            unique_ids,
+        ));
+
+        // Display command if available
+        if let Some(cli_args) = command_map.get(txn_seq)
+            && !cli_args.is_empty()
+        {
+            output.push_str(&format!("  Command: {}\n", cli_args.join(" ")));
+        }
+        output.push('\n');
+
+        // Format operations for this transaction
+        let formatted_ops = format_operations_from_batches(batches_for_txn.clone(), &path_map)?;
+
+        if formatted_ops.is_empty() {
+            output.push_str("  (No operations found - this should not happen)\n");
+        } else {
+            for op in formatted_ops {
+                output.push_str(&format!("  {}\n", op));
+            }
+        }
+    }
+
+    Ok(output)
 }
 
 /// Format byte size as human-readable string
@@ -128,7 +577,7 @@ fn format_byte_size(bytes: i64) -> String {
     if bytes < 0 {
         return "unknown size".to_string();
     }
-    
+
     let bytes = bytes as f64;
     if bytes < 1024.0 {
         format!("{} bytes", bytes as i64)
@@ -141,712 +590,372 @@ fn format_byte_size(bytes: i64) -> String {
     }
 }
 
-// Load operations from commit info directly (read operations from this specific commit)
-async fn load_operations_from_commit_info(commit_info: &deltalake::kernel::CommitInfo, store_path: &str) -> Result<(Vec<String>, Option<i64>)> {
-    let mut operations = Vec::new();
-    
-    // Since read_version is not available, we need to determine the version differently
-    // Try to find the Delta Lake log files and correlate by timestamp
-    let timestamp = commit_info.timestamp.unwrap_or(0);
-    debug!("Looking for Delta Lake log files by timestamp {timestamp}");
-    
-    let mut found_version = None;
-    
-    match find_delta_log_version_by_timestamp(store_path, timestamp).await {
-        Ok(Some(version)) => {
-            debug!("Found matching Delta Lake version: {version}");
-            found_version = Some(version);
-            
-            // Try to read the specific Delta Lake log file for this version
-            match read_delta_log_for_version(store_path, version).await {
-                Ok(add_actions) => {
-                    if !add_actions.is_empty() {
-                        // Read the specific files that were added
-                        match read_specific_parquet_files(&add_actions, store_path).await {
-                            Ok(oplog_operations) => {
-                                let formatted = format_operations_by_partition(oplog_operations);
-                                operations.extend(formatted);
-                            }
-                            Err(e) => {
-                                operations.push(format!("Could not read added files: {}", e));
-                            }
-                        }
-                    } else {
-                        operations.push("No files were added in this commit".to_string());
-                    }
-                }
-                Err(e) => {
-                    operations.push(format!("Could not parse Delta Lake log for version {}: {}", version, e));
-                }
-            }
-        }
-        Ok(None) => {
-            operations.push("Could not find matching Delta Lake log version for this timestamp".to_string());
-        }
-        Err(e) => {
-            operations.push(format!("Error searching for Delta Lake version: {}", e));
-        }
-    }
-    
-    Ok((operations, found_version))
-}
-
-// Read the Delta Lake log file for a specific version to extract Add actions
-async fn read_delta_log_for_version(store_path: &str, version: i64) -> Result<Vec<String>> {
-    use std::path::Path;
-    
-    // Delta Lake log files are named with zero-padded version numbers
-    let log_filename = format!("{:020}.json", version);
-    let log_path = Path::new(store_path).join("_delta_log").join(&log_filename);
-    
-    let mut add_actions = Vec::new();
-    
-    // Try to read the log file
-    match tokio::fs::read_to_string(&log_path).await {
-        Ok(contents) => {
-            // Each line in the log file is a JSON object representing an action
-            for line in contents.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                
-                // Parse the JSON action
-                match serde_json::from_str::<serde_json::Value>(line) {
-                    Ok(action) => {
-                        // Check if this is an Add action
-                        if let Some(add) = action.get("add") {
-                            if let Some(path) = add.get("path").and_then(|p| p.as_str()) {
-                                add_actions.push(path.to_string());
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        println!("Warning: Could not parse action JSON: {}", e);
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            return Err(anyhow!("Could not read Delta Lake log file {}: {}", log_path.display(), e));
-        }
-    }
-    
-    Ok(add_actions)
-}
-
-// Read specific Parquet files that were added in a commit
-async fn read_specific_parquet_files(file_paths: &[String], store_path: &str) -> Result<Vec<(String, String)>> {
-    let mut operations = Vec::new();
-    
-    let file_count = file_paths.len();
-    debug!("read_specific_parquet_files called with {file_count} files");
-    
-    for file_path in file_paths {
-        debug!("Processing file_path: {file_path}");
-        
-        // Convert to full path
-        let full_path = if file_path.starts_with('/') {
-            file_path.clone()
-        } else {
-            format!("{}/{}", store_path, file_path)
-        };
-        
-        debug!("Full path constructed: {full_path}");
-        
-        // Parse the Parquet file to extract oplog operations
-        debug!("About to read parquet file: {full_path}");
-        match read_single_parquet_file(&full_path).await {
-            Ok(ops) => {
-                let op_count = ops.len();
-                debug!("Parquet file returned {op_count} operations");
-                operations.extend(ops)
-            },
-            Err(e) => {
-                debug!("Parquet file read failed: {e}");
-                operations.push(("unknown".to_string(), format!("Error reading {}: {}", file_path, e)));
-            }
-        }
-    }
-    
-    Ok(operations)
-}
-
-// Read a single Parquet file and extract operations (simplified version)
-async fn read_single_parquet_file(file_path: &str) -> Result<Vec<(String, String)>> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    
-    debug!("Reading Parquet file: {file_path}");
-    
-    // Extract part_id from the file path (Delta Lake partitioning)
-    let part_id = extract_part_id_from_path(file_path)?;
-    debug!("Extracted part_id: {part_id}");
-    
-    // Open the Parquet file
-    let file = std::fs::File::open(file_path)
-        .map_err(|e| anyhow!("Failed to open Parquet file {}: {}", file_path, e))?;
-    
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
-    
-    let reader = builder.build()
-        .map_err(|e| anyhow!("Failed to build Parquet reader: {}", e))?;
-    
-    let mut operations = Vec::new();
-    
-    // Read all record batches
-    for batch_result in reader {
-        let batch = batch_result
-            .map_err(|e| anyhow!("Failed to read Parquet batch: {}", e))?;
-        
-        // Get schema
-        let schema = batch.schema();
-        let column_names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
-        let column_names_debug = format!("{:?}", column_names);
-        debug!("Parquet columns: {column_names_debug}");
-        
-        // Find required column indices
-        let node_id_idx = schema.index_of("node_id")
-            .map_err(|_| anyhow!("node_id column not found"))?;
-        let file_type_idx = schema.index_of("file_type")
-            .map_err(|_| anyhow!("file_type column not found"))?;
-        let content_idx = schema.index_of("content")
-            .map_err(|_| anyhow!("content column not found"))?;
-        
-        // Get optional columns
-        let factory_idx = schema.index_of("factory").ok();
-        let min_event_time_idx = schema.index_of("min_event_time").ok();
-        let max_event_time_idx = schema.index_of("max_event_time").ok();
-        let sha256_idx = schema.index_of("sha256").ok();
-        let size_idx = schema.index_of("size").ok();
-        let version_idx = schema.index_of("version").ok();
-        
-        // Get column arrays
-        let node_id_array = batch.column(node_id_idx);
-        let file_type_array = batch.column(file_type_idx);
-        let content_array = batch.column(content_idx);
-        
-        let node_ids = node_id_array.as_any().downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow!("node_id column is not a StringArray"))?;
-        let file_types = file_type_array.as_any().downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow!("file_type column is not a StringArray"))?;
-        let contents = content_array.as_any().downcast_ref::<BinaryArray>()
-            .ok_or_else(|| anyhow!("content column is not a BinaryArray"))?;
-        
-        // Get optional arrays
-        let factories = factory_idx.and_then(|idx| 
-            batch.column(idx).as_any().downcast_ref::<StringArray>()
-        );
-        let min_event_times = min_event_time_idx.and_then(|idx| 
-            batch.column(idx).as_any().downcast_ref::<arrow_array::Int64Array>()
-        );
-        let max_event_times = max_event_time_idx.and_then(|idx| 
-            batch.column(idx).as_any().downcast_ref::<arrow_array::Int64Array>()
-        );
-        let sha256_hashes = sha256_idx.and_then(|idx| 
-            batch.column(idx).as_any().downcast_ref::<StringArray>()
-        );
-        let sizes = size_idx.and_then(|idx| 
-            batch.column(idx).as_any().downcast_ref::<arrow_array::Int64Array>()
-        );
-        let versions = version_idx.and_then(|idx| 
-            batch.column(idx).as_any().downcast_ref::<arrow_array::Int64Array>()
-        );
-        
-        for i in 0..batch.num_rows() {
-            let node_id = node_ids.value(i);
-            let file_type_str = file_types.value(i);
-            
-            let content_bytes = if contents.is_null(i) {
-                &[] // Large files have NULL content
-            } else {
-                contents.value(i) // Small files have actual content bytes
-            };
-            
-            // Extract optional fields
-            let factory = factories.and_then(|arr| {
-                if arr.is_null(i) { None } else { Some(arr.value(i)) }
-            });
-            
-            let temporal_range = match (min_event_times, max_event_times) {
-                (Some(min_arr), Some(max_arr)) if !min_arr.is_null(i) && !max_arr.is_null(i) => {
-                    Some((min_arr.value(i), max_arr.value(i)))
-                },
-                _ => None,
-            };
-            
-            let sha256_hash = sha256_hashes.and_then(|arr| {
-                if arr.is_null(i) { None } else { Some(arr.value(i)) }
-            });
-            let file_size = sizes.and_then(|arr| {
-                if arr.is_null(i) { None } else { Some(arr.value(i)) }
-            });
-            let tinyfs_version = versions.and_then(|arr| {
-                if arr.is_null(i) { None } else { Some(arr.value(i)) }
-            });
-            
-            // Parse file_type from string
-            let file_type = match file_type_str {
-                "directory" => EntryType::Directory,
-                "file:data" => EntryType::FileData,
-                "file:table" => EntryType::FileTable,
-                "file:series" => EntryType::FileSeries,
-                "symlink" => EntryType::Symlink,
-                _ => return Err(anyhow!("Unknown file_type: {}", file_type_str)),
-            };
-            
-            // Parse content based on file type
-            match parse_direct_content(&part_id, node_id, file_type, content_bytes, temporal_range, factory, sha256_hash, file_size, tinyfs_version) {
-                Ok(description) => {
-                    operations.push((part_id.clone(), description));
-                },
-                Err(e) => {
-                    operations.push((part_id.clone(), format!("Error parsing entry {}/{}: {}", format_node_id(&part_id), format_node_id(node_id), e)));
-                }
-            }
-        }
-    }
-    
-    Ok(operations)
-}
-
-// Extract part_id from Delta Lake partitioned file path
-fn extract_part_id_from_path(file_path: &str) -> Result<String> {
-    // Try the partitioned format first: .../part_id=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX/part-xxxxx.parquet
-    if let Some(part_start) = file_path.find("part_id=") {
-        let after_equals = &file_path[part_start + 8..]; // Skip "part_id="
-        if let Some(slash_pos) = after_equals.find('/') {
-            return Ok(after_equals[..slash_pos].to_string());
-        }
-    }
-    
-    // Fallback: Extract from filename directly: part-00001-UUID-c000.snappy.parquet
-    if let Some(file_name) = file_path.split('/').last() {
-        if file_name.starts_with("part-") {
-            // Extract the partition number (e.g., "00001" from "part-00001-...")
-            if let Some(dash_pos) = file_name[5..].find('-') {
-                let partition_num = &file_name[5..5+dash_pos];
-                return Ok(format!("0000{}", partition_num)); // Pad to make it consistent
-            }
-        }
-    }
-    
-    // Default fallback - use "0000" as the partition ID
-    Ok("0000".to_string())
-}
-
-// Parse oplog content based on entry type  
-fn parse_direct_content(_part_id: &str, node_id: &str, file_type: EntryType, content: &[u8], temporal_range: Option<(i64, i64)>, factory: Option<&str>, _sha256_hash: Option<&str>, file_size: Option<i64>, tinyfs_version: Option<i64>) -> Result<String> {
-    match file_type {
-        EntryType::Directory => {
-            // Check if this is a dynamic directory with factory type
-            if let Some(factory_type) = factory {
-                // Dynamic directory - show configuration content
-                match factory_type {
-                    "hostmount" => {
-                        // Parse as YAML configuration 
-                        match std::str::from_utf8(content) {
-                            Ok(yaml_content) => {
-                                Ok(format!("Dynamic Directory (hostmount) [{}]: {}", format_node_id(node_id), yaml_content.trim()))
-                            }
-                            Err(_) => {
-                                let content_preview = format_content_preview(content);
-                                Ok(format!("Dynamic Directory (hostmount) [{}] (parse error): {}", format_node_id(node_id), content_preview))
-                            }
-                        }
-                    }
-                    _ => {
-                        // Unknown factory type
-                        let content_preview = format_content_preview(content);
-                        Ok(format!("Dynamic Directory ({}) [{}]: {}", factory_type, format_node_id(node_id), content_preview))
-                    }
-                }
-            } else {
-                // Static directory - try to parse as Arrow IPC directory entries
-                match parse_directory_entries(content) {
-                    Ok(entries) => {
-                        if entries.is_empty() {
-                            Ok(format!("Directory (empty) [{}]", format_node_id(node_id)))
-                        } else {
-                            let mut descriptions = Vec::new();
-                            for entry in entries {
-                                descriptions.push(format!("        {} ▸ {}", entry.name, format_node_id(&entry.child_node_id)));
-                            }
-                            Ok(format!("Directory [{}] with {} entries:\n{}", format_node_id(node_id), descriptions.len(), descriptions.join("\n")))
-                        }
-                    }
-                    Err(_) => {
-                        let content_preview = format_content_preview(content);
-                        Ok(format!("Directory [{}] (parse error): {}", format_node_id(node_id), content_preview))
-                    }
-                }
-            }
-        }
-        EntryType::FileData => {
-            // Regular file content - show preview with node ID
-            let content_preview = format_content_preview(content);
-            let version_info = match tinyfs_version {
-                Some(ver) => format!(" v{}", ver),
-                None => "".to_string(),
-            };
-            Ok(format!("FileData [{}]{}: {}", format_node_id(node_id), version_info, content_preview))
-        }
-        EntryType::FileTable => {
-            // Check if this is a dynamic file with factory type
-            if let Some(factory_type) = factory {
-                // Dynamic table file - show configuration content and factory type
-                match factory_type {
-                    "sql-derived" => {
-                        // Parse as YAML configuration 
-                        match std::str::from_utf8(content) {
-                            Ok(yaml_content) => {
-                                Ok(format!("Dynamic FileTable (sql-derived) [{}]: {} ({} bytes config)", format_node_id(node_id), yaml_content.trim(), content.len()))
-                            }
-                            Err(_) => {
-                                let content_preview = format_content_preview(content);
-                                Ok(format!("Dynamic FileTable (sql-derived) [{}]: {} ({} bytes config)", format_node_id(node_id), content_preview, content.len()))
-                            }
-                        }
-                    }
-                    _ => {
-                        // Other dynamic table types
-                        let content_preview = format_content_preview(content);
-                        Ok(format!("Dynamic FileTable ({}) [{}]: {} ({} bytes config)", factory_type, format_node_id(node_id), content_preview, content.len()))
-                    }
-                }
-            } else {
-                // Regular table file (Parquet) - show as binary data with node ID and row count
-                let row_count = extract_row_count_from_parquet_content(content).unwrap_or_else(|e| format!("row count error: {}", e));
-                Ok(format!("FileTable [{}]: Parquet data ({} bytes, {} rows)", format_node_id(node_id), content.len(), row_count))
-            }
-        }
-        EntryType::FileSeries => {
-            // Check if this is a large file: content is None/empty (stored externally)
-            // This is the correct test - large files have no inline content
-            if content.is_empty() {
-                // Large file - stored externally with SHA256 reference
-                let size_display = format_byte_size(file_size.unwrap_or(-1));
-                let temporal_info = match temporal_range {
-                    Some((min_time, max_time)) => format!(" (temporal: {} to {})", format_timestamp(min_time), format_timestamp(max_time)),
-                    None => " (temporal: missing)".to_string(),
-                };
-                let version_info = match tinyfs_version {
-                    Some(ver) => format!(" v{}", ver),
-                    None => "".to_string(),
-                };
-                Ok(format!("FileSeries [{}]{}: Large file ({}){}", 
-                    format_node_id(node_id), version_info, size_display, temporal_info))
-            } else {
-                // Small file - stored inline
-                let temporal_info = match temporal_range {
-                    Some((min_time, max_time)) => format!(" (temporal: {} to {})", format_timestamp(min_time), format_timestamp(max_time)),
-                    None => " (temporal: missing)".to_string(),
-                };
-                let row_count = extract_row_count_from_parquet_content(content)
-                    .unwrap_or_else(|e| format!("row count error: {}", e));
-                let version_info = match tinyfs_version {
-                    Some(ver) => format!(" v{}", ver),
-                    None => "".to_string(),
-                };
-                // Skip schema display for cleaner output - can add --verbose flag later if needed
-                Ok(format!("FileSeries [{}]{}: Parquet data ({}){} ({} rows)", format_node_id(node_id), version_info, format_byte_size(content.len() as i64), temporal_info, row_count))
-            }
-        }
-        EntryType::Symlink => {
-            // Symlink content is the target path as UTF-8
-            match String::from_utf8(content.to_vec()) {
-                Ok(target) => Ok(format!("Symlink [{}] -> {}", format_node_id(node_id), target)),
-                Err(_) => {
-                    let content_preview = format_content_preview(content);
-                    Ok(format!("Symlink [{}] (invalid UTF-8): {}", format_node_id(node_id), content_preview))
-                }
-            }
-        }
-    }
-}
-
-// Format content preview with proper handling of binary vs text data
-fn format_content_preview(content: &[u8]) -> String {
-    // Check if content looks like text (mostly printable ASCII with some control chars allowed)
-    let is_likely_text = content.iter().take(100).all(|&b| {
-        b.is_ascii() && (b.is_ascii_graphic() || b.is_ascii_whitespace())
-    });
-    
-    if is_likely_text {
-        // Handle as text content
-        if content.len() > 30 {
-            let preview = String::from_utf8_lossy(&content[..30]);
-            let quoted = quote_newlines(&preview);
-            format!("\"{}\"... ({} bytes)", quoted, content.len())
-        } else {
-            let content_str = String::from_utf8_lossy(content);
-            let quoted = quote_newlines(&content_str);
-            format!("\"{}\" ({} bytes)", quoted, content.len())
-        }
-    } else {
-        // Handle as binary data
-        if content.len() == 0 {
-            "Empty file (0 bytes)".to_string()
-        } else {
-            format!("Binary data ({} bytes)", content.len())
-        }
-    }
-}
-
-// Quote newlines in content preview
-fn quote_newlines(s: &str) -> String {
-    s.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
-}
-
-
-// Extract row count from Parquet content efficiently using metadata
-fn extract_row_count_from_parquet_content(content: &[u8]) -> Result<String> {
-    use parquet::file::reader::{SerializedFileReader, FileReader};
-    use bytes::Bytes;
-    let bytes = Bytes::copy_from_slice(content);
-    let reader = SerializedFileReader::new(bytes)
-        .map_err(|e| anyhow!("Failed to create Parquet reader: {}", e))?;
-    let metadata = reader.metadata();
-    let row_count: i64 = metadata.row_groups().iter().map(|g| g.num_rows()).sum();
-    Ok(row_count.to_string())
-}
-
-/// Find the Delta Lake version number for a commit by parsing log files directly
-async fn find_delta_log_version_by_timestamp(store_path: &str, target_timestamp: i64) -> Result<Option<i64>> {
-    use std::path::Path;
-    use tokio::fs;
-    
-    let delta_log_path = Path::new(store_path).join("_delta_log");
-    
-    if !delta_log_path.exists() {
-        return Ok(None);
-    }
-    
-    // Read all .json files in the _delta_log directory
-    let mut entries = fs::read_dir(&delta_log_path).await?;
-    let mut log_files = Vec::new();
-    
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if let Some(extension) = path.extension() {
-            if extension == "json" {
-                if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
-                    // Parse version from filename like "00000000000000000001.json"
-                    if let Ok(version) = filename.parse::<i64>() {
-                        log_files.push((version, path));
-                    }
-                }
-            }
-        }
-    }
-    
-    // Sort by version number
-    log_files.sort_by_key(|(version, _)| *version);
-    
-    // Find the version that matches our timestamp (or closest before it)
-    let mut best_match = None;
-    
-    for (version, log_file) in log_files {
-        match fs::read_to_string(&log_file).await {
-            Ok(content) => {
-                // Parse each line as JSON (Delta Lake log format)
-                for line in content.lines() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    
-                    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(line) {
-                        if let Some(commit_info) = json_value.get("commitInfo") {
-                            if let Some(timestamp) = commit_info.get("timestamp").and_then(|v| v.as_i64()) {
-                                // Allow for small timing differences (within 1 second)
-                                if (timestamp - target_timestamp).abs() <= 1000 {
-                                    return Ok(Some(version));
-                                }
-                                // Track closest match
-                                if timestamp <= target_timestamp {
-                                    best_match = Some(version);
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            Err(_) => continue, // Skip unreadable files
-        }
-    }
-    
-    Ok(best_match)
-}
-
-// Format operations grouped by partition with headers and better alignment
-fn format_operations_by_partition(operations: Vec<(String, String)>) -> Vec<String> {
+/// Format operations from Arrow batches (used by transaction sequence display)
+fn format_operations_from_batches(
+    batches: Vec<arrow::record_batch::RecordBatch>,
+    path_map: &std::collections::HashMap<String, String>,
+) -> Result<Vec<String>, steward::StewardError> {
+    use arrow::array::{Array, BinaryArray, Int64Array, StringArray};
+    use arrow::datatypes::DataType;
+    use arrow_cast::cast;
     use std::collections::HashMap;
-    
-    // Group operations by partition
-    let mut partition_groups: HashMap<String, Vec<String>> = HashMap::new();
-    for (part_id, operation) in operations {
-        partition_groups.entry(part_id).or_insert_with(Vec::new).push(operation);
+    use tinyfs::tree_format::TreeNode;
+
+    // Group operations by partition for better readability
+    let mut partition_groups: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
+
+    for batch in batches {
+        // Extract columns
+        let part_id_col = batch
+            .column_by_name("part_id")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing part_id column".into()))?;
+        let part_id_string_col = match part_id_col.data_type() {
+            DataType::Utf8 => part_id_col.clone(),
+            _ => cast(part_id_col.as_ref(), &DataType::Utf8).map_err(|e| {
+                steward::StewardError::Dyn(format!("Failed to cast part_id: {}", e).into())
+            })?,
+        };
+        let part_ids = part_id_string_col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast part_id column".into())
+            })?;
+
+        let node_id_col = batch
+            .column_by_name("node_id")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing node_id column".into()))?;
+        let node_id_string_col = match node_id_col.data_type() {
+            DataType::Utf8 => node_id_col.clone(),
+            _ => cast(node_id_col.as_ref(), &DataType::Utf8).map_err(|e| {
+                steward::StewardError::Dyn(format!("Failed to cast node_id: {}", e).into())
+            })?,
+        };
+        let node_ids = node_id_string_col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast node_id column".into())
+            })?;
+
+        let file_type_col = batch
+            .column_by_name("file_type")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing file_type column".into()))?;
+        let file_type_string_col = match file_type_col.data_type() {
+            DataType::Utf8 => file_type_col.clone(),
+            _ => cast(file_type_col.as_ref(), &DataType::Utf8).map_err(|e| {
+                steward::StewardError::Dyn(format!("Failed to cast file_type: {}", e).into())
+            })?,
+        };
+        let file_types = file_type_string_col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast file_type column".into())
+            })?;
+
+        let version_col = batch
+            .column_by_name("version")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing version column".into()))?;
+        let versions = version_col
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast version column".into())
+            })?;
+
+        let size_col = batch
+            .column_by_name("size")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing size column".into()))?;
+        let sizes = size_col
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast size column".into()))?;
+
+        let content_col = batch
+            .column_by_name("content")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing content column".into()))?;
+        let contents = content_col
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast content column".into())
+            })?;
+
+        let factory_col = batch
+            .column_by_name("factory")
+            .ok_or_else(|| steward::StewardError::Dyn("Missing factory column".into()))?;
+        let factory_string_col = match factory_col.data_type() {
+            DataType::Utf8 => factory_col.clone(),
+            _ => cast(factory_col.as_ref(), &DataType::Utf8).map_err(|e| {
+                steward::StewardError::Dyn(format!("Failed to cast factory: {}", e).into())
+            })?,
+        };
+        let factories = factory_string_col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                steward::StewardError::Dyn("Failed to downcast factory column".into())
+            })?;
+
+        // Format each row
+        for i in 0..batch.num_rows() {
+            let part_id = part_ids.value(i).to_string();
+            let node_id = node_ids.value(i);
+            let file_type = file_types.value(i);
+            let version = versions.value(i);
+            let size = if sizes.is_null(i) { -1 } else { sizes.value(i) };
+            let factory = if factories.is_null(i) {
+                None
+            } else {
+                Some(factories.value(i))
+            };
+
+            // For directories, decode content and show entries
+            let (detail_display, dir_entries) = if file_type == "directory" {
+                // Check if this is a dynamic directory
+                let is_dynamic = factory.is_some() && factory != Some("tlogfs");
+
+                if is_dynamic {
+                    // Dynamic directories don't have parseable content
+                    let factory_name = factory.unwrap_or("unknown");
+                    (format!(" (dynamic: {})", factory_name), Vec::new())
+                } else if contents.is_null(i) {
+                    (" (0 entries)".to_string(), Vec::new())
+                } else {
+                    let content_bytes = contents.value(i);
+                    // Decode directory entries for static directories
+                    match decode_directory_entries(content_bytes) {
+                        Ok(entries) => {
+                            let count = entries.len();
+                            let entry_word = if count == 1 { "entry" } else { "entries" };
+                            (format!(" ({} {})", count, entry_word), entries)
+                        }
+                        Err(e) => {
+                            // If decode fails, just show that it has content
+                            (format!(" (decode error: {})", e), Vec::new())
+                        }
+                    }
+                }
+            } else {
+                // For files, show size
+                (format!(" ({})", format_byte_size(size)), Vec::new())
+            };
+
+            let operation = format!(
+                "Node {} {} v{}{}",
+                format_node_id(node_id),
+                file_type,
+                version,
+                detail_display
+            );
+
+            // Convert directory entries to strings
+            let entry_strings: Vec<String> = dir_entries
+                .iter()
+                .map(|entry| format!("{} → {}", entry.name, format_node_id(&entry.child_node_id)))
+                .collect();
+
+            let part_entry = partition_groups.entry(part_id).or_default();
+            part_entry.push((operation, entry_strings));
+        }
     }
-    
+
+    // Format output grouped by partition using tree formatter
     let mut result = Vec::new();
-    
-    // Sort partitions for consistent output
     let mut sorted_partitions: Vec<_> = partition_groups.into_iter().collect();
     sorted_partitions.sort_by_key(|(part_id, _)| part_id.clone());
-    
+
     for (part_id, ops) in sorted_partitions {
-        // More visually distinct partition header
-        let entry_word = if ops.len() == 1 { "entry" } else { "entries" };
-        result.push(format!("    ▌ Partition {} ({} {}):", format_node_id(&part_id), ops.len(), entry_word));
-        for op in ops {
-            result.push(format!("      {}", op));
+        let path_display = path_map
+            .get(&part_id)
+            .map(|s| s.as_str())
+            .unwrap_or("<unknown>");
+
+        // Add partition label (not indented)
+        result.push(format!(
+            "  Partition {} {}:",
+            format_node_id(&part_id),
+            path_display
+        ));
+
+        // Create a tree for the operations under this partition
+        let mut partition_root = TreeNode::new(""); // Empty root node
+
+        for (operation, entries) in ops {
+            // Create a node for this operation
+            let mut node = TreeNode::new(operation);
+
+            // Add directory entries as children
+            for entry in entries {
+                node.add_child(TreeNode::new(entry));
+            }
+
+            partition_root.add_child(node);
         }
+
+        // Format the tree and add to result, skipping the empty root line and indenting the rest
+        let tree_output = tinyfs::tree_format::format_tree(&partition_root);
+        for (i, line) in tree_output.lines().enumerate() {
+            if i == 0 {
+                continue; // Skip the empty root label
+            }
+            result.push(format!("    {}", line)); // Indent tree structure relative to partition label
+        }
+        result.push(String::new()); // Blank line after each partition
     }
-    
-    result
+
+    Ok(result)
+}
+
+/// Decode directory content and return entries with their names and node IDs
+fn decode_directory_entries(
+    content_bytes: &[u8],
+) -> Result<Vec<tlogfs::schema::VersionedDirectoryEntry>, String> {
+    // Use the public helper from tlogfs
+    let entries = tlogfs::schema::decode_versioned_directory_entries(content_bytes)
+        .map_err(|e| format!("Failed to decode: {}", e))?;
+
+    Ok(entries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
-    use crate::common::{ShipContext, FilesystemChoice};
     use crate::commands::init::init_command;
+    use crate::common::ShipContext;
+    use log::debug;
+    use tempfile::TempDir;
+
     struct TestSetup {
         _temp_dir: TempDir,
         ship_context: ShipContext,
-        #[allow(dead_code)] // Needed for test infrastructure
-        pond_path: PathBuf,
     }
 
     impl TestSetup {
         async fn new() -> Result<Self> {
             let temp_dir = TempDir::new().expect("Failed to create temp directory");
             let pond_path = temp_dir.path().join("test_pond");
-            
+
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
             let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
-            
+
             // Initialize pond
-            init_command(&ship_context).await
+            init_command(&ship_context, None, None)
+                .await
                 .expect("Failed to initialize pond");
-            
+
             Ok(TestSetup {
                 _temp_dir: temp_dir,
                 ship_context,
-                pond_path,
             })
         }
-
-        // /// Create a test file in the host filesystem
-        // async fn create_host_file(&self, filename: &str, content: &str) -> Result<PathBuf> {
-        //     let file_path = self._temp_dir.path().join(filename);
-        //     tokio::fs::write(&file_path, content).await?;
-        //     Ok(file_path)
-        // }
-
-        // /// Copy a file to pond using copy command (creates transactions)
-        // async fn copy_to_pond(&self, host_file: &str, pond_path: &str, format: &str) -> Result<()> {
-        //     let host_path = self.create_host_file(host_file, "test content").await?;
-        //     copy_command(&self.ship_context, &[host_path.to_string_lossy().to_string()], pond_path, format).await
-        // }
     }
 
     #[tokio::test]
     async fn test_show_empty_pond() {
         let setup = TestSetup::new().await.expect("Failed to create test setup");
-        
+
         let mut results = Vec::new();
-        show_command(&setup.ship_context, FilesystemChoice::Data, |output| {
-            results.push(output);
-        }).await.expect("Show command failed");
-        
+        show_command(&setup.ship_context, "detailed", |output| {
+            results.push(output.to_string());
+        })
+        .await
+        .expect("Show command failed");
+
         // Should have at least the pond initialization transaction
-        assert!(results.len() >= 1, "Should have at least initialization transaction");
-        
+        assert!(
+            !results.is_empty(),
+            "Should have at least initialization transaction"
+        );
+
         // Check that output contains transaction information
         let output = results.join("");
-        assert!(output.contains("Transaction"), "Should contain transaction information");
+        assert!(
+            output.contains("Transaction"),
+            "Should contain transaction information"
+        );
     }
 
     #[tokio::test]
     async fn test_show_command_format() {
-        use tempfile::tempdir;
-        use steward::Ship;
         use crate::common::ShipContext;
-        
+        use steward::Ship;
+        use tempfile::tempdir;
+
         // Create a temporary pond using steward (like production)
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pond_path = temp_dir.path().join("test_pond");
 
         // Initialize pond using steward - this creates the full Delta Lake setup
-        let mut ship = Ship::create_pond(&pond_path).await.expect("Failed to initialize pond");
-        
-        // Add a transaction with some file operations 
+        let mut ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("Failed to initialize pond");
+
+        // Add a transaction with some file operations
         let args = vec!["test_command".to_string(), "test_arg".to_string()];
-        ship.transact(args, |_tx, fs| Box::pin(async move {
-            let data_root = fs.root().await.map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            tinyfs::async_helpers::convenience::create_file_path(&data_root, "/example.txt", b"test content for show").await
+        ship.transact(&steward::PondUserMetadata::new(args), |_tx, fs| {
+            Box::pin(async move {
+                let data_root = fs
+                    .root()
+                    .await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                _ = tinyfs::async_helpers::convenience::create_file_path(
+                    &data_root,
+                    "/example.txt",
+                    b"test content for show",
+                )
+                .await
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-            Ok(())
-        })).await.expect("Failed to execute test transaction");
-        
+                Ok(())
+            })
+        })
+        .await
+        .expect("Failed to execute test transaction");
+
         // Create ship context for show command
         let ship_context = ShipContext::new(Some(pond_path.clone()), vec!["test".to_string()]);
-        
+
         // Capture show command output
         let mut captured_output = String::new();
-        show_command(&ship_context, FilesystemChoice::Data, |output: String| {
-            captured_output.push_str(&output);
-        }).await.expect("Show command should work");
-        
-        println!("Show command output:\n{}", captured_output);
-        
-        // Test the format improvements that we implemented:
-        
-        // 1. Should have transaction headers with command info in new format
-        assert!(captured_output.contains("=== Transaction"), "Should contain transaction headers");
-        assert!(captured_output.contains("(Command: ["), "Should contain command info with new array format");
-        
-        // 2. Should show our test command and arguments 
-        assert!(captured_output.contains("test_command"), "Should contain the command we executed");
-        assert!(captured_output.contains("test_arg"), "Should contain the command argument");
-        
-        // 3. Should have Delta Lake version info in new combined format
-        // Either "Delta Lake Version: N (timestamp)" or graceful fallback for test environment
-        assert!(
-            captured_output.contains("Delta Lake Version:") || captured_output.contains("No operation details available"),
-            "Should show Delta Lake version info or graceful fallback"
-        );
-        
-        // 4. Should show proper timestamp format if available
-        if captured_output.contains("UTC") {
-            // If we have timestamps, they should be human-readable
-            let has_readable_timestamp = captured_output.contains("2025") || captured_output.contains("2024");
-            assert!(has_readable_timestamp, "Timestamps should be human-readable, not raw milliseconds");
-        }
-        
-        // 5. Should NOT contain old verbose format that we removed
-        assert!(!captured_output.contains("Added 1 files in this commit"), "Should not contain verbose file addition messages");
-        assert!(!captured_output.contains("Files added:"), "Should not contain verbose file listing");
-        
-        // 6. Should not be empty
-        assert!(!captured_output.trim().is_empty(), "Show output should not be empty");
-        
-        // 7. Should have multiple transactions (steward creates initialization transaction + our test transaction)
-        let transaction_count = captured_output.matches("=== Transaction").count();
-        assert!(transaction_count >= 2, "Should show at least init + our test transaction");
-    }
+        show_command(&ship_context, "detailed", |output: &str| {
+            captured_output.push_str(output);
+        })
+        .await
+        .expect("Show command should work");
 
-    #[tokio::test]
-    async fn test_show_control_filesystem_error() {
-        let setup = TestSetup::new().await.expect("Failed to create test setup");
-        
-        let result = show_command(&setup.ship_context, FilesystemChoice::Control, |_| {}).await;
-        
-        assert!(result.is_err(), "Should fail for control filesystem access");
-        assert!(result.unwrap_err().to_string().contains("Control filesystem access not yet implemented"),
-                "Should have specific error message");
+        debug!("Show command output:\n{}", captured_output);
+
+        // Test the new transaction sequence based format:
+
+        // 1. Should have transaction sequence headers
+        assert!(
+            captured_output.contains(TRANSACTION_LABEL),
+            "Should contain transaction headers"
+        );
+
+        // 2. Should show partition groups with paths
+        assert!(
+            captured_output.contains("Partition"),
+            "Should contain partition information"
+        );
+        // The root partition should show "/" path (format is "Partition 00000000 /:" - no entry count on partition line)
+        assert!(
+            captured_output.contains("/:"),
+            "Should show root directory path in partition"
+        );
+
+        // 3. Should show the file we created
+        assert!(
+            captured_output.contains("file:data"),
+            "Should show the file we created"
+        );
+
+        // 4. Should not be empty
+        assert!(
+            !captured_output.trim().is_empty(),
+            "Show output should not be empty"
+        );
     }
 }

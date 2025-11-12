@@ -86,6 +86,7 @@ pub struct DynamicDirDirectory {
 }
 
 impl DynamicDirDirectory {
+    #[must_use]
     pub fn new(config: DynamicDirConfig, context: FactoryContext) -> Self {
         let entries_count = config.entries.len();
         debug!("DynamicDirDirectory::new - creating directory with {entries_count} entries");
@@ -107,7 +108,7 @@ impl DynamicDirDirectory {
 
     /// Create a DirHandle from this dynamic directory
     pub fn create_handle(self) -> DirHandle {
-        tinyfs::DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
+        DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 
     /// Create a node for a specific entry using its configured factory
@@ -126,18 +127,16 @@ impl DynamicDirDirectory {
         })?;
 
         // Try to create as a directory first, then as a file
-        let node_type = if let Ok(dir_handle) = FactoryRegistry::create_directory_with_context(
-            &entry.factory,
-            &config_bytes,
-            &self.context,
-        ) {
+        let node_type = if let Ok(dir_handle) =
+            FactoryRegistry::create_directory(&entry.factory, &config_bytes, self.context.clone())
+        {
             debug!(
                 "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
                 entry.name
             );
             tinyfs::NodeType::Directory(dir_handle)
         } else if let Ok(file_handle) =
-            FactoryRegistry::create_file_with_context(&entry.factory, &config_bytes, &self.context)
+            FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone()).await
         {
             debug!(
                 "DynamicDirDirectory::create_entry_node - created file for entry '{}'",
@@ -161,7 +160,7 @@ impl DynamicDirDirectory {
         id_bytes.extend_from_slice(&config_bytes);
         let node_id = tinyfs::NodeID::from_content(&id_bytes);
 
-        let node_ref = tinyfs::NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
+        let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
             id: node_id,
             node_type,
         })));
@@ -192,7 +191,7 @@ impl DynamicDirDirectory {
             // Cache it
             {
                 let mut cache = self.entry_cache.write().await;
-                cache.insert(entry_name.to_string(), node_ref.clone());
+                _ = cache.insert(entry_name.to_string(), node_ref.clone());
             }
 
             Ok(Some(node_ref))
@@ -265,17 +264,14 @@ impl Metadata for DynamicDirDirectory {
             version: 1,
             size: None,
             sha256: None,
-            entry_type: EntryType::Directory,
+            entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
     }
 }
 
 // Factory functions for the linkme registration system
-fn create_dynamic_dir_handle_with_context(
-    config: Value,
-    context: &FactoryContext,
-) -> TinyFSResult<DirHandle> {
+fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle> {
     let config: DynamicDirConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
 
@@ -286,7 +282,7 @@ fn create_dynamic_dir_handle_with_context(
     config.hash(&mut hasher);
     let config_hash = hasher.finish();
     debug!(
-        "[INSTRUMENT] create_dynamic_dir_handle_with_context: parent_node_id={:?}, entry_names={:?}, config_hash={:x}",
+        "[INSTRUMENT] create_dynamic_dir_handle: parent_node_id={:?}, entry_names={:?}, config_hash={:x}",
         parent_node_id, entry_names, config_hash
     );
 
@@ -294,24 +290,20 @@ fn create_dynamic_dir_handle_with_context(
     let cache_entry_name = format!("dynamic_dir_{:x}", config_hash);
 
     // Create cache key synchronously - we'll use a placeholder part_id since we can't await here
-    // The cache key will be based on parent_node_id and config_hash which should be sufficient for uniqueness
-    let cache_key = crate::persistence::DynamicNodeKey::new(
-        format!("sync_cache_{}", parent_node_id), // Use parent_node_id as part_id placeholder
-        parent_node_id,
-        cache_entry_name,
-    );
+
+    let cache_key = crate::persistence::DynamicNodeKey::new(parent_node_id, cache_entry_name);
 
     debug!("[INSTRUMENT] cache_key: {:?}", cache_key);
 
     // Check if we have a cached directory for this configuration
-    if let Some(cached_node_type) = context.state.get_dynamic_node_cache(&cache_key) {
-        if let tinyfs::NodeType::Directory(cached_dir_handle) = cached_node_type {
-            debug!(
-                "[INSTRUMENT] returning cached dynamic directory for config_hash={:x}",
-                config_hash
-            );
-            return Ok(cached_dir_handle);
-        }
+    if let Some(cached_node_type) = context.state.get_dynamic_node_cache(&cache_key)
+        && let tinyfs::NodeType::Directory(cached_dir_handle) = cached_node_type
+    {
+        debug!(
+            "[INSTRUMENT] returning cached dynamic directory for config_hash={:x}",
+            config_hash
+        );
+        return Ok(cached_dir_handle);
     }
 
     // Create new instance
@@ -375,13 +367,17 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
         })?;
 
         // Validate with the specific factory and get processed config
-        let processed_config = FactoryRegistry::validate_config(&entry.factory, &config_bytes).map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Invalid config for entry '{}' using factory '{}': {}: {:?}",
-                entry.name, entry.factory, e, String::from_utf8_lossy(&config_bytes),
-            ))
-        })?;
-        
+        let processed_config = FactoryRegistry::validate_config(&entry.factory, &config_bytes)
+            .map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Invalid config for entry '{}' using factory '{}': {}: {:?}",
+                    entry.name,
+                    entry.factory,
+                    e,
+                    String::from_utf8_lossy(&config_bytes),
+                ))
+            })?;
+
         // Update the entry with the processed config
         entry.config = processed_config;
     }
@@ -408,7 +404,7 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
 register_dynamic_factory!(
     name: "dynamic-dir",
     description: "Create configurable directories where each entry is dynamically generated using other factories",
-    directory_with_context: create_dynamic_dir_handle_with_context,
+    directory: create_dynamic_dir_handle,
     validate: validate_dynamic_dir_config
 );
 
@@ -420,16 +416,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_dynamic_dir_config_validation() {
+        // Create a temporary template file for testing
+        let temp_dir = TempDir::new().unwrap();
+        let template_path = temp_dir.path().join("test_template.tmpl");
+        std::fs::write(&template_path, "Test content").unwrap();
+
         // Test valid configuration
-        let valid_config = r#"
+        let valid_config = format!(
+            r#"
 entries:
   - name: "test_entry"
     factory: "template"
     config:
       in_pattern: "/base/*.tmpl"
       out_pattern: "$0.txt"
-      template: "Test content"
-"#;
+      template_file: "{}"
+"#,
+            template_path.to_string_lossy()
+        );
 
         let result = validate_dynamic_dir_config(valid_config.as_bytes());
         assert!(result.is_ok());
@@ -449,21 +453,25 @@ entries: []
         );
 
         // Test duplicate entry names
-        let duplicate_names_config = r#"
+        let duplicate_names_config = format!(
+            r#"
 entries:
   - name: "duplicate"
     factory: "template"
     config:
       in_pattern: "/base/*.tmpl"
       out_pattern: "$0.txt"
-      template: "Test content"
+      template_file: "{}"
   - name: "duplicate"
     factory: "template"
     config:
       in_pattern: "/other/*.tmpl"
       out_pattern: "$0.html"
-      template: "Other content"
-"#;
+      template_file: "{}"
+"#,
+            template_path.to_string_lossy(),
+            template_path.to_string_lossy()
+        );
 
         let result = validate_dynamic_dir_config(duplicate_names_config.as_bytes());
         assert!(result.is_err());
@@ -475,30 +483,36 @@ entries:
         );
 
         // Test empty entry name
-        let empty_name_config = r#"
+        let empty_name_config = format!(
+            r#"
 entries:
   - name: ""
     factory: "template"
     config:
       in_pattern: "/base/*.tmpl"
       out_pattern: "$0.txt"
-      template: "Test content"
-"#;
+      template_file: "{}"
+"#,
+            template_path.to_string_lossy()
+        );
 
         let result = validate_dynamic_dir_config(empty_name_config.as_bytes());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty name"));
 
         // Test empty factory name
-        let empty_factory_config = r#"
+        let empty_factory_config = format!(
+            r#"
 entries:
   - name: "test"
     factory: ""
     config:
       in_pattern: "/base/*.tmpl"
       out_pattern: "$0.txt"
-      template: "Test content"
-"#;
+      template_file: "{}"
+"#,
+            template_path.to_string_lossy()
+        );
 
         let result = validate_dynamic_dir_config(empty_factory_config.as_bytes());
         assert!(result.is_err());
@@ -527,10 +541,14 @@ entries:
     async fn test_dynamic_dir_creation() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+        // Create a template file for testing
+        let template_path = temp_dir.path().join("test_template.tmpl");
+        std::fs::write(&template_path, "Test template content").unwrap();
+
+        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
         use tinyfs::NodeID;
         let context = FactoryContext::new(state, NodeID::root());
@@ -543,7 +561,7 @@ entries:
                 config: serde_json::json!({
                     "in_pattern": "/base/*.tmpl",
                     "out_pattern": "$0.txt",
-                    "template": "Test template content"
+                    "template_file": template_path.to_string_lossy()
                 }),
             }],
         };
@@ -568,10 +586,16 @@ entries:
 
         let temp_dir = TempDir::new().unwrap();
 
-        let mut persistence = OpLogPersistence::create(temp_dir.path().to_str().unwrap())
+        // Create template files for testing
+        let template_path1 = temp_dir.path().join("test_template1.tmpl");
+        std::fs::write(&template_path1, "Template 1 content").unwrap();
+        let template_path2 = temp_dir.path().join("test_template2.tmpl");
+        std::fs::write(&template_path2, "Template 2 content").unwrap();
+
+        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
-        let tx_guard = persistence.begin().await.unwrap();
+        let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
         use tinyfs::NodeID;
         let context = FactoryContext::new(state, NodeID::root());
@@ -585,7 +609,7 @@ entries:
                     config: serde_json::json!({
                         "in_pattern": "/base/*.tmpl",
                         "out_pattern": "$0.txt",
-                        "template": "Template 1 content"
+                        "template_file": template_path1.to_string_lossy()
                     }),
                 },
                 DynamicDirEntry {
@@ -594,7 +618,7 @@ entries:
                     config: serde_json::json!({
                         "in_pattern": "/other/*.tmpl",
                         "out_pattern": "$0.html",
-                        "template": "Template 2 content"
+                        "template_file": template_path2.to_string_lossy()
                     }),
                 },
             ],

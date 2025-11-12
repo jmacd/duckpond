@@ -1,22 +1,12 @@
-use std::env;
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::env;
+use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use chrono;
-use clap::ValueEnum;
 use log::debug;
 use tinyfs::EntryType;
-
-/// Which filesystem to access in the steward-managed pond
-#[derive(Clone, Debug, ValueEnum, PartialEq)]
-pub enum FilesystemChoice {
-    /// Primary data filesystem (default)
-    Data,
-    /// Control filesystem for transaction metadata
-    Control,
-}
 
 /// Context needed to create and operate on a Ship
 ///
@@ -34,16 +24,22 @@ pub struct ShipContext {
 
 impl ShipContext {
     /// Create a new ShipContext from CLI parsing
-    pub fn new(pond_path: Option<PathBuf>, original_args: Vec<String>) -> Self {
+    #[must_use]
+    pub fn new<P: AsRef<Path>>(pond_path: Option<P>, original_args: Vec<String>) -> Self {
         Self {
-            pond_path,
+            pond_path: pond_path.map(|p| p.as_ref().to_path_buf()),
             original_args,
             template_variables: HashMap::new(),
         }
     }
 
     /// Create a new ShipContext with template variables from CLI parsing
-    pub fn with_variables(pond_path: Option<PathBuf>, original_args: Vec<String>, template_variables: HashMap<String, String>) -> Self {
+    #[must_use]
+    pub fn with_variables(
+        pond_path: Option<PathBuf>,
+        original_args: Vec<String>,
+        template_variables: HashMap<String, String>,
+    ) -> Self {
         Self {
             pond_path,
             original_args,
@@ -71,6 +67,24 @@ impl ShipContext {
             .await
             .map_err(|e| anyhow!("Failed to initialize pond: {}", e))
     }
+
+    /// Create pond infrastructure for restoration from bundles
+    ///
+    /// Unlike `create_pond()`, this creates the pond structure WITHOUT recording
+    /// the initial transaction #1. The first bundle will create txn_seq=1 with
+    /// the original command metadata from the source pond.
+    ///
+    /// REQUIRED: preserve_metadata must be provided with the source pond's identity.
+    /// Restoration means cloning another pond, not creating a new one.
+    pub async fn create_pond_for_restoration(
+        &self,
+        preserve_metadata: steward::PondMetadata,
+    ) -> Result<steward::Ship> {
+        let pond_path = self.resolve_pond_path()?;
+        steward::Ship::create_pond_for_restoration(&pond_path, preserve_metadata)
+            .await
+            .map_err(|e| anyhow!("Failed to create pond for restoration: {}", e))
+    }
 }
 
 /// Get the pond path with an optional override, falling back to POND environment variable
@@ -85,48 +99,38 @@ pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<Pat
     Ok(pond_base)
 }
 
-/// Core function to format a u64 ID value with friendly hex formatting
-/// Shows exactly 4, 8, 12, or 16 hex digits based on the magnitude of the ID
-/// 0000-FFFF -> 4 digits, 00010000-FFFFFFFF -> 8 digits, etc.
-pub fn format_id_value(id_value: u64) -> String {
-    if id_value <= 0xFFFF {
-        // 0-65535: show as exactly 4 hex digits
-        format!("{:04X}", id_value)
-    } else if id_value <= 0xFFFFFFFF {
-        // 65536-4294967295: show as exactly 8 hex digits
-        format!("{:08X}", id_value)
-    } else if id_value <= 0xFFFFFFFFFFFF {
-        // Show as exactly 12 hex digits
-        format!("{:012X}", id_value)
-    } else {
-        // Show as exactly 16 hex digits
-        format!("{:016X}", id_value)
-    }
-}
+/// Number of hex characters to show when shortening UUID7 values
+/// This matches the rightmost block (12 characters) of a UUID
+const UUID_SHORT_LENGTH: usize = 12;
 
-/// Helper function to format node IDs in a friendly way
-/// For UUID7 strings, shows last 8 hex characters (random part, git-style)
+/// Helper function to format node IDs in a friendly way with square brackets
+/// For UUID7 strings, shows last 12 hex characters (rightmost block)
 /// For hex strings, shows appropriate number of digits based on magnitude
+/// Always wraps the result in square brackets for consistency
+#[must_use]
 pub fn format_node_id(node_id: &str) -> String {
+    // @@@ YUCK Use Uuid, fail, do not fallback
     // Check if this looks like a UUID7 (contains hyphens)
-    if node_id.contains('-') {
-        // UUID7 format - take last 8 hex characters (random part)
+    let id_str = if node_id.contains('-') {
+        // UUID7 format - take last UUID_SHORT_LENGTH hex characters (rightmost block)
         // This avoids timestamp collisions when UUIDs are generated rapidly
         let hex_only: String = node_id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
         let len = hex_only.len();
-        if len >= 8 {
-            hex_only[len - 8..].to_string()
+        if len >= UUID_SHORT_LENGTH {
+            hex_only[len - UUID_SHORT_LENGTH..].to_string()
         } else {
             hex_only
         }
     } else {
         // Hex format - parse as hex and format based on magnitude
-        let id_value = u64::from_str_radix(node_id, 16).unwrap_or(0);
-        format_id_value(id_value)
-    }
+        panic!("unhandled code path");
+    };
+
+    format!("[{}]", id_str)
 }
 
 /// Helper function to format file sizes
+#[must_use]
 pub fn format_file_size(size: u64) -> String {
     if size >= 1024 * 1024 {
         format!("{:.1}MB", size as f64 / (1024.0 * 1024.0))
@@ -135,27 +139,6 @@ pub fn format_file_size(size: u64) -> String {
     } else {
         format!("{}B", size)
     }
-}
-
-/// Helper function to parse directory content
-pub fn parse_directory_content(content: &[u8]) -> Result<Vec<tlogfs::VersionedDirectoryEntry>> {
-    if content.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    use arrow::ipc::reader::StreamReader;
-
-    let cursor = std::io::Cursor::new(content);
-    let reader = StreamReader::try_new(cursor, None)?;
-
-    let mut all_entries = Vec::new();
-    for batch_result in reader {
-        let batch = batch_result?;
-        let entries: Vec<tlogfs::VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
-        all_entries.extend(entries);
-    }
-
-    Ok(all_entries)
 }
 
 /// Helper struct to store file information for DuckPond-specific output
@@ -169,16 +152,17 @@ pub struct FileInfo {
 
 impl FileInfo {
     /// Format in DuckPond-specific style showing meaningful metadata
+    #[must_use]
     pub fn format_duckpond_style(&self) -> String {
         let type_symbol = match self.metadata.entry_type {
-            EntryType::Directory => "📁",
+            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "📁",
             EntryType::Symlink => "🔗",
-            EntryType::FileData => "📄",
-            EntryType::FileTable => "📊",
-            EntryType::FileSeries => "📈",
+            EntryType::FileDataPhysical | EntryType::FileDataDynamic => "📄",
+            EntryType::FileTablePhysical | EntryType::FileTableDynamic => "📊",
+            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "📈",
         };
 
-        let size_str = if self.metadata.entry_type == EntryType::Directory {
+        let size_str = if self.metadata.entry_type.is_directory() {
             "-".to_string()
         } else {
             format_file_size(self.metadata.size.unwrap_or(0))
@@ -189,7 +173,7 @@ impl FileInfo {
             timestamp_us / 1_000_000,
             ((timestamp_us % 1_000_000) * 1000) as u32,
         )
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).expect("ok"));
 
         let time_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -216,6 +200,7 @@ pub struct FileInfoVisitor {
 }
 
 impl FileInfoVisitor {
+    #[must_use]
     pub fn new(show_all: bool) -> Self {
         Self { show_all }
     }
@@ -238,7 +223,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         }
 
         // Extract metadata that we can access from the node
-        let node_id = node.id().await.to_hex_string();
+        let node_id = node.id().await.to_string();
 
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {

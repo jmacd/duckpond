@@ -2,18 +2,37 @@
 name = "tlogfs"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[lib]
+doctest = false
+
+[features]
+# Test helpers - enables commit_test() method for integration tests
+test-helpers = []
 
 [dependencies]
-anyhow = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-cast = { workspace = true }
 arrow-csv = { workspace = true }
 arrow-schema = { workspace = true }
+async-compression = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+clap = { workspace = true }
+data_privacy = { workspace = true }
+data_privacy_macros = { workspace = true }
 datafusion = { workspace = true }
 deltalake = { workspace = true }
 env_logger = { workspace = true }
@@ -35,30 +54,14 @@ tera = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tokio = { workspace = true }
+tokio-tar = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
+utilities = { workspace = true }
 uuid7 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio-test = { workspace = true }
 
-[lints.clippy]
-# Strong defaults: deny problematic patterns
-cargo = { level = "deny", priority = -1 }
-correctness = { level = "deny", priority = -1 }
-perf = { level = "deny", priority = -1 }
-complexity = { level = "warn", priority = -1 }
-style = { level = "warn", priority = -1 }
-suspicious = { level = "warn", priority = -1 }
-restriction = { level = "allow", priority = -1 }
-
-# Specific Clippy lint customizations
-unwrap_used = "deny"
-print_stdout = "deny"
-print_stderr = "deny"
-must-use-candidate = "warn"
-await_holding_lock = "warn"
-manual_async_fn = "warn"
-dbg_macro = "warn"
-explicit_into_iter_loop = "warn"
+[lints]
+workspace = true

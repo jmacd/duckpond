@@ -10,6 +10,8 @@ export POND
 
 cargo build --release
 
+${EXE} mknod hydrovu /etc/hydrovu --overwrite --config-path ${NOYO}/hydrovu.yaml
+
 ${EXE} mknod dynamic-dir /combined --overwrite --config-path ${NOYO}/combine.yaml
 
 ${EXE} mknod dynamic-dir /singled --overwrite --config-path ${NOYO}/single.yaml

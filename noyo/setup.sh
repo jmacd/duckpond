@@ -1,4 +1,6 @@
 #!/bin/sh
+set -x
+set -e
 
 ROOT=/Volumes/sourcecode/src/duckpond
 NOYO=${ROOT}/noyo
@@ -11,7 +13,13 @@ cargo build --release
 
 ${EXE} init
 
-${EXE} hydrovu create ${NOYO}/hydrovu.yaml
+${EXE} mkdir -p /etc/system.d
+
+${EXE} copy ${NOYO}/data.md.tmpl /etc
+
+${EXE} mknod remote /etc/system.d/backup --config-path ${NOYO}/backup.yaml
+
+${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
 
 ${EXE} mknod dynamic-dir /combined --config-path ${NOYO}/combine.yaml
 
