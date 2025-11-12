@@ -2,6 +2,9 @@
 //!
 //! Provides utilities to format boxed headers with left- and right-justified fields
 
+// TODO remove when clippy updates, can only get this to fail in CI/CD
+#![allow(clippy::uninlined_format_args)]
+
 /// Standard box width for banners
 pub const BANNER_WIDTH: usize = 64;
 
