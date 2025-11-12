@@ -1434,7 +1434,7 @@ async fn test_replica_preserves_transaction_sequences() {
                     state
                         .initialize_root_directory()
                         .await
-                        .map_err(|e| steward::StewardError::DataInit(e))?;
+                        .map_err(steward::StewardError::DataInit)?;
 
                     Ok(())
                 })
