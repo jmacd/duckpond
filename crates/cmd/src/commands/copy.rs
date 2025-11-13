@@ -1,5 +1,8 @@
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::future::Future;
 
 /// Direction of copy operation
 #[derive(Debug, PartialEq)]
@@ -21,27 +24,81 @@ fn parse_host_path(path: &str) -> (bool, String) {
 }
 
 /// Determine copy direction based on sources and destination
-/// - If dest has "host://" prefix → copying OUT from pond to host
-/// - Otherwise → copying IN from host to pond (current behavior)
+/// - If dest has "host://" → copying OUT (pond → host), sources must NOT have "host://"
+/// - If sources have "host://" → copying IN (host → pond), dest must NOT have "host://"
+/// - Require explicit and consistent use of "host://" prefix
 fn determine_copy_direction(sources: &[String], dest: &str) -> Result<CopyDirection> {
     let (dest_is_host, _) = parse_host_path(dest);
     
-    if dest_is_host {
-        // Copying OUT: sources should be pond paths (no host:// prefix)
-        for source in sources {
-            let (source_is_host, _) = parse_host_path(source);
-            if source_is_host {
-                return Err(anyhow!(
-                    "Invalid copy: when destination is 'host://', sources must be pond paths (without 'host://' prefix)"
-                ));
-            }
+    // Check if any source has host:// prefix
+    let sources_have_host = sources.iter().any(|s| parse_host_path(s).0);
+    
+    match (dest_is_host, sources_have_host) {
+        (true, true) => Err(anyhow!(
+            "Invalid copy: cannot use 'host://' prefix on both sources and destination"
+        )),
+        (true, false) => {
+            // Copy OUT: pond → host
+            Ok(CopyDirection::Out)
         }
-        Ok(CopyDirection::Out)
-    } else {
-        // Copying IN: sources should be host paths (no host:// prefix for backward compatibility)
-        // We don't require host:// prefix for sources when copying in
-        Ok(CopyDirection::In)
+        (false, true) => {
+            // Copy IN: host → pond
+            // Verify ALL sources have host:// prefix for consistency
+            for source in sources {
+                if !parse_host_path(source).0 {
+                    return Err(anyhow!(
+                        "Invalid copy: when copying from host, ALL sources must have 'host://' prefix"
+                    ));
+                }
+            }
+            Ok(CopyDirection::In)
+        }
+        (false, false) => {
+            // Backward compatibility: assume copy IN if no host:// anywhere
+            // But warn that this is deprecated behavior
+            log::warn!("Copying without 'host://' prefix is deprecated. Use 'host://' on sources when copying IN.");
+            Ok(CopyDirection::In)
+        }
     }
+}
+
+/// Recursively find files in a host directory
+/// Returns list of (absolute_path, relative_path_from_base) tuples
+async fn find_files_recursive(base_dir: &str) -> Result<Vec<(String, String)>> {
+    use tokio::fs;
+    
+    let mut results = Vec::new();
+    let base_path = std::path::Path::new(base_dir);
+    
+    fn visit_dir<'a>(
+        dir: &'a std::path::Path,
+        base: &'a std::path::Path,
+        results: &'a mut Vec<(String, String)>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            let mut entries = fs::read_dir(dir).await?;
+            
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let metadata = fs::metadata(&path).await?;
+                
+                if metadata.is_dir() {
+                    visit_dir(&path, base, results).await?;
+                } else if metadata.is_file() {
+                    let absolute = path.to_string_lossy().to_string();
+                    let relative = path.strip_prefix(base)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .to_string();
+                    results.push((absolute, relative));
+                }
+            }
+            Ok(())
+        })
+    }
+    
+    visit_dir(base_path, base_path, &mut results).await?;
+    Ok(results)
 }
 
 async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
@@ -60,14 +117,17 @@ async fn copy_files_to_directory(
     format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for source in sources {
+        // Strip host:// prefix if present (for copy IN with explicit host:// prefix)
+        let (_is_host, clean_source) = parse_host_path(source);
+        
         // Extract filename from source path
-        let source_filename = std::path::Path::new(source)
+        let source_filename = std::path::Path::new(&clean_source)
             .file_name()
             .ok_or("Invalid file path")?
             .to_str()
             .ok_or("Invalid filename")?;
 
-        copy_single_file_to_directory_with_name(source, dest_wd, source_filename, format).await?;
+        copy_single_file_to_directory_with_name(&clean_source, dest_wd, source_filename, format).await?;
     }
     Ok(())
 }
@@ -115,6 +175,130 @@ async fn copy_single_file_to_directory_with_name(
     Ok(())
 }
 
+/// Recursively copy directory from host filesystem to pond, preserving structure
+/// Uses dual traversal: readdir on host paired with in_path on pond WD
+async fn copy_directory_recursive(
+    ship_context: &ShipContext,
+    host_base_dir: &str,
+    pond_dest: &str,
+) -> Result<()> {
+    use std::path::Path;
+    use tokio::fs;
+    
+    let mut ship = ship_context.open_pond().await?;
+    let host_base = Path::new(host_base_dir).to_path_buf();
+    let pond_dest = pond_dest.to_string();
+    
+    ship.transact(
+        &steward::PondUserMetadata::new(vec!["copy-recursive".to_string()]),
+        |_tx, fs| Box::pin(async move {
+            let root = fs.root().await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            
+            // Navigate to or create destination directory
+            let dest_wd = if pond_dest != "/" {
+                let clean_dest = pond_dest.trim_end_matches('/');
+                root.create_dir_path(clean_dest).await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?
+            } else {
+                root
+            };
+            
+            // Dual traversal helper
+            fn copy_dir_contents<'a>(
+                host_path: &'a Path,
+                pond_wd: tinyfs::WD,
+            ) -> Pin<Box<dyn Future<Output = Result<(u32, u32), steward::StewardError>> + Send + 'a>> {
+                Box::pin(async move {
+                    let mut dir_count = 0u32;
+                    let mut file_count = 0u32;
+                    
+                    let mut entries = fs::read_dir(host_path).await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                            tinyfs::Error::Other(format!("Failed to read directory {:?}: {}", host_path, e))
+                        )))?;
+                    
+                    while let Some(entry) = entries.next_entry().await
+                        .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                            tinyfs::Error::Other(format!("Failed to read entry: {}", e))
+                        )))? {
+                        
+                        let host_entry_path = entry.path();
+                        let entry_name = entry.file_name();
+                        let name_str = entry_name.to_string_lossy().to_string();
+                        
+                        let metadata = entry.metadata().await
+                            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                                tinyfs::Error::Other(format!("Failed to get metadata: {}", e))
+                            )))?;
+                        
+                        if metadata.is_dir() {
+                            // Create directory in pond and recurse
+                            let name_for_closure = name_str.clone();
+                            let child_wd = pond_wd.in_path(&name_str, |parent_wd, lookup| async move {
+                                match lookup {
+                                    tinyfs::Lookup::NotFound(_, name) => {
+                                        // Create directory and return WD for it
+                                        parent_wd.create_dir_path(&name).await
+                                    }
+                                    tinyfs::Lookup::Found(_) => {
+                                        // Directory already exists, open it as WD
+                                        parent_wd.open_dir_path(&name_for_closure).await
+                                    }
+                                    tinyfs::Lookup::Empty(_) => Err(tinyfs::Error::empty_path()),
+                                }
+                            }).await
+                            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                            
+                            dir_count += 1;
+                            
+                            // Recurse into subdirectory
+                            let (sub_dirs, sub_files) = copy_dir_contents(&host_entry_path, child_wd).await?;
+                            dir_count += sub_dirs;
+                            file_count += sub_files;
+                            
+                        } else if metadata.is_file() {
+                            // Copy file into pond at this level
+                            let source_path_str = host_entry_path.to_str()
+                                .ok_or_else(|| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                                    tinyfs::Error::Other("Invalid UTF-8 in path".to_string())
+                                )))?;
+                            
+                            // Infer format from file extension
+                            let format = if name_str.ends_with(".series") {
+                                "series"
+                            } else if name_str.ends_with(".table") {
+                                "table"
+                            } else {
+                                "data"
+                            };
+                            
+                            copy_single_file_to_directory_with_name(
+                                source_path_str,
+                                &pond_wd,
+                                &name_str,
+                                format
+                            ).await
+                            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                                tinyfs::Error::Other(format!("Failed to copy file: {}", e))
+                            )))?;
+                            
+                            file_count += 1;
+                        }
+                    }
+                    
+                    Ok((dir_count, file_count))
+                })
+            }
+            
+            let (dirs, files) = copy_dir_contents(&host_base, dest_wd).await?;
+            log::info!("Recursively copied {} directories and {} files from {:?} to {:?}", 
+                dirs, files, host_base, pond_dest);
+            Ok(())
+        })
+    ).await.map_err(|e| anyhow!("Recursive copy failed: {}", e))
+}
+
 /// Copy files INTO the pond from host filesystem
 ///
 /// This function handles the original copy behavior: host → pond
@@ -133,6 +317,19 @@ async fn copy_in(
     // Validate arguments
     if sources.is_empty() {
         return Err(anyhow!("At least one source file must be specified"));
+    }
+
+    // Check if we have a single source that is a directory on the host
+    if sources.len() == 1 {
+        let (is_host, host_path) = parse_host_path(&sources[0]);
+        if is_host {
+            let host_path_buf = PathBuf::from(&host_path);
+            if tokio::fs::metadata(&host_path_buf).await.ok().map(|m| m.is_dir()).unwrap_or(false) {
+                // This is a recursive directory copy from host to pond
+                log::info!("Detected directory copy from host: {} → {}", host_path, dest);
+                return copy_directory_recursive(ship_context, &host_path, dest).await;
+            }
+        }
     }
 
     // Clone data needed inside the closure
@@ -1142,6 +1339,102 @@ mod tests {
             "Should fail when copying pond path to pond path without host:// prefix"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_copy_roundtrip_out_then_in() -> Result<()> {
+        // Setup: Create first pond with test files
+        let setup1 = TestSetup::new().await?;
+
+        // Create directories first
+        let mut ship1 = steward::Ship::open_pond(&setup1.pond_path).await?;
+        ship1.transact(
+            &steward::PondUserMetadata::new(vec!["test".to_string(), "setup".to_string()]),
+            |_tx, fs| Box::pin(async move {
+                let root = fs.root().await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                _ = root.create_dir_path("/data").await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                _ = root.create_dir_path("/data/subdir").await
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                Ok(())
+            })
+        ).await?;
+
+        // Create test files in first pond
+        let test_files = vec![
+            "/data/file1.series",
+            "/data/file2.series",
+            "/data/subdir/file3.series",
+        ];
+
+        for file_path in &test_files {
+            setup1.create_parquet_series_in_pond(file_path).await?;
+        }
+
+        // Step 1: Copy OUT to host filesystem
+        let output_dir = tempfile::tempdir()?;
+        let output_path = output_dir.path().to_string_lossy().to_string();
+
+        let (ship_context1, sources, dest, format) = setup1.copy_context(
+            vec!["/data/**/*.series".to_string()],
+            format!("host://{}", output_path),
+            "data".to_string(),
+        );
+
+        copy_command(&ship_context1, &sources, &dest, &format).await?;
+
+        // Verify files were exported
+        let exported_files: Vec<_> = test_files.iter().map(|p| {
+            let relative = p.trim_start_matches('/');
+            output_dir.path().join(relative)
+        }).collect();
+
+        for exported_file in &exported_files {
+            assert!(
+                exported_file.exists(),
+                "Exported file should exist: {:?}",
+                exported_file
+            );
+        }
+
+        // Step 2: Create NEW pond and copy IN from host
+        let setup2 = TestSetup::new().await?;
+
+        // Copy the entire directory structure back into the new pond
+        let (ship_context2, sources2, dest2, format2) = setup2.copy_context(
+            vec![format!("host://{}/data", output_path)],
+            "/imported".to_string(),
+            "data".to_string(),
+        );
+
+        copy_command(&ship_context2, &sources2, &dest2, &format2).await?;
+
+        // Step 3: Verify all files exist in second pond with correct structure
+        for original_path in &test_files {
+            let relative = original_path.trim_start_matches("/data/");
+            let imported_path = format!("/imported/{}", relative);
+            
+            assert!(
+                setup2.verify_file_exists(&imported_path).await?,
+                "Imported file should exist: {}",
+                imported_path
+            );
+
+            // Read content from second pond
+            let content = setup2.read_pond_file_content(&imported_path).await?;
+            
+            // Verify content is non-empty (contains parquet data)
+            assert!(!content.is_empty(), "Imported file should not be empty");
+            
+            // Verify parquet magic bytes (PAR1)
+            assert_eq!(&content[0..4], b"PAR1", "Should be valid parquet file");
+            
+            log::debug!("✅ Round-trip verified for: {} ({} bytes)", imported_path, content.len());
+        }
+
+        log::info!("✅ Round-trip test complete: {} files copied OUT and IN successfully", test_files.len());
         Ok(())
     }
 }
