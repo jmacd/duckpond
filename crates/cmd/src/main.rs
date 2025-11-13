@@ -124,9 +124,9 @@ enum Commands {
     Cat {
         /// File path to read
         path: String,
-        /// Display mode [default: raw] [possible values: raw, table]
+        /// Output format [default: raw] [possible values: raw, table]
         #[arg(long, default_value = "raw")]
-        display: String,
+        format: String,
         /// Time range start (Unix timestamp in milliseconds, optional)
         #[arg(long)]
         time_start: Option<i64>,
@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
         }
         Commands::Cat {
             path,
-            display,
+            format,
             time_start,
             time_end,
             query,
@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
             commands::cat_command(
                 &ship_context,
                 &path,
-                &display,
+                &format,
                 None,
                 time_start,
                 time_end,
