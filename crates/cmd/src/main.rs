@@ -137,14 +137,17 @@ enum Commands {
         #[arg(long)]
         query: Option<String>,
     },
-    /// Copy files into the pond (supports multiple files like UNIX cp)
+    /// Copy files into or out of the pond
+    ///
+    /// Copy IN (host → pond): pond copy file1.csv file2.csv /dest/path --format=table
+    /// Copy OUT (pond → host): pond copy '/pattern/**/*.series' host:///output/dir
     Copy {
-        /// Source file paths (one or more files to copy)
+        /// Source paths: host files (copy IN) or pond paths/patterns (copy OUT)
         #[arg(required = true)]
         sources: Vec<String>,
-        /// Destination path in pond (file name or directory)
+        /// Destination: pond path (copy IN) or host://path (copy OUT)
         dest: String,
-        /// Format handling [possible values: data, table, series]
+        /// Format for copying IN [possible values: data, table, series] (ignored for copy OUT)
         #[arg(long, default_value = "data")]
         format: String,
     },
