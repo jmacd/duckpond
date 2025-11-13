@@ -56,6 +56,9 @@ pub mod sql_derived;
 // Temporal reduce dynamic factory
 pub mod temporal_reduce;
 
+// Timeseries join dynamic factory
+pub mod timeseries_join;
+
 // Schema validation utilities
 pub mod schema_validation;
 
