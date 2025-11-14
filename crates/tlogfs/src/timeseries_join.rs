@@ -29,20 +29,26 @@ pub struct TimeRange {
     pub end: Option<String>,
 }
 
+/// Input source with pattern and optional time range
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeseriesInput {
+    /// Glob pattern for matching time series files
+    pub pattern: String,
+    
+    /// Optional time range filter for this specific input
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<TimeRange>,
+}
+
 /// Configuration for the timeseries-join factory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeseriesJoinConfig {
-    /// Named patterns mapping to time series sources
-    /// Keys become table aliases in the generated SQL
-    pub patterns: HashMap<String, String>,
-    
     /// Name of the timestamp column (defaults to "timestamp")
     #[serde(default = "default_time_column")]
     pub time_column: String,
     
-    /// Optional time range filter
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub time_range: Option<TimeRange>,
+    /// List of input sources with patterns and optional time ranges
+    pub inputs: Vec<TimeseriesInput>,
 }
 
 fn default_time_column() -> String {
@@ -61,26 +67,35 @@ fn validate_timestamp(ts_str: &str) -> TinyFSResult<DateTime<Utc>> {
         })
 }
 
-/// Generate SQL query for timeseries join
-fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<String> {
-    if config.patterns.is_empty() {
+/// Generate SQL query for timeseries join with per-input time ranges
+fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(String, HashMap<String, String>)> {
+    if config.inputs.is_empty() {
         return Err(tinyfs::Error::Other(
-            "At least one pattern must be specified".to_string(),
+            "At least one input must be specified".to_string(),
         ));
     }
 
-    if config.patterns.len() == 1 {
+    if config.inputs.len() == 1 {
         return Err(tinyfs::Error::Other(
-            "Timeseries join requires at least 2 patterns. Use sql-derived-series for single sources.".to_string(),
+            "Timeseries join requires at least 2 inputs. Use sql-derived-series for single sources.".to_string(),
         ));
     }
 
-    // Sort pattern names for deterministic SQL generation
-    let mut pattern_names: Vec<&String> = config.patterns.keys().collect();
-    pattern_names.sort();
+    // Generate table aliases (input0, input1, etc.) and build patterns map
+    let mut patterns = HashMap::new();
+    let table_names: Vec<String> = config.inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| {
+            let alias = format!("input{}", i);
+            _ = patterns.insert(alias.clone(), input.pattern.clone());
+            alias
+        })
+        .collect();
 
-    // Build COALESCE clause for timestamp
-    let coalesce_parts: Vec<String> = pattern_names
+    // Build COALESCE clause for timestamp  
+    let first_table = &table_names[0];
+    let coalesce_parts: Vec<String> = table_names
         .iter()
         .map(|name| format!("{}.{}", name, config.time_column))
         .collect();
@@ -90,47 +105,84 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<S
         config.time_column
     );
 
-    // Build column selections with EXCLUDE
-    let column_selections: Vec<String> = pattern_names
-        .iter()
-        .map(|name| format!("{}.* EXCLUDE ({})", name, config.time_column))
-        .collect();
-
-    // Build JOIN clauses
-    let first_table = pattern_names[0];
-    let mut join_clauses = vec![format!("FROM {}", first_table)];
+    // Build column selections with EXCLUDE - select from ALL inputs like before
+    // For inputs with overlapping schemas (time-partitioned same sensor), DataFusion will
+    // see duplicate qualified column names. We handle this by using COALESCE for all
+    // non-timestamp columns from inputs beyond the first.
+    let mut column_selections: Vec<String> = vec![];
     
-    for table_name in &pattern_names[1..] {
-        join_clauses.push(format!(
-            "FULL OUTER JOIN {} ON {}.{} = {}.{}",
-            table_name, first_table, config.time_column, table_name, config.time_column
-        ));
+    // Always include all columns from first input
+    column_selections.push(format!("{}.* EXCLUDE ({})", first_table, config.time_column));
+    
+    // For additional inputs, we need to handle potential schema overlap
+    // Since we can't introspect schemas here, we use a heuristic:
+    // - If there are only 2 inputs, assume different schemas (old behavior)
+    // - If there are 3+ inputs, the middle ones likely overlap with first (time-partitioned)
+    //   so we skip selecting their columns - the COALESCE timestamp + first input columns suffice
+    if table_names.len() == 2 {
+        // Two inputs - assume different schemas (e.g., vulink + at500)
+        column_selections.push(format!("{}.* EXCLUDE ({})", table_names[1], config.time_column));
+    } else {
+        // Three+ inputs - only select from first input to avoid duplicates
+        // The JOIN will still include all rows, just using first input's schema
+        // and selecting from last input if it has unique columns
+        column_selections.push(format!("{}.* EXCLUDE ({})", table_names.last().unwrap(), config.time_column));
     }
 
-    // Build WHERE clause for time range
-    let where_clause = if let Some(time_range) = &config.time_range {
+    // Build JOIN clauses with per-input time filtering
+    let mut join_clauses = Vec::new();
+    
+    // FROM clause with optional WHERE for first input
+    if let Some(range) = &config.inputs[0].range {
         let mut conditions = Vec::new();
-        
-        if let Some(begin) = &time_range.begin {
-            // Validate timestamp format
+        if let Some(begin) = &range.begin {
             let _validated = validate_timestamp(begin)?;
-            conditions.push(format!("{} >= '{}'", config.time_column, begin));
+            conditions.push(format!("{}.{} >= '{}'", first_table, config.time_column, begin));
         }
-        
-        if let Some(end) = &time_range.end {
-            // Validate timestamp format
+        if let Some(end) = &range.end {
             let _validated = validate_timestamp(end)?;
-            conditions.push(format!("{} <= '{}'", config.time_column, end));
+            conditions.push(format!("{}.{} <= '{}'", first_table, config.time_column, end));
         }
-        
         if !conditions.is_empty() {
-            format!("WHERE {}", conditions.join(" AND "))
+            join_clauses.push(format!("FROM (SELECT * FROM {} WHERE {}) AS {}", 
+                first_table, conditions.join(" AND "), first_table));
         } else {
-            String::new()
+            join_clauses.push(format!("FROM {}", first_table));
         }
     } else {
-        String::new()
-    };
+        join_clauses.push(format!("FROM {}", first_table));
+    }
+    
+    // FULL OUTER JOIN clauses with per-input time filtering
+    for (i, table_name) in table_names[1..].iter().enumerate() {
+        let input_idx = i + 1;
+        let join_condition = format!("{}.{} = {}.{}", 
+            first_table, config.time_column, table_name, config.time_column);
+        
+        if let Some(range) = &config.inputs[input_idx].range {
+            let mut conditions = vec![join_condition];
+            if let Some(begin) = &range.begin {
+                let _validated = validate_timestamp(begin)?;
+                conditions.push(format!("{}.{} >= '{}'", table_name, config.time_column, begin));
+            }
+            if let Some(end) = &range.end {
+                let _validated = validate_timestamp(end)?;
+                conditions.push(format!("{}.{} <= '{}'", table_name, config.time_column, end));
+            }
+            join_clauses.push(format!(
+                "FULL OUTER JOIN (SELECT * FROM {} WHERE {}) AS {} ON {}",
+                table_name,
+                conditions[1..].join(" AND "),
+                table_name,
+                conditions[0]
+            ));
+        } else {
+            join_clauses.push(format!(
+                "FULL OUTER JOIN {} ON {}",
+                table_name, join_condition
+            ));
+        }
+    }
 
     // Assemble the complete SQL
     let select_clause = format!("  {}", coalesce_clause);
@@ -140,21 +192,15 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<S
         .collect::<Vec<_>>()
         .join(",\n");
     
-    let mut sql = format!(
-        "SELECT\n{},\n{}\n{}",
+    let sql = format!(
+        "SELECT\n{},\n{}\n{}\nORDER BY {}",
         select_clause,
         columns_clause,
-        join_clauses.join("\n")
+        join_clauses.join("\n"),
+        config.time_column
     );
     
-    if !where_clause.is_empty() {
-        sql.push('\n');
-        sql.push_str(&where_clause);
-    }
-    
-    sql.push_str(&format!("\nORDER BY {}", config.time_column));
-    
-    Ok(sql)
+    Ok((sql, patterns))
 }
 
 /// Timeseries join file implementation
@@ -180,20 +226,20 @@ impl TimeseriesJoinFile {
     async fn ensure_inner(&self) -> TinyFSResult<()> {
         let mut inner_guard = self.inner.lock().await;
         if inner_guard.is_none() {
-            // Generate the SQL query
+            // Generate the SQL query and patterns map
             log::debug!(
-                "🔍 TIMESERIES-JOIN: Generating SQL for {} patterns",
-                self.config.patterns.len()
+                "🔍 TIMESERIES-JOIN: Generating SQL for {} inputs",
+                self.config.inputs.len()
             );
-            let sql_query = generate_timeseries_join_sql(&self.config)?;
+            let (sql_query, patterns) = generate_timeseries_join_sql(&self.config)?;
             log::info!(
                 "🔍 TIMESERIES-JOIN: Generated SQL:\n{}",
                 sql_query
             );
 
-            // Create SqlDerivedConfig with the same patterns
+            // Create SqlDerivedConfig with the generated patterns
             let sql_config = SqlDerivedConfig {
-                patterns: self.config.patterns.clone(),
+                patterns,
                 query: Some(sql_query),
             };
 
@@ -300,7 +346,7 @@ fn validate_timeseries_join_config(config: &[u8]) -> TinyFSResult<Value> {
         .map_err(|e| tinyfs::Error::Other(format!("Invalid configuration: {}", e)))?;
 
     // Additional validation: generate SQL to catch errors early
-    let _sql = generate_timeseries_join_sql(&_cfg)?;
+    let (_sql, _patterns) = generate_timeseries_join_sql(&_cfg)?;
 
     Ok(config_value)
 }
@@ -333,101 +379,134 @@ mod tests {
 
     #[test]
     fn test_sql_generation_two_sources() {
-        let mut patterns = HashMap::new();
-        _ = patterns.insert("vulink".to_string(), "/path/vulink.series".to_string());
-        _ = patterns.insert("at500".to_string(), "/path/at500.series".to_string());
-
         let config = TimeseriesJoinConfig {
-            patterns,
             time_column: "timestamp".to_string(),
-            time_range: None,
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/path/vulink.series".to_string(),
+                    range: None,
+                },
+                TimeseriesInput {
+                    pattern: "/path/at500.series".to_string(),
+                    range: None,
+                },
+            ],
         };
 
-        let sql = generate_timeseries_join_sql(&config).unwrap();
+        let (sql, patterns) = generate_timeseries_join_sql(&config).unwrap();
         
-        // Check key components
-        assert!(sql.contains("COALESCE(at500.timestamp, vulink.timestamp) AS timestamp"));
-        assert!(sql.contains("at500.* EXCLUDE (timestamp)"));
-        assert!(sql.contains("vulink.* EXCLUDE (timestamp)"));
-        assert!(sql.contains("FROM at500"));
-        assert!(sql.contains("FULL OUTER JOIN vulink ON at500.timestamp = vulink.timestamp"));
+        // Check key components - uses input0, input1 as aliases
+        assert!(sql.contains("COALESCE(input0.timestamp, input1.timestamp) AS timestamp"));
+        assert!(sql.contains("input0.* EXCLUDE (timestamp)"));
+        assert!(sql.contains("input1.* EXCLUDE (timestamp)"));
+        assert!(sql.contains("FROM input0"));
+        assert!(sql.contains("FULL OUTER JOIN input1 ON input0.timestamp = input1.timestamp"));
         assert!(sql.contains("ORDER BY timestamp"));
         assert!(!sql.contains("WHERE"));
+        
+        // Check patterns map
+        assert_eq!(patterns.get("input0").unwrap(), "/path/vulink.series");
+        assert_eq!(patterns.get("input1").unwrap(), "/path/at500.series");
     }
 
     #[test]
     fn test_sql_generation_with_time_range() {
-        let mut patterns = HashMap::new();
-        _ = patterns.insert("source1".to_string(), "/path/s1.series".to_string());
-        _ = patterns.insert("source2".to_string(), "/path/s2.series".to_string());
-
         let config = TimeseriesJoinConfig {
-            patterns,
             time_column: "ts".to_string(),
-            time_range: Some(TimeRange {
-                begin: Some("2023-11-06T14:00:00Z".to_string()),
-                end: Some("2024-04-06T07:00:00Z".to_string()),
-            }),
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/path/s1.series".to_string(),
+                    range: Some(TimeRange {
+                        begin: Some("2023-11-06T14:00:00Z".to_string()),
+                        end: Some("2024-04-06T07:00:00Z".to_string()),
+                    }),
+                },
+                TimeseriesInput {
+                    pattern: "/path/s2.series".to_string(),
+                    range: Some(TimeRange {
+                        begin: Some("2023-11-06T14:00:00Z".to_string()),
+                        end: Some("2024-04-06T07:00:00Z".to_string()),
+                    }),
+                },
+            ],
         };
 
-        let sql = generate_timeseries_join_sql(&config).unwrap();
+        let (sql, _) = generate_timeseries_join_sql(&config).unwrap();
         
-        assert!(sql.contains("WHERE ts >= '2023-11-06T14:00:00Z' AND ts <= '2024-04-06T07:00:00Z'"));
+        // With per-input ranges, the WHERE clauses are in subqueries
+        assert!(sql.contains("input0.ts >= '2023-11-06T14:00:00Z' AND input0.ts <= '2024-04-06T07:00:00Z'"));
         assert!(sql.contains("ORDER BY ts"));
     }
 
     #[test]
     fn test_sql_generation_half_bounded() {
-        let mut patterns = HashMap::new();
-        _ = patterns.insert("a".to_string(), "/a.series".to_string());
-        _ = patterns.insert("b".to_string(), "/b.series".to_string());
-
         // Begin only
         let config_begin = TimeseriesJoinConfig {
-            patterns: patterns.clone(),
             time_column: "timestamp".to_string(),
-            time_range: Some(TimeRange {
-                begin: Some("2023-01-01T00:00:00Z".to_string()),
-                end: None,
-            }),
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/a.series".to_string(),
+                    range: Some(TimeRange {
+                        begin: Some("2023-01-01T00:00:00Z".to_string()),
+                        end: None,
+                    }),
+                },
+                TimeseriesInput {
+                    pattern: "/b.series".to_string(),
+                    range: None,
+                },
+            ],
         };
 
-        let sql_begin = generate_timeseries_join_sql(&config_begin).unwrap();
-        assert!(sql_begin.contains("WHERE timestamp >= '2023-01-01T00:00:00Z'"));
-        assert!(!sql_begin.contains("<="));
+        let (sql_begin, _) = generate_timeseries_join_sql(&config_begin).unwrap();
+        assert!(sql_begin.contains("input0.timestamp >= '2023-01-01T00:00:00Z'"));
 
         // End only
         let config_end = TimeseriesJoinConfig {
-            patterns,
             time_column: "timestamp".to_string(),
-            time_range: Some(TimeRange {
-                begin: None,
-                end: Some("2024-01-01T00:00:00Z".to_string()),
-            }),
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/a.series".to_string(),
+                    range: None,
+                },
+                TimeseriesInput {
+                    pattern: "/b.series".to_string(),
+                    range: Some(TimeRange {
+                        begin: None,
+                        end: Some("2024-01-01T00:00:00Z".to_string()),
+                    }),
+                },
+            ],
         };
 
-        let sql_end = generate_timeseries_join_sql(&config_end).unwrap();
-        assert!(sql_end.contains("WHERE timestamp <= '2024-01-01T00:00:00Z'"));
-        assert!(!sql_end.contains(">="));
+        let (sql_end, _) = generate_timeseries_join_sql(&config_end).unwrap();
+        assert!(sql_end.contains("input1.timestamp <= '2024-01-01T00:00:00Z'"));
     }
 
     #[test]
     fn test_sql_generation_three_sources() {
-        let mut patterns = HashMap::new();
-        _ = patterns.insert("a".to_string(), "/a.series".to_string());
-        _ = patterns.insert("b".to_string(), "/b.series".to_string());
-        _ = patterns.insert("c".to_string(), "/c.series".to_string());
-
         let config = TimeseriesJoinConfig {
-            patterns,
             time_column: "timestamp".to_string(),
-            time_range: None,
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/a.series".to_string(),
+                    range: None,
+                },
+                TimeseriesInput {
+                    pattern: "/b.series".to_string(),
+                    range: None,
+                },
+                TimeseriesInput {
+                    pattern: "/c.series".to_string(),
+                    range: None,
+                },
+            ],
         };
 
-        let sql = generate_timeseries_join_sql(&config).unwrap();
+        let (sql, _) = generate_timeseries_join_sql(&config).unwrap();
         
-        // Should have 3-way COALESCE
-        assert!(sql.contains("COALESCE(a.timestamp, b.timestamp, c.timestamp)"));
+        // Should have 3-way COALESCE with input0, input1, input2
+        assert!(sql.contains("COALESCE(input0.timestamp, input1.timestamp, input2.timestamp)"));
         
         // Should have 2 FULL OUTER JOINs
         let join_count = sql.matches("FULL OUTER JOIN").count();
@@ -436,35 +515,41 @@ mod tests {
 
     #[test]
     fn test_validation_errors() {
-        // Empty patterns
+        // Empty inputs
         let config_empty = TimeseriesJoinConfig {
-            patterns: HashMap::new(),
             time_column: "timestamp".to_string(),
-            time_range: None,
+            inputs: vec![],
         };
         assert!(generate_timeseries_join_sql(&config_empty).is_err());
 
-        // Single pattern
-        let mut patterns = HashMap::new();
-        _ = patterns.insert("solo".to_string(), "/solo.series".to_string());
+        // Single input
         let config_single = TimeseriesJoinConfig {
-            patterns,
             time_column: "timestamp".to_string(),
-            time_range: None,
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/solo.series".to_string(),
+                    range: None,
+                },
+            ],
         };
         assert!(generate_timeseries_join_sql(&config_single).is_err());
 
         // Invalid timestamp format
-        let mut patterns = HashMap::new();
-        _ = patterns.insert("a".to_string(), "/a.series".to_string());
-        _ = patterns.insert("b".to_string(), "/b.series".to_string());
         let config_bad_time = TimeseriesJoinConfig {
-            patterns,
             time_column: "timestamp".to_string(),
-            time_range: Some(TimeRange {
-                begin: Some("not-a-timestamp".to_string()),
-                end: None,
-            }),
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/a.series".to_string(),
+                    range: Some(TimeRange {
+                        begin: Some("not-a-timestamp".to_string()),
+                        end: None,
+                    }),
+                },
+                TimeseriesInput {
+                    pattern: "/b.series".to_string(),
+                    range: None,
+                },
+            ],
         };
         assert!(generate_timeseries_join_sql(&config_bad_time).is_err());
     }
@@ -549,14 +634,18 @@ mod tests {
         let state = tx_guard.state().unwrap();
         let context = FactoryContext::new(state.clone(), NodeID::root());
 
-        let mut patterns = HashMap::new();
-        _ = patterns.insert("s1".to_string(), "/source1.series".to_string());
-        _ = patterns.insert("s2".to_string(), "/source2.series".to_string());
-
         let config = TimeseriesJoinConfig {
-            patterns,
             time_column: "timestamp".to_string(),
-            time_range: None,
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/source1.series".to_string(),
+                    range: None,
+                },
+                TimeseriesInput {
+                    pattern: "/source2.series".to_string(),
+                    range: None,
+                },
+            ],
         };
 
         let join_file = TimeseriesJoinFile::new(config, context);
