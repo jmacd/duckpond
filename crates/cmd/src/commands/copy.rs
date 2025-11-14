@@ -62,45 +62,6 @@ fn determine_copy_direction(sources: &[String], dest: &str) -> Result<CopyDirect
     }
 }
 
-/// Recursively find files in a host directory
-/// Returns list of (absolute_path, relative_path_from_base) tuples
-async fn find_files_recursive(base_dir: &str) -> Result<Vec<(String, String)>> {
-    use tokio::fs;
-    
-    let mut results = Vec::new();
-    let base_path = std::path::Path::new(base_dir);
-    
-    fn visit_dir<'a>(
-        dir: &'a std::path::Path,
-        base: &'a std::path::Path,
-        results: &'a mut Vec<(String, String)>,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
-        Box::pin(async move {
-            let mut entries = fs::read_dir(dir).await?;
-            
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                let metadata = fs::metadata(&path).await?;
-                
-                if metadata.is_dir() {
-                    visit_dir(&path, base, results).await?;
-                } else if metadata.is_file() {
-                    let absolute = path.to_string_lossy().to_string();
-                    let relative = path.strip_prefix(base)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .to_string();
-                    results.push((absolute, relative));
-                }
-            }
-            Ok(())
-        })
-    }
-    
-    visit_dir(base_path, base_path, &mut results).await?;
-    Ok(results)
-}
-
 async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
     match format {
         "data" => Ok(tinyfs::EntryType::FileDataPhysical),
