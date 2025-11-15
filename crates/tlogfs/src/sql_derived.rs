@@ -284,6 +284,7 @@ impl SqlDerivedFile {
                 default_query = format!("SELECT * FROM {}", pattern_name);
                 &default_query
             } else {
+		// @@@
                 "SELECT * FROM <specify_pattern_name>"
             }
         };
