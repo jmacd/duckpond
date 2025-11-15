@@ -53,6 +53,9 @@ pub mod data_taxonomy;
 // SQL-derived dynamic node factory
 pub mod sql_derived;
 
+// Scope prefix table provider for dynamic column renaming
+pub mod scope_prefix_table_provider;
+
 // Temporal reduce dynamic factory
 pub mod temporal_reduce;
 

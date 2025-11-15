@@ -38,6 +38,10 @@ pub struct TimeseriesInput {
     /// Optional time range filter for this specific input
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<TimeRange>,
+    
+    /// Optional scope prefix to add to all column names (e.g., "BDock" -> "BDock.temperature")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// Configuration for the timeseries-join factory
@@ -234,10 +238,31 @@ impl TimeseriesJoinFile {
                 sql_query
             );
 
-            // Create SqlDerivedConfig with the generated patterns
-            let sql_config = SqlDerivedConfig {
-                patterns,
-                query: Some(sql_query),
+            // Build scope_prefixes map from inputs that have scope set
+            let mut scope_prefixes = HashMap::new();
+            for (i, input) in self.config.inputs.iter().enumerate() {
+                if let Some(ref scope_prefix) = input.scope {
+                    let table_name = format!("input{}", i);
+                    log::debug!(
+                        "🔧 TIMESERIES-JOIN: Adding scope prefix '{}' for table '{}'",
+                        scope_prefix, table_name
+                    );
+                    _ = scope_prefixes.insert(
+                        table_name,
+                        (scope_prefix.clone(), self.config.time_column.clone()),
+                    );
+                }
+            }
+
+            // Create SqlDerivedConfig with the generated patterns and scope prefixes
+            let sql_config = if scope_prefixes.is_empty() {
+                SqlDerivedConfig::new(patterns, Some(sql_query))
+            } else {
+                log::debug!(
+                    "🔧 TIMESERIES-JOIN: Configuring {} scope prefixes",
+                    scope_prefixes.len()
+                );
+                SqlDerivedConfig::new_scoped(patterns, Some(sql_query), scope_prefixes)
             };
 
             // Create SqlDerivedFile in Series mode
@@ -381,10 +406,12 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/path/vulink.series".to_string(),
+                    scope: None,
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/path/at500.series".to_string(),
+                    scope: None,
                     range: None,
                 },
             ],
@@ -413,6 +440,7 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/path/s1.series".to_string(),
+                    scope: None,
                     range: Some(TimeRange {
                         begin: Some("2023-11-06T14:00:00Z".to_string()),
                         end: Some("2024-04-06T07:00:00Z".to_string()),
@@ -420,6 +448,7 @@ mod tests {
                 },
                 TimeseriesInput {
                     pattern: "/path/s2.series".to_string(),
+                    scope: None,
                     range: Some(TimeRange {
                         begin: Some("2023-11-06T14:00:00Z".to_string()),
                         end: Some("2024-04-06T07:00:00Z".to_string()),
@@ -443,6 +472,7 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/a.series".to_string(),
+                    scope: None,
                     range: Some(TimeRange {
                         begin: Some("2023-01-01T00:00:00Z".to_string()),
                         end: None,
@@ -450,6 +480,7 @@ mod tests {
                 },
                 TimeseriesInput {
                     pattern: "/b.series".to_string(),
+                    scope: None,
                     range: None,
                 },
             ],
@@ -464,10 +495,12 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/a.series".to_string(),
+                    scope: None,
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/b.series".to_string(),
+                    scope: None,
                     range: Some(TimeRange {
                         begin: None,
                         end: Some("2024-01-01T00:00:00Z".to_string()),
@@ -487,14 +520,17 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/a.series".to_string(),
+                    scope: None,
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/b.series".to_string(),
+                    scope: None,
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/c.series".to_string(),
+                    scope: None,
                     range: None,
                 },
             ],
@@ -525,6 +561,7 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/solo.series".to_string(),
+                    scope: None,
                     range: None,
                 },
             ],
@@ -537,6 +574,7 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/a.series".to_string(),
+                    scope: None,
                     range: Some(TimeRange {
                         begin: Some("not-a-timestamp".to_string()),
                         end: None,
@@ -544,6 +582,7 @@ mod tests {
                 },
                 TimeseriesInput {
                     pattern: "/b.series".to_string(),
+                    scope: None,
                     range: None,
                 },
             ],
@@ -636,10 +675,12 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/source1.series".to_string(),
+                    scope: None,
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/source2.series".to_string(),
+                    scope: None,
                     range: None,
                 },
             ],
@@ -668,6 +709,137 @@ mod tests {
         
         // Should have columns: timestamp, temp_a, temp_b
         assert_eq!(batch.num_columns(), 3);
+
+        tx_guard.commit_test().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_timeseries_join_with_scope_prefixes() {
+        use crate::factory::FactoryContext;
+        use crate::persistence::OpLogPersistence;
+        use arrow::array::{Float64Array, TimestampSecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::io::Cursor;
+        use tinyfs::{EntryType, FS, NodeID};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        {
+            let tx_guard = persistence.begin_test().await.unwrap();
+            let state = tx_guard.state().unwrap();
+            let fs = FS::new(state.clone()).await.unwrap();
+            let root = fs.root().await.unwrap();
+
+            // Create source1.series with temp column
+            let schema1 = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new("temp", DataType::Float64, false),
+            ]));
+            let timestamps1 = TimestampSecondArray::from(vec![1, 2, 3]);
+            let temps1 = Float64Array::from(vec![10.0, 20.0, 30.0]);
+            let batch1 = RecordBatch::try_new(
+                schema1.clone(),
+                vec![Arc::new(timestamps1), Arc::new(temps1)],
+            ).unwrap();
+            let mut parquet_buffer1 = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer1);
+                let mut writer1 = ArrowWriter::try_new(cursor, schema1, None).unwrap();
+                writer1.write(&batch1).unwrap();
+                _ = writer1.close().unwrap();
+            }
+            let mut file_writer1 = root
+                .async_writer_path_with_type("/source1.series", EntryType::FileSeriesPhysical)
+                .await
+                .unwrap();
+            use tokio::io::AsyncWriteExt;
+            file_writer1.write_all(&parquet_buffer1).await.unwrap();
+            file_writer1.flush().await.unwrap();
+            file_writer1.shutdown().await.unwrap();
+
+            // Create source2.series with pressure column
+            let schema2 = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+                Field::new("pressure", DataType::Float64, false),
+            ]));
+            let timestamps2 = TimestampSecondArray::from(vec![2, 3, 4]);
+            let pressures = Float64Array::from(vec![100.0, 101.0, 102.0]);
+            let batch2 = RecordBatch::try_new(
+                schema2.clone(),
+                vec![Arc::new(timestamps2), Arc::new(pressures)],
+            ).unwrap();
+            let mut parquet_buffer2 = Vec::new();
+            {
+                let cursor = Cursor::new(&mut parquet_buffer2);
+                let mut writer2 = ArrowWriter::try_new(cursor, schema2, None).unwrap();
+                writer2.write(&batch2).unwrap();
+                _ = writer2.close().unwrap();
+            }
+            let mut file_writer2 = root
+                .async_writer_path_with_type("/source2.series", EntryType::FileSeriesPhysical)
+                .await
+                .unwrap();
+            file_writer2.write_all(&parquet_buffer2).await.unwrap();
+            file_writer2.flush().await.unwrap();
+            file_writer2.shutdown().await.unwrap();
+
+            tx_guard.commit_test().await.unwrap();
+        }
+
+        // Test with scope prefixes
+        let tx_guard = persistence.begin_test().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        let root_id = NodeID::root();
+        let context = FactoryContext::new(state.clone(), root_id);
+
+        let config = TimeseriesJoinConfig {
+            time_column: "timestamp".to_string(),
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: "/source1.series".to_string(),
+                    scope: Some("BDock".to_string()),
+                    range: None,
+                },
+                TimeseriesInput {
+                    pattern: "/source2.series".to_string(),
+                    scope: Some("ADock".to_string()),
+                    range: None,
+                },
+            ],
+        };
+
+        let join_file = TimeseriesJoinFile::new(config, context);
+        let table_provider = join_file
+            .as_table_provider(root_id, root_id, &state)
+            .await
+            .unwrap();
+
+        // Query to verify scoped column names - use direct scan to avoid SQL optimizer
+        let ctx = state.session_context().await.unwrap();
+        let df_state = ctx.state();
+        let plan = table_provider.scan(&df_state, None, &[], None).await.unwrap();
+        
+        let task_ctx = ctx.task_ctx();
+        let stream = plan.execute(0, task_ctx).unwrap();
+        
+        use futures::StreamExt;
+        let batches: Vec<_> = stream.collect::<Vec<_>>().await.into_iter().map(|r| r.unwrap()).collect();
+
+        assert!(!batches.is_empty());
+        let batch = &batches[0];
+        let schema = batch.schema();
+        
+        // Verify column names include scope prefixes
+        let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(column_names.contains(&"timestamp"), "Should have timestamp column");
+        assert!(column_names.contains(&"BDock.temp"), "Should have BDock.temp column");
+        assert!(column_names.contains(&"ADock.pressure"), "Should have ADock.pressure column");
 
         tx_guard.commit_test().await.unwrap();
     }

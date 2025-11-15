@@ -33,6 +33,7 @@
 use crate::factory::FactoryContext;
 use crate::query::queryable_file::QueryableFile;
 use crate::register_dynamic_factory;
+use crate::scope_prefix_table_provider::ScopePrefixTableProvider;
 use async_trait::async_trait;
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -97,16 +98,47 @@ pub enum SqlDerivedMode {
 }
 
 /// Configuration for SQL-derived file generation
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct SqlDerivedConfig {
     /// Named patterns for matching files. Each pattern name becomes a table in the SQL query.
     /// Each pattern can match multiple files which are automatically harmonized with UNION ALL BY NAME.
     /// Example: {"vulink": "/data/vulink*.series", "at500": "/data/at500*.series"}
+    #[serde(default)]
     pub patterns: HashMap<String, String>,
 
     /// SQL query to execute on the source data. Defaults to "SELECT * FROM source" if not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
+    
+    /// Optional scope prefixes to apply to table columns (internal use by derivative factories)
+    /// Maps table name to (scope_prefix, time_column_name)
+    /// NOT serialized - must be set programmatically by factories like timeseries-join
+    #[serde(skip, default)]
+    pub scope_prefixes: Option<HashMap<String, (String, String)>>,
+}
+
+impl SqlDerivedConfig {
+    /// Create a new SqlDerivedConfig with patterns and optional query
+    pub fn new(patterns: HashMap<String, String>, query: Option<String>) -> Self {
+        Self {
+            patterns,
+            query,
+            scope_prefixes: None,
+        }
+    }
+    
+    /// Create a new SqlDerivedConfig with scope prefixes for column renaming
+    pub fn new_scoped(
+        patterns: HashMap<String, String>,
+        query: Option<String>,
+        scope_prefixes: HashMap<String, (String, String)>,
+    ) -> Self {
+        Self {
+            patterns,
+            query,
+            scope_prefixes: Some(scope_prefixes),
+        }
+    }
 }
 
 /// Represents a resolved file with its path and NodeID
@@ -778,10 +810,42 @@ impl QueryableFile for SqlDerivedFile {
                         unique_table_name,
                         Arc::as_ptr(&ctx)
                     );
+                    
+                    // Wrap with ScopePrefixTableProvider if scope prefix is configured
+                    let final_table_provider: Arc<dyn datafusion::catalog::TableProvider> = 
+                        if let Some(scope_prefixes) = &self.config.scope_prefixes {
+                            log::debug!(
+                                "🔧 SQL-DERIVED: Checking scope_prefixes for pattern '{}'. Available keys: {:?}",
+                                pattern_name, scope_prefixes.keys().collect::<Vec<_>>()
+                            );
+                            if let Some((scope_prefix, time_column)) = scope_prefixes.get(pattern_name.as_str()) {
+                                log::info!(
+                                    "🔧 SQL-DERIVED: Wrapping table '{}' (pattern '{}') with scope prefix '{}'",
+                                    unique_table_name, pattern_name, scope_prefix
+                                );
+                                let wrapped = Arc::new(ScopePrefixTableProvider::new(
+                                    listing_table_provider,
+                                    scope_prefix.clone(),
+                                    time_column.clone(),
+                                )?);
+                                use datafusion::catalog::TableProvider;
+                                debug!(
+                                    "🔧 SQL-DERIVED: Wrapped table '{}' schema: {:?}",
+                                    unique_table_name,
+                                    wrapped.schema().fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+                                );
+                                wrapped
+                            } else {
+                                listing_table_provider
+                            }
+                        } else {
+                            listing_table_provider
+                        };
+                    
                     _ = ctx
                         .register_table(
                             datafusion::sql::TableReference::bare(unique_table_name.as_str()),
-                            listing_table_provider,
+                            final_table_provider,
                         )
                         .map_err(|e| {
                             log::error!(
@@ -1388,6 +1452,7 @@ query: ""
                 map
             },
             query: Some("SELECT location, reading FROM sensor_data WHERE reading > 85 ORDER BY reading DESC".to_string()),
+            ..Default::default()
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -1559,6 +1624,7 @@ query: ""
             query: Some(
                 "SELECT location, reading, sensor_id FROM data ORDER BY sensor_id".to_string(),
             ),
+            ..Default::default()
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -1734,6 +1800,7 @@ query: ""
                 map
             },
             query: Some("SELECT * FROM metrics UNION ALL SELECT * FROM logs".to_string()),
+            ..Default::default()
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -1814,6 +1881,7 @@ query: ""
                 map
             },
             query: None, // No query specified - should default to "SELECT * FROM source"
+            ..Default::default()
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -1874,6 +1942,7 @@ query: ""
                 map
             },
             query: Some("SELECT location, reading * 1.5 as adjusted_reading FROM sensor_data WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string()),
+            ..Default::default()
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -1937,6 +2006,7 @@ query: ""
                 map
             },
             query: Some("SELECT location, reading FROM multi_sensor_data WHERE reading > 75 ORDER BY reading DESC".to_string()),
+            ..Default::default()
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -2005,6 +2075,7 @@ query: ""
                 "SELECT location, reading, sensor_id FROM multi_sensor_data ORDER BY sensor_id"
                     .to_string(),
             ),
+            ..Default::default()
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -2086,6 +2157,7 @@ query: ""
                 map
             },
             query: Some("SELECT name, value * 2 as doubled_value FROM data WHERE value > 150 ORDER BY doubled_value DESC".to_string()),
+            ..Default::default()
         };
 
         let sql_derived_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Table).unwrap();
@@ -2290,6 +2362,7 @@ query: ""
                     map
                 },
                 query: Some("SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value".to_string()),
+                ..Default::default()
             };
 
             let first_sql_file =
@@ -2347,6 +2420,7 @@ query: ""
                     map
                 },
                 query: Some("SELECT name, adjusted_value * 2 as final_value FROM intermediate WHERE adjusted_value > 250 ORDER BY final_value DESC".to_string()),
+                ..Default::default()
             };
 
             let second_sql_file =
@@ -2620,6 +2694,7 @@ query: ""
             },
             // Use COALESCE pattern like in our fixed HydroVu config to ensure non-nullable timestamps
             query: Some("SELECT COALESCE(sensor_a.timestamp, pressure_b.timestamp) AS timestamp, sensor_a.* EXCLUDE (timestamp), pressure_b.* EXCLUDE (timestamp) FROM sensor_a FULL OUTER JOIN pressure_b ON sensor_a.timestamp = pressure_b.timestamp ORDER BY timestamp".to_string()),
+            ..Default::default()
         };
 
         let sql_derived_file =
@@ -2855,6 +2930,7 @@ query: ""
                     map
                 },
                 query: Some("SELECT timestamp, temperature, humidity FROM series WHERE station_id = 'BDock' ORDER BY timestamp".to_string()),
+                ..Default::default()
             };
 
             let sql_file = SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
@@ -3569,6 +3645,7 @@ query: ""
                 map
             },
             query: Some("SELECT * FROM data ORDER BY timestamp".to_string()),
+            ..Default::default()
         };
 
         let sql_derived_file =
@@ -3670,6 +3747,7 @@ query: ""
                 map
             },
             query: Some("SELECT * FROM TempData ORDER BY timestamp".to_string()),
+            ..Default::default()
         };
 
         let sql_derived_file =

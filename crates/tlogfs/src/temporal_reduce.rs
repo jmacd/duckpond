@@ -323,6 +323,7 @@ impl TemporalReduceSqlFile {
                     patterns
                 },
                 query: Some(sql_query.clone()),
+                scope_prefixes: None,
             };
 
             log::info!(

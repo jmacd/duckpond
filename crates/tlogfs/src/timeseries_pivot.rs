@@ -239,6 +239,7 @@ impl QueryableFile for TimeseriesPivotFile {
         let sql_config = SqlDerivedConfig {
             patterns,
             query: Some(sql),
+            scope_prefixes: None,
         };
 
         // Use SqlDerivedSeries factory to create the file
