@@ -35,12 +35,6 @@ pub struct TimeseriesInput {
     /// Glob pattern for matching time series files
     pub pattern: String,
     
-    /// Scope prefix to prepend to all column names (e.g., "Vulink" or "AT500_Surface")
-    /// Use empty string "" if no prefix is needed.
-    /// NOTE: Scope prefix implementation requires schema introspection - currently only empty string is supported.
-    /// For scoped data, apply the scope prefix at ingestion time (e.g., in hydrovu configuration).
-    pub scope: String,
-    
     /// Optional time range filter for this specific input
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<TimeRange>,
@@ -111,32 +105,25 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
         config.time_column
     );
 
-    // Build column selections with scope prefix applied
-    // For each input, if scope is non-empty, we need to select each column and prefix it
-    // If scope is empty, use SELECT * EXCLUDE as before
+    // Build column selections with EXCLUDE
     let mut column_selections: Vec<String> = vec![];
     
-    // Determine which inputs to select columns from (same heuristic as before)
-    let select_from_indices: Vec<usize> = if table_names.len() == 2 {
-        // Two inputs - select from both
-        vec![0, 1]
-    } else {
-        // Three+ inputs - select from first and last only
-        vec![0, table_names.len() - 1]
-    };
+    // Always include all columns from first input
+    column_selections.push(format!("{}.* EXCLUDE ({})", first_table, config.time_column));
     
-    for &idx in &select_from_indices {
-        let table = &table_names[idx];
-        let scope = &config.inputs[idx].scope;
-        
-        if scope.is_empty() {
-            // No scope prefix - select all columns as-is
-            column_selections.push(format!("{}.* EXCLUDE ({})", table, config.time_column));
-        } else {
-            // Scope prefix required - we need to use a subquery to rename columns
-            // This will be handled in the FROM/JOIN clause by wrapping the input
-            column_selections.push(format!("{}.* EXCLUDE ({})", table, config.time_column));
-        }
+    // For additional inputs, we need to handle potential schema overlap
+    // Since we can't introspect schemas here, we use a heuristic:
+    // - If there are only 2 inputs, assume different schemas (old behavior)
+    // - If there are 3+ inputs, the middle ones likely overlap with first (time-partitioned)
+    //   so we skip selecting their columns - the COALESCE timestamp + first input columns suffice
+    if table_names.len() == 2 {
+        // Two inputs - assume different schemas (e.g., vulink + at500)
+        column_selections.push(format!("{}.* EXCLUDE ({})", table_names[1], config.time_column));
+    } else {
+        // Three+ inputs - only select from first input to avoid duplicates
+        // The JOIN will still include all rows, just using first input's schema
+        // and selecting from last input if it has unique columns
+        column_selections.push(format!("{}.* EXCLUDE ({})", table_names.last().unwrap(), config.time_column));
     }
 
     // Build JOIN clauses with per-input time filtering
@@ -394,12 +381,10 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/path/vulink.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/path/at500.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
             ],
@@ -428,7 +413,6 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/path/s1.series".to_string(),
-                    scope: String::new(),
                     range: Some(TimeRange {
                         begin: Some("2023-11-06T14:00:00Z".to_string()),
                         end: Some("2024-04-06T07:00:00Z".to_string()),
@@ -436,7 +420,6 @@ mod tests {
                 },
                 TimeseriesInput {
                     pattern: "/path/s2.series".to_string(),
-                    scope: String::new(),
                     range: Some(TimeRange {
                         begin: Some("2023-11-06T14:00:00Z".to_string()),
                         end: Some("2024-04-06T07:00:00Z".to_string()),
@@ -460,7 +443,6 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/a.series".to_string(),
-                    scope: String::new(),
                     range: Some(TimeRange {
                         begin: Some("2023-01-01T00:00:00Z".to_string()),
                         end: None,
@@ -468,7 +450,6 @@ mod tests {
                 },
                 TimeseriesInput {
                     pattern: "/b.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
             ],
@@ -483,12 +464,10 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/a.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/b.series".to_string(),
-                    scope: String::new(),
                     range: Some(TimeRange {
                         begin: None,
                         end: Some("2024-01-01T00:00:00Z".to_string()),
@@ -508,17 +487,14 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/a.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/b.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/c.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
             ],
@@ -549,7 +525,6 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/solo.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
             ],
@@ -562,7 +537,6 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/a.series".to_string(),
-                    scope: String::new(),
                     range: Some(TimeRange {
                         begin: Some("not-a-timestamp".to_string()),
                         end: None,
@@ -570,7 +544,6 @@ mod tests {
                 },
                 TimeseriesInput {
                     pattern: "/b.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
             ],
@@ -663,12 +636,10 @@ mod tests {
             inputs: vec![
                 TimeseriesInput {
                     pattern: "/source1.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
                 TimeseriesInput {
                     pattern: "/source2.series".to_string(),
-                    scope: String::new(),
                     range: None,
                 },
             ],
