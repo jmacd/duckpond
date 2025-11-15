@@ -59,6 +59,9 @@ pub mod temporal_reduce;
 // Timeseries join dynamic factory
 pub mod timeseries_join;
 
+// Timeseries pivot dynamic factory
+pub mod timeseries_pivot;
+
 // Schema validation utilities
 pub mod schema_validation;
 

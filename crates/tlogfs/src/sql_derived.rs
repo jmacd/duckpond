@@ -135,20 +135,6 @@ impl SqlDerivedFile {
         FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 
-    // Create ListingTable using TinyFS ObjectStore from the provided SessionContext
-    //
-    // Create a DataFusion ListingTable using files already registered with the ObjectStore.
-    // Uses the ObjectStore registry from the provided SessionContext.
-    // Create table provider from OpLogFiles by calling their as_table_provider() methods
-    // async fn create_table_provider_from_oplog_files(&self, oplog_files: &[Arc<dyn tinyfs::File>], tx: &mut crate::transaction_guard::TransactionGuard<'_>) -> Result<Arc<dyn TableProvider>, DataFusionError> {
-    //     if oplog_files.is_empty() {
-    //         return Err(DataFusionError::Plan("No OpLogFiles to create table provider from".to_string()));
-    //     }
-
-    //     // For now, return an error since resolve_pattern_to_queryable_files needs to be implemented properly
-    //     return Err(DataFusionError::Plan("create_table_provider_from_oplog_files not yet fully implemented - resolve_pattern_to_queryable_files needs proper file extraction from TinyFS".to_string()));
-    // }
-
     /// Resolve pattern to QueryableFile instances (eliminates ResolvedFile indirection)
     pub async fn resolve_pattern_to_queryable_files(
         &self,

@@ -97,13 +97,6 @@ impl WideRecord {
     ) -> anyhow::Result<Vec<Self>> {
         use std::collections::BTreeSet;
 
-        // Count total raw readings for debugging
-        // let total_raw_readings: usize = location_readings
-        //     .parameters
-        //     .iter()
-        //     .map(|p| p.readings.len())
-        //     .sum();
-
         // Collect all unique timestamps from all parameters
         let all_timestamps: BTreeSet<i64> = location_readings
             .parameters
