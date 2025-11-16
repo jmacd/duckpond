@@ -1,4 +1,4 @@
-//! Steward Transaction Guard - Wraps tlogfs transaction guard with steward-specific logic
+//! Steward Transaction Guard - Wraps tlogfs transaction with audit logging
 
 use crate::{
     PondTxnMetadata, StewardError,
@@ -12,7 +12,7 @@ use tinyfs::FS;
 use tlogfs::factory::ExecutionContext;
 use tlogfs::transaction_guard::TransactionGuard;
 
-/// Steward transaction guard that ensures proper sequencing of data and control filesystem operations
+/// Steward transaction guard wraps TLogFS transaction with control table lifecycle tracking
 pub struct StewardTransactionGuard<'a> {
     /// The underlying tlogfs transaction guard
     data_tx: Option<TransactionGuard<'a>>,

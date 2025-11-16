@@ -39,7 +39,8 @@ pub struct TimeseriesInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<TimeRange>,
     
-    /// Optional scope prefix to add to all column names (e.g., "BDock" -> "BDock.temperature")
+    /// Optional scope prefix to add to all column names (e.g.,
+    /// "temperature" -> "BDock.temperature")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }

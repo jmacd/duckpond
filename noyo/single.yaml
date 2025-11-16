@@ -1,79 +1,25 @@
 entries:
   - name: "DO"
-    factory: "sql-derived-series"
+    factory: "timeseries-pivot"
     config:
-      patterns:
-        bdock: "/combined/BDock"
-        silver: "/combined/Silver"
-        princess: "/combined/Princess"
-      query: |
-        WITH all_timestamps AS (
-          SELECT timestamp FROM bdock
-          UNION
-          SELECT timestamp FROM silver
-          UNION
-          SELECT timestamp FROM princess
-        )
-        SELECT 
-          t.timestamp,
-          b."AT500_Surface.DO.mg/L" as "BDock.AT500_Surface.DO.mg/L",
-          s."AT500_Surface.DO.mg/L" as "Silver.AT500_Surface.DO.mg/L",
-          p."AT500_Surface.DO.mg/L" as "Princess.AT500_Surface.DO.mg/L"
-        FROM all_timestamps t
-        LEFT JOIN bdock b ON t.timestamp = b.timestamp
-        LEFT JOIN silver s ON t.timestamp = s.timestamp
-        LEFT JOIN princess p ON t.timestamp = p.timestamp
-        ORDER BY t.timestamp
+      pattern: "/combined/*"
+      columns:
+        - "AT500_Surface.DO.mg/L"
+        - "AT500_Bottom.DO.mg/L"
 
   - name: "Salinity"
-    factory: "sql-derived-series"
+    factory: "timeseries-pivot"
     config:
-      patterns:
-        bdock: "/combined/BDock"
-        silver: "/combined/Silver"
-        princess: "/combined/Princess"
-      query: |
-        WITH all_timestamps AS (
-          SELECT timestamp FROM bdock
-          UNION
-          SELECT timestamp FROM silver
-          UNION
-          SELECT timestamp FROM princess
-        )
-        SELECT 
-          t.timestamp,
-          b."AT500_Surface.Salinity.psu" as "BDock.AT500_Surface.Salinity.psu",
-          s."AT500_Surface.Salinity.psu" as "Silver.AT500_Surface.Salinity.psu",
-          p."AT500_Surface.Salinity.psu" as "Princess.AT500_Surface.Salinity.psu"
-        FROM all_timestamps t
-        LEFT JOIN bdock b ON t.timestamp = b.timestamp
-        LEFT JOIN silver s ON t.timestamp = s.timestamp
-        LEFT JOIN princess p ON t.timestamp = p.timestamp
-        ORDER BY t.timestamp
+      pattern: "/combined/*"
+      columns:
+        - "AT500_Surface.Salinity.psu"
+        - "AT500_Bottom.Salinity.psu"
 
   - name: "Temperature"
-    factory: "sql-derived-series"
+    factory: "timeseries-pivot"
     config:
-      patterns:
-        bdock: "/combined/BDock"
-        silver: "/combined/Silver"
-        princess: "/combined/Princess"
-      query: |
-        WITH all_timestamps AS (
-          SELECT timestamp FROM bdock
-          UNION
-          SELECT timestamp FROM silver
-          UNION
-          SELECT timestamp FROM princess
-        )
-        SELECT 
-          t.timestamp,
-          b."AT500_Surface.Temperature.C" as "BDock.AT500_Surface.Temperature.C",
-          s."AT500_Surface.Temperature.C" as "Silver.AT500_Surface.Temperature.C",
-          p."AT500_Surface.Temperature.C" as "Princess.AT500_Surface.Temperature.C"
-        FROM all_timestamps t
-        LEFT JOIN bdock b ON t.timestamp = b.timestamp
-        LEFT JOIN silver s ON t.timestamp = s.timestamp
-        LEFT JOIN princess p ON t.timestamp = p.timestamp
-        ORDER BY t.timestamp
+      pattern: "/combined/*"
+      columns:
+        - "AT500_Surface.Temperature.C"
+        - "AT500_Bottom.Temperature.C"
     

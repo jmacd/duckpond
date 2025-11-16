@@ -1,10 +1,10 @@
 #![allow(missing_docs)]
 
-//! Steward - Secondary filesystem for monitoring and post-commit actions
+//! Steward - Transaction coordination and audit logging
 //!
-//! The steward manages a primary "data" filesystem and a secondary "control" filesystem,
-//! both implemented using tlogfs. It sequences post-commit actions and maintains
-//! transaction metadata in the control filesystem.
+//! Steward manages transaction lifecycle for the data filesystem (TLogFS),
+//! recording transaction metadata in a separate control table (Delta Lake).
+//! It sequences post-commit actions and enables recovery from incomplete transactions.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -75,7 +75,7 @@ pub fn get_data_path(pond_path: &Path) -> PathBuf {
     pond_path.join("data")
 }
 
-/// Get the control filesystem path under the pond
+/// Get the control table path under the pond
 #[must_use]
 pub fn get_control_path(pond_path: &Path) -> PathBuf {
     pond_path.join("control")
