@@ -282,7 +282,7 @@ impl TemporalReduceSqlFile {
             pattern_name,
         )
         .await?;
-        log::info!(
+        log::debug!(
             "🔍 TEMPORAL-REDUCE SQL for {}: \n{}",
             &self.source_path,
             sql
@@ -326,7 +326,7 @@ impl TemporalReduceSqlFile {
                 scope_prefixes: None,
             };
 
-            log::info!(
+            log::debug!(
                 "🔍 TEMPORAL-REDUCE SqlDerivedConfig for '{}': query=\n{}",
                 self.source_path,
                 sql_query
@@ -392,7 +392,7 @@ impl QueryableFile for TemporalReduceSqlFile {
         part_id: tinyfs::NodeID,
         state: &crate::persistence::State,
     ) -> Result<Arc<dyn TableProvider>, crate::error::TLogFSError> {
-        log::info!(
+        log::debug!(
             "📋 DELEGATING TemporalReduceSqlFile to inner file: node_id={}, part_id={}",
             node_id,
             part_id

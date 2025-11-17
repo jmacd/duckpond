@@ -1,0 +1,33 @@
+[package]
+name = "provider"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[dependencies]
+url.workspace = true
+serde_qs.workspace = true
+arrow.workspace = true
+arrow-csv.workspace = true
+arrow-schema.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+async-compression.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tinyfs.workspace = true
+datafusion.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
