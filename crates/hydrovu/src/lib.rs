@@ -345,7 +345,6 @@ impl HydroVuCollector {
             &location_readings,
             &names.units,
             &names.parameters,
-            &device,
         )
         .map_err(|e| {
             steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(

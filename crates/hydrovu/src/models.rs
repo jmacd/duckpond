@@ -26,7 +26,6 @@ pub struct HydroVuConfig {
 pub struct HydroVuDevice {
     pub name: String,
     pub id: i64,
-    pub scope: String,
     pub comment: Option<String>,
 }
 
@@ -86,14 +85,12 @@ pub(crate) struct WideRecord {
 }
 
 impl WideRecord {
-    /// Convert from API response to timestamp-joined wide records
-    /// This follows the original implementation's approach of joining by timestamp
-    /// Uses original HydroVu naming convention: {scope}.{param_name}.{unit_name}
+    /// Convert from API response to timestamp-joined wide records,
+    /// joining records by timestamp
     pub(crate) fn from_location_readings(
         location_readings: &LocationReadings,
         units: &BTreeMap<String, String>,
         parameters: &BTreeMap<String, String>,
-        device: &HydroVuDevice, // Add device for scope information
     ) -> anyhow::Result<Vec<Self>> {
         use std::collections::BTreeSet;
 
@@ -122,7 +119,7 @@ impl WideRecord {
                     .find(|r| r.timestamp == timestamp_sec)
                     .map(|r| r.value);
 
-                // Create column name using original HydroVu convention: {scope}.{param_name}.{unit_name}
+                // Create column name using original HydroVu convention: {param_name}.{unit_name}
                 let param_name = parameters
                     .get(&param_info.parameter_id)
                     .unwrap_or(&param_info.parameter_id); // Fall back to ID if not found in dictionary
@@ -130,7 +127,7 @@ impl WideRecord {
                     .get(&param_info.unit_id)
                     .unwrap_or(&param_info.unit_id); // Fall back to ID if not found in dictionary
 
-                let column_name = format!("{}.{}.{}", device.scope, param_name, unit_name);
+                let column_name = format!("{}.{}", param_name, unit_name);
 
                 _ = parameter_values.insert(column_name, value);
             }

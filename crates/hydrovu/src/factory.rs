@@ -66,12 +66,6 @@ fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
                 device.id
             )));
         }
-        if device.scope.is_empty() {
-            return Err(tinyfs::Error::InvalidConfig(format!(
-                "Device scope cannot be empty for device ID {}",
-                device.id
-            )));
-        }
     }
 
     if config.max_points_per_run == 0 {
