@@ -24,10 +24,13 @@ serde.workspace = true
 thiserror.workspace = true
 tinyfs.workspace = true
 datafusion.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
+datafusion-common.workspace = true
+arrow-array.workspace = true
 
 [lints]
 workspace = true

@@ -1,8 +1,10 @@
 //! Provider: URL-Based file access
 
 mod error;
+mod null_padding;
 
 pub use error::{Error, Result};
+pub use null_padding::null_padding_table;
 
 use std::pin::Pin;
 use tokio::io::AsyncRead;
