@@ -2339,22 +2339,48 @@ impl InnerState {
         part_id: NodeID,
         node_id: NodeID,
     ) -> Result<Vec<OplogEntry>, TLogFSError> {
-        eprintln!("DEBUG query_records: ===== RECEIVED part_id={}, node_id={} =====", part_id, node_id);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let call_num = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
         
-        // DEBUG: Check what's actually in the delta_table for this part_id
-        let debug_sql = format!("SELECT COUNT(*) as cnt FROM delta_table WHERE part_id = '{}'", part_id);
-        if let Ok(df) = self.session_context.sql(&debug_sql).await {
-            if let Ok(batches) = df.collect().await {
-                eprintln!("DEBUG query_records: Total records in delta_table for part_id={}: {:?}", part_id, batches);
-            }
-        }
+        // Extract caller function name from backtrace
+        let backtrace = std::backtrace::Backtrace::capture();
+        let backtrace_str = backtrace.to_string();
+        
+        // Find the first frame that's in tlogfs::persistence but NOT query_records
+        // Format is like: "   4: tlogfs::persistence::InnerState::load_node::{{closure}}"
+        let caller = backtrace_str
+            .lines()
+            .find(|line| {
+                line.contains("tlogfs::persistence::InnerState::") 
+                    && !line.contains("query_records")
+            })
+            .and_then(|line| {
+                // Extract function name - look for pattern like "tlogfs::persistence::InnerState::function_name"
+                if let Some(pos) = line.find("tlogfs::persistence::InnerState::") {
+                    let rest = &line[pos + "tlogfs::persistence::InnerState::".len()..];
+                    // Take function name up to :: or {{
+                    let end = rest.find("::")
+                        .or_else(|| rest.find("{{"))
+                        .unwrap_or(rest.len());
+                    Some(rest[..end].to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        
+        // Track call patterns for optimization analysis
+        // Format: QUERY_TRACE|call_num|caller|part_id|node_id
+        eprintln!("QUERY_TRACE|{}|{}|{}|{}", call_num, caller, part_id, node_id);
         
         // Step 1: Get committed records from Delta Lake using node-scoped SQL
         let sql = format!(
             "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
             part_id, node_id
         );
-        eprintln!("DEBUG query_records: Executing SQL: {}", sql);
+        
+        let start = std::time::Instant::now();
         let committed_records = match self.session_context.sql(&sql).await {
             Ok(df) => match df.collect().await {
                 Ok(batches) => {
@@ -2364,21 +2390,20 @@ impl InnerState {
                             serde_arrow::from_record_batch(&batch)?;
                         records.extend(batch_records);
                     }
-                    eprintln!("DEBUG query_records: Found {} committed records from Delta Lake", records.len());
                     records
                 }
                 Err(e) => {
-                    eprintln!("DEBUG query_records: ERROR collecting batches: {}", e);
                     return Err(TLogFSError::DataFusion(e));
                 }
             },
             Err(e) => {
-                eprintln!("DEBUG query_records: ERROR executing SQL: {}", e);
                 return Err(TLogFSError::DataFusion(e));
             }
         };
+        let query_ms = start.elapsed().as_millis();
 
         // Step 2: Get pending records from memory (node-scoped)
+        let pending_start = std::time::Instant::now();
         let records = {
             self.records
                 .iter()
@@ -2388,11 +2413,20 @@ impl InnerState {
                 .cloned()
                 .collect::<Vec<_>>()
         };
+        let memory_scan_us = pending_start.elapsed().as_micros();
 
         // Step 3: Combine and sort by timestamp
+        let committed_count = committed_records.len();
+        let pending_count = records.len();
+        
         let mut all_records = committed_records;
         all_records.extend(records);
         all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        // Log performance metrics for optimization analysis
+        // Format: QUERY_PERF|call_num|committed_count|pending_count|total_count|query_ms|memory_us
+        eprintln!("QUERY_PERF|{}|{}|{}|{}|{}|{}", 
+            call_num, committed_count, pending_count, all_records.len(), query_ms, memory_scan_us);
 
         Ok(all_records)
     }
@@ -2842,6 +2876,11 @@ impl InnerState {
         part_id: NodeID,
     ) -> TinyFSResult<Vec<FileVersionInfo>> {
         debug!("list_file_versions called for node_id={node_id}, part_id={part_id}");
+        
+        // Print stack trace to find who's calling this repeatedly
+        let bt = std::backtrace::Backtrace::capture();
+        eprintln!("DEBUG_STACK list_file_versions called from:\n{}", bt);
+        
         // CRITICAL: query_records expects (part_id, node_id) but we receive (node_id, part_id)
         // Must pass them in the correct order!
         let mut records = self
