@@ -127,14 +127,19 @@ impl TimeseriesPivotFile {
         );
 
         // Build column selections: for each column, select from each site
+        // Note: scope_prefix wrapper prepends the ORIGINAL alias (not sql_derived_xxx) to column names
+        // So after sql_derived replaces "Silver" -> "sql_derived_silver_xxx" in table references,
+        // the column names still use the original alias: sql_derived_silver_xxx."Silver.Column"
         let mut column_selections = vec![format!("all_timestamps.{}", self.config.time_column)];
         
         for (alias, _) in matched_inputs {
             for column in &self.config.columns {
-                // Output column name: SiteName.ColumnName (e.g., BDock.AT500_Surface.DO.mg/L)
+                // Reference format: table."Scope.Column"
+                // e.g., Silver."Silver.AT500_Surface.DO.mg/L"
+                // After sql_derived replacement: sql_derived_silver_xxx."Silver.AT500_Surface.DO.mg/L"
                 column_selections.push(format!(
-                    "{}.\"{}\" AS \"{}.{}\"", 
-                    alias, column, alias, column
+                    "{}.\"{}\"", 
+                    alias, format!("{}.{}", alias, column)
                 ));
             }
         }
@@ -235,6 +240,15 @@ impl QueryableFile for TimeseriesPivotFile {
         
         log::info!("📝 TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
 
+        // Build scope_prefixes map for each table
+        let mut scope_prefixes = HashMap::new();
+        for (alias, _) in &matched_inputs {
+            _ = scope_prefixes.insert(
+                alias.clone(),
+                (alias.clone(), self.config.time_column.clone()),
+            );
+        }
+
         // Build list of expected columns for null padding
         // These are the raw column names that should exist in each source table
         let mut expected_columns = HashMap::new();
@@ -242,8 +256,8 @@ impl QueryableFile for TimeseriesPivotFile {
             _ = expected_columns.insert(column.clone(), arrow::datatypes::DataType::Float64);
         }
 
-        // Create SqlDerivedFile config with null_padding wrapper
-        let sql_config = SqlDerivedConfig::new(patterns, Some(sql))
+        // Create SqlDerivedFile config with scope prefixes and null_padding wrapper
+        let sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
             .with_provider_wrapper(move |provider| {
                 provider::null_padding_table(provider, expected_columns.clone())
                     .map_err(|e| TLogFSError::DataFusion(e))

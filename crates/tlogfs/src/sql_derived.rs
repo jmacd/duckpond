@@ -368,9 +368,30 @@ impl SqlDerivedFile {
 
         if let Some(table_mappings) = &options.table_mappings {
             // Replace each pattern name with its unique table name
+            // Use a more sophisticated approach to avoid replacing inside double-quoted strings
             for (pattern_name, unique_table_name) in table_mappings {
                 debug!("Replacing table name '{pattern_name}' with '{unique_table_name}'");
-                result = result.replace(pattern_name, unique_table_name);
+                
+                // Split by double quotes to process quoted and unquoted sections separately
+                let parts: Vec<&str> = result.split('"').collect();
+                let mut new_result = String::new();
+                
+                for (i, part) in parts.iter().enumerate() {
+                    if i % 2 == 0 {
+                        // Even indices are outside quotes - do replacement
+                        new_result.push_str(&part.replace(pattern_name, unique_table_name));
+                    } else {
+                        // Odd indices are inside quotes - don't replace
+                        new_result.push_str(part);
+                    }
+                    
+                    // Add back the quote if this isn't the last part
+                    if i < parts.len() - 1 {
+                        new_result.push('"');
+                    }
+                }
+                
+                result = new_result;
             }
         } else if let Some(source_replacement) = &options.source_replacement {
             debug!("Replacing 'source' with '{source_replacement}'");
