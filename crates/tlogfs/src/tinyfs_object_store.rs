@@ -646,18 +646,21 @@ impl ObjectStore for TinyFsObjectStore {
 
         let prefix_str = prefix.as_ref().map(|p| p.as_ref()).unwrap_or("None");
         debug!("ObjectStore list called with prefix: {prefix_str}");
+        eprintln!("DEBUG objectstore list: Called with prefix: {}", prefix_str);
 
         let stream = async_stream::stream! {
             // Parse the prefix to extract both node_id and part_id for dynamic discovery
             if let Some(ref prefix_str) = prefix {
                 if let Some((node_id, part_id)) = extract_node_and_part_ids_from_path(prefix_str) {
                     debug!("ObjectStore extracting file versions for node_id: {node_id}, part_id: {part_id}");
+                    eprintln!("DEBUG objectstore: Extracted node_id={}, part_id={} from prefix: {}", node_id, part_id, prefix_str);
 
                     // Query persistence layer directly with proper node_id and part_id - no pre-registration needed!
                     match persistence.list_file_versions(node_id, part_id).await {
                         Ok(versions) => {
                             let version_count = versions.len();
                             debug!("ObjectStore discovered {version_count} versions for node {node_id}");
+                            eprintln!("DEBUG objectstore list: Discovered {} versions for node_id={}, part_id={}", version_count, node_id, part_id);
 
                             for version_info in versions {
                                 let version_path = TinyFsPathBuilder::specific_version(&part_id, &node_id, version_info.version);
@@ -685,11 +688,13 @@ impl ObjectStore for TinyFsObjectStore {
                                 };
                                 let size = version_info.size;
                                 debug!("ObjectStore yielding ObjectMeta: path={version_path}, size={size}");
+                                eprintln!("DEBUG objectstore list: Yielding file: path={}, size={}", version_path, size);
                                 yield Ok(object_meta);
                             }
                         }
                         Err(e) => {
                             debug!("ObjectStore failed to list file versions for node {node_id}: {e}");
+                            eprintln!("DEBUG objectstore list: ERROR listing versions for node_id={}, part_id={}: {}", node_id, part_id, e);
                             yield Err(object_store::Error::Generic {
                                 store: "TinyFS",
                                 source: format!("Failed to list file versions for node {}: {}", node_id, e).into(),
@@ -698,9 +703,11 @@ impl ObjectStore for TinyFsObjectStore {
                     }
                 } else {
                     debug!("ObjectStore could not extract node_id from prefix: {prefix_str}");
+                    eprintln!("DEBUG objectstore list: Could not extract node_id from prefix: {}", prefix_str);
                 }
             } else {
                 debug!("ObjectStore list called with no prefix - no files to return");
+                eprintln!("DEBUG objectstore list: No prefix provided - returning empty");
             }
         };
 

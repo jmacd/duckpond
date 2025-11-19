@@ -2,9 +2,11 @@
 
 mod error;
 mod null_padding;
+mod scope_prefix;
 
 pub use error::{Error, Result};
 pub use null_padding::null_padding_table;
+pub use scope_prefix::ScopePrefixTableProvider;
 
 use std::pin::Pin;
 use tokio::io::AsyncRead;

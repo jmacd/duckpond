@@ -324,6 +324,7 @@ impl TemporalReduceSqlFile {
                 },
                 query: Some(sql_query.clone()),
                 scope_prefixes: None,
+                provider_wrapper: None,
             };
 
             log::debug!(

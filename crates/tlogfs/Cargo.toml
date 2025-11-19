@@ -43,6 +43,7 @@ log = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
 paste = { workspace = true }
+provider = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }

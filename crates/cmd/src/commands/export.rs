@@ -778,9 +778,12 @@ fn extract_timestamps_from_path(
         return Ok((None, None));
     }
 
-    // Add defaults only for parts that logically should have defaults when missing
-    // Year and month are always required if any temporal parsing occurred
-    // Day defaults to 1, time components default to 0
+    // Add defaults for missing temporal parts that weren't partitioned
+    // When --temporal year is used, month/day/etc. default to their starting values
+    // When --temporal year,month is used, day/hour/etc. default to their starting values
+    if !temporal_parts.contains_key("month") {
+        _ = temporal_parts.insert("month", 1);
+    }
     if !temporal_parts.contains_key("day") {
         _ = temporal_parts.insert("day", 1);
     }

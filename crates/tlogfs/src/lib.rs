@@ -47,14 +47,8 @@ pub mod factory;
 // Data taxonomy for sensitive configuration fields
 pub mod data_taxonomy;
 
-// Hostmount dynamic directory
-// pub mod hostmount;
-
 // SQL-derived dynamic node factory
 pub mod sql_derived;
-
-// Scope prefix table provider for dynamic column renaming
-pub mod scope_prefix_table_provider;
 
 // Temporal reduce dynamic factory
 pub mod temporal_reduce;

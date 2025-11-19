@@ -2339,11 +2339,22 @@ impl InnerState {
         part_id: NodeID,
         node_id: NodeID,
     ) -> Result<Vec<OplogEntry>, TLogFSError> {
+        eprintln!("DEBUG query_records: ===== RECEIVED part_id={}, node_id={} =====", part_id, node_id);
+        
+        // DEBUG: Check what's actually in the delta_table for this part_id
+        let debug_sql = format!("SELECT COUNT(*) as cnt FROM delta_table WHERE part_id = '{}'", part_id);
+        if let Ok(df) = self.session_context.sql(&debug_sql).await {
+            if let Ok(batches) = df.collect().await {
+                eprintln!("DEBUG query_records: Total records in delta_table for part_id={}: {:?}", part_id, batches);
+            }
+        }
+        
         // Step 1: Get committed records from Delta Lake using node-scoped SQL
         let sql = format!(
             "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
             part_id, node_id
         );
+        eprintln!("DEBUG query_records: Executing SQL: {}", sql);
         let committed_records = match self.session_context.sql(&sql).await {
             Ok(df) => match df.collect().await {
                 Ok(batches) => {
@@ -2353,11 +2364,18 @@ impl InnerState {
                             serde_arrow::from_record_batch(&batch)?;
                         records.extend(batch_records);
                     }
+                    eprintln!("DEBUG query_records: Found {} committed records from Delta Lake", records.len());
                     records
                 }
-                Err(e) => return Err(TLogFSError::DataFusion(e)),
+                Err(e) => {
+                    eprintln!("DEBUG query_records: ERROR collecting batches: {}", e);
+                    return Err(TLogFSError::DataFusion(e));
+                }
             },
-            Err(e) => return Err(TLogFSError::DataFusion(e)),
+            Err(e) => {
+                eprintln!("DEBUG query_records: ERROR executing SQL: {}", e);
+                return Err(TLogFSError::DataFusion(e));
+            }
         };
 
         // Step 2: Get pending records from memory (node-scoped)
@@ -2824,6 +2842,8 @@ impl InnerState {
         part_id: NodeID,
     ) -> TinyFSResult<Vec<FileVersionInfo>> {
         debug!("list_file_versions called for node_id={node_id}, part_id={part_id}");
+        // CRITICAL: query_records expects (part_id, node_id) but we receive (node_id, part_id)
+        // Must pass them in the correct order!
         let mut records = self
             .query_records(part_id, node_id)
             .await
@@ -2831,6 +2851,7 @@ impl InnerState {
 
         let record_count = records.len();
         debug!("list_file_versions found {record_count} records for node {node_id}");
+        eprintln!("DEBUG list_file_versions: Found {} records for node_id={}, part_id={}", record_count, node_id, part_id);
 
         // Sort records by timestamp ASC (oldest first) to assign logical file versions
         records.sort_by_key(|record| record.timestamp);

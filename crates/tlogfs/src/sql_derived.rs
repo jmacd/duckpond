@@ -33,7 +33,7 @@
 use crate::factory::FactoryContext;
 use crate::query::queryable_file::QueryableFile;
 use crate::register_dynamic_factory;
-use crate::scope_prefix_table_provider::ScopePrefixTableProvider;
+use provider::ScopePrefixTableProvider;
 use async_trait::async_trait;
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ pub enum SqlDerivedMode {
 }
 
 /// Configuration for SQL-derived file generation
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct SqlDerivedConfig {
     /// Named patterns for matching files. Each pattern name becomes a table in the SQL query.
     /// Each pattern can match multiple files which are automatically harmonized with UNION ALL BY NAME.
@@ -115,6 +115,12 @@ pub struct SqlDerivedConfig {
     /// NOT serialized - must be set programmatically by factories like timeseries-join
     #[serde(skip, default)]
     pub scope_prefixes: Option<HashMap<String, (String, String)>>,
+    
+    /// Optional closure to wrap TableProviders before registration
+    /// Used by timeseries-pivot to inject null_padding_table wrapping
+    /// NOT serialized - must be set programmatically
+    #[serde(skip, default)]
+    pub provider_wrapper: Option<Arc<dyn Fn(Arc<dyn datafusion::catalog::TableProvider>) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> + Send + Sync>>,
 }
 
 impl SqlDerivedConfig {
@@ -124,6 +130,7 @@ impl SqlDerivedConfig {
             patterns,
             query,
             scope_prefixes: None,
+            provider_wrapper: None,
         }
     }
     
@@ -137,7 +144,28 @@ impl SqlDerivedConfig {
             patterns,
             query,
             scope_prefixes: Some(scope_prefixes),
+            provider_wrapper: None,
         }
+    }
+    
+    /// Builder method to add a provider wrapper closure
+    pub fn with_provider_wrapper<F>(mut self, wrapper: F) -> Self 
+    where
+        F: Fn(Arc<dyn datafusion::catalog::TableProvider>) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> + Send + Sync + 'static,
+    {
+        self.provider_wrapper = Some(Arc::new(wrapper));
+        self
+    }
+}
+
+impl std::fmt::Debug for SqlDerivedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlDerivedConfig")
+            .field("patterns", &self.patterns)
+            .field("query", &self.query)
+            .field("scope_prefixes", &self.scope_prefixes)
+            .field("provider_wrapper", &self.provider_wrapper.as_ref().map(|_| "<closure>"))
+            .finish()
     }
 }
 
@@ -702,7 +730,13 @@ impl QueryableFile for SqlDerivedFile {
                                     "✅ SQL-DERIVED: Successfully created table provider for node_id={}",
                                     node_id
                                 );
-                                provider
+                                // Apply optional provider wrapper (e.g., null_padding_table)
+                                if let Some(wrapper) = &self.config.provider_wrapper {
+                                    debug!("Applying provider wrapper to table '{}'", pattern_name);
+                                    wrapper(provider)?
+                                } else {
+                                    provider
+                                }
                             }
                             Err(e) => {
                                 log::error!(
@@ -785,7 +819,15 @@ impl QueryableFile for SqlDerivedFile {
                         urls.len()
                     );
 
-                    create_table_provider(dummy_node_id, dummy_part_id, state, options).await?
+                    let provider = create_table_provider(dummy_node_id, dummy_part_id, state, options).await?;
+                    
+                    // Apply optional provider wrapper (e.g., null_padding_table)
+                    if let Some(wrapper) = &self.config.provider_wrapper {
+                        debug!("Applying provider wrapper to multi-file table '{}'", pattern_name);
+                        wrapper(provider)?
+                    } else {
+                        provider
+                    }
                 };
                 // Register the ListingTable as the provider
                 let table_exists = matches!(

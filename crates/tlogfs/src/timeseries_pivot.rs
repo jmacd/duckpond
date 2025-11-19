@@ -235,12 +235,19 @@ impl QueryableFile for TimeseriesPivotFile {
         
         log::info!("📝 TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
 
-        // Create SqlDerivedFile config
-        let sql_config = SqlDerivedConfig {
-            patterns,
-            query: Some(sql),
-            scope_prefixes: None,
-        };
+        // Build list of expected columns for null padding
+        // These are the raw column names that should exist in each source table
+        let mut expected_columns = HashMap::new();
+        for column in &self.config.columns {
+            _ = expected_columns.insert(column.clone(), arrow::datatypes::DataType::Float64);
+        }
+
+        // Create SqlDerivedFile config with null_padding wrapper
+        let sql_config = SqlDerivedConfig::new(patterns, Some(sql))
+            .with_provider_wrapper(move |provider| {
+                provider::null_padding_table(provider, expected_columns.clone())
+                    .map_err(|e| TLogFSError::DataFusion(e))
+            });
 
         // Use SqlDerivedSeries factory to create the file
         let sql_file = SqlDerivedFile::new(
