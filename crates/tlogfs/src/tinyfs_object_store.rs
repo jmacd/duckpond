@@ -26,6 +26,8 @@
 //! ```
 
 use std::fmt;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use std::ops::Range;
 
@@ -108,6 +110,14 @@ struct FileSeriesInfo {
     versions: Vec<tinyfs::FileVersionInfo>,
 }
 
+/// Metadata for a file version (cached from list() call)
+#[derive(Debug, Clone)]
+#[allow(dead_code)]  // Fields are cached for future use; currently only presence check matters
+struct CachedVersionMeta {
+    size: u64,
+    sha256: Option<String>,
+}
+
 /// TinyFS-backed ObjectStore implementation.
 ///
 /// This store maps ObjectStore paths to TinyFS file handles:
@@ -117,13 +127,19 @@ struct FileSeriesInfo {
 pub struct TinyFsObjectStore {
     /// Persistence layer for dynamic file discovery and version access
     persistence: crate::persistence::State,
+    /// Metadata cache: maps clean path (without metadata) to version metadata
+    /// Populated during list() calls, consumed by get_range() to avoid redundant queries
+    metadata_cache: Arc<Mutex<HashMap<String, CachedVersionMeta>>>,
 }
 
 impl TinyFsObjectStore {
     /// Create a new TinyFS ObjectStore
     #[must_use]
     pub fn new(persistence: crate::persistence::State) -> Self {
-        Self { persistence }
+        Self {
+            persistence,
+            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Create ObjectMeta for a specific version
@@ -402,6 +418,7 @@ impl ObjectStore for TinyFsObjectStore {
     ) -> ObjectStoreResult<Bytes> {
         let path = location.as_ref();
         debug!("🔍 ObjectStore get_range called for path: {path}, range: {range:?}");
+        eprintln!("GET_RANGE|{}|{}..{}|{}", path, range.start, range.end, range.end - range.start);
         debug!(
             "🔍 ObjectStore get_range called - this means DataFusion is trying to read Parquet metadata"
         );
@@ -421,24 +438,48 @@ impl ObjectStore for TinyFsObjectStore {
             }
         };
 
-        // Parse the path to get node_id and part_id for dynamic discovery
+        // OPTIMIZATION: Check cache first to avoid database query
+        let location_str = location.as_ref();
+        
+        // Parse the path to get node_id and part_id
         let parsed_path =
-            parse_tinyfs_path(location.as_ref()).map_err(|err| object_store::Error::Generic {
+            parse_tinyfs_path(location_str).map_err(|err| object_store::Error::Generic {
                 store: "TinyFS",
                 source: err.into(),
             })?;
+        
+        // Try to get metadata from cache
+        let cached_metadata = if let Ok(cache) = self.metadata_cache.lock() {
+            cache.get(location_str).cloned()
+        } else {
+            None
+        };
+        
+        let has_cached_metadata = cached_metadata.is_some();
+        
+        if has_cached_metadata {
+            debug!("✅ ObjectStore get_range: metadata found in cache, skipping list_file_versions() query");
+            eprintln!("DEBUG get_range OPTIMIZATION: Metadata in cache, skipping database query for {}", location_str);
+        } else {
+            debug!("⚠️ ObjectStore get_range: no cached metadata, falling back to list_file_versions() query");
+            eprintln!("DEBUG get_range FALLBACK: No cached metadata, querying database for {}", location_str);
+        }
 
-        // Query persistence layer dynamically for file versions
-        let versions = self
-            .persistence
-            .list_file_versions(parsed_path.node_id, parsed_path.part_id)
-            .await
-            .map_err(|e| object_store::Error::Generic {
-                store: "TinyFS",
-                source: format!("Failed to list file versions: {}", e).into(),
-            })?;
+        // Query persistence layer dynamically for file versions ONLY if not in cache
+        let versions = if !has_cached_metadata {
+            self.persistence
+                .list_file_versions(parsed_path.node_id, parsed_path.part_id)
+                .await
+                .map_err(|e| object_store::Error::Generic {
+                    store: "TinyFS",
+                    source: format!("Failed to list file versions: {}", e).into(),
+                })?
+        } else {
+            // Metadata in cache - we don't need version info from database
+            Vec::new()
+        };
 
-        if versions.is_empty() {
+        if !has_cached_metadata && versions.is_empty() {
             let node_id = parsed_path.node_id;
             let part_id = parsed_path.part_id;
             debug!(
@@ -642,6 +683,7 @@ impl ObjectStore for TinyFsObjectStore {
         prefix: Option<&ObjectPath>,
     ) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
         let persistence = self.persistence.clone();
+        let metadata_cache = self.metadata_cache.clone();
         let prefix = prefix.map(|p| p.as_ref().to_string());
 
         let prefix_str = prefix.as_ref().map(|p| p.as_ref()).unwrap_or("None");
@@ -663,10 +705,8 @@ impl ObjectStore for TinyFsObjectStore {
                             eprintln!("DEBUG objectstore list: Discovered {} versions for node_id={}, part_id={}", version_count, node_id, part_id);
 
                             for version_info in versions {
+                                // Filter by prefix before creating path
                                 let version_path = TinyFsPathBuilder::specific_version(&part_id, &node_id, version_info.version);
-                                debug!("ObjectStore discovered version: {version_path}");
-
-                                // Filter by prefix if it doesn't match
                                 if !version_path.starts_with(prefix_str) {
                                     debug!("ObjectStore skipping version {version_path} (doesn't match prefix {prefix_str})");
                                     continue;
@@ -679,16 +719,34 @@ impl ObjectStore for TinyFsObjectStore {
                                     continue;
                                 }
 
+                                // Use clean path (DataFusion-compatible format)
+                                let clean_path = version_path.clone();
+                                
+                                // OPTIMIZATION: Cache metadata to avoid re-querying in get_range()
+                                // Store metadata keyed by clean path for later retrieval
+                                let cache_key = clean_path.clone();
+                                let cached_meta = CachedVersionMeta {
+                                    size: version_info.size,
+                                    sha256: version_info.sha256.clone(),
+                                };
+                                
+                                // Insert into cache (lock briefly, then release)
+                                if let Ok(mut cache) = metadata_cache.lock() {
+                                    let _ = cache.insert(cache_key, cached_meta);
+                                }
+
+                                debug!("ObjectStore discovered version: {version_path}");
+
                                 let object_meta = ObjectMeta {
-                                    location: ObjectPath::from(version_path.clone()),
+                                    location: ObjectPath::from(clean_path.clone()),
                                     last_modified: chrono::Utc::now(), // TODO: use actual timestamp from version_info
                                     size: version_info.size,
                                     e_tag: None,
                                     version: None,
                                 };
                                 let size = version_info.size;
-                                debug!("ObjectStore yielding ObjectMeta: path={version_path}, size={size}");
-                                eprintln!("DEBUG objectstore list: Yielding file: path={}, size={}", version_path, size);
+                                debug!("ObjectStore yielding ObjectMeta: path={clean_path}, size={size}");
+                                eprintln!("DEBUG objectstore list: Yielding file: path={}, size={}", clean_path, size);
                                 yield Ok(object_meta);
                             }
                         }

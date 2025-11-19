@@ -124,6 +124,10 @@ pub struct TemporalReduceSqlFile {
     context: FactoryContext,
     // Lazy-initialized actual SQL file
     inner: Arc<tokio::sync::Mutex<Option<SqlDerivedFile>>>,
+    // CACHE: Discovered columns to avoid repeated schema discovery
+    // This prevents the O(N) cascade where discover_source_columns() triggers
+    // as_table_provider() on each layer for every export operation
+    discovered_columns: Arc<tokio::sync::Mutex<Option<Vec<String>>>>,
 }
 
 impl TemporalReduceSqlFile {
@@ -142,12 +146,41 @@ impl TemporalReduceSqlFile {
             source_path,
             context,
             inner: Arc::new(tokio::sync::Mutex::new(None)),
+            discovered_columns: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
     /// Discover source columns by accessing the source node directly
+    /// CACHED: Only performs discovery once per TemporalReduceSqlFile instance
     async fn discover_source_columns(&self) -> TinyFSResult<Vec<String>> {
-        log::debug!("TemporalReduceFile::discover_source_columns - accessing source node directly");
+        // Check cache first - avoid repeated schema discovery cascade
+        {
+            let columns_guard = self.discovered_columns.lock().await;
+            if let Some(cached_columns) = &*columns_guard {
+                log::debug!(
+                    "🚀 CACHE HIT: Using cached {} columns for temporal reduce source '{}'",
+                    cached_columns.len(),
+                    self.source_path
+                );
+                return Ok(cached_columns.clone());
+            }
+        }
+        
+        log::debug!(
+            "💾 CACHE MISS: Discovering columns for temporal reduce source '{}' (first access)",
+            self.source_path
+        );
+        
+        let mut columns_guard = self.discovered_columns.lock().await;
+        // Double-check after acquiring write lock (another thread might have populated it)
+        if let Some(cached_columns) = &*columns_guard {
+            log::debug!(
+                "🚀 CACHE HIT (race): Using cached {} columns for temporal reduce source '{}'",
+                cached_columns.len(),
+                self.source_path
+            );
+            return Ok(cached_columns.clone());
+        }
 
         let node_id = self.source_node.id().await;
 
@@ -241,6 +274,14 @@ impl TemporalReduceSqlFile {
                 node_id
             )));
         }
+
+        // Cache the discovered columns for future calls
+        *columns_guard = Some(columns.clone());
+        log::debug!(
+            "💾 CACHED: Stored {} discovered columns for temporal reduce source '{}'",
+            columns.len(),
+            self.source_path
+        );
 
         Ok(columns)
     }

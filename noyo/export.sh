@@ -1,9 +1,12 @@
 #!/bin/sh
 
+set -x -i
+
 ROOT=/Volumes/sourcecode/src/duckpond
 NOYO=${ROOT}/noyo
 POND=${NOYO}/pond
-EXE=${ROOT}/target/release/pond
+#EXE=${ROOT}/target/release/pond
+EXE=${ROOT}/target/debug/pond
 OUTDIR=./export
 
 export RUST_BACKTRACE=1
@@ -12,7 +15,8 @@ export POND_MAX_ALLOC_MB=1000
 
 export POND
 
-cargo build --release
+cargo build
+#cargo build --release
 
 rm -rf ${OUTDIR}
 
