@@ -332,14 +332,6 @@ pub async fn create_table_provider(
             debug!(
                 "🚀 CACHE HIT: Returning cached TableProvider for node_id: {node_id}, part_id: {part_id}"
             );
-            eprintln!("DEBUG cache: Cached schema has {} fields: {:?}", 
-                cached_provider.schema().fields().len(),
-                cached_provider.schema().fields().iter().map(|f| f.name()).collect::<Vec<_>>());
-            log::info!(
-                "📋 REUSED TableProvider from cache: node_id={}, part_id={}",
-                node_id,
-                part_id
-            );
             return Ok(cached_provider);
         } else {
             debug!(
@@ -392,20 +384,11 @@ pub async fn create_table_provider(
     // 3. Merge schemas from all valid Parquet versions
     // 4. Provide the unified schema
     let ctx = state.session_context().await?;
-    eprintln!("DEBUG schema_inference: About to infer schema for node_id={}, part_id={}, debug_info={}", node_id, part_id, debug_info);
     let config_with_schema = config
         .infer_schema(&ctx.state())
         .await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Schema inference failed: {}", e)))?;
-    eprintln!("DEBUG schema_inference: Inferred schema has {} fields: {:?}", 
-        config_with_schema.file_schema.as_ref().map(|s| s.fields().len()).unwrap_or(0),
-        config_with_schema.file_schema.as_ref().map(|s| s.fields().iter().map(|f| f.name()).collect::<Vec<_>>()).unwrap_or_default());
 
-    // Create the ListingTable - DataFusion handles all the complexity!
-    log::info!(
-        "📋 CREATING ListingTable with schema inference: {}",
-        debug_info
-    );
     let listing_table = ListingTable::try_new(config_with_schema)
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
 
@@ -437,7 +420,7 @@ pub async fn create_table_provider(
         max_time,
     ));
 
-    log::info!(
+    log::debug!(
         "📋 CREATED TableProvider: node_id={}, part_id={}, temporal_bounds=({}, {}), urls={}",
         node_id,
         part_id,

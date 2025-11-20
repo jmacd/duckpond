@@ -213,7 +213,7 @@ impl QueryableFile for TimeseriesPivotFile {
         _part_id: NodeID,
         _state: &State,
     ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-        log::info!(
+        log::debug!(
             "🔍 TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
             self.config.pattern,
             self.config.columns.len()
@@ -223,7 +223,7 @@ impl QueryableFile for TimeseriesPivotFile {
         let matched_inputs = self.resolve_pattern().await
             .map_err(TLogFSError::TinyFS)?;
         
-        log::info!(
+        log::debug!(
             "📋 TIMESERIES-PIVOT: Pattern matched {} inputs: {:?}",
             matched_inputs.len(),
             matched_inputs.iter().map(|(a, _)| a).collect::<Vec<_>>()
@@ -238,7 +238,7 @@ impl QueryableFile for TimeseriesPivotFile {
         // Generate SQL - SqlDerivedFile will handle missing columns gracefully
         let (sql, patterns) = self.generate_pivot_sql(&matched_inputs);
         
-        log::info!("📝 TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
+        log::debug!("📝 TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
 
         // Build scope_prefixes map for each table
         let mut scope_prefixes = HashMap::new();
@@ -377,16 +377,17 @@ mod tests {
         assert_eq!(patterns.get("Silver"), Some(&"/combined/silver".to_string()));
         assert_eq!(patterns.get("BDock"), Some(&"/combined/bdock".to_string()));
 
-        // Check SQL structure
+        // Check SQL structure - column names have scope prefix from ScopePrefixTableProvider
         assert!(sql.contains("WITH all_timestamps AS"));
         assert!(sql.contains("SELECT time FROM Silver"));
         assert!(sql.contains("SELECT time FROM BDock"));
         assert!(sql.contains("UNION"));
         assert!(sql.contains("all_timestamps.time"));
-        assert!(sql.contains("Silver.\"WaterTemp\" AS \"Silver.WaterTemp\""));
-        assert!(sql.contains("Silver.\"DO\" AS \"Silver.DO\""));
-        assert!(sql.contains("BDock.\"WaterTemp\" AS \"BDock.WaterTemp\""));
-        assert!(sql.contains("BDock.\"DO\" AS \"BDock.DO\""));
+        // After scope_prefix wrapper, columns are: Silver."Silver.WaterTemp", Silver."Silver.DO", etc.
+        assert!(sql.contains("Silver.\"Silver.WaterTemp\""));
+        assert!(sql.contains("Silver.\"Silver.DO\""));
+        assert!(sql.contains("BDock.\"BDock.WaterTemp\""));
+        assert!(sql.contains("BDock.\"BDock.DO\""));
         assert!(sql.contains("LEFT JOIN Silver ON all_timestamps.time = Silver.time"));
         assert!(sql.contains("LEFT JOIN BDock ON all_timestamps.time = BDock.time"));
         assert!(sql.contains("ORDER BY all_timestamps.time"));
@@ -408,7 +409,8 @@ mod tests {
         let (sql, patterns) = pivot_file.generate_pivot_sql(&matched_inputs);
 
         assert_eq!(patterns.len(), 1);
-        assert!(sql.contains("OnlySite.\"Temp\" AS \"OnlySite.Temp\""));
+        // After scope_prefix wrapper, column is: OnlySite."OnlySite.Temp"
+        assert!(sql.contains("OnlySite.\"OnlySite.Temp\""));
         assert!(sql.contains("all_timestamps.timestamp"));
     }
 

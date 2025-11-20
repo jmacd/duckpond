@@ -357,48 +357,154 @@ impl SqlDerivedFile {
         result
     }
 
-    /// Apply table name transformations to SQL query
-    /// Single implementation for all table replacement needs
+    /// Apply table name transformations to SQL query using LogicalPlan transformation
+    /// This properly handles table references without touching column names in quotes
     fn apply_table_transformations(
         &self,
         original_sql: &str,
         options: &SqlTransformOptions,
     ) -> String {
-        let mut result = original_sql.to_string();
-
-        if let Some(table_mappings) = &options.table_mappings {
-            // Replace each pattern name with its unique table name
-            // Use a more sophisticated approach to avoid replacing inside double-quoted strings
-            for (pattern_name, unique_table_name) in table_mappings {
-                debug!("Replacing table name '{pattern_name}' with '{unique_table_name}'");
-                
-                // Split by double quotes to process quoted and unquoted sections separately
-                let parts: Vec<&str> = result.split('"').collect();
-                let mut new_result = String::new();
-                
-                for (i, part) in parts.iter().enumerate() {
-                    if i % 2 == 0 {
-                        // Even indices are outside quotes - do replacement
-                        new_result.push_str(&part.replace(pattern_name, unique_table_name));
-                    } else {
-                        // Odd indices are inside quotes - don't replace
-                        new_result.push_str(part);
-                    }
-                    
-                    // Add back the quote if this isn't the last part
-                    if i < parts.len() - 1 {
-                        new_result.push('"');
-                    }
-                }
-                
-                result = new_result;
-            }
-        } else if let Some(source_replacement) = &options.source_replacement {
-            debug!("Replacing 'source' with '{source_replacement}'");
-            result = result.replace("source", source_replacement);
+        // If no transformations needed, return original
+        if options.table_mappings.is_none() && options.source_replacement.is_none() {
+            return original_sql.to_string();
         }
 
-        result
+        // Parse SQL into LogicalPlan, transform table references, then unparse back to SQL
+        // This ensures we only replace actual table references, not column names or string literals
+        use datafusion::sql::parser::DFParser;
+        use datafusion::sql::sqlparser::dialect::GenericDialect;
+        
+        let dialect = GenericDialect {};
+        
+        // Parse the SQL
+        let statements = match DFParser::parse_sql_with_dialect(original_sql, &dialect) {
+            Ok(stmts) => stmts,
+            Err(e) => {
+                debug!("Failed to parse SQL for transformation, falling back to original: {}", e);
+                return original_sql.to_string();
+            }
+        };
+        
+        if statements.is_empty() {
+            return original_sql.to_string();
+        }
+        
+        // Get the first statement (we only expect one SELECT)
+        let mut statement = statements[0].clone();
+        
+        // Apply transformations to table names in the AST
+        use datafusion::sql::sqlparser::ast::{Query, SetExpr, Select, TableFactor};
+        use datafusion::sql::parser::Statement as DFStatement;
+        
+        fn replace_table_names_in_statement(
+            statement: &mut DFStatement,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            match statement {
+                DFStatement::Statement(boxed) => {
+                    if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut() {
+                        replace_table_names_in_query(query, table_mappings, source_replacement);
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        fn replace_table_names_in_query(
+            query: &mut Box<Query>,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            // Handle CTEs (WITH clauses)
+            if let Some(ref mut with) = query.with {
+                for cte_table in &mut with.cte_tables {
+                    replace_table_names_in_query(&mut cte_table.query, table_mappings, source_replacement);
+                }
+            }
+            
+            // Handle main query body
+            replace_table_names_in_set_expr(&mut query.body, table_mappings, source_replacement);
+        }
+        
+        fn replace_table_names_in_set_expr(
+            set_expr: &mut SetExpr,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            match set_expr {
+                SetExpr::Select(select) => {
+                    replace_table_names_in_select(select, table_mappings, source_replacement);
+                }
+                SetExpr::SetOperation { left, right, .. } => {
+                    // Handle UNION, INTERSECT, EXCEPT operations
+                    replace_table_names_in_set_expr(left, table_mappings, source_replacement);
+                    replace_table_names_in_set_expr(right, table_mappings, source_replacement);
+                }
+                SetExpr::Query(query) => {
+                    replace_table_names_in_query(query, table_mappings, source_replacement);
+                }
+                _ => {}
+            }
+        }
+        
+        fn replace_table_names_in_select(
+            select: &mut Box<Select>,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            // Replace in FROM clause
+            for table_with_joins in &mut select.from {
+                replace_table_name(&mut table_with_joins.relation, table_mappings, source_replacement);
+                
+                // Replace in JOINs
+                for join in &mut table_with_joins.joins {
+                    replace_table_name(&mut join.relation, table_mappings, source_replacement);
+                }
+            }
+        }
+        
+        fn replace_table_name(
+            table_factor: &mut TableFactor,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            if let TableFactor::Table { name, alias, .. } = table_factor {
+                let table_name = name.to_string();
+                
+                if let Some(mappings) = table_mappings {
+                    if let Some(replacement) = mappings.get(&table_name) {
+                        debug!("Replacing table reference '{}' with '{}' in AST", table_name, replacement);
+                        use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart, TableAlias};
+                        
+                        // If no existing alias, add one using the original table name
+                        // This allows column references like "sensor_a.timestamp" to still work
+                        if alias.is_none() {
+                            *alias = Some(TableAlias {
+                                name: Ident::new(&table_name),
+                                columns: vec![],
+                            });
+                        }
+                        
+                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement.clone()))]);
+                    }
+                } else if let Some(replacement) = source_replacement {
+                    if table_name == "source" {
+                        debug!("Replacing 'source' with '{}' in AST", replacement);
+                        use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
+                    }
+                }
+            } else if let TableFactor::Derived { subquery, .. } = table_factor {
+                // Recursively handle subqueries
+                replace_table_names_in_query(subquery, table_mappings, source_replacement);
+            }
+        }
+        
+        replace_table_names_in_statement(&mut statement, options.table_mappings.as_ref(), options.source_replacement.as_deref());
+        
+        // Unparse the transformed AST back to SQL
+        statement.to_string()
     }
 }
 
@@ -638,11 +744,6 @@ impl QueryableFile for SqlDerivedFile {
             debug!(
                 "🚀 CACHE HIT: Returning cached ViewTable for node_id: {node_id}, part_id: {part_id}"
             );
-            log::info!(
-                "📋 REUSED ViewTable from cache: node_id={}, part_id={}",
-                node_id,
-                part_id
-            );
             return Ok(cached_provider);
         }
 
@@ -650,12 +751,6 @@ impl QueryableFile for SqlDerivedFile {
 
         // Get SessionContext from state to set up tables
         let ctx = state.session_context().await?;
-        log::info!(
-            "🔍 SQL-DERIVED: Got SessionContext {:p} for node_id={}, part_id={}",
-            Arc::as_ptr(&ctx),
-            node_id,
-            part_id
-        );
 
         // Create mapping from user pattern names to unique internal table names
         let mut table_mappings = HashMap::new();
@@ -834,7 +929,7 @@ impl QueryableFile for SqlDerivedFile {
                         ..Default::default()
                     };
 
-                    log::info!(
+                    log::debug!(
                         "📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs",
                         pattern_name,
                         urls.len()
@@ -868,11 +963,6 @@ impl QueryableFile for SqlDerivedFile {
                         "🔍 SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...",
                         unique_table_name, pattern_name
                     );
-                    log::info!(
-                        "📋 REGISTERING table '{}' in SessionContext {:p}",
-                        unique_table_name,
-                        Arc::as_ptr(&ctx)
-                    );
                     
                     // Wrap with ScopePrefixTableProvider if scope prefix is configured
                     let final_table_provider: Arc<dyn datafusion::catalog::TableProvider> = 
@@ -882,7 +972,7 @@ impl QueryableFile for SqlDerivedFile {
                                 pattern_name, scope_prefixes.keys().collect::<Vec<_>>()
                             );
                             if let Some((scope_prefix, time_column)) = scope_prefixes.get(pattern_name.as_str()) {
-                                log::info!(
+                                log::debug!(
                                     "🔧 SQL-DERIVED: Wrapping table '{}' (pattern '{}') with scope prefix '{}'",
                                     unique_table_name, pattern_name, scope_prefix
                                 );
@@ -952,11 +1042,6 @@ impl QueryableFile for SqlDerivedFile {
             "🔍 SQL-DERIVED: Executing SQL with DataFusion: {}",
             effective_sql
         );
-        log::info!(
-            "🔍 SQL-DERIVED: Parsing SQL with SessionContext {:p}: {}",
-            Arc::as_ptr(&ctx),
-            effective_sql
-        );
 
         // Debug: List all registered tables in the context
         debug!("🔍 SQL-DERIVED: Available tables in DataFusion context:");
@@ -964,11 +1049,6 @@ impl QueryableFile for SqlDerivedFile {
             if let Some(schema) = catalog.schema("public") {
                 let table_names: Vec<String> = schema.table_names();
                 debug!("🔍 SQL-DERIVED: Registered tables: {:?}", table_names);
-                log::info!(
-                    "📋 AVAILABLE tables in SessionContext {:p}: {:?}",
-                    Arc::as_ptr(&ctx),
-                    table_names
-                );
             } else {
                 debug!("🔍 SQL-DERIVED: Could not access 'public' schema");
             }
@@ -995,14 +1075,6 @@ impl QueryableFile for SqlDerivedFile {
         debug!("✅ SQL-DERIVED: Successfully created logical plan");
 
         use datafusion::catalog::view::ViewTable;
-
-        log::info!(
-            "📋 CREATED ViewTable for SQL-derived file: node_id={}, part_id={}, patterns={}, effective_sql_length={}",
-            node_id,
-            part_id,
-            self.get_config().patterns.len(),
-            effective_sql.len()
-        );
 
         let view_table = ViewTable::new(logical_plan, Some(effective_sql));
         let table_provider = Arc::new(view_table);
@@ -3830,5 +3902,326 @@ query: ""
         );
 
         tx_guard_mut.commit_test().await.unwrap();
+    }
+
+    /// Test AST-based table name replacement preserves quoted column names
+    #[test]
+    fn test_ast_table_replacement_preserves_column_names() {
+        // Test case: Column name contains table name - should NOT be replaced
+        let original_sql = r#"SELECT Silver."Silver.AT500_Surface.DO.mg/L" FROM Silver"#;
+        
+        let mut table_mappings = HashMap::new();
+        _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_12345".to_string());
+        
+        let options = SqlTransformOptions {
+            table_mappings: Some(table_mappings),
+            source_replacement: None,
+        };
+        
+        let transformed = apply_table_transformations_test(original_sql, &options);
+        
+        // Table name should be replaced in FROM clause
+        assert!(transformed.contains("sql_derived_silver_12345"), 
+            "Table reference should be replaced, got: {}", transformed);
+        
+        // Column name should NOT be replaced - should still contain "Silver."
+        assert!(transformed.contains(r#""Silver.AT500_Surface.DO.mg/L""#), 
+            "Column name should be preserved, got: {}", transformed);
+    }
+    
+    /// Test AST transformation handles multiple table references correctly
+    #[test]
+    fn test_ast_table_replacement_multiple_tables() {
+        let original_sql = r#"
+            SELECT 
+                Silver."Silver.WaterTemp",
+                BDock."BDock.WaterTemp"
+            FROM Silver
+            JOIN BDock ON Silver.timestamp = BDock.timestamp
+        "#;
+        
+        let mut table_mappings = HashMap::new();
+        _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_abc".to_string());
+        _ = table_mappings.insert("BDock".to_string(), "sql_derived_bdock_def".to_string());
+        
+        let options = SqlTransformOptions {
+            table_mappings: Some(table_mappings),
+            source_replacement: None,
+        };
+        
+        let transformed = apply_table_transformations_test(original_sql, &options);
+        
+        // Both table references should be replaced
+        assert!(transformed.contains("sql_derived_silver_abc"), 
+            "Silver table should be replaced, got: {}", transformed);
+        assert!(transformed.contains("sql_derived_bdock_def"), 
+            "BDock table should be replaced, got: {}", transformed);
+        
+        // Column names should be preserved with original scope prefixes
+        assert!(transformed.contains(r#""Silver.WaterTemp""#), 
+            "Silver column name should be preserved, got: {}", transformed);
+        assert!(transformed.contains(r#""BDock.WaterTemp""#), 
+            "BDock column name should be preserved, got: {}", transformed);
+    }
+    
+    /// Test AST transformation handles subqueries
+    #[test]
+    fn test_ast_table_replacement_subquery() {
+        let original_sql = r#"
+            SELECT * FROM (
+                SELECT Silver."Silver.Value" FROM Silver
+            ) AS subquery
+        "#;
+        
+        let mut table_mappings = HashMap::new();
+        _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_xyz".to_string());
+        
+        let options = SqlTransformOptions {
+            table_mappings: Some(table_mappings),
+            source_replacement: None,
+        };
+        
+        let transformed = apply_table_transformations_test(original_sql, &options);
+        
+        // Table in subquery should be replaced
+        assert!(transformed.contains("sql_derived_silver_xyz"), 
+            "Table in subquery should be replaced, got: {}", transformed);
+        
+        // Column name in subquery should be preserved
+        assert!(transformed.contains(r#""Silver.Value""#), 
+            "Column name in subquery should be preserved, got: {}", transformed);
+    }
+    
+    /// Test that non-matching table names are not replaced
+    #[test]
+    fn test_ast_table_replacement_no_match() {
+        let original_sql = r#"SELECT timestamp, value FROM OtherTable"#;
+        
+        let mut table_mappings = HashMap::new();
+        _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_123".to_string());
+        
+        let options = SqlTransformOptions {
+            table_mappings: Some(table_mappings),
+            source_replacement: None,
+        };
+        
+        let transformed = apply_table_transformations_test(original_sql, &options);
+        
+        // Original table name should remain unchanged
+        assert!(transformed.contains("OtherTable"), 
+            "Non-matching table should not be replaced, got: {}", transformed);
+        
+        // Should NOT contain the replacement
+        assert!(!transformed.contains("sql_derived_silver_123"), 
+            "Replacement should not appear for non-matching table, got: {}", transformed);
+    }
+    
+    /// Test source replacement pattern
+    #[test]
+    fn test_ast_source_replacement() {
+        let original_sql = r#"SELECT timestamp, value FROM source WHERE value > 10"#;
+        
+        let options = SqlTransformOptions {
+            table_mappings: None,
+            source_replacement: Some("my_actual_table".to_string()),
+        };
+        
+        let transformed = apply_table_transformations_test(original_sql, &options);
+        
+        // 'source' should be replaced with actual table name
+        assert!(transformed.contains("my_actual_table"), 
+            "Source should be replaced, got: {}", transformed);
+        assert!(!transformed.contains(" source "), 
+            "Original 'source' should not remain, got: {}", transformed);
+    }
+    
+    /// Test that no transformations returns original SQL unchanged
+    #[test]
+    fn test_ast_no_transformations() {
+        let original_sql = r#"SELECT * FROM MyTable"#;
+        
+        let options = SqlTransformOptions {
+            table_mappings: None,
+            source_replacement: None,
+        };
+        
+        let transformed = apply_table_transformations_test(original_sql, &options);
+        
+        // Should return original SQL if no transformations
+        assert_eq!(transformed.trim(), original_sql.trim(), 
+            "SQL without transformations should be unchanged");
+    }
+    
+    /// Test complex SQL with CTEs and window functions preserves structure
+    #[test]
+    fn test_ast_complex_sql_structure() {
+        let original_sql = r#"
+            WITH ranked AS (
+                SELECT 
+                    Silver."Silver.Value",
+                    ROW_NUMBER() OVER (ORDER BY timestamp) as rn
+                FROM Silver
+            )
+            SELECT * FROM ranked WHERE rn <= 10
+        "#;
+        
+        let mut table_mappings = HashMap::new();
+        _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_999".to_string());
+        
+        let options = SqlTransformOptions {
+            table_mappings: Some(table_mappings),
+            source_replacement: None,
+        };
+        
+        let transformed = apply_table_transformations_test(original_sql, &options);
+        
+        // Table name should be replaced
+        assert!(transformed.contains("sql_derived_silver_999"), 
+            "Table should be replaced in CTE, got: {}", transformed);
+        
+        // Column name with scope prefix should be preserved
+        assert!(transformed.contains(r#""Silver.Value""#), 
+            "Column name should be preserved in CTE, got: {}", transformed);
+        
+        // CTE structure should be preserved
+        assert!(transformed.to_uppercase().contains("WITH"), 
+            "CTE keyword should be preserved, got: {}", transformed);
+        assert!(transformed.to_uppercase().contains("ROW_NUMBER"), 
+            "Window function should be preserved, got: {}", transformed);
+    }
+    
+    /// Helper function for testing apply_table_transformations without needing a full SqlDerivedFile
+    fn apply_table_transformations_test(
+        original_sql: &str,
+        options: &SqlTransformOptions,
+    ) -> String {
+        // If no transformations needed, return original
+        if options.table_mappings.is_none() && options.source_replacement.is_none() {
+            return original_sql.to_string();
+        }
+
+        use datafusion::sql::parser::DFParser;
+        use datafusion::sql::sqlparser::dialect::GenericDialect;
+        
+        let dialect = GenericDialect {};
+        
+        let statements = match DFParser::parse_sql_with_dialect(original_sql, &dialect) {
+            Ok(stmts) => stmts,
+            Err(e) => {
+                panic!("Failed to parse SQL: {}", e);
+            }
+        };
+        
+        if statements.is_empty() {
+            return original_sql.to_string();
+        }
+        
+        let mut statement = statements[0].clone();
+        
+        use datafusion::sql::sqlparser::ast::{Query, SetExpr, Select, TableFactor};
+        use datafusion::sql::parser::Statement as DFStatement;
+        
+        fn replace_table_names_in_statement(
+            statement: &mut DFStatement,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            match statement {
+                DFStatement::Statement(boxed) => {
+                    if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut() {
+                        replace_table_names_in_query(query, table_mappings, source_replacement);
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        fn replace_table_names_in_query(
+            query: &mut Box<Query>,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            // Handle CTEs (WITH clauses)
+            if let Some(ref mut with) = query.with {
+                for cte_table in &mut with.cte_tables {
+                    replace_table_names_in_query(&mut cte_table.query, table_mappings, source_replacement);
+                }
+            }
+            
+            // Handle main query body
+            replace_table_names_in_set_expr(&mut query.body, table_mappings, source_replacement);
+        }
+        
+        fn replace_table_names_in_set_expr(
+            set_expr: &mut SetExpr,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            match set_expr {
+                SetExpr::Select(select) => {
+                    replace_table_names_in_select(select, table_mappings, source_replacement);
+                }
+                SetExpr::SetOperation { left, right, .. } => {
+                    // Handle UNION, INTERSECT, EXCEPT operations
+                    replace_table_names_in_set_expr(left, table_mappings, source_replacement);
+                    replace_table_names_in_set_expr(right, table_mappings, source_replacement);
+                }
+                SetExpr::Query(query) => {
+                    replace_table_names_in_query(query, table_mappings, source_replacement);
+                }
+                _ => {}
+            }
+        }
+        
+        fn replace_table_names_in_select(
+            select: &mut Box<Select>,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            for table_with_joins in &mut select.from {
+                replace_table_name(&mut table_with_joins.relation, table_mappings, source_replacement);
+                
+                for join in &mut table_with_joins.joins {
+                    replace_table_name(&mut join.relation, table_mappings, source_replacement);
+                }
+            }
+        }
+        
+        fn replace_table_name(
+            table_factor: &mut TableFactor,
+            table_mappings: Option<&HashMap<String, String>>,
+            source_replacement: Option<&str>,
+        ) {
+            if let TableFactor::Table { name, alias, .. } = table_factor {
+                let table_name = name.to_string();
+                
+                if let Some(mappings) = table_mappings {
+                    if let Some(replacement) = mappings.get(&table_name) {
+                        use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart, TableAlias};
+                        
+                        // If no existing alias, add one using the original table name
+                        if alias.is_none() {
+                            *alias = Some(TableAlias {
+                                name: Ident::new(&table_name),
+                                columns: vec![],
+                            });
+                        }
+                        
+                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement.clone()))]);
+                    }
+                } else if let Some(replacement) = source_replacement {
+                    if table_name == "source" {
+                        use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
+                    }
+                }
+            } else if let TableFactor::Derived { subquery, .. } = table_factor {
+                replace_table_names_in_query(subquery, table_mappings, source_replacement);
+            }
+        }
+        
+        replace_table_names_in_statement(&mut statement, options.table_mappings.as_ref(), options.source_replacement.as_deref());
+        
+        statement.to_string()
     }
 }
