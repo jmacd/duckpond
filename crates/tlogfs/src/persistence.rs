@@ -2853,16 +2853,13 @@ impl InnerState {
     }
 
     // Versioning operations implementation
+    
     async fn list_file_versions(
         &self,
         node_id: NodeID,
         part_id: NodeID,
     ) -> TinyFSResult<Vec<FileVersionInfo>> {
         debug!("list_file_versions called for node_id={node_id}, part_id={part_id}");
-        
-        // Print stack trace to find who's calling this repeatedly
-        // let bt = std::backtrace::Backtrace::capture();
-        // eprintln!("DEBUG_STACK list_file_versions called from:\n{}", bt);
         
         // CRITICAL: query_records expects (part_id, node_id) but we receive (node_id, part_id)
         // Must pass them in the correct order! @@@ FIX MESS
@@ -2926,20 +2923,47 @@ impl InnerState {
         part_id: NodeID,
         version: Option<u64>,
     ) -> TinyFSResult<Vec<u8>> {
-        let mut records = self
-            .query_records(part_id, node_id)
-            .await
-            .map_err(error_utils::to_tinyfs_error)?;
-
-        // Sort records by timestamp ASC (oldest first) to create logical file versions
-        records.sort_by_key(|record| record.timestamp);
-
+        // OPTIMIZATION: Query for specific version instead of fetching all versions
         let target_record = match version {
             Some(v) => {
-                // Find specific version by the actual version field, not array index
-                records
-                    .into_iter()
-                    .find(|record| record.version == v as i64)
+                // Query for specific version only
+                let sql = format!(
+                    "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' AND version = {} LIMIT 1",
+                    part_id, node_id, v
+                );
+                
+                let records = match self.session_context.sql(&sql).await {
+                    Ok(df) => match df.collect().await {
+                        Ok(batches) => {
+                            let mut records = Vec::new();
+                            for batch in batches {
+                                let batch_records: Vec<OplogEntry> =
+                                    serde_arrow::from_record_batch(&batch)
+                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize record: {}", e)))?;
+                                records.extend(batch_records);
+                            }
+                            records
+                        }
+                        Err(e) => {
+                            return Err(tinyfs::Error::Other(format!("Query execution failed: {}", e)));
+                        }
+                    },
+                    Err(e) => {
+                        return Err(tinyfs::Error::Other(format!("SQL parse failed: {}", e)));
+                    }
+                };
+                
+                // Check pending records too (for uncommitted writes)
+                let pending_record = self.records
+                    .iter()
+                    .find(|r| {
+                        r.part_id == part_id.to_string() 
+                        && r.node_id == node_id.to_string() 
+                        && r.version == v as i64
+                    })
+                    .cloned();
+                
+                pending_record.or_else(|| records.into_iter().next())
                     .ok_or_else(|| {
                         tinyfs::Error::NotFound(PathBuf::from(format!(
                             "Version {} of file {} not found",
@@ -2948,13 +2972,10 @@ impl InnerState {
                     })?
             }
             None => {
-                // Return latest version (last record after sorting by timestamp ASC)
-                records.into_iter().last().ok_or_else(|| {
-                    tinyfs::Error::NotFound(PathBuf::from(format!(
-                        "No versions of file {} found",
-                        node_id
-                    )))
-                })?
+                // FAIL-FAST: Version must be specified - no guessing
+                return Err(tinyfs::Error::Other(
+                    format!("read_file_version called with version=None for node_id={}, part_id={}. Version must be specified explicitly.", node_id, part_id)
+                ));
             }
         };
 

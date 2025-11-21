@@ -454,69 +454,20 @@ impl ObjectStore for TinyFsObjectStore {
         let has_cached_metadata = cached_metadata.is_some();
         
         if has_cached_metadata {
-            debug!("✅ ObjectStore get_range: metadata found in cache, skipping list_file_versions() query");
+            debug!("✅ ObjectStore get_range: metadata found in cache, skipping version query");
         } else {
-            debug!("⚠️ ObjectStore get_range: no cached metadata, falling back to list_file_versions() query");
+            debug!("⚠️ ObjectStore get_range: no cached metadata, will query for latest version if needed");
         }
 
-        // Query persistence layer dynamically for file versions ONLY if not in cache
-        let versions = if !has_cached_metadata {
-            self.persistence
-                .list_file_versions(parsed_path.node_id, parsed_path.part_id)
-                .await
-                .map_err(|e| object_store::Error::Generic {
-                    store: "TinyFS",
-                    source: format!("Failed to list file versions: {}", e).into(),
-                })?
-        } else {
-            // Metadata in cache - we don't need version info from database
-            Vec::new()
-        };
-
-        if !has_cached_metadata && versions.is_empty() {
-            let node_id = parsed_path.node_id;
-            let part_id = parsed_path.part_id;
-            debug!(
-                "❌ ObjectStore get_range no versions found for node_id={node_id}, part_id={part_id}"
-            );
-            return Err(object_store::Error::NotFound {
-                path: location.to_string(),
-                source: "No file versions found".into(),
-            });
-        }
-
-        // Create FileSeriesInfo dynamically
-        let series_info = FileSeriesInfo {
-            node_id: parsed_path.node_id,
-            part_id: parsed_path.part_id,
-            versions,
-        };
-
-        let node_id = series_info.node_id;
-        let part_id = series_info.part_id;
-        let version_count = series_info.versions.len();
-        debug!(
-            "✅ ObjectStore get_range dynamically discovered series info: node_id={node_id}, part_id={part_id}, {version_count} versions"
-        );
-
-        // Read the specific version using persistence layer
-        let version_to_read = match version_num {
-            Some(v) => v,
-            None => {
-                // If no version specified, use the latest available version
-                let latest = series_info
-                    .versions
-                    .iter()
-                    .map(|v| v.version)
-                    .max()
-                    .ok_or_else(|| object_store::Error::NotFound {
-                        path: location.to_string(),
-                        source: "No versions available for file series".into(),
-                    })?;
-                debug!("🔍 ObjectStore get_range using latest version: {latest}");
-                latest
-            }
-        };
+        // FAIL-FAST: Version must be specified in path for file series
+        let version_to_read = version_num.ok_or_else(|| object_store::Error::Generic {
+            store: "TinyFS",
+            source: format!(
+                "File series path '{}' missing version number. Paths must include version like 'tinyfs:///.../file.series?version=1'",
+                location
+            ).into(),
+        })?;
+        debug!("🔍 ObjectStore get_range using version: {version_to_read}");
 
         debug!(
             "🔍 ObjectStore get_range reading version {version_to_read} for DataFusion schema inference"
@@ -526,8 +477,8 @@ impl ObjectStore for TinyFsObjectStore {
         let version_data = match self
             .persistence
             .read_file_version(
-                series_info.node_id,
-                series_info.part_id,
+                parsed_path.node_id,
+                parsed_path.part_id,
                 Some(version_to_read),
             )
             .await
