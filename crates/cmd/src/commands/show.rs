@@ -811,9 +811,9 @@ fn format_operations_from_batches(
 /// Decode directory content and return entries with their names and node IDs
 fn decode_directory_entries(
     content_bytes: &[u8],
-) -> Result<Vec<tlogfs::schema::VersionedDirectoryEntry>, String> {
+) -> Result<Vec<tlogfs::DirectoryEntry>, String> {
     // Use the public helper from tlogfs
-    let entries = tlogfs::schema::decode_versioned_directory_entries(content_bytes)
+    let entries = tlogfs::schema::decode_directory_entries(content_bytes)
         .map_err(|e| format!("Failed to decode: {}", e))?;
 
     Ok(entries)

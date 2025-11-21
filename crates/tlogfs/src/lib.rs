@@ -80,7 +80,10 @@ pub mod file_table;
 // Re-export key types
 pub use error::TLogFSError;
 pub use persistence::OpLogPersistence;
-pub use schema::{OplogEntry, VersionedDirectoryEntry};
+pub use schema::{DirectoryEntry, OplogEntry};
+// Backward compatibility alias
+#[allow(deprecated)]
+pub use schema::VersionedDirectoryEntry;
 pub use transaction_guard::TransactionGuard;
 pub use txn_metadata::{PondTxnMetadata, PondUserMetadata};
 

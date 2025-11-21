@@ -1,6 +1,6 @@
 use super::directory::OpLogDirectory;
 use super::error::TLogFSError;
-use super::schema::{ForArrow, OperationType, OplogEntry, VersionedDirectoryEntry};
+use super::schema::{DirectoryEntry, ForArrow, OplogEntry};
 use super::symlink::OpLogSymlink;
 use super::transaction_guard::TransactionGuard;
 use crate::factory::{FactoryContext, FactoryRegistry};
@@ -1189,7 +1189,7 @@ impl InnerState {
 
         // Create root directory using direct TLogFS commit (no transaction guard needed for bootstrap)
         let now = Utc::now().timestamp_micros();
-        let empty_entries: Vec<VersionedDirectoryEntry> = Vec::new();
+        let empty_entries: Vec<DirectoryEntry> = Vec::new();
         let content = self.serialize_directory_entries(&empty_entries)?;
 
         let root_entry = OplogEntry::new_inline(
@@ -1706,10 +1706,10 @@ impl InnerState {
         Ok(Some(()))
     }
 
-    /// Serialize VersionedDirectoryEntry records as Arrow IPC bytes
+    /// Serialize DirectoryEntry records as Arrow IPC bytes
     fn serialize_directory_entries(
         &self,
-        entries: &[VersionedDirectoryEntry],
+        entries: &[DirectoryEntry],
     ) -> Result<Vec<u8>, TLogFSError> {
         // For empty directories, use truly empty content (0 bytes) instead of Arrow IPC with schema
         if entries.is_empty() {
@@ -1718,25 +1718,28 @@ impl InnerState {
         serialization::serialize_to_arrow_ipc(entries)
     }
 
-    /// Deserialize VersionedDirectoryEntry records from Arrow IPC bytes
+    /// Deserialize DirectoryEntry records from Arrow IPC bytes into HashMap by name
     fn deserialize_directory_entries(
         &self,
         content: &[u8],
-    ) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
+    ) -> Result<HashMap<String, DirectoryEntry>, TLogFSError> {
         // Handle empty directories (0 bytes of content)
         if content.is_empty() {
-            return Ok(Vec::new());
+            return Ok(HashMap::new());
         }
         debug!(
             "deserialize_directory_entries: processing {} bytes for directory entries",
             content.len()
         );
-        let result = serialization::deserialize_from_arrow_ipc(content)?;
+        let entries: Vec<DirectoryEntry> = serialization::deserialize_from_arrow_ipc(content)?;
+        let map: HashMap<String, DirectoryEntry> = entries.into_iter()
+            .map(|e| (e.name.clone(), e))
+            .collect();
         debug!(
             "deserialize_directory_entries: successfully deserialized {} directory entries",
-            result.len()
+            map.len()
         );
-        Ok(result)
+        Ok(map)
     }
 
     /// Store file content reference with transaction context (used by transaction guard FileWriter)
@@ -1901,56 +1904,62 @@ impl InnerState {
         Ok(())
     }
 
-    /// Query directory entries for a parent node
+    /// Query directory entries for a parent node (OPTIMIZED: LATEST VERSION ONLY)
+    /// 
+    /// 🚀 MAJOR PERFORMANCE IMPROVEMENT: This function now reads ONLY the latest version
+    /// instead of iterating through all historical versions. This is O(1) instead of O(N)
+    /// where N = number of transactions that modified the directory.
+    /// 
+    /// Uses SQL "ORDER BY version DESC LIMIT 1" to fetch exactly one record from Delta Lake.
     async fn query_directory_entries(
         &self,
         part_id: NodeID,
-    ) -> Result<Vec<VersionedDirectoryEntry>, TLogFSError> {
-        let records = self.query_records(part_id, part_id).await?;
+    ) -> Result<Vec<DirectoryEntry>, TLogFSError> {
+        // 🚀 CRITICAL: Use specialized query that fetches ONLY latest record via SQL LIMIT 1
+        let latest_record = self.query_latest_directory_record(part_id).await?
+            .ok_or_else(|| TLogFSError::NodeNotFound {
+                path: PathBuf::from(format!("Directory {}", part_id))
+            })?;
 
-        let mut all_entries = Vec::new();
-        for record in records {
-            // record is already an OplogEntry - no need to deserialize
-            if record.file_type.is_directory()
-                && let Some(content) = &record.content
-            {
-                debug!(
-                    "query_directory_content: deserializing directory content for part_id={}, node_id={}, version={}, content_size={} bytes",
-                    record.part_id,
-                    record.node_id,
-                    record.version,
-                    content.len()
-                );
-                let dir_entries = self.deserialize_directory_entries(content)
-                        .map_err(|e| TLogFSError::ArrowMessage(format!(
-                            "Failed to deserialize directory content for part_id={}, node_id={}, version={}: {}. \
-                            This indicates corrupted Arrow IPC data or architectural mismatch between static and dynamic directories.",
-                            record.part_id, record.node_id, record.version, e
-                        )))?;
-                all_entries.extend(dir_entries);
-            }
+        debug!(
+            "🚀 query_directory_entries: read ONLY version {} for part_id={} (SQL LIMIT 1)",
+            latest_record.version, part_id
+        );
+
+        // Validate format field (future-proofing)
+        use super::schema::StorageFormat;
+        if latest_record.format != StorageFormat::FullDir {
+            warn!(
+                "Directory {} has unexpected format {:?}, expected FullDir",
+                part_id, latest_record.format
+            );
+            // Don't fail - allow Inline format for backward compatibility during transition
         }
 
-        // Deduplicate entries by name, keeping only the latest operation
-        // Since records are ordered by timestamp DESC, newer entries come first
-        let mut seen_names = HashSet::new();
-        let mut deduplicated_entries = Vec::new();
-
-        // Process in forward order so later entries (newer transactions) take precedence
-        for entry in all_entries {
-            if !seen_names.contains(&entry.name) {
-                _ = seen_names.insert(entry.name.clone());
-                if matches!(
-                    entry.operation_type,
-                    OperationType::Insert | OperationType::Update
-                ) {
-                    deduplicated_entries.push(entry);
-                }
-            }
+        // ✅ Single record fetched via SQL LIMIT 1
+        // ✅ Single deserialize - complete directory state as HashMap
+        // ✅ No iteration through history
+        // ✅ No deduplication across versions
+        // ✅ Constant time regardless of transaction count
+        if let Some(content) = &latest_record.content {
+            debug!(
+                "query_directory_entries: deserializing {} bytes for directory {}",
+                content.len(), part_id
+            );
+            let entries_map = self.deserialize_directory_entries(content)
+                .map_err(|e| TLogFSError::ArrowMessage(format!(
+                    "Failed to deserialize directory content for part_id={}, version={}: {}",
+                    part_id, latest_record.version, e
+                )))?;
+            debug!(
+                "✅ query_directory_entries: loaded {} entries from snapshot (version {})",
+                entries_map.len(), latest_record.version
+            );
+            Ok(entries_map.into_values().collect())
+        } else {
+            // Empty directory
+            Ok(Vec::new())
         }
-
-        deduplicated_entries.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(deduplicated_entries)
     }
 
     /// Query for a single directory entry by name
@@ -1958,7 +1967,7 @@ impl InnerState {
         &self,
         part_id: NodeID,
         entry_name: &str,
-    ) -> Result<Option<VersionedDirectoryEntry>, TLogFSError> {
+    ) -> Result<Option<DirectoryEntry>, TLogFSError> {
         // Performance tracing - enable with perf analysis
         let mut trace = utilities::perf_trace::PerfTrace::start("query_single_directory_entry");
         let caller = utilities::perf_trace::extract_caller("tlogfs::persistence::InnerState::", "query_single_directory_entry");
@@ -1972,81 +1981,69 @@ impl InnerState {
         {
             match operation {
                 DirectoryOperation::InsertWithType(node_id, node_type) => {
-                    return Ok(Some(VersionedDirectoryEntry::new(
+                    return Ok(Some(DirectoryEntry::new(
                         entry_name.to_string(),
-                        Some(*node_id),
-                        OperationType::Insert,
+                        *node_id,
                         *node_type,
+                        0, // Version will be set when flushed
                     )));
                 }
                 DirectoryOperation::DeleteWithType(_node_type) => {
                     return Ok(None);
                 }
                 DirectoryOperation::RenameWithType(new_name, node_id, node_type) => {
-                    return Ok(Some(VersionedDirectoryEntry::new(
+                    return Ok(Some(DirectoryEntry::new(
                         new_name.clone(),
-                        Some(*node_id),
-                        OperationType::Insert,
+                        *node_id,
                         *node_type,
+                        0, // Version will be set when flushed
                     )));
                 }
             }
         }
 
-        // Query committed records - we want the directory record itself (node_id == part_id)
+        // 🚀 OPTIMIZATION: Read latest directory snapshot and do O(1) HashMap lookup
         let query_start = std::time::Instant::now();
-        let records = self.query_records(part_id, part_id).await?;
+        let latest_record = self.query_latest_directory_record(part_id).await?;
         trace.metric("query_ms", query_start.elapsed().as_millis() as u64);
-        trace.metric("record_count", records.len() as u64);
-
-        // Process records in order (latest first) to get the most recent operation
-        // query_records already returns records sorted by timestamp DESC
-        for record in records.iter() {
-            // record is already an OplogEntry - no need to deserialize
-            if record.file_type.is_directory()
-                && let Some(content) = &record.content
-            {
-                debug!(
-                    "query_directory_entry: deserializing directory content for entry '{}' in part_id={}, node_id={}, version={}, content_size={} bytes",
-                    entry_name,
-                    record.part_id,
-                    record.node_id,
-                    record.version,
-                    content.len()
-                );
-                let directory_entries = self.deserialize_directory_entries(content)
-                        .map_err(|e| TLogFSError::ArrowMessage(format!(
-                            "Failed to deserialize directory content for entry '{}' in part_id={}, node_id={}, version={}: {}. \
-                            This indicates corrupted Arrow IPC data or architectural mismatch between static and dynamic directories.",
-                            entry_name, record.part_id, record.node_id, record.version, e
-                        )))?;
-
-                // Process entries in reverse order within each record (latest first)
-                for entry in directory_entries.iter().rev() {
-                    if entry.name == entry_name {
-                        match entry.operation_type {
-                            OperationType::Insert | OperationType::Update => {
-                                trace.metric("found", 1);
-                                return Ok(Some(entry.clone()));
-                            }
-                            OperationType::Delete => {
-                                trace.metric("found", 0);
-                                return Ok(None);
-                            }
-                        }
-                    }
-                }
+        
+        if let Some(record) = latest_record {
+            if let Some(content) = &record.content {
+                let entries_map = self.deserialize_directory_entries(content)
+                    .map_err(|e| TLogFSError::ArrowMessage(format!(
+                        "Failed to deserialize directory content for part_id={}: {}",
+                        part_id, e
+                    )))?;
+                trace.metric("entry_count", entries_map.len() as u64);
+                
+                // O(1) HashMap lookup by name
+                let result = entries_map.get(entry_name).cloned();
+                trace.metric("found", if result.is_some() { 1 } else { 0 });
+                Ok(result)
+            } else {
+                // Empty directory
+                trace.metric("entry_count", 0);
+                trace.metric("found", 0);
+                Ok(None)
             }
+        } else {
+            // Directory not found
+            trace.metric("entry_count", 0);
+            trace.metric("found", 0);
+            Ok(None)
         }
-
-        trace.metric("found", 0);
-        Ok(None)
     }
 
-    /// Process all accumulated directory operations in a batch
+    /// Process all accumulated directory operations in a batch (FULL SNAPSHOT VERSION)
+    /// 
+    /// This rewritten function implements full directory snapshots instead of incremental changes.
+    /// Key changes:
+    /// 1. Load current directory state (if exists)
+    /// 2. Apply pending operations to build new complete state
+    /// 3. Write full snapshot using new_directory_full_snapshot constructor
     async fn flush_directory_operations(&mut self) -> Result<(), TLogFSError> {
         debug!(
-            "flush_directory_operations: starting, txn_seq={}, operations.len()={}, created_directories.len()={}",
+            "flush_directory_operations: starting FULL SNAPSHOT mode, txn_seq={}, operations.len()={}, created_directories.len()={}",
             self.txn_seq,
             self.operations.len(),
             self.created_directories.len()
@@ -2057,83 +2054,84 @@ impl InnerState {
         // Track which directories have operations (will be written with content)
         let populated_directories: HashSet<NodeID> = pending_dirs.keys().copied().collect();
 
-        if pending_dirs.is_empty() {
-            debug!("flush_directory_operations: no pending_dirs, checking for empty directories");
-            // Even if no operations, we might have empty directories to store
-            // (handled at the end of this function)
-        } else {
+        if !pending_dirs.is_empty() {
             debug!(
                 "flush_directory_operations: processing {} directories with operations",
                 pending_dirs.len()
             );
+            
             for (part_id, operations) in pending_dirs {
                 debug!(
                     "flush_directory_operations: writing directory {} with {} operations",
                     part_id,
                     operations.len()
                 );
-                let mut versioned_entries = Vec::new();
-
+                
+                // 🚀 STEP 1: Load current directory state (or empty map for new directories)
+                let mut current_state: HashMap<String, DirectoryEntry> = 
+                    match self.query_directory_entries(part_id).await {
+                        Ok(entries) => {
+                            debug!("Loaded {} existing entries for directory {}", entries.len(), part_id);
+                            entries.into_iter()
+                                .map(|e| (e.name.clone(), e))
+                                .collect()
+                        }
+                        Err(_) => {
+                            debug!("No existing entries for directory {} (new directory)", part_id);
+                            HashMap::new()
+                        }
+                    };
+                
+                // 🚀 STEP 2: Apply pending operations to build new complete state
+                let next_version = self.get_next_version_for_node(part_id, part_id).await?;
+                
                 for (entry_name, operation) in operations {
                     match operation {
-                        DirectoryOperation::InsertWithType(child_node_id, node_type) => {
-                            versioned_entries.push(VersionedDirectoryEntry::new(
+                        DirectoryOperation::InsertWithType(child_node_id, entry_type) => {
+                            _ = current_state.insert(entry_name.clone(), DirectoryEntry::new(
                                 entry_name,
-                                Some(child_node_id),
-                                OperationType::Insert,
-                                node_type,
+                                child_node_id,
+                                entry_type,
+                                next_version, // Mark with current version
                             ));
                         }
-                        DirectoryOperation::DeleteWithType(node_type) => {
-                            versioned_entries.push(VersionedDirectoryEntry::new(
-                                entry_name,
-                                None,
-                                OperationType::Delete,
-                                node_type,
-                            ));
+                        DirectoryOperation::DeleteWithType(_) => {
+                            _ = current_state.remove(&entry_name);
                         }
-                        DirectoryOperation::RenameWithType(new_name, child_node_id, node_type) => {
-                            // Delete the old entry
-                            versioned_entries.push(VersionedDirectoryEntry::new(
-                                entry_name,
-                                None,
-                                OperationType::Delete,
-                                node_type,
-                            ));
-                            // Insert with new name
-                            versioned_entries.push(VersionedDirectoryEntry::new(
+                        DirectoryOperation::RenameWithType(new_name, child_node_id, entry_type) => {
+                            _ = current_state.remove(&entry_name);
+                            _ = current_state.insert(new_name.clone(), DirectoryEntry::new(
                                 new_name,
-                                Some(child_node_id),
-                                OperationType::Insert,
-                                node_type,
+                                child_node_id,
+                                entry_type,
+                                next_version, // Mark with current version
                             ));
                         }
                     }
                 }
-
-                // Create directory record for parent directory contents
-                let content_bytes = self.serialize_directory_entries(&versioned_entries)?;
-
-                // Get proper version number for this directory
-                let version = self.get_next_version_for_node(part_id, part_id).await?;
-
+                
+                // 🚀 STEP 3: Serialize complete state as full snapshot
+                let all_entries: Vec<DirectoryEntry> = current_state.into_values().collect();
+                debug!("Serializing {} total entries for directory {}", all_entries.len(), part_id);
+                let content_bytes = self.serialize_directory_entries(&all_entries)?;
+                
+                // 🚀 STEP 4: Create full snapshot OplogEntry
                 let now = Utc::now().timestamp_micros();
-                let record = OplogEntry::new_inline(
+                let record = OplogEntry::new_directory_full_snapshot(
                     part_id,
-                    part_id,
-                    EntryType::DirectoryPhysical,
                     now,
-                    version,
+                    next_version,
                     content_bytes,
                     self.txn_seq,
                 );
-
+                
                 self.records.push(record);
             }
+        } else {
+            debug!("flush_directory_operations: no pending_dirs, checking for empty directories");
         }
 
         // Handle truly empty directories: directories created but never populated
-        // populated_directories was captured before consuming pending_dirs
         let empty_directories: Vec<NodeID> = self
             .created_directories
             .iter()
@@ -2143,7 +2141,7 @@ impl InnerState {
 
         for node_id in empty_directories {
             debug!(
-                "flush_directory_operations: creating 0-byte entry for empty directory {}",
+                "flush_directory_operations: creating empty directory snapshot for {}",
                 node_id
             );
 
@@ -2151,13 +2149,12 @@ impl InnerState {
             let version = self.get_next_version_for_node(node_id, node_id).await?;
 
             let now = Utc::now().timestamp_micros();
-            let record = OplogEntry::new_inline(
+            // Empty directories still use full snapshot format
+            let record = OplogEntry::new_directory_full_snapshot(
                 node_id,
-                node_id,
-                EntryType::DirectoryPhysical,
                 now,
                 version,
-                Vec::new(), // 0 bytes for truly empty directory
+                Vec::new(), // Empty content for empty directory
                 self.txn_seq,
             );
             self.records.push(record);
@@ -2341,6 +2338,60 @@ impl InnerState {
         self.records.push(entry);
 
         Ok(())
+    }
+
+    /// Query for ONLY the latest directory record (O(1) performance)
+    /// 
+    /// This function uses SQL LIMIT 1 to fetch only the most recent directory version,
+    /// avoiding the O(N) cost of reading all historical versions.
+    /// 
+    /// IMPORTANT: This function checks BOTH committed (Delta Lake) and pending (self.records) state.
+    /// During a transaction, pending directory records in self.records take precedence over committed ones.
+    async fn query_latest_directory_record(
+        &self,
+        part_id: NodeID,
+    ) -> Result<Option<OplogEntry>, TLogFSError> {
+        // Step 1: Check pending records in memory FIRST
+        // During flush_directory_operations, newly created directory snapshots are in self.records
+        let pending_record = self.records
+            .iter()
+            .filter(|r| {
+                r.part_id == part_id.to_string() 
+                    && r.node_id == part_id.to_string()
+                    && r.file_type.is_directory()
+            })
+            .max_by_key(|r| r.version)
+            .cloned();
+
+        // Step 2: Query Delta Lake for the single latest committed directory record
+        // Note: file_type values in database are serialized as 'dir:physical' and 'dir:dynamic'
+        let sql = format!(
+            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' AND file_type IN ('dir:physical', 'dir:dynamic') ORDER BY version DESC LIMIT 1",
+            part_id, part_id
+        );
+        
+        let committed_record = match self.session_context.sql(&sql).await {
+            Ok(df) => match df.collect().await {
+                Ok(batches) => {
+                    if batches.is_empty() || batches[0].num_rows() == 0 {
+                        None
+                    } else {
+                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batches[0])?;
+                        records.into_iter().next()
+                    }
+                }
+                Err(e) => return Err(TLogFSError::DataFusion(e)),
+            },
+            Err(e) => return Err(TLogFSError::DataFusion(e)),
+        };
+
+        // Step 3: Return the latest between committed and pending (pending wins if both exist)
+        match (committed_record, pending_record) {
+            (Some(c), Some(p)) => Ok(Some(if p.version > c.version { p } else { c })),
+            (Some(c), None) => Ok(Some(c)),
+            (None, Some(p)) => Ok(Some(p)),
+            (None, None) => Ok(None),
+        }
     }
 
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
@@ -2647,17 +2698,11 @@ impl InnerState {
             .await
             .map_err(error_utils::to_tinyfs_error)?;
 
+        // With full snapshots, all entries in the snapshot exist (no delete operations)
         let mut current_state = HashMap::new();
         for entry in all_entries {
-            match entry.operation_type {
-                OperationType::Insert | OperationType::Update => {
-                    if let Ok(child_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                        _ = current_state.insert(entry.name, (child_id, entry.entry_type));
-                    }
-                }
-                OperationType::Delete => {
-                    _ = current_state.remove(&entry.name);
-                }
+            if let Ok(child_id) = NodeID::from_hex_string(&entry.child_node_id) {
+                _ = current_state.insert(entry.name, (child_id, entry.entry_type));
             }
         }
 
@@ -2817,11 +2862,9 @@ impl InnerState {
     ) -> TinyFSResult<Option<(NodeID, EntryType)>> {
         match self.query_single_directory_entry(part_id, entry_name).await {
             Ok(Some(entry)) => {
+                // With full snapshots, if entry exists in result, it's a valid entry
                 if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                    match entry.operation_type {
-                        OperationType::Delete => Ok(None),
-                        _ => Ok(Some((child_node_id, entry.entry_type))),
-                    }
+                    Ok(Some((child_node_id, entry.entry_type)))
                 } else {
                     Ok(None)
                 }

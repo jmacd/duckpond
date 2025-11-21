@@ -230,6 +230,32 @@ pub fn compute_sha256(content: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Storage format for OplogEntry content
+/// This field enables forward compatibility for different storage strategies
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum StorageFormat {
+    /// Small files, symlinks, and dynamic nodes - content stored inline in OplogEntry
+    #[serde(rename = "inline")]
+    Inline,
+    
+    /// Physical directories - full directory snapshot stored in content field
+    #[serde(rename = "fulldir")]
+    FullDir,
+    
+    // Future formats for optimization:
+    // #[serde(rename = "hashdir")]
+    // HashDir,  // Hash-based directory structure for very large directories
+    // 
+    // #[serde(rename = "btree")]
+    // BTreeDir, // B-tree indexed directory for sorted access
+}
+
+impl Default for StorageFormat {
+    fn default() -> Self {
+        Self::Inline
+    }
+}
+
 /// Trait for converting data structures to Arrow and Delta Lake schemas
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
@@ -309,6 +335,10 @@ pub struct OplogEntry {
     /// Factory type for dynamic files/directories
     pub factory: Option<String>,
 
+    /// Storage format for this entry's content
+    /// Determines how to interpret the content field and optimize access patterns
+    pub format: StorageFormat,
+
     /// Transaction sequence number from Steward
     /// This links OpLog records to transaction sequences for chronological ordering
     pub txn_seq: i64,
@@ -336,6 +366,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("max_override", DataType::Int64, true)), // Manual override for temporal bounds
             Arc::new(Field::new("extended_attributes", DataType::Utf8, true)), // JSON-encoded application metadata
             Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
+            Arc::new(Field::new("format", DataType::Utf8, false)), // Storage format - required field
             Arc::new(Field::new("txn_seq", DataType::Int64, false)), // Transaction sequence number from Steward (required)
         ]
     }
@@ -376,6 +407,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            format: StorageFormat::Inline, // Small files use inline storage
             txn_seq,
         }
     }
@@ -409,6 +441,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            format: StorageFormat::Inline, // Large files use inline format (content is external)
             txn_seq,
         }
     }
@@ -440,6 +473,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            format: StorageFormat::Inline, // Symlinks and small metadata use inline storage
             txn_seq,
         }
     }
@@ -488,6 +522,7 @@ impl OplogEntry {
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
             factory: None, // Physical file, no factory
+            format: StorageFormat::Inline, // Small FileSeries use inline storage
             txn_seq,
         }
     }
@@ -523,6 +558,7 @@ impl OplogEntry {
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
             factory: None, // Physical file, no factory
+            format: StorageFormat::Inline, // Large FileSeries use inline format (content is external)
             txn_seq,
         }
     }
@@ -622,6 +658,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
+            format: StorageFormat::Inline, // Dynamic directories use inline storage
             txn_seq,
         }
     }
@@ -668,6 +705,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
+            format: StorageFormat::Inline, // Dynamic files use inline storage
             txn_seq,
         }
     }
@@ -691,6 +729,36 @@ impl OplogEntry {
             self.content.as_deref()
         } else {
             None
+        }
+    }
+
+    /// Create entry for directory full snapshot (new storage format)
+    /// This constructor creates a complete directory state snapshot instead of incremental changes
+    #[must_use]
+    pub fn new_directory_full_snapshot(
+        part_id: NodeID,
+        timestamp: i64,
+        version: i64,
+        content: Vec<u8>, // Serialized DirectoryEntry[]
+        txn_seq: i64,
+    ) -> Self {
+        Self {
+            part_id: part_id.to_string(),
+            node_id: part_id.to_string(), // For dirs: node_id == part_id
+            file_type: tinyfs::EntryType::DirectoryPhysical,
+            timestamp,
+            version,
+            content: Some(content),
+            sha256: None,
+            size: None,
+            min_event_time: None,
+            max_event_time: None,
+            min_override: None,
+            max_override: None,
+            extended_attributes: None,
+            factory: None,
+            format: StorageFormat::FullDir, // Full directory snapshot
+            txn_seq,
         }
     }
 
@@ -738,39 +806,39 @@ impl OplogEntry {
     }
 }
 
-/// Extended directory entry with versioning support
+/// Directory entry with full snapshot support
+/// 
+/// This struct represents a single entry in a directory's full state snapshot.
+/// Unlike the previous VersionedDirectoryEntry which stored incremental operations,
+/// DirectoryEntry represents the complete state of an entry at a specific version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VersionedDirectoryEntry {
+pub struct DirectoryEntry {
     /// Entry name within the directory
     pub name: String,
     /// Hex-encoded NodeID of the child
     pub child_node_id: String,
-    /// Type of operation
-    pub operation_type: OperationType,
     /// Comprehensive entry type (includes physical/dynamic distinction)
     /// This field contains ALL information needed to determine partition assignment
     pub entry_type: tinyfs::EntryType,
+    /// Version number when this entry was last modified
+    /// Enables tracking which version last touched each entry
+    pub version_last_modified: i64,
 }
 
-impl VersionedDirectoryEntry {
-    /// Create a new directory entry with EntryType (convenience constructor)
+impl DirectoryEntry {
+    /// Create a new directory entry (full snapshot style)
     #[must_use]
     pub fn new(
         name: String,
-        child_node_id: Option<NodeID>,
-        operation_type: OperationType,
+        child_node_id: NodeID,
         entry_type: tinyfs::EntryType,
+        version_last_modified: i64,
     ) -> Self {
         Self {
             name,
-            child_node_id: child_node_id
-		.map(|x| x.to_string())
-		.unwrap_or_else(|| {
-		    // FAIL-FAST: Empty node IDs indicate architectural confusion
-		    panic!("VersionedDirectoryEntry created with None node_id - this indicates a fundamental API misuse. Operation: {:?}", operation_type)
-		}),
-            operation_type,
+            child_node_id: child_node_id.to_string(),
             entry_type,
+            version_last_modified,
         }
     }
 
@@ -781,33 +849,29 @@ impl VersionedDirectoryEntry {
     }
 }
 
-/// Operation type for directory mutations
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub enum OperationType {
-    Insert,
-    Delete,
-    Update,
-}
+/// Type alias for backward compatibility during transition
+#[deprecated(note = "Use DirectoryEntry instead")]
+pub type VersionedDirectoryEntry = DirectoryEntry;
 
-impl ForArrow for VersionedDirectoryEntry {
+impl ForArrow for DirectoryEntry {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
-            Arc::new(Field::new("operation_type", DataType::Utf8, false)),
             Arc::new(Field::new("entry_type", DataType::Utf8, false)),
+            Arc::new(Field::new("version_last_modified", DataType::Int64, false)),
         ]
     }
 }
 
-/// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
-pub fn encode_versioned_directory_entries(
-    entries: &Vec<VersionedDirectoryEntry>,
+/// Encode DirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
+pub fn encode_directory_entries(
+    entries: &Vec<DirectoryEntry>,
 ) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
     let entry_count = entries.len();
-    debug!("encode_versioned_directory_entries() - encoding {entry_count} entries");
+    debug!("encode_directory_entries() - encoding {entry_count} entries");
     for (i, entry) in entries.iter().enumerate() {
         let name = &entry.name;
         let child_node_id = &entry.child_node_id;
@@ -815,12 +879,12 @@ pub fn encode_versioned_directory_entries(
     }
 
     // Use serde_arrow consistently for both empty and non-empty cases
-    let batch = serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?;
+    let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), entries)?;
 
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
     debug!(
-        "encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns"
+        "encode_directory_entries() - created batch with {row_count} rows, {col_count} columns"
     );
 
     let mut buffer = Vec::new();
@@ -831,14 +895,22 @@ pub fn encode_versioned_directory_entries(
     writer.finish()?;
 
     let buffer_len = buffer.len();
-    debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes");
+    debug!("encode_directory_entries() - encoded to {buffer_len} bytes");
     Ok(buffer)
 }
 
-/// Decode VersionedDirectoryEntry records from Arrow IPC bytes
-pub fn decode_versioned_directory_entries(
+/// Legacy function name for backward compatibility
+#[deprecated(note = "Use encode_directory_entries instead")]
+pub fn encode_versioned_directory_entries(
+    entries: &Vec<DirectoryEntry>,
+) -> Result<Vec<u8>, crate::error::TLogFSError> {
+    encode_directory_entries(&entries.clone())
+}
+
+/// Decode DirectoryEntry records from Arrow IPC bytes
+pub fn decode_directory_entries(
     content: &[u8],
-) -> Result<Vec<VersionedDirectoryEntry>, crate::error::TLogFSError> {
+) -> Result<Vec<DirectoryEntry>, crate::error::TLogFSError> {
     use arrow::ipc::reader::StreamReader;
 
     // Handle empty directories (0 bytes of content)
@@ -847,7 +919,7 @@ pub fn decode_versioned_directory_entries(
     }
 
     debug!(
-        "decode_versioned_directory_entries() - processing {} bytes",
+        "decode_directory_entries() - processing {} bytes",
         content.len()
     );
 
@@ -860,13 +932,21 @@ pub fn decode_versioned_directory_entries(
             crate::error::TLogFSError::ArrowMessage(format!("Failed to read IPC batch: {}", e))
         })?;
 
-        let entries: Vec<VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+        let entries: Vec<DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
         debug!(
-            "decode_versioned_directory_entries() - decoded {} entries",
+            "decode_directory_entries() - decoded {} entries",
             entries.len()
         );
         Ok(entries)
     } else {
         Ok(Vec::new())
     }
+}
+
+/// Legacy function name for backward compatibility
+#[deprecated(note = "Use decode_directory_entries instead")]
+pub fn decode_versioned_directory_entries(
+    content: &[u8],
+) -> Result<Vec<DirectoryEntry>, crate::error::TLogFSError> {
+    decode_directory_entries(content)
 }
