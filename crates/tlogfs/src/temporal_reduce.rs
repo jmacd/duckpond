@@ -22,9 +22,11 @@
 //!       resolutions: [1h, 2h, 4h, 12h, 24h]
 //!       aggregations:
 //!         - type: "avg"
-//!           columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C"]
+//!           # Glob patterns supported: * matches any characters
+//!           # "Vulink*.Temperature.C" matches "Vulink1.Temperature.C", "Vulink2.Temperature.C", etc.
+//!           columns: ["Vulink*.Temperature.C", "AT500_Surface.Temperature.C"]
 //!         - type: "min"
-//!           columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C"]
+//!           columns: ["Vulink*.Temperature.C", "AT500_Surface.Temperature.C"]
 //!         - type: "max"  # columns optional - applies to all numeric columns
 //! ```
 //!
@@ -154,25 +156,8 @@ impl TemporalReduceSqlFile {
     /// CACHED: Only performs discovery once per TemporalReduceSqlFile instance
     async fn discover_source_columns(&self) -> TinyFSResult<Vec<String>> {
         // Check cache first - avoid repeated schema discovery cascade
-        {
-            let columns_guard = self.discovered_columns.lock().await;
-            if let Some(cached_columns) = &*columns_guard {
-                log::debug!(
-                    "🚀 CACHE HIT: Using cached {} columns for temporal reduce source '{}'",
-                    cached_columns.len(),
-                    self.source_path
-                );
-                return Ok(cached_columns.clone());
-            }
-        }
-        
-        log::debug!(
-            "💾 CACHE MISS: Discovering columns for temporal reduce source '{}' (first access)",
-            self.source_path
-        );
-        
         let mut columns_guard = self.discovered_columns.lock().await;
-        // Double-check after acquiring write lock (another thread might have populated it)
+
         if let Some(cached_columns) = &*columns_guard {
             log::debug!(
                 "🚀 CACHE HIT (race): Using cached {} columns for temporal reduce source '{}'",
@@ -205,11 +190,10 @@ impl TemporalReduceSqlFile {
         let part_id = match parent_node_path.1 {
             tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
             _ => {
-                log::warn!(
-                    "Parent directory not found for {}, falling back to root",
-                    self.source_path
-                );
-                tinyfs::NodeID::root()
+                return Err(tinyfs::Error::Other(format!(
+                    "Parent directory not found for {}",
+                    self.source_path,
+                )));
             }
         };
 
@@ -303,14 +287,39 @@ impl TemporalReduceSqlFile {
         let mut modified_config = self.config.clone();
 
         for agg in &mut modified_config.aggregations {
-            if agg.columns.is_none() {
-                // Use all discovered columns for this aggregation
-                agg.columns = Some(discovered_columns.clone());
-                log::debug!(
-                    "TemporalReduceFile: filled {} aggregation with {} columns",
-                    agg.agg_type.to_sql(),
-                    discovered_columns.len()
-                );
+            match agg.columns.take() {
+                None => {
+                    // Use all discovered columns for this aggregation
+                    agg.columns = Some(discovered_columns.clone());
+                    log::debug!(
+                        "TemporalReduceFile: filled {} aggregation with {} columns",
+                        agg.agg_type.to_sql(),
+                        discovered_columns.len()
+                    );
+                }
+                Some(patterns) => {
+                    // Apply glob matching to filter discovered columns
+                    let mut matched_columns = Vec::new();
+                    for pattern in &patterns {
+                        for column in &discovered_columns {
+                            if match_column_pattern(column, pattern) {
+                                // Avoid duplicates
+                                if !matched_columns.contains(column) {
+                                    matched_columns.push(column.clone());
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Replace the patterns with the matched columns
+                    agg.columns = Some(matched_columns.clone());
+                    log::debug!(
+                        "TemporalReduceFile: {} aggregation matched {} patterns to {} columns",
+                        agg.agg_type.to_sql(),
+                        patterns.len(),
+                        matched_columns.len()
+                    );
+                }
             }
         }
 
@@ -465,6 +474,58 @@ fn duration_to_sql_interval(duration: Duration) -> String {
         // Seconds
         format!("INTERVAL {} SECOND", total_seconds)
     }
+}
+
+/// Match a column name against a glob pattern using tinyfs glob matching logic
+///
+/// Supports simple patterns with a single `*` wildcard:
+/// - `"Vulink*.Temperature.C"` matches `"Vulink1.Temperature.C"`, `"Vulink2.Temperature.C"`, etc.
+/// - `"Vulink*"` matches any column starting with "Vulink"
+/// - `"*.Temperature.C"` matches any column ending with ".Temperature.C"
+/// - `"*"` matches any column name
+///
+/// # Design
+/// This reuses the same wildcard matching logic from `tinyfs::glob::WildcardComponent::Wildcard`
+/// without requiring the full path parsing infrastructure. Column names aren't paths, so we
+/// apply the pattern matching directly to the string.
+///
+/// # Limitations
+/// - Only supports a single `*` wildcard per pattern (no `**` or multiple `*`)
+/// - Multiple wildcards fall back to exact string matching
+/// - No bracket expressions or other advanced glob features
+fn match_column_pattern(column: &str, pattern: &str) -> bool {
+    // If no wildcard, do exact match
+    if !pattern.contains('*') {
+        return column == pattern;
+    }
+
+    // Parse the pattern as a single component (not a path)
+    // We can reuse the Wildcard variant logic directly
+    let asterisk_count = pattern.chars().filter(|&c| c == '*').count();
+
+    // Only support single wildcard patterns for simplicity
+    if asterisk_count != 1 {
+        return column == pattern; // Fall back to exact match
+    }
+
+    let wildcard_idx = pattern.find('*').expect("wildcard checked");
+    let prefix = if wildcard_idx > 0 {
+        Some(&pattern[..wildcard_idx])
+    } else {
+        None
+    };
+
+    let suffix = if wildcard_idx < pattern.len() - 1 {
+        Some(&pattern[wildcard_idx + 1..])
+    } else {
+        None
+    };
+
+    // Match logic from WildcardComponent::Wildcard
+    let prefix_str = prefix.unwrap_or("");
+    let suffix_str = suffix.unwrap_or("");
+
+    column.starts_with(prefix_str) && column.ends_with(suffix_str)
 }
 
 /// Generate SQL query for temporal aggregation
@@ -1030,6 +1091,41 @@ mod tests {
         assert_eq!(AggregationType::Max.to_sql(), "MAX");
         assert_eq!(AggregationType::Count.to_sql(), "COUNT");
         assert_eq!(AggregationType::Sum.to_sql(), "SUM");
+    }
+
+    #[test]
+    fn test_match_column_pattern_exact() {
+        assert!(match_column_pattern("Vulink.Temperature.C", "Vulink.Temperature.C"));
+        assert!(!match_column_pattern("Vulink1.Temperature.C", "Vulink.Temperature.C"));
+    }
+
+    #[test]
+    fn test_match_column_pattern_wildcard() {
+        // Test prefix + suffix
+        assert!(match_column_pattern("Vulink1.Temperature.C", "Vulink*.Temperature.C"));
+        assert!(match_column_pattern("Vulink2.Temperature.C", "Vulink*.Temperature.C"));
+        assert!(match_column_pattern("Vulink123.Temperature.C", "Vulink*.Temperature.C"));
+        assert!(!match_column_pattern("AT500.Temperature.C", "Vulink*.Temperature.C"));
+        
+        // Test prefix only
+        assert!(match_column_pattern("Vulink1.Temperature.C", "Vulink*"));
+        assert!(match_column_pattern("Vulink2.Temperature.C", "Vulink*"));
+        assert!(!match_column_pattern("AT500.Temperature.C", "Vulink*"));
+        
+        // Test suffix only
+        assert!(match_column_pattern("Vulink1.Temperature.C", "*.Temperature.C"));
+        assert!(match_column_pattern("AT500.Temperature.C", "*.Temperature.C"));
+        assert!(!match_column_pattern("Vulink1.Salinity.psu", "*.Temperature.C"));
+    }
+
+    #[test]
+    fn test_match_column_pattern_edge_cases() {
+        // Empty wildcard match (matches everything)
+        assert!(match_column_pattern("anything", "*"));
+        assert!(match_column_pattern("", "*"));
+        
+        // Multiple wildcards should fall back to exact match (no support)
+        assert!(!match_column_pattern("a.b.c", "*.*"));
     }
 
     // TODO: Add integration test for generate_temporal_sql function
