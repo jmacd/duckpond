@@ -306,7 +306,7 @@ pub struct OplogEntry {
     /// For FileSeries: includes timestamp column name and other series metadata
     pub extended_attributes: Option<String>,
 
-    /// Factory type for dynamic files/directories ("tlogfs" for static, "hostmount" for hostmount dynamic dir, etc)
+    /// Factory type for dynamic files/directories
     pub factory: Option<String>,
 
     /// Transaction sequence number from Steward
@@ -675,7 +675,7 @@ impl OplogEntry {
     /// Check if this entry is a dynamic node (has factory type)
     #[must_use]
     pub fn is_dynamic(&self) -> bool {
-        self.factory.is_some() && self.factory.as_ref() != Some(&"tlogfs".to_string())
+        self.factory.is_some()
     }
 
     /// Get factory type if this is a dynamic node

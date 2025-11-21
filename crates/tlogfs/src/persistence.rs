@@ -2261,7 +2261,6 @@ impl InnerState {
         for record in &self.records {
             if record.node_id == node_id.to_string()
                 && let Some(factory_type) = &record.factory
-                && factory_type != "tlogfs"
                 && let Some(config_content) = &record.content
             {
                 return Ok(Some((factory_type.clone(), config_content.clone())));
@@ -2273,7 +2272,6 @@ impl InnerState {
 
         if let Some(record) = records.first()
             && let Some(factory_type) = &record.factory
-            && factory_type != "tlogfs"
             && let Some(config_content) = &record.content
         {
             Ok(Some((factory_type.clone(), config_content.clone())))
