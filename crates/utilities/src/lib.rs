@@ -5,3 +5,4 @@
 //! Shared utilities used across DuckPond crates
 
 pub mod banner;
+pub mod perf_trace;

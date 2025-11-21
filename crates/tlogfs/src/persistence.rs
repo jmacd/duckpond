@@ -1959,6 +1959,13 @@ impl InnerState {
         part_id: NodeID,
         entry_name: &str,
     ) -> Result<Option<VersionedDirectoryEntry>, TLogFSError> {
+        // Performance tracing - enable with perf analysis
+        let mut trace = utilities::perf_trace::PerfTrace::start("query_single_directory_entry");
+        let caller = utilities::perf_trace::extract_caller("tlogfs::persistence::InnerState::", "query_single_directory_entry");
+        trace.param("caller", &caller);
+        trace.param("part_id", part_id);
+        trace.param("entry_name", entry_name);
+        
         // Check pending directory operations first
         if let Some(operations) = self.operations.get(&part_id)
             && let Some(operation) = operations.get(entry_name)
@@ -1987,7 +1994,10 @@ impl InnerState {
         }
 
         // Query committed records - we want the directory record itself (node_id == part_id)
+        let query_start = std::time::Instant::now();
         let records = self.query_records(part_id, part_id).await?;
+        trace.metric("query_ms", query_start.elapsed().as_millis() as u64);
+        trace.metric("record_count", records.len() as u64);
 
         // Process records in order (latest first) to get the most recent operation
         // query_records already returns records sorted by timestamp DESC
@@ -2016,15 +2026,20 @@ impl InnerState {
                     if entry.name == entry_name {
                         match entry.operation_type {
                             OperationType::Insert | OperationType::Update => {
+                                trace.metric("found", 1);
                                 return Ok(Some(entry.clone()));
                             }
-                            OperationType::Delete => return Ok(None),
+                            OperationType::Delete => {
+                                trace.metric("found", 0);
+                                return Ok(None);
+                            }
                         }
                     }
                 }
             }
         }
 
+        trace.metric("found", 0);
         Ok(None)
     }
 
@@ -2339,40 +2354,12 @@ impl InnerState {
         part_id: NodeID,
         node_id: NodeID,
     ) -> Result<Vec<OplogEntry>, TLogFSError> {
-        // use std::sync::atomic::{AtomicU64, Ordering};
-        // static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
-        // let call_num = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
-        
-        // Extract caller function name from backtrace
-        // let backtrace = std::backtrace::Backtrace::capture();
-        // let backtrace_str = backtrace.to_string();
-        
-        // Find the first frame that's in tlogfs::persistence but NOT query_records
-        // Format is like: "   4: tlogfs::persistence::InnerState::load_node::{{closure}}"
-        // let caller = backtrace_str
-        //     .lines()
-        //     .find(|line| {
-        //         line.contains("tlogfs::persistence::InnerState::") 
-        //             && !line.contains("query_records")
-        //     })
-        //     .and_then(|line| {
-        //         // Extract function name - look for pattern like "tlogfs::persistence::InnerState::function_name"
-        //         if let Some(pos) = line.find("tlogfs::persistence::InnerState::") {
-        //             let rest = &line[pos + "tlogfs::persistence::InnerState::".len()..];
-        //             // Take function name up to :: or {{
-        //             let end = rest.find("::")
-        //                 .or_else(|| rest.find("{{"))
-        //                 .unwrap_or(rest.len());
-        //             Some(rest[..end].to_string())
-        //         } else {
-        //             None
-        //         }
-        //     })
-        //     .unwrap_or_else(|| "unknown".to_string());
-        
-        // Track call patterns for optimization analysis
-        // Format: QUERY_TRACE|call_num|caller|part_id|node_id
-        // eprintln!("QUERY_TRACE|{}|{}|{}|{}", call_num, caller, part_id, node_id);
+        // Performance tracing - enable with RUST_LOG=trace and redirect stderr
+        let mut trace = utilities::perf_trace::PerfTrace::start("query_records");
+        let caller = utilities::perf_trace::extract_caller("tlogfs::persistence::InnerState::", "query_records");
+        trace.param("caller", &caller);
+        trace.param("part_id", part_id);
+        trace.param("node_id", node_id);
         
         // Step 1: Get committed records from Delta Lake using node-scoped SQL
         let sql = format!(
@@ -2380,7 +2367,7 @@ impl InnerState {
             part_id, node_id
         );
         
-        // let start = std::time::Instant::now();
+        let query_start = std::time::Instant::now();
         let committed_records = match self.session_context.sql(&sql).await {
             Ok(df) => match df.collect().await {
                 Ok(batches) => {
@@ -2400,10 +2387,11 @@ impl InnerState {
                 return Err(TLogFSError::DataFusion(e));
             }
         };
-        // let query_ms = start.elapsed().as_millis();
+        trace.metric("query_ms", query_start.elapsed().as_millis() as u64);
+        trace.metric("committed_count", committed_records.len() as u64);
 
         // Step 2: Get pending records from memory (node-scoped)
-        // let pending_start = std::time::Instant::now();
+        let pending_start = std::time::Instant::now();
         let records = {
             self.records
                 .iter()
@@ -2413,20 +2401,15 @@ impl InnerState {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        // let memory_scan_us = pending_start.elapsed().as_micros();
+        trace.metric("memory_scan_us", pending_start.elapsed().as_micros() as u64);
+        trace.metric("pending_count", records.len() as u64);
 
         // Step 3: Combine and sort by timestamp
-        // let committed_count = committed_records.len();
-        // let pending_count = records.len();
-        
         let mut all_records = committed_records;
         all_records.extend(records);
         all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-
-        // Log performance metrics for optimization analysis
-        // Format: QUERY_PERF|call_num|committed_count|pending_count|total_count|query_ms|memory_us
-        // eprintln!("QUERY_PERF|{}|{}|{}|{}|{}|{}", 
-        //    call_num, committed_count, pending_count, all_records.len(), query_ms, memory_scan_us);
+        
+        trace.metric("total_count", all_records.len() as u64);
 
         Ok(all_records)
     }
