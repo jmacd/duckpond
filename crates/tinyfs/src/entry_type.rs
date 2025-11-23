@@ -56,6 +56,38 @@ pub enum EntryType {
 }
 
 impl EntryType {
+    /// Determine the partition ID for a child entry based on entry type.
+    ///
+    /// Core Rule: Only DirectoryPhysical creates its own partition.
+    /// Everything else (files, dynamic dirs, symlinks) uses parent's partition.
+    ///
+    /// # Arguments
+    /// * `child_node_id` - The node ID of the child entry
+    /// * `parent_node_id` - The node ID of the parent directory
+    ///
+    /// # Returns
+    /// The partition ID to use for this entry
+    #[must_use]
+    pub fn partition_id(
+        &self,
+        child_node_id: crate::NodeID,
+        parent_node_id: crate::NodeID,
+    ) -> crate::NodeID {
+        match self {
+            EntryType::DirectoryPhysical => {
+                // Physical directories create their own partition
+                child_node_id
+            }
+            _ => {
+                // Everything else uses parent's partition:
+                // - DirectoryDynamic
+                // - All files (physical and dynamic)
+                // - Symlinks
+                parent_node_id
+            }
+        }
+    }
+
     /// Check if this entry is a file (any format, physical or dynamic)
     #[must_use]
     pub fn is_file(&self) -> bool {

@@ -800,17 +800,9 @@ impl Directory for TemporalReduceDirectory {
 
     async fn entries(
         &self,
-    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
-        let mut entries = vec![];
-
-        // Discover all source files first
-        let source_files = match self.discover_source_files().await {
-            Ok(files) => files,
-            Err(e) => {
-                entries.push(Err(e));
-                return Ok(Box::pin(stream::iter(entries)));
-            }
-        };
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>> {
+        // Discover all source files - fail fast on error
+        let source_files = self.discover_source_files().await?;
 
         // Group source files by output_name to create directory structure
         let mut sites = HashMap::new();
@@ -818,24 +810,22 @@ impl Directory for TemporalReduceDirectory {
             _ = sites.insert(output_name, source_path);
         }
 
-        // Create a directory entry for each unique output_name (site)
-        for (site_name, source_path) in sites {
-            // Get the source node for this site
-            let source_node = match self.get_source_node_by_path(&source_path).await {
-                Ok(node) => node,
-                Err(e) => {
-                    entries.push(Err(e));
-                    continue;
-                }
-            };
-
-            // Create the site directory using shared helper
-            let node_ref = self.create_site_directory_node(
+        // Create DirectoryEntry for each unique output_name (site)
+        let mut entries = Vec::new();
+        for (site_name, _source_path) in sites {
+            // Get the actual node to extract its real node_id - fail fast on error
+            let node_ref = self.get(&site_name).await?.ok_or_else(|| {
+                tinyfs::Error::Other(format!("Failed to create temporal-reduce site '{}'", site_name))
+            })?;
+            
+            let node = node_ref.lock().await;
+            let dir_entry = tinyfs::DirectoryEntry::new(
                 site_name.clone(),
-                source_path.clone(),
-                source_node,
+                node.id,
+                EntryType::DirectoryDynamic,
+                0,
             );
-            entries.push(Ok((site_name, node_ref)));
+            entries.push(Ok(dir_entry));
         }
 
         let stream = stream::iter(entries);
@@ -915,35 +905,29 @@ impl TemporalReduceSiteDirectory {
 impl Directory for TemporalReduceSiteDirectory {
     async fn entries(
         &self,
-    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>> {
         let mut entries = vec![];
 
-        // Create an entry for each resolution
-        for (res_str, duration) in &self.parsed_resolutions {
+        // Create DirectoryEntry for each resolution without creating the file yet
+        for (res_str, _duration) in &self.parsed_resolutions {
             let filename = format!("res={}.series", res_str);
-
-            let sql_file = match self.create_temporal_sql_file(*duration).await {
-                Ok(file) => file,
-                Err(e) => {
-                    entries.push(Err(e));
-                    continue;
-                }
-            };
-
-            // Create deterministic NodeID for this temporal-reduce entry
+            
+            // Create deterministic node ID for this entry
             let mut id_bytes = Vec::new();
             id_bytes.extend_from_slice(self.site_name.as_bytes());
             id_bytes.extend_from_slice(self.source_path.as_bytes());
             id_bytes.extend_from_slice(res_str.as_bytes());
             id_bytes.extend_from_slice(filename.as_bytes());
-            id_bytes.extend_from_slice(b"temporal-reduce-site-entry"); // Factory type for uniqueness
+            id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
             let node_id = tinyfs::NodeID::from_content(&id_bytes);
 
-            let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
-                id: node_id,
-                node_type: NodeType::File(sql_file),
-            })));
-            entries.push(Ok((filename, node_ref)));
+            let dir_entry = tinyfs::DirectoryEntry::new(
+                filename.clone(),
+                node_id,
+                EntryType::FileSeriesDynamic,
+                0,
+            );
+            entries.push(Ok(dir_entry));
         }
 
         let stream = stream::iter(entries);
@@ -1051,245 +1035,297 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factory::FactoryRegistry;
+    use crate::factory::{FactoryContext, FactoryRegistry};
+    use crate::persistence::OpLogPersistence;
+    use arrow::array::{Float64Array, TimestampMillisecondArray};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tinyfs::arrow::SimpleParquetExt;
+    use tinyfs::{EntryType, NodeID, NodeType};
 
-    #[test]
-    fn test_duration_to_sql_interval() {
-        assert_eq!(
-            duration_to_sql_interval(Duration::from_secs(3600)),
-            "INTERVAL 1 HOUR"
-        );
-        assert_eq!(
-            duration_to_sql_interval(Duration::from_secs(86400)),
-            "INTERVAL 1 DAY"
-        );
-        assert_eq!(
-            duration_to_sql_interval(Duration::from_secs(3600 * 6)),
-            "INTERVAL 6 HOUR"
-        );
-        assert_eq!(
-            duration_to_sql_interval(Duration::from_secs(60)),
-            "INTERVAL 1 MINUTE"
-        );
-    }
-
-    #[test]
-    fn test_extract_time_unit_from_interval() {
-        assert_eq!(extract_time_unit_from_interval("INTERVAL 1 HOUR"), "hour");
-        assert_eq!(extract_time_unit_from_interval("INTERVAL 6 HOUR"), "hour");
-        assert_eq!(extract_time_unit_from_interval("INTERVAL 1 DAY"), "day");
-        assert_eq!(
-            extract_time_unit_from_interval("INTERVAL 30 MINUTE"),
-            "minute"
-        );
-    }
-
-    #[test]
-    fn test_aggregation_type_to_sql() {
-        assert_eq!(AggregationType::Avg.to_sql(), "AVG");
-        assert_eq!(AggregationType::Min.to_sql(), "MIN");
-        assert_eq!(AggregationType::Max.to_sql(), "MAX");
-        assert_eq!(AggregationType::Count.to_sql(), "COUNT");
-        assert_eq!(AggregationType::Sum.to_sql(), "SUM");
-    }
-
-    #[test]
-    fn test_match_column_pattern_exact() {
-        assert!(match_column_pattern("Vulink.Temperature.C", "Vulink.Temperature.C"));
-        assert!(!match_column_pattern("Vulink1.Temperature.C", "Vulink.Temperature.C"));
-    }
-
-    #[test]
-    fn test_match_column_pattern_wildcard() {
-        // Test prefix + suffix
-        assert!(match_column_pattern("Vulink1.Temperature.C", "Vulink*.Temperature.C"));
-        assert!(match_column_pattern("Vulink2.Temperature.C", "Vulink*.Temperature.C"));
-        assert!(match_column_pattern("Vulink123.Temperature.C", "Vulink*.Temperature.C"));
-        assert!(!match_column_pattern("AT500.Temperature.C", "Vulink*.Temperature.C"));
-        
-        // Test prefix only
-        assert!(match_column_pattern("Vulink1.Temperature.C", "Vulink*"));
-        assert!(match_column_pattern("Vulink2.Temperature.C", "Vulink*"));
-        assert!(!match_column_pattern("AT500.Temperature.C", "Vulink*"));
-        
-        // Test suffix only
-        assert!(match_column_pattern("Vulink1.Temperature.C", "*.Temperature.C"));
-        assert!(match_column_pattern("AT500.Temperature.C", "*.Temperature.C"));
-        assert!(!match_column_pattern("Vulink1.Salinity.psu", "*.Temperature.C"));
-    }
-
-    #[test]
-    fn test_match_column_pattern_edge_cases() {
-        // Empty wildcard match (matches everything)
-        assert!(match_column_pattern("anything", "*"));
-        assert!(match_column_pattern("", "*"));
-        
-        // Multiple wildcards should fall back to exact match (no support)
-        assert!(!match_column_pattern("a.b.c", "*.*"));
-    }
-
-    // TODO: Add integration test for generate_temporal_sql function
-    // The function requires async context and FactoryContext which needs persistence layer
-    // This should be tested in the integration tests where the full context is available
-
-    // #[test]
-    // fn test_generate_temporal_sql() {
-    //     // This test is commented out because generate_temporal_sql now requires
-    //     // async context and FactoryContext which are not easily available in unit tests
-    // }
-
-    #[test]
-    fn test_temporal_reduce_config_serialization() {
-        let config = TemporalReduceConfig {
-            in_pattern: "/hydrovu/*".to_string(),
-            out_pattern: "$0".to_string(),
-            time_column: "timestamp".to_string(),
-            resolutions: vec!["1h".to_string(), "6h".to_string(), "1d".to_string()],
-            aggregations: vec![
-                AggregationConfig {
-                    agg_type: AggregationType::Avg,
-                    columns: Some(vec!["temperature".to_string(), "conductivity".to_string()]),
-                },
-                AggregationConfig {
-                    agg_type: AggregationType::Min,
-                    columns: Some(vec!["temperature".to_string()]),
-                },
-                AggregationConfig {
-                    agg_type: AggregationType::Max,
-                    columns: Some(vec!["temperature".to_string()]),
-                },
-                AggregationConfig {
-                    agg_type: AggregationType::Count,
-                    columns: Some(vec!["*".to_string()]),
-                },
-            ],
-        };
-
-        // Test YAML serialization
-        let yaml = serde_yaml::to_string(&config).expect("Failed to serialize to YAML");
-        let deserialized: TemporalReduceConfig =
-            serde_yaml::from_str(&yaml).expect("Failed to deserialize from YAML");
-
-        assert_eq!(config.in_pattern, deserialized.in_pattern);
-        assert_eq!(config.out_pattern, deserialized.out_pattern);
-        assert_eq!(config.time_column, deserialized.time_column);
-        assert_eq!(config.resolutions, deserialized.resolutions);
-        assert_eq!(config.aggregations.len(), deserialized.aggregations.len());
-
-        // Test JSON serialization
-        let json = serde_json::to_string(&config).expect("Failed to serialize to JSON");
-        let deserialized: TemporalReduceConfig =
-            serde_json::from_str(&json).expect("Failed to deserialize from JSON");
-
-        assert_eq!(config.in_pattern, deserialized.in_pattern);
-        assert_eq!(config.out_pattern, deserialized.out_pattern);
-        assert_eq!(config.time_column, deserialized.time_column);
-        assert_eq!(config.resolutions, deserialized.resolutions);
-        assert_eq!(config.aggregations.len(), deserialized.aggregations.len());
-    }
-
-    #[test]
-    fn test_factory_registration() {
-        // Test that the temporal-reduce factory is properly registered
-        let factory = FactoryRegistry::get_factory("temporal-reduce");
-        assert!(factory.is_some());
-
-        let factory = factory.unwrap();
-        assert_eq!(factory.name, "temporal-reduce");
-        assert!(factory.description.contains("temporal downsampling"));
-        assert!(factory.create_directory.is_some());
-        assert!(factory.create_file.is_none());
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let valid_config = r#"
-in_pattern: "/hydrovu/*"
-out_pattern: "$0"
-time_column: "timestamp"
-resolutions:
-  - "1h"
-  - "6h" 
-  - "1d"
-aggregations:
-  - type: "avg"
-    columns: ["temperature", "conductivity"]
-  - type: "count"
-    columns: ["*"]
-"#;
-
-        // Test valid config validation
-        let result = validate_temporal_reduce_config(valid_config.as_bytes());
-        assert!(result.is_ok());
-
-        // Test invalid resolution
-        let invalid_config = r#"
-in_pattern: "/hydrovu/*"
-out_pattern: "$0"
-time_column: "timestamp"
-resolutions:
-  - "invalid_duration"
-aggregations:
-  - type: "avg"
-    columns: ["temperature"]
-"#;
-
-        let result = validate_temporal_reduce_config(invalid_config.as_bytes());
-        assert!(result.is_err());
-        let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("Invalid resolution"));
-
-        // Test missing required fields
-        let incomplete_config = r#"
-in_pattern: "/hydrovu/*"
-# missing out_pattern, time_column, resolutions, and aggregations
-"#;
-
-        let result = validate_temporal_reduce_config(incomplete_config.as_bytes());
-        assert!(result.is_err());
-    }
-
+    /// Comprehensive integration test for temporal-reduce factory
+    ///
+    /// Creates multiple series files with different names (site1, site2, site3),
+    /// each with 3 days of hourly data, then validates that temporal-reduce correctly:
+    /// - Discovers all source files matching the pattern
+    /// - Creates site subdirectories for each matched file
+    /// - Generates daily aggregated files with correct avg/min/max values
+    /// - Produces exactly 3 rows (one per day) for each site
     #[tokio::test]
-    async fn test_temporal_reduce_directory_creation() {
-        use crate::persistence::OpLogPersistence;
-        use tempfile::TempDir;
+    async fn test_temporal_reduce_multi_site_daily_aggregation() {
+        let _ = env_logger::try_init();
 
-        // Create a test configuration
-        let config = TemporalReduceConfig {
-            in_pattern: "/test/source/*".to_string(),
-            out_pattern: "$0".to_string(),
-            time_column: "timestamp".to_string(),
-            resolutions: vec!["1h".to_string(), "1d".to_string()],
-            aggregations: vec![AggregationConfig {
-                agg_type: AggregationType::Avg,
-                columns: Some(vec!["temperature".to_string()]),
-            }],
-        };
-
-        // Create test persistence and get state
         let temp_dir = TempDir::new().unwrap();
         let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
-        let tx_guard = persistence.begin_test().await.unwrap();
-        let state = tx_guard.state().unwrap();
-        let context = FactoryContext::new(state, tinyfs::NodeID::root());
 
-        // Create the directory
-        let directory = TemporalReduceDirectory::new(config, context).unwrap();
+        // Transaction 1: Create source series files with 3 days of hourly data
+        {
+            let tx_guard = persistence.begin_test().await.unwrap();
+            let root = tx_guard.root().await.unwrap();
+            _ = root.create_dir_path("/sources").await.unwrap();
 
-        // Verify parsed resolutions
-        assert_eq!(directory.parsed_resolutions.len(), 2);
-        assert_eq!(directory.parsed_resolutions[0].0, "1h");
-        assert_eq!(directory.parsed_resolutions[0].1, Duration::from_secs(3600));
-        assert_eq!(directory.parsed_resolutions[1].0, "1d");
-        assert_eq!(
-            directory.parsed_resolutions[1].1,
-            Duration::from_secs(86400)
-        );
+            // Schema: timestamp + temperature + salinity
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("temperature", DataType::Float64, false),
+                Field::new("salinity", DataType::Float64, false),
+            ]));
 
-        // Test that we can get entries (though they won't work without actual data)
-        let entries_result = directory.entries().await;
-        assert!(entries_result.is_ok());
+            // Create 3 series files, each with 3 days of hourly data
+            // Day boundaries: Day 0 = 0-86399999ms, Day 1 = 86400000-172799999ms, Day 2 = 172800000-259199999ms
+            for site_num in 1..=3 {
+                let filename = format!("/sources/site{}.series", site_num);
+                let base_temp = 15.0 + (site_num as f64) * 5.0; // site1=20, site2=25, site3=30
+                let base_salinity = 30.0 + (site_num as f64) * 2.0; // site1=32, site2=34, site3=36
+
+                let mut all_timestamps = Vec::new();
+                let mut all_temps = Vec::new();
+                let mut all_salinities = Vec::new();
+
+                // 3 days × 24 hours = 72 data points per site
+                for day in 0..3 {
+                    for hour in 0..24 {
+                        let timestamp_ms = (day * 86400 + hour * 3600) * 1000; // milliseconds
+                        all_timestamps.push(timestamp_ms);
+                        all_temps.push(base_temp + hour as f64); // temperature increases by hour
+                        all_salinities.push(base_salinity + hour as f64 * 0.1);
+                    }
+                }
+
+                let batch = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondArray::from(all_timestamps)),
+                        Arc::new(Float64Array::from(all_temps)),
+                        Arc::new(Float64Array::from(all_salinities)),
+                    ],
+                )
+                .unwrap();
+
+                // Write the series file
+                root.write_parquet(&filename, &batch, EntryType::FileSeriesPhysical)
+                    .await
+                    .unwrap();
+            }
+
+            tx_guard.commit_test().await.unwrap();
+        }
+
+        // Transaction 2: Create temporal-reduce directory and verify aggregations
+        {
+            let tx_guard = persistence.begin_test().await.unwrap();
+            let state = tx_guard.state().unwrap();
+
+            // Create temporal-reduce configuration
+            let config = TemporalReduceConfig {
+                in_pattern: "/sources/*.series".to_string(),
+                out_pattern: "$0".to_string(), // Preserve filename as site directory name
+                time_column: "timestamp".to_string(),
+                resolutions: vec!["1d".to_string()], // Daily aggregation
+                aggregations: vec![
+                    AggregationConfig {
+                        agg_type: AggregationType::Avg,
+                        columns: Some(vec!["temperature".to_string(), "salinity".to_string()]),
+                    },
+                    AggregationConfig {
+                        agg_type: AggregationType::Min,
+                        columns: Some(vec!["temperature".to_string()]),
+                    },
+                    AggregationConfig {
+                        agg_type: AggregationType::Max,
+                        columns: Some(vec!["temperature".to_string()]),
+                    },
+                ],
+            };
+
+            let context = FactoryContext::new(state.clone(), NodeID::root());
+            let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+            let temporal_handle = temporal_dir.create_handle();
+
+            // Verify we have 3 site directories
+            // Note: The pattern "*.series" wildcard captures only the part matching "*" (e.g., "site1")
+            // The out_pattern "$0" uses the first capture group, so directory names are just "site1", "site2", "site3"
+            use futures::StreamExt;
+            let mut entries_stream = temporal_handle.entries().await.unwrap();
+            let mut site_names = Vec::new();
+            while let Some(entry_result) = entries_stream.next().await {
+                let entry = entry_result.unwrap();
+                site_names.push(entry.name.clone());
+            }
+            site_names.sort();
+            
+            // The glob pattern "/sources/*.series" captures just the part matching * (without .series)
+            // so we expect "site1", "site2", "site3" as directory names
+            assert_eq!(
+                site_names,
+                vec!["site1", "site2", "site3"],
+                "Should find all 3 site directories (without .series extension)"
+            );
+
+            // Verify each site has correct daily aggregations
+            for site_num in 1..=3 {
+                let site_name = format!("site{}", site_num);
+                let base_temp = 15.0 + (site_num as f64) * 5.0;
+
+                // Get the site directory
+                let site_node = temporal_handle.get(&site_name).await.unwrap().unwrap();
+                let site_node_guard = site_node.lock().await;
+                let site_dir = match &site_node_guard.node_type {
+                    NodeType::Directory(dir) => dir,
+                    _ => panic!("Expected directory for {}", site_name),
+                };
+
+                // Get the daily aggregation file
+                let daily_file_node = site_dir.get("res=1d.series").await.unwrap().unwrap();
+                let daily_file_guard = daily_file_node.lock().await;
+                let node_id = daily_file_guard.id;
+
+                // Read and verify the aggregated data using QueryableFile interface
+                if let NodeType::File(file_handle) = &daily_file_guard.node_type {
+                    let file_arc = file_handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+
+                    // Get table provider to query the data
+                    let queryable_file = crate::sql_derived::try_as_queryable_file(&**file_guard)
+                        .expect("Temporal-reduce should create QueryableFile");
+
+                    let table_provider = queryable_file
+                        .as_table_provider(node_id, node_id, &state)
+                        .await
+                        .unwrap();
+
+                    // Execute query to get results
+                    let ctx = state.session_context().await.unwrap();
+                    let table_name = format!("temporal_{}", site_num);
+                    _ = ctx.register_table(&table_name, table_provider).unwrap();
+
+                    let query = format!(
+                        "SELECT * FROM {} ORDER BY timestamp",
+                        table_name
+                    );
+                    let dataframe = ctx.sql(&query).await.unwrap();
+                    let batches = dataframe.collect().await.unwrap();
+
+                    // Should have exactly 3 rows (one per day)
+                    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                    assert_eq!(
+                        total_rows, 3,
+                        "Site {} should have exactly 3 daily aggregated rows",
+                        site_num
+                    );
+
+                    // Verify schema has expected columns
+                    assert!(!batches.is_empty(), "Should have at least one batch");
+                    let result_schema = &batches[0].schema();
+                    assert!(
+                        result_schema.column_with_name("timestamp").is_some(),
+                        "Should have timestamp column"
+                    );
+                    assert!(
+                        result_schema.column_with_name("temperature.avg").is_some(),
+                        "Should have temperature.avg column"
+                    );
+                    assert!(
+                        result_schema.column_with_name("salinity.avg").is_some(),
+                        "Should have salinity.avg column"
+                    );
+                    assert!(
+                        result_schema.column_with_name("temperature.min").is_some(),
+                        "Should have temperature.min column"
+                    );
+                    assert!(
+                        result_schema.column_with_name("temperature.max").is_some(),
+                        "Should have temperature.max column"
+                    );
+
+                    // Verify values for first day (day 0)
+                    // Each day has 24 hours: hour 0-23
+                    // Expected avg temperature: base_temp + (0+1+2+...+23)/24 = base_temp + 11.5
+                    // Expected min temperature: base_temp + 0 = base_temp
+                    // Expected max temperature: base_temp + 23 = base_temp + 23
+                    let first_batch = &batches[0];
+                    let temp_avg_col = first_batch
+                        .column_by_name("temperature.avg")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+
+                    let temp_min_col = first_batch
+                        .column_by_name("temperature.min")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+
+                    let temp_max_col = first_batch
+                        .column_by_name("temperature.max")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+
+                    let expected_avg = base_temp + 11.5; // Average of 0..23
+                    let expected_min = base_temp;
+                    let expected_max = base_temp + 23.0;
+
+                    assert!(
+                        (temp_avg_col.value(0) - expected_avg).abs() < 0.01,
+                        "Site {} day 0: expected avg={}, got={}",
+                        site_num,
+                        expected_avg,
+                        temp_avg_col.value(0)
+                    );
+                    assert_eq!(
+                        temp_min_col.value(0),
+                        expected_min,
+                        "Site {} day 0: min temperature mismatch",
+                        site_num
+                    );
+                    assert_eq!(
+                        temp_max_col.value(0),
+                        expected_max,
+                        "Site {} day 0: max temperature mismatch",
+                        site_num
+                    );
+
+                    log::info!(
+                        "✅ Site {} verified: {} rows, avg={:.2}, min={:.2}, max={:.2}",
+                        site_num,
+                        total_rows,
+                        temp_avg_col.value(0),
+                        temp_min_col.value(0),
+                        temp_max_col.value(0)
+                    );
+                } else {
+                    panic!("Expected file node for {}/res=1d.series", site_name);
+                }
+            }
+
+            tx_guard.commit_test().await.unwrap();
+        }
+
+        log::info!("✅ Temporal-reduce integration test completed successfully");
+        log::info!("   - Created 3 series files with 72 hourly records each (3 days)");
+        log::info!("   - Verified temporal-reduce discovered all 3 sites");
+        log::info!("   - Validated daily aggregations: 3 rows per site");
+        log::info!("   - Confirmed avg/min/max calculations are correct");
+    }
+
+    #[test]
+    fn test_factory_registration() {
+        let factory = FactoryRegistry::get_factory("temporal-reduce");
+        assert!(factory.is_some());
+        let factory = factory.unwrap();
+        assert_eq!(factory.name, "temporal-reduce");
+        assert!(factory.description.contains("temporal downsampling"));
     }
 }

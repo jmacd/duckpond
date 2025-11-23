@@ -6,6 +6,7 @@ use crate::glob::*;
 use crate::node::*;
 use crate::symlink::*;
 use async_trait::async_trait;
+use futures::stream::Stream;
 use log::debug;
 use std::collections::HashSet;
 use std::future::Future;
@@ -13,7 +14,9 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Mutex;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -65,8 +68,92 @@ impl WD {
         }
     }
 
-    pub async fn read_dir(&self) -> Result<DirEntryStream> {
-        self.dref.read_dir().await
+    /// Get directory entries without loading nodes (for filtering before batch load)
+    async fn get_entries(&self) -> Result<Vec<DirectoryEntry>> {
+        use futures::StreamExt;
+        let mut stream = self.dref.handle.entries().await?;
+        let mut entries = Vec::new();
+        while let Some(result) = stream.next().await {
+            entries.push(result?);
+        }
+        Ok(entries)
+    }
+
+    /// Get a stream of lightweight directory entries (does NOT load nodes)
+    /// Use this for inspecting directory contents without loading all nodes.
+    /// For efficient node loading, use pattern matching or batch operations.
+    pub async fn entries(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
+        self.dref.handle.entries().await
+    }
+
+    /// Get a single node by name (loads the node from persistence)
+    /// Note: For multiple nodes, prefer batch loading via pattern matching
+    pub async fn get(&self, name: &str) -> Result<Option<NodePath>> {
+        self.dref.get(name).await
+    }
+
+    /// Batch load nodes for multiple directory entries  
+    /// 🚀 OPTIMIZATION: Groups by partition and loads with minimal SQL queries
+    async fn load_entries(&self, entries: Vec<DirectoryEntry>) -> Result<Vec<NodePath>> {
+        // For each entry, we need to determine its partition and node ID
+        // Then batch load all nodes at once
+        let mut requests = Vec::new();
+        
+        let parent_node_id = self.np.node.lock().await.id;
+        
+        for entry in &entries {
+            let node_id = entry.child_node_id;  // Direct field access (no longer a method)
+            
+            // Use EntryType's partition_id method to determine partition
+            let part_id = entry.entry_type.partition_id(node_id, parent_node_id);
+            
+            requests.push((entry.name.clone(), node_id, part_id, entry.entry_type));
+        }
+        
+        // Extract (node_id, part_id) pairs for batch loading
+        let batch_requests: Vec<(NodeID, NodeID)> = requests
+            .iter()
+            .map(|(_, node_id, part_id, _)| (*node_id, *part_id))
+            .collect();
+        
+        // 🚀 BATCH LOAD: Load all nodes with M queries (M = # partitions) instead of N queries (N = # nodes)
+        let loaded_node_types = self.fs.batch_load_nodes(batch_requests).await?;
+        
+        // Convert NodeType to NodeRef
+        let mut loaded_nodes = std::collections::HashMap::new();
+        for (node_id, node_type) in loaded_node_types {
+            let node_ref = NodeRef::new(Arc::new(Mutex::new(Node {
+                node_type,
+                id: node_id,
+            })));
+            _ = loaded_nodes.insert(node_id, node_ref);
+        }
+        
+        // Build NodePath results in original order
+        let mut node_paths = Vec::new();
+        for (name, node_id, _, _) in requests {
+            // Try loaded_nodes first (from persistence), then fall back to directory.get()
+            // This handles both TlogFS (nodes in persistence) and MemoryFS (nodes in directory)
+            let node_ref = if let Some(node_ref) = loaded_nodes.get(&node_id) {
+                node_ref.clone()
+            } else {
+                // Fall back to directory.get() for MemoryFS and other in-memory implementations
+                self.dref.handle.get(&name).await?
+                    .ok_or_else(|| Error::NotFound(PathBuf::from(format!(
+                        "Node '{}' (id={}) not found in batch load or directory.get()",
+                        name, node_id
+                    ))))?
+            };
+            
+            node_paths.push(NodePath {
+                node: node_ref,
+                path: self.dref.path().join(&name),
+            });
+        }
+        
+        Ok(node_paths)
     }
 
     fn is_root(&self) -> bool {
@@ -649,17 +736,21 @@ impl WD {
                     }
                 }
                 WildcardComponent::Wildcard { .. } => {
-                    // Match any component that satisfies the wildcard pattern
-                    use futures::StreamExt;
-                    let mut dir_stream = self.read_dir().await?;
-                    let mut children = Vec::new();
-                    while let Some(child) = dir_stream.next().await {
-                        children.push(child);
-                    }
+                    // 🚀 OPTIMIZATION: Filter entries BEFORE loading nodes
+                    let all_entries = self.get_entries().await?;
+                    
+                    // Filter by name pattern first (no node loading!)
+                    let matching_entries: Vec<_> = all_entries
+                        .into_iter()
+                        .filter(|entry| pattern[0].match_component(&entry.name).is_some())
+                        .collect();
+                    
+                    // Batch load only matching nodes
+                    let children = self.load_entries(matching_entries.clone()).await?;
 
-                    for child in children {
-                        // Check if the name matches the wildcard pattern
-                        if let Some(captured_match) = pattern[0].match_component(child.basename()) {
+                    for (child, entry) in children.into_iter().zip(matching_entries.iter()) {
+                        // Extract captured match
+                        if let Some(captured_match) = pattern[0].match_component(&entry.name) {
                             captured.push(captured_match.expect("wildcard capture"));
                             self.visit_match_with_visitor(
                                 child, false, pattern, visited, captured, stack, results, visitor,
@@ -687,16 +778,14 @@ impl WD {
                         .await?;
                     }
 
-                    // Case 2: Match one or more directories - recurse into children with same pattern
-                    use futures::StreamExt;
-                    let mut dir_stream = self.read_dir().await?;
-                    let mut children = Vec::new();
-                    while let Some(child) = dir_stream.next().await {
-                        children.push(child);
-                    }
+                                        // Case 2: Match one or more directories - recurse into children with same pattern
+                    // \ud83d\ude80 OPTIMIZATION: Get all entries, batch load them
+                    // Note: we load ALL children (files + dirs), visit_match_with_visitor decides whether to recurse
+                    let all_entries = self.get_entries().await?;
+                    let children = self.load_entries(all_entries.clone()).await?;
 
-                    for child in children {
-                        captured.push(child.basename().clone());
+                    for (child, entry) in children.into_iter().zip(all_entries.iter()) {
+                        captured.push(entry.name.clone());
                         self.visit_match_with_visitor(
                             child, true, pattern, visited, captured, stack, results, visitor,
                         )

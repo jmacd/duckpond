@@ -44,39 +44,29 @@ impl OpLogDirectory {
     /// (directory, file, symlink) AND whether the node is physical or dynamic.
     /// This allows partition determination WITHOUT querying OplogEntry.factory.
     ///
-    /// Partition Rules:
-    /// - DirectoryPhysical: uses child_node_id as part_id (creates own partition)
-    /// - All other types: use self.node_id as part_id (parent's partition)
-    ///   - DirectoryDynamic: parent's partition
-    ///   - All files (physical/dynamic): parent's partition
-    ///   - Symlinks: parent's partition
+    /// Determine partition ID for a child entry.
+    /// Delegates to EntryType::partition_id() for consistent logic across codebase.
     fn get_child_partition_id(
         &self,
         child_node_id: NodeID,
         entry_type: &tinyfs::EntryType,
     ) -> tinyfs::Result<NodeID> {
-        match entry_type {
-            tinyfs::EntryType::DirectoryPhysical => {
-                // Physical directories create their own partition
-                debug!(
-                    "Physical directory {}, creating own partition",
-                    child_node_id
-                );
-                Ok(child_node_id)
-            }
-            _ => {
-                // Everything else uses parent's partition:
-                // - Dynamic directories
-                // - All files (physical and dynamic)
-                // - Symlinks
-                debug!(
-                    "Node {} (type: {}), using parent partition",
-                    child_node_id,
-                    entry_type.as_str()
-                );
-                Ok(self.node_id)
-            }
+        let part_id = entry_type.partition_id(child_node_id, self.node_id);
+        
+        if matches!(entry_type, tinyfs::EntryType::DirectoryPhysical) {
+            debug!(
+                "Physical directory {}, creating own partition",
+                child_node_id
+            );
+        } else {
+            debug!(
+                "Node {} (type: {}), using parent partition",
+                child_node_id,
+                entry_type.as_str()
+            );
         }
+        
+        Ok(part_id)
     }
 }
 
@@ -203,67 +193,21 @@ impl Directory for OpLogDirectory {
 
     async fn entries(
         &self,
-    ) -> tinyfs::Result<Pin<Box<dyn Stream<Item = tinyfs::Result<(String, NodeRef)>> + Send>>> {
+    ) -> tinyfs::Result<Pin<Box<dyn Stream<Item = tinyfs::Result<tinyfs::DirectoryEntry>> + Send>>> {
         debug!("OpLogDirectory::entries() - querying via persistence layer");
 
-        // // Get current directory node ID
-        // let node_id = self
-        //     .parse_node_id()
-        //     .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
         // Load directory entries with types from persistence layer
-        let entries_with_types = self.state.load_directory_entries(self.node_id).await?;
+        let entries_map = self.state.load_directory_entries(self.node_id).await?;
 
-        let entry_count = entries_with_types.len();
+        let entry_count = entries_map.len();
         debug!("OpLogDirectory::entries() - found {entry_count} entries");
 
-        // Convert to stream of NodeRef instances
+        // Convert from HashMap<String, DirectoryEntry> to stream of tinyfs::DirectoryEntry
         let mut entry_results = Vec::new();
 
-        for (name, (child_node_id, entry_type)) in entries_with_types {
-            // Load each child node using deterministic partition selection
-            let part_id = match self.get_child_partition_id(child_node_id, &entry_type) {
-                Ok(part_id) => part_id,
-                Err(e) => {
-                    let child_node_hex = child_node_id.to_string();
-                    let error_msg = format!(
-                        "Failed to determine partition for {}: {}",
-                        child_node_hex, e
-                    );
-                    debug!("Directory::entries - {}", error_msg);
-                    entry_results.push(Err(tinyfs::Error::Other(error_msg)));
-                    continue;
-                }
-            };
-
-            // Load node from correct partition
-            match self.state.load_node(child_node_id, part_id).await {
-                Ok(child_node_type) => {
-                    // Create Node and wrap in NodeRef
-                    let node = tinyfs::Node {
-                        id: child_node_id,
-                        node_type: child_node_type,
-                    };
-                    let node_ref = NodeRef::new(Arc::new(Mutex::new(node)));
-                    entry_results.push(Ok((name, node_ref)));
-                }
-                Err(e) => {
-                    let child_node_hex = child_node_id.to_string();
-                    let error_msg = format!("{}", e);
-                    debug!("  Warning: Failed to load child node {child_node_hex}: {error_msg}");
-
-                    // Create a clearer error for data integrity issues
-                    let integrity_error = tinyfs::Error::NotFound(std::path::PathBuf::from(
-                        format!(
-                            "DATA INTEGRITY ISSUE: Directory '{}' contains reference to nonexistent node {}. \
-                            This indicates metadata corruption where directory entries point to deleted or missing nodes. \
-                            Original error: {}",
-                            name, child_node_hex, error_msg
-                        ),
-                    ));
-                    entry_results.push(Err(integrity_error));
-                }
-            }
+        for (_name, dir_entry) in entries_map {
+            // dir_entry is already tinyfs::DirectoryEntry (schema.rs has type alias now)
+            entry_results.push(Ok(dir_entry));
         }
 
         // Create stream from results

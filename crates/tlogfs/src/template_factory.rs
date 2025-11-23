@@ -157,7 +157,7 @@ impl Directory for TemplateDirectory {
 
     async fn entries(
         &self,
-    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<(String, NodeRef)>> + Send>>> {
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>> {
         debug!("TemplateDirectory::entries - listing discovered template files");
 
         // Discover template files from in_pattern
@@ -179,39 +179,30 @@ impl Directory for TemplateDirectory {
                 "TemplateDirectory::entries - creating entry {expanded_name} from pattern match"
             );
 
-            // Check cache first
-            let node_ref = {
-                let cache = self.node_cache.lock().await;
-                cache.get(&expanded_name).cloned()
-            };
-
-            let node_ref = if let Some(cached_node) = node_ref {
-                debug!("TemplateDirectory::entries - using cached node for {expanded_name}");
-                cached_node
-            } else {
-                debug!("TemplateDirectory::entries - creating new node for {expanded_name}");
-
-                // Get template content
-                let template_content = self.get_template_content().await?;
-
-                let template_file =
-                    TemplateFile::new(template_content, self.context.clone(), captured);
-
-                let new_node_ref = NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
-                    id: tinyfs::NodeID::generate(),
-                    node_type: tinyfs::NodeType::File(template_file.create_handle()),
-                })));
-
-                // Cache the node
-                {
-                    let mut cache = self.node_cache.lock().await;
-                    _ = cache.insert(expanded_name.clone(), new_node_ref.clone());
+            // Template files need to be created/loaded to get their real node_id
+            match self.get(&expanded_name).await {
+                Ok(Some(node_ref)) => {
+                    // Extract real node_id from the created/cached node
+                    let node = node_ref.lock().await;
+                    let dir_entry = tinyfs::DirectoryEntry::new(
+                        expanded_name.clone(),
+                        node.id,
+                        EntryType::FileDataDynamic,
+                        0,
+                    );
+                    entries.push(Ok(dir_entry));
                 }
-
-                new_node_ref
-            };
-
-            entries.push(Ok((expanded_name, node_ref)));
+                Ok(None) => {
+                    let error_msg = format!("Failed to create template file '{}'", expanded_name);
+                    error!("TemplateDirectory::entries - {error_msg}");
+                    entries.push(Err(tinyfs::Error::Other(error_msg)));
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to create template file '{}': {}", expanded_name, e);
+                    error!("TemplateDirectory::entries - {error_msg}");
+                    entries.push(Err(tinyfs::Error::Other(error_msg)));
+                }
+            }
         }
 
         let entries_len = entries.len();

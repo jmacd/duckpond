@@ -94,10 +94,22 @@ pub trait PersistenceLayer: Send + Sync {
     ) -> Result<()>;
 
     // Directory operations with versioning
+    /// Load all directory entries with full metadata (without loading nodes)
     async fn load_directory_entries(
         &self,
         parent_node_id: NodeID,
-    ) -> Result<HashMap<String, (NodeID, EntryType)>>;
+    ) -> Result<HashMap<String, crate::DirectoryEntry>>;
+    
+    /// Batch load multiple nodes grouped by partition for efficiency.
+    /// Default implementation returns empty map; tlogfs overrides with optimized batch loading.
+    async fn batch_load_nodes(
+        &self,
+        _requests: Vec<(NodeID, NodeID)>,
+    ) -> Result<HashMap<NodeID, NodeType>> {
+        // Default implementation for persistence layers that don't support batch loading
+        Ok(HashMap::new())
+    }
+    
     /// Optimized query for a single directory entry by name
     async fn query_directory_entry(
         &self,

@@ -825,15 +825,43 @@ impl PersistenceLayer for State {
             .map_err(error_utils::to_tinyfs_error)
     }
 
-    async fn load_directory_entries(
+    /// Batch load multiple nodes grouped by partition for efficiency.
+    /// Issues one SQL query per partition instead of one query per node.
+    async fn batch_load_nodes(
         &self,
-        part_id: NodeID,
-    ) -> TinyFSResult<HashMap<String, (NodeID, EntryType)>> {
+        requests: Vec<(NodeID, NodeID)>, // (node_id, part_id) pairs
+    ) -> TinyFSResult<HashMap<NodeID, NodeType>> {
         self.inner
             .lock()
             .await
-            .load_directory_entries(part_id)
+            .load_nodes_batched(requests, self.clone())
             .await
+    }
+
+    async fn load_directory_entries(
+        &self,
+        part_id: NodeID,
+    ) -> TinyFSResult<HashMap<String, tinyfs::DirectoryEntry>> {
+        let tlogfs_entries = self.inner
+            .lock()
+            .await
+            .load_directory_entries(part_id)
+            .await?;
+        
+        // Convert from tlogfs::DirectoryEntry to tinyfs::DirectoryEntry
+        let mut tinyfs_entries = HashMap::new();
+        for (name, entry) in tlogfs_entries {
+            let node_id = entry.child_node_id;
+            let tinyfs_entry = tinyfs::DirectoryEntry::new(
+                entry.name.clone(),
+                node_id,
+                entry.entry_type,
+                entry.version_last_modified,
+            );
+            _ = tinyfs_entries.insert(name, tinyfs_entry);
+        }
+        
+        Ok(tinyfs_entries)
     }
 
     async fn query_directory_entry(
@@ -1049,10 +1077,8 @@ impl State {
 
         // Add pending records (same logic as query_records)
         let mut all_records = committed_records;
-        let part_id_hex = part_id.to_string();
-        let node_id_hex = node_id.to_string();
         for record in &inner.records {
-            if record.part_id == part_id_hex && record.node_id == node_id_hex {
+            if record.part_id == part_id && record.node_id == *node_id {
                 all_records.push(record.clone());
             }
         }
@@ -1455,14 +1481,14 @@ impl InnerState {
     /// Find existing large file entry in pending records (to avoid duplicates during store_node)
     async fn find_existing_large_file_entry(
         &self,
-        node_id_str: &str,
-        part_id_str: &str,
+        node_id: NodeID,
+        part_id: NodeID,
     ) -> Option<OplogEntry> {
         self.records
             .iter()
             .find(|entry| {
-                entry.node_id == node_id_str &&
-		entry.part_id == part_id_str &&
+                entry.node_id == node_id &&
+		entry.part_id == part_id &&
 		entry.content.is_none() && // Large files have no inline content @@@
 		entry.sha256.is_some() // Large files have SHA256 @@@
             })
@@ -1764,7 +1790,7 @@ impl InnerState {
             let existing_entry = self
                 .records
                 .iter()
-                .find(|e| e.node_id == node_id.to_string() && e.part_id == part_id.to_string());
+                .find(|e| e.node_id == node_id && e.part_id == part_id);
 
             if let Some(existing) = existing_entry {
                 // Check if this is a placeholder entry (version 0) vs real content
@@ -1884,8 +1910,8 @@ impl InnerState {
 
         // Find existing entry for this node/part combination
         let existing_index = self.records.iter().position(|existing_entry| {
-            existing_entry.part_id == part_id.to_string()
-                && existing_entry.node_id == node_id.to_string()
+            existing_entry.part_id == part_id
+                && existing_entry.node_id == node_id
         });
 
         if let Some(index) = existing_index {
@@ -2256,7 +2282,7 @@ impl InnerState {
     ) -> Result<Option<(String, Vec<u8>)>, TLogFSError> {
         // First check pending records (for nodes created in current transaction)
         for record in &self.records {
-            if record.node_id == node_id.to_string()
+            if record.node_id == node_id
                 && let Some(factory_type) = &record.factory
                 && let Some(config_content) = &record.content
             {
@@ -2340,6 +2366,58 @@ impl InnerState {
         Ok(())
     }
 
+    /// Query for ONLY the latest record for any node type (O(1) performance)
+    /// 
+    /// This function uses SQL LIMIT 1 to fetch only the most recent version,
+    /// avoiding the O(N) cost of reading all historical versions.
+    /// 
+    /// IMPORTANT: This function checks BOTH committed (Delta Lake) and pending (self.records) state.
+    /// During a transaction, pending records in self.records take precedence over committed ones.
+    async fn query_latest_record(
+        &self,
+        part_id: NodeID,
+        node_id: NodeID,
+    ) -> Result<Option<OplogEntry>, TLogFSError> {
+        // Step 1: Check pending records in memory FIRST
+        let pending_record = self.records
+            .iter()
+            .filter(|r| {
+                r.part_id == part_id 
+                    && r.node_id == node_id
+            })
+            .max_by_key(|r| r.version)
+            .cloned();
+
+        // Step 2: Query Delta Lake for the single latest committed record
+        let sql = format!(
+            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY version DESC LIMIT 1",
+            part_id, node_id
+        );
+        
+        let committed_record = match self.session_context.sql(&sql).await {
+            Ok(df) => match df.collect().await {
+                Ok(batches) => {
+                    if batches.is_empty() || batches[0].num_rows() == 0 {
+                        None
+                    } else {
+                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batches[0])?;
+                        records.into_iter().next()
+                    }
+                }
+                Err(e) => return Err(TLogFSError::DataFusion(e)),
+            },
+            Err(e) => return Err(TLogFSError::DataFusion(e)),
+        };
+
+        // Step 3: Return the latest between committed and pending (pending wins if both exist)
+        match (committed_record, pending_record) {
+            (Some(c), Some(p)) => Ok(Some(if p.version > c.version { p } else { c })),
+            (Some(c), None) => Ok(Some(c)),
+            (None, Some(p)) => Ok(Some(p)),
+            (None, None) => Ok(None),
+        }
+    }
+
     /// Query for ONLY the latest directory record (O(1) performance)
     /// 
     /// This function uses SQL LIMIT 1 to fetch only the most recent directory version,
@@ -2356,8 +2434,8 @@ impl InnerState {
         let pending_record = self.records
             .iter()
             .filter(|r| {
-                r.part_id == part_id.to_string() 
-                    && r.node_id == part_id.to_string()
+                r.part_id == part_id 
+                    && r.node_id == part_id
                     && r.file_type.is_directory()
             })
             .max_by_key(|r| r.version)
@@ -2445,7 +2523,7 @@ impl InnerState {
             self.records
                 .iter()
                 .filter(|record| {
-                    record.part_id == part_id.to_string() && record.node_id == node_id.to_string()
+                    record.part_id == part_id && record.node_id == node_id
                 })
                 .cloned()
                 .collect::<Vec<_>>()
@@ -2463,6 +2541,111 @@ impl InnerState {
         Ok(all_records)
     }
 
+    /// Batch load multiple nodes grouped by partition for efficiency.
+    /// Issues one SQL query per partition instead of one query per node.
+    ///
+    /// Returns a HashMap keyed by node_id for O(1) lookup.
+    async fn load_nodes_batched(
+        &self,
+        requests: Vec<(NodeID, NodeID)>, // (node_id, part_id) pairs
+        state: State,
+    ) -> TinyFSResult<HashMap<NodeID, NodeType>> {
+        use std::collections::HashMap;
+
+        if requests.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Group requests by partition
+        let mut by_partition: HashMap<NodeID, Vec<NodeID>> = HashMap::new();
+        let requests_clone = requests.clone();
+        for (node_id, part_id) in requests_clone {
+            by_partition.entry(part_id).or_default().push(node_id);
+        }
+
+        debug!(
+            "load_nodes_batched: {} nodes across {} partitions",
+            by_partition.values().map(|v| v.len()).sum::<usize>(),
+            by_partition.len()
+        );
+
+        let mut results = HashMap::new();
+
+        // Load each partition with a single query
+        for (part_id, node_ids) in by_partition {
+            let part_id_str = part_id.to_string();
+            let node_id_strs: Vec<String> = node_ids.iter().map(|id| id.to_string()).collect();
+
+            // Build SQL with IN clause for all node_ids in this partition
+            let node_list = node_id_strs
+                .iter()
+                .map(|id| format!("'{}'", id))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let sql = format!(
+                "SELECT * FROM (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY version DESC) as rn
+                    FROM delta_table
+                    WHERE part_id = '{}' AND node_id IN ({})
+                ) WHERE rn = 1",
+                part_id_str, node_list
+            );
+
+            debug!("Batch loading {} nodes from partition {}", node_ids.len(), part_id_str);
+
+            match self.session_context.sql(&sql).await {
+                Ok(df) => match df.collect().await {
+                    Ok(batches) => {
+                        // Parse records from batches
+                        for batch in batches {
+                            let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)
+                                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse batch: {}", e)))
+                                .map_err(error_utils::to_tinyfs_error)?;
+                            for record in records {
+                                let node_id = record.node_id;
+                                
+                                match node_factory::create_node_from_oplog_entry(
+                                    &record,
+                                    node_id,
+                                    part_id,
+                                    state.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(node) => {
+                                        _ = results.insert(node_id, node);
+                                    }
+                                    Err(e) => {
+                                        debug!("Failed to create node {}: {}", node_id, e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to collect batches for partition {}: {}", part_id_str, e);
+                    }
+                },
+                Err(e) => {
+                    debug!("SQL query failed for partition {}: {}", part_id_str, e);
+                }
+            }
+        }
+
+        // Check for nodes created in this transaction but not yet flushed
+        for (node_id, _) in requests {
+            if !results.contains_key(&node_id) && self.created_directories.contains(&node_id) {
+                debug!("Found node {} in created_directories", node_id);
+                if let Ok(node) = node_factory::create_directory_node(node_id, state.clone()) {
+                    _ = results.insert(node_id, node);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     async fn load_node(
         &self,
         node_id: NodeID,
@@ -2474,53 +2657,31 @@ impl InnerState {
 
         debug!("load_node {node_id_str} part_id={part_id_str}");
 
-        // Query Delta Lake for the most recent record for this node
-        let records = match self.query_records(part_id, node_id).await {
-            Ok(records) => {
-                let record_count = records.len();
-                debug!("query_records returned {record_count} records");
-                records
+        // 🚀 OPTIMIZATION: Query only the latest record (O(1) instead of O(N))
+        match self.query_latest_record(part_id, node_id).await {
+            Ok(Some(record)) => {
+                debug!("load_node: found latest record version {}", record.version);
+                // Use node factory to create the appropriate node type
+                node_factory::create_node_from_oplog_entry(&record, node_id, part_id, state).await
+            }
+            Ok(None) => {
+                // Node doesn't exist in committed or pending records
+                // Check if it's a directory created in this transaction but not yet flushed
+                if self.created_directories.contains(&node_id) {
+                    debug!("Found node in created_directories, creating empty directory node");
+                    node_factory::create_directory_node(node_id, state)
+                } else {
+                    // Node doesn't exist in database or pending transactions
+                    Err(tinyfs::Error::NotFound(PathBuf::from(format!(
+                        "Node {} not found",
+                        node_id_str
+                    ))))
+                }
             }
             Err(e) => {
                 let error_msg = e.to_string();
-                debug!("query_records failed with error: {error_msg}");
-                return Err(error_utils::to_tinyfs_error(e));
-            }
-        };
-
-        if let Some(record) = records.first() {
-            // record is already an OplogEntry - no need to deserialize again
-            debug!("storage has existing record");
-
-            // Use node factory to create the appropriate node type
-            node_factory::create_node_from_oplog_entry(
-                record, // Use the OplogEntry directly
-                node_id, part_id, state,
-            )
-            .await
-        } else {
-            // Node doesn't exist in committed data, check pending transactions
-            let pending_record = self
-                .records
-                .iter()
-                .find(|entry| entry.node_id == node_id_str && entry.part_id == part_id_str)
-                .cloned();
-
-            if let Some(record) = pending_record {
-                // Found in pending records, create node from it
-                debug!("Found node in pending records");
-
-                node_factory::create_node_from_oplog_entry(&record, node_id, part_id, state).await
-            } else if self.created_directories.contains(&node_id) {
-                // Directory was created in this transaction but not yet written to records
-                debug!("Found node in created_directories, creating empty directory node");
-                node_factory::create_directory_node(node_id, state)
-            } else {
-                // Node doesn't exist in database or pending transactions
-                Err(tinyfs::Error::NotFound(PathBuf::from(format!(
-                    "Node {} not found",
-                    node_id_str
-                ))))
+                debug!("query_latest_record failed with error: {error_msg}");
+                Err(error_utils::to_tinyfs_error(e))
             }
         }
     }
@@ -2549,7 +2710,7 @@ impl InnerState {
             let pending_record = self
                 .records
                 .iter()
-                .find(|entry| entry.node_id == node_id_str && entry.part_id == part_id_str)
+                .find(|entry| entry.node_id == node_id && entry.part_id == part_id)
                 .cloned();
 
             if let Some(record) = pending_record {
@@ -2557,7 +2718,7 @@ impl InnerState {
             } else {
                 // Node doesn't exist
                 Err(TLogFSError::TinyFS(tinyfs::Error::NotFound(PathBuf::from(
-                    format!("Node {} not found", node_id_str),
+                    format!("Node {} not found", node_id),
                 ))))
             }
         }
@@ -2592,13 +2753,12 @@ impl InnerState {
                 // This handles the case where TinyFS async writer used HybridWriter but the memory content is empty
                 if file_content.is_empty() {
                     // Check if there's an existing large file stored for this node
-                    let node_hex = node_id.to_string();
                     if let Some(_existing_entry) = self
-                        .find_existing_large_file_entry(&node_hex, &part_id.to_string())
+                        .find_existing_large_file_entry(node_id, part_id)
                         .await
                     {
                         debug!(
-                            "TRANSACTION: store_node() - found existing large file entry for {node_hex}, skipping duplicate"
+                            "TRANSACTION: store_node() - found existing large file entry for {node_id}, skipping duplicate"
                         );
                         return Ok(()); // Don't create duplicate entry
                     }
@@ -2670,7 +2830,7 @@ impl InnerState {
         let in_pending = self
             .records
             .iter()
-            .any(|r| r.node_id == node_id.to_string() && r.part_id == part_id.to_string());
+            .any(|r| r.node_id == node_id && r.part_id == part_id);
         if in_pending {
             return Ok(true);
         }
@@ -2692,18 +2852,17 @@ impl InnerState {
     async fn load_directory_entries(
         &self,
         part_id: NodeID,
-    ) -> TinyFSResult<HashMap<String, (NodeID, EntryType)>> {
+    ) -> TinyFSResult<HashMap<String, DirectoryEntry>> {
         let all_entries = self
             .query_directory_entries(part_id)
             .await
             .map_err(error_utils::to_tinyfs_error)?;
 
         // With full snapshots, all entries in the snapshot exist (no delete operations)
+        // Return full DirectoryEntry for each entry
         let mut current_state = HashMap::new();
         for entry in all_entries {
-            if let Ok(child_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                _ = current_state.insert(entry.name, (child_id, entry.entry_type));
-            }
+            _ = current_state.insert(entry.name.clone(), entry);
         }
 
         Ok(current_state)
@@ -2863,11 +3022,8 @@ impl InnerState {
         match self.query_single_directory_entry(part_id, entry_name).await {
             Ok(Some(entry)) => {
                 // With full snapshots, if entry exists in result, it's a valid entry
-                if let Ok(child_node_id) = NodeID::from_hex_string(&entry.child_node_id) {
-                    Ok(Some((child_node_id, entry.entry_type)))
-                } else {
-                    Ok(None)
-                }
+                let child_node_id = entry.child_node_id;
+                Ok(Some((child_node_id, entry.entry_type)))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(error_utils::to_tinyfs_error(e)),
@@ -2998,8 +3154,8 @@ impl InnerState {
                 let pending_record = self.records
                     .iter()
                     .find(|r| {
-                        r.part_id == part_id.to_string() 
-                        && r.node_id == node_id.to_string() 
+                        r.part_id == part_id 
+                        && r.node_id == node_id 
                         && r.version == v as i64
                     })
                     .cloned();
@@ -3077,7 +3233,7 @@ impl InnerState {
                 "set_extended_attributes checking record[{index}]: node_id={record_node}, part_id={record_part}, version={record_version}"
             );
 
-            if record.node_id == node_id_str && record.part_id == part_id_str {
+            if record.node_id == node_id && record.part_id == part_id {
                 debug!(
                     "set_extended_attributes found matching record at index {index} with version {record_version}"
                 );

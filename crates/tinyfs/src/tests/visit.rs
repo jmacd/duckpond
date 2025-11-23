@@ -143,7 +143,7 @@ impl Directory for VisitDirectory {
 
     async fn entries(
         &self,
-    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<(String, NodeRef)>> + Send>>> {
+    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<crate::DirectoryEntry>> + Send>>> {
         // For now, fall back to the original visitor pattern implementation
         // TODO: Use derived manager for better performance and caching
         let mut visitor = FilenameCollector::new();
@@ -151,7 +151,18 @@ impl Directory for VisitDirectory {
         let result = root.visit_with_visitor(&self.pattern, &mut visitor).await;
         // @@@
         _ = result?;
-        let items: Vec<_> = visitor.items.into_iter().map(Ok).collect();
+        let items: Vec<_> = visitor.items.into_iter().map(|(name, _node_ref)| {
+            // Convert NodeRef to DirectoryEntry (without awaiting - use placeholder)
+            // Use a deterministic NodeID for testing
+            let node_id = crate::NodeID::from_content(format!("visit:{}", name).as_bytes());
+            let dir_entry = crate::DirectoryEntry::new(
+                name.clone(),
+                node_id,
+                crate::EntryType::FileDataDynamic,
+                0,
+            );
+            Ok(dir_entry)
+        }).collect();
         Ok(Box::pin(stream::iter(items)))
     }
 }
@@ -253,9 +264,11 @@ async fn test_visit_directory() {
 
     // Test iterator functionality of VisitDirectory
     let mut entries = BTreeSet::new();
-    let mut dir_stream = visit_dir.read_dir().await.unwrap();
+    let mut entry_stream = visit_dir.entries().await.unwrap();
     use futures::StreamExt;
-    while let Some(np) = dir_stream.next().await {
+    while let Some(result) = entry_stream.next().await {
+        let dir_entry = result.unwrap();
+        let np = visit_dir.get(&dir_entry.name).await.unwrap().unwrap();
         let file_node = np.borrow().await.as_file().unwrap();
         let reader = file_node.async_reader().await.unwrap();
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)

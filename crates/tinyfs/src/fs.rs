@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::DirectoryEntry;
 use crate::EntryType;
 use crate::error::*;
 use crate::node::*;
@@ -90,14 +91,23 @@ impl FS {
         Ok(node)
     }
 
-    /// Load directory entries
+    /// Load directory entries with full metadata (without loading nodes)
     pub async fn load_directory_entries(
         &self,
         parent_node_id: NodeID,
-    ) -> Result<HashMap<String, (NodeID, EntryType)>> {
+    ) -> Result<HashMap<String, DirectoryEntry>> {
         self.persistence
             .load_directory_entries(parent_node_id)
             .await
+    }
+
+    /// Batch load multiple nodes grouped by partition for efficiency.
+    /// Issues one SQL query per partition instead of one query per node.
+    pub async fn batch_load_nodes(
+        &self,
+        requests: Vec<(NodeID, NodeID)>,
+    ) -> Result<HashMap<NodeID, NodeType>> {
+        self.persistence.batch_load_nodes(requests).await
     }
 
     /// Get a metadata value for a node by name (numeric values only)

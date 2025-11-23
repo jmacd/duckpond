@@ -15,7 +15,7 @@ pub const ROOT_UUID: &str = "00000000-0000-7000-8000-000000000000";
 
 /// Unique identifier for a node in the filesystem
 /// Now uses UUID7 for global uniqueness and time ordering
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NodeID(uuid7::Uuid);
 
 /// Uses the 8-8-12-8 form UUID7 string for storage/filenames. This

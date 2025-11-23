@@ -7,8 +7,41 @@ use tokio::io::AsyncWrite;
 use crate::error::*;
 use crate::metadata::Metadata;
 use crate::node::*;
+use crate::EntryType;
 use async_trait::async_trait;
 use futures::stream::Stream;
+
+/// Lightweight directory entry information without loading the full node.
+/// Contains just enough information to filter entries and determine partition assignment.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    /// Entry name within the directory
+    pub name: String,
+    /// NodeID of the child
+    pub child_node_id: NodeID,
+    /// Comprehensive entry type (includes physical/dynamic distinction)
+    pub entry_type: EntryType,
+    /// Version number when this entry was last modified
+    pub version_last_modified: i64,
+}
+
+impl DirectoryEntry {
+    /// Create a new directory entry
+    #[must_use]
+    pub fn new(
+        name: String,
+        child_node_id: NodeID,
+        entry_type: EntryType,
+        version_last_modified: i64,
+    ) -> Self {
+        Self {
+            name,
+            child_node_id,
+            entry_type,
+            version_last_modified,
+        }
+    }
+}
 
 /// Represents a directory containing named entries.
 #[async_trait]
@@ -17,37 +50,17 @@ pub trait Directory: Metadata + Send + Sync {
 
     async fn insert(&mut self, name: String, id: NodeRef) -> Result<()>;
 
+    /// Returns a stream of directory entries (lightweight metadata) without loading full nodes.
+    /// Callers should use batch loading to load multiple nodes efficiently.
+    /// Returns DirectoryEntry which contains the name, so no tuple needed.
     async fn entries(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>>;
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>>;
 }
 
 /// A handle for a refcounted directory.
 #[derive(Clone)]
 pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn Directory>>>);
-
-/// Async directory entry stream
-pub struct DirEntryStream {
-    entries: Vec<NodePath>,
-    current: usize,
-}
-
-impl Stream for DirEntryStream {
-    type Item = NodePath;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        if self.current < self.entries.len() {
-            let entry = self.entries[self.current].clone();
-            self.current += 1;
-            std::task::Poll::Ready(Some(entry))
-        } else {
-            std::task::Poll::Ready(None)
-        }
-    }
-}
 
 /// Represents a Dir/File/Symlink handle with the active path.
 #[derive(Clone)]
@@ -92,7 +105,7 @@ impl Handle {
 
     pub async fn entries(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
         let dir = self.0.lock().await;
         dir.entries().await
     }
@@ -148,25 +161,6 @@ impl Pathed<Handle> {
 
     pub async fn insert(&self, name: String, id: NodeRef) -> Result<()> {
         self.handle.insert(name, id).await
-    }
-
-    pub async fn read_dir(&self) -> Result<DirEntryStream> {
-        let mut entries = Vec::new();
-        let mut stream = self.handle.entries().await?;
-
-        use futures::StreamExt;
-        while let Some(result) = stream.next().await {
-            let (name, nref) = result?;
-            entries.push(NodePath {
-                node: nref,
-                path: self.path.join(name),
-            });
-        }
-
-        Ok(DirEntryStream {
-            entries,
-            current: 0,
-        })
     }
 }
 

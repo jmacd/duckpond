@@ -221,7 +221,7 @@ impl Directory for DynamicDirDirectory {
     async fn entries(
         &self,
     ) -> tinyfs::Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = tinyfs::Result<(String, NodeRef)>> + Send>>,
+        std::pin::Pin<Box<dyn futures::Stream<Item = tinyfs::Result<tinyfs::DirectoryEntry>> + Send>>,
     > {
         let entries_count = self.config.entries.len();
         debug!("DynamicDirDirectory::entries - listing {entries_count} configured entries");
@@ -229,16 +229,24 @@ impl Directory for DynamicDirDirectory {
         let mut results = Vec::new();
 
         for entry in &self.config.entries {
+            // Dynamic entries need to be created/loaded to get their real node_id
             match self.get_entry_node(&entry.name).await {
                 Ok(Some(node_ref)) => {
                     debug!(
                         "DynamicDirDirectory::entries - successfully created entry '{}'",
                         entry.name
                     );
-                    results.push(Ok((entry.name.clone(), node_ref)));
+                    // Extract real node_id from the created node
+                    let node = node_ref.lock().await;
+                    let dir_entry = tinyfs::DirectoryEntry::new(
+                        entry.name.clone(),
+                        node.id,
+                        EntryType::DirectoryDynamic,
+                        0, // No version for dynamic entries
+                    );
+                    results.push(Ok(dir_entry));
                 }
                 Ok(None) => {
-                    // This shouldn't happen since we control the configuration
                     let error_msg = format!("Entry '{}' not found in configuration", entry.name);
                     error!("DynamicDirDirectory::entries - {error_msg}");
                     results.push(Err(tinyfs::Error::Other(error_msg)));
@@ -635,10 +643,37 @@ entries:
         let names: std::collections::HashSet<String> = entries
             .iter()
             .filter_map(|result| result.as_ref().ok())
-            .map(|(name, _)| name.clone())
+            .map(|dir_entry| dir_entry.name.clone())
             .collect();
 
         assert!(names.contains("template1"));
         assert!(names.contains("template2"));
+
+        // CRITICAL: Validate that node_ids are real UUIDs, not placeholders like "dynamic:template1"
+        for entry_result in &entries {
+            let dir_entry = entry_result.as_ref().unwrap();
+            
+            // child_node_id is already a valid NodeID type
+            let node_id_str = dir_entry.child_node_id.to_string();
+            
+            // Should NOT be a placeholder pattern
+            assert!(
+                !node_id_str.starts_with("dynamic:"),
+                "Entry '{}' has placeholder node_id: {}",
+                dir_entry.name, node_id_str
+            );
+            assert!(
+                !node_id_str.starts_with("template:"),
+                "Entry '{}' has placeholder node_id: {}",
+                dir_entry.name, node_id_str
+            );
+            
+            // Verify it's a proper UUID format (36 chars with dashes: 8-4-4-4-12)
+            assert_eq!(
+                node_id_str.len(), 36,
+                "Entry '{}' node_id wrong length: {}",
+                dir_entry.name, node_id_str
+            );
+        }
     }
 }

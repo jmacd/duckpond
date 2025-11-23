@@ -18,7 +18,7 @@ pub mod tree_format; // Tree formatting utilities for hierarchical displays
 mod wd; // Arrow integration module
 
 // Public exports - Core filesystem API
-pub use dir::{Directory, Handle as DirHandle, Pathed};
+pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
 pub use file::{AsyncReadSeek, File, Handle as FileHandle};
 pub use fs::FS;
 pub use node::{Node, NodeID, NodePath, NodeRef, NodeType};

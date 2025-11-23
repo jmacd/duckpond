@@ -700,8 +700,12 @@ fn format_operations_from_batches(
 
         // Format each row
         for i in 0..batch.num_rows() {
-            let part_id = part_ids.value(i).to_string();
-            let node_id = node_ids.value(i);
+            let part_id_str = part_ids.value(i);
+            let part_id = tinyfs::NodeID::from_hex_string(part_id_str)
+                .map_err(|e| steward::StewardError::Dyn(format!("Invalid part_id: {}", e).into()))?;
+            let node_id_str = node_ids.value(i);
+            let node_id = tinyfs::NodeID::from_hex_string(node_id_str)
+                .map_err(|e| steward::StewardError::Dyn(format!("Invalid node_id: {}", e).into()))?;
             let file_type = file_types.value(i);
             let version = versions.value(i);
             let size = if sizes.is_null(i) { -1 } else { sizes.value(i) };
@@ -744,7 +748,7 @@ fn format_operations_from_batches(
 
             let operation = format!(
                 "Node {} {} v{}{}",
-                format_node_id(node_id),
+                format_node_id(&node_id),
                 file_type,
                 version,
                 detail_display
@@ -756,7 +760,7 @@ fn format_operations_from_batches(
                 .map(|entry| format!("{} → {}", entry.name, format_node_id(&entry.child_node_id)))
                 .collect();
 
-            let part_entry = partition_groups.entry(part_id).or_default();
+            let part_entry = partition_groups.entry(part_id.to_string()).or_default();
             part_entry.push((operation, entry_strings));
         }
     }

@@ -241,19 +241,6 @@ pub enum StorageFormat {
     /// Physical directories - full directory snapshot stored in content field
     #[serde(rename = "fulldir")]
     FullDir,
-    
-    // Future formats for optimization:
-    // #[serde(rename = "hashdir")]
-    // HashDir,  // Hash-based directory structure for very large directories
-    // 
-    // #[serde(rename = "btree")]
-    // BTreeDir, // B-tree indexed directory for sorted access
-}
-
-impl Default for StorageFormat {
-    fn default() -> Self {
-        Self::Inline
-    }
 }
 
 /// Trait for converting data structures to Arrow and Delta Lake schemas
@@ -291,11 +278,10 @@ pub trait ForArrow {
 /// This represents a single filesystem operation (create, update, delete)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OplogEntry {
-    /// Hex-encoded partition ID (parent directory for files/symlinks, self for directories)
-    /// TODO Investigate if we can store these as NodeID and serialize as hex string.
-    pub part_id: String,
-    /// Hex-encoded NodeID from TinyFS
-    pub node_id: String,
+    /// Partition ID (parent directory for files/symlinks, self for directories)
+    pub part_id: NodeID,
+    /// NodeID from TinyFS
+    pub node_id: NodeID,
     /// Type of filesystem entry (file, directory, or symlink)
     pub file_type: tinyfs::EntryType,
     /// Timestamp when this node was modified (microseconds since Unix epoch)
@@ -392,8 +378,8 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
+            part_id,
+            node_id,
             file_type,
             timestamp,
             version,
@@ -426,8 +412,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
+            part_id,
+            node_id,
             file_type,
             timestamp,
             version,
@@ -458,8 +444,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
+            part_id,
+            node_id,
             file_type,
             timestamp,
             version,
@@ -507,8 +493,8 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
+            part_id,
+            node_id,
             file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
@@ -543,8 +529,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
+            part_id,
+            node_id,
             file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
@@ -644,8 +630,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
+            part_id,
+            node_id,
             file_type: tinyfs::EntryType::DirectoryDynamic, // Use comprehensive type
             timestamp,
             version,
@@ -691,8 +677,8 @@ impl OplogEntry {
         };
 
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
+            part_id,
+            node_id,
             file_type: dynamic_file_type,
             timestamp,
             version,
@@ -743,8 +729,8 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id: part_id.to_string(),
-            node_id: part_id.to_string(), // For dirs: node_id == part_id
+            part_id,
+            node_id: part_id, // For dirs: node_id == part_id
             file_type: tinyfs::EntryType::DirectoryPhysical,
             timestamp,
             version,
@@ -806,54 +792,16 @@ impl OplogEntry {
     }
 }
 
-/// Directory entry with full snapshot support
-/// 
-/// This struct represents a single entry in a directory's full state snapshot.
-/// Unlike the previous VersionedDirectoryEntry which stored incremental operations,
-/// DirectoryEntry represents the complete state of an entry at a specific version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DirectoryEntry {
-    /// Entry name within the directory
-    pub name: String,
-    /// Hex-encoded NodeID of the child
-    pub child_node_id: String,
-    /// Comprehensive entry type (includes physical/dynamic distinction)
-    /// This field contains ALL information needed to determine partition assignment
-    pub entry_type: tinyfs::EntryType,
-    /// Version number when this entry was last modified
-    /// Enables tracking which version last touched each entry
-    pub version_last_modified: i64,
-}
-
-impl DirectoryEntry {
-    /// Create a new directory entry (full snapshot style)
-    #[must_use]
-    pub fn new(
-        name: String,
-        child_node_id: NodeID,
-        entry_type: tinyfs::EntryType,
-        version_last_modified: i64,
-    ) -> Self {
-        Self {
-            name,
-            child_node_id: child_node_id.to_string(),
-            entry_type,
-            version_last_modified,
-        }
-    }
-
-    /// Get the entry type (Copy trait makes this simple)
-    #[must_use]
-    pub fn entry_type(&self) -> tinyfs::EntryType {
-        self.entry_type
-    }
-}
+/// Type alias - use tinyfs::DirectoryEntry as the canonical type
+/// This avoids duplicate struct definitions and maintains a single source of truth.
+pub type DirectoryEntry = tinyfs::DirectoryEntry;
 
 /// Type alias for backward compatibility during transition
 #[deprecated(note = "Use DirectoryEntry instead")]
-pub type VersionedDirectoryEntry = DirectoryEntry;
+pub type VersionedDirectoryEntry = tinyfs::DirectoryEntry;
 
-impl ForArrow for DirectoryEntry {
+/// ForArrow implementation for tinyfs::DirectoryEntry to enable Arrow/Parquet serialization
+impl ForArrow for tinyfs::DirectoryEntry {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
@@ -941,12 +889,4 @@ pub fn decode_directory_entries(
     } else {
         Ok(Vec::new())
     }
-}
-
-/// Legacy function name for backward compatibility
-#[deprecated(note = "Use decode_directory_entries instead")]
-pub fn decode_versioned_directory_entries(
-    content: &[u8],
-) -> Result<Vec<DirectoryEntry>, crate::error::TLogFSError> {
-    decode_directory_entries(content)
 }

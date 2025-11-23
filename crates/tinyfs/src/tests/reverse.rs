@@ -54,20 +54,34 @@ impl Directory for ReverseDirectory {
 
     async fn entries(
         &self,
-    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<(String, NodeRef)>> + Send>>> {
+    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<crate::DirectoryEntry>> + Send>>> {
         let root = self.fs.root().await?;
         let dir = root.open_dir_path(&self.target_path).await?;
-        let mut dir_stream = dir.read_dir().await?;
+        let mut entry_stream = dir.entries().await?;
 
         let mut sub = Vec::new();
         use futures::StreamExt;
-        while let Some(np) = dir_stream.next().await {
+        while let Some(result) = entry_stream.next().await {
+            let dir_entry = result?;
+            let np = dir.get(&dir_entry.name).await?.ok_or_else(|| error::Error::NotFound(dir_entry.name.into()))?;
             sub.push(np);
         }
 
         let mut reversed_items = Vec::new();
         for np in sub {
-            reversed_items.push(Ok((reverse_string(&np.basename()), np.node.clone())));
+            let node = np.node.lock().await;
+            let entry_type = match &node.node_type {
+                NodeType::Directory(_) => crate::EntryType::DirectoryPhysical,
+                NodeType::File(_) => crate::EntryType::FileDataPhysical,
+                NodeType::Symlink(_) => crate::EntryType::Symlink,
+            };
+            let dir_entry = crate::DirectoryEntry::new(
+                reverse_string(&np.basename()),
+                node.id,
+                entry_type,
+                0,
+            );
+            reversed_items.push(Ok(dir_entry));
         }
 
         Ok(Box::pin(stream::iter(reversed_items)))
@@ -124,10 +138,12 @@ async fn test_reverse_directory() {
     // Test iterator functionality of ReverseDirectory
     let reverse_dir = root.open_dir_path("/2").await.unwrap();
 
-    let mut dir_stream = reverse_dir.read_dir().await.unwrap();
+    let mut entry_stream = reverse_dir.entries().await.unwrap();
     let mut actual = Vec::new();
     use futures::StreamExt;
-    while let Some(np) = dir_stream.next().await {
+    while let Some(result) = entry_stream.next().await {
+        let dir_entry = result.unwrap();
+        let np = reverse_dir.get(&dir_entry.name).await.unwrap().unwrap();
         let file_node = np.borrow().await.as_file().unwrap();
         let reader = file_node.async_reader().await.unwrap();
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)

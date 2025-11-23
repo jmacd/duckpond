@@ -87,12 +87,25 @@ impl PersistenceLayer for MemoryPersistence {
     async fn load_directory_entries(
         &self,
         parent_node_id: NodeID,
-    ) -> Result<HashMap<String, (NodeID, EntryType)>> {
+    ) -> Result<HashMap<String, crate::DirectoryEntry>> {
         let directories = self.directories.lock().await;
+        
+        // Convert from (NodeID, EntryType) to DirectoryEntry
         Ok(directories
             .get(&parent_node_id)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, (child_node_id, entry_type))| {
+                let dir_entry = crate::DirectoryEntry::new(
+                    name.clone(),
+                    child_node_id,
+                    entry_type,
+                    0, // Version not tracked in memory @@@
+                );
+                (name, dir_entry)
+            })
+            .collect())
     }
 
     async fn load_symlink_target(

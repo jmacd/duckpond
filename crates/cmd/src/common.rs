@@ -108,7 +108,8 @@ const UUID_SHORT_LENGTH: usize = 12;
 /// For hex strings, shows appropriate number of digits based on magnitude
 /// Always wraps the result in square brackets for consistency
 #[must_use]
-pub fn format_node_id(node_id: &str) -> String {
+pub fn format_node_id(node_id: &impl std::fmt::Display) -> String {
+    let node_id = node_id.to_string();
     // @@@ YUCK Use Uuid, fail, do not fallback
     // Check if this looks like a UUID7 (contains hyphens)
     let id_str = if node_id.contains('-') {
@@ -145,7 +146,7 @@ pub fn format_file_size(size: u64) -> String {
 #[derive(Debug)]
 pub struct FileInfo {
     pub path: String,
-    pub node_id: String,
+    pub node_id: tinyfs::NodeID,
     pub metadata: tinyfs::NodeMetadata,
     pub symlink_target: Option<String>,
 }
@@ -223,7 +224,7 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         }
 
         // Extract metadata that we can access from the node
-        let node_id = node.id().await.to_string();
+        let node_id = node.id().await;
 
         match node_ref.node_type() {
             tinyfs::NodeType::File(file_handle) => {
