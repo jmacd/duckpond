@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
+use std::collections::HashMap;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -94,35 +95,34 @@ impl WD {
         self.dref.get(name).await
     }
 
-    /// Batch load nodes for multiple directory entries  
-    /// 🚀 OPTIMIZATION: Groups by partition and loads with minimal SQL queries
+    /// Batch load nodes for multiple directory entries
+    /// Note@@@ Still not safe. have to assume these came from this.
     async fn load_entries(&self, entries: Vec<DirectoryEntry>) -> Result<Vec<NodePath>> {
         // For each entry, we need to determine its partition and node ID
         // Then batch load all nodes at once
         let mut requests = Vec::new();
         
-        let parent_node_id = self.np.node.lock().await.id;
+        let parent_id = self.np.node.lock().await.id;
         
         for entry in &entries {
             let node_id = entry.child_node_id;  // Direct field access (no longer a method)
             
             // Use EntryType's partition_id method to determine partition
-            let part_id = entry.entry_type.partition_id(node_id, parent_node_id);
+            //let part_id = entry.entry_type.partition_id(node_id, parent_id);
             
-            requests.push((entry.name.clone(), node_id, part_id, entry.entry_type));
+            requests.push((entry.name.clone(), parent_id.child_id(node_id), entry.entry_type));
         }
         
-        // Extract (node_id, part_id) pairs for batch loading
-        let batch_requests: Vec<(NodeID, NodeID)> = requests
+        // Extract FileIDs for batch loading
+        let batch_requests: Vec<FileID> = requests
             .iter()
-            .map(|(_, node_id, part_id, _)| (*node_id, *part_id))
+            .map(|(_, id, _)| id.clone())
             .collect();
         
-        // 🚀 BATCH LOAD: Load all nodes with M queries (M = # partitions) instead of N queries (N = # nodes)
         let loaded_node_types = self.fs.batch_load_nodes(batch_requests).await?;
         
         // Convert NodeType to NodeRef
-        let mut loaded_nodes = std::collections::HashMap::new();
+        let mut loaded_nodes = HashMap::new();
         for (node_id, node_type) in loaded_node_types {
             let node_ref = NodeRef::new(Arc::new(Mutex::new(Node {
                 node_type,
@@ -133,17 +133,17 @@ impl WD {
         
         // Build NodePath results in original order
         let mut node_paths = Vec::new();
-        for (name, node_id, _, _) in requests {
+        for (name, id, _) in requests {
             // Try loaded_nodes first (from persistence), then fall back to directory.get()
             // This handles both TlogFS (nodes in persistence) and MemoryFS (nodes in directory)
-            let node_ref = if let Some(node_ref) = loaded_nodes.get(&node_id) {
+            let node_ref = if let Some(node_ref) = loaded_nodes.get(&id) {
                 node_ref.clone()
             } else {
                 // Fall back to directory.get() for MemoryFS and other in-memory implementations
                 self.dref.handle.get(&name).await?
                     .ok_or_else(|| Error::NotFound(PathBuf::from(format!(
-                        "Node '{}' (id={}) not found in batch load or directory.get()",
-                        name, node_id
+                        "Node '{}' (id={:?}) not found in batch load or directory.get()",
+                        name, id
                     ))))?
             };
             
@@ -156,15 +156,16 @@ impl WD {
         Ok(node_paths)
     }
 
-    fn is_root(&self) -> bool {
-        // Use try_lock since this is a sync method
-        if let Ok(node_guard) = self.np.node.try_lock() {
-            node_guard.id.is_root()
-        } else {
-            false // If we can't lock, assume not root
-        }
+    async fn is_root(&self) -> bool {
+        let node_guard = self.np.node.lock().await;
+        node_guard.id.is_root()
     }
 
+    async fn id(&self) -> FileID {
+        let node_guard = self.np.node.lock().await;
+        node_guard.id
+    }
+    
     #[must_use]
     pub fn node_path(&self) -> NodePath {
         self.np.clone()
@@ -177,7 +178,7 @@ impl WD {
         T: Into<NodeType>,
     {
         let node_type = node_creator().into();
-        let node = self.fs.create_node(NodeID::root(), node_type).await?;
+        let node = self.fs.create_node(self.id().await, node_type).await?;
         self.dref.insert(name.to_string(), node.clone()).await?;
         Ok(NodePath {
             node,
@@ -252,13 +253,13 @@ impl WD {
             .in_path(path.as_ref(), |wd, entry| async move {
                 match entry {
                     Lookup::NotFound(_, name) => {
-                        // Use the actual parent directory's node ID (the wd.np for this directory)
-                        let parent_node_id = wd.np.id().await.to_string();
+                        // Use the actual parent directory's node ID
+                        let parent_id = wd.id().await;
 
-                        // Create empty file node first with specified entry type (memory-only for streaming)
+                        // Create empty file node first with specified entry type
                         let node = wd
                             .fs
-                            .create_file_memory_only(Some(&parent_node_id), entry_type)
+                            .create_file_node_pending_write(parent_id, entry_type)
                             .await?;
 
                         // Insert into the directory and return NodePath
@@ -307,22 +308,26 @@ impl WD {
         Ok(writer)
     }
     /// Creates a symlink at the specified path
-    pub async fn create_symlink_path<P: AsRef<Path>>(
+    pub async fn create_symlink_path<P, T>(
         &self,
         path: P,
-        target: P,
-    ) -> Result<NodePath> {
-        let target_str = target.as_ref().to_string_lossy();
-        let parent_node_id = self.np.id().await.to_string();
-        let path_clone = path.as_ref().to_path_buf();
+        target: T,
+    ) -> Result<NodePath>
+    where
+	 P: AsRef<Path>,
+	 T: AsRef<str>
+    {
+        let parent_id = self.id().await;
+	let target = target.as_ref();
+	let path = path.as_ref().clone();
 
-        self.in_path(path.as_ref(), |wd, entry| async move {
+        self.in_path(path.clone(), |wd, entry| async move {
             match entry {
                 Lookup::NotFound(_, name) => {
                     // Create the symlink node through the filesystem which coordinates with the backend
                     let node = wd
                         .fs
-                        .create_symlink(&target_str, Some(&parent_node_id))
+                        .create_symlink_node(parent_id, &target)
                         .await?;
 
                     // Insert into the directory and return NodePath
@@ -332,7 +337,7 @@ impl WD {
                         path: wd.dref.path().join(&name),
                     })
                 }
-                Lookup::Found(_) => Err(Error::already_exists(&path_clone)),
+                Lookup::Found(_) => Err(Error::already_exists(path)),
                 Lookup::Empty(_) => Err(Error::empty_path()),
             }
         })
@@ -347,8 +352,11 @@ impl WD {
             .in_path(path.as_ref(), |wd, entry| async move {
                 match entry {
                     Lookup::NotFound(_, name) => {
-                        // Create the directory node through the filesystem which coordinates with the backend
-                        let node = wd.fs.create_directory().await?;
+
+                        // Create the directory node
+			let id = FileID::new_physical_dir_id();
+			let node_type = wd.fs.persistence.create_directory_node(id).await?;
+			let node = NodeRef::new(Arc::new(Mutex::new(Node { node_type, id })));
 
                         // Insert into the directory and return NodePath
                         wd.dref.insert(name.clone(), node.clone()).await?;
@@ -388,17 +396,10 @@ impl WD {
         &self,
         path: P,
     ) -> Result<Vec<crate::persistence::FileVersionInfo>> {
-        let (parent_wd, lookup) = self.resolve_path(path).await?;
+        let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
             Lookup::Found(node) => {
-                let node_guard = node.borrow().await;
-                let _file_node = node_guard.as_file()?;
-                // Get node and part IDs for the versioning call
-                let node_id = node_guard.id();
-                let part_id = parent_wd.np.node.id().await; // Use parent directory as part_id
-                drop(node_guard); // Release the guard before calling async method
-
-                self.fs.list_file_versions(node_id, part_id).await
+                self.fs.list_file_versions(node.id().await).await
             }
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
             Lookup::Empty(_) => Err(Error::empty_path()),
@@ -411,16 +412,10 @@ impl WD {
         path: P,
         version: Option<u64>,
     ) -> Result<Vec<u8>> {
-        let (parent_wd, lookup) = self.resolve_path(path).await?;
+        let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
             Lookup::Found(node) => {
-                let node_guard = node.borrow().await;
-                let _file_node = node_guard.as_file()?;
-                let node_id = node_guard.id();
-                let part_id = parent_wd.np.node.id().await; // Use parent directory as part_id
-                drop(node_guard); // Release the guard before calling async method
-
-                self.fs.read_file_version(node_id, part_id, version).await
+                self.fs.read_file_version(node.id().await, version).await
             }
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
             Lookup::Empty(_) => Err(Error::empty_path()),
@@ -536,7 +531,7 @@ impl WD {
                         return Err(Error::prefix_not_supported(path));
                     }
                     Component::RootDir => {
-                        if !self.np.borrow().await.is_root() {
+                        if !self.is_root().await {
                             return Err(Error::root_path_from_non_root(path));
                         }
                         continue;
@@ -663,7 +658,7 @@ impl WD {
         V: Visitor<T>,
         T: Send,
     {
-        let pattern = if self.is_root() {
+        let pattern = if self.is_root().await {
             crate::path::strip_root(pattern)
         } else {
             pattern.as_ref().to_path_buf()
@@ -705,7 +700,7 @@ impl WD {
     fn visit_recursive_with_visitor<'a, V, T>(
         &'a self,
         pattern: &'a [WildcardComponent],
-        visited: &'a mut Vec<HashSet<NodeID>>,
+        visited: &'a mut Vec<HashSet<FileID>>,
         captured: &'a mut Vec<String>,
         stack: &'a mut Vec<NodePath>,
         results: &'a mut Vec<T>,
@@ -736,7 +731,6 @@ impl WD {
                     }
                 }
                 WildcardComponent::Wildcard { .. } => {
-                    // 🚀 OPTIMIZATION: Filter entries BEFORE loading nodes
                     let all_entries = self.get_entries().await?;
                     
                     // Filter by name pattern first (no node loading!)
@@ -778,9 +772,7 @@ impl WD {
                         .await?;
                     }
 
-                                        // Case 2: Match one or more directories - recurse into children with same pattern
-                    // \ud83d\ude80 OPTIMIZATION: Get all entries, batch load them
-                    // Note: we load ALL children (files + dirs), visit_match_with_visitor decides whether to recurse
+                    // Case 2: Match one or more directories - recurse into children with same pattern
                     let all_entries = self.get_entries().await?;
                     let children = self.load_entries(all_entries.clone()).await?;
 
@@ -804,7 +796,7 @@ impl WD {
         child: NodePath,
         is_double: bool,
         pattern: &[WildcardComponent],
-        visited: &mut Vec<HashSet<NodeID>>,
+        visited: &mut Vec<HashSet<FileID>>,
         captured: &mut Vec<String>,
         stack: &mut Vec<NodePath>,
         results: &mut Vec<T>,
@@ -958,88 +950,14 @@ impl WD {
 
     /// Create a dynamic directory node with factory type and configuration
     /// This exposes dynamic node creation through the TinyFS API
-    pub async fn create_dynamic_directory_path<P: AsRef<Path>>(
+    pub async fn create_dynamic_path<P: AsRef<Path>>(
         &self,
         path: P,
+	entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<NodePath> {
-        let path_clone = path.as_ref().to_path_buf();
-        let node = self
-            .in_path(path.as_ref(), |wd, entry| async move {
-                match entry {
-                    Lookup::NotFound(_, name) => {
-                        // Create dynamic directory through the FS API
-                        let parent_node_id = wd.np.node.id().await;
-                        let node_id = wd
-                            .fs
-                            .create_dynamic_directory(
-                                parent_node_id,
-                                name.clone(),
-                                factory_type,
-                                config_content,
-                            )
-                            .await?;
-
-                        // Get the created node from the FS
-                        let node = wd.fs.get_node(node_id, parent_node_id).await?;
-
-                        // ✅ DON'T call insert() - create_dynamic_directory() already created the directory entry
-                        // Calling insert() here would create a duplicate directory entry
-                        Ok(NodePath {
-                            node,
-                            path: wd.dref.path().join(&name),
-                        })
-                    }
-                    Lookup::Found(_) => Err(Error::already_exists(&path_clone)),
-                    Lookup::Empty(_) => Err(Error::empty_path()),
-                }
-            })
-            .await?;
-
-        Ok(node)
-    }
-
-    /// Create a dynamic file node with factory type and configuration
-    pub async fn create_dynamic_file_path<P: AsRef<Path>>(
-        &self,
-        path: P,
-        file_type: EntryType,
-        factory_type: &str,
-        config_content: Vec<u8>,
-    ) -> Result<NodePath> {
-        let path_clone = path.as_ref().to_path_buf();
-        self.in_path(path.as_ref(), |wd, entry| async move {
-            match entry {
-                Lookup::NotFound(_, name) => {
-                    // Create dynamic file through the FS API
-                    let parent_node_id = wd.np.node.id().await;
-                    let node_id = wd
-                        .fs
-                        .create_dynamic_file(
-                            parent_node_id,
-                            name.clone(),
-                            file_type,
-                            factory_type,
-                            config_content,
-                        )
-                        .await?;
-
-                    // Get the created node from the FS
-                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
-
-                    // ✅ DON'T call insert() - create_dynamic_file() already created the directory entry
-                    // Calling insert() here would create a duplicate directory entry
-                    Ok(NodePath {
-                        node,
-                        path: wd.dref.path().join(&name),
-                    })
-                }
-                Lookup::Found(_) => Err(Error::already_exists(&path_clone)),
-                Lookup::Empty(_) => Err(Error::empty_path()),
-            }
-        })
-        .await
+	self.create_dynamic_path_with_overwrite(path, entry_type, factory_type, config_content, false).await
     }
 
     /// Read entire file content via path (convenience for tests/special cases)
@@ -1078,20 +996,17 @@ impl WD {
     pub async fn set_extended_attributes<P: AsRef<Path>>(
         &self,
         path: P,
-        attributes: std::collections::HashMap<String, String>,
+        attributes: HashMap<String, String>,
     ) -> Result<()> {
         // Resolve the path to get both the file's NodeID and its parent directory
-        let (parent_wd, lookup) = self.resolve_path(path).await?;
+        let (_, lookup) = self.resolve_path(path).await?;
 
         match lookup {
             Lookup::Found(node_path) => {
-                let node_id = node_path.id().await;
-                // Use the parent directory's NodeID as the partition
-                let part_id = parent_wd.np.id().await;
+                let id = node_path.id().await;
 
-                // Delegate to FS layer which will call persistence
                 self.fs
-                    .set_extended_attributes(node_id, part_id, attributes)
+                    .set_extended_attributes(id, attributes)
                     .await
             }
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
@@ -1099,10 +1014,11 @@ impl WD {
         }
     }
 
-    /// Create a dynamic directory node with overwrite support
-    pub async fn create_dynamic_directory_path_with_overwrite<P: AsRef<Path>>(
+    /// Create a dynamic node with overwrite support
+    pub async fn create_dynamic_path_with_overwrite<P: AsRef<Path>>(
         &self,
         path: P,
+	entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
         overwrite: bool,
@@ -1111,68 +1027,43 @@ impl WD {
         let node = self
             .in_path(path.as_ref(), |wd, entry| async move {
                 match entry {
-                    Lookup::Found(existing_node_path) if overwrite => {
+                    Lookup::Found(existing) if overwrite => {
                         // For overwrite, we need to update the configuration of the existing dynamic node
-                        // First, get the node IDs without accessing the old node (which would parse config)
-                        let existing_node_id = existing_node_path.node.lock().await.id;
-                        let parent_node_id = wd.np.node.id().await;
+                        let existing_id = existing.id().await;
+
+			assert_eq!(existing_id.entry_type(), entry_type);
 
                         // Update the dynamic node configuration via FS layer
                         wd.fs
                             .update_dynamic_node_config(
-                                existing_node_id,
-                                parent_node_id,
+                                existing_id,
                                 factory_type,
                                 config_content,
                             )
                             .await?;
 
                         // Return the existing node path
-                        Ok(existing_node_path)
-                    }
-                    Lookup::NotFound(_, name) if overwrite => {
-                        // This could be either truly not found OR found but failed to parse config
-                        // For overwrite operations, we should try to recreate/overwrite anyway
-                        // since the parent directory info is available in wd
-                        let parent_node_id = wd.np.node.id().await;
-                        let node_id = wd
-                            .fs
-                            .create_dynamic_directory(
-                                parent_node_id,
-                                name.clone(),
-                                factory_type,
-                                config_content,
-                            )
-                            .await?;
-
-                        // Get the created node from the FS
-                        let node = wd.fs.get_node(node_id, parent_node_id).await?;
-
-                        // ✅ DON'T call insert() - create_dynamic_directory() already created the directory entry
-                        // Calling insert() here would create a duplicate directory entry
-                        Ok(NodePath {
-                            node,
-                            path: wd.dref.path().join(&name),
-                        })
+                        Ok(existing)
                     }
                     Lookup::NotFound(_, name) => {
-                        // Create dynamic directory through the FS API
-                        let parent_node_id = wd.np.node.id().await;
-                        let node_id = wd
+                        // For overwrite operations, we should try to recreate/overwrite anyway
+                        // since the parent directory info is available in wd
+ 			let id = wd.id().await.new_child_id(EntryType::DirectoryDynamic);
+                        let node_type = wd
                             .fs
-                            .create_dynamic_directory(
-                                parent_node_id,
+                            .create_dynamic_node(
+                                id,
                                 name.clone(),
+				entry_type, 
                                 factory_type,
                                 config_content,
                             )
                             .await?;
 
-                        // Get the created node from the FS
-                        let node = wd.fs.get_node(node_id, parent_node_id).await?;
+			let node = NodeRef::new(Arc::new(Mutex::new(Node { node_type, id })));
+			// @@@ wasnt support to do this, but we changed signatures of create_dynamic_dir
+			wd.dref.insert(name.clone(), node.clone()).await?;
 
-                        // ✅ DON'T call insert() - create_dynamic_directory() already created the directory entry
-                        // Calling insert() here would create a duplicate directory entry
                         Ok(NodePath {
                             node,
                             path: wd.dref.path().join(&name),
@@ -1185,67 +1076,6 @@ impl WD {
             .await?;
 
         Ok(node)
-    }
-
-    /// Create a dynamic file node with overwrite support
-    pub async fn create_dynamic_file_path_with_overwrite<P: AsRef<Path>>(
-        &self,
-        path: P,
-        file_type: EntryType,
-        factory_type: &str,
-        config_content: Vec<u8>,
-        overwrite: bool,
-    ) -> Result<NodePath> {
-        let path_clone = path.as_ref().to_path_buf();
-        self.in_path(path.as_ref(), |wd, entry| async move {
-            match entry {
-                Lookup::NotFound(_, name) => {
-                    // Create dynamic file through the FS API
-                    let parent_node_id = wd.np.node.id().await;
-                    let node_id = wd
-                        .fs
-                        .create_dynamic_file(
-                            parent_node_id,
-                            name.clone(),
-                            file_type,
-                            factory_type,
-                            config_content,
-                        )
-                        .await?;
-
-                    // Get the created node from the FS
-                    let node = wd.fs.get_node(node_id, parent_node_id).await?;
-
-                    // ✅ DON'T call insert() - create_dynamic_file() already created the directory entry
-                    // Calling insert() here would create a duplicate directory entry
-                    Ok(NodePath {
-                        node,
-                        path: wd.dref.path().join(&name),
-                    })
-                }
-                Lookup::Found(existing_node_path) if overwrite => {
-                    // For overwrite, update the configuration of the existing dynamic node
-                    let existing_node_id = existing_node_path.id().await;
-                    let parent_node_id = wd.np.node.id().await;
-
-                    // Update the dynamic node configuration via FS layer
-                    wd.fs
-                        .update_dynamic_node_config(
-                            existing_node_id,
-                            parent_node_id,
-                            factory_type,
-                            config_content,
-                        )
-                        .await?;
-
-                    // Return the existing node path
-                    Ok(existing_node_path)
-                }
-                Lookup::Found(_) => Err(Error::already_exists(&path_clone)),
-                Lookup::Empty(_) => Err(Error::empty_path()),
-            }
-        })
-        .await
     }
 }
 

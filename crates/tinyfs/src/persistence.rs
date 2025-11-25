@@ -1,6 +1,6 @@
 use crate::EntryType;
 use crate::error::Result;
-use crate::node::{NodeID, NodeType};
+use crate::node::{NodeID, FileID, NodeType};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -26,69 +26,69 @@ pub struct FileVersionInfo {
 pub trait PersistenceLayer: Send + Sync {
     /// Downcast support for accessing concrete implementation methods
     fn as_any(&self) -> &dyn std::any::Any;
-    // Node operations (with part_id for containing directory)
-    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType>;
+
+    // Node operations
+    async fn load_node(&self, file_id: FileID) -> Result<NodeType>;
     async fn store_node(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+	id: FileID,
         node_type: &NodeType,
     ) -> Result<()>;
-    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
+    async fn exists_node(&self, id: FileID) -> Result<bool>;
 
-    // Symlink operations (for symlinks to avoid local state)
+    // Symlink operations
     async fn load_symlink_target(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+	id: FileID,
     ) -> Result<std::path::PathBuf>;
     async fn store_symlink_target(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+	id: FileID,
         target: &std::path::Path,
     ) -> Result<()>;
 
     // Factory methods for creating nodes directly with persistence
     async fn create_file_node(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        entry_type: EntryType,
+	file_id: FileID,
     ) -> Result<NodeType>;
-    async fn create_directory_node(&self, node_id: NodeID) -> Result<NodeType>;
+
+    async fn create_directory_node(&self,
+	id: FileID,
+    ) -> Result<NodeType>;
     async fn create_symlink_node(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         target: &std::path::Path,
     ) -> Result<NodeType>;
 
     // Dynamic node factory methods
-    async fn create_dynamic_directory_node(
+    async fn create_dynamic_node(
         &self,
-        parent_node_id: NodeID,
+        id: FileID,
         name: String,
+	entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
-    ) -> Result<NodeID>;
-    async fn create_dynamic_file_node(
-        &self,
-        parent_node_id: NodeID,
-        name: String,
-        file_type: EntryType,
-        factory_type: &str,
-        config_content: Vec<u8>,
-    ) -> Result<NodeID>;
+    ) -> Result<NodeType>;
+
+    // async fn create_dynamic_file_node(
+    //     &self,
+    //     id: FileID,
+    //     name: String,
+    //     file_type: EntryType,
+    //     factory_type: &str,
+    //     config_content: Vec<u8>,
+    // ) -> Result<NodeType>;
+
     async fn get_dynamic_node_config(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
     ) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
+
     async fn update_dynamic_node_config(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<()>;
@@ -97,15 +97,15 @@ pub trait PersistenceLayer: Send + Sync {
     /// Load all directory entries with full metadata (without loading nodes)
     async fn load_directory_entries(
         &self,
-        parent_node_id: NodeID,
+        parent_id: FileID,
     ) -> Result<HashMap<String, crate::DirectoryEntry>>;
     
     /// Batch load multiple nodes grouped by partition for efficiency.
     /// Default implementation returns empty map; tlogfs overrides with optimized batch loading.
     async fn batch_load_nodes(
         &self,
-        _requests: Vec<(NodeID, NodeID)>,
-    ) -> Result<HashMap<NodeID, NodeType>> {
+        _requests: Vec<FileID>,
+    ) -> Result<HashMap<FileID, NodeType>> {
         // Default implementation for persistence layers that don't support batch loading
         Ok(HashMap::new())
     }
@@ -113,9 +113,9 @@ pub trait PersistenceLayer: Send + Sync {
     /// Optimized query for a single directory entry by name
     async fn query_directory_entry(
         &self,
-        parent_node_id: NodeID,
+        parent_id: FileID,
         entry_name: &str,
-    ) -> Result<Option<(NodeID, EntryType)>>;
+    ) -> Result<Option<(FileID, EntryType)>>;
     /// Directory entry update that stores node type (only supported operation)
     async fn update_directory_entry(
         &self,
@@ -134,8 +134,7 @@ pub trait PersistenceLayer: Send + Sync {
     /// Requires both node_id and part_id for efficient querying
     async fn metadata_u64(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         name: &str,
     ) -> Result<Option<u64>>;
 
@@ -144,16 +143,14 @@ pub trait PersistenceLayer: Send + Sync {
     /// Returns versions in chronological order (oldest to newest)
     async fn list_file_versions(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
     ) -> Result<Vec<FileVersionInfo>>;
 
     /// Read content of a specific version of a file
     /// If version is None, reads the latest version
     async fn read_file_version(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         version: Option<u64>,
     ) -> Result<Vec<u8>>;
 
@@ -161,8 +158,7 @@ pub trait PersistenceLayer: Send + Sync {
     /// This should modify the pending version of the node in the current transaction
     async fn set_extended_attributes(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         attributes: HashMap<String, String>,
     ) -> Result<()>;
 }

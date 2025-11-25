@@ -62,6 +62,7 @@ hex = "0.4.3"
 humantime = "2.1"
 linkme = "0.3"
 log = "0.4.17"
+num_enum = "0.7"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 object_store = { version = "0.12" }
 parquet = { version = "55", features = ["async", "arrow"] }

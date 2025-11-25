@@ -15,13 +15,13 @@ description.workspace = true
 doctest = false
 
 [dependencies]
-tokio = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
-log = { workspace = true }
-uuid7 = { workspace = true }
-serde = { workspace = true }
-sha2 = { workspace = true }
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+log.workspace = true
+uuid7.workspace = true
+serde.workspace = true
+sha2.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 arrow.workspace = true
@@ -29,10 +29,11 @@ parquet.workspace = true
 deltalake.workspace = true
 tokio-util.workspace = true
 serde_arrow.workspace = true
+num_enum.workspace = true
 
 [dev-dependencies]
-serde_json = { workspace = true }
-bytes = { workspace = true }
+serde_json.workspace = true
+bytes.workspace = true
 
 [lints]
 workspace = true

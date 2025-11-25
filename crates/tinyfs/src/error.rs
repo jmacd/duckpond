@@ -1,5 +1,6 @@
 use std::cell::BorrowMutError;
 use std::path::{Path, PathBuf};
+use crate::node::FileID;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -8,6 +9,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     NotFound(PathBuf),
+    IDNotFound(FileID),
     NotADirectory(PathBuf),
     NotAFile(PathBuf),
     NotASymlink(PathBuf),

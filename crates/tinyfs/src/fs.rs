@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -7,16 +6,16 @@ use crate::DirectoryEntry;
 use crate::EntryType;
 use crate::error::*;
 use crate::node::*;
-use crate::persistence::PersistenceLayer;
+use crate::persistence::{PersistenceLayer, FileVersionInfo};
 use crate::wd::WD;
-
-// TODO A pattern like /templates/**/* will resolve directories like /template/xyz
 
 /// Main filesystem structure - pure persistence layer architecture (Phase 5)
 #[derive(Clone)]
 pub struct FS {
-    persistence: Arc<dyn PersistenceLayer>,
-    busy: Arc<Mutex<HashSet<NodeID>>>, // Only coordination state for loop detection
+    pub(crate) persistence: Arc<dyn PersistenceLayer>,
+
+    /// Coordination state for loop detection    
+    busy: Arc<Mutex<HashSet<FileID>>>,
 }
 
 impl FS {
@@ -31,8 +30,7 @@ impl FS {
     /// Returns a working directory context for the root directory
     /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {
-        let root_node_id = NodeID::root();
-        let root_node = self.get_existing_node(root_node_id, root_node_id).await?;
+        let root_node = self.get_existing_node(FileID::root()).await?;
         let node = NodePath {
             node: root_node,
             path: "/".into(),
@@ -45,68 +43,72 @@ impl FS {
     }
 
     /// Get an existing node - does NOT create if missing
-    pub async fn get_existing_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
-        // Load from persistence layer - fail if not found
-        let node_type = self.persistence.load_node(node_id, part_id).await?;
+    pub async fn get_existing_node(&self, id: FileID) -> Result<NodeRef> {
+        let node_type = self.persistence.load_node(id).await?;
         let node = NodeRef::new(Arc::new(Mutex::new(Node {
             node_type,
-            id: node_id,
+            id,
         })));
         Ok(node)
     }
 
-    /// Get or create a node - uses persistence layer directly
-    pub async fn get_or_create_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
-        // Try to load from persistence layer
-        match self.persistence.load_node(node_id, part_id).await {
-            Ok(node_type) => {
-                let node = NodeRef::new(Arc::new(Mutex::new(Node {
-                    node_type,
-                    id: node_id,
-                })));
-                Ok(node)
-            }
-            Err(Error::NotFound(_)) => {
-                // Node doesn't exist - return error instead of auto-creating
-                // Nodes should be explicitly created through transactions
-                Err(Error::NotFound(PathBuf::from(format!(
-                    "Node {}/{} not found and on-demand creation disabled",
-                    node_id, part_id
-                ))))
-            }
-            Err(e) => Err(e),
-        }
-    }
+    // /// Get or create a node - uses persistence layer directly
+    // pub async fn get_or_create_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+    //     // Try to load from persistence layer
+    //     match self.persistence.load_node(node_id, part_id).await {
+    //         Ok(node_type) => {
+    //             let node = NodeRef::new(Arc::new(Mutex::new(Node {
+    //                 node_type,
+    //                 id: node_id,
+    //             })));
+    //             Ok(node)
+    //         }
+    //         Err(Error::NotFound(_)) => {
+    //             // Node doesn't exist - return error instead of auto-creating
+    //             // Nodes should be explicitly created through transactions
+    //             Err(Error::NotFound(PathBuf::from(format!(
+    //                 "Node {}/{} not found and on-demand creation disabled",
+    //                 node_id, part_id
+    //             ))))
+    //         }
+    //         Err(e) => Err(e),
+    //     }
+    // }
+
+    // /// Get a node by its ID
+    // pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+    //     self.get_or_create_node(node_id, part_id).await
+    // }
 
     /// Create a new node with persistence
-    pub async fn create_node(&self, part_id: NodeID, node_type: NodeType) -> Result<NodeRef> {
-        let node_id = NodeID::generate();
+    pub async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<NodeRef> {
+        let id = parent_id.new_child_id(node_type.entry_type().await?);
         self.persistence
-            .store_node(node_id, part_id, &node_type)
+            .store_node(id, &node_type)
             .await?;
         let node = NodeRef::new(Arc::new(Mutex::new(Node {
             node_type,
-            id: node_id,
+            id,
         })));
         Ok(node)
     }
 
     /// Load directory entries with full metadata (without loading nodes)
-    pub async fn load_directory_entries(
+    pub(crate) async fn load_directory_entries(
         &self,
-        parent_node_id: NodeID,
+        parent_id: FileID,
     ) -> Result<HashMap<String, DirectoryEntry>> {
         self.persistence
-            .load_directory_entries(parent_node_id)
+            .load_directory_entries(parent_id)
             .await
     }
 
     /// Batch load multiple nodes grouped by partition for efficiency.
     /// Issues one SQL query per partition instead of one query per node.
-    pub async fn batch_load_nodes(
+    pub(crate) async fn batch_load_nodes(
         &self,
-        requests: Vec<(NodeID, NodeID)>,
-    ) -> Result<HashMap<NodeID, NodeType>> {
+        requests: Vec<FileID>,
+    ) -> Result<HashMap<FileID, NodeType>> {
         self.persistence.batch_load_nodes(requests).await
     }
 
@@ -114,11 +116,10 @@ impl FS {
     /// Common names: "timestamp", "version", "size"
     pub async fn metadata_u64(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         name: &str,
     ) -> Result<Option<u64>> {
-        self.persistence.metadata_u64(node_id, part_id, name).await
+        self.persistence.metadata_u64(id, name).await
     }
 
     /// Get a working directory context from a NodePath
@@ -142,169 +143,112 @@ impl FS {
         _ = busy.remove(&node.id().await);
     }
 
-    /// Get a node by its ID
-    pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
-        self.get_or_create_node(node_id, part_id).await
-    }
-
-    /// Create a new directory node and return its NodeRef
-    pub async fn create_directory(&self) -> Result<NodeRef> {
-        let id = NodeID::generate();
-        let node_type = self.persistence.create_directory_node(id).await?;
-        let node = NodeRef::new(Arc::new(Mutex::new(Node { node_type, id })));
-        Ok(node)
-    }
-
-    pub async fn create_file_memory_only(
+    pub(crate) async fn create_file_node_pending_write(
         &self,
-        parent_node_id: Option<&str>,
+        parent_id: FileID,
         entry_type: EntryType,
     ) -> Result<NodeRef> {
         // Generate a new node ID
-        let node_id = NodeID::generate();
-
-        // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
-        let part_id = if let Some(parent_id_str) = parent_node_id {
-            // Convert parent node ID string to NodeID
-            NodeID::from_hex_string(parent_id_str)
-                .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
-        } else {
-            NodeID::root()
-        };
+        let id = parent_id.new_child_id(entry_type);
 
         // Create the file node in memory only - no immediate persistence
         let node_type = self
             .persistence
-            .create_file_node(node_id, part_id, entry_type)
+            .create_file_node(id)
             .await?;
 
         let node = NodeRef::new(Arc::new(Mutex::new(Node {
             node_type,
-            id: node_id,
+            id,
         })));
         Ok(node)
     }
 
     /// Create a new symlink node and return its NodeRef
-    pub async fn create_symlink(
+    pub(crate) async fn create_symlink_node(
         &self,
+        parent_id: FileID,
         target: &str,
-        parent_node_id: Option<&str>,
     ) -> Result<NodeRef> {
-        // Generate a new node ID
-        let node_id = NodeID::generate();
+        let id = parent_id.new_child_id(EntryType::Symlink);
 
-        // Use the provided parent_node_id as the part_id, or ROOT_ID as fallback
-        let part_id = if let Some(parent_id_str) = parent_node_id {
-            // Convert parent node ID string to NodeID
-            NodeID::from_hex_string(parent_id_str)
-                .map_err(|_| Error::Other(format!("Invalid parent node ID: {}", parent_id_str)))?
-        } else {
-            NodeID::root()
-        };
-
-        // Create the symlink node via persistence layer - this will create OpLogSymlink directly
         let target_path = std::path::Path::new(target);
         let node_type = self
             .persistence
-            .create_symlink_node(node_id, part_id, target_path)
+            .create_symlink_node(id, target_path)
             .await?;
 
         let node = NodeRef::new(Arc::new(Mutex::new(Node {
             node_type,
-            id: node_id,
+            id,
         })));
         Ok(node)
     }
 
     /// List all versions of a file
-    pub async fn list_file_versions(
+    pub(crate) async fn list_file_versions(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> Result<Vec<crate::persistence::FileVersionInfo>> {
-        self.persistence.list_file_versions(node_id, part_id).await
+        id: FileID,
+    ) -> Result<Vec<FileVersionInfo>> {
+        self.persistence.list_file_versions(id).await
     }
 
     /// Read a specific version of a file
     /// @@@ BAD
-    pub async fn read_file_version(
+    pub(crate) async fn read_file_version(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         version: Option<u64>,
     ) -> Result<Vec<u8>> {
         self.persistence
-            .read_file_version(node_id, part_id, version)
+            .read_file_version(id, version)
             .await
     }
 
     /// Create a dynamic directory node with factory type and configuration
-    pub async fn create_dynamic_directory(
+    pub(crate) async fn create_dynamic_node(
         &self,
-        parent_node_id: NodeID,
+        id: FileID,
         name: String,
+	entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
-    ) -> Result<NodeID> {
+    ) -> Result<NodeType> {
         self.persistence
-            .create_dynamic_directory_node(parent_node_id, name, factory_type, config_content)
-            .await
-    }
-
-    /// Create a dynamic file node with factory type and configuration  
-    pub async fn create_dynamic_file(
-        &self,
-        parent_node_id: NodeID,
-        name: String,
-        file_type: EntryType,
-        factory_type: &str,
-        config_content: Vec<u8>,
-    ) -> Result<NodeID> {
-        self.persistence
-            .create_dynamic_file_node(
-                parent_node_id,
-                name,
-                file_type,
-                factory_type,
-                config_content,
-            )
+            .create_dynamic_node(id, name, entry_type, factory_type, config_content)
             .await
     }
 
     /// Check if a node is dynamic and return its factory configuration
-    pub async fn get_dynamic_node_config(
+    pub(crate) async fn get_dynamic_node_config(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
     ) -> Result<Option<(String, Vec<u8>)>> {
         self.persistence
-            .get_dynamic_node_config(node_id, part_id)
+            .get_dynamic_node_config(id)
             .await
     }
 
     /// Update the configuration of an existing dynamic node
-    pub async fn update_dynamic_node_config(
+    pub(crate) async fn update_dynamic_node_config(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<()> {
         self.persistence
-            .update_dynamic_node_config(node_id, part_id, factory_type, config_content)
+            .update_dynamic_node_config(id, factory_type, config_content)
             .await
     }
 
     /// Set extended attributes on an existing node
     pub async fn set_extended_attributes(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         attributes: HashMap<String, String>,
     ) -> Result<()> {
         self.persistence
-            .set_extended_attributes(node_id, part_id, attributes)
+            .set_extended_attributes(id, attributes)
             .await
     }
 }

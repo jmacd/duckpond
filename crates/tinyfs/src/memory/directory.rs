@@ -2,7 +2,7 @@ use crate::EntryType;
 use crate::dir::{Directory, DirectoryEntry, Handle};
 use crate::error::{Error, Result};
 use crate::metadata::{Metadata, NodeMetadata};
-use crate::node::{NodeRef, NodeType};
+use crate::node::NodeRef;
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 use std::collections::BTreeMap;
@@ -47,19 +47,12 @@ impl Directory for MemoryDirectory {
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
         let mut items = Vec::new();
-        for (name, node_ref) in &self.entries {
-            // Access node to get its info
-            let node = node_ref.lock().await;
-            let entry_type = match &node.node_type {
-                NodeType::Directory(_) => EntryType::DirectoryPhysical,
-                NodeType::File(_) => EntryType::FileDataPhysical,
-                NodeType::Symlink(_) => EntryType::Symlink,
-            };
+        for (name, node) in &self.entries {
             let dir_entry = DirectoryEntry::new(
                 name.clone(),
-                node.id,
-                entry_type,
-                0, // Version not tracked in memory
+                node.id().await.node_id(),
+		node.entry_type().await,
+                0, // Version not tracked in memory @@@
             );
             items.push(Ok(dir_entry));
         }

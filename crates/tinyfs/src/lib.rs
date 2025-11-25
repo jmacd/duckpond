@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 pub mod arrow;
-pub mod async_helpers; // New helper module for reducing duplication
+pub mod async_helpers;
 mod dir;
 mod entry_type;
 mod error;
@@ -14,8 +14,8 @@ mod node;
 mod path;
 pub mod persistence;
 mod symlink;
-pub mod tree_format; // Tree formatting utilities for hierarchical displays
-mod wd; // Arrow integration module
+pub mod tree_format;
+mod wd;
 
 // Public exports - Core filesystem API
 pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
@@ -39,3 +39,4 @@ mod tests;
 
 #[cfg(test)]
 mod metadata_impl_tests;
+

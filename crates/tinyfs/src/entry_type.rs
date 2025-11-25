@@ -1,92 +1,49 @@
 use std::str::FromStr;
+use serde::{Serialize, Deserialize};
+use num_enum::IntoPrimitive;
 
 /// Node type identifiers for directory entries and persistence
-///
-/// This enum provides type-safe alternatives to string literals
-/// for identifying node types in directory entries and persistence layers.
-/// Files are distinguished by their format for different access patterns.
-///
-/// CRITICAL: This enum is now COMPREHENSIVE - it includes both the access method
-/// (directory, file, symlink) AND whether the node is physical (real TLogFS) or
-/// dynamic (factory-based). This eliminates the need to query OplogEntry.factory
-/// to determine partition assignment.
-///
-/// Partition Rules:
-/// - DirectoryPhysical: uses child_node_id as part_id (own partition)
-/// - DirectoryDynamic: uses parent_node_id as part_id (parent's partition)
-/// - All Files (physical/dynamic): use parent_node_id as part_id (parent's partition)
-/// - Symlinks: use parent_node_id as part_id (parent's partition, always physical)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, IntoPrimitive)]
 #[serde(rename_all = "lowercase")]
+#[repr(u8)]
 pub enum EntryType {
     /// Physical directory - real TLogFS directory that creates its own partition
     #[serde(rename = "dir:physical")]
-    DirectoryPhysical,
+    DirectoryPhysical = 1,
 
     /// Dynamic directory - factory-based directory that uses parent's partition
     #[serde(rename = "dir:dynamic")]
-    DirectoryDynamic,
+    DirectoryDynamic = 2,
 
     /// Symbolic link entry (always physical, no dynamic symlinks)
-    Symlink,
+    Symlink = 3,
 
     /// Physical data file - arbitrary byte content, accessed via Read/Write traits
     #[serde(rename = "file:data:physical")]
-    FileDataPhysical,
+    FileDataPhysical = 4,
 
     /// Dynamic data file - factory-generated data file
     #[serde(rename = "file:data:dynamic")]
-    FileDataDynamic,
+    FileDataDynamic = 5,
 
     /// Physical table file - single-version table stored as Parquet
     #[serde(rename = "file:table:physical")]
-    FileTablePhysical,
+    FileTablePhysical = 6,
 
     /// Dynamic table file - factory-generated table
     #[serde(rename = "file:table:dynamic")]
-    FileTableDynamic,
+    FileTableDynamic = 7,
 
     /// Physical series file - multi-version table series, supports time-travel queries
     #[serde(rename = "file:series:physical")]
-    FileSeriesPhysical,
+    FileSeriesPhysical = 8,
 
     /// Dynamic series file - factory-generated time series
     #[serde(rename = "file:series:dynamic")]
-    FileSeriesDynamic,
+    FileSeriesDynamic = 9,
 }
 
 impl EntryType {
-    /// Determine the partition ID for a child entry based on entry type.
-    ///
-    /// Core Rule: Only DirectoryPhysical creates its own partition.
-    /// Everything else (files, dynamic dirs, symlinks) uses parent's partition.
-    ///
-    /// # Arguments
-    /// * `child_node_id` - The node ID of the child entry
-    /// * `parent_node_id` - The node ID of the parent directory
-    ///
-    /// # Returns
-    /// The partition ID to use for this entry
-    #[must_use]
-    pub fn partition_id(
-        &self,
-        child_node_id: crate::NodeID,
-        parent_node_id: crate::NodeID,
-    ) -> crate::NodeID {
-        match self {
-            EntryType::DirectoryPhysical => {
-                // Physical directories create their own partition
-                child_node_id
-            }
-            _ => {
-                // Everything else uses parent's partition:
-                // - DirectoryDynamic
-                // - All files (physical and dynamic)
-                // - Symlinks
-                parent_node_id
-            }
-        }
-    }
 
     /// Check if this entry is a file (any format, physical or dynamic)
     #[must_use]
@@ -213,6 +170,15 @@ impl EntryType {
             }
             crate::NodeType::Symlink(_) => Ok(EntryType::Symlink),
         }
+    }
+}
+
+impl TryFrom<u8> for EntryType {
+    type Error = String;
+
+    /// 
+    fn try_from(v: u8) -> Result<Self, String> {
+	v.try_into()
     }
 }
 
