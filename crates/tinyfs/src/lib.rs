@@ -21,7 +21,7 @@ mod wd;
 pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
 pub use file::{AsyncReadSeek, File, Handle as FileHandle};
 pub use fs::FS;
-pub use node::{Node, NodeID, NodePath, NodeRef, NodeType};
+pub use node::{Node, NodeID, NodePath, NodeType};
 pub use wd::{CopyDestination, Lookup, Visitor, WD};
 
 // Buffer utilities for tests and special cases

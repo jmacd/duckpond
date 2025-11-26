@@ -1,4 +1,4 @@
-use std::ops::Deref;
+//use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,11 +8,19 @@ use crate::EntryType;
 use crate::dir::Pathed;
 use crate::error::Error;
 use crate::error::Result;
+use tokio::sync::Mutex;
 
 /// Root directory gets a special deterministic UUID7
 /// Only version (7) and variant (2) fields are set per UUID7 format
-/// The least-significant digit is 1 for EntryType::DirectoryPhysical.
-pub const ROOT_UUID: &str = "00000000-0000-7000-8000-000000000001";
+/// The nibble following version (7) is 1 for EntryType::DirectoryPhysical.
+pub const ROOT_UUID: &str = "00000000-0000-7100-8000-000000000000";
+
+#[must_use]
+pub fn root_uuid() -> Uuid {
+    ROOT_UUID
+         .parse::<Uuid>()
+         .expect("ROOT_UUID should be a valid UUID7")
+}
 
 /// Unique identifier for a node in the filesystem
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -90,10 +98,7 @@ impl NodeID {
 
     #[must_use]
     pub fn is_root(&self) -> bool {
-        let root_uuid = ROOT_UUID
-            .parse::<Uuid>()
-            .expect("ROOT_UUID should be a valid UUID7");
-        self.0 == root_uuid
+        self.0 == root_uuid()
     }
 
     /// Generate a new UUID7-based NodeID
@@ -107,8 +112,8 @@ impl NodeID {
 
     ///
     fn entry_type(&self) -> EntryType {
-	let mut b: [u8; 16] = uuid7::uuid7().into();
-	EntryType::try_from(b[6] & 0xf)
+	let mut b: [u8; 16] = self.0.into();
+	EntryType::try_from(b[6] & 0xf).unwrap()
     }
     
 }
@@ -137,16 +142,14 @@ impl FileID {
     pub fn part_id(&self) -> PartID {
 	self.part_id
     }
-    
+
     /// Root directory has a special UUID7
     #[must_use]
     pub fn root() -> Self {
-        let uuid = ROOT_UUID
-            .parse::<Uuid>()
-            .expect("ROOT_UUID should be a valid UUID7");
+        let uuid = root_uuid();
         Self{
 	    node_id: NodeID(uuid),
-	    part_id: PartID(uuid)}
+	    part_id: PartID(NodeID(uuid))}
     }
 
     pub fn new_physical_dir_id() -> Self {
@@ -210,56 +213,48 @@ impl NodeType {
 #[derive(Clone)]
 pub struct Node {
     pub id: FileID,
-    pub node_type: NodeType,
+    pub node_type: Arc<Mutex<NodeType>>,
 }
-
-#[derive(Clone)]
-pub struct NodeRef(Arc<tokio::sync::Mutex<Node>>);
 
 /// Contains a node reference and the path used to reach it
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct NodePath {
-    pub node: NodeRef,
+    pub node: Node,
     pub path: PathBuf,
-}
-
-pub struct NodePathRef<'a> {
-    node: Node, // We'll need to clone the node since we can't hold async locks
-    path: &'a PathBuf,
 }
 
 pub type DirNode = Pathed<crate::dir::Handle>;
 pub type FileNode = Pathed<crate::file::Handle>;
 pub type SymlinkNode = Pathed<crate::symlink::Handle>;
 
-impl NodeRef {
-    pub fn new(r: Arc<tokio::sync::Mutex<Node>>) -> Self {
-        Self(r)
+impl Node {
+    pub fn new(id: FileID, node_type: NodeType) -> Self {
+        Self {
+	    id,
+	    node_type: Arc::new(Mutex::new(node_type)),
+	}
     }
 
     /// Get the FileID for this node
-    pub async fn id(&self) -> FileID {
-        self.0.lock().await.id
+    pub fn id(&self) -> FileID {
+        self.id
     }
 
     /// Get the FileID for this node
-    pub async fn entry_type(&self) -> EntryType {
-        self.0.lock().await.node_type.entry_type().await.expect("valid")
-    }
-}
-
-impl Deref for NodeRef {
-    type Target = Arc<tokio::sync::Mutex<Node>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    pub fn entry_type(&self) -> EntryType {
+        self.id().entry_type()
     }
 }
 
 impl NodePath {
     #[must_use]
-    pub async fn id(&self) -> FileID {
-        self.node.lock().await.id
+    pub fn is_root(&self) -> bool {
+	self.id() == FileID::root()
+    }
+
+    #[must_use]
+    pub fn id(&self) -> FileID {
+        self.node.id()
     }
 
     #[must_use]
@@ -282,57 +277,44 @@ impl NodePath {
         self.path.clone().join(p)
     }
 
-    #[must_use]
-    pub async fn borrow(&self) -> NodePathRef<'_> {
-        NodePathRef {
-            node: self.node.lock().await.clone(),
-            path: &self.path,
-        }
-    }
-}
-
-impl NodePathRef<'_> {
-    pub fn as_file(&self) -> Result<FileNode> {
-        if let NodeType::File(f) = &self.node.node_type {
-            Ok(Pathed::new(self.path, f.clone()))
+    pub async fn into_dir(&self) -> Option<DirNode> {
+	let node_type = self.node.node_type.lock().await;
+        if let NodeType::Directory(d) = &*node_type {
+            Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
-            Err(Error::not_a_file(self.path))
+	    None
         }
     }
 
-    pub fn as_symlink(&self) -> Result<SymlinkNode> {
-        if let NodeType::Symlink(s) = &self.node.node_type {
-            Ok(Pathed::new(self.path, s.clone()))
+    pub async fn as_dir(&self) -> Result<DirNode> {
+	self.into_dir().await.ok_or_else(|| Error::not_a_directory(self.path.clone()))
+    }
+
+    pub async fn into_file(&self) -> Option<FileNode> {
+	let node_type = self.node.node_type.lock().await;
+        if let NodeType::File(d) = &*node_type {
+            Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
-            Err(Error::not_a_symlink(self.path))
-        }
+	    None
+	}
+    }
+    
+    pub async fn as_file(&self) -> Result<FileNode> {
+	self.into_file().await.ok_or_else(|| Error::not_a_file(self.path.clone()))
     }
 
-    pub fn as_dir(&self) -> Result<DirNode> {
-        if let NodeType::Directory(d) = &self.node.node_type {
-            Ok(Pathed::new(self.path, d.clone()))
+    pub async fn into_symlink(&self) -> Option<SymlinkNode> {
+	let node_type = self.node.node_type.lock().await;
+        if let NodeType::Symlink(d) = &*node_type {
+            Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
-            Err(Error::not_a_directory(self.path))
+	    None
         }
     }
 
-    // pub fn is_root(&self) -> bool {
-    //     self.id() == NodeID::root()
-    // }
-
-    pub fn node_type(&self) -> NodeType {
-        self.node.node_type.clone()
-    }
-
-    pub fn id(&self) -> FileID {
-        self.node.id
-    }
-}
-
-impl PartialEq<Node> for Node {
-    fn eq(&self, other: &Node) -> bool {
-        self.id == other.id
-    }
+    pub async fn as_symlink(&self) -> Result<SymlinkNode> {
+	self.into_symlink().await.ok_or_else(|| Error::not_a_symlink(self.path.clone()))
+    }    
 }
 
 impl std::fmt::Debug for NodeType {

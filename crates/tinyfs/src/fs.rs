@@ -6,7 +6,7 @@ use crate::DirectoryEntry;
 use crate::EntryType;
 use crate::error::*;
 use crate::node::*;
-use crate::persistence::{PersistenceLayer, FileVersionInfo};
+use crate::persistence::{FileVersionInfo, PersistenceLayer};
 use crate::wd::WD;
 
 /// Main filesystem structure - pure persistence layer architecture (Phase 5)
@@ -30,7 +30,7 @@ impl FS {
     /// Returns a working directory context for the root directory
     /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {
-        let root_node = self.get_existing_node(FileID::root()).await?;
+        let root_node = self.persistence.load_node(FileID::root()).await?;
         let node = NodePath {
             node: root_node,
             path: "/".into(),
@@ -42,22 +42,18 @@ impl FS {
         WD::new(np.clone(), self.clone()).await
     }
 
-    /// Get an existing node - does NOT create if missing
-    pub async fn get_existing_node(&self, id: FileID) -> Result<NodeRef> {
-        let node_type = self.persistence.load_node(id).await?;
-        let node = NodeRef::new(Arc::new(Mutex::new(Node {
-            node_type,
-            id,
-        })));
-        Ok(node)
-    }
+    // /// Get an existing node - does NOT create if missing
+    // pub async fn get_existing_node(&self, id: FileID) -> Result<Node> {
+    //     let node_type = self.persistence.load_node(id).await?;
+    //     Ok(Node::new(id, node_type))
+    // }
 
     // /// Get or create a node - uses persistence layer directly
-    // pub async fn get_or_create_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+    // pub async fn get_or_create_node(&self, node_id: NodeID, part_id: NodeID) -> Result<Node> {
     //     // Try to load from persistence layer
     //     match self.persistence.load_node(node_id, part_id).await {
     //         Ok(node_type) => {
-    //             let node = NodeRef::new(Arc::new(Mutex::new(Node {
+    //             let node = Node::new(Arc::new(Mutex::new(Node {
     //                 node_type,
     //                 id: node_id,
     //             })));
@@ -76,20 +72,15 @@ impl FS {
     // }
 
     // /// Get a node by its ID
-    // pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeRef> {
+    // pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<Node> {
     //     self.get_or_create_node(node_id, part_id).await
     // }
 
     /// Create a new node with persistence
-    pub async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<NodeRef> {
+    pub async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<Node> {
         let id = parent_id.new_child_id(node_type.entry_type().await?);
-        self.persistence
-            .store_node(id, &node_type)
-            .await?;
-        let node = NodeRef::new(Arc::new(Mutex::new(Node {
-            node_type,
-            id,
-        })));
+	let node = Node::new(id, node_type);
+        self.persistence.store_node(id, &node).await?;
         Ok(node)
     }
 
@@ -98,9 +89,7 @@ impl FS {
         &self,
         parent_id: FileID,
     ) -> Result<HashMap<String, DirectoryEntry>> {
-        self.persistence
-            .load_directory_entries(parent_id)
-            .await
+        self.persistence.load_directory_entries(parent_id).await
     }
 
     /// Batch load multiple nodes grouped by partition for efficiency.
@@ -108,18 +97,8 @@ impl FS {
     pub(crate) async fn batch_load_nodes(
         &self,
         requests: Vec<FileID>,
-    ) -> Result<HashMap<FileID, NodeType>> {
+    ) -> Result<HashMap<FileID, Node>> {
         self.persistence.batch_load_nodes(requests).await
-    }
-
-    /// Get a metadata value for a node by name (numeric values only)
-    /// Common names: "timestamp", "version", "size"
-    pub async fn metadata_u64(
-        &self,
-        id: FileID,
-        name: &str,
-    ) -> Result<Option<u64>> {
-        self.persistence.metadata_u64(id, name).await
     }
 
     /// Get a working directory context from a NodePath
@@ -130,7 +109,7 @@ impl FS {
     // Loop detection methods - these work the same regardless of persistence vs backend
     pub(crate) async fn enter_node(&self, node: &NodePath) -> Result<()> {
         let mut busy = self.busy.lock().await;
-        let id = node.id().await;
+        let id = node.id();
         if busy.contains(&id) {
             return Err(Error::visit_loop(node.path()));
         }
@@ -140,36 +119,29 @@ impl FS {
 
     pub(crate) async fn exit_node(&self, node: &NodePath) {
         let mut busy = self.busy.lock().await;
-        _ = busy.remove(&node.id().await);
+        _ = busy.remove(&node.id());
     }
 
     pub(crate) async fn create_file_node_pending_write(
         &self,
         parent_id: FileID,
         entry_type: EntryType,
-    ) -> Result<NodeRef> {
+    ) -> Result<Node> {
         // Generate a new node ID
         let id = parent_id.new_child_id(entry_type);
 
         // Create the file node in memory only - no immediate persistence
-        let node_type = self
-            .persistence
-            .create_file_node(id)
-            .await?;
+        let node_type = self.persistence.create_file_node(id).await?;
 
-        let node = NodeRef::new(Arc::new(Mutex::new(Node {
-            node_type,
-            id,
-        })));
-        Ok(node)
+        Ok(Node::new(id, node_type))
     }
 
-    /// Create a new symlink node and return its NodeRef
+    /// Create a new symlink node and return its Node
     pub(crate) async fn create_symlink_node(
         &self,
         parent_id: FileID,
         target: &str,
-    ) -> Result<NodeRef> {
+    ) -> Result<Node> {
         let id = parent_id.new_child_id(EntryType::Symlink);
 
         let target_path = std::path::Path::new(target);
@@ -178,18 +150,11 @@ impl FS {
             .create_symlink_node(id, target_path)
             .await?;
 
-        let node = NodeRef::new(Arc::new(Mutex::new(Node {
-            node_type,
-            id,
-        })));
-        Ok(node)
+        Ok(Node::new(id, node_type))
     }
 
     /// List all versions of a file
-    pub(crate) async fn list_file_versions(
-        &self,
-        id: FileID,
-    ) -> Result<Vec<FileVersionInfo>> {
+    pub(crate) async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>> {
         self.persistence.list_file_versions(id).await
     }
 
@@ -200,9 +165,7 @@ impl FS {
         id: FileID,
         version: Option<u64>,
     ) -> Result<Vec<u8>> {
-        self.persistence
-            .read_file_version(id, version)
-            .await
+        self.persistence.read_file_version(id, version).await
     }
 
     /// Create a dynamic directory node with factory type and configuration
@@ -210,7 +173,7 @@ impl FS {
         &self,
         id: FileID,
         name: String,
-	entry_type: EntryType,
+        entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<NodeType> {
@@ -224,9 +187,7 @@ impl FS {
         &self,
         id: FileID,
     ) -> Result<Option<(String, Vec<u8>)>> {
-        self.persistence
-            .get_dynamic_node_config(id)
-            .await
+        self.persistence.get_dynamic_node_config(id).await
     }
 
     /// Update the configuration of an existing dynamic node

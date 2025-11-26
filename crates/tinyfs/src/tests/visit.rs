@@ -10,7 +10,7 @@ use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
 use crate::fs::FS;
-use crate::node::NodeRef;
+use crate::node::Node;
 use crate::node::NodeType;
 
 /// A directory implementation that derives its contents from wildcard matches
@@ -36,7 +36,7 @@ impl VisitDirectory {
 
 /// A visitor that creates filename and node ref pairs for directory iteration
 struct FilenameCollector {
-    items: Vec<(String, NodeRef)>,
+    items: Vec<(String, Node)>,
 }
 
 impl FilenameCollector {
@@ -46,12 +46,12 @@ impl FilenameCollector {
 }
 
 #[async_trait::async_trait]
-impl crate::wd::Visitor<(String, NodeRef)> for FilenameCollector {
+impl crate::wd::Visitor<(String, Node)> for FilenameCollector {
     async fn visit(
         &mut self,
         node: crate::node::NodePath,
         captured: &[String],
-    ) -> error::Result<(String, NodeRef)> {
+    ) -> error::Result<(String, Node)> {
         let filename = if captured.is_empty() {
             node.basename()
         } else {
@@ -122,7 +122,7 @@ impl crate::wd::Visitor<String> for BasenameVisitor {
 
 #[async_trait::async_trait]
 impl Directory for VisitDirectory {
-    async fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> error::Result<Option<Node>> {
         let mut visitor = FilenameCollector::new();
         let root_node = self.fs.root().await?;
         let result = root_node
@@ -137,7 +137,7 @@ impl Directory for VisitDirectory {
             .map(|(_, r)| r))
     }
 
-    async fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {
+    async fn insert(&mut self, name: String, _id: Node) -> error::Result<()> {
         Err(error::Error::immutable(name))
     }
 
@@ -152,7 +152,7 @@ impl Directory for VisitDirectory {
         // @@@
         _ = result?;
         let items: Vec<_> = visitor.items.into_iter().map(|(name, _node_ref)| {
-            // Convert NodeRef to DirectoryEntry (without awaiting - use placeholder)
+            // Convert Node to DirectoryEntry (without awaiting - use placeholder)
             // Use a deterministic NodeID for testing
             let node_id = crate::NodeID::from_content(format!("visit:{}", name).as_bytes());
             let dir_entry = crate::DirectoryEntry::new(

@@ -721,19 +721,6 @@ impl PersistenceLayer for State {
             .await
     }
 
-    async fn store_symlink_target(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        target: &Path,
-    ) -> TinyFSResult<()> {
-        self.inner
-            .lock()
-            .await
-            .store_symlink_target(node_id, part_id, target)
-            .await
-    }
-
     async fn create_file_node(
         &self,
         node_id: NodeID,
@@ -891,19 +878,6 @@ impl PersistenceLayer for State {
 
     async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> TinyFSResult<NodeMetadata> {
         self.inner.lock().await.metadata(node_id, part_id).await
-    }
-
-    async fn metadata_u64(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        name: &str,
-    ) -> TinyFSResult<Option<u64>> {
-        self.inner
-            .lock()
-            .await
-            .metadata_u64(node_id, part_id, name)
-            .await
     }
 
     async fn list_file_versions(
@@ -2895,17 +2869,6 @@ impl InnerState {
         }
     }
 
-    async fn store_symlink_target(
-        &mut self,
-        node_id: NodeID,
-        part_id: NodeID,
-        target: &Path,
-    ) -> TinyFSResult<()> {
-        let symlink_handle = tinyfs::memory::MemorySymlink::new_handle(target.to_path_buf());
-        let node_type = NodeType::Symlink(symlink_handle);
-        self.store_node(node_id, part_id, &node_type).await
-    }
-
     async fn create_file_node(
         &mut self,
         node_id: NodeID,
@@ -2933,7 +2896,11 @@ impl InnerState {
         state: State,
     ) -> TinyFSResult<NodeType> {
         // Store the target immediately
-        self.store_symlink_target(node_id, part_id, target).await?;
+        // self.store_symlink_target(node_id, part_id, target).await?;
+	// @@@
+        let symlink_handle = tinyfs::memory::MemorySymlink::new_handle(target.to_path_buf());
+        let node_type = NodeType::Symlink(symlink_handle);
+        self.store_node(node_id, part_id, &node_type).await
 
         // Create and return the symlink node
         node_factory::create_symlink_node(node_id, part_id, state, target)
@@ -2975,42 +2942,6 @@ impl InnerState {
             debug!("metadata: no records found");
             // Node doesn't exist
             Err(tinyfs::Error::not_found(format!("Node {}", node_id_str)))
-        }
-    }
-
-    async fn metadata_u64(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        name: &str,
-    ) -> TinyFSResult<Option<u64>> {
-        debug!("metadata_u64: querying node_id={node_id}, part_id={part_id}, name={name}");
-
-        // Query Delta Lake for the most recent record for this node using the correct partition
-        let records = self
-            .query_records(part_id, node_id)
-            .await
-            .map_err(error_utils::to_tinyfs_error)?;
-
-        let record_count = records.len();
-        debug!("metadata_u64: found {record_count} records");
-
-        if let Some(record) = records.first() {
-            // Use the record directly - it's already an OplogEntry
-            let timestamp = record.timestamp;
-            let version = record.version;
-            debug!("metadata_u64: record.timestamp={timestamp}, record.version={version}");
-
-            // Return the requested metadata field
-            match name {
-                "timestamp" => Ok(Some(record.timestamp as u64)),
-                "version" => Ok(Some(record.version as u64)),
-                _ => Ok(None), // Unknown metadata field
-            }
-        } else {
-            debug!("metadata_u64: no records found");
-            // Node doesn't exist
-            Ok(None)
         }
     }
 

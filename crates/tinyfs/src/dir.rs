@@ -19,7 +19,7 @@ pub struct DirectoryEntry {
     pub name: String,
     /// NodeID of the child
     pub child_node_id: NodeID,
-    /// Comprehensive entry type (includes physical/dynamic distinction)
+    /// Comprehensive entry type, redundant.
     pub entry_type: EntryType,
     /// Version number when this entry was last modified
     pub version_last_modified: i64,
@@ -46,9 +46,9 @@ impl DirectoryEntry {
 /// Represents a directory containing named entries.
 #[async_trait]
 pub trait Directory: Metadata + Send + Sync {
-    async fn get(&self, name: &str) -> Result<Option<NodeRef>>;
+    async fn get(&self, name: &str) -> Result<Option<Node>>;
 
-    async fn insert(&mut self, name: String, id: NodeRef) -> Result<()>;
+    async fn insert(&mut self, name: String, id: Node) -> Result<()>;
 
     /// Returns a stream of directory entries (lightweight metadata) without loading full nodes.
     /// Callers should use batch loading to load multiple nodes efficiently.
@@ -74,12 +74,12 @@ impl Handle {
         Self(r)
     }
 
-    pub async fn get(&self, name: &str) -> Result<Option<NodeRef>> {
+    pub async fn get(&self, name: &str) -> Result<Option<Node>> {
         let dir = self.0.lock().await;
         dir.get(name).await
     }
 
-    pub async fn insert(&self, name: String, id: NodeRef) -> Result<()> {
+    pub async fn insert(&self, name: String, id: Node) -> Result<()> {
         log::debug!(
             "Handle::insert() - forwarding to Directory trait: {name}",
             name = name
@@ -159,7 +159,7 @@ impl Pathed<Handle> {
         }
     }
 
-    pub async fn insert(&self, name: String, id: NodeRef) -> Result<()> {
+    pub async fn insert(&self, name: String, id: Node) -> Result<()> {
         self.handle.insert(name, id).await
     }
 }

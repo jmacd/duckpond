@@ -10,7 +10,7 @@ use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
 use crate::fs::FS;
-use crate::node::NodeRef;
+use crate::node::Node;
 use crate::node::NodeType;
 use std::collections::BTreeSet;
 
@@ -37,7 +37,7 @@ impl ReverseDirectory {
 
 #[async_trait::async_trait]
 impl Directory for ReverseDirectory {
-    async fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> error::Result<Option<Node>> {
         let original_name = reverse_string(name);
         let path = self.target_path.join(&original_name);
 
@@ -48,7 +48,7 @@ impl Directory for ReverseDirectory {
         }
     }
 
-    async fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {
+    async fn insert(&mut self, name: String, _id: Node) -> error::Result<()> {
         Err(error::Error::immutable(name))
     }
 
