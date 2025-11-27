@@ -43,19 +43,11 @@ impl FS {
     }
 
     /// Create a new node with persistence
-    pub async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<Node> {
+    pub(crate) async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<Node> {
         let id = parent_id.new_child_id(node_type.entry_type().await?);
 	let node = Node::new(id, node_type);
         self.persistence.store_node(&node).await?;
         Ok(node)
-    }
-
-    /// Load directory entries with full metadata (without loading nodes)
-    pub(crate) async fn load_directory_entries(
-        &self,
-        parent_id: FileID,
-    ) -> Result<HashMap<String, DirectoryEntry>> {
-        self.persistence.load_directory_entries(parent_id).await
     }
 
     /// Batch load multiple nodes grouped by partition for efficiency.
@@ -65,11 +57,6 @@ impl FS {
         requests: Vec<DirectoryEntry>,
     ) -> Result<HashMap<String, Node>> {
         self.persistence.batch_load_nodes(parent_id, requests).await
-    }
-
-    /// Get a working directory context from a NodePath
-    pub async fn working_dir_from_node(&self, node_path: &NodePath) -> Result<WD> {
-        self.wd(node_path).await
     }
 
     // Loop detection methods - these work the same regardless of persistence vs backend
@@ -144,14 +131,6 @@ impl FS {
             .await
     }
 
-    /// Check if a node is dynamic and return its factory configuration
-    pub(crate) async fn get_dynamic_node_config(
-        &self,
-        id: FileID,
-    ) -> Result<Option<(String, Vec<u8>)>> {
-        self.persistence.get_dynamic_node_config(id).await
-    }
-
     /// Update the configuration of an existing dynamic node
     pub(crate) async fn update_dynamic_node_config(
         &self,
@@ -165,7 +144,7 @@ impl FS {
     }
 
     /// Set extended attributes on an existing node
-    pub async fn set_extended_attributes(
+    pub(crate) async fn set_extended_attributes(
         &self,
         id: FileID,
         attributes: HashMap<String, String>,

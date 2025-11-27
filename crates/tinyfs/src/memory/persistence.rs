@@ -131,8 +131,16 @@ impl PersistenceLayer for MemoryPersistence {
         self.0.lock().await.load_directory_entries(id).await
     }
 
-    async fn batch_load_nodes(&self, parent_id: FileID, requests: Vec<DirectoryEntry>) -> Result<HashMap<String, Node>> {
-        self.0.lock().await.batch_load_nodes(parent_id, requests).await
+    async fn batch_load_nodes(
+        &self,
+        parent_id: FileID,
+        requests: Vec<DirectoryEntry>,
+    ) -> Result<HashMap<String, Node>> {
+        self.0
+            .lock()
+            .await
+            .batch_load_nodes(parent_id, requests)
+            .await
     }
 
     async fn query_directory_entry(
@@ -242,8 +250,20 @@ impl State {
         Ok(node)
     }
 
-    async fn batch_load_nodes(&self, _id: FileID, _requests: Vec<DirectoryEntry>) -> Result<HashMap<String, Node>> {
-        panic!("not implemented");
+    async fn batch_load_nodes(
+        &self,
+        id: FileID,
+        requests: Vec<DirectoryEntry>,
+    ) -> Result<HashMap<String, Node>> {
+        let nodes = futures::future::try_join_all(
+            requests
+                .into_iter()
+                .map(|entry| async move {
+                    let node = self.load_node(id.child_id(entry.child_node_id)).await?;
+                    Ok::<_, Error>((entry.name, node))
+                }),
+        ).await?;
+        Ok(nodes.into_iter().collect())
     }
 
     async fn query_directory_entry(
