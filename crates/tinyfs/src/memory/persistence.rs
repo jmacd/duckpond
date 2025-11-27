@@ -67,8 +67,8 @@ impl PersistenceLayer for MemoryPersistence {
         self.0.lock().await.load_node(id).await
     }
 
-    async fn store_node(&self, id: FileID, node_type: &Node) -> Result<()> {
-        self.0.lock().await.store_node(id, node_type).await
+    async fn store_node(&self, node: &Node) -> Result<()> {
+        self.0.lock().await.store_node(node).await
     }
 
     async fn exists_node(&self, id: FileID) -> Result<bool> {
@@ -131,8 +131,8 @@ impl PersistenceLayer for MemoryPersistence {
         self.0.lock().await.load_directory_entries(id).await
     }
 
-    async fn batch_load_nodes(&self, requests: Vec<FileID>) -> Result<HashMap<FileID, Node>> {
-        self.0.lock().await.batch_load_nodes(requests).await
+    async fn batch_load_nodes(&self, parent_id: FileID, requests: Vec<DirectoryEntry>) -> Result<HashMap<String, Node>> {
+        self.0.lock().await.batch_load_nodes(parent_id, requests).await
     }
 
     async fn query_directory_entry(
@@ -185,21 +185,16 @@ impl PersistenceLayer for MemoryPersistence {
     }
 }
 
-#[async_trait]
-impl PersistenceLayer for State {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
+impl State {
     async fn load_node(&self, id: FileID) -> Result<Node> {
         match self.nodes.get(&id) {
-            Some(node) => Ok(node.node_type.clone()),
+            Some(node) => Ok(node.clone()),
             None => Err(Error::IDNotFound(id)),
         }
     }
 
-    async fn store_node(&self, id: FileID, node_type: &Node) -> Result<()> {
-        _ = self.nodes.insert(id, node_type.clone());
+    async fn store_node(&mut self, node: &Node) -> Result<()> {
+        _ = self.nodes.insert(node.id, node.clone());
         Ok(())
     }
 
@@ -221,33 +216,33 @@ impl PersistenceLayer for State {
     }
 
     async fn load_symlink_target(&self, id: FileID) -> Result<std::path::PathBuf> {
-        let node_type = self.load_node(id).await?;
-        match node_type {
-            Node::Symlink(symlink_handle) => symlink_handle.readlink().await,
+        let node = self.load_node(id).await?;
+        match &*node.node_type.lock().await {
+            NodeType::Symlink(handle) => handle.readlink().await,
             _ => Err(Error::Other("Expected symlink node type".to_string())),
         }
     }
 
     async fn create_file_node(&self, id: FileID) -> Result<Node> {
-        // @@@ DO NOT PASS CONTENT????
+        // @@@ shouldn't pass content
         let file_handle =
             crate::memory::MemoryFile::new_handle_with_entry_type([], id.entry_type());
-        Ok(Node::File(file_handle))
+        Ok(Node::new(id, NodeType::File(file_handle)))
     }
 
-    async fn create_directory_node(&self, _id: FileID) -> Result<Node> {
+    async fn create_directory_node(&self, id: FileID) -> Result<Node> {
         let dir_handle = MemoryDirectory::new_handle();
-        Ok(Node::Directory(dir_handle))
+        Ok(Node::new(id, NodeType::Directory(dir_handle)))
     }
 
-    async fn create_symlink_node(&self, id: FileID, target: &std::path::Path) -> Result<Node> {
+    async fn create_symlink_node(&mut self, id: FileID, target: &std::path::Path) -> Result<Node> {
         let symlink_handle = crate::memory::MemorySymlink::new_handle(target.to_path_buf());
-        let node_type = Node::Symlink(symlink_handle.clone());
-        self.store_node(id, &node_type).await?;
-        Ok(node_type)
+        let node = Node::new(id, NodeType::Symlink(symlink_handle.clone()));
+        self.store_node(&node).await?;
+        Ok(node)
     }
 
-    async fn batch_load_nodes(&self, _requests: Vec<FileID>) -> Result<HashMap<FileID, Node>> {
+    async fn batch_load_nodes(&self, _id: FileID, _requests: Vec<DirectoryEntry>) -> Result<HashMap<String, Node>> {
         Err(Error::internal("not implemented"))
     }
 
@@ -264,21 +259,18 @@ impl PersistenceLayer for State {
     }
 
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
-        let node_type = self.nodes.get(&id).ok_or_else(|| {
+        let node = self.nodes.get(&id).ok_or_else(|| {
             Error::NotFound(std::path::PathBuf::from(format!("Node {id:?} not found",)))
         })?;
 
-        match node_type {
-            Node::File(handle) => {
-                // Query the handle's metadata to get the entry type
-                handle.metadata().await
-            }
+        match &*node.node_type.lock().await {
+            NodeType::File(handle) => handle.metadata().await,
             _ => Err(Error::Other("Non-file metadata unimplemented".to_string())),
         }
     }
 
     async fn update_directory_entry(
-        &self,
+        &mut self,
         id: FileID,
         entry_name: &str,
         operation: DirectoryOperation,
@@ -356,7 +348,7 @@ impl PersistenceLayer for State {
     }
 
     async fn set_extended_attributes(
-        &self,
+        &mut self,
         id: FileID,
         attributes: HashMap<String, String>,
     ) -> Result<()> {

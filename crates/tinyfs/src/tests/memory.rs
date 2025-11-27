@@ -406,7 +406,7 @@ impl crate::wd::Visitor<Vec<u8>> for FileContentVisitor {
         node: crate::node::NodePath,
         _captured: &[String],
     ) -> crate::error::Result<Vec<u8>> {
-        let file_node = node.borrow().await.as_file()?;
+        let file_node = node.as_file().await?;
         let reader = file_node.async_reader().await?;
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await

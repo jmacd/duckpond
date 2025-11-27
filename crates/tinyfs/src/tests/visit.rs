@@ -83,7 +83,7 @@ impl crate::wd::Visitor<(String, Vec<u8>)> for FileContentVisitor {
         node: crate::node::NodePath,
         _captured: &[String],
     ) -> error::Result<(String, Vec<u8>)> {
-        let file_node = node.borrow().await.as_file().unwrap();
+        let file_node = node.as_file().await.unwrap();
         let reader = file_node.async_reader().await.unwrap();
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await
@@ -269,7 +269,7 @@ async fn test_visit_directory() {
     while let Some(result) = entry_stream.next().await {
         let dir_entry = result.unwrap();
         let np = visit_dir.get(&dir_entry.name).await.unwrap().unwrap();
-        let file_node = np.borrow().await.as_file().unwrap();
+        let file_node = np.as_file().await.unwrap();
         let reader = file_node.async_reader().await.unwrap();
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await

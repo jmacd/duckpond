@@ -112,7 +112,7 @@ impl NodeID {
 
     ///
     fn entry_type(&self) -> EntryType {
-	let mut b: [u8; 16] = self.0.into();
+	let b: [u8; 16] = self.0.into();
 	EntryType::try_from(b[6] & 0xf).unwrap()
     }
     
@@ -247,6 +247,14 @@ impl Node {
 }
 
 impl NodePath {
+    #[must_use]
+    pub fn new(node: Node, path: PathBuf) -> Self {
+	Self {
+	    node,
+	    path,
+	}
+    }
+    
     #[must_use]
     pub fn is_root(&self) -> bool {
 	self.id() == FileID::root()

@@ -94,57 +94,18 @@ impl WD {
     }
 
     /// Batch load nodes for multiple directory entries
-    /// Note @@@ not safe. have to assume the entries came from this.
-    async fn load_entries(&self, entries: Vec<DirectoryEntry>) -> Result<Vec<NodePath>> {
-        // For each entry, we need to determine its partition and node ID
-        // Then batch load all nodes at once
-        let requests: Vec<_> = entries
-            .iter()
-            .map(|e| {
-                (
-                    e.name.clone(),
-                    self.id().child_id(e.child_node_id),
-                    e.entry_type,
-                )
-            })
-            .collect();
-
-        // Extract FileIDs for batch loading
-        let batch_requests: Vec<FileID> = requests.iter().map(|(_, id, _)| id.clone()).collect();
-
-        let loaded_node_types = self.fs.batch_load_nodes(batch_requests).await?;
-
-        // Convert NodeType to Node
-        let mut loaded_nodes = HashMap::new();
-        for (id, node_type) in loaded_node_types {
-            let node_ref = Node::new(id, node_type);
-            _ = loaded_nodes.insert(id, node_ref);
-        }
-
-        // Build NodePath results in original order
-        let mut node_paths = Vec::new();
-        for (name, id, _) in requests {
-            // Try loaded_nodes first (from persistence), then fall back to directory.get()
-            // This handles both TlogFS (nodes in persistence) and MemoryFS (nodes in directory)
-            let node_ref = if let Some(node_ref) = loaded_nodes.get(&id) {
-                node_ref.clone()
-            } else {
-                // Fall back to directory.get() for MemoryFS and other in-memory implementations
-                self.dref.handle.get(&name).await?.ok_or_else(|| {
-                    Error::NotFound(PathBuf::from(format!(
-                        "Node '{}' (id={:?}) not found in batch load or directory.get()",
-                        name, id
-                    )))
-                })?
-            };
-
-            node_paths.push(NodePath {
-                node: node_ref,
-                path: self.dref.path().join(&name),
-            });
-        }
-
-        Ok(node_paths)
+    async fn load_entries(
+        &self,
+        entries: Vec<DirectoryEntry>,
+    ) -> Result<HashMap<String, NodePath>> {
+        let loaded = self.fs.batch_load_nodes(self.id(), entries).await?;
+        Ok(loaded
+            .into_iter()
+           .map(|(name, node)| {
+	       let path = self.dref.path().join(&name);
+	       (name, NodePath::new(node, path))
+	   })
+            .collect())
     }
 
     fn is_root(&self) -> bool {
@@ -297,9 +258,9 @@ impl WD {
         T: AsRef<str>,
     {
         let target = target.as_ref();
-        let path = path.as_ref().clone();
+        let path = path.as_ref();
 
-        self.in_path(path.clone(), |wd, entry| async move {
+        self.in_path(path, |wd, entry| async move {
             match entry {
                 Lookup::NotFound(_, name) => {
                     let parent_id = self.id();
@@ -328,14 +289,10 @@ impl WD {
                 match entry {
                     Lookup::NotFound(_, name) => {
                         let id = FileID::new_physical_dir_id();
-                        let node_type = wd.fs.persistence.create_directory_node(id).await?;
-                        let node = Node::new(id, node_type);
+                        let node = wd.fs.persistence.create_directory_node(id).await?;
 
                         wd.dref.insert(name.clone(), node.clone()).await?;
-                        Ok(NodePath {
-                            node,
-                            path: wd.dref.path().join(&name),
-                        })
+                        Ok(NodePath::new(node, wd.dref.path().join(&name)))
                     }
                     Lookup::Found(_) => Err(Error::already_exists(&path_clone)),
                     Lookup::Empty(_) => Err(Error::empty_path()),
@@ -498,7 +455,7 @@ impl WD {
                         return Err(Error::prefix_not_supported(path));
                     }
                     Component::RootDir => {
-                        if !self.is_root().await {
+                        if !self.is_root() {
                             return Err(Error::root_path_from_non_root(path));
                         }
                         continue;
@@ -514,14 +471,12 @@ impl WD {
                     }
                     Component::Normal(name) => {
                         let dnode = stack.last().expect("stack not empty").clone();
-                        let ddir = dnode.borrow().await.as_dir()?;
+                        let ddir = dnode.as_dir().await?;
                         let name = name.to_string_lossy().to_string();
 
                         let name_bound = &name;
-                        debug!(
-                            "resolve: Looking up name '{name}' in directory",
-                            name = name_bound
-                        );
+                        debug!("resolve: Looking up name '{name_bound}' in directory");
+
                         match ddir.get(&name).await {
                             Err(dir_error) => {
                                 // Directory access failed (e.g., dynamic dir config parsing failed)
@@ -551,8 +506,8 @@ impl WD {
                                 }
                             }
                             Ok(Some(child)) => {
-                                match child.borrow().await.node_type() {
-                                    NodeType::Symlink(ref link) => {
+                                match &*child.node.node_type.lock().await {
+                                    NodeType::Symlink(link) => {
                                         let (newsz, relp) =
                                             crate::path::normalize(link.readlink().await?, &stack)?;
                                         if depth >= SYMLINK_LOOP_LIMIT {
@@ -678,9 +633,8 @@ impl WD {
         T: Send,
     {
         Box::pin(async move {
-            if self.np.borrow().await.as_dir().is_err() {
-                return Ok(());
-            }
+	    // @@@ Seems redundant
+            _ = self.np.as_dir().await?;
 
             // Handle empty pattern case
             if pattern.is_empty() {
@@ -709,9 +663,9 @@ impl WD {
                     // Batch load only matching nodes
                     let children = self.load_entries(matching_entries.clone()).await?;
 
-                    for (child, entry) in children.into_iter().zip(matching_entries.iter()) {
+                    for (name, child) in children {
                         // Extract captured match
-                        if let Some(captured_match) = pattern[0].match_component(&entry.name) {
+                        if let Some(captured_match) = pattern[0].match_component(&name) {
                             captured.push(captured_match.expect("wildcard capture"));
                             self.visit_match_with_visitor(
                                 child, false, pattern, visited, captured, stack, results, visitor,
@@ -743,8 +697,8 @@ impl WD {
                     let all_entries = self.get_entries().await?;
                     let children = self.load_entries(all_entries.clone()).await?;
 
-                    for (child, entry) in children.into_iter().zip(all_entries.iter()) {
-                        captured.push(entry.name.clone());
+                    for (name, child) in children {
+                        captured.push(name.clone());
                         self.visit_match_with_visitor(
                             child, true, pattern, visited, captured, stack, results, visitor,
                         )
@@ -999,7 +953,7 @@ impl WD {
                         // For overwrite operations, we should try to recreate/overwrite anyway
                         // since the parent directory info is available in wd
                         let id = wd.id().new_child_id(EntryType::DirectoryDynamic);
-                        let node_type = wd
+                        let node = wd
                             .fs
                             .create_dynamic_node(
                                 id,
@@ -1010,14 +964,10 @@ impl WD {
                             )
                             .await?;
 
-                        let node = Node::new(id, node_type);
-                        // @@@ wasnt support to do this, but we changed signatures of create_dynamic_dir
+                        // @@@ wasnt supposed to do this, but we changed signatures of create_dynamic_dir
                         wd.dref.insert(name.clone(), node.clone()).await?;
 
-                        Ok(NodePath {
-                            node,
-                            path: wd.dref.path().join(&name),
-                        })
+                        Ok(NodePath::new(node, wd.dref.path().join(&name)))
                     }
                     Lookup::Found(_) => Err(Error::already_exists(&path_clone)),
                     Lookup::Empty(_) => Err(Error::empty_path()),
@@ -1037,11 +987,7 @@ impl std::fmt::Debug for WD {
 
 impl PartialEq<WD> for WD {
     fn eq(&self, other: &WD) -> bool {
-        // We can't use async in PartialEq, so use try_lock for comparison
-        match (self.np.node.try_lock(), other.np.node.try_lock()) {
-            (Ok(self_guard), Ok(other_guard)) => self_guard.id == other_guard.id,
-            _ => false, // If we can't lock both, assume they're different
-        }
+	self.id() == other.id()
     }
 }
 
@@ -1094,7 +1040,7 @@ mod tests {
         let (wd, lookup) = root.resolve_path("/").await.expect("Failed to resolve /");
         match lookup {
             Lookup::Found(node) => {
-                assert!(node.is_root().await, "Should resolve to root node");
+                assert!(node.is_root(), "Should resolve to root node");
             }
             Lookup::Empty(_) => {
                 panic!("Bug: resolve_path(\"/\") returned Empty instead of Found");
@@ -1112,7 +1058,7 @@ mod tests {
         let (wd2, lookup2) = root.resolve_path(".").await.expect("Failed to resolve .");
         match lookup2 {
             Lookup::Found(node) => {
-                assert!(node.borrow().await.is_root(), "Should resolve to root node");
+                assert!(node.is_root(), "Should resolve to root node");
             }
             Lookup::Empty(_) => {
                 panic!("Bug: resolve_path(\".\") returned Empty instead of Found");
@@ -1151,8 +1097,8 @@ mod tests {
         // The parent should be Found (the root directory)
         match parent_lookup {
             Lookup::Found(node) => {
-                let node_id = node.id().await;
-                let root_id = NodeID::root();
+                let node_id = node.id();
+                let root_id = FileID::root();
                 assert_eq!(node_id, root_id, "Parent node ID should be root ID");
             }
             Lookup::Empty(_) => {

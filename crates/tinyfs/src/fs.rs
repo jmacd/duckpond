@@ -42,45 +42,11 @@ impl FS {
         WD::new(np.clone(), self.clone()).await
     }
 
-    // /// Get an existing node - does NOT create if missing
-    // pub async fn get_existing_node(&self, id: FileID) -> Result<Node> {
-    //     let node_type = self.persistence.load_node(id).await?;
-    //     Ok(Node::new(id, node_type))
-    // }
-
-    // /// Get or create a node - uses persistence layer directly
-    // pub async fn get_or_create_node(&self, node_id: NodeID, part_id: NodeID) -> Result<Node> {
-    //     // Try to load from persistence layer
-    //     match self.persistence.load_node(node_id, part_id).await {
-    //         Ok(node_type) => {
-    //             let node = Node::new(Arc::new(Mutex::new(Node {
-    //                 node_type,
-    //                 id: node_id,
-    //             })));
-    //             Ok(node)
-    //         }
-    //         Err(Error::NotFound(_)) => {
-    //             // Node doesn't exist - return error instead of auto-creating
-    //             // Nodes should be explicitly created through transactions
-    //             Err(Error::NotFound(PathBuf::from(format!(
-    //                 "Node {}/{} not found and on-demand creation disabled",
-    //                 node_id, part_id
-    //             ))))
-    //         }
-    //         Err(e) => Err(e),
-    //     }
-    // }
-
-    // /// Get a node by its ID
-    // pub async fn get_node(&self, node_id: NodeID, part_id: NodeID) -> Result<Node> {
-    //     self.get_or_create_node(node_id, part_id).await
-    // }
-
     /// Create a new node with persistence
     pub async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<Node> {
         let id = parent_id.new_child_id(node_type.entry_type().await?);
 	let node = Node::new(id, node_type);
-        self.persistence.store_node(id, &node).await?;
+        self.persistence.store_node(&node).await?;
         Ok(node)
     }
 
@@ -93,12 +59,12 @@ impl FS {
     }
 
     /// Batch load multiple nodes grouped by partition for efficiency.
-    /// Issues one SQL query per partition instead of one query per node.
     pub(crate) async fn batch_load_nodes(
         &self,
-        requests: Vec<FileID>,
-    ) -> Result<HashMap<FileID, Node>> {
-        self.persistence.batch_load_nodes(requests).await
+	parent_id: FileID,
+        requests: Vec<DirectoryEntry>,
+    ) -> Result<HashMap<String, Node>> {
+        self.persistence.batch_load_nodes(parent_id, requests).await
     }
 
     /// Get a working directory context from a NodePath
@@ -131,9 +97,7 @@ impl FS {
         let id = parent_id.new_child_id(entry_type);
 
         // Create the file node in memory only - no immediate persistence
-        let node_type = self.persistence.create_file_node(id).await?;
-
-        Ok(Node::new(id, node_type))
+        self.persistence.create_file_node(id).await
     }
 
     /// Create a new symlink node and return its Node
@@ -145,12 +109,10 @@ impl FS {
         let id = parent_id.new_child_id(EntryType::Symlink);
 
         let target_path = std::path::Path::new(target);
-        let node_type = self
+        self
             .persistence
             .create_symlink_node(id, target_path)
-            .await?;
-
-        Ok(Node::new(id, node_type))
+            .await
     }
 
     /// List all versions of a file
@@ -176,7 +138,7 @@ impl FS {
         entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
-    ) -> Result<NodeType> {
+    ) -> Result<Node> {
         self.persistence
             .create_dynamic_node(id, name, entry_type, factory_type, config_content)
             .await

@@ -32,7 +32,6 @@ pub trait PersistenceLayer: Send + Sync {
     async fn load_node(&self, file_id: FileID) -> Result<Node>;
     async fn store_node(
         &self,
-	id: FileID,
         node: &Node,
     ) -> Result<()>;
     async fn exists_node(&self, id: FileID) -> Result<bool>;
@@ -91,8 +90,9 @@ pub trait PersistenceLayer: Send + Sync {
     /// Default implementation returns empty map; tlogfs overrides with optimized batch loading.
     async fn batch_load_nodes(
         &self,
-        _requests: Vec<FileID>,
-    ) -> Result<HashMap<FileID, Node>>;
+	parent_id: FileID,
+        requests: Vec<DirectoryEntry>,
+    ) -> Result<HashMap<String, Node>>;
     
     /// Optimized query for a single directory entry by name
     async fn query_directory_entry(

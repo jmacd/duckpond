@@ -69,17 +69,17 @@ impl Directory for ReverseDirectory {
 
         let mut reversed_items = Vec::new();
         for np in sub {
-            let node = np.node.lock().await;
-            let entry_type = match &node.node_type {
+            let node_type = np.node.node_type.lock().await;
+            let entry_type = match &*node_type {
                 NodeType::Directory(_) => crate::EntryType::DirectoryPhysical,
                 NodeType::File(_) => crate::EntryType::FileDataPhysical,
                 NodeType::Symlink(_) => crate::EntryType::Symlink,
             };
             let dir_entry = crate::DirectoryEntry::new(
                 reverse_string(&np.basename()),
-                node.id,
+                np.node.id.node_id(),
                 entry_type,
-                0,
+                0, // @@@
             );
             reversed_items.push(Ok(dir_entry));
         }
@@ -144,7 +144,7 @@ async fn test_reverse_directory() {
     while let Some(result) = entry_stream.next().await {
         let dir_entry = result.unwrap();
         let np = reverse_dir.get(&dir_entry.name).await.unwrap().unwrap();
-        let file_node = np.borrow().await.as_file().unwrap();
+        let file_node = np.as_file().await.unwrap();
         let reader = file_node.async_reader().await.unwrap();
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await
