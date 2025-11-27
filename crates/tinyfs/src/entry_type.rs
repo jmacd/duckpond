@@ -1,9 +1,8 @@
 use std::str::FromStr;
 use serde::{Serialize, Deserialize};
-use num_enum::IntoPrimitive;
 
 /// Node type identifiers for directory entries and persistence
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, IntoPrimitive)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
 pub enum EntryType {
@@ -178,7 +177,18 @@ impl TryFrom<u8> for EntryType {
 
     /// 
     fn try_from(v: u8) -> Result<Self, String> {
-	v.try_into()
+        match v {
+            1 => Ok(EntryType::DirectoryPhysical),
+            2 => Ok(EntryType::DirectoryDynamic),
+            3 => Ok(EntryType::Symlink),
+            4 => Ok(EntryType::FileDataPhysical),
+            5 => Ok(EntryType::FileDataDynamic),
+            6 => Ok(EntryType::FileTablePhysical),
+            7 => Ok(EntryType::FileTableDynamic),
+            8 => Ok(EntryType::FileSeriesPhysical),
+            9 => Ok(EntryType::FileSeriesDynamic),
+            _ => Err(format!("Unknown EntryType: {}", v)),
+        }
     }
 }
 

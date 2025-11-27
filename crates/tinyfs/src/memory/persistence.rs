@@ -243,7 +243,7 @@ impl State {
     }
 
     async fn batch_load_nodes(&self, _id: FileID, _requests: Vec<DirectoryEntry>) -> Result<HashMap<String, Node>> {
-        Err(Error::internal("not implemented"))
+        panic!("not implemented");
     }
 
     async fn query_directory_entry(

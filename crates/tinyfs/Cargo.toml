@@ -29,7 +29,6 @@ parquet.workspace = true
 deltalake.workspace = true
 tokio-util.workspace = true
 serde_arrow.workspace = true
-num_enum.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
