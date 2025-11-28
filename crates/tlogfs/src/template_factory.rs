@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 
 use crate::factory::FactoryContext;
 use tinyfs::{
-    AsyncReadSeek, Directory, EntryType, FS, File, FileHandle, NodeMetadata, NodeRef,
-    Result as TinyFSResult,
+    AsyncReadSeek, Directory, EntryType, FS, File, FileHandle, NodeMetadata,
+    Result as TinyFSResult, Node,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +39,7 @@ pub struct TemplateDirectory {
     config: TemplateSpec,
     context: FactoryContext,
     // Cache to ensure consistent NodeIDs for the same filename
-    node_cache: Arc<Mutex<HashMap<String, NodeRef>>>,
+    node_cache: Arc<Mutex<HashMap<String, Node>>>,
 }
 
 impl TemplateDirectory {
@@ -101,7 +101,7 @@ impl TemplateDirectory {
 
 #[async_trait]
 impl Directory for TemplateDirectory {
-    async fn get(&self, filename: &str) -> TinyFSResult<Option<NodeRef>> {
+    async fn get(&self, filename: &str) -> TinyFSResult<Option<Node>> {
         debug!("TemplateDirectory::get - looking for {filename}");
 
         // Check cache first
@@ -130,9 +130,9 @@ impl Directory for TemplateDirectory {
                 let template_file =
                     TemplateFile::new(template_content, self.context.clone(), captured);
 
-                let node_ref = NodeRef::new(Arc::new(Mutex::new(tinyfs::Node {
-                    id: tinyfs::NodeID::generate(),
-                    node_type: tinyfs::NodeType::File(template_file.create_handle()),
+                let node_ref = Node::new(Arc::new(Mutex::new(Node {
+                    id: NodeID::generate(),
+                    node_type: NodeType::File(template_file.create_handle()),
                 })));
 
                 // Cache the node
@@ -149,7 +149,7 @@ impl Directory for TemplateDirectory {
         Ok(None)
     }
 
-    async fn insert(&mut self, _filename: String, _node: NodeRef) -> TinyFSResult<()> {
+    async fn insert(&mut self, _filename: String, _node: Node) -> TinyFSResult<()> {
         Err(tinyfs::Error::Other(
             "Template directories are read-only".to_string(),
         ))

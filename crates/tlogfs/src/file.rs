@@ -18,10 +18,7 @@ use tokio::sync::RwLock;
 /// - Proper separation of concerns
 pub struct OpLogFile {
     /// Unique node identifier for this file
-    node_id: NodeID,
-
-    /// Parent directory node ID (for persistence operations)
-    part_id: NodeID,
+    id: FileID,
 
     /// Reference to persistence layer (single source of truth)
     state: State,
@@ -39,11 +36,10 @@ enum TransactionWriteState {
 impl OpLogFile {
     /// Create new file instance with persistence layer dependency injection
     #[must_use]
-    pub fn new(node_id: NodeID, part_id: NodeID, state: State) -> Self {
+    pub fn new(id: FileID, state: State) -> Self {
         debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {part_id}");
         Self {
-            node_id,
-            part_id,
+            id,
             state,
             transaction_state: Arc::new(RwLock::new(TransactionWriteState::Ready)),
         }

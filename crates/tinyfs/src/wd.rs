@@ -967,7 +967,6 @@ impl WD {
                             .fs
                             .create_dynamic_node(
                                 id,
-                                name.clone(),
                                 entry_type,
                                 factory_type,
                                 config_content,
@@ -975,6 +974,8 @@ impl WD {
                             .await?;
 
                         // @@@ wasnt supposed to do this, but we changed signatures of create_dynamic_dir
+                        // @@@ And no longer passing name.clone(),
+			// we need to store@@@@
                         wd.dref.insert(name.clone(), node.clone()).await?;
 
                         Ok(NodePath::new(node, wd.dref.path().join(&name)))

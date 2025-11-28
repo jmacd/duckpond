@@ -66,15 +66,6 @@ impl PersistenceLayer for MemoryPersistence {
         self.0.lock().await.store_node(node).await
     }
 
-    async fn exists_node(&self, id: FileID) -> Result<bool> {
-        self.0.lock().await.exists_node(id).await
-    }
-
-    // Symlink operations
-    async fn load_symlink_target(&self, id: FileID) -> Result<std::path::PathBuf> {
-        self.0.lock().await.load_symlink_target(id).await
-    }
-
     // Factory methods for creating nodes directly with persistence
     async fn create_file_node(&self, id: FileID) -> Result<Node> {
         self.0.lock().await.create_file_node(id).await
@@ -91,7 +82,6 @@ impl PersistenceLayer for MemoryPersistence {
     async fn create_dynamic_node(
         &self,
         id: FileID,
-        name: String,
         entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
@@ -99,7 +89,7 @@ impl PersistenceLayer for MemoryPersistence {
         self.0
             .lock()
             .await
-            .create_dynamic_node(id, name, entry_type, factory_type, config_content)
+            .create_dynamic_node(id, entry_type, factory_type, config_content)
             .await
     }
 
@@ -168,18 +158,6 @@ impl State {
     async fn store_node(&mut self, node: &Node) -> Result<()> {
         _ = self.nodes.insert(node.id, node.clone());
         Ok(())
-    }
-
-    async fn exists_node(&self, id: FileID) -> Result<bool> {
-        Ok(self.nodes.contains_key(&id))
-    }
-
-    async fn load_symlink_target(&self, id: FileID) -> Result<std::path::PathBuf> {
-        let node = self.load_node(id).await?;
-        match node.node_type {
-            NodeType::Symlink(handle) => handle.readlink().await,
-            _ => Err(Error::Other("Expected symlink node type".to_string())),
-        }
     }
 
     async fn create_file_node(&self, id: FileID) -> Result<Node> {
@@ -300,7 +278,6 @@ impl State {
     async fn create_dynamic_node(
         &self,
         _id: FileID,
-        _name: String,
         _entry_type: EntryType,
         _factory_type: &str,
         _config_content: Vec<u8>,

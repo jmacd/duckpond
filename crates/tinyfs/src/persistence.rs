@@ -4,6 +4,7 @@ use crate::error::Result;
 use crate::node::{FileID, Node};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Information about a specific version of a file
 #[derive(Debug, Clone)]
@@ -28,40 +29,19 @@ pub trait PersistenceLayer: Send + Sync {
     /// Downcast support for accessing concrete implementation methods
     fn as_any(&self) -> &dyn std::any::Any;
 
-    // Node operations
     async fn load_node(&self, file_id: FileID) -> Result<Node>;
-    async fn store_node(
-        &self,
-        node: &Node,
-    ) -> Result<()>;
-    async fn exists_node(&self, id: FileID) -> Result<bool>;
 
-    // Symlink operations
-    async fn load_symlink_target(
-        &self,
-	id: FileID,
-    ) -> Result<std::path::PathBuf>;
+    async fn store_node(&self, node: &Node,) -> Result<()>;
 
-    // Factory methods for creating nodes directly with persistence
-    async fn create_file_node(
-        &self,
-	file_id: FileID,
-    ) -> Result<Node>;
+    async fn create_file_node(&self, file_id: FileID,) -> Result<Node>;
 
-    async fn create_directory_node(&self,
-	id: FileID,
-    ) -> Result<Node>;
-    async fn create_symlink_node(
-        &self,
-        id: FileID,
-        target: &std::path::Path,
-    ) -> Result<Node>;
+    async fn create_directory_node(&self, id: FileID,) -> Result<Node>;
 
-    // Dynamic node factory methods
+    async fn create_symlink_node(&self, id: FileID, target: &Path,) -> Result<Node>;
+
     async fn create_dynamic_node(
         &self,
         id: FileID,
-        name: String,
 	entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
@@ -86,13 +66,11 @@ pub trait PersistenceLayer: Send + Sync {
 	parent_id: FileID,
         requests: Vec<DirectoryEntry>,
     ) -> Result<HashMap<String, Node>>;
-    
-    // Metadata operations
+
     /// Get consolidated metadata for a node
     /// Requires both node_id and part_id for efficient querying
     async fn metadata(&self, id: FileID) -> Result<crate::NodeMetadata>;
 
-    // Versioning operations (for file:series support)
     /// List all versions of a file, returning metadata for each version
     /// Returns versions in chronological order (oldest to newest)
     async fn list_file_versions(
@@ -116,13 +94,3 @@ pub trait PersistenceLayer: Send + Sync {
         attributes: HashMap<String, String>,
     ) -> Result<()>;
 }
-
-// #[derive(Clone)]
-// pub enum DirectoryOperation {
-//     /// Insert operation that includes node type (only supported operation)
-//     InsertWithType(NodeID, EntryType),
-//     /// Delete operation with node type for consistency
-//     DeleteWithType(EntryType),
-//     /// Rename operation with node type
-//     RenameWithType(String, NodeID, EntryType), // old_name, new_node_id, node_type
-// }

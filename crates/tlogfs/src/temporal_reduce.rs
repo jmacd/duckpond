@@ -53,7 +53,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tinyfs::{
-    DirHandle, Directory, EntryType, Node, NodeMetadata, NodeRef, NodeType, Result as TinyFSResult,
+    DirHandle, Directory, EntryType, Node, NodeMetadata, NodeType, Result as TinyFSResult,
 };
 
 /// Aggregation types supported by the temporal reduce factory
@@ -121,7 +121,7 @@ pub struct TemporalReduceConfig {
 pub struct TemporalReduceSqlFile {
     config: TemporalReduceConfig,
     duration: Duration,
-    source_node: NodeRef,
+    source_node: Node,
     source_path: String, // For SQL pattern reference
     context: FactoryContext,
     // Lazy-initialized actual SQL file
@@ -137,7 +137,7 @@ impl TemporalReduceSqlFile {
     pub fn new(
         config: TemporalReduceConfig,
         duration: Duration,
-        source_node: NodeRef,
+        source_node: Node,
         source_path: String,
         context: FactoryContext,
     ) -> Self {
@@ -712,7 +712,7 @@ impl TemporalReduceDirectory {
     }
 
     /// Get source node by path from discovered source files
-    async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<NodeRef> {
+    async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<Node> {
         let fs = tinyfs::FS::new(self.context.state.clone())
             .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
@@ -734,8 +734,8 @@ impl TemporalReduceDirectory {
         &self,
         site_name: String,
         source_path: String,
-        source_node: NodeRef,
-    ) -> NodeRef {
+        source_node: Node,
+    ) -> Node {
         let site_directory = TemporalReduceSiteDirectory::new(
             site_name.clone(),
             source_path.clone(),
@@ -752,7 +752,7 @@ impl TemporalReduceDirectory {
         id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
         let node_id = tinyfs::NodeID::from_content(&id_bytes);
 
-        NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+        Node::new(Arc::new(tokio::sync::Mutex::new(Node {
             id: node_id,
             node_type: NodeType::Directory(site_directory.create_handle()),
         })))
@@ -767,7 +767,7 @@ impl TemporalReduceDirectory {
 
 #[async_trait]
 impl Directory for TemporalReduceDirectory {
-    async fn get(&self, name: &str) -> TinyFSResult<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> TinyFSResult<Option<Node>> {
         // Discover all source files first
         let source_files = self.discover_source_files().await?;
 
@@ -792,7 +792,7 @@ impl Directory for TemporalReduceDirectory {
         Ok(None)
     }
 
-    async fn insert(&mut self, _name: String, _id: NodeRef) -> TinyFSResult<()> {
+    async fn insert(&mut self, _name: String, _id: Node) -> TinyFSResult<()> {
         Err(tinyfs::Error::Other(
             "temporal-reduce directory is read-only".to_string(),
         ))
@@ -851,7 +851,7 @@ impl tinyfs::Metadata for TemporalReduceDirectory {
 pub struct TemporalReduceSiteDirectory {
     site_name: String,
     source_path: String,
-    source_node: NodeRef,
+    source_node: Node,
     config: TemporalReduceConfig,
     context: FactoryContext,
     parsed_resolutions: Vec<(String, Duration)>,
@@ -862,7 +862,7 @@ impl TemporalReduceSiteDirectory {
     pub fn new(
         site_name: String,
         source_path: String,
-        source_node: NodeRef,
+        source_node: Node,
         config: TemporalReduceConfig,
         context: FactoryContext,
         parsed_resolutions: Vec<(String, Duration)>,
@@ -934,7 +934,7 @@ impl Directory for TemporalReduceSiteDirectory {
         Ok(Box::pin(stream))
     }
 
-    async fn get(&self, name: &str) -> TinyFSResult<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> TinyFSResult<Option<Node>> {
         // Check if the requested name matches any of our resolution files
         for (res_str, duration) in &self.parsed_resolutions {
             let filename = format!("res={}.series", res_str);
@@ -950,7 +950,7 @@ impl Directory for TemporalReduceSiteDirectory {
                 id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
                 let node_id = tinyfs::NodeID::from_content(&id_bytes);
 
-                let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(Node {
+                let node_ref = Node::new(Arc::new(tokio::sync::Mutex::new(Node {
                     id: node_id,
                     node_type: NodeType::File(sql_file),
                 })));
@@ -960,7 +960,7 @@ impl Directory for TemporalReduceSiteDirectory {
         Ok(None)
     }
 
-    async fn insert(&mut self, _name: String, _node: NodeRef) -> TinyFSResult<()> {
+    async fn insert(&mut self, _name: String, _node: Node) -> TinyFSResult<()> {
         // Temporal reduce site directories are read-only
         Err(tinyfs::Error::Other(
             "Temporal reduce site directories are read-only".to_string(),

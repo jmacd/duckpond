@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tinyfs::NodeID;
+use tinyfs::{FileID, PartID, NodeID, EntryType};
 
 /// Extended attributes - immutable metadata set at file creation
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -279,11 +279,11 @@ pub trait ForArrow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OplogEntry {
     /// Partition ID (parent directory for files/symlinks, self for directories)
-    pub part_id: NodeID,
+    pub part_id: PartID,
     /// NodeID from TinyFS
     pub node_id: NodeID,
     /// Type of filesystem entry (file, directory, or symlink)
-    pub file_type: tinyfs::EntryType,
+    pub file_type: EntryType, // @@@ rename one or other
     /// Timestamp when this node was modified (microseconds since Unix epoch)
     pub timestamp: i64,
     /// Per-node modification version counter (starts at 1, increments on each change)
@@ -370,7 +370,7 @@ impl OplogEntry {
     pub fn new_small_file(
         part_id: NodeID,
         node_id: NodeID,
-        file_type: tinyfs::EntryType,
+        file_type: EntryType,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
@@ -404,7 +404,7 @@ impl OplogEntry {
     pub fn new_large_file(
         part_id: NodeID,
         node_id: NodeID,
-        file_type: tinyfs::EntryType,
+        file_type: EntryType,
         timestamp: i64,
         version: i64,
         sha256: String,
@@ -437,7 +437,7 @@ impl OplogEntry {
     pub fn new_inline(
         part_id: NodeID,
         node_id: NodeID,
-        file_type: tinyfs::EntryType,
+        file_type: EntryType,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
@@ -495,7 +495,7 @@ impl OplogEntry {
         Self {
             part_id,
             node_id,
-            file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
+            file_type: EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
             content: Some(content.clone()),
@@ -531,7 +531,7 @@ impl OplogEntry {
         Self {
             part_id,
             node_id,
-            file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
+            file_type: EntryType::FileSeriesPhysical, // Physical series file
             timestamp,
             version,
             content: None,
@@ -617,12 +617,11 @@ impl OplogEntry {
         }
     }
 
-    /// Create entry for dynamic directory with factory type and configuration
-    /// This is the primary constructor for dynamic nodes as described in the plan
+    /// Create entry for dynamic node with factory type and configuration
     #[must_use]
-    pub fn new_dynamic_directory(
-        part_id: NodeID,
-        node_id: NodeID,
+    pub fn new_dynamic_node(
+        id: FileID,
+	entry_type: EntryType,
         timestamp: i64,
         version: i64,
         factory_type: &str,
@@ -630,12 +629,12 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
-            file_type: tinyfs::EntryType::DirectoryDynamic, // Use comprehensive type
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: entry_type,
             timestamp,
             version,
-            content: Some(config_content), // Configuration stored in content field
+            content: Some(config_content),
             sha256: None,
             size: None,
             min_event_time: None,
@@ -645,53 +644,6 @@ impl OplogEntry {
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
             format: StorageFormat::Inline, // Dynamic directories use inline storage
-            txn_seq,
-        }
-    }
-
-    /// Create entry for dynamic file with factory type and configuration
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_dynamic_file(
-        part_id: NodeID,
-        node_id: NodeID,
-        file_type: tinyfs::EntryType,
-        timestamp: i64,
-        version: i64,
-        factory_type: &str,
-        config_content: Vec<u8>,
-        txn_seq: i64,
-    ) -> Self {
-        // Convert physical file type to dynamic variant
-        let dynamic_file_type = match file_type {
-            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
-                tinyfs::EntryType::FileDataDynamic
-            }
-            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
-                tinyfs::EntryType::FileTableDynamic
-            }
-            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
-                tinyfs::EntryType::FileSeriesDynamic
-            }
-            _ => file_type, // Leave other types unchanged (though should only be file types)
-        };
-
-        Self {
-            part_id,
-            node_id,
-            file_type: dynamic_file_type,
-            timestamp,
-            version,
-            content: Some(config_content), // Configuration stored in content field
-            sha256: None,
-            size: None, // Dynamic files don't have predetermined size
-            min_event_time: None,
-            max_event_time: None,
-            min_override: None,
-            max_override: None,
-            extended_attributes: None,
-            factory: Some(factory_type.to_string()), // Factory type identifier
-            format: StorageFormat::Inline, // Dynamic files use inline storage
             txn_seq,
         }
     }
@@ -731,7 +683,7 @@ impl OplogEntry {
         Self {
             part_id,
             node_id: part_id, // For dirs: node_id == part_id
-            file_type: tinyfs::EntryType::DirectoryPhysical,
+            file_type: EntryType::DirectoryPhysical,
             timestamp,
             version,
             content: Some(content),
@@ -748,48 +700,48 @@ impl OplogEntry {
         }
     }
 
-    /// Get comprehensive EntryType that includes physical/dynamic distinction
-    /// This is the authoritative method for determining the complete entry type
-    /// including whether the node is factory-based or not.
-    #[must_use]
-    pub fn comprehensive_entry_type(&self) -> tinyfs::EntryType {
-        let is_dynamic = self.is_dynamic();
+    // /// Get comprehensive EntryType that includes physical/dynamic distinction
+    // /// This is the authoritative method for determining the complete entry type
+    // /// including whether the node is factory-based or not.
+    // #[must_use]
+    // pub fn comprehensive_entry_type(&self) -> EntryType {
+    //     let is_dynamic = self.is_dynamic();
 
-        match self.file_type {
-            tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
-                // Directory: check factory field to determine physical vs dynamic
-                if is_dynamic {
-                    tinyfs::EntryType::DirectoryDynamic
-                } else {
-                    tinyfs::EntryType::DirectoryPhysical
-                }
-            }
-            tinyfs::EntryType::Symlink => tinyfs::EntryType::Symlink,
+    //     match self.file_type {
+    //         EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => {
+    //             // Directory: check factory field to determine physical vs dynamic
+    //             if is_dynamic {
+    //                 EntryType::DirectoryDynamic
+    //             } else {
+    //                 EntryType::DirectoryPhysical
+    //             }
+    //         }
+    //         EntryType::Symlink => EntryType::Symlink,
 
-            // Files: check factory field and preserve base format
-            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
-                if is_dynamic {
-                    tinyfs::EntryType::FileDataDynamic
-                } else {
-                    tinyfs::EntryType::FileDataPhysical
-                }
-            }
-            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
-                if is_dynamic {
-                    tinyfs::EntryType::FileTableDynamic
-                } else {
-                    tinyfs::EntryType::FileTablePhysical
-                }
-            }
-            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
-                if is_dynamic {
-                    tinyfs::EntryType::FileSeriesDynamic
-                } else {
-                    tinyfs::EntryType::FileSeriesPhysical
-                }
-            }
-        }
-    }
+    //         // Files: check factory field and preserve base format
+    //         EntryType::FileDataPhysical | EntryType::FileDataDynamic => {
+    //             if is_dynamic {
+    //                 EntryType::FileDataDynamic
+    //             } else {
+    //                 EntryType::FileDataPhysical
+    //             }
+    //         }
+    //         EntryType::FileTablePhysical | EntryType::FileTableDynamic => {
+    //             if is_dynamic {
+    //                 EntryType::FileTableDynamic
+    //             } else {
+    //                 EntryType::FileTablePhysical
+    //             }
+    //         }
+    //         EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+    //             if is_dynamic {
+    //                 EntryType::FileSeriesDynamic
+    //             } else {
+    //                 EntryType::FileSeriesPhysical
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 /// Type alias - use tinyfs::DirectoryEntry as the canonical type

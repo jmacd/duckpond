@@ -56,7 +56,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tinyfs::{
-    DirHandle, Directory, EntryType, Metadata, NodeMetadata, NodeRef, Result as TinyFSResult,
+    DirHandle, Directory, EntryType, Metadata, NodeMetadata, Result as TinyFSResult, Node,
 };
 
 /// Configuration for a single directory entry
@@ -82,7 +82,7 @@ pub struct DynamicDirDirectory {
     config: DynamicDirConfig,
     context: FactoryContext,
     /// Cache of created nodes to avoid recreating them on each access
-    entry_cache: tokio::sync::RwLock<HashMap<String, NodeRef>>,
+    entry_cache: tokio::sync::RwLock<HashMap<String, Node>>,
 }
 
 impl DynamicDirDirectory {
@@ -112,7 +112,7 @@ impl DynamicDirDirectory {
     }
 
     /// Create a node for a specific entry using its configured factory
-    async fn create_entry_node(&self, entry: &DynamicDirEntry) -> TinyFSResult<NodeRef> {
+    async fn create_entry_node(&self, entry: &DynamicDirEntry) -> TinyFSResult<Node> {
         debug!(
             "DynamicDirDirectory::create_entry_node - creating entry '{}' with factory '{}'",
             entry.name, entry.factory
@@ -160,7 +160,7 @@ impl DynamicDirDirectory {
         id_bytes.extend_from_slice(&config_bytes);
         let node_id = tinyfs::NodeID::from_content(&id_bytes);
 
-        let node_ref = NodeRef::new(Arc::new(tokio::sync::Mutex::new(tinyfs::Node {
+        let node_ref = Node::new(Arc::new(tokio::sync::Mutex::new(Node {
             id: node_id,
             node_type,
         })));
@@ -169,7 +169,7 @@ impl DynamicDirDirectory {
     }
 
     /// Get or create a cached entry node
-    async fn get_entry_node(&self, entry_name: &str) -> TinyFSResult<Option<NodeRef>> {
+    async fn get_entry_node(&self, entry_name: &str) -> TinyFSResult<Option<Node>> {
         // Check cache first
         {
             let cache = self.entry_cache.read().await;
@@ -206,12 +206,12 @@ impl DynamicDirDirectory {
 
 #[async_trait]
 impl Directory for DynamicDirDirectory {
-    async fn get(&self, name: &str) -> tinyfs::Result<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> tinyfs::Result<Option<Node>> {
         debug!("DynamicDirDirectory::get - looking for entry '{name}'");
         self.get_entry_node(name).await
     }
 
-    async fn insert(&mut self, _name: String, _id: NodeRef) -> tinyfs::Result<()> {
+    async fn insert(&mut self, _name: String, _id: Node) -> tinyfs::Result<()> {
         debug!("DynamicDirDirectory::insert - mutation not permitted on dynamic directory");
         Err(tinyfs::Error::Other(
             "Dynamic directory is read-only".to_string(),

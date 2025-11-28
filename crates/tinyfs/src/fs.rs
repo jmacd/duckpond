@@ -121,13 +121,12 @@ impl FS {
     pub(crate) async fn create_dynamic_node(
         &self,
         id: FileID,
-        name: String,
         entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<Node> {
         self.persistence
-            .create_dynamic_node(id, name, entry_type, factory_type, config_content)
+            .create_dynamic_node(id, entry_type, factory_type, config_content)
             .await
     }
 
