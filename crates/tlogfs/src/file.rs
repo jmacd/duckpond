@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tinyfs::{
-    AsyncReadSeek, Error as TinyFSError, File, Metadata, NodeID, NodeMetadata,
+    AsyncReadSeek, Error as TinyFSError, File, FileID, Metadata, NodeID, NodeMetadata,
     persistence::PersistenceLayer,
 };
 use tokio::io::AsyncWrite;
@@ -37,7 +37,7 @@ impl OpLogFile {
     /// Create new file instance with persistence layer dependency injection
     #[must_use]
     pub fn new(id: FileID, state: State) -> Self {
-        debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {part_id}");
+        debug!("OpLogFile::new() - creating file with node_id: {id}");
         Self {
             id,
             state,

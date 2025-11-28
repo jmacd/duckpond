@@ -197,7 +197,7 @@ impl State {
 
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
         let node = self.nodes.get(&id).ok_or_else(|| {
-            Error::NotFound(std::path::PathBuf::from(format!("Node {id:?} not found",)))
+            Error::NotFound(std::path::PathBuf::from(format!("Node {id} not found",)))
         })?;
 
         match &node.node_type {
@@ -233,7 +233,7 @@ impl State {
                         Ok(file_version.content.clone())
                     } else {
                         Err(Error::NotFound(std::path::PathBuf::from(format!(
-                            "Version {v} of file {id:?} not found"
+                            "Version {v} of file {id} not found"
                         ))))
                     }
                 }
@@ -242,14 +242,14 @@ impl State {
                         Ok(latest.content.clone())
                     } else {
                         Err(Error::NotFound(std::path::PathBuf::from(format!(
-                            "No versions of file {id:?} found",
+                            "No versions of file {id} found",
                         ))))
                     }
                 }
             }
         } else {
             Err(Error::NotFound(std::path::PathBuf::from(format!(
-                "File {id:?} not found",
+                "File {id} not found",
             ))))
         }
     }
@@ -265,12 +265,12 @@ impl State {
                 Ok(())
             } else {
                 Err(Error::NotFound(std::path::PathBuf::from(format!(
-                    "No versions of file {id:?} found",
+                    "No versions of file {id} found",
                 ))))
             }
         } else {
             Err(Error::NotFound(std::path::PathBuf::from(format!(
-                "File {id:?} not found",
+                "File {id} not found",
             ))))
         }
     }

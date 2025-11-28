@@ -15,6 +15,7 @@ description.workspace = true
 doctest = false
 
 [dependencies]
+thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 futures.workspace = true

@@ -5,13 +5,14 @@ use log::debug;
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::{
-    DirHandle, Directory, Metadata, NodeMetadata, Node, PartID,
+    DirHandle, Directory, Metadata, NodeMetadata, Node, FileID,
     persistence::PersistenceLayer,
 };
 use tokio::sync::Mutex;
 
 pub struct OpLogDirectory {
     /// Unique node identifier for this directory
+    /// @@@ Note PartID == NodeID here, could store PartID
     id: FileID,
 
     /// Reference to persistence layer (single source of truth)

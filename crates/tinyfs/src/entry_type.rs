@@ -175,7 +175,6 @@ impl EntryType {
 impl TryFrom<u8> for EntryType {
     type Error = String;
 
-    /// 
     fn try_from(v: u8) -> Result<Self, String> {
         match v {
             1 => Ok(EntryType::DirectoryPhysical),

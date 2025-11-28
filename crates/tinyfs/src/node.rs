@@ -107,10 +107,9 @@ impl NodeID {
         Self(Uuid::from(b))
     }
 
-    ///
     fn entry_type(&self) -> EntryType {
 	let b: [u8; 16] = self.0.into();
-	EntryType::try_from(b[6] & 0xf).unwrap()
+	EntryType::try_from(b[6] & 0xf).expect("coded")
     }
     
 }
@@ -149,6 +148,7 @@ impl FileID {
 	    part_id: PartID(NodeID(uuid))}
     }
 
+    #[must_use]
     pub fn new_physical_dir_id() -> Self {
 	let node_id = NodeID::generate(EntryType::DirectoryPhysical);
 	let part_id = PartID(node_id);
@@ -158,6 +158,7 @@ impl FileID {
 	}
     }
 
+    #[must_use]
     pub fn new_child_id(&self, et: EntryType) -> Self {
 	if et == EntryType::DirectoryPhysical {
 	    Self::new_physical_dir_id()
@@ -169,10 +170,12 @@ impl FileID {
 	}
     }
 
+    #[must_use]
     pub fn entry_type(&self) -> EntryType {
 	self.node_id.entry_type()
     }
 
+    #[must_use]
     pub fn child_id(&self, child: NodeID) -> Self {
 	if child.entry_type() == EntryType::DirectoryPhysical {
 	    Self {
@@ -225,6 +228,7 @@ pub type FileNode = Pathed<crate::file::Handle>;
 pub type SymlinkNode = Pathed<crate::symlink::Handle>;
 
 impl Node {
+    #[must_use]
     pub fn new(id: FileID, node_type: NodeType) -> Self {
         Self {
 	    id,
@@ -233,11 +237,13 @@ impl Node {
     }
 
     /// Get the FileID for this node
+    #[must_use]
     pub fn id(&self) -> FileID {
         self.id
     }
 
     /// Get the FileID for this node
+    #[must_use]
     pub fn entry_type(&self) -> EntryType {
         self.id().entry_type()
     }
@@ -327,5 +333,23 @@ impl std::fmt::Debug for NodeType {
             NodeType::Directory(_) => write!(f, "(directory)"),
             NodeType::Symlink(_) => write!(f, "(symlink)"),
         }
+    }
+}
+
+impl std::fmt::Display for FileID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	write!(f, "{}/{}", self.part_id.0.0, self.node_id.0)
+    }
+}
+
+impl std::fmt::Display for NodeID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	write!(f, "[{}]", self.0)
+    }
+}
+
+impl std::fmt::Display for PartID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	write!(f, "<{}>", self.0)
     }
 }

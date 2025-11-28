@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::{
-    EntryType, FS, FileVersionInfo, FileID, NodeID, NodeMetadata, NodeType, Result as TinyFSResult, Node,
+    EntryType, FS, FileVersionInfo, FileID, PartID, NodeID, NodeMetadata, NodeType,
+    Result as TinyFSResult, Node,
     persistence::PersistenceLayer,
 };
 use tokio::sync::Mutex;
@@ -74,13 +75,13 @@ pub struct State {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DynamicNodeKey {
-    pub parent_id: FileID,
+    pub parent_id: PartID,
     pub entry_name: String,
 }
 
 impl DynamicNodeKey {
     #[must_use]
-    pub fn new(parent_id: FileID, entry_name: String) -> Self {
+    pub fn new(parent_id: PartID, entry_name: String) -> Self {
         Self {
             parent_id,
             entry_name,
@@ -3366,12 +3367,13 @@ mod node_factory {
         oplog_entry: &OplogEntry,
 	// @@@ Unclear about this, used to pass a name, need the parent ??
 	// @@@ OH parent_id has parent identity, maybe, below node_id.to_string()
-        parent_id: FileID,
+        id: FileID,
         state: State,
         factory_type: &str,
     ) -> Result<NodeType, tinyfs::Error> {
-        let cache_key = DynamicNodeKey::new(parent_id,
-					    node_id.to_string());
+        let cache_key = DynamicNodeKey::new(id.part_id(),
+					    // @@@ BOGUS
+					    id.node_id().to_string());
         {
             let cache = state
                 .dynamic_node_cache
@@ -3391,7 +3393,7 @@ mod node_factory {
         })?;
 
         // Create context with all template variables (vars, export, and any other keys)
-        let context = FactoryContext::new(state.clone(), part_id);
+        let context = FactoryContext::new(state.clone(), id.part_id());
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {

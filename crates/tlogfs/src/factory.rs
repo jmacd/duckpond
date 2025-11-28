@@ -14,7 +14,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::{AsyncReadSeek, EntryType, File, Metadata, NodeMetadata};
-use tinyfs::{DirHandle, FileHandle, NodeID, Result as TinyFSResult};
+use tinyfs::{DirHandle, FileHandle, NodeID, PartID, Result as TinyFSResult};
 use tokio::sync::Mutex;
 
 /// Execution mode for factory operations
@@ -132,21 +132,21 @@ pub struct FactoryContext {
     /// Access to the persistence layer for resolving pond nodes
     pub state: State,
     /// Parent node id for context-aware factories
-    pub parent_node_id: NodeID,
+    pub parent_id: PartID,
     /// Pond identity metadata (pond_id, birth_timestamp, etc.)
     /// Provided by Steward when creating factory contexts
     pub pond_metadata: Option<PondMetadata>,
 }
 
 impl FactoryContext {
-    /// Create a new factory context with the given state and parent_node_id
+    /// Create a new factory context with the given state and parent_id
     /// Automatically extracts template variables and export data from the state
     /// NOTE! should be #[cfg(test)]
     #[must_use]
-    pub fn new(state: State, parent_node_id: NodeID) -> Self {
+    pub fn new(state: State, parent_id: PartID) -> Self {
         Self {
             state,
-            parent_node_id,
+            parent_id,
             pond_metadata: None,
         }
     }
@@ -155,12 +155,12 @@ impl FactoryContext {
     #[must_use]
     pub fn with_metadata(
         state: State,
-        parent_node_id: NodeID,
+        parent_id: NodeID,
         pond_metadata: PondMetadata,
     ) -> Self {
         Self {
             state,
-            parent_node_id,
+            parent_id,
             pond_metadata: Some(pond_metadata),
         }
     }
@@ -171,7 +171,7 @@ impl FactoryContext {
         entry_name: &str,
     ) -> Result<crate::persistence::DynamicNodeKey, TLogFSError> {
         Ok(crate::persistence::DynamicNodeKey::new(
-            self.parent_node_id,
+            self.parent_id,
             entry_name.to_string(),
         ))
     }

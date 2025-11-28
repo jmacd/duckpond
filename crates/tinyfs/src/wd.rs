@@ -267,7 +267,7 @@ impl WD {
             match entry {
                 Lookup::NotFound(_, name) => {
                     let parent_id = wd.id();
-                    let node = wd.fs.create_symlink_node(parent_id, &target).await?;
+                    let node = wd.fs.create_symlink_node(parent_id, target).await?;
                     
                     // Store the node so it can be loaded later
                     wd.fs.persistence.store_node(&node).await?;

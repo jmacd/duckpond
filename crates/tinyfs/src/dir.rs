@@ -13,7 +13,7 @@ use futures::stream::Stream;
 
 /// Lightweight directory entry information without loading the full node.
 /// Contains just enough information to filter entries and determine partition assignment.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DirectoryEntry {
     /// Entry name within the directory
     pub name: String,
