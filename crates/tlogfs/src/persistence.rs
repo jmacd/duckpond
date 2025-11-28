@@ -2889,20 +2889,13 @@ impl InnerState {
     }
 
     async fn create_symlink_node(
-        &mut self,
+        &self,
         node_id: NodeID,
         part_id: NodeID,
         target: &Path,
         state: State,
     ) -> TinyFSResult<NodeType> {
-        // Store the target immediately
-        // self.store_symlink_target(node_id, part_id, target).await?;
-	// @@@
-        let symlink_handle = tinyfs::memory::MemorySymlink::new_handle(target.to_path_buf());
-        let node_type = NodeType::Symlink(symlink_handle);
-        self.store_node(node_id, part_id, &node_type).await
-
-        // Create and return the symlink node
+        // Just create the in-memory node - caller will call store_node
         node_factory::create_symlink_node(node_id, part_id, state, target)
     }
 

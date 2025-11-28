@@ -211,6 +211,9 @@ impl WD {
                             .fs
                             .create_file_node_pending_write(parent_id, entry_type)
                             .await?;
+                        
+                        // Store the node so it can be loaded later
+                        wd.fs.persistence.store_node(&node).await?;
 
                         // Insert into the directory and return NodePath
                         wd.dref.insert(name.clone(), node.clone()).await?;
@@ -263,8 +266,11 @@ impl WD {
         self.in_path(path, |wd, entry| async move {
             match entry {
                 Lookup::NotFound(_, name) => {
-                    let parent_id = self.id();
+                    let parent_id = wd.id();
                     let node = wd.fs.create_symlink_node(parent_id, &target).await?;
+                    
+                    // Store the node so it can be loaded later
+                    wd.fs.persistence.store_node(&node).await?;
 
                     // Insert into the directory and return NodePath
                     wd.dref.insert(name.clone(), node.clone()).await?;
@@ -290,6 +296,7 @@ impl WD {
                     Lookup::NotFound(_, name) => {
                         let id = FileID::new_physical_dir_id();
                         let node = wd.fs.persistence.create_directory_node(id).await?;
+                        wd.fs.persistence.store_node(&node).await?;
 
                         wd.dref.insert(name.clone(), node.clone()).await?;
                         Ok(NodePath::new(node, wd.dref.path().join(&name)))
@@ -476,8 +483,9 @@ impl WD {
 
                         let name_bound = &name;
                         debug!("resolve: Looking up name '{name_bound}' in directory");
+                        let get_result = ddir.get(&name).await;
 
-                        match ddir.get(&name).await {
+                        match get_result {
                             Err(dir_error) => {
                                 // Directory access failed (e.g., dynamic dir config parsing failed)
                                 // For mknod overwrite operations, we still want to provide parent info
@@ -506,13 +514,14 @@ impl WD {
                                 }
                             }
                             Ok(Some(child)) => {
-                                match &*child.node.node_type.lock().await {
+                                match &child.node.node_type {
                                     NodeType::Symlink(link) => {
+                                        let target = link.readlink().await?;
                                         let (newsz, relp) =
-                                            crate::path::normalize(link.readlink().await?, &stack)?;
+                                            crate::path::normalize(&target, &stack)?;
                                         if depth >= SYMLINK_LOOP_LIMIT {
                                             return Err(Error::symlink_loop(
-                                                link.readlink().await?,
+                                                target,
                                             ));
                                         }
                                         let (_, handle) =
@@ -659,10 +668,10 @@ impl WD {
                         .into_iter()
                         .filter(|entry| pattern[0].match_component(&entry.name).is_some())
                         .collect();
-
                     // Batch load only matching nodes
                     let children = self.load_entries(matching_entries.clone()).await?;
-
+                    let children: std::collections::BTreeMap<_, _> = children.into_iter().collect();
+                    
                     for (name, child) in children {
                         // Extract captured match
                         if let Some(captured_match) = pattern[0].match_component(&name) {
@@ -696,6 +705,7 @@ impl WD {
                     // Case 2: Match one or more directories - recurse into children with same pattern
                     let all_entries = self.get_entries().await?;
                     let children = self.load_entries(all_entries.clone()).await?;
+                    let children: std::collections::BTreeMap<_, _> = children.into_iter().collect();
 
                     for (name, child) in children {
                         captured.push(name.clone());

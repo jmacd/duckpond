@@ -1,7 +1,7 @@
 use crate::EntryType;
 use crate::dir::DirectoryEntry;
 use crate::error::Result;
-use crate::node::{NodeID, FileID, Node};
+use crate::node::{FileID, Node};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -79,13 +79,6 @@ pub trait PersistenceLayer: Send + Sync {
         config_content: Vec<u8>,
     ) -> Result<()>;
 
-    // Directory operations with versioning
-    /// Load all directory entries with full metadata (without loading nodes)
-    async fn load_directory_entries(
-        &self,
-        parent_id: FileID,
-    ) -> Result<HashMap<String, DirectoryEntry>>;
-    
     /// Batch load multiple nodes grouped by partition for efficiency.
     /// Default implementation returns empty map; tlogfs overrides with optimized batch loading.
     async fn batch_load_nodes(
@@ -94,20 +87,6 @@ pub trait PersistenceLayer: Send + Sync {
         requests: Vec<DirectoryEntry>,
     ) -> Result<HashMap<String, Node>>;
     
-    /// Optimized query for a single directory entry by name
-    async fn query_directory_entry(
-        &self,
-        parent_id: FileID,
-        entry_name: &str,
-    ) -> Result<Option<DirectoryEntry>>;
-    /// Directory entry update that stores node type (only supported operation)
-    async fn update_directory_entry(
-        &self,
-        id: FileID,
-        entry_name: &str,
-        operation: DirectoryOperation,
-    ) -> Result<()>;
-
     // Metadata operations
     /// Get consolidated metadata for a node
     /// Requires both node_id and part_id for efficient querying
@@ -138,12 +117,12 @@ pub trait PersistenceLayer: Send + Sync {
     ) -> Result<()>;
 }
 
-#[derive(Clone)]
-pub enum DirectoryOperation {
-    /// Insert operation that includes node type (only supported operation)
-    InsertWithType(NodeID, EntryType),
-    /// Delete operation with node type for consistency
-    DeleteWithType(EntryType),
-    /// Rename operation with node type
-    RenameWithType(String, NodeID, EntryType), // old_name, new_node_id, node_type
-}
+// #[derive(Clone)]
+// pub enum DirectoryOperation {
+//     /// Insert operation that includes node type (only supported operation)
+//     InsertWithType(NodeID, EntryType),
+//     /// Delete operation with node type for consistency
+//     DeleteWithType(EntryType),
+//     /// Rename operation with node type
+//     RenameWithType(String, NodeID, EntryType), // old_name, new_node_id, node_type
+// }

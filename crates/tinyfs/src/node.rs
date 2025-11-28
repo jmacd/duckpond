@@ -1,14 +1,11 @@
-//use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use uuid7::Uuid;
 use serde::{Serialize, Deserialize};
 use crate::EntryType;
 use crate::dir::Pathed;
 use crate::error::Error;
 use crate::error::Result;
-use tokio::sync::Mutex;
 
 /// Root directory gets a special deterministic UUID7
 /// Only version (7) and variant (2) fields are set per UUID7 format
@@ -213,7 +210,7 @@ impl NodeType {
 #[derive(Clone)]
 pub struct Node {
     pub id: FileID,
-    pub node_type: Arc<Mutex<NodeType>>,
+    pub node_type: NodeType,
 }
 
 /// Contains a node reference and the path used to reach it
@@ -231,7 +228,7 @@ impl Node {
     pub fn new(id: FileID, node_type: NodeType) -> Self {
         Self {
 	    id,
-	    node_type: Arc::new(Mutex::new(node_type)),
+	    node_type,
 	}
     }
 
@@ -286,8 +283,8 @@ impl NodePath {
     }
 
     pub async fn into_dir(&self) -> Option<DirNode> {
-	let node_type = self.node.node_type.lock().await;
-        if let NodeType::Directory(d) = &*node_type {
+	let node_type = &self.node.node_type;
+        if let NodeType::Directory(d) = node_type {
             Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
 	    None
@@ -299,8 +296,7 @@ impl NodePath {
     }
 
     pub async fn into_file(&self) -> Option<FileNode> {
-	let node_type = self.node.node_type.lock().await;
-        if let NodeType::File(d) = &*node_type {
+        if let NodeType::File(d) = &self.node.node_type {
             Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
 	    None
@@ -312,8 +308,7 @@ impl NodePath {
     }
 
     pub async fn into_symlink(&self) -> Option<SymlinkNode> {
-	let node_type = self.node.node_type.lock().await;
-        if let NodeType::Symlink(d) = &*node_type {
+        if let NodeType::Symlink(d) = &self.node.node_type {
             Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
 	    None

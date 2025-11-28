@@ -2,7 +2,7 @@ use crate::DirectoryEntry;
 use crate::error::{Error, Result};
 use crate::memory::MemoryDirectory;
 use crate::node::{FileID, Node, NodeType};
-use crate::persistence::{DirectoryOperation, FileVersionInfo, PersistenceLayer};
+use crate::persistence::{FileVersionInfo, PersistenceLayer};
 use crate::{EntryType, NodeMetadata};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -29,9 +29,6 @@ pub struct State {
 
     // Non-file nodes (directories, symlinks): (node_id, part_id) -> Node
     nodes: HashMap<FileID, Node>,
-
-    // parent_id -> {name -> child_id}
-    directories: HashMap<FileID, HashMap<String, DirectoryEntry>>,
 }
 
 impl Default for State {
@@ -43,8 +40,6 @@ impl Default for State {
         Self {
             file_versions: HashMap::new(),
             nodes: HashMap::from([(root_dir.id, root_dir)]),
-            directories: HashMap::new(),
-            //root_dir,
         }
     }
 }
@@ -125,12 +120,6 @@ impl PersistenceLayer for MemoryPersistence {
             .await
     }
 
-    // Directory operations with versioning
-    /// Load all directory entries with full metadata (without loading nodes)
-    async fn load_directory_entries(&self, id: FileID) -> Result<HashMap<String, DirectoryEntry>> {
-        self.0.lock().await.load_directory_entries(id).await
-    }
-
     async fn batch_load_nodes(
         &self,
         parent_id: FileID,
@@ -140,31 +129,6 @@ impl PersistenceLayer for MemoryPersistence {
             .lock()
             .await
             .batch_load_nodes(parent_id, requests)
-            .await
-    }
-
-    async fn query_directory_entry(
-        &self,
-        id: FileID,
-        entry_name: &str,
-    ) -> Result<Option<DirectoryEntry>> {
-        self.0
-            .lock()
-            .await
-            .query_directory_entry(id, entry_name)
-            .await
-    }
-
-    async fn update_directory_entry(
-        &self,
-        id: FileID,
-        entry_name: &str,
-        operation: DirectoryOperation,
-    ) -> Result<()> {
-        self.0
-            .lock()
-            .await
-            .update_directory_entry(id, entry_name, operation)
             .await
     }
 
@@ -210,22 +174,9 @@ impl State {
         Ok(self.nodes.contains_key(&id))
     }
 
-    async fn load_directory_entries(
-        &self,
-        parent_id: FileID,
-    ) -> Result<HashMap<String, DirectoryEntry>> {
-        Ok(self
-            .directories
-            .get(&parent_id)
-            .cloned()
-            .ok_or_else(|| Error::IDNotFound(parent_id))?
-            .into_iter()
-            .collect())
-    }
-
     async fn load_symlink_target(&self, id: FileID) -> Result<std::path::PathBuf> {
         let node = self.load_node(id).await?;
-        match &*node.node_type.lock().await {
+        match node.node_type {
             NodeType::Symlink(handle) => handle.readlink().await,
             _ => Err(Error::Other("Expected symlink node type".to_string())),
         }
@@ -266,57 +217,15 @@ impl State {
         Ok(nodes.into_iter().collect())
     }
 
-    async fn query_directory_entry(
-        &self,
-        parent_id: FileID,
-        entry_name: &str,
-    ) -> Result<Option<DirectoryEntry>> {
-        Ok(self
-            .directories
-            .get(&parent_id)
-            .and_then(|entries| entries.get(entry_name))
-            .cloned())
-    }
-
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
         let node = self.nodes.get(&id).ok_or_else(|| {
             Error::NotFound(std::path::PathBuf::from(format!("Node {id:?} not found",)))
         })?;
 
-        match &*node.node_type.lock().await {
+        match &node.node_type {
             NodeType::File(handle) => handle.metadata().await,
             _ => Err(Error::Other("Non-file metadata unimplemented".to_string())),
         }
-    }
-
-    async fn update_directory_entry(
-        &mut self,
-        id: FileID,
-        entry_name: &str,
-        operation: DirectoryOperation,
-    ) -> Result<()> {
-        let version = 0; // @@@ unused
-        let name = entry_name.to_string();
-        let dir_entries = self.directories.entry(id).or_insert_with(HashMap::new);
-        match operation {
-            DirectoryOperation::InsertWithType(node_id, entry_type) => {
-                _ = dir_entries.insert(
-                    name.clone(),
-                    DirectoryEntry::new(name, node_id, entry_type, version),
-                );
-            }
-            DirectoryOperation::DeleteWithType(_) => {
-                _ = dir_entries.remove(entry_name);
-            }
-            DirectoryOperation::RenameWithType(new_name, node_id, entry_type) => {
-                _ = dir_entries.remove(entry_name);
-                _ = dir_entries.insert(
-                    new_name.clone(),
-                    DirectoryEntry::new(new_name, node_id, entry_type, version),
-                );
-            }
-        }
-        Ok(())
     }
 
     async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>> {

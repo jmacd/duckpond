@@ -69,8 +69,7 @@ impl Directory for ReverseDirectory {
 
         let mut reversed_items = Vec::new();
         for np in sub {
-            let node_type = np.node.node_type.lock().await;
-            let entry_type = match &*node_type {
+            let entry_type = match &np.node.node_type {
                 NodeType::Directory(_) => crate::EntryType::DirectoryPhysical,
                 NodeType::File(_) => crate::EntryType::FileDataPhysical,
                 NodeType::Symlink(_) => crate::EntryType::Symlink,

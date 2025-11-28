@@ -53,7 +53,7 @@ impl FS {
     /// Batch load multiple nodes grouped by partition for efficiency.
     pub(crate) async fn batch_load_nodes(
         &self,
-	parent_id: FileID,
+        parent_id: FileID,
         requests: Vec<DirectoryEntry>,
     ) -> Result<HashMap<String, Node>> {
         self.persistence.batch_load_nodes(parent_id, requests).await

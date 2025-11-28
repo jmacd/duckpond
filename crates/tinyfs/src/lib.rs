@@ -31,7 +31,7 @@ pub use entry_type::EntryType;
 pub use error::{Error, Result};
 pub use memory::persistence::MemoryPersistence;
 pub use metadata::{Metadata, NodeMetadata};
-pub use persistence::{DirectoryOperation, FileVersionInfo, PersistenceLayer};
+pub use persistence::{FileVersionInfo, PersistenceLayer};
 pub use symlink::{Handle as SymlinkHandle, Symlink};
 
 #[cfg(test)]
