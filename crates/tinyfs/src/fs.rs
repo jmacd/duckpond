@@ -112,7 +112,7 @@ impl FS {
     pub(crate) async fn read_file_version(
         &self,
         id: FileID,
-        version: Option<u64>,
+        version: u64,
     ) -> Result<Vec<u8>> {
         self.persistence.read_file_version(id, version).await
     }
@@ -121,12 +121,11 @@ impl FS {
     pub(crate) async fn create_dynamic_node(
         &self,
         id: FileID,
-        entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<Node> {
         self.persistence
-            .create_dynamic_node(id, entry_type, factory_type, config_content)
+            .create_dynamic_node(id, factory_type, config_content)
             .await
     }
 

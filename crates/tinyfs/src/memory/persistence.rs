@@ -82,14 +82,13 @@ impl PersistenceLayer for MemoryPersistence {
     async fn create_dynamic_node(
         &self,
         id: FileID,
-        entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<Node> {
         self.0
             .lock()
             .await
-            .create_dynamic_node(id, entry_type, factory_type, config_content)
+            .create_dynamic_node(id, factory_type, config_content)
             .await
     }
 
@@ -130,7 +129,7 @@ impl PersistenceLayer for MemoryPersistence {
         self.0.lock().await.list_file_versions(id).await
     }
 
-    async fn read_file_version(&self, id: FileID, version: Option<u64>) -> Result<Vec<u8>> {
+    async fn read_file_version(&self, id: FileID, version: u64) -> Result<Vec<u8>> {
         self.0.lock().await.read_file_version(id, version).await
     }
 
@@ -184,14 +183,11 @@ impl State {
         id: FileID,
         requests: Vec<DirectoryEntry>,
     ) -> Result<HashMap<String, Node>> {
-        let nodes = futures::future::try_join_all(
-            requests
-                .into_iter()
-                .map(|entry| async move {
-                    let node = self.load_node(id.child_id(entry.child_node_id)).await?;
-                    Ok::<_, Error>((entry.name, node))
-                }),
-        ).await?;
+        let nodes = futures::future::try_join_all(requests.into_iter().map(|entry| async move {
+            let node = self.load_node(id.child_id(entry.child_node_id)).await?;
+            Ok::<_, Error>((entry.name, node))
+        }))
+        .await?;
         Ok(nodes.into_iter().collect())
     }
 
@@ -225,28 +221,24 @@ impl State {
         }
     }
 
-    async fn read_file_version(&self, id: FileID, version: Option<u64>) -> Result<Vec<u8>> {
+    async fn read_file_version(&self, id: FileID, version: u64) -> Result<Vec<u8>> {
         if let Some(versions) = self.file_versions.get(&id) {
-            match version {
-                Some(v) => {
-                    if let Some(file_version) = versions.iter().find(|fv| fv.version == v) {
-                        Ok(file_version.content.clone())
-                    } else {
-                        Err(Error::NotFound(std::path::PathBuf::from(format!(
-                            "Version {v} of file {id} not found"
-                        ))))
-                    }
-                }
-                None => {
-                    if let Some(latest) = versions.last() {
-                        Ok(latest.content.clone())
-                    } else {
-                        Err(Error::NotFound(std::path::PathBuf::from(format!(
-                            "No versions of file {id} found",
-                        ))))
-                    }
-                }
+            if let Some(file_version) = versions.iter().find(|fv| fv.version == version) {
+                Ok(file_version.content.clone())
+            } else {
+                Err(Error::NotFound(std::path::PathBuf::from(format!(
+                    "Version {version} of file {id} not found"
+                ))))
             }
+            // None => {
+            //     if let Some(latest) = versions.last() {
+            //         Ok(latest.content.clone())
+            //     } else {
+            //         Err(Error::NotFound(std::path::PathBuf::from(format!(
+            //             "No versions of file {id} found",
+            //         ))))
+            //     }
+            // }
         } else {
             Err(Error::NotFound(std::path::PathBuf::from(format!(
                 "File {id} not found",
@@ -278,7 +270,6 @@ impl State {
     async fn create_dynamic_node(
         &self,
         _id: FileID,
-        _entry_type: EntryType,
         _factory_type: &str,
         _config_content: Vec<u8>,
     ) -> Result<Node> {

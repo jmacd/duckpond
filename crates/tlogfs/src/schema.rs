@@ -368,9 +368,7 @@ impl OplogEntry {
     /// Create entry for small file (<= threshold)
     #[must_use]
     pub fn new_small_file(
-        part_id: NodeID,
-        node_id: NodeID,
-        file_type: EntryType,
+        id: FileID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
@@ -378,9 +376,9 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id,
-            node_id,
-            file_type,
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: Some(content.clone()),
@@ -402,9 +400,7 @@ impl OplogEntry {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_large_file(
-        part_id: NodeID,
-        node_id: NodeID,
-        file_type: EntryType,
+        id: FileID,
         timestamp: i64,
         version: i64,
         sha256: String,
@@ -412,9 +408,9 @@ impl OplogEntry {
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
-            file_type,
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: None,
@@ -435,18 +431,16 @@ impl OplogEntry {
     /// Create entry for non-file types (directories, symlinks) - always inline
     #[must_use]
     pub fn new_inline(
-        part_id: NodeID,
-        node_id: NodeID,
-        file_type: EntryType,
+        id: FileID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id,
-            node_id,
-            file_type,
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: Some(content),
@@ -481,8 +475,7 @@ impl OplogEntry {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_file_series(
-        part_id: NodeID,
-        node_id: NodeID,
+        id: FileID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
@@ -493,9 +486,9 @@ impl OplogEntry {
     ) -> Self {
         let size = content.len() as u64;
         Self {
-            part_id,
-            node_id,
-            file_type: EntryType::FileSeriesPhysical, // Physical series file
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: Some(content.clone()),
@@ -517,8 +510,7 @@ impl OplogEntry {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_large_file_series(
-        part_id: NodeID,
-        node_id: NodeID,
+        id: FileID,
         timestamp: i64,
         version: i64,
         sha256: String,
@@ -528,10 +520,11 @@ impl OplogEntry {
         extended_attributes: ExtendedAttributes,
         txn_seq: i64,
     ) -> Self {
+	assert_eq!(EntryType::FileSeriesPhysical, id.entry_type());
         Self {
-            part_id,
-            node_id,
-            file_type: EntryType::FileSeriesPhysical, // Physical series file
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: EntryType::FileSeriesPhysical,
             timestamp,
             version,
             content: None,
@@ -621,7 +614,6 @@ impl OplogEntry {
     #[must_use]
     pub fn new_dynamic_node(
         id: FileID,
-	entry_type: EntryType,
         timestamp: i64,
         version: i64,
         factory_type: &str,
@@ -631,7 +623,7 @@ impl OplogEntry {
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
-            file_type: entry_type,
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: Some(config_content),
@@ -674,16 +666,16 @@ impl OplogEntry {
     /// This constructor creates a complete directory state snapshot instead of incremental changes
     #[must_use]
     pub fn new_directory_full_snapshot(
-        part_id: NodeID,
+        id: FileID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>, // Serialized DirectoryEntry[]
         txn_seq: i64,
     ) -> Self {
         Self {
-            part_id,
-            node_id: part_id, // For dirs: node_id == part_id
-            file_type: EntryType::DirectoryPhysical,
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: Some(content),

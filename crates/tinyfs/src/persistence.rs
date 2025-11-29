@@ -37,12 +37,11 @@ pub trait PersistenceLayer: Send + Sync {
 
     async fn create_directory_node(&self, id: FileID,) -> Result<Node>;
 
-    async fn create_symlink_node(&self, id: FileID, target: &Path,) -> Result<Node>;
+    async fn create_symlink_node(&self, id: FileID, target: &Path) -> Result<Node>;
 
     async fn create_dynamic_node(
         &self,
         id: FileID,
-	entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<Node>;
@@ -83,7 +82,7 @@ pub trait PersistenceLayer: Send + Sync {
     async fn read_file_version(
         &self,
         id: FileID,
-        version: Option<u64>,
+        version: u64,
     ) -> Result<Vec<u8>>;
 
     /// Set extended attributes on an existing node

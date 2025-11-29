@@ -343,7 +343,7 @@ impl WD {
     pub async fn read_file_version<P: AsRef<Path>>(
         &self,
         path: P,
-        version: Option<u64>,
+        version: u64,
     ) -> Result<Vec<u8>> {
         let (_, lookup) = self.resolve_path(path).await?;
         match lookup {
@@ -962,12 +962,12 @@ impl WD {
                     Lookup::NotFound(_, name) => {
                         // For overwrite operations, we should try to recreate/overwrite anyway
                         // since the parent directory info is available in wd
-                        let id = wd.id().new_child_id(EntryType::DirectoryDynamic);
+			// @@@ not using special dynamic ID constructor
+                        let id = wd.id().new_child_id(entry_type);
                         let node = wd
                             .fs
                             .create_dynamic_node(
                                 id,
-                                entry_type,
                                 factory_type,
                                 config_content,
                             )

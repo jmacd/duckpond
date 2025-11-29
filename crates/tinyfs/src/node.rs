@@ -125,6 +125,11 @@ pub struct FileID {
 
 impl FileID {
     #[must_use]
+    pub fn new_from_ids(part_id: PartID, node_id: NodeID) -> Self {
+	Self { part_id, node_id }
+    }
+
+    #[must_use]
     pub fn is_root(&self) -> bool {
 	*self == Self::root()
     }
