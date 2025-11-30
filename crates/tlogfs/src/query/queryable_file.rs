@@ -9,7 +9,7 @@ use crate::error::TLogFSError;
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use std::sync::Arc;
-use tinyfs::{File, NodeID};
+use tinyfs::{File, FileID};
 
 /// Single trait for all files that can be queried as DataFusion tables
 ///
@@ -25,8 +25,7 @@ pub trait QueryableFile: File {
     /// - Other file types: implement as needed
     async fn as_table_provider(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         state: &crate::persistence::State,
     ) -> Result<Arc<dyn TableProvider>, TLogFSError>;
 }

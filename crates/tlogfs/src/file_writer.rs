@@ -5,14 +5,12 @@ use log::{debug, info};
 use std::io::{Cursor, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tinyfs::{EntryType, NodeID};
+use tinyfs::{EntryType, FileID};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWriteExt};
 
 /// Main file writer that supports both small and large files with automatic promotion
 pub struct FileWriter<'tx> {
-    pub(crate) node_id: NodeID,
-    pub(crate) part_id: NodeID,
-    pub(crate) file_type: EntryType,
+    pub(crate) id: FileID,
     pub(crate) storage: WriterStorage,
     pub(crate) total_written: u64,
     pub(crate) transaction: &'tx TransactionGuard<'tx>,
@@ -115,19 +113,16 @@ impl<'tx> FileWriter<'tx> {
 
     /// Finalize the write operation with content analysis and transaction storage
     pub async fn finish(mut self) -> Result<WriteResult, TLogFSError> {
-        let node_hex = self.node_id.to_string();
         let total_written = self.total_written;
-        let node_id = self.node_id;
-        let part_id = self.part_id;
-        let file_type = self.file_type;
-
-        debug!("Finalizing FileWriter for node {node_hex}, total written: {total_written} bytes");
+	let id = self.id;
+	
+        debug!("Finalizing FileWriter for node {id}, total written: {total_written} bytes");
 
         // Create AsyncRead + AsyncSeek interface for content analysis
         let content_reader = self.create_content_reader().await?;
 
         // Extract metadata based on file type
-        let metadata = match file_type {
+        let metadata = match id.entry_type() {
             EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
                 SeriesProcessor::extract_temporal_metadata(content_reader).await?
             }
@@ -139,7 +134,7 @@ impl<'tx> FileWriter<'tx> {
             }
             _ => {
                 return Err(TLogFSError::Transaction {
-                    message: format!("Unsupported file type for writer: {:?}", file_type),
+                    message: format!("Unsupported file type for writer: {}", id.entry_type()),
                 });
             }
         };
@@ -150,12 +145,11 @@ impl<'tx> FileWriter<'tx> {
 
         // Store in transaction (replaces any existing pending version)
         state
-            .store_file_content_ref(node_id, part_id, content_ref, file_type, metadata.clone())
+            .store_file_content_ref(id, content_ref, metadata.clone())
             .await?;
 
-        let node_hex = node_id.to_string();
         let size = total_written;
-        info!("Successfully wrote file node {node_hex}, size: {size}");
+        info!("Successfully wrote file node {id}, size: {size}");
 
         Ok(WriteResult {
             size: total_written,

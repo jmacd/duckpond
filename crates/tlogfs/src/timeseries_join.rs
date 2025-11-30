@@ -323,14 +323,11 @@ impl tinyfs::Metadata for TimeseriesJoinFile {
 impl QueryableFile for TimeseriesJoinFile {
     async fn as_table_provider(
         &self,
-        node_id: tinyfs::NodeID,
-        part_id: tinyfs::NodeID,
+        id: tinyfs::FileID,
         state: &crate::persistence::State,
     ) -> Result<Arc<dyn TableProvider>, crate::error::TLogFSError> {
         log::debug!(
-            "📋 DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: node_id={}, part_id={}",
-            node_id,
-            part_id
+            "📋 DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: id={id}",
         );
         self.ensure_inner()
             .await
@@ -340,7 +337,7 @@ impl QueryableFile for TimeseriesJoinFile {
         let inner = inner_guard
             .as_ref()
             .expect("inner initialized by ensure_inner");
-        inner.as_table_provider(node_id, part_id, state).await
+        inner.as_table_provider(id, state).await
     }
 }
 

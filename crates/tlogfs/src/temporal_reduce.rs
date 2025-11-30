@@ -439,21 +439,18 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
 impl QueryableFile for TemporalReduceSqlFile {
     async fn as_table_provider(
         &self,
-        node_id: tinyfs::NodeID,
-        part_id: tinyfs::NodeID,
+        id: tinyfs::FileID,
         state: &crate::persistence::State,
     ) -> Result<Arc<dyn TableProvider>, crate::error::TLogFSError> {
         log::debug!(
-            "📋 DELEGATING TemporalReduceSqlFile to inner file: node_id={}, part_id={}",
-            node_id,
-            part_id
+            "📋 DELEGATING TemporalReduceSqlFile to inner file: id={id}",
         );
         self.ensure_inner()
             .await
             .map_err(crate::error::TLogFSError::TinyFS)?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().expect("safelock");
-        inner.as_table_provider(node_id, part_id, state).await
+        inner.as_table_provider(id, state).await
     }
 }
 

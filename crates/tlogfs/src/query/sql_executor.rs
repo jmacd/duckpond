@@ -41,46 +41,50 @@ pub async fn execute_sql_on_file<'a>(
 
     match lookup_result {
         Lookup::Found(node_path) => {
-            let node_guard = node_path.borrow().await;
-            let file_handle = node_guard.as_file().map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Path {} does not point to a file: {}", path, e))
-            })?;
+            let file_handle = node_path.as_file().await.map_err(TLogFSError::TinyFS)?;
 
             // Get the entry type and metadata
-            let metadata = file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
+            //let metadata = file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
 
-            match metadata.entry_type {
+            match node_path.id().entry_type() {
                 tinyfs::EntryType::FileTablePhysical
                 | tinyfs::EntryType::FileTableDynamic
                 | tinyfs::EntryType::FileSeriesPhysical
                 | tinyfs::EntryType::FileSeriesDynamic => {
                     // Use trait dispatch instead of type checking - follows anti-duplication principles
 
-                    let file_arc = file_handle.handle.get_file().await;
-                    let file_guard = file_arc.lock().await;
+                    //let file_arc = file_handle.handle.get_file().await;
+                    //let file_guard = file_arc.lock().await;
 
+		    // @@@ This appears to be dead code: it wasn't necessary because
+		    // the node.id().part_id() is the parent partition we needed.
+		    //
                     // Simple and direct: get NodeIDs without unnecessary conversions
-                    let node_id = node_path.id().await;
-                    let part_id = {
-                        let parent_path = node_path.dirname();
-                        let parent_node_path =
-                            tinyfs_wd.resolve_path(&parent_path).await.map_err(|e| {
-                                TLogFSError::ArrowMessage(format!(
-                                    "Failed to resolve parent path: {}",
-                                    e
-                                ))
-                            })?;
-                        match parent_node_path.1 {
-                            Lookup::Found(parent_node) => parent_node.id().await,
-                            _ => tinyfs::NodeID::root(),
-                        }
-                    };
+                    // let node_id = node_path.id();
+                    // let part_id = {
+                    //     let parent_path = node_path.dirname();
+                    //     let parent_node_path =
+                    //         tinyfs_wd.resolve_path(&parent_path).await.map_err(|e| {
+                    //             TLogFSError::ArrowMessage(format!(
+                    //                 "Failed to resolve parent path: {}",
+                    //                 e
+                    //             ))
+                    //         })?;
+                    //     match parent_node_path.1 {
+                    //         Lookup::Found(parent_node) => parent_node.id(),
+                    //         _ => tinyfs::NodeID::root(),
+                    //     }
+                    // };
 
                     // Single workflow: Use QueryableFile trait dispatch instead of type checking
+
+		    let file_arc = file_handle.handle.get_file().await;
+                    let file_guard = file_arc.lock().await;
+
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let state = tx.state()?;
                         let table_provider = queryable_file
-                            .as_table_provider(node_id, part_id, &state)
+                            .as_table_provider(node_path.id(), &state)
                             .await?;
                         drop(file_guard);
 
@@ -116,8 +120,8 @@ pub async fn execute_sql_on_file<'a>(
                     Ok(stream)
                 }
                 _ => Err(TLogFSError::ArrowMessage(format!(
-                    "Path {} points to unsupported entry type for table operations: {:?}",
-                    path, metadata.entry_type
+                    "Path {} points to unsupported entry type for table operations: {}",
+                    path, node_path.entry_type()
                 ))),
             }
         }
@@ -143,7 +147,6 @@ pub async fn get_file_schema(
     path: &str,
     state: &crate::persistence::State,
 ) -> Result<arrow::datatypes::SchemaRef, TLogFSError> {
-    // Resolve path - same pattern as execute_sql_on_file
     use tinyfs::Lookup;
     let (_, lookup_result) = tinyfs_wd
         .resolve_path(path)
@@ -152,15 +155,9 @@ pub async fn get_file_schema(
 
     match lookup_result {
         Lookup::Found(node_path) => {
-            let node_guard = node_path.borrow().await;
-            let file_handle = node_guard.as_file().map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Path {} does not point to a file: {}", path, e))
-            })?;
+            let file_handle = node_path.as_file().await.map_err(TLogFSError::TinyFS)?;
 
-            // Get the entry type and metadata
-            let metadata = file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
-
-            match metadata.entry_type {
+            match node_path.entry_type() {
                 tinyfs::EntryType::FileTablePhysical
                 | tinyfs::EntryType::FileTableDynamic
                 | tinyfs::EntryType::FileSeriesPhysical
@@ -168,26 +165,26 @@ pub async fn get_file_schema(
                     let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 
-                    let node_id = node_path.id().await;
-                    let part_id = {
-                        let parent_path = node_path.dirname();
-                        let parent_node_path =
-                            tinyfs_wd.resolve_path(&parent_path).await.map_err(|e| {
-                                TLogFSError::ArrowMessage(format!(
-                                    "Failed to resolve parent path: {}",
-                                    e
-                                ))
-                            })?;
-                        match parent_node_path.1 {
-                            Lookup::Found(parent_node) => parent_node.id().await,
-                            _ => tinyfs::NodeID::root(),
-                        }
-                    };
+                    // let node_id = node_path.id().await;
+                    // let part_id = {
+                    //     let parent_path = node_path.dirname();
+                    //     let parent_node_path =
+                    //         tinyfs_wd.resolve_path(&parent_path).await.map_err(|e| {
+                    //             TLogFSError::ArrowMessage(format!(
+                    //                 "Failed to resolve parent path: {}",
+                    //                 e
+                    //             ))
+                    //         })?;
+                    //     match parent_node_path.1 {
+                    //         Lookup::Found(parent_node) => parent_node.id().await,
+                    //         _ => tinyfs::NodeID::root(),
+                    //     }
+                    // };
 
                     // Get QueryableFile and table provider
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let table_provider = queryable_file
-                            .as_table_provider(node_id, part_id, state)
+                            .as_table_provider(node_path.id(), state)
                             .await?;
                         drop(file_guard);
 
@@ -200,8 +197,8 @@ pub async fn get_file_schema(
                     }
                 }
                 _ => Err(TLogFSError::ArrowMessage(format!(
-                    "Unsupported file type for schema extraction: {:?}",
-                    metadata.entry_type
+                    "Unsupported file type for schema extraction: {}",
+                    node_path.entry_type()
                 ))),
             }
         }

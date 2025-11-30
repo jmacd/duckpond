@@ -450,11 +450,10 @@ pub async fn create_table_provider(
 /// Thin wrapper around create_table_provider() with default options
 /// Create a listing table provider - core function taking State directly
 pub async fn create_listing_table_provider(
-    node_id: tinyfs::NodeID,
-    part_id: tinyfs::NodeID,
+    id: tinyfs::FileID,
     state: &crate::persistence::State,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    create_table_provider(node_id, part_id, state, TableProviderOptions::default()).await
+    create_table_provider(id, state, TableProviderOptions::default()).await
 }
 
 /// Create a listing table provider from TransactionGuard - convenience wrapper

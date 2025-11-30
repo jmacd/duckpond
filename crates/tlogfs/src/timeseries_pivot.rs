@@ -26,7 +26,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tinyfs::{EntryType, FileHandle, NodeID, NodeMetadata, Result as TinyFSResult};
+use tinyfs::{EntryType, FileHandle, FileID, NodeMetadata, Result as TinyFSResult};
 use tokio::sync::Mutex;
 
 /// Configuration for timeseries-pivot factory
@@ -209,9 +209,8 @@ impl tinyfs::Metadata for TimeseriesPivotFile {
 impl QueryableFile for TimeseriesPivotFile {
     async fn as_table_provider(
         &self,
-        _node_id: NodeID,
-        _part_id: NodeID,
-        _state: &State,
+        id: FileID,
+        state: &State,
     ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
         log::debug!(
             "🔍 TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
@@ -271,7 +270,7 @@ impl QueryableFile for TimeseriesPivotFile {
         )?;
 
         // Delegate to SqlDerivedFile - it handles everything from here
-        sql_file.as_table_provider(_node_id, _part_id, _state).await
+        sql_file.as_table_provider(id, state).await
     }
 }
 
@@ -351,7 +350,7 @@ mod tests {
         });
         
         let state = tx_guard.state().unwrap();
-        let context = FactoryContext::new(state.clone(), NodeID::root());
+	let context = FactoryContext::new(state.clone(), FileID::root().part_id());
         
         TimeseriesPivotFile { config, context }
     }

@@ -729,25 +729,23 @@ impl QueryableFile for SqlDerivedFile {
     /// allowing DataFusion to handle query planning and optimization efficiently.
     async fn as_table_provider(
         &self,
-        node_id: tinyfs::NodeID,
-        part_id: tinyfs::NodeID,
+        id: tinyfs::FileID,
         state: &crate::persistence::State,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
         // Check cache first for SqlDerivedFile ViewTable
         let cache_key = crate::persistence::TableProviderKey::new(
-            node_id,
-            part_id,
+            id,
             crate::file_table::VersionSelection::LatestVersion,
         );
 
         if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
             debug!(
-                "🚀 CACHE HIT: Returning cached ViewTable for node_id: {node_id}, part_id: {part_id}"
+                "🚀 CACHE HIT: Returning cached ViewTable for node_id: {id}"
             );
             return Ok(cached_provider);
         }
 
-        debug!("💾 CACHE MISS: Creating new ViewTable for node_id: {node_id}, part_id: {part_id}");
+        debug!("💾 CACHE MISS: Creating new ViewTable for node_id: {id}");
 
         // Get SessionContext from state to set up tables
         let ctx = state.session_context().await?;
@@ -1081,7 +1079,7 @@ impl QueryableFile for SqlDerivedFile {
 
         // Cache the ViewTable for future reuse
         state.set_table_provider_cache(cache_key, table_provider.clone());
-        debug!("💾 CACHED: Stored ViewTable for node_id: {node_id}, part_id: {part_id}");
+        debug!("💾 CACHED: Stored ViewTable for node_id: {id}");
 
         Ok(table_provider)
     }

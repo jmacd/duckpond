@@ -250,7 +250,13 @@ impl Node {
     /// Get the FileID for this node
     #[must_use]
     pub fn entry_type(&self) -> EntryType {
-        self.id().entry_type()
+        self.id.entry_type()
+    }
+
+    /// Get the NodeType
+    #[must_use]
+    pub fn node_type(&self) -> NodeType {
+        self.node_type.clone()
     }
 }
 
@@ -273,6 +279,11 @@ impl NodePath {
         self.node.id()
     }
 
+    #[must_use]
+    pub fn entry_type(&self) -> EntryType {
+        self.node.id().entry_type()
+    }
+    
     #[must_use]
     pub fn basename(&self) -> String {
         crate::path::basename(&self.path).unwrap_or_default()

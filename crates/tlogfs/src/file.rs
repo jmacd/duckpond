@@ -385,42 +385,39 @@ impl crate::query::QueryableFile for OpLogFile {
     /// instead of duplicating DataFusion setup logic.
     async fn as_table_provider(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         state: &State,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
         log::debug!(
-            "📋 DELEGATING OpLogFile to create_listing_table_provider: node_id={}, part_id={}",
-            node_id,
-            part_id
+            "📋 DELEGATING OpLogFile to create_listing_table_provider: id={id}",
         );
         // Delegate to existing create_listing_table_provider - no duplication
-        crate::file_table::create_listing_table_provider(node_id, part_id, state).await
+        crate::file_table::create_listing_table_provider(id, state).await
     }
 }
 
-/// Create a table provider from multiple file URLs
-/// This is a convenience function following anti-duplication principles
-pub async fn create_table_provider_for_multiple_urls(
-    urls: Vec<String>,
-    tx: &mut crate::transaction_guard::TransactionGuard<'_>,
-) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-    log::debug!(
-        "📋 CREATING TableProvider for multiple URLs: {} files",
-        urls.len()
-    );
-    use crate::file_table::{TableProviderOptions, create_table_provider};
-    use tinyfs::NodeID;
+// /// Create a table provider from multiple file URLs
+// /// This is a convenience function following anti-duplication principles
+// pub async fn create_table_provider_for_multiple_urls(
+//     urls: Vec<String>,
+//     tx: &mut crate::transaction_guard::TransactionGuard<'_>,
+// ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+//     log::debug!(
+//         "📋 CREATING TableProvider for multiple URLs: {} files",
+//         urls.len()
+//     );
+//     use crate::file_table::{TableProviderOptions, create_table_provider};
+//     use tinyfs::NodeID;
 
-    // Use dummy node IDs since we're providing explicit URLs
-    let dummy_node_id = NodeID::root();
-    let dummy_part_id = NodeID::root();
+//     // Use dummy node IDs since we're providing explicit URLs
+//     let dummy_node_id = NodeID::root();
+//     let dummy_part_id = NodeID::root();
 
-    let options = TableProviderOptions {
-        additional_urls: urls,
-        ..Default::default()
-    };
+//     let options = TableProviderOptions {
+//         additional_urls: urls,
+//         ..Default::default()
+//     };
 
-    let state = tx.state()?;
-    create_table_provider(dummy_node_id, dummy_part_id, &state, options).await
-}
+//     let state = tx.state()?;
+//     create_table_provider(dummy_node_id, dummy_part_id, &state, options).await
+// }
