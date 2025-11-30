@@ -120,7 +120,7 @@ async fn execute_test(
 
     // For testing purposes, create a result in /tmp/test-executor-results
     // (We can't easily create directories under the config node without knowing its ID)
-    let result_path = format!("/tmp/test-executor-result-{}.txt", context.parent_node_id);
+    let result_path = format!("/tmp/test-executor-result-{}.txt", context.parent_id);
     let result_content = format!(
         "Executed {} times\nMessage: {}\nContext: {:?}\n",
         parsed_config.repeat_count, parsed_config.message, ctx

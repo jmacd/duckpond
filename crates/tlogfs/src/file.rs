@@ -47,14 +47,14 @@ impl OpLogFile {
 
     /// Get the node ID for this file
     #[must_use]
-    pub fn get_node_id(&self) -> NodeID {
-        self.node_id
+    pub fn node_id(&self) -> NodeID {
+        self.id.node_id()
     }
 
     /// Get the part ID (parent directory node ID) for this file
     #[must_use]
-    pub fn get_part_id(&self) -> NodeID {
-        self.part_id
+    pub fn part_id(&self) -> PartID {
+        self.id.part_id()
     }
 
     /// Create a file handle for TinyFS integration
@@ -68,7 +68,7 @@ impl OpLogFile {
 impl Metadata for OpLogFile {
     async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
         // For files, the partition is the parent directory (parent_node_id)
-        self.state.metadata(self.node_id, self.part_id).await
+        self.state.metadata(self.id).await
     }
 }
 
@@ -89,7 +89,7 @@ impl File for OpLogFile {
         // Use streaming async reader instead of loading entire file into memory
         let reader = self
             .state
-            .async_file_reader(self.node_id, self.part_id)
+            .async_file_reader(self.id)
             .await
             .map_err(|e| TinyFSError::Other(e.to_string()))?;
 
@@ -119,19 +119,17 @@ impl File for OpLogFile {
         debug!("OpLogFile::async_writer()");
 
         // Get the current entry type from metadata to preserve it
-        let metadata = self.state.metadata(self.node_id, self.part_id).await?;
+        let metadata = self.state.metadata(self.id).await?;
         let entry_type = metadata.entry_type;
 
         // Create a simple buffering writer that will store content via persistence layer
         let persistence = self.state.clone();
-        let node_id = self.node_id;
-        let part_id = self.part_id;
+        let file_id = self.id;
         let transaction_state = self.transaction_state.clone();
 
         Ok(Box::pin(OpLogFileWriter::new(
             persistence,
-            node_id,
-            part_id,
+            file_id,
             transaction_state,
             entry_type,
         )))
@@ -146,8 +144,7 @@ impl File for OpLogFile {
 struct OpLogFileWriter {
     buffer: Vec<u8>,
     state: State,
-    node_id: NodeID,
-    part_id: NodeID,
+    file_id: FileID,
     transaction_state: Arc<RwLock<TransactionWriteState>>,
     completed: bool,
     completion_future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -161,16 +158,14 @@ impl Unpin for OpLogFileWriter {}
 impl OpLogFileWriter {
     fn new(
         state: State,
-        node_id: NodeID,
-        part_id: NodeID,
+        file_id: FileID,
         transaction_state: Arc<RwLock<TransactionWriteState>>,
         entry_type: tinyfs::EntryType,
     ) -> Self {
         Self {
             buffer: Vec::new(),
             state,
-            node_id,
-            part_id,
+            file_id,
             transaction_state,
             completed: false,
             completion_future: None,
@@ -258,8 +253,7 @@ impl AsyncWrite for OpLogFileWriter {
         if this.completion_future.is_none() {
             let content = std::mem::take(&mut this.buffer);
             let mut state = this.state.clone();
-            let node_id = this.node_id;
-            let part_id = this.part_id;
+            let file_id = this.file_id;
             let transaction_state = this.transaction_state.clone();
             let entry_type = this.entry_type;
 
@@ -279,10 +273,8 @@ impl AsyncWrite for OpLogFileWriter {
                 let result = async {
                     // Use the new FileWriter pattern through transaction guard API
                     state.store_file_content_ref(
-                        node_id,
-                        part_id,
+                        file_id,
                         crate::file_writer::ContentRef::Small(content.clone()),
-                        entry_type,
                         match entry_type {
                             tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
                                 // Special case: Handle empty FileSeries (0 bytes) for metadata-only versions

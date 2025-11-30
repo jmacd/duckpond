@@ -184,7 +184,9 @@ impl State {
         requests: Vec<DirectoryEntry>,
     ) -> Result<HashMap<String, Node>> {
         let nodes = futures::future::try_join_all(requests.into_iter().map(|entry| async move {
-            let node = self.load_node(id.child_id(entry.child_node_id)).await?;
+            // Construct FileID from directory's part_id and child's node_id
+            let child_id = FileID::new_from_ids(id.part_id(), entry.child_node_id);
+            let node = self.load_node(child_id).await?;
             Ok::<_, Error>((entry.name, node))
         }))
         .await?;

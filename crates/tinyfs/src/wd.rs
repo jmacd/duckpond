@@ -267,7 +267,7 @@ impl WD {
             match entry {
                 Lookup::NotFound(_, name) => {
                     let parent_id = wd.id();
-                    let node = wd.fs.create_symlink_node(parent_id, target).await?;
+                    let node = wd.fs.create_symlink_node(parent_id, &target).await?;
                     
                     // Store the node so it can be loaded later
                     wd.fs.persistence.store_node(&node).await?;
@@ -962,8 +962,7 @@ impl WD {
                     Lookup::NotFound(_, name) => {
                         // For overwrite operations, we should try to recreate/overwrite anyway
                         // since the parent directory info is available in wd
-			// @@@ not using special dynamic ID constructor
-                        let id = wd.id().new_child_id(entry_type);
+                        let id = wd.id().new_child_id(EntryType::DirectoryDynamic);
                         let node = wd
                             .fs
                             .create_dynamic_node(
@@ -974,8 +973,6 @@ impl WD {
                             .await?;
 
                         // @@@ wasnt supposed to do this, but we changed signatures of create_dynamic_dir
-                        // @@@ And no longer passing name.clone(),
-			// we need to store@@@@
                         wd.dref.insert(name.clone(), node.clone()).await?;
 
                         Ok(NodePath::new(node, wd.dref.path().join(&name)))

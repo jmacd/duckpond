@@ -61,14 +61,14 @@ impl VersionSelection {
     /// Generate URL pattern for this version selection
     /// Eliminates duplicate URL pattern generation throughout the codebase
     #[must_use]
-    pub fn to_url_pattern(&self, part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
+    pub fn to_url_pattern(&self, file_id: &tinyfs::FileID) -> String {
         match self {
             VersionSelection::AllVersions | VersionSelection::LatestVersion => {
-                crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(part_id, node_id)
+                crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(file_id)
             }
             VersionSelection::SpecificVersion(version) => {
                 crate::tinyfs_object_store::TinyFsPathBuilder::url_specific_version(
-                    part_id, node_id, *version,
+                    file_id, *version,
                 )
             }
         }
@@ -304,8 +304,7 @@ pub struct TableProviderOptions {
 /// Replaces create_listing_table_provider and create_listing_table_provider_with_options
 /// Following anti-duplication guidelines: options pattern instead of function suffixes
 pub async fn create_table_provider(
-    node_id: tinyfs::NodeID,
-    part_id: tinyfs::NodeID, // Used for DeltaLake partition pruning (see deltalake-partition-pruning-fix.md)
+    file_id: tinyfs::FileID, // FileID contains both node_id and part_id for DeltaLake partition pruning
     state: &crate::persistence::State,
     options: TableProviderOptions,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
@@ -315,27 +314,26 @@ pub async fn create_table_provider(
     // This is handled by the caller using the transaction guard's object_store() method
     // Following anti-duplication: no duplicate ObjectStore creation or registration needed here
 
-    log::debug!("create_table_provider called for node_id: {node_id}");
+    log::debug!("create_table_provider called for file_id: {}", file_id.node_id());
 
     // Use centralized debug logging to eliminate duplication
-    options.version_selection.log_debug(&node_id);
+    options.version_selection.log_debug(&file_id.node_id());
 
     // Check cache first (only for simple cases without additional_urls)
     if options.additional_urls.is_empty() {
         let cache_key = crate::persistence::TableProviderKey::new(
-            node_id,
-            part_id,
+            file_id,
             options.version_selection.clone(),
         );
 
         if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
             debug!(
-                "🚀 CACHE HIT: Returning cached TableProvider for node_id: {node_id}, part_id: {part_id}"
+                "🚀 CACHE HIT: Returning cached TableProvider for file_id: {}", file_id.node_id()
             );
             return Ok(cached_provider);
         } else {
             debug!(
-                "💾 CACHE MISS: Creating new TableProvider for node_id: {node_id}, part_id: {part_id}"
+                "💾 CACHE MISS: Creating new TableProvider for file_id: {}", file_id.node_id()
             );
         }
     } else {
@@ -345,7 +343,7 @@ pub async fn create_table_provider(
     // Create ListingTable URL(s) - either from options.additional_urls or pattern generation
     let (config, debug_info) = if options.additional_urls.is_empty() {
         // Default behavior: single URL from pattern
-        let url_pattern = options.version_selection.to_url_pattern(&part_id, &node_id);
+        let url_pattern = options.version_selection.to_url_pattern(&file_id);
         let table_url = ListingTableUrl::parse(&url_pattern)
             .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to parse table URL: {}", e)))?;
 
@@ -394,7 +392,7 @@ pub async fn create_table_provider(
 
     // Get temporal overrides from the current version of this FileSeries using fail-fast method
     let temporal_overrides = state
-        .get_temporal_overrides_for_node_id(&node_id, part_id)
+        .get_temporal_overrides_for_node_id(file_id)
         .await?;
 
     // EXPLICIT BUSINESS LOGIC: For FileSeries without temporal overrides, use unbounded ranges
@@ -402,7 +400,7 @@ pub async fn create_table_provider(
     let (min_time, max_time) = temporal_overrides.unwrap_or_else(|| {
         debug!(
             "No temporal overrides found for FileSeries {} - using unbounded time range",
-            node_id
+            file_id
         );
         (i64::MIN, i64::MAX)
     });
@@ -421,9 +419,8 @@ pub async fn create_table_provider(
     ));
 
     log::debug!(
-        "📋 CREATED TableProvider: node_id={}, part_id={}, temporal_bounds=({}, {}), urls={}",
-        node_id,
-        part_id,
+        "📋 CREATED TableProvider: file_id={}, temporal_bounds=({}, {}), urls={}",
+        file_id,
         min_time,
         max_time,
         debug_info
@@ -432,12 +429,11 @@ pub async fn create_table_provider(
     // Cache the result (only for simple cases without additional_urls)
     if options.additional_urls.is_empty() {
         let cache_key = crate::persistence::TableProviderKey::new(
-            node_id,
-            part_id,
+            file_id,
             options.version_selection.clone(),
         );
         state.set_table_provider_cache(cache_key, table_provider.clone());
-        debug!("💾 CACHED: Stored TableProvider for node_id: {node_id}, part_id: {part_id}");
+        debug!("💾 CACHED: Stored TableProvider for file_id: {file_id}");
     }
 
     Ok(table_provider)
@@ -450,34 +446,31 @@ pub async fn create_table_provider(
 /// Thin wrapper around create_table_provider() with default options
 /// Create a listing table provider - core function taking State directly
 pub async fn create_listing_table_provider(
-    id: tinyfs::FileID,
+    file_id: tinyfs::FileID,
     state: &crate::persistence::State,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    create_table_provider(id, state, TableProviderOptions::default()).await
+    create_table_provider(file_id, state, TableProviderOptions::default()).await
 }
 
 /// Create a listing table provider from TransactionGuard - convenience wrapper
 pub async fn create_listing_table_provider_from_tx<'a>(
-    node_id: tinyfs::NodeID,
-    part_id: tinyfs::NodeID,
+    file_id: tinyfs::FileID,
     tx: &mut crate::transaction_guard::TransactionGuard<'a>,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     let state = tx.state()?;
-    create_listing_table_provider(node_id, part_id, &state).await
+    create_listing_table_provider(file_id, &state).await
 }
 
 /// Create a table provider with specific version selection
 /// Thin wrapper around create_table_provider() with version options
 pub async fn create_listing_table_provider_with_options<'a>(
-    node_id: tinyfs::NodeID,
-    part_id: tinyfs::NodeID,
+    file_id: tinyfs::FileID,
     tx: &mut crate::transaction_guard::TransactionGuard<'a>,
     version_selection: VersionSelection,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
     let state = tx.state()?;
     create_table_provider(
-        node_id,
-        part_id,
+        file_id,
         &state,
         TableProviderOptions {
             version_selection,

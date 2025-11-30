@@ -111,7 +111,26 @@ impl NodeID {
 	let b: [u8; 16] = self.0.into();
 	EntryType::try_from(b[6] & 0xf).expect("coded")
     }
+}
+
+impl PartID {
+    /// Create PartID from UUID string (for path parsing)
+    #[must_use]
+    pub fn new(uuid_str: String) -> Self {
+        Self(NodeID::new(uuid_str))
+    }
     
+    /// Wrap a NodeID as a PartID (for when we know it represents a partition)
+    #[must_use]
+    pub fn from_node_id(node_id: NodeID) -> Self {
+        Self(node_id)
+    }
+    
+    /// Get the root PartID (same as root NodeID)
+    #[must_use]
+    pub fn root() -> Self {
+        Self(NodeID(root_uuid()))
+    }
 }
 
 /// A FileID combines NodeID and PartID with embedded EntryType information.

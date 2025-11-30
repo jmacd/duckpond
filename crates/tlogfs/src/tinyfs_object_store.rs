@@ -50,39 +50,37 @@ pub struct TinyFsPathBuilder;
 impl TinyFsPathBuilder {
     /// Create path for all versions: "part/{part_id}/node/{node_id}/version/"
     #[must_use]
-    pub fn all_versions(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
-        format!("part/{}/node/{}/version/", part_id, node_id)
+    pub fn all_versions(file_id: &tinyfs::FileID) -> String {
+        format!("part/{}/node/{}/version/", file_id.part_id(), file_id.node_id())
     }
 
     /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"
     #[must_use]
     pub fn specific_version(
-        part_id: &tinyfs::NodeID,
-        node_id: &tinyfs::NodeID,
+        file_id: &tinyfs::FileID,
         version: u64,
     ) -> String {
         format!(
             "part/{}/node/{}/version/{}.parquet",
-            part_id, node_id, version
+            file_id.part_id(), file_id.node_id(), version
         )
     }
 
     /// Create tinyfs:// URL for all versions
     #[must_use]
-    pub fn url_all_versions(part_id: &tinyfs::NodeID, node_id: &tinyfs::NodeID) -> String {
-        format!("tinyfs:///{}", Self::all_versions(part_id, node_id))
+    pub fn url_all_versions(file_id: &tinyfs::FileID) -> String {
+        format!("tinyfs:///{}", Self::all_versions(file_id))
     }
 
     /// Create tinyfs:// URL for specific version  
     #[must_use]
     pub fn url_specific_version(
-        part_id: &tinyfs::NodeID,
-        node_id: &tinyfs::NodeID,
+        file_id: &tinyfs::FileID,
         version: u64,
     ) -> String {
         format!(
             "tinyfs:///{}",
-            Self::specific_version(part_id, node_id, version)
+            Self::specific_version(file_id, version)
         )
     }
 
@@ -102,10 +100,8 @@ impl TinyFsPathBuilder {
 /// File series information for ObjectStore registry
 #[derive(Debug, Clone)]
 struct FileSeriesInfo {
-    /// Node ID for the file series
-    node_id: tinyfs::NodeID,
-    /// Part ID for the file series  
-    part_id: tinyfs::NodeID,
+    /// FileID for the file series
+    file_id: tinyfs::FileID,
     /// Version information for all versions in the series
     versions: Vec<tinyfs::FileVersionInfo>,
 }
@@ -202,8 +198,8 @@ impl TinyFsObjectStore {
         // Use canonical parser for consistency
         match parse_tinyfs_path(path_str) {
             Ok(parsed) => {
-                // Create series key that includes both node_id and part_id
-                let series_key = format!("node/{}/part/{}", parsed.node_id, parsed.part_id);
+                // Create series key using FileID components
+                let series_key = format!("node/{}/part/{}", parsed.file_id.node_id(), parsed.file_id.part_id());
                 Ok((series_key, parsed.version))
             }
             Err(err) => Err(object_store::Error::Generic {
@@ -289,7 +285,7 @@ impl ObjectStore for TinyFsObjectStore {
         // Query persistence layer dynamically for file versions
         let versions = self
             .persistence
-            .list_file_versions(parsed_path.node_id, parsed_path.part_id)
+            .list_file_versions(parsed_path.file_id)
             .await
             .map_err(|e| object_store::Error::Generic {
                 store: "TinyFS",
@@ -305,8 +301,7 @@ impl ObjectStore for TinyFsObjectStore {
 
         // Create FileSeriesInfo dynamically
         let series_info = FileSeriesInfo {
-            node_id: parsed_path.node_id,
-            part_id: parsed_path.part_id,
+            file_id: parsed_path.file_id,
             versions,
         };
         debug!("ObjectStore dynamically discovered file series for series_key: {series_key}");
@@ -348,9 +343,8 @@ impl ObjectStore for TinyFsObjectStore {
         let version_data = self
             .persistence
             .read_file_version(
-                series_info.node_id,
-                series_info.part_id,
-                Some(version_to_read),
+                series_info.file_id,
+                version_to_read,
             )
             .await
             .map_err(|e| object_store::Error::Generic {
@@ -477,9 +471,8 @@ impl ObjectStore for TinyFsObjectStore {
         let version_data = match self
             .persistence
             .read_file_version(
-                parsed_path.node_id,
-                parsed_path.part_id,
-                Some(version_to_read),
+                parsed_path.file_id,
+                version_to_read,
             )
             .await
         {
@@ -637,18 +630,19 @@ impl ObjectStore for TinyFsObjectStore {
         let stream = async_stream::stream! {
             // Parse the prefix to extract both node_id and part_id for dynamic discovery
             if let Some(ref prefix_str) = prefix {
-                if let Some((node_id, part_id)) = extract_node_and_part_ids_from_path(prefix_str) {
+                if let Some(file_id) = extract_node_and_part_ids_from_path(prefix_str) {
                     debug!("ObjectStore extracting file versions for node_id: {node_id}, part_id: {part_id}");
 
-                    // Query persistence layer directly with proper node_id and part_id - no pre-registration needed!
-                    match persistence.list_file_versions(node_id, part_id).await {
+                    // Query persistence layer directly with FileID - no pre-registration needed!
+                    // file_id already constructed by extract_node_and_part_ids_from_path
+                    match persistence.list_file_versions(file_id).await {
                         Ok(versions) => {
                             let version_count = versions.len();
-                            debug!("ObjectStore discovered {version_count} versions for node {node_id}");
+                            debug!("ObjectStore discovered {version_count} versions for {file_id}");
 
                             for version_info in versions {
                                 // Filter by prefix before creating path
-                                let version_path = TinyFsPathBuilder::specific_version(&part_id, &node_id, version_info.version);
+                                let version_path = TinyFsPathBuilder::specific_version(&file_id, version_info.version);
                                 if !version_path.starts_with(prefix_str) {
                                     debug!("ObjectStore skipping version {version_path} (doesn't match prefix {prefix_str})");
                                     continue;
@@ -754,8 +748,7 @@ impl ObjectStore for TinyFsObjectStore {
 /// Canonical TinyFS path parsing result
 #[derive(Debug, Clone)]
 struct TinyFsPath {
-    node_id: tinyfs::NodeID,
-    part_id: tinyfs::NodeID,
+    file_id: tinyfs::FileID,
     version: Option<u64>, // None = all versions, Some(n) = specific version n
 }
 
@@ -772,9 +765,9 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
             .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
 
         // For directories, node_id == part_id
+        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::from_node_id(node_id), node_id);
         return Ok(TinyFsPath {
-            node_id,
-            part_id: node_id,
+            file_id,
             version: None, // Directories don't have explicit versions in the path
         });
     }
@@ -795,7 +788,7 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
     let part_id = parts[1]
         .parse::<uuid7::Uuid>()
         .map_err(|_| format!("Invalid part_id UUID: {}", parts[1]))
-        .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
+        .map(|uuid| tinyfs::PartID::new(uuid.to_string()))?;
 
     let node_id = parts[3]
         .parse::<uuid7::Uuid>()
@@ -819,19 +812,19 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
         return Err(format!("Invalid TinyFS path length: {}", path));
     };
 
+    let file_id = tinyfs::FileID::new_from_ids(part_id, node_id);
     Ok(TinyFsPath {
-        node_id,
-        part_id,
+        file_id,
         version,
     })
 }
 
-/// Extract node_id and part_id from a tinyfs:// path using canonical parser
+/// Extract FileID from a tinyfs:// path using canonical parser
 /// Examples:
-/// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version" -> Some((node_id, part_id))
-/// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version/1.parquet" -> Some((node_id, part_id))
-fn extract_node_and_part_ids_from_path(path: &str) -> Option<(tinyfs::NodeID, tinyfs::NodeID)> {
+/// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version" -> Some(file_id)
+/// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version/1.parquet" -> Some(file_id)
+fn extract_node_and_part_ids_from_path(path: &str) -> Option<tinyfs::FileID> {
     parse_tinyfs_path(path)
         .ok()
-        .map(|parsed| (parsed.node_id, parsed.part_id))
+        .map(|parsed| parsed.file_id)
 }

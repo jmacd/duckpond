@@ -200,13 +200,7 @@ impl SqlDerivedFile {
         &self,
         pattern: &str,
         entry_type: EntryType,
-    ) -> TinyFSResult<
-        Vec<(
-            tinyfs::NodeID,
-            tinyfs::NodeID,
-            Arc<tokio::sync::Mutex<Box<dyn File>>>,
-        )>,
-    > {
+    ) -> TinyFSResult<Vec<tinyfs::NodePath>> {
         // STEP 1: Build TinyFS from State (transaction context from FactoryContext)
         let fs = tinyfs::FS::new(self.context.state.clone())
             .await
@@ -283,31 +277,17 @@ impl SqlDerivedFile {
         let mut queryable_files = Vec::new();
 
         for (node_path, _captured) in matches {
-            let node_ref = node_path.borrow().await;
-
-            if let Ok(file_node) = node_ref.as_file()
-                && let Ok(metadata) = file_node.metadata().await
+            if let Ok(file_handle) = node_path.as_file().await
+                && let Ok(metadata) = file_handle.metadata().await
                 && metadata.entry_type == entry_type
             {
-                let file_arc = file_node.handle.get_file().await;
-                let node_id = node_path.id().await;
-                let part_id = {
-                    let parent_path = node_path.dirname();
-                    let parent_node_path =
-                        tinyfs_root.resolve_path(&parent_path).await.map_err(|e| {
-                            tinyfs::Error::Other(format!("Failed to resolve parent path: {}", e))
-                        })?;
-                    match parent_node_path.1 {
-                        tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
-                        _ => tinyfs::NodeID::root(),
-                    }
-                };
-                // For FileSeries, deduplicate by (node_id, part_id). For FileTable, node_id is sufficient.
+                let file_id = node_path.id();
+                // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
                     EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
-                        (node_id, part_id)
+                        file_id
                     }
-                    _ => (node_id, tinyfs::NodeID::root()),
+                    _ => tinyfs::FileID::new_from_ids(file_id.part_id(), file_id.node_id()),
                 };
                 if seen.insert(dedup_key) {
                     let entry_type_str = format!("{entry_type:?}");
@@ -315,7 +295,7 @@ impl SqlDerivedFile {
                     debug!(
                         "Successfully extracted file with entry_type '{entry_type_str}' at path '{path_str}'"
                     );
-                    queryable_files.push((node_id, part_id, file_arc));
+                    queryable_files.push(node_path.clone());
                 } else {
                     let path_str = node_path.path().display().to_string();
                     debug!("Deduplication: Skipping duplicate file at path '{path_str}'");
@@ -681,16 +661,11 @@ impl SqlDerivedFile {
     ///
     /// This enables DataFusion table provider and query plan caching by ensuring the same
     /// SQL query + pattern + underlying files always get the same table name.
-    #[allow(clippy::type_complexity)]
     async fn generate_deterministic_table_name(
         &self,
         pattern_name: &str,
         pattern: &str,
-        queryable_files: &[(
-            tinyfs::NodeID,
-            tinyfs::NodeID,
-            Arc<tokio::sync::Mutex<Box<dyn File>>>,
-        )],
+        queryable_files: &[tinyfs::NodePath],
     ) -> Result<String, crate::error::TLogFSError> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -707,13 +682,14 @@ impl SqlDerivedFile {
         // Hash the pattern string
         pattern.hash(&mut hasher);
 
-        // Hash the file paths (sorted for deterministic ordering)
-        let mut file_paths: Vec<String> = Vec::new();
-        for (node_id, part_id, _) in queryable_files {
-            file_paths.push(format!("{}_{}", node_id, part_id));
+        // Hash the file IDs (sorted for deterministic ordering)
+        let mut file_ids: Vec<String> = Vec::new();
+        for node_path in queryable_files {
+            let file_id = node_path.id();
+            file_ids.push(format!("{}_{}", file_id.node_id(), file_id.part_id()));
         }
-        file_paths.sort();
-        file_paths.hash(&mut hasher);
+        file_ids.sort();
+        file_ids.hash(&mut hasher);
 
         let hash_value = hasher.finish();
         Ok(format!("{:016x}", hash_value))
@@ -825,24 +801,32 @@ impl QueryableFile for SqlDerivedFile {
                 // Create table provider using QueryableFile trait - handles both OpLogFile and SqlDerivedFile
                 let listing_table_provider = if queryable_files.len() == 1 {
                     // Single file: use QueryableFile trait dispatch
-                    let (node_id, part_id, file_arc) = &queryable_files[0];
+                    let node_path = &queryable_files[0];
+                    let file_id = node_path.id();
                     debug!(
-                        "🔍 SQL-DERIVED: Creating table provider for single file: node_id={}, part_id={}",
-                        node_id, part_id
+                        "🔍 SQL-DERIVED: Creating table provider for single file: file_id={}",
+                        file_id.node_id()
                     );
+                    let file_handle = node_path.as_file().await.map_err(|e| {
+                        crate::error::TLogFSError::ArrowMessage(format!(
+                            "Failed to get file handle: {}",
+                            e
+                        ))
+                    })?;
+                    let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         debug!(
                             "🔍 SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider..."
                         );
                         match queryable_file
-                            .as_table_provider(*node_id, *part_id, state)
+                            .as_table_provider(file_id, state)
                             .await
                         {
                             Ok(provider) => {
                                 debug!(
-                                    "✅ SQL-DERIVED: Successfully created table provider for node_id={}",
-                                    node_id
+                                    "✅ SQL-DERIVED: Successfully created table provider for file_id={}",
+                                    file_id.node_id()
                                 );
                                 // Apply optional provider wrapper (e.g., null_padding_table)
                                 if let Some(wrapper) = &self.config.provider_wrapper {
@@ -854,8 +838,8 @@ impl QueryableFile for SqlDerivedFile {
                             }
                             Err(e) => {
                                 log::error!(
-                                    "❌ SQL-DERIVED: Failed to create table provider for node_id={}: {}",
-                                    node_id,
+                                    "❌ SQL-DERIVED: Failed to create table provider for file_id={}: {}",
+                                    file_id.node_id(),
                                     e
                                 );
                                 return Err(e);
@@ -875,7 +859,15 @@ impl QueryableFile for SqlDerivedFile {
                     // Multiple files: use multi-URL ListingTable approach (maintains ownership chain)
                     // Following anti-duplication: use existing create_table_provider_for_multiple_urls pattern
                     let mut urls = Vec::new();
-                    for (node_id, part_id, file_arc) in queryable_files {
+                    for node_path in queryable_files {
+                        let file_id = node_path.id();
+                        let file_handle = node_path.as_file().await.map_err(|e| {
+                            crate::error::TLogFSError::ArrowMessage(format!(
+                                "Failed to get file handle: {}",
+                                e
+                            ))
+                        })?;
+                        let file_arc = file_handle.handle.get_file().await;
                         let file_guard = file_arc.lock().await;
                         if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                             // For files that implement QueryableFile, we need to get their URL pattern
@@ -888,7 +880,7 @@ impl QueryableFile for SqlDerivedFile {
                                     // Generate URL pattern for this OpLogFile
                                     let url_pattern =
                                         crate::file_table::VersionSelection::AllVersions
-                                            .to_url_pattern(&part_id, &node_id);
+                                            .to_url_pattern(&file_id);
                                     urls.push(url_pattern);
                                 }
                                 None => {
@@ -917,10 +909,8 @@ impl QueryableFile for SqlDerivedFile {
                     // Create single TableProvider with multiple URLs - maintains ownership chain
                     // Use direct create_table_provider with additional_urls to avoid TransactionGuard dependency
                     use crate::file_table::{TableProviderOptions, create_table_provider};
-                    use tinyfs::NodeID;
 
-                    let dummy_node_id = NodeID::root();
-                    let dummy_part_id = NodeID::root();
+                    let dummy_file_id = tinyfs::FileID::root();
 
                     let options = TableProviderOptions {
                         additional_urls: urls.clone(),
@@ -933,7 +923,7 @@ impl QueryableFile for SqlDerivedFile {
                         urls.len()
                     );
 
-                    let provider = create_table_provider(dummy_node_id, dummy_part_id, state, options).await?;
+                    let provider = create_table_provider(dummy_file_id, state, options).await?;
                     
                     // Apply optional provider wrapper (e.g., null_padding_table)
                     if let Some(wrapper) = &self.config.provider_wrapper {
@@ -1128,7 +1118,7 @@ mod tests {
         // Get table provider
         let state_ref = tx_guard.state()?;
         let table_provider = sql_derived_file
-            .as_table_provider(NodeID::root(), NodeID::root(), &state_ref)
+            .as_table_provider(tinyfs::FileID::root(), &state_ref)
             .await?;
 
         debug!("execute_sql_derived_direct: Got table provider");
@@ -2023,7 +2013,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(NodeID::root(), NodeID::root(), &state)
+            .as_table_provider(tinyfs::FileID::root(), &state)
             .await
             .unwrap();
 
@@ -2084,7 +2074,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(NodeID::root(), NodeID::root(), &state)
+            .as_table_provider(tinyfs::FileID::root(), &state)
             .await
             .unwrap();
 
@@ -2148,7 +2138,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(NodeID::root(), NodeID::root(), &state)
+            .as_table_provider(tinyfs::FileID::root(), &state)
             .await
             .unwrap();
 
@@ -2217,7 +2207,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(NodeID::root(), NodeID::root(), &state)
+            .as_table_provider(tinyfs::FileID::root(), &state)
             .await
             .unwrap();
 
@@ -3149,9 +3139,10 @@ query: ""
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let state = tx_guard_mut.state().unwrap();
+                        let file_id = node_guard.id;
                         let table_provider = queryable_file
                             .as_table_provider(
-                                node_id, node_id, // Use same for part_id
+                                file_id,
                                 &state,
                             )
                             .await
@@ -3287,9 +3278,9 @@ query: ""
 
                     // Verify we can actually create a table provider from it
                     let queryable = queryable_file.unwrap();
-                    let node_id = node_guard.id;
+                    let file_id = node_guard.id;
                     let table_provider = queryable
-                        .as_table_provider(node_id, node_id, &state)
+                        .as_table_provider(file_id, &state)
                         .await
                         .unwrap();
 
@@ -3458,14 +3449,14 @@ query: ""
 
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         log::debug!("   - File {} implements QueryableFile", path_str);
+                        let file_id = node_guard.id;
                         log::debug!(
-                            "   - Using node_id: {}, part_id: {} (same as node_id)",
-                            node_id,
-                            node_id
+                            "   - Using file_id: {}",
+                            file_id.node_id()
                         );
 
                         match queryable_file
-                            .as_table_provider(node_id, node_id, &debug_state)
+                            .as_table_provider(file_id, &debug_state)
                             .await
                         {
                             Ok(table_provider) => {
@@ -3571,9 +3562,10 @@ query: ""
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let state = tx_guard.state().unwrap();
+                        let file_id = node_guard.id;
                         let table_provider = queryable_file
                             .as_table_provider(
-                                node_id, node_id, // Use same for part_id
+                                file_id,
                                 &state,
                             )
                             .await

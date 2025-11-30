@@ -167,7 +167,7 @@ impl TemporalReduceSqlFile {
             return Ok(cached_columns.clone());
         }
 
-        let node_id = self.source_node.id().await;
+        let file_id = self.source_node.id();
 
         // Get the correct part_id (parent directory's node_id) using TinyFS resolve_path() pattern
         // For files, part_id should be the parent directory's node_id, not the file's node_id
@@ -187,8 +187,8 @@ impl TemporalReduceSqlFile {
             .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve parent path: {}", e)))?;
 
-        let part_id = match parent_node_path.1 {
-            tinyfs::Lookup::Found(parent_node) => parent_node.id().await,
+        let parent_id = match parent_node_path.1 {
+            tinyfs::Lookup::Found(parent_node) => parent_node.id(),
             _ => {
                 return Err(tinyfs::Error::Other(format!(
                     "Parent directory not found for {}",
@@ -198,40 +198,34 @@ impl TemporalReduceSqlFile {
         };
 
         log::debug!(
-            "TemporalReduceFile: resolved part_id={} for file node_id={}",
-            part_id,
-            node_id
+            "TemporalReduceFile: file_id={}, parent_id={}",
+            file_id,
+            parent_id
         );
 
-        // Get the file handle from the node and access the file - following CLI pattern
-        let node_guard = self.source_node.lock().await;
-        let table_provider = match &node_guard.node_type {
-            NodeType::File(file_handle) => {
-                let file_arc = file_handle.get_file().await;
-                let file_guard = file_arc.lock().await;
+        // Get the file handle from the node - extract from node_type
+        let file_handle = match &self.source_node.node_type {
+            NodeType::File(handle) => handle.clone(),
+            _ => return Err(tinyfs::Error::Other("Source node is not a file".to_string())),
+        };
+        let file_arc = file_handle.get_file().await;
+        let file_guard = file_arc.lock().await;
 
-                // In temporal reduce context, source files are always QueryableFile implementations
-                if let Some(queryable_file) =
-                    crate::sql_derived::try_as_queryable_file(&**file_guard)
-                {
-                    queryable_file
-                        .as_table_provider(node_id, part_id, &self.context.state)
-                        .await
-                        .map_err(|e| {
-                            tinyfs::Error::Other(format!(
-                                "QueryableFile table provider error: {}",
-                                e
-                            ))
-                        })?
-                } else {
-                    return Err(tinyfs::Error::Other("Source file does not implement QueryableFile - temporal reduce requires queryable sources".to_string()));
-                }
-            }
-            _ => {
-                return Err(tinyfs::Error::Other(
-                    "Source path does not point to a file".to_string(),
-                ));
-            }
+        // In temporal reduce context, source files are always QueryableFile implementations
+        let table_provider = if let Some(queryable_file) =
+            crate::sql_derived::try_as_queryable_file(&**file_guard)
+        {
+            queryable_file
+                .as_table_provider(file_id, &self.context.state)
+                .await
+                .map_err(|e| {
+                    tinyfs::Error::Other(format!(
+                        "QueryableFile table provider error: {}",
+                        e
+                    ))
+                })?
+        } else {
+            return Err(tinyfs::Error::Other("Source file does not implement QueryableFile - temporal reduce requires queryable sources".to_string()));
         };
 
         // Get schema and extract all column names, filtering out only the timestamp column
@@ -251,11 +245,10 @@ impl TemporalReduceSqlFile {
                 "Schema discovery failed: no columns found in source file '{}'. \
                 Table provider returned schema with {} total fields. \
                 This indicates a problem with the table provider configuration or partition pruning. \
-                Check that the correct part_id ({}) and node_id ({}) are being used.",
+                Check that the correct file_id ({}) is being used.",
                 self.source_path,
                 schema.fields().len(),
-                part_id,
-                node_id
+                file_id
             )));
         }
 
@@ -748,11 +741,9 @@ impl TemporalReduceDirectory {
         id_bytes.extend_from_slice(source_path.as_bytes());
         id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
         let node_id = tinyfs::NodeID::from_content(&id_bytes);
+        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::root(), node_id);
 
-        Node::new(Arc::new(tokio::sync::Mutex::new(Node {
-            id: node_id,
-            node_type: NodeType::Directory(site_directory.create_handle()),
-        })))
+        Node::new(file_id, NodeType::Directory(site_directory.create_handle()))
     }
 
     /// Create a DirHandle from this temporal reduce directory
@@ -811,11 +802,9 @@ impl Directory for TemporalReduceDirectory {
         let mut entries = Vec::new();
         for (site_name, _source_path) in sites {
             // Get the actual node to extract its real node_id - fail fast on error
-            let node_ref = self.get(&site_name).await?.ok_or_else(|| {
+            let node = self.get(&site_name).await?.ok_or_else(|| {
                 tinyfs::Error::Other(format!("Failed to create temporal-reduce site '{}'", site_name))
             })?;
-            
-            let node = node_ref.lock().await;
             let dir_entry = tinyfs::DirectoryEntry::new(
                 site_name.clone(),
                 node.id,
@@ -946,11 +935,9 @@ impl Directory for TemporalReduceSiteDirectory {
                 id_bytes.extend_from_slice(filename.as_bytes());
                 id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
                 let node_id = tinyfs::NodeID::from_content(&id_bytes);
+                let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::root(), node_id);
 
-                let node_ref = Node::new(Arc::new(tokio::sync::Mutex::new(Node {
-                    id: node_id,
-                    node_type: NodeType::File(sql_file),
-                })));
+                let node_ref = Node::new(file_id, NodeType::File(sql_file));
                 return Ok(Some(node_ref));
             }
         }

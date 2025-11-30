@@ -159,11 +159,9 @@ impl DynamicDirDirectory {
         id_bytes.extend_from_slice(entry.factory.as_bytes());
         id_bytes.extend_from_slice(&config_bytes);
         let node_id = tinyfs::NodeID::from_content(&id_bytes);
+        let file_id = tinyfs::FileID::new_from_ids(self.context.parent_id, node_id);
 
-        let node_ref = Node::new(Arc::new(tokio::sync::Mutex::new(Node {
-            id: node_id,
-            node_type,
-        })));
+        let node_ref = Node::new(file_id, node_type);
 
         Ok(node_ref)
     }
@@ -236,11 +234,10 @@ impl Directory for DynamicDirDirectory {
                         "DynamicDirDirectory::entries - successfully created entry '{}'",
                         entry.name
                     );
-                    // Extract real node_id from the created node
-                    let node = node_ref.lock().await;
+                    // Extract node_id from the created node's FileID
                     let dir_entry = tinyfs::DirectoryEntry::new(
                         entry.name.clone(),
-                        node.id,
+                        node_ref.id().node_id(),
                         EntryType::DirectoryDynamic,
                         0, // No version for dynamic entries
                     );
@@ -283,8 +280,8 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
     let config: DynamicDirConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
 
-    // Instrument: log parent_node_id, entry names, and config hash
-    let parent_node_id = context.parent_node_id;
+    // Instrument: log parent_id, entry names, and config hash
+    let parent_node_id = context.parent_id;
     let entry_names: Vec<_> = config.entries.iter().map(|e| e.name.clone()).collect();
     let mut hasher = DefaultHasher::new();
     config.hash(&mut hasher);
@@ -304,8 +301,8 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
     debug!("[INSTRUMENT] cache_key: {:?}", cache_key);
 
     // Check if we have a cached directory for this configuration
-    if let Some(cached_node_type) = context.state.get_dynamic_node_cache(&cache_key)
-        && let tinyfs::NodeType::Directory(cached_dir_handle) = cached_node_type
+    if let Some(cached_node) = context.state.get_dynamic_node_cache(&cache_key)
+        && let tinyfs::NodeType::Directory(cached_dir_handle) = cached_node.node_type
     {
         debug!(
             "[INSTRUMENT] returning cached dynamic directory for config_hash={:x}",
@@ -321,7 +318,7 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
     // Cache the directory handle for future access within this transaction
     context
         .state
-        .set_dynamic_node_cache(cache_key, tinyfs::NodeType::Directory(dir_handle.clone()));
+        .set_dynamic_node_cache(cache_key, tinyfs::Node::new(parent_node_id, tinyfs::NodeType::Directory(dir_handle.clone())));
     debug!(
         "[INSTRUMENT] cached new dynamic directory for config_hash={:x}",
         config_hash

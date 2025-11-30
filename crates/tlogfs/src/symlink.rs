@@ -36,8 +36,8 @@ impl OpLogSymlink {
 #[async_trait]
 impl Metadata for OpLogSymlink {
     async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
-        // For symlinks, the partition is the parent directory (parent_node_id)
-        self.state.metadata(self.node_id, self.parent_node_id).await
+        // For symlinks, the partition is the parent directory (part_id)
+        self.state.metadata(self.id).await
     }
 }
 
@@ -47,7 +47,7 @@ impl Symlink for OpLogSymlink {
         // Load symlink target directly from persistence layer (avoids recursion)
         let target = self
             .state
-            .load_symlink_target(self.node_id, self.parent_node_id)
+            .load_symlink_target(self.id)
             .await?;
         Ok(target)
     }

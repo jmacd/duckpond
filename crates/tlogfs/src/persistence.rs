@@ -779,6 +779,10 @@ impl PersistenceLayer for State {
         self.inner.lock().await.metadata(id).await
     }
 
+    async fn load_symlink_target(&self, id: FileID) -> TinyFSResult<PathBuf> {
+        self.inner.lock().await.load_symlink_target(id).await
+    }
+
     async fn list_file_versions(&self, id: FileID) -> TinyFSResult<Vec<FileVersionInfo>> {
         self.inner.lock().await.list_file_versions(id).await
     }
@@ -834,9 +838,8 @@ impl State {
     }
 
     /// Set cached dynamic node by key (for dynamic directory factory)
-    pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: NodeType) {
-        _ = self
-            .dynamic_node_cache
+    pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: Node) {
+        self.dynamic_node_cache
             .lock()
             .expect("Failed to acquire dynamic node cache lock")
             .insert(key, value);
@@ -2031,29 +2034,21 @@ impl InnerState {
         Ok(())
     }
 
-    // /// Create a dynamic directory node with factory configuration
-    // /// This is the primary method for implementing the `mknod` command functionality
-    // async fn create_dynamic_node(
-    //     &mut self,
-    //     id: FileID,
-    //     factory_type: &str,
-    //     config_content: Vec<u8>,
-    // ) -> Result<Node, TLogFSError> {
-    //     let now = Utc::now().timestamp_micros();
-
-    //     // Create dynamic directory OplogEntry
-    //     let entry = OplogEntry::new_dynamic_directory(
-    //         id,
-    //         now,
-    //         1, // @@@ MaDE THIS UP
-    //         factory_type,
-    //         config_content,
-    //         self.txn_seq,
-    //     );
-
-    //     // @@@ WEIRD
-    //     Ok(id)
-    // }
+    /// Create a dynamic directory node with factory configuration
+    /// This is the primary method for implementing the `mknod` command functionality
+    /// TODO: Complete implementation with FileID refactoring
+    async fn create_dynamic_node(
+        &mut self,
+        id: FileID,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<Node, TLogFSError> {
+        // TODO: Implement proper dynamic node creation with oplog entry
+        let _ = (id, factory_type, config_content, self.txn_seq);
+        Err(TLogFSError::Transaction {
+            message: "create_dynamic_node not yet implemented with FileID refactoring".to_string(),
+        })
+    }
 
     // /// Create a dynamic file node with factory configuration
     // pub async fn create_dynamic_file(
@@ -3170,7 +3165,7 @@ mod node_factory {
     ) -> Result<Node, tinyfs::Error> {
         let oplog_symlink = OpLogSymlink::new(id, state);
         let symlink_handle = OpLogSymlink::create_handle(oplog_symlink);
-        Ok(NodeType::Symlink(symlink_handle))
+        Ok(Node::new(id, NodeType::Symlink(symlink_handle)))
     }
 
     /// Create a node from an OplogEntry

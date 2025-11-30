@@ -17,7 +17,7 @@ use futures::stream::Stream;
 pub struct DirectoryEntry {
     /// Entry name within the directory
     pub name: String,
-    /// NodeID of the child
+    /// NodeID of the child (combined with directory's part_id to form FileID)
     pub child_node_id: NodeID,
     /// Comprehensive entry type, redundant.
     pub entry_type: EntryType,
