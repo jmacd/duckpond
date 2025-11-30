@@ -373,18 +373,18 @@ impl std::fmt::Debug for NodeType {
 
 impl std::fmt::Display for FileID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	write!(f, "{}/{}", self.part_id.0.0, self.node_id.0)
+	write!(f, "<{}/[{}]>", self.part_id.0.0, self.node_id.0)
     }
 }
 
 impl std::fmt::Display for NodeID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	write!(f, "[{}]", self.0)
+	write!(f, "{}", self.0)
     }
 }
 
 impl std::fmt::Display for PartID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	write!(f, "<{}>", self.0)
+	write!(f, "{}", self.0)
     }
 }

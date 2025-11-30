@@ -270,9 +270,10 @@ impl OpLogPersistence {
 
             let metadata = PondTxnMetadata::new(1, root_metadata.expect("metadata when new"));
 
-            let tx = persistence.begin_write(&metadata).await?;
+            let mut tx = persistence.begin_write(&metadata).await?;
 
             // Actually create the root directory entry
+            // IMPORTANT: initialize_root_directory adds entry to records AFTER begin_impl cleared them
             tx.state()
                 .map_err(|e| {
                     TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to get state: {}", e)))
@@ -453,7 +454,10 @@ impl OpLogPersistence {
             .ok_or(TLogFSError::Missing)?
             .commit_impl(metadata, self.table.clone())
             .await?;
-        self.table.update().await?;
+        
+        // Reload the table from disk to pick up the committed changes
+        // This ensures subsequent transactions see the new data
+        self.table = deltalake::open_table(self.path.to_string_lossy().to_string()).await?;
         self.last_txn_seq = new_seq;
 
         Ok(res)
@@ -2038,8 +2042,14 @@ impl InnerState {
     }
 
     /// Create a dynamic directory node with factory configuration
-    /// This is the primary method for implementing the `mknod` command functionality
-    /// TODO: Complete implementation with FileID refactoring
+    /// Create a dynamic node with factory configuration (used by `mknod` command)
+    /// 
+    /// NOTE: Most dynamic nodes (created by DynamicDirDirectory, TemplateDirectory, etc.)
+    /// do NOT need this method - they are created on-the-fly from configuration when
+    /// their parent directory is accessed. This method is only for explicitly creating
+    /// persistent dynamic nodes via `mknod`.
+    ///
+    /// TODO: Complete implementation - for now, callers should use FactoryRegistry directly
     async fn create_dynamic_node(
         &mut self,
         id: FileID,
@@ -2049,7 +2059,7 @@ impl InnerState {
         // TODO: Implement proper dynamic node creation with oplog entry
         let _ = (id, factory_type, config_content, self.txn_seq);
         Err(TLogFSError::Transaction {
-            message: "create_dynamic_node not yet implemented with FileID refactoring".to_string(),
+            message: "create_dynamic_node not yet implemented - use FactoryRegistry directly for now".to_string(),
         })
     }
 
@@ -2196,6 +2206,7 @@ impl InnerState {
             id.node_id()
         );
 
+        debug!("query_latest_record SQL: {}", sql);
         match self.session_context.sql(&sql).await {
             Ok(df) => match df.collect().await {
                 Ok(batches) => {
@@ -2330,114 +2341,151 @@ impl InnerState {
     }
 
     /// Batch load multiple nodes in a single partition.
+    /// Checks in-memory structures first (pending operations, created directories), then queries Delta Lake.
     async fn load_nodes_batched(
         &self,
-	_parent_id: FileID,
-        _requests: Vec<DirectoryEntry>,
-        _state: State,
+	parent_id: FileID,
+        requests: Vec<DirectoryEntry>,
+        state: State,
     ) -> TinyFSResult<HashMap<NodeID, Node>> {
-        // if requests.is_empty() {
-        //     return Ok(HashMap::new());
-        // }
+        if requests.is_empty() {
+            debug!("load_nodes_batched: EMPTY REQUEST for parent {}", parent_id);
+            return Ok(HashMap::new());
+        }
 
-        // // Group requests by partition
-	// let node_ids: Vec<_> = requests.iter().map(|entry| entry.child_node_id).collect();
+        debug!(
+            "🔍 BATCH_LOAD: {} nodes from parent {} (partition={})",
+            requests.len(),
+            parent_id,
+            parent_id.part_id()
+        );
 
-        // debug!(
-        //     "load_nodes_batched: {} nodes",
-        //     node_ids.len()
-        // );
+        let mut results = HashMap::new();
+        let mut nodes_to_query = Vec::new();
 
-        // let mut results = HashMap::new();
+        // Step 1: Check in-memory structures first (transaction-local data)
+        for entry in &requests {
+            let child_id = FileID::new_from_ids(parent_id.part_id(), entry.child_node_id);
+            debug!("  📂 Checking entry '{}' -> node_id={}", entry.name, entry.child_node_id);
+            
+            // Check if this is a newly created directory in this transaction
+            if self.created_directories.contains(&child_id) {
+                debug!("  ✅ Found node {} in created_directories", child_id);
+                match node_factory::create_directory_node(child_id, state.clone()) {
+                    Ok(node) => {
+                        _ = results.insert(entry.child_node_id, node);
+                        continue;
+                    }
+                    Err(e) => {
+                        debug!("Failed to create directory node {}: {}", child_id, e);
+                    }
+                }
+            }
 
-        // // Check for nodes created in this transaction but not yet flushed
-	// // @@@ NOT FINISHED THIS HERE
-	
-        // for (node_id, _) in node_ids {
-        //     if self.created_directories.contains(&node_id) {
-        //         debug!("Found node {} in created_directories", node_id);
-        //         if let Ok(node) = node_factory::create_directory_node(node_id, state.clone()) {
-        //             _ = results.insert(node_id, node);
-        //         }
-        //     }
-        // }
+            // Check if there are pending operations for this node in self.operations
+            if self.has_pending_operations(child_id) {
+                debug!("Node {} has pending operations, will need to merge with committed data", child_id);
+                // Still need to query for this node to get base state
+            }
 
-        // // if self.created_directories.contains(&node_id) {
-	
-        // // Load each partition with a single query
-        // let node_id_strs: Vec<String> = node_ids.iter().map(|id| id.to_string()).collect();
+            // Check if there's a pending record in self.records
+            let has_pending_record = self
+                .records
+                .iter()
+                .any(|r| r.node_id == entry.child_node_id && r.part_id == parent_id.part_id());
+            
+            if has_pending_record {
+                debug!("Node {} has pending records, loading via load_node", child_id);
+                // Use load_node which properly merges pending and committed data
+                match self.load_node(child_id, state.clone()).await {
+                    Ok(node) => {
+                        _ = results.insert(entry.child_node_id, node);
+                        continue;
+                    }
+                    Err(e) => {
+                        debug!("Failed to load node with pending records {}: {}", child_id, e);
+                    }
+                }
+            }
 
-        // // Build SQL with IN clause for all node_ids in this partition
-        // let node_list = node_id_strs
-        //     .iter()
-        //     .map(|id| format!("'{}'", id))
-        //     .collect::<Vec<_>>()
-        //     .join(", ");
+            // No in-memory data for this node - add to batch query list
+            nodes_to_query.push(entry.child_node_id);
+        }
 
-        // let sql = format!(
-        //     "SELECT * FROM (
-        //             SELECT *, ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY version DESC) as rn
-        //             FROM delta_table
-        //             WHERE part_id = '{}' AND node_id IN ({})
-        //         ) WHERE rn = 1",
-        //     parent_id.part_id(), node_list
-        // );
+        // Step 2: Batch query Delta Lake for remaining nodes
+        if !nodes_to_query.is_empty() {
+            debug!(
+                "  💾 Batch querying {} nodes from Delta Lake for partition {}",
+                nodes_to_query.len(),
+                parent_id.part_id()
+            );
 
-        //     debug!(
-        //         "Batch loading {} nodes from partition {}",
-        //         node_ids.len(),
-        //         parent_id.part_id()
-        //     );
+            // Build SQL with IN clause for all node_ids in this partition
+            let node_list = nodes_to_query
+                .iter()
+                .map(|id| format!("'{}'", id))
+                .collect::<Vec<_>>()
+                .join(", ");
 
-        //     match self.session_context.sql(&sql).await {
-        //         Ok(df) => match df.collect().await {
-        //             Ok(batches) => {
-        //                 // Parse records from batches
-        //                 for batch in batches {
-        //                     let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)
-        //                         .map_err(|e| {
-        //                             TLogFSError::ArrowMessage(format!(
-        //                                 "Failed to parse batch: {}",
-        //                                 e
-        //                             ))
-        //                         })
-        //                         .map_err(error_utils::to_tinyfs_error)?;
-        //                     for record in records {
-	// 			assert_eq!(record.part_id, parent_id.part_id());
-        //                         let id = FileID::new_from_ids(parent_id.part_id(), record.node_id);
+            let sql = format!(
+                "SELECT * FROM (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY version DESC) as rn
+                    FROM delta_table
+                    WHERE part_id = '{}' AND node_id IN ({})
+                ) WHERE rn = 1",
+                parent_id.part_id(),
+                node_list
+            );
 
-        //                         match node_factory::create_node_from_oplog_entry(
-        //                             &record,
-        //                             id,
-        //                             state.clone(),
-        //                         )
-        //                         .await
-        //                         {
-        //                             Ok(node) => {
-        //                                 _ = results.insert(id, node);
-        //                             }
-        //                             Err(e) => {
-        //                                 debug!("Failed to create node {}: {}", id, e);
-        //                             }
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //             Err(e) => {
-        //                 debug!(
-        //                     "Failed to collect batches for partition {}: {}",
-        //                     parent_id, e
-        //                 );
-        //             }
-        //         },
-        //         Err(e) => {
-        //             debug!("SQL query failed for partition {}: {}", parent_id, e);
-        //         }
-        // }
+            match self.session_context.sql(&sql).await {
+                Ok(df) => match df.collect().await {
+                    Ok(batches) => {
+                        for batch in batches {
+                            let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)
+                                .map_err(|e| {
+                                    TLogFSError::ArrowMessage(format!(
+                                        "Failed to parse batch: {}",
+                                        e
+                                    ))
+                                })
+                                .map_err(error_utils::to_tinyfs_error)?;
+                            
+                            for record in records {
+                                let id = FileID::new_from_ids(parent_id.part_id(), record.node_id);
 
-        // Ok(results)
-	// @@ VERY INCOMPLETE
-	Ok(HashMap::new())
+                                match node_factory::create_node_from_oplog_entry(
+                                    &record,
+                                    id,
+                                    state.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(node) => {
+                                        _ = results.insert(record.node_id, node);
+                                    }
+                                    Err(e) => {
+                                        debug!("Failed to create node from oplog entry {}: {}", id, e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Failed to collect batches for partition {}: {}",
+                            parent_id.part_id(),
+                            e
+                        );
+                    }
+                },
+                Err(e) => {
+                    debug!("SQL query failed for partition {}: {}", parent_id.part_id(), e);
+                }
+            }
+        }
+
+        debug!("  ✨ BATCH_LOAD COMPLETE: returning {} nodes", results.len());
+        Ok(results)
     }
 
     async fn load_node(&self, id: FileID, state: State) -> TinyFSResult<Node> {

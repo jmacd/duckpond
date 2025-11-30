@@ -127,29 +127,37 @@ impl DynamicDirDirectory {
         })?;
 
         // Try to create as a directory first, then as a file
-        let node_type = if let Ok(dir_handle) =
-            FactoryRegistry::create_directory(&entry.factory, &config_bytes, self.context.clone())
-        {
-            debug!(
-                "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
-                entry.name
-            );
-            tinyfs::NodeType::Directory(dir_handle)
-        } else if let Ok(file_handle) =
-            FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone()).await
-        {
-            debug!(
-                "DynamicDirDirectory::create_entry_node - created file for entry '{}'",
-                entry.name
-            );
-            tinyfs::NodeType::File(file_handle)
-        } else {
-            let error_msg = format!(
-                "Factory '{}' for entry '{}' does not support directories or files",
-                entry.factory, entry.name
-            );
-            error!("DynamicDirDirectory::create_entry_node - {error_msg}");
-            return Err(tinyfs::Error::Other(error_msg));
+        let node_type = match FactoryRegistry::create_directory(&entry.factory, &config_bytes, self.context.clone()) {
+            Ok(dir_handle) => {
+                debug!(
+                    "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
+                    entry.name
+                );
+                tinyfs::NodeType::Directory(dir_handle)
+            }
+            Err(dir_err) => {
+                debug!(
+                    "DynamicDirDirectory::create_entry_node - directory creation failed for '{}': {}",
+                    entry.name, dir_err
+                );
+                match FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone()).await {
+                    Ok(file_handle) => {
+                        debug!(
+                            "DynamicDirDirectory::create_entry_node - created file for entry '{}'",
+                            entry.name
+                        );
+                        tinyfs::NodeType::File(file_handle)
+                    }
+                    Err(file_err) => {
+                        let error_msg = format!(
+                            "Factory '{}' for entry '{}' does not support directories or files. Dir error: {}, File error: {}",
+                            entry.factory, entry.name, dir_err, file_err
+                        );
+                        error!("DynamicDirDirectory::create_entry_node - {error_msg}");
+                        return Err(tinyfs::Error::Other(error_msg));
+                    }
+                }
+            }
         };
 
         // Deterministically generate NodeID for entry node based on entry name, factory, and config

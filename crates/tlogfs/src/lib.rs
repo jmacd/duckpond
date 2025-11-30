@@ -63,7 +63,7 @@ pub mod timeseries_pivot;
 pub mod schema_validation;
 
 // Template dynamic factory
-// pub mod template_factory;
+pub mod template_factory;
 
 // TinyFS ObjectStore implementation for DataFusion ListingTable integration
 pub mod tinyfs_object_store;

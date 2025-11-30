@@ -130,10 +130,16 @@ impl Directory for TemplateDirectory {
                 let template_file =
                     TemplateFile::new(template_content, self.context.clone(), captured);
 
-                let node_ref = Node::new(Arc::new(Mutex::new(Node {
-                    id: NodeID::generate(),
-                    node_type: NodeType::File(template_file.create_handle()),
-                })));
+                // Generate deterministic node_id for this template file
+                let mut id_bytes = Vec::new();
+                id_bytes.extend_from_slice(filename.as_bytes());
+                id_bytes.extend_from_slice(self.config.in_pattern.as_bytes());
+                id_bytes.extend_from_slice(self.config.out_pattern.as_bytes());
+                id_bytes.extend_from_slice(self.config.template_file.as_bytes());
+                let node_id = tinyfs::NodeID::from_content(&id_bytes);
+                let file_id = tinyfs::FileID::new_from_ids(self.context.file_id.part_id(), node_id);
+
+                let node_ref = Node::new(file_id, tinyfs::NodeType::File(template_file.create_handle()));
 
                 // Cache the node
                 {
@@ -183,10 +189,9 @@ impl Directory for TemplateDirectory {
             match self.get(&expanded_name).await {
                 Ok(Some(node_ref)) => {
                     // Extract real node_id from the created/cached node
-                    let node = node_ref.lock().await;
                     let dir_entry = tinyfs::DirectoryEntry::new(
                         expanded_name.clone(),
-                        node.id,
+                        node_ref.id().node_id(),
                         EntryType::FileDataDynamic,
                         0,
                     );
