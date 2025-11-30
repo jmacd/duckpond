@@ -159,7 +159,7 @@ impl DynamicDirDirectory {
         id_bytes.extend_from_slice(entry.factory.as_bytes());
         id_bytes.extend_from_slice(&config_bytes);
         let node_id = tinyfs::NodeID::from_content(&id_bytes);
-        let file_id = tinyfs::FileID::new_from_ids(self.context.parent_id, node_id);
+        let file_id = tinyfs::FileID::new_from_ids(self.context.file_id.part_id(), node_id);
 
         let node_ref = Node::new(file_id, node_type);
 
@@ -281,7 +281,7 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
 
     // Instrument: log parent_id, entry names, and config hash
-    let parent_node_id = context.parent_id;
+    let parent_node_id = context.file_id.part_id();
     let entry_names: Vec<_> = config.entries.iter().map(|e| e.name.clone()).collect();
     let mut hasher = DefaultHasher::new();
     config.hash(&mut hasher);
@@ -318,7 +318,7 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
     // Cache the directory handle for future access within this transaction
     context
         .state
-        .set_dynamic_node_cache(cache_key, tinyfs::Node::new(parent_node_id, tinyfs::NodeType::Directory(dir_handle.clone())));
+        .set_dynamic_node_cache(cache_key, Node::new(context.file_id, tinyfs::NodeType::Directory(dir_handle.clone())));
     debug!(
         "[INSTRUMENT] cached new dynamic directory for config_hash={:x}",
         config_hash
@@ -555,8 +555,8 @@ entries:
             .unwrap();
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
-        use tinyfs::NodeID;
-        let context = FactoryContext::new(state, NodeID::root());
+        use tinyfs::FileID;
+        let context = FactoryContext::new(state, FileID::root());
 
         // Create a valid configuration using template factory
         let config = DynamicDirConfig {
@@ -602,8 +602,8 @@ entries:
             .unwrap();
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
-        use tinyfs::NodeID;
-        let context = FactoryContext::new(state, NodeID::root());
+        use tinyfs::FileID;
+        let context = FactoryContext::new(state, FileID::root());
 
         // Create configuration with multiple entries using template factory
         let config = DynamicDirConfig {

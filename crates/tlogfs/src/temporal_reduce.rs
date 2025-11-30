@@ -807,7 +807,7 @@ impl Directory for TemporalReduceDirectory {
             })?;
             let dir_entry = tinyfs::DirectoryEntry::new(
                 site_name.clone(),
-                node.id,
+                node.id.node_id(),
                 EntryType::DirectoryDynamic,
                 0,
             );
@@ -1027,7 +1027,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use tinyfs::arrow::SimpleParquetExt;
-    use tinyfs::{EntryType, NodeID, NodeType};
+    use tinyfs::{EntryType, FileID, NodeType};
 
     /// Comprehensive integration test for temporal-reduce factory
     ///
@@ -1130,7 +1130,7 @@ mod tests {
                 ],
             };
 
-            let context = FactoryContext::new(state.clone(), NodeID::root());
+            let context = FactoryContext::new(state.clone(), FileID::root());
             let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
             let temporal_handle = temporal_dir.create_handle();
 
@@ -1161,19 +1161,17 @@ mod tests {
 
                 // Get the site directory
                 let site_node = temporal_handle.get(&site_name).await.unwrap().unwrap();
-                let site_node_guard = site_node.lock().await;
-                let site_dir = match &site_node_guard.node_type {
+                let site_dir = match &site_node.node_type {
                     NodeType::Directory(dir) => dir,
                     _ => panic!("Expected directory for {}", site_name),
                 };
 
                 // Get the daily aggregation file
                 let daily_file_node = site_dir.get("res=1d.series").await.unwrap().unwrap();
-                let daily_file_guard = daily_file_node.lock().await;
-                let node_id = daily_file_guard.id;
+                let file_id = daily_file_node.id;
 
                 // Read and verify the aggregated data using QueryableFile interface
-                if let NodeType::File(file_handle) = &daily_file_guard.node_type {
+                if let NodeType::File(file_handle) = &daily_file_node.node_type {
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 
@@ -1182,7 +1180,7 @@ mod tests {
                         .expect("Temporal-reduce should create QueryableFile");
 
                     let table_provider = queryable_file
-                        .as_table_provider(node_id, node_id, &state)
+                        .as_table_provider(file_id, &state)
                         .await
                         .unwrap();
 

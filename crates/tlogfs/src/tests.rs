@@ -514,7 +514,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     let wd2 = tx2.root().await?;
 
     let file_node = wd2.get_node_path("/large_test.dat").await?;
-    let file_handle = file_node.borrow().await.as_file()?;
+    let file_handle = file_node.as_file().await?;
 
     debug!("Getting async reader for large file...");
     let mut reader = file_handle.async_reader().await?;
@@ -597,7 +597,7 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     let wd2 = tx2.root().await?;
 
     let file_node = wd2.get_node_path("/small_test.txt").await?;
-    let file_handle = file_node.borrow().await.as_file()?;
+    let file_handle = file_node.as_file().await?;
 
     debug!("Getting async reader for small file...");
     let mut reader = file_handle.async_reader().await?;

@@ -736,6 +736,7 @@ impl PersistenceLayer for State {
             .await
             .create_dynamic_node(id, factory_type, config_content)
             .await
+            .map_err(error_utils::to_tinyfs_error)
     }
 
     async fn get_dynamic_node_config(&self, id: FileID) -> TinyFSResult<Option<(String, Vec<u8>)>> {
@@ -768,19 +769,16 @@ impl PersistenceLayer for State {
         parent_id: FileID,
         requests: Vec<DirectoryEntry>,
     ) -> TinyFSResult<HashMap<String, Node>> {
-        self.inner
+        let map = self.inner
             .lock()
             .await
             .load_nodes_batched(parent_id, requests, self.clone())
-            .await
+            .await?;
+        Ok(map.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
 
     async fn metadata(&self, id: FileID) -> TinyFSResult<NodeMetadata> {
         self.inner.lock().await.metadata(id).await
-    }
-
-    async fn load_symlink_target(&self, id: FileID) -> TinyFSResult<PathBuf> {
-        self.inner.lock().await.load_symlink_target(id).await
     }
 
     async fn list_file_versions(&self, id: FileID) -> TinyFSResult<Vec<FileVersionInfo>> {
@@ -805,6 +803,11 @@ impl PersistenceLayer for State {
 }
 
 impl State {
+    /// Load symlink target path
+    pub async fn load_symlink_target(&self, id: FileID) -> TinyFSResult<PathBuf> {
+        self.inner.lock().await.load_symlink_target(id).await
+    }
+
     /// Track a directory as created in this transaction (for deferred storage decision)
     pub async fn track_created_directory(&self, id: FileID) {
         _ = self.inner.lock().await.created_directories.insert(id);
@@ -839,7 +842,7 @@ impl State {
 
     /// Set cached dynamic node by key (for dynamic directory factory)
     pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: Node) {
-        self.dynamic_node_cache
+        _ = self.dynamic_node_cache
             .lock()
             .expect("Failed to acquire dynamic node cache lock")
             .insert(key, value);
@@ -2669,11 +2672,12 @@ impl InnerState {
     }
 
     async fn create_symlink_node(
-        &self,
+        &mut self,
         id: FileID,
         target: &Path,
         state: State,
     ) -> TinyFSResult<Node> {
+        // Create symlink node in memory only - store_node will persist it
         node_factory::create_symlink_node(id, target, state)
     }
 
@@ -3240,7 +3244,7 @@ mod node_factory {
         })?;
 
         // Create context with all template variables (vars, export, and any other keys)
-        let context = FactoryContext::new(state.clone(), id.part_id());
+        let context = FactoryContext::new(state.clone(), id);
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {

@@ -44,11 +44,7 @@ impl Metadata for OpLogSymlink {
 #[async_trait]
 impl Symlink for OpLogSymlink {
     async fn readlink(&self) -> tinyfs::Result<std::path::PathBuf> {
-        // Load symlink target directly from persistence layer (avoids recursion)
-        let target = self
-            .state
-            .load_symlink_target(self.id)
-            .await?;
-        Ok(target)
+        // Directly query persistence layer for symlink target
+        self.state.load_symlink_target(self.id).await
     }
 }

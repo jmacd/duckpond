@@ -350,7 +350,7 @@ mod tests {
         });
         
         let state = tx_guard.state().unwrap();
-	let context = FactoryContext::new(state.clone(), FileID::root().part_id());
+	let context = FactoryContext::new(state.clone(), FileID::root());
         
         TimeseriesPivotFile { config, context }
     }

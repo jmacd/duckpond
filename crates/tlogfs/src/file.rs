@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 use tinyfs::{
     AsyncReadSeek, Error as TinyFSError, File, FileID, Metadata, NodeID, NodeMetadata,
     persistence::PersistenceLayer,
+    PartID,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;

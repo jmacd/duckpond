@@ -631,7 +631,7 @@ impl ObjectStore for TinyFsObjectStore {
             // Parse the prefix to extract both node_id and part_id for dynamic discovery
             if let Some(ref prefix_str) = prefix {
                 if let Some(file_id) = extract_node_and_part_ids_from_path(prefix_str) {
-                    debug!("ObjectStore extracting file versions for node_id: {node_id}, part_id: {part_id}");
+                    debug!("ObjectStore extracting file versions for file_id: {file_id}");
 
                     // Query persistence layer directly with FileID - no pre-registration needed!
                     // file_id already constructed by extract_node_and_part_ids_from_path
@@ -686,10 +686,10 @@ impl ObjectStore for TinyFsObjectStore {
                             }
                         }
                         Err(e) => {
-                            debug!("ObjectStore failed to list file versions for node {node_id}: {e}");
+                            debug!("ObjectStore failed to list file versions for {file_id}: {e}");
                             yield Err(object_store::Error::Generic {
                                 store: "TinyFS",
-                                source: format!("Failed to list file versions for node {}: {}", node_id, e).into(),
+                                source: format!("Failed to list file versions for {}: {}", file_id, e).into(),
                             });
                         }
                     }

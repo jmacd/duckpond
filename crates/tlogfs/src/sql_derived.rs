@@ -31,6 +31,7 @@
 //! see [`crates/docs/sql-derived-design.md`](../docs/sql-derived-design.md).
 
 use crate::factory::FactoryContext;
+use tinyfs::FileID;
 use crate::query::queryable_file::QueryableFile;
 use crate::register_dynamic_factory;
 use provider::ScopePrefixTableProvider;
@@ -287,7 +288,7 @@ impl SqlDerivedFile {
                     EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
                         file_id
                     }
-                    _ => tinyfs::FileID::new_from_ids(file_id.part_id(), file_id.node_id()),
+                    _ => FileID::new_from_ids(file_id.part_id(), file_id.node_id()),
                 };
                 if seen.insert(dedup_key) {
                     let entry_type_str = format!("{entry_type:?}");
@@ -705,7 +706,7 @@ impl QueryableFile for SqlDerivedFile {
     /// allowing DataFusion to handle query planning and optimization efficiently.
     async fn as_table_provider(
         &self,
-        id: tinyfs::FileID,
+        id: FileID,
         state: &crate::persistence::State,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
         // Check cache first for SqlDerivedFile ViewTable
@@ -910,7 +911,7 @@ impl QueryableFile for SqlDerivedFile {
                     // Use direct create_table_provider with additional_urls to avoid TransactionGuard dependency
                     use crate::file_table::{TableProviderOptions, create_table_provider};
 
-                    let dummy_file_id = tinyfs::FileID::root();
+                    let dummy_file_id = FileID::root();
 
                     let options = TableProviderOptions {
                         additional_urls: urls.clone(),
@@ -1082,7 +1083,6 @@ mod tests {
     use arrow_array::record_batch;
     use tempfile::TempDir;
     use tinyfs::FS;
-    use tinyfs::NodeID;
     use tinyfs::arrow::SimpleParquetExt;
 
     /// Helper function to get a string array from any column, handling different Arrow string types
@@ -1118,7 +1118,7 @@ mod tests {
         // Get table provider
         let state_ref = tx_guard.state()?;
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::FileID::root(), &state_ref)
+            .as_table_provider(FileID::root(), &state_ref)
             .await?;
 
         debug!("execute_sql_derived_direct: Got table provider");
@@ -1567,7 +1567,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1737,7 +1737,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1914,7 +1914,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1993,7 +1993,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create SQL-derived file without specifying query (should use default)
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2013,7 +2013,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::FileID::root(), &state)
+            .as_table_provider(FileID::root(), &state)
             .await
             .unwrap();
 
@@ -2057,7 +2057,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with FileSeries source
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2074,7 +2074,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::FileID::root(), &state)
+            .as_table_provider(FileID::root(), &state)
             .await
             .unwrap();
 
@@ -2121,7 +2121,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with multi-version FileSeries source
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2138,7 +2138,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::FileID::root(), &state)
+            .as_table_provider(FileID::root(), &state)
             .await
             .unwrap();
 
@@ -2183,7 +2183,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file that should union all 3 versions
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2207,7 +2207,7 @@ query: ""
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
         let table_provider = sql_derived_file
-            .as_table_provider(tinyfs::FileID::root(), &state)
+            .as_table_provider(FileID::root(), &state)
             .await
             .unwrap();
 
@@ -2272,7 +2272,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with read-only state context
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2477,7 +2477,7 @@ query: ""
             let root = fs.root().await.unwrap();
 
             // Create the first SQL-derived file (filters and transforms original data)
-            let context = FactoryContext::new(state.clone(), NodeID::root());
+            let context = FactoryContext::new(state.clone(), FileID::root());
             let first_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
@@ -2535,7 +2535,7 @@ query: ""
             let tx_guard = persistence.begin_test().await.unwrap();
             let state = tx_guard.state().unwrap();
 
-            let context = FactoryContext::new(state, NodeID::root());
+            let context = FactoryContext::new(state, FileID::root());
             let second_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
@@ -2806,7 +2806,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state.clone(), NodeID::root());
+        let context = FactoryContext::new(state.clone(), FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -3044,7 +3044,7 @@ query: ""
         let bdock_sql_derived = {
             let tx_guard = persistence.begin_test().await.unwrap();
             let state = tx_guard.state().unwrap();
-            let context = FactoryContext::new(state, NodeID::root());
+            let context = FactoryContext::new(state, FileID::root());
 
             let config = SqlDerivedConfig {
                 patterns: {
@@ -3065,7 +3065,7 @@ query: ""
         let temporal_reduce_dir = {
             let tx_guard = persistence.begin_test().await.unwrap();
             let state = tx_guard.state().unwrap();
-            let context = FactoryContext::new(state, NodeID::root());
+            let context = FactoryContext::new(state, FileID::root());
 
             let config = TemporalReduceConfig {
                 in_pattern: "/sensors/stations/*".to_string(), // Use pattern to match parquet data
@@ -3119,8 +3119,7 @@ query: ""
 
             // Then get the resolution file "res=1d.series" within that site directory
             let site_node = site_dir_node.unwrap();
-            let site_node_guard = site_node.lock().await;
-            if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node_guard.node_type {
+            if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node.node_type {
                 let daily_series_node = site_dir_handle.get("res=1d.series").await.unwrap();
                 assert!(
                     daily_series_node.is_some(),
@@ -3130,16 +3129,15 @@ query: ""
                 let daily_node = daily_series_node.unwrap();
 
                 // Use public API to access the file handle and downcast using Any
-                let node_guard = daily_node.lock().await;
-                let node_id = node_guard.id;
+                let node_id = daily_node.id;
 
-                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                if let tinyfs::NodeType::File(file_handle) = &daily_node.node_type {
                     // Access the file through the public API and downcast using as_any()
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let state = tx_guard_mut.state().unwrap();
-                        let file_id = node_guard.id;
+                        let file_id = daily_node.id;
                         let table_provider = queryable_file
                             .as_table_provider(
                                 file_id,
@@ -3264,8 +3262,7 @@ query: ""
 
         match file_lookup.1 {
             tinyfs::Lookup::Found(node_path) => {
-                let node_guard = node_path.node.lock().await;
-                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                if let tinyfs::NodeType::File(file_handle) = &node_path.node.node_type {
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 
@@ -3278,7 +3275,7 @@ query: ""
 
                     // Verify we can actually create a table provider from it
                     let queryable = queryable_file.unwrap();
-                    let file_id = node_guard.id;
+                    let file_id = node_path.node.id;
                     let table_provider = queryable
                         .as_table_provider(file_id, &state)
                         .await
@@ -3395,7 +3392,7 @@ query: ""
         {
             let tx_guard = persistence.begin_test().await.unwrap();
             let state = tx_guard.state().unwrap();
-            let context = FactoryContext::new(state, NodeID::root());
+            let context = FactoryContext::new(state, FileID::root());
 
             // Define temporal-reduce config with wildcard schema discovery
             let temporal_config = TemporalReduceConfig {
@@ -3433,11 +3430,10 @@ query: ""
                 log::debug!("   - Match {}: {} -> captured: {:?}", i, path_str, captured);
 
                 // Try to access the schema of this file directly
-                let node_guard = node_path.node.lock().await;
-                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                if let tinyfs::NodeType::File(file_handle) = &node_path.node.node_type {
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
-                    let node_id = node_guard.id;
+                    let node_id = node_path.node.id;
 
                     // Check the file metadata first
                     let metadata = file_guard.metadata().await.unwrap();
@@ -3449,7 +3445,7 @@ query: ""
 
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         log::debug!("   - File {} implements QueryableFile", path_str);
-                        let file_id = node_guard.id;
+                        let file_id = node_path.node.id;
                         log::debug!(
                             "   - Using file_id: {}",
                             file_id.node_id()
@@ -3528,7 +3524,7 @@ query: ""
                         log::debug!("   - Actual file type name: {}", type_name);
                     }
                 } else {
-                    log::debug!("   - Match {} is not a file: {:?}", i, node_guard.node_type);
+                    log::debug!("   - Match {} is not a file: {:?}", i, node_path.node.node_type);
                 }
             }
 
@@ -3542,8 +3538,7 @@ query: ""
 
             // Then get the resolution file "res=1d.series" within that site directory
             let site_node = site_dir_node.unwrap();
-            let site_node_guard = site_node.lock().await;
-            if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node_guard.node_type {
+            if let tinyfs::NodeType::Directory(site_dir_handle) = &site_node.node_type {
                 let daily_series_node = site_dir_handle.get("res=1d.series").await.unwrap();
                 assert!(
                     daily_series_node.is_some(),
@@ -3553,16 +3548,15 @@ query: ""
                 let daily_node = daily_series_node.unwrap();
 
                 // Use public API to access the file handle and downcast using Any
-                let node_guard = daily_node.lock().await;
-                let node_id = node_guard.id;
+                let node_id = daily_node.id;
 
-                if let tinyfs::NodeType::File(file_handle) = &node_guard.node_type {
+                if let tinyfs::NodeType::File(file_handle) = &daily_node.node_type {
                     // Access the file through the public API and downcast using as_any()
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let state = tx_guard.state().unwrap();
-                        let file_id = node_guard.id;
+                        let file_id = daily_node.id;
                         let table_provider = queryable_file
                             .as_table_provider(
                                 file_id,
@@ -3762,7 +3756,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -3861,7 +3855,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, NodeID::root());
+        let context = FactoryContext::new(state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();

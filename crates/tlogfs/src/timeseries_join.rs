@@ -395,7 +395,7 @@ mod tests {
     use std::io::Cursor;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tinyfs::{EntryType, NodeID};
+    use tinyfs::EntryType;
 
     #[test]
     fn test_sql_generation_two_sources() {
@@ -666,7 +666,8 @@ mod tests {
         // Now create the timeseries join
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
-        let context = FactoryContext::new(state.clone(), NodeID::root());
+        use tinyfs::FileID;
+        let context = FactoryContext::new(state.clone(), FileID::root());
 
         let config = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),
@@ -688,7 +689,7 @@ mod tests {
         
         // Test as_table_provider
         let table_provider = join_file
-            .as_table_provider(NodeID::root(), NodeID::root(), &state)
+            .as_table_provider(FileID::root(), &state)
             .await
             .unwrap();
 
@@ -720,7 +721,7 @@ mod tests {
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
         use std::io::Cursor;
-        use tinyfs::{EntryType, FS, NodeID};
+        use tinyfs::{EntryType, FS, FileID};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
@@ -793,7 +794,7 @@ mod tests {
         // Test with scope prefixes
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
-        let root_id = NodeID::root();
+        let root_id = FileID::root();
         let context = FactoryContext::new(state.clone(), root_id);
 
         let config = TimeseriesJoinConfig {
@@ -814,7 +815,7 @@ mod tests {
 
         let join_file = TimeseriesJoinFile::new(config, context);
         let table_provider = join_file
-            .as_table_provider(root_id, root_id, &state)
+            .as_table_provider(root_id, &state)
             .await
             .unwrap();
 
