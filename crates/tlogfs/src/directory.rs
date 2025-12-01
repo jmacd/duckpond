@@ -71,106 +71,54 @@ impl Directory for OpLogDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<Node>> {
         debug!("OpLogDirectory::get('{name}')");
         
-        // Query for the directory's latest OplogEntry which contains child entries
-        let records = self.state.query_records(self.id).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to query directory records: {}", e)))?;
+        // Load directory state into memory if not already present
+        self.state.ensure_directory_loaded(self.id).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
         
-        let Some(record) = records.first() else {
-            debug!("OpLogDirectory::get: directory not found in oplog");
+        // Get entry from in-memory state
+        let entry_opt = self.state.get_directory_entry(self.id, name).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get directory entry: {}", e)))?;
+        
+        let Some(entry) = entry_opt else {
+            debug!("OpLogDirectory::get: entry '{name}' not found");
             return Ok(None);
         };
         
-        // Decode directory entries from Arrow IPC
-        let Some(content_bytes) = &record.content else {
-            debug!("OpLogDirectory::get: directory has no entries (content=None)");
-            return Ok(None);
+        debug!("OpLogDirectory::get: found entry '{name}'!");
+        
+        // Construct FileID based on entry type:
+        // - Physical directories: part_id == node_id (self-partitioned)
+        // - Everything else: part_id == parent's part_id
+        let child_file_id = if entry.entry_type == tinyfs::EntryType::DirectoryPhysical {
+            FileID::from_physical_dir_node_id(entry.child_node_id)
+        } else {
+            FileID::new_from_ids(self.id.part_id(), entry.child_node_id)
         };
         
-        let entries: Vec<tinyfs::DirectoryEntry> = crate::schema::decode_directory_entries(content_bytes)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to decode directory entries: {}", e)))?;
-        
-        debug!("OpLogDirectory::get: found {} entries in directory", entries.len());
-        for entry in &entries {
-            debug!("  - entry name='{}' child_node_id={}", entry.name, entry.child_node_id);
-        }
-        
-        // Find the requested entry
-        for entry in entries {
-            if entry.name == name {
-                debug!("OpLogDirectory::get: found entry '{name}'!");
-                // Construct FileID based on entry type:
-                // - Physical directories: part_id == node_id (self-partitioned)
-                // - Everything else: part_id == parent's part_id
-                let child_file_id = if entry.entry_type == tinyfs::EntryType::DirectoryPhysical {
-                    FileID::from_physical_dir_node_id(entry.child_node_id)
-                } else {
-                    FileID::new_from_ids(self.id.part_id(), entry.child_node_id)
-                };
-                
-                // Load the child node
-                let child_node = self.state.load_node(child_file_id).await?;
-                return Ok(Some(child_node));
-            }
-        }
-        
-        debug!("OpLogDirectory::get: entry '{name}' not found");
-        Ok(None)
+        // Load the child node
+        let child_node = self.state.load_node(child_file_id).await?;
+        Ok(Some(child_node))
     }
 
     async fn insert(&mut self, name: String, node: Node) -> tinyfs::Result<()> {
         debug!("OpLogDirectory::insert('{name}', {:?})", node.id());
         
-        // Get current directory entries
-        let mut entries: Vec<tinyfs::DirectoryEntry> = {
-            let records = self.state.query_records(self.id).await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to query directory: {}", e)))?;
-            
-            if let Some(record) = records.first() {
-                if let Some(content_bytes) = &record.content {
-                    crate::schema::decode_directory_entries(content_bytes)
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to decode entries: {}", e)))?
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        };
+        // Ensure directory is loaded in memory
+        self.state.ensure_directory_loaded(self.id).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
         
-        // Check if entry already exists with same name
+        // Create the new entry
         let node_id = node.id();
-        if let Some(existing) = entries.iter().find(|e| e.name == name) {
-            if existing.child_node_id == node_id.node_id() {
-                // Entry already exists with exact same node - this is a no-op
-                // This should not happen in correct usage, but return success to avoid breaking tests
-                debug!("OpLogDirectory::insert: entry '{name}' already exists with same node_id={}, no-op", node_id.node_id());
-                return Ok(());
-            } else {
-                // Entry exists with different node - this is an error (trying to replace)
-                return Err(tinyfs::Error::Other(format!(
-                    "Directory entry '{}' already exists with different node_id (existing={}, new={})",
-                    name, existing.child_node_id, node_id.node_id()
-                )));
-            }
-        }
-        
-        // Add the new entry
         let new_entry = tinyfs::DirectoryEntry::new(
             name.clone(),
             node_id.node_id(),
             node_id.entry_type(),
-            1, // version_last_modified - will be set properly by persistence layer
+            1, // version_last_modified - will be set properly at flush time
         );
         
-        entries.push(new_entry);
-        
-        // Encode entries back to Arrow IPC
-        let content_bytes = crate::schema::encode_directory_entries(&entries)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to encode entries: {}", e)))?;
-        
-        // Store updated directory content
-        self.state.update_directory_content(self.id, content_bytes).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to update directory: {}", e)))?;
+        // Insert into in-memory state (checks for duplicates and marks as modified)
+        self.state.insert_directory_entry(self.id, new_entry).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to insert directory entry: {}", e)))?;
         
         Ok(())
     }

@@ -60,6 +60,239 @@ async fn test_transaction_guard_basic_usage() {
     info!("✅ Transaction committed successfully");
 }
 
+/// Test the absolute basics: create, commit, reopen, read empty root
+#[tokio::test]
+async fn test_create_commit_reopen_read_root() {
+    let store_path = test_dir();
+
+    // Step 1: Create new OpLogPersistence with root directory
+    debug!("Step 1: Creating new OpLogPersistence");
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+    
+    debug!("OpLogPersistence created successfully");
+
+    // Step 2: Begin a transaction and verify we can access root
+    debug!("Step 2: Beginning first transaction");
+    let tx1 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+    
+    let root1 = tx1.root().await.expect("Failed to get root directory");
+    debug!("✅ Got root directory in first transaction");
+
+    // List the root directory (should be empty)
+    use futures::stream::StreamExt;
+    let mut entries_stream1 = root1.entries().await.expect("Failed to get entries stream");
+    let mut entries1 = Vec::new();
+    while let Some(entry_result) = entries_stream1.next().await {
+        let entry = entry_result.expect("Failed to read entry");
+        entries1.push(entry);
+    }
+    debug!("Root directory has {} entries", entries1.len());
+    assert_eq!(entries1.len(), 0, "Root should be empty initially");
+    
+    // Step 3: Commit the transaction
+    debug!("Step 3: Committing first transaction");
+    tx1.commit_test()
+        .await
+        .expect("Failed to commit first transaction");
+    debug!("✅ First transaction committed");
+
+    // Step 4: Begin a second transaction and read root again
+    debug!("Step 4: Beginning second transaction (should see committed data)");
+    let tx2 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin second transaction");
+    
+    let root2 = tx2.root().await.expect("Failed to get root in second transaction");
+    debug!("✅ Got root directory in second transaction");
+    
+    // List the root directory again (should still be empty)
+    let mut entries_stream2 = root2.entries().await.expect("Failed to get entries stream");
+    let mut entries2 = Vec::new();
+    while let Some(entry_result) = entries_stream2.next().await {
+        let entry = entry_result.expect("Failed to read entry");
+        entries2.push(entry);
+    }
+    debug!("Root directory has {} entries in second transaction", entries2.len());
+    assert_eq!(entries2.len(), 0, "Root should still be empty");
+    
+    // No need to commit read transaction
+    debug!("✅ Test passed - can create, commit, and read empty root");
+}
+
+/// Test create file, commit, reopen, read file
+#[tokio::test]
+async fn test_create_file_commit_reopen_read() {
+    let store_path = test_dir();
+
+    // Step 1: Create new OpLogPersistence with root directory
+    debug!("Step 1: Creating new OpLogPersistence");
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    // Step 2: Create a simple file
+    debug!("Step 2: Creating a file");
+    {
+        let tx = persistence.begin_test().await.expect("Failed to begin transaction");
+        let root = tx.root().await.expect("Failed to get root");
+        
+        // Write a simple text file
+        root.write_file_path_from_slice("test.txt", b"Hello, World!")
+            .await
+            .expect("Failed to write file");
+        
+        debug!("✅ File created");
+        
+        tx.commit_test().await.expect("Failed to commit");
+        debug!("✅ Transaction committed");
+    }
+
+    // Step 3: Read the file back in a new transaction
+    debug!("Step 3: Reading file in new transaction");
+    {
+        let tx = persistence.begin_test().await.expect("Failed to begin second transaction");
+        let root = tx.root().await.expect("Failed to get root");
+        
+        // Read the file
+        let content = root.read_file_path_to_vec("test.txt")
+            .await
+            .expect("Failed to read file");
+        
+        let content_str = String::from_utf8(content).expect("Invalid UTF-8");
+        debug!("✅ Read file content: '{}'", content_str);
+        
+        assert_eq!(content_str, "Hello, World!", "File content should match");
+        
+        debug!("✅ Test passed - can create file, commit, and read back");
+    }
+}
+
+/// Test create file:series, commit, reopen, read - SIMPLIFIED VERSION
+#[tokio::test]
+async fn test_create_series_commit_reopen_read_simple() {
+    let store_path = test_dir();
+
+    // Step 1: Create new OpLogPersistence with root directory
+    debug!("Step 1: Creating new OpLogPersistence");
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    // Step 2: Create a simple series file
+    debug!("Step 2: Creating a file:series");
+    {
+        let tx = persistence.begin_test().await.expect("Failed to begin transaction");
+        let root = tx.root().await.expect("Failed to get root");
+        
+        // Create test data as a RecordBatch
+        let batch = record_batch!(
+            ("timestamp", Int64, [1704067200000_i64]),
+            ("value", Float64, [42.0_f64])
+        ).expect("Failed to create batch");
+        
+        debug!("Created RecordBatch with {} rows", batch.num_rows());
+        
+        // Write the series
+        let (min_time, max_time) = root
+            .create_series_from_batch("test.series", &batch, Some("timestamp"))
+            .await
+            .expect("Failed to create series");
+        
+        debug!("✅ Series created with time range: {} to {}", min_time, max_time);
+        
+        tx.commit_test().await.expect("Failed to commit");
+        debug!("✅ Transaction committed");
+    }
+
+    // Step 3: Read the series back in a new transaction
+    debug!("Step 3: Reading series in new transaction");
+    {
+        let tx = persistence.begin_test().await.expect("Failed to begin second transaction");
+        let root = tx.root().await.expect("Failed to get root");
+        
+        // Check if file exists
+        let exists = root.exists(std::path::Path::new("test.series")).await;
+        debug!("File exists: {}", exists);
+        assert!(exists, "Series file should exist after commit");
+        
+        // Read the series back
+        let read_batch = root.read_table_as_batch("test.series")
+            .await
+            .expect("Failed to read series");
+        
+        debug!("✅ Read RecordBatch with {} rows, {} columns", 
+               read_batch.num_rows(), read_batch.num_columns());
+        
+        assert_eq!(read_batch.num_rows(), 1, "Should have 1 row");
+        assert_eq!(read_batch.num_columns(), 2, "Should have 2 columns");
+        
+        debug!("✅ Test passed - can create series, commit, and read back");
+    }
+}
+
+/// Test create series in subdirectory, commit, reopen, read
+#[tokio::test]
+async fn test_create_series_in_subdir() {
+    let store_path = test_dir();
+
+    debug!("Creating new OpLogPersistence");
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    // Create a series in a subdirectory
+    debug!("Creating series in subdirectory");
+    {
+        let tx = persistence.begin_test().await.expect("Failed to begin transaction");
+        let root = tx.root().await.expect("Failed to get root");
+        
+        // Create subdirectory
+        debug!("Creating test/ subdirectory");
+        let _test_dir = root.create_dir_path("test").await.expect("Failed to create directory");
+        
+        // Create series in subdirectory
+        let batch = record_batch!(
+            ("timestamp", Int64, [1704067200000_i64]),
+            ("value", Float64, [42.0_f64])
+        ).expect("Failed to create batch");
+        
+        debug!("Writing series to test/data.series");
+        let _time_range = root.create_series_from_batch("test/data.series", &batch, Some("timestamp"))
+            .await
+            .expect("Failed to create series");
+        
+        debug!("✅ Series created, committing...");
+        tx.commit_test().await.expect("Failed to commit");
+        debug!("✅ Committed");
+    }
+
+    // Read back in new transaction
+    debug!("Reading back in new transaction");
+    {
+        let tx = persistence.begin_test().await.expect("Failed to begin read transaction");
+        let root = tx.root().await.expect("Failed to get root");
+        
+        let exists = root.exists(std::path::Path::new("test/data.series")).await;
+        debug!("File exists: {}", exists);
+        assert!(exists, "File should exist");
+        
+        let read_batch = root.read_table_as_batch("test/data.series")
+            .await
+            .expect("Failed to read series");
+        
+        debug!("✅ Read {} rows", read_batch.num_rows());
+        assert_eq!(read_batch.num_rows(), 1);
+    }
+    
+    debug!("✅ Test passed");
+}
+
 /// Test reading from a directory after creation (simulating steward's read pattern)
 #[tokio::test]
 async fn test_transaction_guard_read_after_create() {
@@ -875,6 +1108,34 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         // Create TLogFS persistence layer
         debug!("Creating persistence layer...");
         let mut persistence = OpLogPersistence::create_test(&store_path).await?;
+
+        // Check filesystem after bootstrap
+        debug!("\n=== Checking filesystem after bootstrap ===");
+        let store_path_obj = std::path::Path::new(&store_path);
+        debug!("Store path: {}", store_path);
+        debug!("Store path exists: {}", store_path_obj.exists());
+        if store_path_obj.exists() {
+            if let Ok(entries) = std::fs::read_dir(store_path_obj) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        debug!("  - {}", entry.path().display());
+                    }
+                }
+            }
+        }
+        
+        // Check _delta_log directory
+        let delta_log_path = store_path_obj.join("_delta_log");
+        debug!("Delta log exists: {}", delta_log_path.exists());
+        if delta_log_path.exists() {
+            if let Ok(entries) = std::fs::read_dir(&delta_log_path) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        debug!("  - delta log: {}", entry.path().display());
+                    }
+                }
+            }
+        }
 
         let series_path = "devices/sensor_123/data.series";
 

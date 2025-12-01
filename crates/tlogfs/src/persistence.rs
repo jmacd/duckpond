@@ -36,21 +36,44 @@ pub struct OpLogPersistence {
     pub(crate) last_txn_seq: i64, // Track last committed transaction sequence for validation
 }
 
-#[derive(Clone)]
-pub enum DirectoryOperation {
-    /// Insert operation that includes node type (only supported operation)
-    InsertWithType(NodeID, EntryType),
-    /// Delete operation with node type for consistency
-    DeleteWithType(EntryType),
-    /// Rename operation with node type
-    RenameWithType(String, NodeID, EntryType), // old_name, new_node_id, node_type
+/// In-memory directory state during a transaction
+/// Tracks loaded directory content and whether it has been modified
+pub struct DirectoryState {
+    /// Whether this directory has been modified during this transaction
+    pub modified: bool,
+    /// Map of child name -> DirectoryEntry for O(1) lookups and duplicate detection
+    pub mapping: HashMap<String, tinyfs::DirectoryEntry>,
+}
+
+impl DirectoryState {
+    /// Create a new unmodified directory state from entries
+    fn new_unmodified(entries: Vec<tinyfs::DirectoryEntry>) -> Self {
+        let mapping = entries
+            .into_iter()
+            .map(|entry| (entry.name.clone(), entry))
+            .collect();
+        Self {
+            modified: false,
+            mapping,
+        }
+    }
+
+    /// Create a new empty unmodified directory state
+    fn new_empty() -> Self {
+        Self {
+            modified: false,
+            mapping: HashMap::new(),
+        }
+    }
 }
 
 pub struct InnerState {
     path: PathBuf,
     table: DeltaTable,        // The Delta table for this transaction
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
-    operations: HashMap<FileID, HashMap<String, DirectoryOperation>>, // @@@ SUS
+    /// In-memory directory state management for transaction
+    /// Maps FileID (directory) -> DirectoryState (loaded/modified state)
+    directories: HashMap<FileID, DirectoryState>,
     created_directories: HashSet<FileID>, // Track mkdir operations separately
     session_context: Arc<SessionContext>,
     txn_seq: i64,
@@ -313,6 +336,9 @@ impl OpLogPersistence {
     }
 
     pub(crate) fn state(&self) -> Result<State, TLogFSError> {
+        if self.state.is_none() {
+            panic!("❌ CRITICAL BUG: state() called but self.state is None! This should never happen during an active transaction.");
+        }
         self.state.clone().ok_or(TLogFSError::Missing)
     }
 
@@ -823,6 +849,7 @@ impl State {
     }
 
     /// Update directory content (used by OpLogDirectory::insert)
+    /// DEPRECATED: This writes immediately. Use ensure_directory_loaded + insert_directory_entry instead.
     pub async fn update_directory_content(
         &self,
         id: FileID,
@@ -833,6 +860,44 @@ impl State {
             .await
             .update_directory_content(id, content)
             .await
+    }
+
+    /// Ensure directory is loaded into in-memory state
+    /// If not present, loads from OpLog and caches with modified: false
+    pub async fn ensure_directory_loaded(&self, id: FileID) -> Result<(), TLogFSError> {
+        self.inner
+            .lock()
+            .await
+            .ensure_directory_loaded(id)
+            .await
+    }
+
+    /// Get a directory entry from in-memory state
+    /// Directory must be loaded first via ensure_directory_loaded
+    pub async fn get_directory_entry(
+        &self,
+        dir_id: FileID,
+        entry_name: &str,
+    ) -> Result<Option<tinyfs::DirectoryEntry>, TLogFSError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .get_directory_entry(dir_id, entry_name))
+    }
+
+    /// Insert a directory entry into in-memory state
+    /// Directory must be loaded first via ensure_directory_loaded
+    /// Checks for duplicates and marks directory as modified
+    pub async fn insert_directory_entry(
+        &self,
+        dir_id: FileID,
+        entry: tinyfs::DirectoryEntry,
+    ) -> Result<(), TLogFSError> {
+        self.inner
+            .lock()
+            .await
+            .insert_directory_entry(dir_id, entry)
     }
 
     /// Get the shared DataFusion SessionContext
@@ -1052,7 +1117,8 @@ impl InnerState {
         );
 
         // Register the fundamental delta_table for direct DeltaTable queries
-        debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor");
+        debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}", 
+            table.version());
         _ = ctx
             .register_table("delta_table", Arc::new(table.clone()))
             .map_err(|e| {
@@ -1065,7 +1131,7 @@ impl InnerState {
             path: path.as_ref().to_path_buf(),
             table,
             records: Vec::new(),
-            operations: HashMap::new(),
+            directories: HashMap::new(),
             created_directories: HashSet::new(),
             session_context: ctx,
             txn_seq,
@@ -1092,36 +1158,80 @@ impl InnerState {
     pub async fn initialize_root_directory(&mut self) -> Result<(), TLogFSError> {
          let root_id = FileID::root();
 
-        // Create root directory using direct TLogFS commit (no transaction guard needed for bootstrap)
-        let now = Utc::now().timestamp_micros();
-        let empty_entries: Vec<DirectoryEntry> = Vec::new();
-        let content = self.serialize_directory_entries(&empty_entries)?;
+        // Initialize root directory in memory as empty (will be written to OpLog at commit)
+        _ = self.directories.insert(root_id, DirectoryState::new_empty());
+        // Mark as modified so flush writes it
+        if let Some(dir_state) = self.directories.get_mut(&root_id) {
+            dir_state.modified = true;
+        }
 
-        let root_entry = OplogEntry::new_inline(
-            root_id,
-            now,
-            1, // First version of root directory node
-            content,
-            self.txn_seq, // Bootstrap operations don't have a sequence from Steward
-        );
-
-        self.records.push(root_entry);
+        debug!("Initialized root directory {} in memory, marked as modified", root_id);
 
         Ok(())
     }
 
-    /// Check if a directory has pending operations in this transaction
+    /// Check if a directory has pending operations (modifications) in this transaction
     fn has_pending_operations(&self, id: FileID) -> bool {
-        // Check if there are any pending OpLog records for this directory
-        // This includes directory content updates from insert() operations
-        self.records.iter().any(|r| r.node_id == id.node_id() && r.part_id == id.part_id() && r.file_type.is_directory())
+        // Check if directory is loaded and marked as modified
+        self.directories
+            .get(&id)
+            .map(|dir_state| dir_state.modified)
+            .unwrap_or(false)
+    }
+
+    /// Ensure directory is loaded into in-memory state
+    /// If not present, loads from OpLog and caches with modified: false
+    async fn ensure_directory_loaded(&mut self, id: FileID) -> Result<(), TLogFSError> {
+        // Check if already loaded
+        if self.directories.contains_key(&id) {
+            return Ok(());
+        }
+
+        // Load from OpLog
+        let entries = self.query_directory_entries(id).await?;
+        debug!("Loaded {} entries for directory {} from OpLog", entries.len(), id);
+
+        // Cache in memory with modified: false
+        _ = self.directories.insert(id, DirectoryState::new_unmodified(entries));
+        Ok(())
+    }
+
+    /// Get a directory entry from in-memory state
+    /// Directory must be loaded first via ensure_directory_loaded
+    fn get_directory_entry(&self, dir_id: FileID, entry_name: &str) -> Option<tinyfs::DirectoryEntry> {
+        self.directories
+            .get(&dir_id)
+            .and_then(|dir_state| dir_state.mapping.get(entry_name).cloned())
+    }
+
+    /// Insert a directory entry into in-memory state
+    /// Directory must be loaded first via ensure_directory_loaded
+    /// Checks for duplicates and marks directory as modified
+    fn insert_directory_entry(&mut self, dir_id: FileID, entry: tinyfs::DirectoryEntry) -> Result<(), TLogFSError> {
+        let dir_state = self.directories.get_mut(&dir_id)
+            .ok_or_else(|| TLogFSError::Internal(format!("Directory {} not loaded", dir_id)))?;
+
+        // Check for duplicate entry (O(1) lookup)
+        if dir_state.mapping.contains_key(&entry.name) {
+            return Err(TLogFSError::Internal(format!(
+                "Directory entry '{}' already exists in directory {}",
+                entry.name, dir_id
+            )));
+        }
+
+        // Insert new entry and mark as modified
+        _ = dir_state.mapping.insert(entry.name.clone(), entry);
+        dir_state.modified = true;
+
+        debug!("Inserted entry into directory {}, marked as modified", dir_id);
+        Ok(())
     }
 
     /// Begin a new transaction
     async fn begin_impl(&mut self) -> Result<(), TLogFSError> {
         // Clear any stale state (should be clean already, but just in case)
         self.records.clear();
-        self.operations.clear();
+        self.directories.clear();
 
         debug!("Started transaction");
         Ok(())
@@ -1566,6 +1676,13 @@ impl InnerState {
         let count = records.len();
         info!("Committing {count} operations in {:?}", self.path);
 
+        // Debug: log what we're about to commit
+        for (i, record) in records.iter().enumerate() {
+            debug!("  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}", 
+                i, record.part_id, record.node_id, record.file_type, record.version,
+                record.content.as_ref().map(|c| c.len()).unwrap_or(0));
+        }
+
         // Convert records to RecordBatch
         let batches = vec![serde_arrow::to_record_batch(
             &OplogEntry::for_arrow(),
@@ -1582,7 +1699,7 @@ impl InnerState {
         _ = write_op.await?;
 
         self.records.clear();
-        self.operations.clear();
+        self.directories.clear();
         self.created_directories.clear();
 
         Ok(Some(()))
@@ -1857,31 +1974,13 @@ impl InnerState {
         trace.param("id", id);
         trace.param("entry_name", entry_name);
 
-        // Check pending directory operations first
-        if let Some(operations) = self.operations.get(&id)
-            && let Some(operation) = operations.get(entry_name)
-        {
-            match operation {
-                DirectoryOperation::InsertWithType(node_id, node_type) => {
-                    return Ok(Some(DirectoryEntry::new(
-                        entry_name.to_string(),
-                        *node_id,
-                        *node_type,
-                        0, // Version will be set when flushed
-                    )));
-                }
-                DirectoryOperation::DeleteWithType(_node_type) => {
-                    return Ok(None);
-                }
-                DirectoryOperation::RenameWithType(new_name, node_id, node_type) => {
-                    return Ok(Some(DirectoryEntry::new(
-                        new_name.clone(),
-                        *node_id,
-                        *node_type,
-                        0, // Version will be set when flushed
-                    )));
-                }
+        // Check in-memory directory state first (loaded or modified)
+        if let Some(dir_state) = self.directories.get(&id) {
+            if let Some(entry) = dir_state.mapping.get(entry_name) {
+                return Ok(Some(entry.clone()));
             }
+            // Entry not in loaded state, means it doesn't exist
+            return Ok(None);
         }
 
         // 🚀 OPTIMIZATION: Read latest directory snapshot and do O(1) HashMap lookup
@@ -1917,146 +2016,82 @@ impl InnerState {
         }
     }
 
-    /// Process all accumulated directory operations in a batch (FULL SNAPSHOT VERSION)
+    /// Flush all pending directory operations to the oplog
     ///
-    /// This rewritten function implements full directory snapshots instead of incremental changes.
-    /// Key changes:
-    /// 1. Load current directory state (if exists)
-    /// 2. Apply pending operations to build new complete state
-    /// 3. Write full snapshot using new_directory_full_snapshot constructor
+    /// New architecture: In-memory directory state with commit-time flush.
+    /// Only writes directories that have been modified during this transaction.
     async fn flush_directory_operations(&mut self) -> Result<(), TLogFSError> {
+        let modified_count = self.directories.values().filter(|ds| ds.modified).count();
         debug!(
-            "flush_directory_operations: starting FULL SNAPSHOT mode, txn_seq={}, operations.len()={}, created_directories.len()={}",
+            "flush_directory_operations: starting, txn_seq={}, directories.len()={}, modified={}",
             self.txn_seq,
-            self.operations.len(),
-            self.created_directories.len()
+            self.directories.len(),
+            modified_count
         );
 
-        let pending_dirs = std::mem::take(&mut self.operations);
+        let pending_dirs = std::mem::take(&mut self.directories);
 
-        // Track which directories have operations (will be written with content)
-        let populated_directories: HashSet<_> = pending_dirs.keys().copied().collect();
-
-        if !pending_dirs.is_empty() {
-            debug!(
-                "flush_directory_operations: processing {} directories with operations",
-                pending_dirs.len()
-            );
-
-            for (id, operations) in pending_dirs {
-                debug!(
-                    "flush_directory_operations: writing directory {} with {} operations",
-                    id,
-                    operations.len()
-                );
-
-                // 🚀 STEP 1: Load current directory state (or empty map for new directories)
-                let mut current_state: HashMap<String, DirectoryEntry> =
-                    match self.query_directory_entries(id).await {
-                        Ok(entries) => {
-                            debug!(
-                                "Loaded {} existing entries for directory {}",
-                                entries.len(),
-                                id
-                            );
-                            entries.into_iter().map(|e| (e.name.clone(), e)).collect()
-                        }
-                        Err(_) => {
-                            debug!(
-                                "No existing entries for directory {} (new directory)",
-                                id
-                            );
-                            HashMap::new()
-                        }
-                    };
-
-                // 🚀 STEP 2: Apply pending operations to build new complete state
-                let next_version = self.get_next_version_for_node(id).await?;
-
-                for (entry_name, operation) in operations {
-                    match operation {
-                        DirectoryOperation::InsertWithType(child_node_id, entry_type) => {
-                            _ = current_state.insert(
-                                entry_name.clone(),
-                                DirectoryEntry::new(
-                                    entry_name,
-                                    child_node_id,
-                                    entry_type,
-                                    next_version, // Mark with current version
-                                ),
-                            );
-                        }
-                        DirectoryOperation::DeleteWithType(_) => {
-                            _ = current_state.remove(&entry_name);
-                        }
-                        DirectoryOperation::RenameWithType(new_name, child_node_id, entry_type) => {
-                            _ = current_state.remove(&entry_name);
-                            _ = current_state.insert(
-                                new_name.clone(),
-                                DirectoryEntry::new(
-                                    new_name,
-                                    child_node_id,
-                                    entry_type,
-                                    next_version, // Mark with current version
-                                ),
-                            );
-                        }
-                    }
-                }
-
-                // 🚀 STEP 3: Serialize complete state as full snapshot
-                let all_entries: Vec<DirectoryEntry> = current_state.into_values().collect();
-                debug!(
-                    "Serializing {} total entries for directory {}",
-                    all_entries.len(),
-                    id
-                );
-                let content_bytes = self.serialize_directory_entries(&all_entries)?;
-
-                // 🚀 STEP 4: Create full snapshot OplogEntry
-                let now = Utc::now().timestamp_micros();
-                let record = OplogEntry::new_directory_full_snapshot(
-                    id,
-                    now,
-                    next_version,
-                    content_bytes,
-                    self.txn_seq,
-                );
-
-                self.records.push(record);
+        // Iterate all directories and write only those marked as modified
+        for (dir_id, dir_state) in pending_dirs {
+            if !dir_state.modified {
+                continue; // Skip unmodified directories
             }
-        } else {
-            debug!("flush_directory_operations: no pending_dirs, checking for empty directories");
-        }
 
-        // Handle truly empty directories: directories created but never populated
-        let empty_directories: Vec<FileID> = self
-            .created_directories
-            .iter()
-            .filter(|id| !populated_directories.contains(id))
-            .copied()
-            .collect();
-
-        for id in empty_directories {
             debug!(
-                "flush_directory_operations: creating empty directory snapshot for {}",
-                id
+                "flush_directory_operations: writing modified directory {} with {} entries",
+                dir_id,
+                dir_state.mapping.len()
             );
 
-            // Get proper version number for this directory
-            let version = self.get_next_version_for_node(id).await?;
+            // Get next version for this directory
+            let next_version = self.get_next_version_for_node(dir_id).await?;
 
+            // Convert HashMap to Vec for serialization, updating version_last_modified
+            let all_entries: Vec<DirectoryEntry> = dir_state
+                .mapping
+                .values()
+                .map(|entry| {
+                    // Update version_last_modified to current version
+                    DirectoryEntry::new(
+                        entry.name.clone(),
+                        entry.child_node_id,
+                        entry.entry_type,
+                        next_version,
+                    )
+                })
+                .collect();
+
+            debug!(
+                "Serializing {} entries for directory {} at version {}",
+                all_entries.len(),
+                dir_id,
+                next_version
+            );
+
+            // Serialize full snapshot
+            let content_bytes = self.serialize_directory_entries(&all_entries)?;
+
+            // Create full snapshot OplogEntry
             let now = Utc::now().timestamp_micros();
-            // Empty directories still use full snapshot format
             let record = OplogEntry::new_directory_full_snapshot(
-                id,
+                dir_id,
                 now,
-                version,
-                Vec::new(), // Empty content for empty directory
+                next_version,
+                content_bytes,
                 self.txn_seq,
             );
+
+            debug!("📝 FLUSH CREATING RECORD: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, format={:?}", 
+                   record.part_id, record.node_id, record.file_type, record.version, 
+                   record.content.as_ref().map(|c| c.len()).unwrap_or(0), record.format);
+
             self.records.push(record);
         }
+
+        debug!(
+            "flush_directory_operations: complete, wrote {} modified directories",
+            modified_count
+        );
 
         Ok(())
     }
@@ -2266,8 +2301,8 @@ impl InnerState {
         // Step 2: Query Delta Lake for the single latest committed directory record
         // Note: file_type values in database are serialized as 'dir:physical' and 'dir:dynamic'
         let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' AND file_type IN (') ORDER BY version DESC LIMIT 1",
-            id.part_id(), id.part_id()
+            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' AND file_type IN ('dir:physical', 'dir:dynamic') ORDER BY version DESC LIMIT 1",
+            id.part_id(), id.node_id()
         );
 
         let committed_record = match self.session_context.sql(&sql).await {
@@ -2511,6 +2546,15 @@ impl InnerState {
     async fn load_node(&self, id: FileID, state: State) -> TinyFSResult<Node> {
         debug!("load_node {id:?}");
 
+        // 🔍 CRITICAL FIX: Check if this is a directory in self.directories first
+        // During a transaction, directories created by store_node() exist in self.directories
+        // but don't have OpLog records in self.records until flush_directory_operations() is called at commit
+        if self.directories.contains_key(&id) {
+            debug!("load_node: found directory {} in self.directories (not yet flushed to OpLog)", id);
+            // Create directory node directly - it exists in memory
+            return node_factory::create_directory_node(id, state);
+        }
+
         // 🚀 OPTIMIZATION: Query only the latest record (O(1) instead of O(N))
         match self.query_latest_record(id).await {
             Ok(record) => {
@@ -2613,29 +2657,26 @@ impl InnerState {
                 vec![]
             }
             NodeType::Directory(_) => {
-                // Check if this directory has pending operations in this transaction
-                // If so, skip creating an empty entry - flush_directory_operations will create v0 with content
-                // This matches the file pattern where empty content is skipped
-                let has_pending = self.has_pending_operations(id);
-                debug!(
-                    "TRANSACTION: store_node() - directory {} has_pending_operations={}",
-                    id, has_pending
-                );
-                if has_pending {
+                // Check if directory already loaded in memory
+                // If present, skip - will be written by flush_directory_operations if modified
+                if self.directories.contains_key(&id) {
                     debug!(
-                        "TRANSACTION: store_node() - directory {} has pending operations, skipping empty entry",
+                        "TRANSACTION: store_node() - directory {} already tracked in memory, skipping",
                         id
                     );
                     return Ok(());
                 }
 
-                // No pending operations - this is a truly empty leaf directory
-                // Create 0-byte entry (not Arrow IPC serialization)
+                // Directory not yet tracked - initialize empty directory in memory and mark as modified
+                // This ensures flush_directory_operations will write the directory to OpLog
                 debug!(
-                    "TRANSACTION: store_node() - directory {} is empty leaf, creating 0-byte entry",
+                    "TRANSACTION: store_node() - initializing empty directory {} in memory, marked as modified",
                     id
                 );
-                vec![]
+                let mut dir_state = DirectoryState::new_empty();
+                dir_state.modified = true; // Mark as modified so it gets written at commit
+                _ = self.directories.insert(id, dir_state);
+                return Ok(());
             }
             NodeType::Symlink(symlink_handle) => {
                 let target = symlink_handle
