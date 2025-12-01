@@ -182,6 +182,16 @@ impl FileID {
 	}
     }
 
+    /// Create FileID for a physical directory using an existing NodeID
+    /// Physical directories are self-partitioned (part_id == node_id)
+    #[must_use]
+    pub fn from_physical_dir_node_id(node_id: NodeID) -> Self {
+	Self {
+	    part_id: PartID(node_id),
+	    node_id,
+	}
+    }
+
     #[must_use]
     pub fn new_child_id(&self, et: EntryType) -> Self {
 	if et == EntryType::DirectoryPhysical {

@@ -817,6 +817,24 @@ impl State {
         _ = self.inner.lock().await.created_directories.insert(id);
     }
 
+    /// Query oplog records for a node (used by directory operations)
+    pub async fn query_records(&self, id: FileID) -> Result<Vec<OplogEntry>, TLogFSError> {
+        self.inner.lock().await.query_records(id).await
+    }
+
+    /// Update directory content (used by OpLogDirectory::insert)
+    pub async fn update_directory_content(
+        &self,
+        id: FileID,
+        content: Vec<u8>,
+    ) -> Result<(), TLogFSError> {
+        self.inner
+            .lock()
+            .await
+            .update_directory_content(id, content)
+            .await
+    }
+
     /// Get the shared DataFusion SessionContext
     ///
     /// This method ensures a single SessionContext across all operations using this State,
@@ -2704,6 +2722,31 @@ impl InnerState {
                 "Symlink {id} not found"
             ))))
         }
+    }
+
+    /// Update directory content with new encoded entries
+    /// Called by OpLogDirectory::insert to persist directory changes
+    async fn update_directory_content(
+        &mut self,
+        id: FileID,
+        content: Vec<u8>,
+    ) -> Result<(), TLogFSError> {
+        let now = Utc::now().timestamp_micros();
+        
+        let next_version = self
+            .get_next_version_for_node(id)
+            .await?;
+        
+        let oplog_entry = OplogEntry::new_inline(
+            id,
+            now,
+            next_version,
+            content,
+            self.txn_seq,
+        );
+        
+        self.records.push(oplog_entry);
+        Ok(())
     }
 
     async fn create_file_node(&mut self, id: FileID, state: State) -> TinyFSResult<Node> {
