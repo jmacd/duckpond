@@ -18,7 +18,6 @@ use deltalake::{DeltaOps, DeltaTable};
 use log::{debug, info, warn};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -71,10 +70,7 @@ pub struct InnerState {
     path: PathBuf,
     table: DeltaTable,        // The Delta table for this transaction
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
-    /// In-memory directory state management for transaction
-    /// Maps FileID (directory) -> DirectoryState (loaded/modified state)
     directories: HashMap<FileID, DirectoryState>,
-    created_directories: HashSet<FileID>, // Track mkdir operations separately
     session_context: Arc<SessionContext>,
     txn_seq: i64,
 }
@@ -756,8 +752,6 @@ impl PersistenceLayer for State {
     async fn create_dynamic_node(
         &self,
         id: FileID,
-        // name: String, // SUS @@@
-        // entry_type: EntryType,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> TinyFSResult<Node> {
@@ -821,11 +815,6 @@ impl State {
     /// Load symlink target path
     pub async fn load_symlink_target(&self, id: FileID) -> TinyFSResult<PathBuf> {
         self.inner.lock().await.load_symlink_target(id).await
-    }
-
-    /// Track a directory as created in this transaction (for deferred storage decision)
-    pub async fn track_created_directory(&self, id: FileID) {
-        _ = self.inner.lock().await.created_directories.insert(id);
     }
 
     /// Query oplog records for a node (used by directory operations)
@@ -1130,7 +1119,6 @@ impl InnerState {
             table,
             records: Vec::new(),
             directories: HashMap::new(),
-            created_directories: HashSet::new(),
             session_context: ctx,
             txn_seq,
         })
@@ -1166,15 +1154,6 @@ impl InnerState {
         debug!("Initialized root directory {} in memory, marked as modified", root_id);
 
         Ok(())
-    }
-
-    /// Check if a directory has pending operations (modifications) in this transaction
-    fn has_pending_operations(&self, id: FileID) -> bool {
-        // Check if directory is loaded and marked as modified
-        self.directories
-            .get(&id)
-            .map(|dir_state| dir_state.modified)
-            .unwrap_or(false)
     }
 
     /// Ensure directory is loaded into in-memory state
@@ -1456,22 +1435,6 @@ impl InnerState {
         }
     }
 
-    /// Find existing large file entry in pending records (to avoid duplicates during store_node)
-    async fn find_existing_large_file_entry(
-        &self,
-        id: FileID,
-    ) -> Option<OplogEntry> {
-        self.records
-            .iter()
-            .find(|entry| {
-                entry.node_id == id.node_id() &&
-		entry.part_id == id.part_id() &&
-		entry.content.is_none() && // Large files have no inline content @@@
-		entry.sha256.is_some() // Large files have SHA256 @@@
-            })
-            .cloned()
-    }
-
     /// Store FileSeries with temporal metadata extraction from Parquet data
     /// This method extracts min/max timestamps from the specified time column
     pub async fn store_file_series_from_parquet(
@@ -1707,7 +1670,6 @@ impl InnerState {
 
         self.records.clear();
         self.directories.clear();
-        self.created_directories.clear();
 
         Ok(Some(()))
     }
@@ -1965,64 +1927,6 @@ impl InnerState {
         }
     }
 
-    /// Query for a single directory entry by name
-    async fn query_single_directory_entry(
-        &self,
-        id: FileID,
-        entry_name: &str,
-    ) -> Result<Option<DirectoryEntry>, TLogFSError> {
-        // Performance tracing - enable with perf analysis
-        let mut trace = utilities::perf_trace::PerfTrace::start("query_single_directory_entry");
-        let caller = utilities::perf_trace::extract_caller(
-            "tlogfs::persistence::InnerState::",
-            "query_single_directory_entry",
-        );
-        trace.param("caller", &caller);
-        trace.param("id", id);
-        trace.param("entry_name", entry_name);
-
-        // Check in-memory directory state first (loaded or modified)
-        if let Some(dir_state) = self.directories.get(&id) {
-            if let Some(entry) = dir_state.mapping.get(entry_name) {
-                return Ok(Some(entry.clone()));
-            }
-            // Entry not in loaded state, means it doesn't exist
-            return Ok(None);
-        }
-
-        // 🚀 OPTIMIZATION: Read latest directory snapshot and do O(1) HashMap lookup
-        let query_start = std::time::Instant::now();
-        let latest_record = self.query_latest_directory_record(id).await?;
-        trace.metric("query_ms", query_start.elapsed().as_millis() as u64);
-
-        if let Some(record) = latest_record {
-            if let Some(content) = &record.content {
-                let entries_map = self.deserialize_directory_entries(content).map_err(|e| {
-                    TLogFSError::ArrowMessage(format!(
-                        "Failed to deserialize directory content for part_id={}: {}",
-                        id, e
-                    ))
-                })?;
-                trace.metric("entry_count", entries_map.len() as u64);
-
-                // O(1) HashMap lookup by name
-                let result = entries_map.get(entry_name).cloned();
-                trace.metric("found", if result.is_some() { 1 } else { 0 });
-                Ok(result)
-            } else {
-                // Empty directory
-                trace.metric("entry_count", 0);
-                trace.metric("found", 0);
-                Ok(None)
-            }
-        } else {
-            // Directory not found
-            trace.metric("entry_count", 0);
-            trace.metric("found", 0);
-            Ok(None)
-        }
-    }
-
     /// Flush all pending directory operations to the oplog
     ///
     /// New architecture: In-memory directory state with commit-time flush.
@@ -2124,55 +2028,6 @@ impl InnerState {
             message: "create_dynamic_node not yet implemented - use FactoryRegistry directly for now".to_string(),
         })
     }
-
-    // /// Create a dynamic file node with factory configuration
-    // pub async fn create_dynamic_file(
-    //     &mut self,
-    //     part_id: NodeID,
-    //     name: String,
-    //     file_type: EntryType,
-    //     factory_type: &str,
-    //     config_content: Vec<u8>,
-    // ) -> Result<NodeID, TLogFSError> {
-    //     debug!(
-    //         "🔧 create_dynamic_file called: part_id={}, name='{}', file_type={:?}, factory_type='{}', txn_seq={}",
-    //         part_id, name, file_type, factory_type, self.txn_seq
-    //     );
-
-    //     let node_id = NodeID::generate();
-    //     let now = Utc::now().timestamp_micros();
-
-    //     // Create dynamic file OplogEntry
-    //     let entry = OplogEntry::new_dynamic_file(
-    //         part_id,
-    //         node_id,
-    //         file_type,
-    //         now,
-    //         1, // Made UP @@@
-    //         factory_type,
-    //         config_content,
-    //         self.txn_seq,
-    //     );
-
-    //     // Add to pending records
-    //     self.records.push(entry);
-    //     debug!(
-    //         "🔧 create_dynamic_file: pushed OplogEntry to records, now calling update_directory_entry"
-    //     );
-
-    //     // Add directory operation for parent
-    //     let directory_op = DirectoryOperation::InsertWithType(node_id, file_type);
-    //     self.update_directory_entry(part_id, &name, directory_op)
-    //         .await
-    //         .map_err(TLogFSError::TinyFS)?;
-
-    //     debug!(
-    //         "🔧 create_dynamic_file: update_directory_entry completed successfully, returning node_id={}",
-    //         node_id
-    //     );
-
-    //     Ok(node_id)
-    // }
 
     /// Get dynamic node configuration if the node is dynamic
     /// Uses the same query pattern as the rest of the persistence layer
@@ -2474,45 +2329,8 @@ impl InnerState {
         // Create OplogEntry based on node type
         let content = match &node.node_type {
             NodeType::File(_file_handle) => {
-                // NOT SURE WHAT IS HAPPENING HERE @@@
-                //
-
-                // let file_content = tinyfs::buffer_helpers::read_file_to_vec(file_handle)
-                //     .await
-                //     .map_err(|e| tinyfs::Error::Other(format!("File content error: {}", e)))?;
-                // let content_len = file_content.len();
-                // debug!("TRANSACTION: store_node() - file has {content_len} bytes of content");
-
-                // // Query the file handle's metadata to get the entry type
-                // let metadata = file_handle
-                //     .metadata()
-                //     .await
-                //     .map_err(|e| tinyfs::Error::Other(format!("Metadata query error: {}", e)))?;
-
-                // // Check if this file was written as a large file by looking for existing large file storage
-                // // This handles the case where TinyFS async writer used HybridWriter but the memory content is empty
-                // if file_content.is_empty() {
-                //     // Check if there's an existing large file stored for this node
-                //     if let Some(_existing_entry) = self
-                //         .find_existing_large_file_entry(node_id, part_id)
-                //         .await
-                //     {
-                //         debug!(
-                //             "TRANSACTION: store_node() - found existing large file entry for {node_id}, skipping duplicate"
-                //         );
-                //         return Ok(()); // Don't create duplicate entry
-                //     }
-
-                //     // Also skip empty files that will be written to later - they'll be handled by the file writer
-                //     debug!(
-                //         "TRANSACTION: store_node() - empty file content for {node_hex}, skipping to avoid duplicate with file writer"
-                //     );
-                //     return Ok(());
-                // }
-
-                // (metadata.entry_type, file_content)
-
-                // @@@ NOT SURE????!!!
+                // Files are created without content - actual content is written later via write_file()
+                // This creates the initial file node record; subsequent writes update it
                 vec![]
             }
             NodeType::Directory(_) => {
@@ -2559,49 +2377,6 @@ impl InnerState {
 
         self.records.push(oplog_entry);
         Ok(())
-    }
-
-    // async fn exists_node(&self, id: NodeID) -> TinyFSResult<bool> {
-    //     // Check pending records first (uncommitted writes in this transaction)
-    //     let in_pending = self
-    //         .records
-    //         .iter()
-    //         .any(|r| r.node_id == node_id && r.part_id == part_id);
-    //     if in_pending {
-    //         return Ok(true);
-    //     }
-
-    //     // Check created directories (tracked but not yet written to records)
-    //     if self.created_directories.contains(&node_id) {
-    //         return Ok(true);
-    //     }
-
-    //     // Check committed records in database
-    //     let records = self
-    //         .query_records(part_id, node_id)
-    //         .await
-    //         .map_err(error_utils::to_tinyfs_error)?;
-
-    //     Ok(!records.is_empty())
-    // }
-
-    async fn load_directory_entries(
-        &self,
-        id: FileID,
-    ) -> TinyFSResult<HashMap<String, DirectoryEntry>> {
-        let all_entries = self
-            .query_directory_entries(id)
-            .await
-            .map_err(error_utils::to_tinyfs_error)?;
-
-        // With full snapshots, all entries in the snapshot exist (no delete operations)
-        // Return full DirectoryEntry for each entry
-        let mut current_state = HashMap::new();
-        for entry in all_entries {
-            _ = current_state.insert(entry.name.clone(), entry);
-        }
-
-        Ok(current_state)
     }
 
     async fn load_symlink_target(&self, id: FileID) -> TinyFSResult<PathBuf> {
@@ -2714,41 +2489,6 @@ impl InnerState {
             Err(tinyfs::Error::not_found(format!("Node {id}")))
         }
     }
-
-    // async fn query_directory_entry(
-    //     &self,
-    //     id: FileID,
-    //     entry_name: &str,
-    // ) -> TinyFSResult<Option<(NodeID, EntryType)>> {
-    //     match self.query_single_directory_entry(part_id, entry_name).await {
-    //         Ok(Some(entry)) => {
-    //             // With full snapshots, if entry exists in result, it's a valid entry
-    //             let child_node_id = entry.child_node_id;
-    //             Ok(Some((child_node_id, entry.entry_type)))
-    //         }
-    //         Ok(None) => Ok(None),
-    //         Err(e) => Err(error_utils::to_tinyfs_error(e)),
-    //     }
-    // }
-
-    // async fn update_directory_entry(
-    //     &mut self,
-    //     part_id: NodeID,
-    //     entry_name: &str,
-    //     operation: DirectoryOperation,
-    // ) -> TinyFSResult<()> {
-    //     // Enhanced directory coalescing - accumulate operations with node types for batch processing
-    //     let dir_ops = self.operations.entry(part_id).or_default();
-
-    //     debug!(
-    //         "update_directory_entry: part_id={}, entry_name='{}', txn_seq={}",
-    //         part_id, entry_name, self.txn_seq
-    //     );
-
-    //     // All operations must now include node type - no legacy conversion
-    //     _ = dir_ops.insert(entry_name.to_string(), operation);
-    //     Ok(())
-    // }
 
     // Versioning operations implementation
 
@@ -3013,19 +2753,6 @@ impl InnerState {
 
         Ok(())
     }
-
-    // // Dynamic node factory methods
-    // async fn create_dynamic_node(
-    //     &mut self,
-    //     id: FileID,
-    //     entry_type: EntryType,
-    //     factory_type: &str,
-    //     config_content: Vec<u8>,
-    // ) -> TinyFSResult<NodeID> {
-    //     self.create_dynamic_node(id, entry_type, factory_type, config_content)
-    //         .await
-    //         .map_err(error_utils::to_tinyfs_error)
-    // }
 }
 
 /// Serialization utilities for Arrow IPC format
@@ -3165,7 +2892,7 @@ mod node_factory {
         target: &Path,
         state: State,
     ) -> Result<Node, tinyfs::Error> {
-        let oplog_symlink = OpLogSymlink::new(id, state);
+        let oplog_symlink = OpLogSymlink::new(id, target.to_path_buf(), state);
         let symlink_handle = OpLogSymlink::create_handle(oplog_symlink);
         Ok(Node::new(id, NodeType::Symlink(symlink_handle)))
     }
@@ -3202,7 +2929,7 @@ mod node_factory {
                 Ok(Node::new(id, NodeType::Directory(dir_handle)))
             }
             EntryType::Symlink => {
-                let oplog_symlink = OpLogSymlink::new(id, state);
+                let oplog_symlink = OpLogSymlink::new_from_persistence(id, state);
                 let symlink_handle = OpLogSymlink::create_handle(oplog_symlink);
                 Ok(Node::new(id, NodeType::Symlink(symlink_handle)))
             }

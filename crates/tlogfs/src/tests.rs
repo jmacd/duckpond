@@ -1371,3 +1371,84 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         }
     }
 }
+
+#[tokio::test]
+async fn test_symlink_create_and_read() {
+    let store_path = test_dir();
+
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    debug!("=== TX1: Create symlink and read in same transaction ===");
+    
+    let tx1 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root = tx1.root().await.expect("Failed to get root");
+
+    // Create a target file with content
+    debug!("Creating target file: /target.txt");
+    use tinyfs::async_helpers::convenience;
+    _ = convenience::create_file_path(&root, "/target.txt", b"Hello, symlink!")
+        .await
+        .expect("Failed to create target file");
+
+    // Create a symlink pointing to the target
+    debug!("Creating symlink: /link -> /target.txt");
+    _ = root
+        .create_symlink_path("/link", "/target.txt")
+        .await
+        .expect("Failed to create symlink");
+
+    // Follow the symlink and read the file content in the same transaction
+    debug!("Following symlink to read file content in TX1");
+    let content = root
+        .read_file_path_to_vec("/link")
+        .await
+        .expect("Failed to read file through symlink in TX1");
+    
+    assert_eq!(
+        content,
+        b"Hello, symlink!",
+        "Should be able to read file through symlink in same transaction"
+    );
+    debug!("✅ Read file content through symlink in TX1: {:?}", String::from_utf8_lossy(&content));
+
+    // Commit TX1
+    debug!("Committing TX1");
+    _ = tx1.commit().await.expect("Failed to commit TX1");
+
+    debug!("\n=== TX2: Read symlink in new transaction ===");
+
+    let tx2 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin TX2");
+
+    let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    // Follow the symlink in TX2 and read content
+    debug!("Following symlink in TX2 to read file content");
+    let content2 = root2
+        .read_file_path_to_vec("/link")
+        .await
+        .expect("Failed to read file through symlink in TX2");
+    
+    assert_eq!(
+        content2,
+        b"Hello, symlink!",
+        "Should be able to read file through symlink in new transaction"
+    );
+    debug!("✅ Read file content through symlink in TX2: {:?}", String::from_utf8_lossy(&content2));
+
+    debug!("\n✅ TEST PASSED!");
+    debug!("- Created symlink in TX1");
+    debug!("- Read symlink target in same transaction");
+    debug!("- Followed symlink to read file content in same transaction");
+    debug!("- Committed TX1");
+    debug!("- Read symlink in new transaction (TX2)");
+    debug!("- Followed symlink in TX2 to read file content");
+}
