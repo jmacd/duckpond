@@ -1008,9 +1008,10 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
 
         debug!("Total directory entries in oplog: {}", total_dir_entries);
 
-        // THE KEY CHECK: We created 3 directories, so should have exactly 3 directory entries
-        // If we have 4+, it means one or more directories were updated unnecessarily
-        let expected_dir_entries = 4; // root (v1 empty, v2 with devices), devices (v1), sensor_123 (v1)
+        // THE KEY CHECK: store_node() skips creating empty directory versions when has_pending_operations() is true
+        // Expected: root v1 (bootstrap), root v2 (with devices), devices v1 (with sensor_123), sensor_123 v1 (with file)
+        // NOT created: devices v1 empty, sensor_123 v1 empty (skipped because insert() happened in same transaction)
+        let expected_dir_entries = 4;
 
         debug!("\n=== Verification Result ===");
         debug!("Expected directory entries: {}", expected_dir_entries);

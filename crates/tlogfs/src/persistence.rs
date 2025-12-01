@@ -1112,7 +1112,9 @@ impl InnerState {
 
     /// Check if a directory has pending operations in this transaction
     fn has_pending_operations(&self, id: FileID) -> bool {
-        self.operations.contains_key(&id)
+        // Check if there are any pending OpLog records for this directory
+        // This includes directory content updates from insert() operations
+        self.records.iter().any(|r| r.node_id == id.node_id() && r.part_id == id.part_id() && r.file_type.is_directory())
     }
 
     /// Begin a new transaction
@@ -2614,7 +2616,12 @@ impl InnerState {
                 // Check if this directory has pending operations in this transaction
                 // If so, skip creating an empty entry - flush_directory_operations will create v0 with content
                 // This matches the file pattern where empty content is skipped
-                if self.has_pending_operations(id) {
+                let has_pending = self.has_pending_operations(id);
+                debug!(
+                    "TRANSACTION: store_node() - directory {} has_pending_operations={}",
+                    id, has_pending
+                );
+                if has_pending {
                     debug!(
                         "TRANSACTION: store_node() - directory {} has pending operations, skipping empty entry",
                         id
@@ -2856,14 +2863,14 @@ impl InnerState {
         let record_count = records.len();
         debug!("list_file_versions found {record_count} records for node {id}");
 
-        // Sort records by timestamp ASC (oldest first) to assign logical file versions
-        records.sort_by_key(|record| record.timestamp);
+        // Sort records by version number (which should match timestamp order anyway)
+        records.sort_by_key(|record| record.version);
 
         let version_infos = records
             .into_iter()
-            .enumerate()
-            .map(|(index, record)| {
-                let logical_version = (index + 1) as u64; // Assign logical file versions 1, 2, 3, etc.
+            .map(|record| {
+                // Use the actual database version number, not a re-enumerated logical version
+                let version = record.version as u64;
 
                 let size = if record.is_large_file() {
                     record.size.unwrap_or(0)
@@ -2889,7 +2896,7 @@ impl InnerState {
                 };
 
                 FileVersionInfo {
-                    version: logical_version,
+                    version,
                     timestamp: record.timestamp,
                     size: size as u64, // Cast back to u64 for tinyfs interface
                     sha256: record.sha256.clone(),
