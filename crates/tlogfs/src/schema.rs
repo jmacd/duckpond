@@ -374,6 +374,13 @@ impl OplogEntry {
         content: Vec<u8>,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field - cannot use new_small_file
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+        
         let size = content.len() as u64;
         Self {
             part_id: id.part_id(),
@@ -407,6 +414,13 @@ impl OplogEntry {
         size: i64,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+        
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
@@ -437,6 +451,13 @@ impl OplogEntry {
         content: Vec<u8>,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+        
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
@@ -484,6 +505,13 @@ impl OplogEntry {
         extended_attributes: ExtendedAttributes,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+        
         let size = content.len() as u64;
         Self {
             part_id: id.part_id(),
@@ -520,7 +548,14 @@ impl OplogEntry {
         extended_attributes: ExtendedAttributes,
         txn_seq: i64,
     ) -> Self {
-	assert_eq!(EntryType::FileSeriesPhysical, id.entry_type());
+        // INVARIANT: Dynamic EntryTypes require factory field
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+        assert_eq!(EntryType::FileSeriesPhysical, id.entry_type());
+        
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),

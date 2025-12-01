@@ -3712,7 +3712,7 @@ query: ""
         }
 
         {
-            // Create Dynamic file
+            // Create second Physical file
             let tx_guard = persistence.begin_test().await.unwrap();
             let root = tx_guard.root().await.unwrap();
 
@@ -3749,7 +3749,7 @@ query: ""
             }
 
             let mut writer = root
-                .async_writer_path_with_type("/test/dynamic.series", EntryType::FileSeriesDynamic)
+                .async_writer_path_with_type("/test/physical2.series", EntryType::FileSeriesPhysical)
                 .await
                 .unwrap();
             use tokio::io::AsyncWriteExt;
@@ -3760,7 +3760,7 @@ query: ""
             tx_guard.commit_test().await.unwrap();
         }
 
-        // Test: SqlDerivedFile should find BOTH Physical and Dynamic files
+        // Test: SqlDerivedFile should find multiple Physical files with pattern matching
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
@@ -3785,11 +3785,11 @@ query: ""
 
         assert!(!result_batches.is_empty(), "Should have at least one batch");
 
-        // Should have data from both files: 3 rows from physical + 3 rows from dynamic = 6 rows total
+        // Should have data from both files: 3 rows from physical + 3 rows from physical2 = 6 rows total
         let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
             total_rows, 6,
-            "Should find both Physical and Dynamic files - got {} rows, expected 6",
+            "Should find multiple Physical files with pattern matching - got {} rows, expected 6",
             total_rows
         );
 

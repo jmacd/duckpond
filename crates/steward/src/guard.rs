@@ -12,6 +12,15 @@ use tinyfs::FS;
 use tlogfs::factory::ExecutionContext;
 use tlogfs::transaction_guard::TransactionGuard;
 
+/// Configuration for a post-commit factory to be executed
+struct PostCommitFactoryConfig {
+    factory_name: String,
+    config_path: String,
+    config_bytes: Vec<u8>,
+    parent_node_id: tinyfs::FileID,
+    factory_mode: String,
+}
+
 /// Steward transaction guard wraps TLogFS transaction with control table lifecycle tracking
 pub struct StewardTransactionGuard<'a> {
     /// The underlying tlogfs transaction guard
@@ -339,14 +348,14 @@ impl<'a> StewardTransactionGuard<'a> {
         // Filter factories based on their execution mode
         let mut factories_to_run = Vec::new();
 
-        for (factory_name, config_path, config_bytes, parent_node_id) in factory_configs {
+        for mut config in factory_configs {
             // Check factory mode setting - MUST be set for factories in /etc/system.d/
-            let factory_mode = match self.control_table.get_factory_mode(&factory_name) {
+            let factory_mode = match self.control_table.get_factory_mode(&config.factory_name) {
                 Some(mode) => mode,
                 None => {
                     error!(
                         "Factory '{}' exists in /etc/system.d/ but has no mode configured",
-                        factory_name
+                        config.factory_name
                     );
                     error!(
                         "Factories in /etc/system.d/ are post-commit factories and MUST have mode set to 'push' or 'pull'"
@@ -358,22 +367,17 @@ impl<'a> StewardTransactionGuard<'a> {
             if factory_mode == "pull" {
                 info!(
                     "Skipping factory '{}' (mode: pull, only runs on manual sync)",
-                    factory_name
+                    config.factory_name
                 );
                 continue;
             }
 
             debug!(
                 "Will execute factory '{}' (mode: {})",
-                factory_name, factory_mode
+                config.factory_name, factory_mode
             );
-            factories_to_run.push((
-                factory_name,
-                config_path,
-                config_bytes,
-                parent_node_id,
-                factory_mode,
-            ));
+            config.factory_mode = factory_mode;
+            factories_to_run.push(config);
         }
 
         if factories_to_run.is_empty() {
@@ -392,23 +396,21 @@ impl<'a> StewardTransactionGuard<'a> {
         );
 
         // Record pending status for all factories to run
-        for (execution_seq, (factory_name, config_path, _, _, _)) in
-            factories_to_run.iter().enumerate()
-        {
+        for (execution_seq, config) in factories_to_run.iter().enumerate() {
             let execution_seq = (execution_seq + 1) as i64; // 1-indexed, i64 to match record_post_commit_* signatures
             if let Err(e) = self
                 .control_table
                 .record_post_commit_pending(
                     &self.txn_meta,
                     execution_seq,
-                    factory_name.clone(),
-                    config_path.clone(),
+                    config.factory_name.clone(),
+                    config.config_path.clone(),
                 )
                 .await
             {
                 log::error!(
                     "Failed to record post-commit pending for {}: {}",
-                    config_path,
+                    config.config_path,
                     e
                 );
                 // Continue despite tracking failure
@@ -418,15 +420,15 @@ impl<'a> StewardTransactionGuard<'a> {
         let total_factories = factories_to_run.len();
 
         // Execute each factory independently
-        for (
-            execution_seq,
-            (factory_name, config_path, config_bytes, parent_node_id, factory_mode),
-        ) in factories_to_run.into_iter().enumerate()
-        {
+        for (execution_seq, config) in factories_to_run.into_iter().enumerate() {
             let execution_seq = (execution_seq + 1) as i64; // 1-indexed, i64 to match record_post_commit_* signatures
             debug!(
                 "Executing post-commit factory {}/{}: {} from {} (mode: {})",
-                execution_seq, total_factories, factory_name, config_path, factory_mode
+                execution_seq,
+                total_factories,
+                config.factory_name,
+                config.config_path,
+                config.factory_mode
             );
 
             // Record started status
@@ -437,7 +439,7 @@ impl<'a> StewardTransactionGuard<'a> {
             {
                 log::error!(
                     "Failed to record post-commit started for {}: {}",
-                    config_path,
+                    config.config_path,
                     e
                 );
                 // Continue despite tracking failure
@@ -448,11 +450,11 @@ impl<'a> StewardTransactionGuard<'a> {
             // Execute the factory
             match self
                 .execute_post_commit_factory(
-                    &factory_name,
-                    &config_path,
-                    &config_bytes,
-                    parent_node_id,
-                    &factory_mode,
+                    &config.factory_name,
+                    &config.config_path,
+                    &config.config_bytes,
+                    config.parent_node_id,
+                    &config.factory_mode,
                 )
                 .await
             {
@@ -460,7 +462,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     let duration_ms = start_time.elapsed().as_millis() as i64;
                     info!(
                         "Post-commit factory succeeded: {} ({}ms)",
-                        config_path, duration_ms
+                        config.config_path, duration_ms
                     );
 
                     // Record completion
@@ -471,7 +473,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     {
                         log::error!(
                             "Failed to record post-commit completion for {}: {}",
-                            config_path,
+                            config.config_path,
                             e
                         );
                     }
@@ -481,7 +483,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     let error_message = format!("{}", e);
                     log::error!(
                         "Post-commit factory failed: {} - {}",
-                        config_path,
+                        config.config_path,
                         error_message
                     );
 
@@ -498,7 +500,7 @@ impl<'a> StewardTransactionGuard<'a> {
                     {
                         log::error!(
                             "Failed to record post-commit failure for {}: {}",
-                            config_path,
+                            config.config_path,
                             e
                         );
                     }
@@ -512,10 +514,10 @@ impl<'a> StewardTransactionGuard<'a> {
     }
 
     /// Discover post-commit factory configurations from /etc/system.d/*
-    /// Returns (factory_name, config_path, config_bytes) sorted by config_path
+    /// Returns factory configs sorted by config_path
     async fn discover_post_commit_factories(
         &self,
-    ) -> Result<Vec<(String, String, Vec<u8>, tinyfs::NodeID)>, StewardError> {
+    ) -> Result<Vec<PostCommitFactoryConfig>, StewardError> {
         debug!("Discovering post-commit factories from /etc/system.d/*");
 
         // Reload OpLogPersistence for discovery
@@ -619,20 +621,16 @@ impl<'a> StewardTransactionGuard<'a> {
                 }
             };
 
-            let config_node = match lookup_result {
-                tinyfs::Lookup::Found(node) => node,
-                _ => {
-                    log::warn!("Config node not found: {}", config_path_str);
-                    continue;
-                }
-            };
+            if !matches!(lookup_result, tinyfs::Lookup::Found(_)) {
+                log::warn!("Config node not found: {}", config_path_str);
+                continue;
+            }
 
-            let node_id = config_node.borrow().await.id();
-            let parent_id = parent_wd.node_path().id().await;
+            let parent_id = parent_wd.node_path().id();
 
             let factory_name = match discovery_tx
                 .state()?
-                .get_factory_for_node(node_id, parent_id)
+                .get_factory_for_node(parent_id)
                 .await
             {
                 Ok(Some(name)) => name,
@@ -646,7 +644,13 @@ impl<'a> StewardTransactionGuard<'a> {
                 }
             };
 
-            factory_configs.push((factory_name, config_path_str, config_bytes, parent_id));
+            factory_configs.push(PostCommitFactoryConfig {
+                factory_name,
+                config_path: config_path_str,
+                config_bytes,
+                parent_node_id: parent_id,
+                factory_mode: String::new(), // Will be set in run_post_commit_factories
+            });
         }
 
         // Commit the post-commit discovery transaction
@@ -657,7 +661,7 @@ impl<'a> StewardTransactionGuard<'a> {
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         // Sort by config_path for deterministic execution order
-        factory_configs.sort_by(|a, b| a.1.cmp(&b.1));
+        factory_configs.sort_by(|a, b| a.config_path.cmp(&b.config_path));
 
         Ok(factory_configs)
     }
@@ -668,7 +672,7 @@ impl<'a> StewardTransactionGuard<'a> {
         factory_name: &str,
         config_path: &str,
         config_bytes: &[u8],
-        parent_node_id: tinyfs::NodeID,
+        parent_node_id: tinyfs::FileID,
         factory_mode: &str,
     ) -> Result<(), StewardError> {
         debug!(
