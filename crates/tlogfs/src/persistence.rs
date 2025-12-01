@@ -799,12 +799,25 @@ impl PersistenceLayer for State {
         parent_id: FileID,
         requests: Vec<DirectoryEntry>,
     ) -> TinyFSResult<HashMap<String, Node>> {
+        // Build a map from node_id -> name for converting the result
+        let node_to_name: HashMap<NodeID, String> = requests
+            .iter()
+            .map(|entry| (entry.child_node_id, entry.name.clone()))
+            .collect();
+        
         let map = self.inner
             .lock()
             .await
             .load_nodes_batched(parent_id, requests, self.clone())
             .await?;
-        Ok(map.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        
+        // Convert HashMap<NodeID, Node> to HashMap<String (name), Node>
+        Ok(map
+            .into_iter()
+            .filter_map(|(node_id, node)| {
+                node_to_name.get(&node_id).map(|name| (name.clone(), node))
+            })
+            .collect())
     }
 
     async fn metadata(&self, id: FileID) -> TinyFSResult<NodeMetadata> {
@@ -884,6 +897,19 @@ impl State {
             .lock()
             .await
             .get_directory_entry(dir_id, entry_name))
+    }
+
+    /// Get all directory entries for a directory
+    /// Directory must be loaded first via ensure_directory_loaded
+    pub async fn get_all_directory_entries(
+        &self,
+        dir_id: FileID,
+    ) -> Result<Vec<tinyfs::DirectoryEntry>, TLogFSError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .get_all_directory_entries(dir_id))
     }
 
     /// Insert a directory entry into in-memory state
@@ -1202,6 +1228,15 @@ impl InnerState {
         self.directories
             .get(&dir_id)
             .and_then(|dir_state| dir_state.mapping.get(entry_name).cloned())
+    }
+
+    /// Get all directory entries from in-memory state
+    /// Directory must be loaded first via ensure_directory_loaded
+    fn get_all_directory_entries(&self, dir_id: FileID) -> Vec<tinyfs::DirectoryEntry> {
+        self.directories
+            .get(&dir_id)
+            .map(|dir_state| dir_state.mapping.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Insert a directory entry into in-memory state

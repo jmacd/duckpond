@@ -272,17 +272,25 @@ impl SqlDerivedFile {
             "resolve_pattern_to_queryable_files: found {matches_count} matches for pattern '{pattern}'"
         );
 
-        // STEP 3: Extract files using the proven sql_executor.rs pattern
+        // STEP 3: Extract files - check entry_type directly from FileID (no metadata fetch needed)
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         let mut queryable_files = Vec::new();
 
         for (node_path, _captured) in matches {
-            if let Ok(file_handle) = node_path.as_file().await
-                && let Ok(metadata) = file_handle.metadata().await
-                && metadata.entry_type == entry_type
-            {
-                let file_id = node_path.id();
+            let file_id = node_path.id();
+            let actual_entry_type = file_id.entry_type();
+            
+            debug!(
+                "🔍 Checking file at path '{}': file_id={}, actual_entry_type={:?}, requested_entry_type={:?}",
+                node_path.path().display(),
+                file_id,
+                actual_entry_type,
+                entry_type
+            );
+            
+            // Check if this node matches the requested entry_type (encoded in FileID)
+            if actual_entry_type == entry_type {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
                     EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {

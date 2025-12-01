@@ -126,10 +126,20 @@ impl Directory for OpLogDirectory {
     async fn entries(
         &self,
     ) -> tinyfs::Result<Pin<Box<dyn Stream<Item = tinyfs::Result<tinyfs::DirectoryEntry>> + Send>>> {
-        debug!("OpLogDirectory::entries() - directory operations not yet fully implemented with FileID");
-        // TODO: Implement directory operations with FileID refactoring
-        let _ = (&self.id, &self.state);
-        let stream = futures::stream::iter(vec![]);
+        debug!("OpLogDirectory::entries() called for directory {}", self.id);
+        
+        // Load directory state into memory if not already present
+        self.state.ensure_directory_loaded(self.id).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
+        
+        // Get all entries from in-memory state
+        let entries = self.state.get_all_directory_entries(self.id).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get directory entries: {}", e)))?;
+        
+        debug!("OpLogDirectory::entries() - returning {} entries", entries.len());
+        
+        // Convert Vec<DirectoryEntry> into a stream
+        let stream = futures::stream::iter(entries.into_iter().map(Ok));
         Ok(Box::pin(stream))
     }
 }

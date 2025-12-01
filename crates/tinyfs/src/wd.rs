@@ -98,7 +98,9 @@ impl WD {
         &self,
         entries: Vec<DirectoryEntry>,
     ) -> Result<HashMap<String, NodePath>> {
+        debug!("🔍 load_entries: loading {} entries from parent {}", entries.len(), self.id());
         let loaded = self.fs.batch_load_nodes(self.id(), entries).await?;
+        debug!("🔍 load_entries: batch_load returned {} nodes", loaded.len());
         Ok(loaded
             .into_iter()
            .map(|(name, node)| {
@@ -662,19 +664,24 @@ impl WD {
                 }
                 WildcardComponent::Wildcard { .. } => {
                     let all_entries = self.get_entries().await?;
+                    debug!("🔍 Wildcard pattern: got {} total entries from directory {}", all_entries.len(), self.id());
 
                     // Filter by name pattern first (no node loading!)
                     let matching_entries: Vec<_> = all_entries
                         .into_iter()
                         .filter(|entry| pattern[0].match_component(&entry.name).is_some())
                         .collect();
+                    debug!("🔍 Wildcard pattern: {} entries matched name pattern", matching_entries.len());
                     // Batch load only matching nodes
                     let children = self.load_entries(matching_entries.clone()).await?;
                     let children: std::collections::BTreeMap<_, _> = children.into_iter().collect();
+                    debug!("🔍 Wildcard pattern: iterating over {} loaded children", children.len());
                     
                     for (name, child) in children {
+                        debug!("🔍 Wildcard pattern: checking child name='{}'", name);
                         // Extract captured match
                         if let Some(captured_match) = pattern[0].match_component(&name) {
+                            debug!("🔍 Wildcard pattern: name '{}' matched pattern, calling visit_match_with_visitor", name);
                             captured.push(captured_match.expect("wildcard capture"));
                             self.visit_match_with_visitor(
                                 child, false, pattern, visited, captured, stack, results, visitor,
@@ -737,6 +744,7 @@ impl WD {
         V: Visitor<T>,
         T: Send,
     {
+        debug!("🔍 visit_match_with_visitor: child={}, pattern.len()={}", child.id(), pattern.len());
         // Ensure the same node is does repeat the scan at the same
         // level in the pattern.
         if visited.len() <= pattern.len() {
