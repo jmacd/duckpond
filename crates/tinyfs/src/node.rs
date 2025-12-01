@@ -192,6 +192,17 @@ impl FileID {
 	}
     }
 
+    /// Create FileID in a specific partition with a new node ID
+    /// Used when creating nodes that should live in their parent's partition
+    #[must_use]
+    pub fn new_in_partition(parent_part_id: PartID, entry_type: EntryType) -> Self {
+        let node_id = NodeID::generate(entry_type);
+        Self {
+            part_id: parent_part_id,
+            node_id,
+        }
+    }
+
     #[must_use]
     pub fn new_child_id(&self, et: EntryType) -> Self {
 	if et == EntryType::DirectoryPhysical {

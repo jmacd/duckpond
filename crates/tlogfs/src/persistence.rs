@@ -2504,10 +2504,12 @@ impl InnerState {
 
         // Step 2: Batch query Delta Lake for remaining nodes
         if !nodes_to_query.is_empty() {
+            // Children of a directory are stored in partition = parent's node_id
+            let children_partition_id = parent_id.node_id();
             debug!(
-                "  💾 Batch querying {} nodes from Delta Lake for partition {}",
+                "  💾 Batch querying {} nodes from Delta Lake for partition {} (parent node_id)",
                 nodes_to_query.len(),
-                parent_id.part_id()
+                children_partition_id
             );
 
             // Build SQL with IN clause for all node_ids in this partition
@@ -2523,7 +2525,7 @@ impl InnerState {
                     FROM delta_table
                     WHERE part_id = '{}' AND node_id IN ({})
                 ) WHERE rn = 1",
-                parent_id.part_id(),
+                children_partition_id,
                 node_list
             );
 
