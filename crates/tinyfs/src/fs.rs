@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::DirectoryEntry;
 use crate::EntryType;
 use crate::error::*;
 use crate::node::*;
@@ -48,15 +47,6 @@ impl FS {
 	let node = Node::new(id, node_type);
         self.persistence.store_node(&node).await?;
         Ok(node)
-    }
-
-    /// Batch load multiple nodes grouped by partition for efficiency.
-    pub(crate) async fn batch_load_nodes(
-        &self,
-        parent_id: FileID,
-        requests: Vec<DirectoryEntry>,
-    ) -> Result<HashMap<String, Node>> {
-        self.persistence.batch_load_nodes(parent_id, requests).await
     }
 
     // Loop detection methods - these work the same regardless of persistence vs backend

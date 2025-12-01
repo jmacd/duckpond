@@ -93,22 +93,7 @@ impl WD {
         self.dref.get(name).await
     }
 
-    /// Batch load nodes for multiple directory entries
-    async fn load_entries(
-        &self,
-        entries: Vec<DirectoryEntry>,
-    ) -> Result<HashMap<String, NodePath>> {
-        debug!("🔍 load_entries: loading {} entries from parent {}", entries.len(), self.id());
-        let loaded = self.fs.batch_load_nodes(self.id(), entries).await?;
-        debug!("🔍 load_entries: batch_load returned {} nodes", loaded.len());
-        Ok(loaded
-            .into_iter()
-           .map(|(name, node)| {
-	       let path = self.dref.path().join(&name);
-	       (name, NodePath::new(node, path))
-	   })
-            .collect())
-    }
+
 
     fn is_root(&self) -> bool {
         self.id().is_root()
@@ -672,22 +657,19 @@ impl WD {
                         .filter(|entry| pattern[0].match_component(&entry.name).is_some())
                         .collect();
                     debug!("🔍 Wildcard pattern: {} entries matched name pattern", matching_entries.len());
-                    // Batch load only matching nodes
-                    let children = self.load_entries(matching_entries.clone()).await?;
-                    let children: std::collections::BTreeMap<_, _> = children.into_iter().collect();
-                    debug!("🔍 Wildcard pattern: iterating over {} loaded children", children.len());
                     
-                    for (name, child) in children {
-                        debug!("🔍 Wildcard pattern: checking child name='{}'", name);
-                        // Extract captured match
-                        if let Some(captured_match) = pattern[0].match_component(&name) {
-                            debug!("🔍 Wildcard pattern: name '{}' matched pattern, calling visit_match_with_visitor", name);
-                            captured.push(captured_match.expect("wildcard capture"));
-                            self.visit_match_with_visitor(
-                                child, false, pattern, visited, captured, stack, results, visitor,
-                            )
-                            .await?;
-                            _ = captured.pop();
+                    // Load matching nodes individually (handles mixed partitions)
+                    for entry in matching_entries {
+                        if let Some(captured_match) = pattern[0].match_component(&entry.name) {
+                            if let Some(child) = self.dref.get(&entry.name).await? {
+                                debug!("🔍 Wildcard pattern: loaded child '{}'", entry.name);
+                                captured.push(captured_match.expect("wildcard capture"));
+                                self.visit_match_with_visitor(
+                                    child, false, pattern, visited, captured, stack, results, visitor,
+                                )
+                                .await?;
+                                _ = captured.pop();
+                            }
                         }
                     }
                 }
@@ -707,20 +689,42 @@ impl WD {
                             visitor,
                         )
                         .await?;
+                    } else {
+                        // Special case: If /** is the terminal component, match all files in current directory
+                        // This handles patterns like "/**" and "dir/**" which should match all files recursively
+                        let all_entries = self.get_entries().await?;
+                        for entry in all_entries {
+                            // Match files (not directories, those are handled below in Case 2)
+                            if !entry.entry_type.is_directory() {
+                                if let Some(child) = self.dref.get(&entry.name).await? {
+                                    captured.push(entry.name.clone());
+                                    self.visit_match_with_visitor(
+                                        child, true, pattern, visited, captured, stack, results, visitor,
+                                    )
+                                    .await?;
+                                    _ = captured.pop();
+                                }
+                            }
+                        }
                     }
 
-                    // Case 2: Match one or more directories - recurse into children with same pattern
+                    // Case 2: Match one or more directories - recurse into child directories only
+                    // Load directories individually as needed (avoid batch load across partitions)
                     let all_entries = self.get_entries().await?;
-                    let children = self.load_entries(all_entries.clone()).await?;
-                    let children: std::collections::BTreeMap<_, _> = children.into_iter().collect();
-
-                    for (name, child) in children {
-                        captured.push(name.clone());
-                        self.visit_match_with_visitor(
-                            child, true, pattern, visited, captured, stack, results, visitor,
-                        )
-                        .await?;
-                        _ = captured.pop();
+                    
+                    for entry in all_entries {
+                        // Only recurse into directories
+                        if entry.entry_type.is_directory() {
+                            // Load this directory node individually
+                            if let Some(child) = self.dref.get(&entry.name).await? {
+                                captured.push(entry.name.clone());
+                                self.visit_match_with_visitor(
+                                    child, true, pattern, visited, captured, stack, results, visitor,
+                                )
+                                .await?;
+                                _ = captured.pop();
+                            }
+                        }
                     }
                 }
             };

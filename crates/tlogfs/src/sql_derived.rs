@@ -3136,9 +3136,6 @@ query: ""
 
                 let daily_node = daily_series_node.unwrap();
 
-                // Use public API to access the file handle and downcast using Any
-                let node_id = daily_node.id;
-
                 if let tinyfs::NodeType::File(file_handle) = &daily_node.node_type {
                     // Access the file through the public API and downcast using as_any()
                     let file_arc = file_handle.get_file().await;
@@ -3441,7 +3438,6 @@ query: ""
                 if let tinyfs::NodeType::File(file_handle) = &node_path.node.node_type {
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
-                    let node_id = node_path.node.id;
 
                     // Check the file metadata first
                     let metadata = file_guard.metadata().await.unwrap();
@@ -3554,9 +3550,6 @@ query: ""
                 );
 
                 let daily_node = daily_series_node.unwrap();
-
-                // Use public API to access the file handle and downcast using Any
-                let node_id = daily_node.id;
 
                 if let tinyfs::NodeType::File(file_handle) = &daily_node.node_type {
                     // Access the file through the public API and downcast using as_any()

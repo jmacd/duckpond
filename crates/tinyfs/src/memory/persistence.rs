@@ -1,4 +1,3 @@
-use crate::DirectoryEntry;
 use crate::error::{Error, Result};
 use crate::memory::MemoryDirectory;
 use crate::node::{FileID, Node, NodeType};
@@ -109,18 +108,6 @@ impl PersistenceLayer for MemoryPersistence {
             .await
     }
 
-    async fn batch_load_nodes(
-        &self,
-        parent_id: FileID,
-        requests: Vec<DirectoryEntry>,
-    ) -> Result<HashMap<String, Node>> {
-        self.0
-            .lock()
-            .await
-            .batch_load_nodes(parent_id, requests)
-            .await
-    }
-
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
         self.0.lock().await.metadata(id).await
     }
@@ -176,21 +163,6 @@ impl State {
         let node = Node::new(id, NodeType::Symlink(symlink_handle.clone()));
         self.store_node(&node).await?;
         Ok(node)
-    }
-
-    async fn batch_load_nodes(
-        &self,
-        id: FileID,
-        requests: Vec<DirectoryEntry>,
-    ) -> Result<HashMap<String, Node>> {
-        let nodes = futures::future::try_join_all(requests.into_iter().map(|entry| async move {
-            // Construct FileID from directory's part_id and child's node_id
-            let child_id = FileID::new_from_ids(id.part_id(), entry.child_node_id);
-            let node = self.load_node(child_id).await?;
-            Ok::<_, Error>((entry.name, node))
-        }))
-        .await?;
-        Ok(nodes.into_iter().collect())
     }
 
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {

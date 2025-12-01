@@ -1,5 +1,4 @@
 use crate::EntryType;
-use crate::dir::DirectoryEntry;
 use crate::error::Result;
 use crate::node::{FileID, Node};
 use async_trait::async_trait;
@@ -57,14 +56,6 @@ pub trait PersistenceLayer: Send + Sync {
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<()>;
-
-    /// Batch load multiple nodes grouped by partition for efficiency.
-    /// Default implementation returns empty map; tlogfs overrides with optimized batch loading.
-    async fn batch_load_nodes(
-        &self,
-	parent_id: FileID,
-        requests: Vec<DirectoryEntry>,
-    ) -> Result<HashMap<String, Node>>;
 
     /// Get consolidated metadata for a node
     /// Requires both node_id and part_id for efficient querying
