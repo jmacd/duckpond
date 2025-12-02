@@ -118,15 +118,14 @@ async fn execute_test(
         }
     }
 
-    // For testing purposes, create a result in /tmp/test-executor-results
-    // (We can't easily create directories under the config node without knowing its ID)
-    let result_path = format!("/tmp/test-executor-result-{}.txt", context.file_id);
+    // For testing purposes, create a result file on the host filesystem
+    let result_path = "/tmp/test-executor-result.txt";
     let result_content = format!(
         "Executed {} times\nMessage: {}\nContext: {:?}\n",
         parsed_config.repeat_count, parsed_config.message, ctx
     );
 
-    std::fs::write(&result_path, result_content).map_err(|e| {
+    std::fs::write(result_path, result_content).map_err(|e| {
         TLogFSError::TinyFS(tinyfs::Error::Other(format!(
             "Failed to write result: {}",
             e

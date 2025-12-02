@@ -271,10 +271,13 @@ impl<'a> StewardTransactionGuard<'a> {
                     &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, new_version
                 );
 
+                // Mark as committed
+                self.committed = true;
+
                 // Run post-commit factories for write transactions
+                // This happens AFTER commit but uses a NEW transaction
                 self.run_post_commit_factories().await;
 
-                self.committed = true;
                 Ok(Some(()))
             }
             Ok(None) => {
@@ -520,23 +523,26 @@ impl<'a> StewardTransactionGuard<'a> {
     ) -> Result<Vec<PostCommitFactoryConfig>, StewardError> {
         debug!("Discovering post-commit factories from /etc/system.d/*");
 
-        // Reload OpLogPersistence for discovery
-        // @@@ Why?
+        // Post-commit discovery happens AFTER the transaction is committed
+        // We need a NEW read transaction to see the committed data
+        // This is a separate operation, not part of the original write transaction
         let data_path = crate::get_data_path(Path::new(&self.pond_path));
         let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path)
             .await
             .map_err(StewardError::DataInit)?;
 
-        // Open a post-commit transaction to discover factories
+        // Open a read transaction for discovery
+        // Use the CURRENT txn_seq (the one we just committed), not +1
+        // Read transactions must use the last write sequence
         let discovery_metadata = PondTxnMetadata::new(
-            self.txn_meta.txn_seq + 1,
+            self.txn_meta.txn_seq,
             tlogfs::PondUserMetadata::new(vec![
                 "internal".to_string(),
                 "post-commit-discovery".to_string(),
             ]),
         );
         let discovery_tx = data_persistence
-            .begin_write(&discovery_metadata)
+            .begin_read(&discovery_metadata)
             .await
             .map_err(StewardError::DataInit)?;
 
@@ -560,12 +566,8 @@ impl<'a> StewardTransactionGuard<'a> {
             }
             Err(e) => {
                 debug!("Failed to resolve /etc/system.d: {}", e);
-                // Post-commit transaction with no factories found
-                // Metadata was already provided at begin(), just commit
-                _ = discovery_tx
-                    .commit()
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                // Commit the discovery transaction before returning
+                _ = discovery_tx.commit().await;
                 return Ok(Vec::new());
             }
         }
@@ -583,14 +585,24 @@ impl<'a> StewardTransactionGuard<'a> {
         let mut factory_configs = Vec::new();
 
         for (node_path, _captures) in matches {
-            // Convert NodePath to String for display and operations
-            let config_path = node_path.path();
-            let config_path_str = config_path.to_string_lossy().to_string();
-            debug!("Found post-commit config: {}", config_path_str);
+            let config_path_str = node_path.path().to_string_lossy().to_string();
+            let config_file_id = node_path.id();
+            debug!("Found post-commit config: {} (id={})", config_path_str, config_file_id);
+
+            // Get parent directory ID (needed for factory context)
+            let parent_path = node_path.dirname();
+            let (parent_wd, _lookup) = match root.resolve_path(&parent_path).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::warn!("Failed to resolve parent path {}: {}", parent_path.display(), e);
+                    continue;
+                }
+            };
+            let parent_id = parent_wd.node_path().id();
 
             // Read the config file using async_reader_path + read_to_end
             let config_bytes = {
-                let mut reader = match root.async_reader_path(&config_path).await {
+                let mut reader = match root.async_reader_path(node_path.path()).await {
                     Ok(r) => r,
                     Err(e) => {
                         log::warn!("Failed to open config {}: {}", config_path_str, e);
@@ -612,25 +624,10 @@ impl<'a> StewardTransactionGuard<'a> {
                 }
             };
 
-            // Get the factory name from the oplog
-            let (parent_wd, lookup_result) = match root.resolve_path(&config_path).await {
-                Ok(result) => result,
-                Err(e) => {
-                    log::warn!("Failed to resolve path {}: {}", config_path_str, e);
-                    continue;
-                }
-            };
-
-            if !matches!(lookup_result, tinyfs::Lookup::Found(_)) {
-                log::warn!("Config node not found: {}", config_path_str);
-                continue;
-            }
-
-            let parent_id = parent_wd.node_path().id();
-
+            // Get the factory name from the oplog entry for this config file
             let factory_name = match discovery_tx
                 .state()?
-                .get_factory_for_node(parent_id)
+                .get_factory_for_node(config_file_id)
                 .await
             {
                 Ok(Some(name)) => name,
@@ -654,7 +651,6 @@ impl<'a> StewardTransactionGuard<'a> {
         }
 
         // Commit the post-commit discovery transaction
-        // Metadata was already provided at begin()
         _ = discovery_tx
             .commit()
             .await

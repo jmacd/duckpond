@@ -69,7 +69,7 @@ async fn run_command_impl(
     let root = fs.root().await?;
 
     // Get the node ID for the config file
-    let (parent_wd, lookup_result) = root
+    let (_parent_wd, lookup_result) = root
         .resolve_path(config_path)
         .await
         .with_context(|| format!("Failed to resolve path: {}", config_path))?;
@@ -84,14 +84,13 @@ async fn run_command_impl(
         }
     };
 
-    // Get node and parent IDs for querying the factory
-    let node_id = config_node.borrow().await.id();
-    let part_id = parent_wd.node_path().id().await;
+    // Get node ID for querying the factory
+    let node_id = config_node.id();
 
     // Get the factory name from the oplog
     let factory_name = tx
         .state()?
-        .get_factory_for_node(node_id, part_id)
+        .get_factory_for_node(node_id)
         .await
         .with_context(|| format!("Failed to get factory for: {}", config_path))?
         .ok_or_else(|| {

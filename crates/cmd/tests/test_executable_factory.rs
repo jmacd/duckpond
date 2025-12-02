@@ -67,12 +67,12 @@ async fn create_test_config(
 
     // Resolve parent after creation
     let (parent_wd, _) = root.resolve_path(parent_path).await?;
-    let parent_node_id = parent_wd.node_path().id().await;
+    let parent_node_id = parent_wd.node_path().id();
 
-    _ = state
-        .create_dynamic_file_node(
-            parent_node_id,
-            path.rsplit('/').next().expect("ok").to_string(),
+    // Create dynamic node using path-based API
+    let _node_path = root
+        .create_dynamic_path(
+            path,
             tinyfs::EntryType::FileDataDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
@@ -141,12 +141,12 @@ repeat_count: 5
         .resolve_path("/configs")
         .await
         .expect("Failed to resolve configs");
-    let parent_node_id = parent_wd.node_path().id().await;
+    let parent_node_id = parent_wd.node_path().id();
 
-    _ = state
-        .create_dynamic_file_node(
-            parent_node_id,
-            "test3".to_string(),
+    // Create dynamic node using path-based API
+    let _node_path = root
+        .create_dynamic_path(
+            "/configs/test3",
             tinyfs::EntryType::FileDataDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),

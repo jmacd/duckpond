@@ -131,6 +131,17 @@ impl PartID {
     pub fn root() -> Self {
         Self(NodeID(root_uuid()))
     }
+    
+    /// Get the wrapped NodeID
+    #[must_use]
+    pub fn to_node_id(&self) -> NodeID {
+        self.0
+    }
+    
+    /// Parse from UUID7 hex string
+    pub fn from_hex_string(uuid_str: &str) -> std::result::Result<Self, String> {
+        NodeID::from_hex_string(uuid_str).map(Self)
+    }
 }
 
 /// A FileID combines NodeID and PartID with embedded EntryType information.

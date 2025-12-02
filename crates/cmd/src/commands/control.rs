@@ -466,7 +466,7 @@ async fn execute_sync_impl(
     let root = fs.root().await?;
 
     // Resolve the factory config path
-    let (parent_wd, lookup_result) = root
+    let (_parent_wd, lookup_result) = root
         .resolve_path(&remote_path)
         .await
         .with_context(|| format!("Failed to resolve path: {}", remote_path))?;
@@ -481,14 +481,13 @@ async fn execute_sync_impl(
         }
     };
 
-    // Get node and parent IDs
-    let node_id = config_node.borrow().await.id();
-    let part_id = parent_wd.node_path().id().await;
+    // Get node ID
+    let node_id = config_node.id();
 
     // Get the factory name from the oplog
     let factory_name = tx
         .state()?
-        .get_factory_for_node(node_id, part_id)
+        .get_factory_for_node(node_id)
         .await
         .with_context(|| format!("Failed to get factory for: {}", remote_path))?
         .ok_or_else(|| {

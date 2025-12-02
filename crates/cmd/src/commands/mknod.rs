@@ -105,68 +105,46 @@ async fn mknod_impl(
         .ok_or_else(|| anyhow!("Unknown factory type: {}", factory_type))?;
 
     // Determine what type of node to create based on factory capabilities
-    let _node_path = if factory.create_directory.is_some() {
-        // Factory supports directories
-        if overwrite {
-            // Use overwrite method directly to bypass parsing existing config
-            root.create_dynamic_directory_path_with_overwrite(
-                path,
-                factory_type,
-                config_bytes.clone(),
-                overwrite,
-            )
-            .await?
-        } else {
-            // Normal creation path
-            root.create_dynamic_directory_path(
-            path,
-            factory_type,
-            config_bytes.clone(),
-        ).await.map_err(|e| match e {
-            tinyfs::Error::AlreadyExists(_) => {
-                anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
-            },
-            e => anyhow!("Failed to create dynamic directory: {}", e),
-        })?
-        }
+    let entry_type = if factory.create_directory.is_some() {
+        tinyfs::EntryType::DirectoryDynamic
     } else if factory.create_file.is_some() || factory.execute.is_some() {
         // Factory supports files - either:
         // 1. Has explicit create_file function (template factory)
         // 2. Is executable factory (config bytes ARE the file content via ConfigFile wrapper)
-        if overwrite {
-            // Use overwrite method directly to bypass parsing existing config
-            root.create_dynamic_file_path_with_overwrite(
-                path,
-                tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
-                factory_type,
-                config_bytes.clone(),
-                overwrite,
-            )
-            .await?
-        } else {
-            // Normal creation path
-            root.create_dynamic_file_path(
-                path,
-                tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
-                factory_type,
-                config_bytes.clone(),
-            )
-            .await
-            .map_err(|e| match e {
-                tinyfs::Error::AlreadyExists(_) => {
-                    anyhow!(
-                        "Dynamic node already exists at path '{}'. Use --overwrite to replace it.",
-                        path
-                    )
-                }
-                e => anyhow!("Failed to create dynamic file: {}", e),
-            })?
-        }
+        tinyfs::EntryType::FileDataDynamic
     } else {
         return Err(anyhow!(
             "Factory '{}' does not support creating directories or files",
             factory_type
         ));
+    };
+
+    let _node_path = if overwrite {
+        root.create_dynamic_path_with_overwrite(
+            path,
+            entry_type,
+            factory_type,
+            config_bytes.clone(),
+            overwrite,
+        )
+        .await?
+    } else {
+        root.create_dynamic_path(
+            path,
+            entry_type,
+            factory_type,
+            config_bytes.clone(),
+        )
+        .await
+        .map_err(|e| match e {
+            tinyfs::Error::AlreadyExists(_) => {
+                anyhow!(
+                    "Dynamic node already exists at path '{}'. Use --overwrite to replace it.",
+                    path
+                )
+            }
+            e => anyhow!("Failed to create dynamic node: {}", e),
+        })?
     };
 
     // Node is created, lock is released - now run factory initialization
@@ -176,7 +154,7 @@ async fn mknod_impl(
         .unwrap_or(std::path::Path::new("/"));
     let parent_node_path = root.resolve_path(parent_path).await?;
     let parent_node_id = match parent_node_path.1 {
-        tinyfs::Lookup::Found(node) => node.id().await,
+        tinyfs::Lookup::Found(node) => node.id(),
         _ => {
             return Err(anyhow!(
                 "Parent directory not found: {}",
