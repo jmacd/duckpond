@@ -4,7 +4,7 @@ use crate::error::*;
 
 /// Represents a path component that may contain a wildcard
 #[derive(Debug, Clone, PartialEq)]
-pub enum WildcardComponent {
+pub(crate) enum WildcardComponent {
     /// A double wildcard ("**") that matches zero or more path segments
     DoubleWildcard {
         /// Index of this wildcard in the pattern
@@ -25,14 +25,14 @@ pub enum WildcardComponent {
 
 /// Iterator that yields WildcardComponents from a glob pattern
 #[derive(Debug, PartialEq)]
-pub struct GlobComponentIterator {
+pub(crate) struct GlobComponentIterator {
     components: Vec<WildcardComponent>,
     position: usize,
 }
 
 impl WildcardComponent {
     /// Check if this component matches the given name
-    pub fn match_component<S: AsRef<str>>(&self, name: S) -> Option<Option<String>> {
+    pub(crate) fn match_component<S: AsRef<str>>(&self, name: S) -> Option<Option<String>> {
         let name = name.as_ref();
 
         match self {
@@ -74,7 +74,7 @@ impl Iterator for GlobComponentIterator {
 }
 
 /// Parse a path into WildcardComponents
-pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator> {
+pub(crate) fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator> {
     let path = pattern.as_ref();
     let mut components = Vec::new();
 

@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+
 use super::super::memory::new_fs;
+use crate::dir::DirectoryEntry;
 use crate::async_helpers::convenience;
 use crate::dir::Directory;
 use crate::dir::Handle as DirectoryHandle;
@@ -54,7 +56,7 @@ impl Directory for ReverseDirectory {
 
     async fn entries(
         &self,
-    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<crate::DirectoryEntry>> + Send>>> {
+    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<DirectoryEntry>> + Send>>> {
         let root = self.fs.root().await?;
         let dir = root.open_dir_path(&self.target_path).await?;
         let mut entry_stream = dir.entries().await?;
@@ -74,7 +76,7 @@ impl Directory for ReverseDirectory {
                 NodeType::File(_) => crate::EntryType::FileDataPhysical,
                 NodeType::Symlink(_) => crate::EntryType::Symlink,
             };
-            let dir_entry = crate::DirectoryEntry::new(
+            let dir_entry = DirectoryEntry::new(
                 reverse_string(&np.basename()),
                 np.node.id.node_id(),
                 entry_type,

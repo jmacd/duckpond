@@ -151,25 +151,6 @@ impl EntryType {
             EntryType::FileSeriesDynamic => "file:series:dynamic",
         }
     }
-
-    /// Convert from NodeType to EntryType for directory entries
-    ///
-    /// Query the handle's metadata to determine the actual EntryType
-    pub async fn from_node_type(node_type: &crate::NodeType) -> crate::error::Result<Self> {
-        match node_type {
-            crate::NodeType::File(handle) => {
-                let metadata = handle.metadata().await?;
-                Ok(metadata.entry_type)
-            }
-            crate::NodeType::Directory(_) => {
-                // For directories, we need additional context to determine if they're dynamic
-                // This method is insufficient - use from_node_type_with_factory instead
-                // Default to physical for compatibility
-                Ok(EntryType::DirectoryPhysical)
-            }
-            crate::NodeType::Symlink(_) => Ok(EntryType::Symlink),
-        }
-    }
 }
 
 impl TryFrom<u8> for EntryType {
@@ -417,31 +398,6 @@ mod tests {
 
         let symlink_parsed: EntryType = serde_json::from_str("\"symlink\"").unwrap();
         assert_eq!(symlink_parsed, EntryType::Symlink);
-    }
-
-    #[tokio::test]
-    async fn test_from_node_type() {
-        // Create memory files with different entry types in their metadata
-        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(
-            vec![],
-            EntryType::FileSeriesPhysical,
-        );
-        let file_node = crate::NodeType::File(file_handle);
-        assert_eq!(
-            EntryType::from_node_type(&file_node).await.unwrap(),
-            EntryType::FileSeriesPhysical
-        );
-
-        // Test with FileData
-        let file_handle2 = crate::memory::MemoryFile::new_handle_with_entry_type(
-            vec![],
-            EntryType::FileDataDynamic,
-        );
-        let file_node2 = crate::NodeType::File(file_handle2);
-        assert_eq!(
-            EntryType::from_node_type(&file_node2).await.unwrap(),
-            EntryType::FileDataDynamic
-        );
     }
 
     #[test]

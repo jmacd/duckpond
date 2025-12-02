@@ -7,6 +7,7 @@ use std::sync::Arc;
 use super::super::memory::new_fs;
 use crate::async_helpers::convenience;
 use crate::dir::Directory;
+use crate::dir::DirectoryEntry;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
 use crate::fs::FS;
@@ -143,7 +144,7 @@ impl Directory for VisitDirectory {
 
     async fn entries(
         &self,
-    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<crate::DirectoryEntry>> + Send>>> {
+    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<DirectoryEntry>> + Send>>> {
         // For now, fall back to the original visitor pattern implementation
         // TODO: Use derived manager for better performance and caching
         let mut visitor = FilenameCollector::new();
@@ -155,7 +156,7 @@ impl Directory for VisitDirectory {
             // Convert Node to DirectoryEntry (without awaiting - use placeholder)
             // Use a deterministic NodeID for testing
             let node_id = crate::NodeID::from_content(format!("visit:{}", name).as_bytes());
-            let dir_entry = crate::DirectoryEntry::new(
+            let dir_entry = DirectoryEntry::new(
                 name.clone(),
                 node_id,
                 crate::EntryType::FileDataDynamic,
