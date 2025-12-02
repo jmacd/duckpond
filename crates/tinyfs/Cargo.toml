@@ -22,6 +22,7 @@ futures.workspace = true
 log.workspace = true
 uuid7.workspace = true
 serde.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true

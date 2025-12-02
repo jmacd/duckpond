@@ -149,3 +149,67 @@ crate::register_executable_factory!(
     initialize: initialize_test,
     execute: execute_test
 );
+
+// ============================================================================
+// Test Directory Factory
+// ============================================================================
+
+/// Validate test directory configuration from YAML bytes
+fn validate_test_dir_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
+    let config = tinyfs::testing::TestDirectoryConfig::from_yaml_bytes(config_bytes)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid test-dir config: {}", e)))?;
+
+    serde_json::to_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+}
+
+/// Create a test directory handle
+fn create_test_dir(
+    config: Value,
+    context: FactoryContext,
+) -> TinyFSResult<tinyfs::DirHandle> {
+    // Parse config to verify structure
+    let _parsed: tinyfs::testing::TestDirectoryConfig = serde_json::from_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+
+    // Return an empty dynamic directory for testing
+    let empty_config = crate::dynamic_dir::DynamicDirConfig { entries: vec![] };
+    let dir = crate::dynamic_dir::DynamicDirDirectory::new(empty_config, context);
+    Ok(dir.create_handle())
+}
+
+crate::register_dynamic_factory!(
+    name: "test-dir",
+    description: "Test directory factory with required YAML config for unit testing",
+    directory: create_test_dir,
+    validate: validate_test_dir_config
+);
+
+// ============================================================================
+// Test File Factory
+// ============================================================================
+
+/// Validate test file configuration from YAML bytes
+fn validate_test_file_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
+    let config = tinyfs::testing::TestFileConfig::from_yaml_bytes(config_bytes)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid test-file config: {}", e)))?;
+
+    serde_json::to_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+}
+
+/// Create a test file handle
+fn create_test_file(config: Value, _context: FactoryContext) -> TinyFSResult<tinyfs::FileHandle> {
+    let parsed: tinyfs::testing::TestFileConfig = serde_json::from_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+
+    // Return file handle with the configured content
+    Ok(crate::factory::ConfigFile::new(parsed.content.into_bytes()).create_handle())
+}
+
+crate::register_dynamic_factory!(
+    name: "test-file",
+    description: "Test file factory with required YAML config for unit testing",
+    file: create_test_file,
+    validate: validate_test_file_config
+);

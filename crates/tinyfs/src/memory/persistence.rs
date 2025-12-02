@@ -24,6 +24,7 @@ pub struct MemoryPersistence(Arc<Mutex<State>>);
 
 pub struct State {
     // Store multiple versions of each file: (node_id, part_id) -> Vec<MemoryFileVersion>
+    // Also used for dynamic nodes (FileDataDynamic, DirectoryDynamic, FileExecutable) - config is the content
     file_versions: HashMap<FileID, Vec<MemoryFileVersion>>,
 
     // Non-file nodes (directories, symlinks): (node_id, part_id) -> Node
@@ -242,28 +243,86 @@ impl State {
     }
 
     async fn create_dynamic_node(
-        &self,
-        _id: FileID,
-        _factory_type: &str,
-        _config_content: Vec<u8>,
+        &mut self,
+        id: FileID,
+        factory_type: &str,
+        config_content: Vec<u8>,
     ) -> Result<Node> {
-        Err(Error::Other(
-            "Dynamic nodes not supported in memory persistence".to_string(),
+        // Dynamic nodes are stored like files with config as content
+        // Factory type goes in extended_metadata["factory"]
+        let mut extended_metadata = HashMap::new();
+        _ = extended_metadata.insert("factory".to_string(), factory_type.to_string());
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        let version = MemoryFileVersion {
+            version: 1,
+            timestamp,
+            content: config_content,
+            entry_type: id.entry_type(),
+            extended_metadata: Some(extended_metadata),
+        };
+
+        self.file_versions
+            .entry(id)
+            .or_insert_with(Vec::new)
+            .push(version);
+
+        // Create a dummy node - actual factory instantiation happens on read
+        Ok(Node::new(
+            id,
+            NodeType::File(super::MemoryFile::new_handle(vec![])),
         ))
     }
 
-    async fn get_dynamic_node_config(&self, _id: FileID) -> Result<Option<(String, Vec<u8>)>> {
-        Err(Error::Internal("unimplemented".into()))
+    async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>> {
+        if let Some(versions) = self.file_versions.get(&id) {
+            if let Some(latest) = versions.last() {
+                if let Some(ref metadata) = latest.extended_metadata {
+                    if let Some(factory_type) = metadata.get("factory") {
+                        return Ok(Some((factory_type.clone(), latest.content.clone())));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn update_dynamic_node_config(
-        &self,
-        _id: FileID,
-        _factory_type: &str,
-        _config_content: Vec<u8>,
+        &mut self,
+        id: FileID,
+        factory_type: &str,
+        config_content: Vec<u8>,
     ) -> Result<()> {
-        Err(Error::Other(
-            "Dynamic node updates not supported in memory persistence".to_string(),
-        ))
+        let mut extended_metadata = HashMap::new();
+        _ = extended_metadata.insert("factory".to_string(), factory_type.to_string());
+
+        let new_version = if let Some(versions) = self.file_versions.get(&id) {
+            let next_version = versions.last().map(|v| v.version + 1).unwrap_or(1);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+
+            MemoryFileVersion {
+                version: next_version,
+                timestamp,
+                content: config_content,
+                entry_type: id.entry_type(),
+                extended_metadata: Some(extended_metadata),
+            }
+        } else {
+            return Err(Error::Other(format!("Dynamic node not found: {}", id)));
+        };
+
+        self.file_versions
+            .get_mut(&id)
+            .ok_or_else(|| Error::Other(format!("Dynamic node not found: {}", id)))?
+            .push(new_version);
+
+        Ok(())
     }
 }

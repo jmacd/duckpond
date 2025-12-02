@@ -655,6 +655,10 @@ impl OplogEntry {
         config_content: Vec<u8>,
         txn_seq: i64,
     ) -> Self {
+        // For ALL dynamic nodes (both files and directories):
+        // - Config goes in content field (YAML bytes)
+        // - Factory type goes in factory field
+        // - No special encoding needed - just store the raw YAML
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
@@ -670,7 +674,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
-            format: StorageFormat::Inline, // Dynamic directories use inline storage
+            format: StorageFormat::Inline, // Config is always inline
             txn_seq,
         }
     }

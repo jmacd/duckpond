@@ -1452,3 +1452,203 @@ async fn test_symlink_create_and_read() {
     debug!("- Read symlink in new transaction (TX2)");
     debug!("- Followed symlink in TX2 to read file content");
 }
+
+/// Test creating dynamic files using high-level path API
+#[tokio::test]
+async fn test_create_dynamic_file_path() {
+    let store_path = test_dir();
+
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    debug!("=== Testing dynamic file creation with path API ===");
+    
+    let tx = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root = tx.root().await.expect("Failed to get root");
+
+    // Create parent directory first
+    debug!("Creating parent directory: /config");
+    _ = root
+        .create_dir_path("/config")
+        .await
+        .expect("Failed to create parent directory");
+
+    // Create a dynamic file with factory name and YAML config
+    debug!("Creating dynamic file: /config/test.yaml");
+    let test_file_config = tinyfs::testing::TestFileConfig::simple("SELECT 1");
+    let config_content = test_file_config.to_yaml_bytes()
+        .expect("Failed to serialize test file config");
+    
+    let dynamic_node = root
+        .create_dynamic_path(
+            "/config/test.yaml",
+            tinyfs::EntryType::FileDataDynamic,
+            "test-file",
+            config_content.clone(),
+        )
+        .await
+        .expect("Failed to create dynamic file");
+
+    debug!("✅ Created dynamic file with factory: test-file");
+    debug!("   Node ID: {:?}", dynamic_node.id());
+
+    // Verify we can read the file back
+    let read_content = root
+        .read_file_path_to_vec("/config/test.yaml")
+        .await
+        .expect("Failed to read dynamic file");
+    
+    // Content from test-file factory is the "content" field, not the YAML config
+    assert_eq!(
+        String::from_utf8_lossy(&read_content),
+        "SELECT 1",
+        "Dynamic file content should be from TestFileConfig.content field"
+    );
+    debug!("✅ Read back dynamic file content successfully");
+
+    // Commit and verify persistence
+    debug!("Committing transaction");
+    _ = tx.commit().await.expect("Failed to commit");
+
+    // Read in new transaction
+    debug!("Reading dynamic file in new transaction");
+    let tx2 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin TX2");
+
+    let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    let content2 = root2
+        .read_file_path_to_vec("/config/test.yaml")
+        .await
+        .expect("Failed to read file in TX2");
+    
+    // Content from test-file factory is the "content" field, not the YAML config
+    assert_eq!(
+        String::from_utf8_lossy(&content2),
+        "SELECT 1",
+        "Dynamic file should persist and return content from factory"
+    );
+    debug!("✅ Dynamic file persisted correctly");
+
+    debug!("\n✅ TEST PASSED!");
+    debug!("- Created dynamic file using high-level path API");
+    debug!("- Read back content in same transaction");
+    debug!("- Committed and verified persistence");
+}
+
+/// Test creating dynamic directories using high-level path API
+/// NOTE: This test currently fails because "processor-factory" is not a registered factory.
+/// This demonstrates that dynamic nodes require proper factory registration.
+#[tokio::test]
+async fn test_create_dynamic_directory_path() {
+    // Use fixed path so we can inspect Delta files after test
+    let store_path = "/tmp/tlogfs_dynamic_dir_test";
+    let _ = std::fs::remove_dir_all(&store_path); // Clean up from previous run
+    
+    println!("\n🔍 Test store path: {}", store_path);
+
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    debug!("=== Testing dynamic directory creation with path API ===");
+    
+    let tx = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root = tx.root().await.expect("Failed to get root");
+
+    // Create parent directory first
+    debug!("Creating parent directory: /factories");
+    _ = root
+        .create_dir_path("/factories")
+        .await
+        .expect("Failed to create parent directory");
+
+    // Create a dynamic directory with factory name and YAML config
+    debug!("Creating dynamic directory: /factories/processors");
+    let test_dir_config = tinyfs::testing::TestDirectoryConfig::simple("processors");
+    let config_content = test_dir_config.to_yaml_bytes()
+        .expect("Failed to serialize test dir config");
+    
+    let dynamic_dir = root
+        .create_dynamic_path(
+            "/factories/processors",
+            tinyfs::EntryType::DirectoryDynamic,
+            "test-dir",
+            config_content,
+        )
+        .await
+        .expect("Failed to create dynamic directory");
+
+    debug!("✅ Created dynamic directory with factory: test-dir");
+    debug!("   Node ID: {:?}", dynamic_dir.id());
+
+    // Verify the directory exists
+    let exists = root
+        .exists(std::path::Path::new("/factories/processors"))
+        .await;
+    assert!(exists, "Dynamic directory should exist");
+    debug!("✅ Dynamic directory exists");
+
+    // Commit
+    debug!("Committing transaction");
+    _ = tx.commit().await.expect("Failed to commit");
+
+    // Inspect what Delta Lake actually wrote
+    println!("\n🔍 After TX1 commit - inspecting Delta Lake files:");
+    println!("📁 Store path: {}", store_path);
+    
+    // List _delta_log directory
+    let delta_log_path = format!("{}/_delta_log", store_path);
+    if let Ok(entries) = std::fs::read_dir(&delta_log_path) {
+        println!("📂 _delta_log directory:");
+        for entry in entries.flatten() {
+            println!("  - {}", entry.file_name().to_string_lossy());
+        }
+    }
+    
+    // List main directory for Parquet files
+    if let Ok(entries) = std::fs::read_dir(&store_path) {
+        println!("📂 Main directory:");
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.ends_with(".parquet") {
+                println!("  - {} (Parquet data file)", fname);
+            }
+        }
+    }
+    
+    println!("\n💡 Use: ./catparquet.sh {} <file>.parquet", store_path);
+    println!("💡 to inspect the actual data written\n");
+
+    // Verify in new transaction
+    let tx2 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin TX2");
+
+    let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    debug!("TX2: Looking up /factories/processors");
+    let result = root2
+        .get_node_path(std::path::Path::new("/factories/processors"))
+        .await;
+    
+    let _node_path = result.expect("Dynamic directory should persist");
+    debug!("✅ Dynamic directory persisted correctly");
+
+    debug!("\n✅ TEST PASSED!");
+    debug!("- Created dynamic directory using high-level path API");
+    debug!("- Verified existence in same transaction");
+    debug!("- Committed and verified persistence");
+}

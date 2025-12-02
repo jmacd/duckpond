@@ -14,6 +14,7 @@ mod node;
 mod path;
 pub mod persistence;
 mod symlink;
+pub mod testing;
 pub mod tree_format;
 mod wd;
 

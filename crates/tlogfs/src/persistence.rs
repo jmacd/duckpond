@@ -480,6 +480,7 @@ impl OpLogPersistence {
         // Reload the table from disk to pick up the committed changes
         // This ensures subsequent transactions see the new data
         self.table = deltalake::open_table(self.path.to_string_lossy().to_string()).await?;
+        println!("🔄 Reloaded table after commit, new version: {:?}", self.table.version());
         self.last_txn_seq = new_seq;
 
         Ok(res)
@@ -758,7 +759,7 @@ impl PersistenceLayer for State {
         self.inner
             .lock()
             .await
-            .create_dynamic_node(id, factory_type, config_content)
+            .create_dynamic_node(id, factory_type, config_content, self.clone())
             .await
             .map_err(error_utils::to_tinyfs_error)
     }
@@ -1104,7 +1105,7 @@ impl InnerState {
         );
 
         // Register the fundamental delta_table for direct DeltaTable queries
-        debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}", 
+        println!("📋 REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}", 
             table.version());
         _ = ctx
             .register_table("delta_table", Arc::new(table.clone()))
@@ -1161,12 +1162,22 @@ impl InnerState {
     async fn ensure_directory_loaded(&mut self, id: FileID) -> Result<(), TLogFSError> {
         // Check if already loaded
         if self.directories.contains_key(&id) {
+            println!("🔍 ensure_directory_loaded: {} already in self.directories", id);
+            let dir_state = self.directories.get(&id).unwrap();
+            println!("🔍   Has {} entries in mapping", dir_state.mapping.len());
+            for (name, entry) in &dir_state.mapping {
+                println!("🔍     Entry: '{}' -> {:?}", name, entry.child_node_id);
+            }
             return Ok(());
         }
 
+        println!("🔍 ensure_directory_loaded: {} NOT in cache, loading from OpLog", id);
         // Load from OpLog
         let entries = self.query_directory_entries(id).await?;
-        debug!("Loaded {} entries for directory {} from OpLog", entries.len(), id);
+        println!("🔍 Loaded {} entries for directory {} from OpLog", entries.len(), id);
+        for entry in &entries {
+            println!("🔍   Entry: '{}' -> {:?} (type: {:?})", entry.name, entry.child_node_id, entry.entry_type);
+        }
 
         // Cache in memory with modified: false
         _ = self.directories.insert(id, DirectoryState::new_unmodified(entries));
@@ -1648,16 +1659,35 @@ impl InnerState {
 
         // Debug: log what we're about to commit
         for (i, record) in records.iter().enumerate() {
-            debug!("  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}", 
+            println!("  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, factory={:?}", 
                 i, record.part_id, record.node_id, record.file_type, record.version,
-                record.content.as_ref().map(|c| c.len()).unwrap_or(0));
+                record.content.as_ref().map(|c| c.len()).unwrap_or(0),
+                record.factory);
         }
 
         // Convert records to RecordBatch
+        println!("🔄 About to serialize {} records with serde_arrow", records.len());
         let batches = vec![serde_arrow::to_record_batch(
             &OplogEntry::for_arrow(),
             &records,
         )?];
+
+        println!("📊 RecordBatch created with {} batches, batch[0] has {} rows", 
+               batches.len(), batches[0].num_rows());
+        
+        // DEBUG: Print first few values from part_id and node_id columns
+        if batches[0].num_rows() > 0 {
+            use arrow::array::StringArray;
+            let part_id_col = batches[0].column(0);
+            let node_id_col = batches[0].column(1);
+            println!("🔍 First 3 rows of RecordBatch:");
+            for i in 0..batches[0].num_rows().min(3) {
+                println!("   Row {}: part_id={:?}, node_id={:?}",
+                    i,
+                    part_id_col.as_any().downcast_ref::<StringArray>().map(|a| a.value(i)),
+                    node_id_col.as_any().downcast_ref::<StringArray>().map(|a| a.value(i)));
+            }
+        }
 
         let mut write_op = DeltaOps(table).write(batches);
 
@@ -1666,7 +1696,9 @@ impl InnerState {
             CommitProperties::default().with_metadata(metadata.to_delta_metadata().into_iter());
         write_op = write_op.with_commit_properties(properties);
 
-        _ = write_op.await?;
+        let version = write_op.await?;
+
+        debug!("✅ Delta write completed successfully, new table version: {:?}", version.version());
 
         self.records.clear();
         self.directories.clear();
@@ -2021,12 +2053,75 @@ impl InnerState {
         id: FileID,
         factory_type: &str,
         config_content: Vec<u8>,
+        state: State,
     ) -> Result<Node, TLogFSError> {
-        // TODO: Implement proper dynamic node creation with oplog entry
-        let _ = (id, factory_type, config_content, self.txn_seq);
-        Err(TLogFSError::Transaction {
-            message: "create_dynamic_node not yet implemented - use FactoryRegistry directly for now".to_string(),
-        })
+        debug!(
+            "create_dynamic_node: id={}, entry_type={:?}, factory_type='{}', txn_seq={}",
+            id, id.entry_type(), factory_type, self.txn_seq
+        );
+
+        let now = Utc::now().timestamp_micros();
+        let next_version = self.get_next_version_for_node(id).await?;
+
+        // Create dynamic node OplogEntry with factory field
+        let oplog_entry = OplogEntry::new_dynamic_node(
+            id,
+            now,
+            next_version,
+            factory_type,
+            config_content.clone(),
+            self.txn_seq,
+        );
+
+        debug!(
+            "📝 CREATING DYNAMIC NODE OPLOG ENTRY: part_id={}, node_id={}, file_type={:?}, version={}, factory={:?}, content_len={:?}, extended_attrs={:?}, format={:?}, txn_seq={}",
+            oplog_entry.part_id, oplog_entry.node_id, oplog_entry.file_type, oplog_entry.version,
+            oplog_entry.factory, oplog_entry.content.as_ref().map(|c| c.len()),
+            oplog_entry.extended_attributes.as_ref().map(|s| &s[0..s.len().min(100)]),
+            oplog_entry.format, oplog_entry.txn_seq
+        );
+
+        // Add to pending records
+        self.records.push(oplog_entry);
+
+        // Create in-memory node - dynamic nodes are treated as regular files/directories
+        // with factory metadata attached. Don't initialize factory here - that's done
+        // by post-commit discovery or explicit FactoryRegistry calls.
+        //
+        // Note: OpLog entry created above contains:
+        // - FileDataDynamic: config in content field
+        // - DirectoryDynamic: config in extended_attributes, empty content for directory entries
+        let node = match id.entry_type() {
+            EntryType::FileDataDynamic => {
+                // Create as regular file node - factory metadata in OpLog
+                node_factory::create_file_node(id, state)
+            }
+            EntryType::DirectoryDynamic => {
+                // For dynamic directories, the OpLog entry was created with empty content
+                // (which represents an empty directory). We still need to track it in
+                // the directories HashMap so subsequent operations (adding children) work.
+                debug!(
+                    "create_dynamic_node: tracking empty dynamic directory {} in memory",
+                    id
+                );
+                let dir_state = DirectoryState::new_empty();
+                // Don't mark as modified - OpLog entry already created above with empty content
+                _ = self.directories.insert(id, dir_state);
+                
+                // Create directory node
+                node_factory::create_directory_node(id, state)
+            }
+            _ => {
+                return Err(TLogFSError::Transaction {
+                    message: format!(
+                        "create_dynamic_node called with non-dynamic EntryType: {:?}",
+                        id.entry_type()
+                    ),
+                })
+            }
+        };
+
+        node.map_err(|e| TLogFSError::TinyFS(e))
     }
 
     /// Get dynamic node configuration if the node is dynamic
@@ -2040,9 +2135,29 @@ impl InnerState {
             if record.node_id == id.node_id()
                 && record.part_id == id.part_id()
                 && let Some(factory_type) = &record.factory
-                && let Some(config_content) = &record.content
             {
-                return Ok(Some((factory_type.clone(), config_content.clone())));
+                // For directories, config is in extended_attributes
+                // For files, config is in content
+                let config_content = if record.file_type == EntryType::DirectoryDynamic {
+                    // Extract from extended_attributes
+                    if let Some(attrs_json) = &record.extended_attributes {
+                        let attrs: serde_json::Value = serde_json::from_str(attrs_json)
+                            .map_err(|e| TLogFSError::ArrowMessage(format!("Invalid JSON in extended_attributes: {}", e)))?;
+                        if let Some(config_b64) = attrs.get("factory_config").and_then(|v| v.as_str()) {
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, config_b64)
+                                .map_err(|e| TLogFSError::ArrowMessage(format!("Invalid base64 in factory_config: {}", e)))?
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                } else {
+                    // For files, use content field
+                    record.content.clone().unwrap_or_default()
+                };
+                
+                return Ok(Some((factory_type.clone(), config_content)));
             }
         }
 
@@ -2051,9 +2166,29 @@ impl InnerState {
 
         if let Some(record) = records.first()
             && let Some(factory_type) = &record.factory
-            && let Some(config_content) = &record.content
         {
-            Ok(Some((factory_type.clone(), config_content.clone())))
+            // For directories, config is in extended_attributes
+            // For files, config is in content
+            let config_content = if record.file_type == EntryType::DirectoryDynamic {
+                // Extract from extended_attributes
+                if let Some(attrs_json) = &record.extended_attributes {
+                    let attrs: serde_json::Value = serde_json::from_str(attrs_json)
+                        .map_err(|e| TLogFSError::ArrowMessage(format!("Invalid JSON in extended_attributes: {}", e)))?;
+                    if let Some(config_b64) = attrs.get("factory_config").and_then(|v| v.as_str()) {
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, config_b64)
+                            .map_err(|e| TLogFSError::ArrowMessage(format!("Invalid base64 in factory_config: {}", e)))?
+                    } else {
+                        return Ok(None);
+                    }
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                // For files, use content field
+                record.content.clone().unwrap_or_default()
+            };
+            
+            Ok(Some((factory_type.clone(), config_content)))
         } else {
             Ok(None)
         }
@@ -2130,7 +2265,19 @@ impl InnerState {
                     if batches.is_empty() || batches[0].num_rows() == 0 {
                         return Err(TLogFSError::Missing);
                     } else {
-                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batches[0])?;
+                        let batch = &batches[0];
+                        println!("🔍 Query returned {} rows", batch.num_rows());
+                        println!("🔍 Schema: {:?}", batch.schema());
+                        
+                        // Print first row details
+                        if batch.num_rows() > 0 {
+                            for (i, field) in batch.schema().fields().iter().enumerate() {
+                                let col = batch.column(i);
+                                println!("  Column {}: {} = {:?}", i, field.name(), col);
+                            }
+                        }
+                        
+                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)?;
                         Ok(records.into_iter().next().expect("one"))
                     }
                 }
@@ -2961,6 +3108,7 @@ mod node_factory {
         }
 
         // Get configuration from the oplog entry
+        // For ALL dynamic nodes, config is stored as-is in content field (original YAML bytes)
         let config_content = oplog_entry.content.as_ref().ok_or_else(|| {
             tinyfs::Error::Other(format!(
                 "Dynamic node missing configuration for factory '{}'",
@@ -2971,20 +3119,52 @@ mod node_factory {
         // Create context with all template variables (vars, export, and any other keys)
         let context = FactoryContext::new(state.clone(), id);
 
+        println!("🔍 create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}", 
+                 factory_type, oplog_entry.file_type, config_content.len());
+
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
             EntryType::DirectoryDynamic => {
+                println!("🔍 Calling FactoryRegistry::create_directory for '{}'", factory_type);
                 let dir_handle = FactoryRegistry::create_directory(
                     factory_type,
                     config_content,
                     context.clone(),
-                )?;
+                ).map_err(|e| {
+                    println!("❌ FactoryRegistry::create_directory failed: {}", e);
+                    e
+                })?;
+                println!("✅ FactoryRegistry::create_directory succeeded");
                 NodeType::Directory(dir_handle)
             }
+            EntryType::FileDataDynamic => {
+                // Check if this is an executable factory
+                if let Some(factory) = FactoryRegistry::get_factory(factory_type) {
+                    if factory.create_file.is_some() {
+                        // File factory - call create_file
+                        println!("🔍 Calling FactoryRegistry::create_file for '{}'", factory_type);
+                        let file_handle = FactoryRegistry::create_file(
+                            factory_type,
+                            config_content,
+                            context.clone(),
+                        ).await.map_err(|e| {
+                            println!("❌ FactoryRegistry::create_file failed: {}", e);
+                            e
+                        })?;
+                        println!("✅ FactoryRegistry::create_file succeeded");
+                        NodeType::File(file_handle)
+                    } else {
+                        // Executable factory - config IS the file content
+                        println!("🔍 Executable factory '{}' - using config as file content", factory_type);
+                        let config_file = crate::factory::ConfigFile::new(config_content.clone());
+                        NodeType::File(config_file.create_handle())
+                    }
+                } else {
+                    return Err(tinyfs::Error::Other(format!("Unknown factory: {}", factory_type)));
+                }
+            }
             _ => {
-                // For file factories, the config_content IS the file content
-                // (For executable factories, this is their configuration; for template factories, this is their input)
-                // We don't call create_file here - that's for programmatic file creation, not reading back stored content
+                // Unknown entry type - shouldn't happen
                 let config_file = crate::factory::ConfigFile::new(config_content.clone());
                 let file_handle = config_file.create_handle();
                 NodeType::File(file_handle)

@@ -474,21 +474,19 @@ impl WD {
 
                         match get_result {
                             Err(dir_error) => {
-                                // Directory access failed (e.g., dynamic dir config parsing failed)
-                                // For mknod overwrite operations, we still want to provide parent info
+                                // Directory access failed - this is ALWAYS an error, not NotFound!
+                                // Examples: dynamic dir factory not registered, permission denied, etc.
+                                // DO NOT convert to NotFound - that masks the real problem
                                 let name_bound2 = &name;
                                 debug!(
                                     "resolve: Directory access error for '{}': {}",
                                     name_bound2, dir_error
                                 );
-                                if components.peek().is_some() {
-                                    // Not the final component, so this is a real error
-                                    return Err(dir_error);
-                                } else {
-                                    // Final component - treat as NotFound with the structured error info
-                                    // The error message will include both the path and the underlying error
-                                    return Ok((dnode, Lookup::NotFound(path.to_path_buf(), name)));
-                                }
+                                // Propagate the real error with context
+                                return Err(Error::Other(format!(
+                                    "Failed to access '{}' in path {}: {}",
+                                    name, path.display(), dir_error
+                                )));
                             }
                             Ok(None) => {
                                 let name_bound2 = &name;
@@ -974,7 +972,7 @@ impl WD {
                     Lookup::NotFound(_, name) => {
                         // For overwrite operations, we should try to recreate/overwrite anyway
                         // since the parent directory info is available in wd
-                        let id = wd.id().new_child_id(EntryType::DirectoryDynamic);
+                        let id = wd.id().new_child_id(entry_type);
                         let node = wd
                             .fs
                             .create_dynamic_node(
@@ -984,7 +982,7 @@ impl WD {
                             )
                             .await?;
 
-                        // @@@ wasnt supposed to do this, but we changed signatures of create_dynamic_dir
+                        // Insert into parent directory with the given name
                         wd.dref.insert(name.clone(), node.clone()).await?;
 
                         Ok(NodePath::new(node, wd.dref.path().join(&name)))

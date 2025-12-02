@@ -4831,6 +4831,7 @@ dependencies = [
  "serde",
  "serde_arrow",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "thiserror 2.0.17",
  "tokio",
