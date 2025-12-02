@@ -2204,13 +2204,20 @@ impl InnerState {
     ) -> Result<(), TLogFSError> {
         let now = Utc::now().timestamp_micros();
 
-        // First, verify the node exists and is a dynamic node
-        let existing_config = self.get_dynamic_node_config(id).await?;
-        if existing_config.is_none() {
-            return Err(TLogFSError::NodeNotFound {
-                path: format!("id:{}", id).into(),
-                // @@@ LAME
-            });
+        // Verify the node exists and is a dynamic node by checking if it has a factory field
+        // We don't try to parse the existing config since it might be malformed (that's why we're overwriting)
+        let has_factory = self.records.iter().any(|r| {
+            r.node_id == id.node_id() && r.part_id == id.part_id() && r.factory.is_some()
+        });
+
+        if !has_factory {
+            // Check committed records
+            let records = self.query_records(id).await?;
+            if !records.first().map(|r| r.factory.is_some()).unwrap_or(false) {
+                return Err(TLogFSError::NodeNotFound {
+                    path: format!("id:{}", id).into(),
+                });
+            }
         }
 
         // Get the current version from existing records to increment it

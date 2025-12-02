@@ -10,7 +10,7 @@ use log::debug;
 use std::collections::HashMap;
 use steward::PondUserMetadata;
 use tempfile::TempDir;
-use tinyfs::{FS, PersistenceLayer};
+use tinyfs::FS;
 use tlogfs::factory::ExecutionContext;
 use tlogfs::{FactoryContext, FactoryRegistry};
 
