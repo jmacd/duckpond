@@ -287,6 +287,27 @@ impl FactoryRegistry {
         (factory.validate_config)(config)
     }
 
+    /// Determine whether a factory creates directories or files
+    /// Each factory is restricted to creating only one type of node
+    /// Returns true if the factory creates directories, false if it creates files
+    pub fn factory_creates_directory(factory_name: &str) -> TinyFSResult<bool> {
+        let factory = Self::get_factory(factory_name)
+            .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
+
+        match (factory.create_directory.is_some(), factory.create_file.is_some()) {
+            (true, false) => Ok(true),
+            (false, true) => Ok(false),
+            (true, true) => Err(tinyfs::Error::Other(format!(
+                "Factory '{}' incorrectly supports both directories and files",
+                factory_name
+            ))),
+            (false, false) => Err(tinyfs::Error::Other(format!(
+                "Factory '{}' supports neither directories nor files",
+                factory_name
+            ))),
+        }
+    }
+
     /// Initialize a factory after node creation (runs outside lock)
     /// The caller manages the transaction; state is available via context
     pub async fn initialize(
