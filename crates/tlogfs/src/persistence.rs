@@ -480,7 +480,7 @@ impl OpLogPersistence {
         // Reload the table from disk to pick up the committed changes
         // This ensures subsequent transactions see the new data
         self.table = deltalake::open_table(self.path.to_string_lossy().to_string()).await?;
-        println!("🔄 Reloaded table after commit, new version: {:?}", self.table.version());
+        debug!("🔄 Reloaded table after commit, new version: {:?}", self.table.version());
         self.last_txn_seq = new_seq;
 
         Ok(res)
@@ -1105,7 +1105,7 @@ impl InnerState {
         );
 
         // Register the fundamental delta_table for direct DeltaTable queries
-        println!("📋 REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}", 
+        debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}", 
             table.version());
         _ = ctx
             .register_table("delta_table", Arc::new(table.clone()))
@@ -1162,22 +1162,11 @@ impl InnerState {
     async fn ensure_directory_loaded(&mut self, id: FileID) -> Result<(), TLogFSError> {
         // Check if already loaded
         if self.directories.contains_key(&id) {
-            println!("🔍 ensure_directory_loaded: {} already in self.directories", id);
-            let dir_state = self.directories.get(&id).unwrap();
-            println!("🔍   Has {} entries in mapping", dir_state.mapping.len());
-            for (name, entry) in &dir_state.mapping {
-                println!("🔍     Entry: '{}' -> {:?}", name, entry.child_node_id);
-            }
             return Ok(());
         }
 
-        println!("🔍 ensure_directory_loaded: {} NOT in cache, loading from OpLog", id);
         // Load from OpLog
         let entries = self.query_directory_entries(id).await?;
-        println!("🔍 Loaded {} entries for directory {} from OpLog", entries.len(), id);
-        for entry in &entries {
-            println!("🔍   Entry: '{}' -> {:?} (type: {:?})", entry.name, entry.child_node_id, entry.entry_type);
-        }
 
         // Cache in memory with modified: false
         _ = self.directories.insert(id, DirectoryState::new_unmodified(entries));
@@ -1659,20 +1648,20 @@ impl InnerState {
 
         // Debug: log what we're about to commit
         for (i, record) in records.iter().enumerate() {
-            println!("  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, factory={:?}", 
+            debug!("  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, factory={:?}", 
                 i, record.part_id, record.node_id, record.file_type, record.version,
                 record.content.as_ref().map(|c| c.len()).unwrap_or(0),
                 record.factory);
         }
 
         // Convert records to RecordBatch
-        println!("🔄 About to serialize {} records with serde_arrow", records.len());
+        debug!("🔄 About to serialize {} records with serde_arrow", records.len());
         let batches = vec![serde_arrow::to_record_batch(
             &OplogEntry::for_arrow(),
             &records,
         )?];
 
-        println!("📊 RecordBatch created with {} batches, batch[0] has {} rows", 
+        debug!("📊 RecordBatch created with {} batches, batch[0] has {} rows", 
                batches.len(), batches[0].num_rows());
         
         // DEBUG: Print first few values from part_id and node_id columns
@@ -1680,9 +1669,9 @@ impl InnerState {
             use arrow::array::StringArray;
             let part_id_col = batches[0].column(0);
             let node_id_col = batches[0].column(1);
-            println!("🔍 First 3 rows of RecordBatch:");
+            debug!("🔍 First 3 rows of RecordBatch:");
             for i in 0..batches[0].num_rows().min(3) {
-                println!("   Row {}: part_id={:?}, node_id={:?}",
+                debug!("   Row {}: part_id={:?}, node_id={:?}",
                     i,
                     part_id_col.as_any().downcast_ref::<StringArray>().map(|a| a.value(i)),
                     node_id_col.as_any().downcast_ref::<StringArray>().map(|a| a.value(i)));
@@ -2273,14 +2262,14 @@ impl InnerState {
                         return Err(TLogFSError::Missing);
                     } else {
                         let batch = &batches[0];
-                        println!("🔍 Query returned {} rows", batch.num_rows());
-                        println!("🔍 Schema: {:?}", batch.schema());
+                        debug!("🔍 Query returned {} rows", batch.num_rows());
+                        debug!("🔍 Schema: {:?}", batch.schema());
                         
                         // Print first row details
                         if batch.num_rows() > 0 {
                             for (i, field) in batch.schema().fields().iter().enumerate() {
                                 let col = batch.column(i);
-                                println!("  Column {}: {} = {:?}", i, field.name(), col);
+                                debug!("  Column {}: {} = {:?}", i, field.name(), col);
                             }
                         }
                         
@@ -3126,22 +3115,22 @@ mod node_factory {
         // Create context with all template variables (vars, export, and any other keys)
         let context = FactoryContext::new(state.clone(), id);
 
-        println!("🔍 create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}", 
+        debug!("🔍 create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}", 
                  factory_type, oplog_entry.file_type, config_content.len());
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
             EntryType::DirectoryDynamic => {
-                println!("🔍 Calling FactoryRegistry::create_directory for '{}'", factory_type);
+                debug!("🔍 Calling FactoryRegistry::create_directory for '{}'", factory_type);
                 let dir_handle = FactoryRegistry::create_directory(
                     factory_type,
                     config_content,
                     context.clone(),
                 ).map_err(|e| {
-                    println!("❌ FactoryRegistry::create_directory failed: {}", e);
+                    debug!("❌ FactoryRegistry::create_directory failed: {}", e);
                     e
                 })?;
-                println!("✅ FactoryRegistry::create_directory succeeded");
+                debug!("✅ FactoryRegistry::create_directory succeeded");
                 NodeType::Directory(dir_handle)
             }
             EntryType::FileDataDynamic => {
@@ -3149,20 +3138,20 @@ mod node_factory {
                 if let Some(factory) = FactoryRegistry::get_factory(factory_type) {
                     if factory.create_file.is_some() {
                         // File factory - call create_file
-                        println!("🔍 Calling FactoryRegistry::create_file for '{}'", factory_type);
+                        debug!("🔍 Calling FactoryRegistry::create_file for '{}'", factory_type);
                         let file_handle = FactoryRegistry::create_file(
                             factory_type,
                             config_content,
                             context.clone(),
                         ).await.map_err(|e| {
-                            println!("❌ FactoryRegistry::create_file failed: {}", e);
+                            debug!("❌ FactoryRegistry::create_file failed: {}", e);
                             e
                         })?;
-                        println!("✅ FactoryRegistry::create_file succeeded");
+                        debug!("✅ FactoryRegistry::create_file succeeded");
                         NodeType::File(file_handle)
                     } else {
                         // Executable factory - config IS the file content
-                        println!("🔍 Executable factory '{}' - using config as file content", factory_type);
+                        debug!("🔍 Executable factory '{}' - using config as file content", factory_type);
                         let config_file = crate::factory::ConfigFile::new(config_content.clone());
                         NodeType::File(config_file.create_handle())
                     }

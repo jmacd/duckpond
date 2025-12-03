@@ -160,14 +160,26 @@ impl DynamicDirDirectory {
             }
         };
 
-        // Deterministically generate NodeID for entry node based on entry name, factory, and config
-        // Pass concatenated bytes directly to NodeID::from_content to avoid double-hashing
+        // Deterministically generate FileID for entry node based on entry name, factory, and config
         let mut id_bytes = Vec::new();
         id_bytes.extend_from_slice(entry.name.as_bytes());
         id_bytes.extend_from_slice(entry.factory.as_bytes());
         id_bytes.extend_from_slice(&config_bytes);
-        let node_id = tinyfs::NodeID::from_content(&id_bytes);
-        let file_id = tinyfs::FileID::new_from_ids(self.context.file_id.part_id(), node_id);
+        // Use this dynamic directory's NodeID as the PartID for children
+        let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
+        // Determine EntryType from the created node_type
+        // For files, query the file's metadata to get the correct EntryType
+        let entry_type = match &node_type {
+            tinyfs::NodeType::Directory(_) => EntryType::DirectoryDynamic,
+            tinyfs::NodeType::File(file_handle) => {
+                // Query the file's metadata to get the correct EntryType
+                // This allows factories like timeseries-join to specify FileSeriesDynamic
+                let metadata = file_handle.metadata().await?;
+                metadata.entry_type
+            }
+            tinyfs::NodeType::Symlink(_) => EntryType::Symlink,
+        };
+        let file_id = tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes);
 
         let node_ref = Node::new(file_id, node_type);
 
@@ -242,11 +254,11 @@ impl Directory for DynamicDirDirectory {
                         "DynamicDirDirectory::entries - successfully created entry '{}'",
                         entry.name
                     );
-                    // Extract node_id from the created node's FileID
+                    // Extract node_id and entry_type from the created node's FileID
                     let dir_entry = tinyfs::DirectoryEntry::new(
                         entry.name.clone(),
                         node_ref.id().node_id(),
-                        EntryType::DirectoryDynamic,
+                        node_ref.id().entry_type(),
                         0, // No version for dynamic entries
                     );
                     results.push(Ok(dir_entry));
@@ -679,6 +691,77 @@ entries:
                 "Entry '{}' node_id wrong length: {}",
                 dir_entry.name, node_id_str
             );
+            
+            // CRITICAL: Validate EntryType is valid (would have caught the from_content bug)
+            let entry_type = dir_entry.entry_type;
+            
+            // For dynamic directory entries, should be either DirectoryDynamic or FileDataDynamic
+            let type_value = entry_type as u8;
+            assert!(
+                type_value >= 1 && type_value <= 9,
+                "Entry '{}' has out-of-range EntryType: {} ({:?})",
+                dir_entry.name, type_value, entry_type
+            );
         }
+    }
+
+    /// Test that DynamicDirDirectory respects the EntryType from factory metadata.
+    /// This test catches a bug where all files were hardcoded to FileDataDynamic
+    /// instead of querying the factory's metadata for the correct type.
+    /// 
+    /// Bug scenario:
+    /// - timeseries-join factory creates SqlDerivedFile with FileSeriesDynamic
+    /// - DynamicDirDirectory was ignoring this and assigning FileDataDynamic
+    /// - SQL pattern resolution failed because it looked for FileSeries* types
+    #[tokio::test]
+    async fn test_dynamic_dir_respects_factory_entry_type() {
+        use crate::factory::FactoryContext;
+        use crate::persistence::OpLogPersistence;
+        use tinyfs::{EntryType, FileID};
+        use futures::StreamExt;
+
+        // Setup
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let tx_guard = persistence.begin_test().await.unwrap();
+        let state = tx_guard.state().unwrap();
+        let context = FactoryContext::new(state, FileID::root());
+
+        // Create a dynamic directory with an entry that uses sql-derived-series
+        // which should create FileSeriesDynamic, NOT FileDataDynamic
+        let config = r#"
+entries:
+  - name: "test_series_file"
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        input: "/some/path/*.parquet"
+      query: "SELECT * FROM input"
+"#;
+
+        // Parse config and create DynamicDirDirectory directly
+        let config_value = serde_yaml::from_str(config).unwrap();
+        let dir_config: DynamicDirConfig = serde_json::from_value(config_value).unwrap();
+        let dynamic_dir = DynamicDirDirectory::new(dir_config, context);
+
+        // Get entries stream and collect
+        let entries_stream = dynamic_dir.entries().await.unwrap();
+        let entries: Vec<_> = entries_stream.collect().await;
+        assert_eq!(entries.len(), 1, "Should have exactly one entry");
+
+        let entry = entries[0].as_ref().unwrap();
+        assert_eq!(entry.name, "test_series_file");
+
+        // CRITICAL TEST: The entry should have FileSeriesDynamic type from sql-derived-series,
+        // NOT FileDataDynamic which would be the bug
+        assert_eq!(
+            entry.entry_type,
+            EntryType::FileSeriesDynamic,
+            "sql-derived-series factory should create FileSeriesDynamic, not FileDataDynamic. \
+             This test catches the bug where DynamicDirDirectory hardcoded EntryType::FileDataDynamic \
+             instead of querying the factory's metadata."
+        );
     }
 }

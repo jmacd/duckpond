@@ -37,31 +37,7 @@ impl NodeID {
         Self(uuid)
     }
 
-    /// Generate a deterministic NodeID from content (for stable dynamic objects)
-    /// Uses SHA-256 hash of content as the random part of UUID7
-    #[must_use]
-    pub fn from_content(content: &[u8]) -> Self {
-        use sha2::{Digest, Sha256};
-        // Create SHA-256 hash of content
-        let mut hasher = Sha256::new();
-        hasher.update(content);
-        let hash = hasher.finalize();
-        // Use a fixed, valid timestamp for deterministic NodeIDs
-        // @@@ WHOA
 
-        let timestamp = 1u64;
-        // Extract 74 bits for the random part (12 bits for rand_a, 62 bits for rand_b)
-        // SHA-256 gives us 32 bytes = 256 bits, plenty for this
-        let bits = u128::from_be_bytes([
-            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8],
-            hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
-        ]);
-        // Top 12 bits for rand_a, next 62 bits for rand_b
-        let rand_a = ((bits >> 66) & 0xFFF) as u16; // 12 bits
-        let rand_b = ((bits >> 4) & 0x3FFF_FFFF_FFFF_FFFF) as u64; // 62 bits
-        let uuid = Uuid::from_fields_v7(timestamp, rand_a, rand_b);
-        Self(uuid)
-    }
 
     /// Get shortened display version (8 chars like git)
     /// TODO use the data-privacy feature
@@ -208,6 +184,46 @@ impl FileID {
     #[must_use]
     pub fn new_in_partition(parent_part_id: PartID, entry_type: EntryType) -> Self {
         let node_id = NodeID::generate(entry_type);
+        Self {
+            part_id: parent_part_id,
+            node_id,
+        }
+    }
+
+    /// Create FileID with deterministic NodeID from content
+    /// Used by dynamic factories to create stable IDs for generated nodes
+    /// For dynamic directories creating children:
+    ///   - Use parent directory's NodeID as the PartID
+    /// For root-level dynamic nodes:
+    ///   - Use PartID::root()
+    #[must_use]
+    pub fn from_content(parent_part_id: PartID, entry_type: EntryType, content: &[u8]) -> Self {
+        use sha2::{Digest, Sha256};
+        
+        // Create SHA-256 hash of content
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        let hash = hasher.finalize();
+        
+        // Use a fixed timestamp for deterministic IDs
+        let timestamp = 1u64;
+        
+        // Extract bits for the random part
+        let bits = u128::from_be_bytes([
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8],
+            hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+        ]);
+        let rand_a = ((bits >> 66) & 0xFFF) as u16; // 12 bits
+        let rand_b = ((bits >> 4) & 0x3FFF_FFFF_FFFF_FFFF) as u64; // 62 bits
+        
+        // Create UUID7 with our timestamp and random bits
+        let uuid = Uuid::from_fields_v7(timestamp, rand_a, rand_b);
+        
+        // Set the EntryType in byte 6's lower nibble
+        let mut bytes: [u8; 16] = uuid.into();
+        bytes[6] = 0x70 | (entry_type as u8);
+        let node_id = NodeID(Uuid::from(bytes));
+        
         Self {
             part_id: parent_part_id,
             node_id,

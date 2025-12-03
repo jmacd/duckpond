@@ -735,13 +735,14 @@ impl TemporalReduceDirectory {
             self.parsed_resolutions.clone(),
         );
 
-        // Create deterministic NodeID for this site directory
+        // Create deterministic FileID for this site directory
         let mut id_bytes = Vec::new();
         id_bytes.extend_from_slice(site_name.as_bytes());
         id_bytes.extend_from_slice(source_path.as_bytes());
         id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
-        let node_id = tinyfs::NodeID::from_content(&id_bytes);
-        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::root(), node_id);
+        // Use this temporal reduce directory's NodeID as the PartID for children
+        let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
+        let file_id = tinyfs::FileID::from_content(parent_part_id, EntryType::DirectoryDynamic, &id_bytes);
 
         Node::new(file_id, NodeType::Directory(site_directory.create_handle()))
     }
@@ -898,18 +899,20 @@ impl Directory for TemporalReduceSiteDirectory {
         for (res_str, _duration) in &self.parsed_resolutions {
             let filename = format!("res={}.series", res_str);
             
-            // Create deterministic node ID for this entry
+            // Create deterministic FileID for this entry - note: we already have the EntryType from dir_entry below
             let mut id_bytes = Vec::new();
             id_bytes.extend_from_slice(self.site_name.as_bytes());
             id_bytes.extend_from_slice(self.source_path.as_bytes());
             id_bytes.extend_from_slice(res_str.as_bytes());
             id_bytes.extend_from_slice(filename.as_bytes());
             id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
-            let node_id = tinyfs::NodeID::from_content(&id_bytes);
+            // Use this temporal reduce site directory's NodeID as the PartID for children
+            let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
+            let file_id = tinyfs::FileID::from_content(parent_part_id, EntryType::FileSeriesDynamic, &id_bytes);
 
             let dir_entry = tinyfs::DirectoryEntry::new(
                 filename.clone(),
-                node_id,
+                file_id.node_id(),
                 EntryType::FileSeriesDynamic,
                 0,
             );
@@ -927,15 +930,16 @@ impl Directory for TemporalReduceSiteDirectory {
             if filename == name {
                 let sql_file = self.create_temporal_sql_file(*duration).await?;
 
-                // Create deterministic NodeID for this temporal-reduce entry
+                // Create deterministic FileID for this temporal-reduce entry
                 let mut id_bytes = Vec::new();
                 id_bytes.extend_from_slice(self.site_name.as_bytes());
                 id_bytes.extend_from_slice(self.source_path.as_bytes());
                 id_bytes.extend_from_slice(res_str.as_bytes());
                 id_bytes.extend_from_slice(filename.as_bytes());
                 id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
-                let node_id = tinyfs::NodeID::from_content(&id_bytes);
-                let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::root(), node_id);
+                // Use this temporal reduce site directory's NodeID as the PartID for children
+                let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
+                let file_id = tinyfs::FileID::from_content(parent_part_id, EntryType::FileDataDynamic, &id_bytes);
 
                 let node_ref = Node::new(file_id, NodeType::File(sql_file));
                 return Ok(Some(node_ref));

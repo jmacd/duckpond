@@ -1,45 +1,4 @@
 //! Bundle creation for remote backups
-//!
-//! This module provides streaming tar+zstd compression for creating backup bundles.
-//! Bundles are written directly to object storage (local filesystem or S3) without
-//! creating temporary files.
-//!
-//! # Architecture
-//!
-//! ```text
-//! AsyncRead (file) → tar → zstd → object_store
-//!                    ↓      ↓         ↓
-//!                  stream  compress  upload
-//! ```
-//!
-//! # Usage
-//!
-//! ```rust,no_run
-//! use tlogfs::bundle::{BundleBuilder, BundleFile};
-//! use object_store::local::LocalFileSystem;
-//! use std::sync::Arc;
-//!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut builder = BundleBuilder::new();
-//!
-//! // Add files with async readers
-//! builder.add_file(
-//!     "/data/file1.csv",
-//!     1024,
-//!     tokio::io::empty(), // Replace with actual AsyncRead
-//! )?;
-//!
-//! // Write bundle to local filesystem (or S3)
-//! let store = Arc::new(LocalFileSystem::new());
-//! let metadata = builder.write_to_store(
-//!     store,
-//!     &object_store::path::Path::from("bundle.tar.zst")
-//! ).await?;
-//!
-//! println!("Bundle created: {} bytes", metadata.compressed_size);
-//! # Ok(())
-//! # }
-//! ```
 
 use crate::error::TLogFSError;
 use async_compression::tokio::write::ZstdEncoder;

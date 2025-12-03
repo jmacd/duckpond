@@ -130,14 +130,15 @@ impl Directory for TemplateDirectory {
                 let template_file =
                     TemplateFile::new(template_content, self.context.clone(), captured);
 
-                // Generate deterministic node_id for this template file
+                // Generate deterministic FileID for this template file
                 let mut id_bytes = Vec::new();
                 id_bytes.extend_from_slice(filename.as_bytes());
                 id_bytes.extend_from_slice(self.config.in_pattern.as_bytes());
                 id_bytes.extend_from_slice(self.config.out_pattern.as_bytes());
                 id_bytes.extend_from_slice(self.config.template_file.as_bytes());
-                let node_id = tinyfs::NodeID::from_content(&id_bytes);
-                let file_id = tinyfs::FileID::new_from_ids(self.context.file_id.part_id(), node_id);
+                // Use this template directory's NodeID as the PartID for children
+                let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
+                let file_id = tinyfs::FileID::from_content(parent_part_id, EntryType::FileDataDynamic, &id_bytes);
 
                 let node_ref = Node::new(file_id, tinyfs::NodeType::File(template_file.create_handle()));
 

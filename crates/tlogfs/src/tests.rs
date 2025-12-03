@@ -1496,6 +1496,16 @@ async fn test_create_dynamic_file_path() {
 
     debug!("✅ Created dynamic file with factory: test-file");
     debug!("   Node ID: {:?}", dynamic_node.id());
+    
+    // Verify EntryType is correctly embedded in the FileID
+    let file_id = dynamic_node.id();
+    let entry_type = file_id.entry_type();
+    assert_eq!(
+        entry_type,
+        tinyfs::EntryType::FileDataDynamic,
+        "Dynamic file should have FileDataDynamic EntryType"
+    );
+    debug!("✅ FileID has correct EntryType: {:?}", entry_type);
 
     // Verify we can read the file back
     let read_content = root
@@ -1523,6 +1533,21 @@ async fn test_create_dynamic_file_path() {
         .expect("Failed to begin TX2");
 
     let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    // Read back the node to verify EntryType persisted correctly
+    let node_path2 = root2
+        .get_node_path(std::path::Path::new("/config/test.yaml"))
+        .await
+        .expect("Failed to get node");
+    
+    let file_id2 = node_path2.id();
+    let entry_type2 = file_id2.entry_type();
+    assert_eq!(
+        entry_type2,
+        tinyfs::EntryType::FileDataDynamic,
+        "Persisted dynamic file should have valid FileDataDynamic EntryType"
+    );
+    debug!("✅ Persisted FileID has correct EntryType: {:?}", entry_type2);
 
     let content2 = root2
         .read_file_path_to_vec("/config/test.yaml")
@@ -1651,4 +1676,182 @@ async fn test_create_dynamic_directory_path() {
     debug!("- Created dynamic directory using high-level path API");
     debug!("- Verified existence in same transaction");
     debug!("- Committed and verified persistence");
+}
+
+/// Test that would have caught the EntryType bug in FileID::from_content
+/// 
+/// This test creates dynamic nodes (both files and directories), commits them,
+/// then reads them back and verifies:
+/// 1. FileIDs are valid and parseable
+/// 2. EntryType is correctly embedded in NodeID
+/// 3. Dynamic nodes can be read and used after persistence
+#[tokio::test]
+async fn test_dynamic_node_entry_type_validation() {
+    let store_path = test_dir();
+    
+    println!("\n🔍 Testing dynamic node EntryType validation");
+
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    // Transaction 1: Create dynamic file and directory
+    let tx1 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root = tx1.root().await.expect("Failed to get root");
+
+    // Create parent directory
+    println!("Creating parent directory: /dynamic-test");
+    let _ = root.create_dir_path("/dynamic-test")
+        .await
+        .expect("Failed to create parent directory");
+
+    // Create dynamic file using test-file factory
+    println!("Creating dynamic file: /dynamic-test/test.yaml");
+    let test_file_config = tinyfs::testing::TestFileConfig::simple("test content from dynamic file");
+    let file_config_bytes = test_file_config
+        .to_yaml_bytes()
+        .expect("Failed to serialize test file config");
+    
+    let dynamic_file = root
+        .create_dynamic_path(
+            "/dynamic-test/test.yaml",
+            tinyfs::EntryType::FileDataDynamic,
+            "test-file",
+            file_config_bytes,
+        )
+        .await
+        .expect("Failed to create dynamic file");
+
+    let file_id = dynamic_file.id();
+    println!("✅ Created dynamic file with ID: {:?}", file_id);
+    
+    // Verify EntryType is valid immediately after creation
+    let file_entry_type = file_id.entry_type();
+    println!("  EntryType from FileID: {:?}", file_entry_type);
+    assert_eq!(
+        file_entry_type,
+        tinyfs::EntryType::FileDataDynamic,
+        "Dynamic file should have FileDataDynamic EntryType"
+    );
+
+    // Create dynamic directory using test-dir factory
+    println!("Creating dynamic directory: /dynamic-test/subdir");
+    let test_dir_config = tinyfs::testing::TestDirectoryConfig::simple("subdir");
+    let dir_config_bytes = test_dir_config
+        .to_yaml_bytes()
+        .expect("Failed to serialize test dir config");
+    
+    let dynamic_dir = root
+        .create_dynamic_path(
+            "/dynamic-test/subdir",
+            tinyfs::EntryType::DirectoryDynamic,
+            "test-dir",
+            dir_config_bytes,
+        )
+        .await
+        .expect("Failed to create dynamic directory");
+
+    let dir_id = dynamic_dir.id();
+    println!("✅ Created dynamic directory with ID: {:?}", dir_id);
+    
+    // Verify EntryType is valid immediately after creation
+    let dir_entry_type = dir_id.entry_type();
+    println!("  EntryType from FileID: {:?}", dir_entry_type);
+    assert_eq!(
+        dir_entry_type,
+        tinyfs::EntryType::DirectoryDynamic,
+        "Dynamic directory should have DirectoryDynamic EntryType"
+    );
+
+    // Commit transaction
+    println!("Committing transaction 1");
+    tx1.commit_test()
+        .await
+        .expect("Failed to commit transaction 1");
+
+    // Transaction 2: Read back the dynamic nodes and verify EntryTypes
+    println!("\nStarting transaction 2 to read back dynamic nodes");
+    let tx2 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction 2");
+
+    let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    // Read back dynamic file
+    println!("Reading back dynamic file: /dynamic-test/test.yaml");
+    let file_node = root2
+        .get_node_path(std::path::Path::new("/dynamic-test/test.yaml"))
+        .await
+        .expect("Failed to get dynamic file");
+
+    let read_file_id = file_node.id();
+    println!("✅ Read back dynamic file with ID: {:?}", read_file_id);
+    
+    // This is the critical test: can we parse the EntryType from the persisted FileID?
+    let read_file_entry_type = read_file_id.entry_type();
+    println!("  EntryType from persisted FileID: {:?}", read_file_entry_type);
+    assert_eq!(
+        read_file_entry_type,
+        tinyfs::EntryType::FileDataDynamic,
+        "Persisted dynamic file should have valid FileDataDynamic EntryType"
+    );
+
+    // Verify we can actually read the file content
+    let file_content = root2
+        .read_file_path_to_vec("/dynamic-test/test.yaml")
+        .await
+        .expect("Failed to read dynamic file content");
+    let content_str = String::from_utf8_lossy(&file_content);
+    println!("  File content: {:?}", content_str);
+    assert_eq!(
+        content_str,
+        "test content from dynamic file",
+        "Dynamic file content should match"
+    );
+
+    // Read back dynamic directory
+    println!("Reading back dynamic directory: /dynamic-test/subdir");
+    let dir_node = root2
+        .get_node_path(std::path::Path::new("/dynamic-test/subdir"))
+        .await
+        .expect("Failed to get dynamic directory");
+
+    let read_dir_id = dir_node.id();
+    println!("✅ Read back dynamic directory with ID: {:?}", read_dir_id);
+    
+    // This is the critical test: can we parse the EntryType from the persisted FileID?
+    let read_dir_entry_type = read_dir_id.entry_type();
+    println!("  EntryType from persisted FileID: {:?}", read_dir_entry_type);
+    assert_eq!(
+        read_dir_entry_type,
+        tinyfs::EntryType::DirectoryDynamic,
+        "Persisted dynamic directory should have valid DirectoryDynamic EntryType"
+    );
+
+    // Verify we can list the directory (even though it's empty)
+    use futures::stream::StreamExt;
+    let dir_node_handle = dir_node
+        .into_dir()
+        .await
+        .expect("Node should be a directory");
+    let mut entries_stream = dir_node_handle.handle.entries().await.expect("Failed to get entries");
+    let mut entry_count = 0;
+    while let Some(entry_result) = entries_stream.next().await {
+        let _entry = entry_result.expect("Failed to read entry");
+        entry_count += 1;
+    }
+    println!("  Directory has {} entries", entry_count);
+
+    println!("\n✅ TEST PASSED!");
+    println!("- Created dynamic file and directory");
+    println!("- Verified EntryType immediately after creation");
+    println!("- Committed to persistence");
+    println!("- Read back from new transaction");
+    println!("- Verified EntryType from persisted NodeIDs (would have panicked with bug)");
+    println!("- Successfully used dynamic nodes (read file, list directory)");
 }
