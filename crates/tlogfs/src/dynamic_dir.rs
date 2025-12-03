@@ -1,48 +1,4 @@
-//! Dynamic directory factory for TLogFS
-//!
-//! This factory creates configurable directories where each entry is dynamically generated
-//! using other factories. It allows building complex directory structures by composing
-//! multiple dynamic nodes within a single directory configuration.
-//!
-//! # Configuration Format
-//!
-//! The configuration defines a list of directory entries, each with:
-//! - `name`: The entry name in the directory
-//! - `factory`: The factory type to use for creating the entry
-//! - `config`: The configuration for the specific factory
-//!
-//! # Example Configuration
-//! ```yaml
-//! entries:
-//!   - name: "field_station"
-//!     factory: "sql-derived-series"
-//!     config:
-//!       patterns:
-//!         - "/measurements/surface/*"
-//!         - "/measurements/bottom/*"
-//!       query: "SELECT * FROM source ORDER BY timestamp"
-//!   
-//!   - name: "host_logs"
-//!     factory: "hostmount"
-//!     config:
-//!       directory: "/var/log/application"
-//!       
-//!   - name: "csv_data"
-//!     factory: "csvdir"
-//!     config:
-//!       source: "/raw/data/*.csv"
-//! ```
-//!
-//! # Architecture
-//!
-//! The DynamicDirDirectory acts as a composition root that:
-//! 1. Parses its own configuration to get the list of entries
-//! 2. For each entry, delegates to the appropriate factory to create the node
-//! 3. Presents all created nodes as a unified directory interface
-//! 4. Handles factory lookup and validation through the FactoryRegistry
-//!
-//! This enables building complex directory structures that combine multiple data sources
-//! and processing types in a single configuration file.
+//! Dynamic directory factory for TinyFS
 
 use crate::factory::{FactoryContext, FactoryRegistry};
 use crate::register_dynamic_factory;
