@@ -163,16 +163,8 @@ impl FactoryContext {
         }
     }
 
-    /// Create a cache key for dynamic directory factory
-    pub async fn create_cache_key(
-        &self,
-        entry_name: &str,
-    ) -> Result<crate::persistence::DynamicNodeKey, TLogFSError> {
-        Ok(crate::persistence::DynamicNodeKey::new(
-            self.file_id.part_id(),
-            entry_name.to_string(),
-        ))
-    }
+    // Note: Cache key creation removed - caching now handled by CachingPersistence
+    // which uses FileID directly, no need for parent+name compound keys
 }
 
 /// A factory descriptor that can create dynamic nodes

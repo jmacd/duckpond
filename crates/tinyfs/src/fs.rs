@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::caching_persistence::CachingPersistence;
 use crate::EntryType;
 use crate::error::*;
 use crate::node::*;
@@ -19,9 +20,13 @@ pub struct FS {
 
 impl FS {
     /// Creates a filesystem with a PersistenceLayer
+    /// Automatically wraps the persistence layer with caching for improved performance
     pub async fn new<P: PersistenceLayer + 'static>(persistence: P) -> Result<Self> {
+        // Wrap persistence layer with caching decorator for transparent node caching
+        let cached_persistence = CachingPersistence::new(persistence);
+        
         Ok(FS {
-            persistence: Arc::new(persistence),
+            persistence: Arc::new(cached_persistence),
             busy: Arc::new(Mutex::new(HashSet::new())),
         })
     }

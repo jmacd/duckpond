@@ -2,6 +2,7 @@
 
 pub mod arrow;
 pub mod async_helpers;
+pub mod caching_persistence;
 mod dir;
 mod entry_type;
 mod error;
@@ -28,6 +29,7 @@ pub use wd::{CopyDestination, Lookup, Visitor, WD};
 // Buffer utilities for tests and special cases
 // WARNING: These load entire files into memory - use sparingly
 pub use async_helpers::buffer_helpers;
+pub use caching_persistence::CachingPersistence;
 pub use entry_type::EntryType;
 pub use error::{Error, Result};
 pub use memory::persistence::MemoryPersistence;

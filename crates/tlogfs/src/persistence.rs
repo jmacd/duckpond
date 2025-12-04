@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::{
-    EntryType, FS, FileID, FileVersionInfo, Node, NodeMetadata, NodeType, PartID,
+    EntryType, FS, FileID, FileVersionInfo, Node, NodeMetadata, NodeType,
     Result as TinyFSResult, persistence::PersistenceLayer,
 };
 use tokio::sync::Mutex;
@@ -80,8 +80,6 @@ pub struct State {
     inner: Arc<Mutex<InnerState>>,
     /// TinyFS ObjectStore instance - shared with SessionContext
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
-    /// Transaction-scoped cache for dynamic nodes
-    dynamic_node_cache: Arc<std::sync::Mutex<HashMap<DynamicNodeKey, Node>>>,
     /// Template variables for CLI variable expansion - mutable shared state
     template_variables: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
     /// Cache for TableProvider instances to avoid repeated ListingTable creation and schema inference
@@ -91,21 +89,7 @@ pub struct State {
     >,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DynamicNodeKey {
-    pub parent_id: PartID,
-    pub entry_name: String,
-}
 
-impl DynamicNodeKey {
-    #[must_use]
-    pub fn new(parent_id: PartID, entry_name: String) -> Self {
-        Self {
-            parent_id,
-            entry_name,
-        }
-    }
-}
 
 /// Cache key for TableProvider instances in TLogFS queries
 /// Combines node_id, part_id, and version selection to uniquely identify table configurations
@@ -444,7 +428,6 @@ impl OpLogPersistence {
                 InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?,
             )),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
-            dynamic_node_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             template_variables: Arc::new(std::sync::Mutex::new(HashMap::new())),
             table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
@@ -903,24 +886,6 @@ impl State {
     #[must_use]
     pub fn object_store(&self) -> Option<Arc<crate::tinyfs_object_store::TinyFsObjectStore>> {
         self.object_store.get().cloned()
-    }
-
-    /// Get cached dynamic node by key (for dynamic directory factory)
-    #[must_use]
-    pub fn get_dynamic_node_cache(&self, key: &DynamicNodeKey) -> Option<Node> {
-        self.dynamic_node_cache
-            .lock()
-            .expect("Failed to acquire dynamic node cache lock")
-            .get(key)
-            .cloned()
-    }
-
-    /// Set cached dynamic node by key (for dynamic directory factory)
-    pub fn set_dynamic_node_cache(&self, key: DynamicNodeKey, value: Node) {
-        _ = self.dynamic_node_cache
-            .lock()
-            .expect("Failed to acquire dynamic node cache lock")
-            .insert(key, value);
     }
 
     /// Get cached TableProvider by key (for TLogFS query optimization)
@@ -3088,21 +3053,9 @@ mod node_factory {
         state: State,
         factory_type: &str,
     ) -> Result<Node, tinyfs::Error> {
-        let cache_key = DynamicNodeKey::new(
-            id.part_id(),
-            // @@@ BOGUS
-            id.node_id().to_string(),
-        );
-        {
-            let cache = state
-                .dynamic_node_cache
-                .lock()
-                .expect("Failed to acquire dynamic node cache lock");
-            if let Some(existing) = cache.get(&cache_key) {
-                return Ok(existing.clone());
-            }
-        }
-
+        // Note: Node caching is now handled by CachingPersistence decorator in tinyfs
+        // No need for manual caching here
+        
         // Get configuration from the oplog entry
         // For ALL dynamic nodes, config is stored as-is in content field (original YAML bytes)
         let config_content = oplog_entry.content.as_ref().ok_or_else(|| {
@@ -3169,14 +3122,8 @@ mod node_factory {
 
 	let node = Node::new(id, node_type);
 
-        // Insert into cache
-        {
-            let mut cache = state
-                .dynamic_node_cache
-                .lock()
-                .expect("Failed to acquire dynamic node cache lock");
-            _ = cache.insert(cache_key, node.clone());
-        }
+        // Note: Node caching is now handled by CachingPersistence decorator in tinyfs
+        // The node will be automatically cached when returned
 
         Ok(node)
     }

@@ -242,7 +242,10 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
     let config: DynamicDirConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
 
-    // Instrument: log parent_id, entry names, and config hash
+    // Note: Node caching is now handled automatically by CachingPersistence decorator
+    // No need for manual caching here - the decorator will cache this node by FileID
+    
+    // Instrument: log parent_id, entry names, and config hash for debugging
     let parent_node_id = context.file_id.part_id();
     let entry_names: Vec<_> = config.entries.iter().map(|e| e.name.clone()).collect();
     let mut hasher = DefaultHasher::new();
@@ -253,36 +256,13 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
         parent_node_id, entry_names, config_hash
     );
 
-    // Create cache key using config hash as entry name to ensure uniqueness per configuration
-    let cache_entry_name = format!("dynamic_dir_{:x}", config_hash);
-
-    // Create cache key synchronously - we'll use a placeholder part_id since we can't await here
-
-    let cache_key = crate::persistence::DynamicNodeKey::new(parent_node_id, cache_entry_name);
-
-    debug!("[INSTRUMENT] cache_key: {:?}", cache_key);
-
-    // Check if we have a cached directory for this configuration
-    if let Some(cached_node) = context.state.get_dynamic_node_cache(&cache_key)
-        && let tinyfs::NodeType::Directory(cached_dir_handle) = cached_node.node_type
-    {
-        debug!(
-            "[INSTRUMENT] returning cached dynamic directory for config_hash={:x}",
-            config_hash
-        );
-        return Ok(cached_dir_handle);
-    }
-
     // Create new instance
+    // CachingPersistence will cache this automatically on create_dynamic_node()
     let dynamic_dir = DynamicDirDirectory::new(config, context.clone());
     let dir_handle = dynamic_dir.create_handle();
 
-    // Cache the directory handle for future access within this transaction
-    context
-        .state
-        .set_dynamic_node_cache(cache_key, Node::new(context.file_id, tinyfs::NodeType::Directory(dir_handle.clone())));
     debug!(
-        "[INSTRUMENT] cached new dynamic directory for config_hash={:x}",
+        "[INSTRUMENT] created dynamic directory for config_hash={:x} (will be cached by CachingPersistence)",
         config_hash
     );
 
