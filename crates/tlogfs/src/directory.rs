@@ -12,7 +12,6 @@ use tokio::sync::Mutex;
 
 pub struct OpLogDirectory {
     /// Unique node identifier for this directory
-    /// @@@ Note PartID == NodeID here, could store PartID
     id: FileID,
 
     /// Reference to persistence layer (single source of truth)
@@ -33,30 +32,6 @@ impl OpLogDirectory {
     pub fn create_handle(self) -> DirHandle {
         DirHandle::new(Arc::new(Mutex::new(Box::new(self))))
     }
-
-    // /// Determine the correct partition ID for a child based on its comprehensive EntryType
-    // fn get_child_partition_id(
-    //     &self,
-    //     child_node_id: NodeID,
-    //     entry_type: &tinyfs::EntryType,
-    // ) -> tinyfs::Result<NodeID> {
-    //     let part_id = entry_type.partition_id(child_node_id, self.node_id);
-        
-    //     if matches!(entry_type, tinyfs::EntryType::DirectoryPhysical) {
-    //         debug!(
-    //             "Physical directory {}, creating own partition",
-    //             child_node_id
-    //         );
-    //     } else {
-    //         debug!(
-    //             "Node {} (type: {}), using parent partition",
-    //             child_node_id,
-    //             entry_type.as_str()
-    //         );
-    //     }
-        
-    //     Ok(part_id)
-    // }
 }
 
 #[async_trait]
