@@ -5,9 +5,11 @@ client_secret: "{{ env(name='HYDRO_KEY_VALUE') }}"
 devices:
   - name:  BDockVulink
     id:    4990594334457856
+    comment: Becomes Field Station surface 10/17/2025    
 
   - name:  BDockAT500
     id:    6154708427603968
+    comment: Becomes Field Station surface 10/17/2025    
 
   - name:  SilverVulink1
     id:    6582334615060480
@@ -19,10 +21,13 @@ devices:
 
   - name:  SilverAT500
     id:    5859376846209024
+    comment: Still current @ Silver
 
   - name:  PrincessVulink
     id:    5877040213786624
+    comment: Becomes Field Station bottom 10/17/2025    
 
   - name:  PrincessAT500
     id:    6187749627789312
+    comment: Becomes Field Station bottom 10/17/2025    
     

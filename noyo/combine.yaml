@@ -29,11 +29,11 @@ entries:
         - pattern: "/hydrovu/devices/**/PrincessVulink.series"
           scope: Vulink2
           range:
-            end: 2025-10-16T21:00:00Z
+            begin: 2025-10-16T21:00:00Z
         - pattern: "/hydrovu/devices/**/PrincessAT500.series"
           scope: AT500_Bottom
           range:
-            end: 2025-10-16T21:00:00Z
+            begin: 2025-10-16T21:00:00Z
 
   - name: "BDock"
     factory: "timeseries-join"
