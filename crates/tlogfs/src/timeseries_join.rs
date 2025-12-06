@@ -86,7 +86,16 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
         ));
     }
 
-    // Generate table aliases (input0, input1, etc.) and build patterns map
+    // Group inputs by scope
+    // Same scope = UNION BY NAME (time-partitioned data, same schema, non-overlapping ranges)
+    // Different scopes = FULL OUTER JOIN (different devices/sensors, different columns)
+    let mut scope_groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, input) in config.inputs.iter().enumerate() {
+        let scope_key = input.scope.as_deref().unwrap_or("").to_string();
+        scope_groups.entry(scope_key).or_insert_with(Vec::new).push(i);
+    }
+
+    // Generate table aliases and patterns map
     let mut patterns = HashMap::new();
     let table_names: Vec<String> = config.inputs
         .iter()
@@ -98,105 +107,109 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
         })
         .collect();
 
-    // Build COALESCE clause for timestamp  
-    let first_table = &table_names[0];
-    let coalesce_parts: Vec<String> = table_names
-        .iter()
-        .map(|name| format!("{}.{}", name, config.time_column))
-        .collect();
-    let coalesce_clause = format!(
-        "COALESCE({}) AS {}",
-        coalesce_parts.join(", "),
-        config.time_column
-    );
-
-    // Build column selections with EXCLUDE
-    let mut column_selections: Vec<String> = vec![];
+    // Build CTEs for each scope group, using UNION BY NAME for same-scope inputs
+    let mut ctes = Vec::new();
+    let mut scope_cte_names = Vec::new();
     
-    // Select columns from ALL inputs (excluding timestamp from each)
-    // For inputs with the same scope (time-partitioned data), they have identical columns
-    // and we only need to select from the first occurrence. For inputs with different scopes,
-    // we select from all to get the union of columns.
-    let mut seen_scopes = std::collections::HashSet::new();
-    for (i, input) in config.inputs.iter().enumerate() {
-        let scope_key = input.scope.as_deref().unwrap_or("");
-        if !seen_scopes.contains(scope_key) || scope_key.is_empty() {
-            let table_name = &table_names[i];
-            column_selections.push(format!("{}.* EXCLUDE ({})", table_name, config.time_column));
-            if !scope_key.is_empty() {
-                _ = seen_scopes.insert(scope_key);
-            }
-        }
-    }
-
-    // Build JOIN clauses with per-input time filtering
-    let mut join_clauses = Vec::new();
-    
-    // FROM clause with optional WHERE for first input
-    if let Some(range) = &config.inputs[0].range {
-        let mut conditions = Vec::new();
-        if let Some(begin) = &range.begin {
-            let _validated = validate_timestamp(begin)?;
-            conditions.push(format!("{}.{} >= '{}'", first_table, config.time_column, begin));
-        }
-        if let Some(end) = &range.end {
-            let _validated = validate_timestamp(end)?;
-            conditions.push(format!("{}.{} <= '{}'", first_table, config.time_column, end));
-        }
-        if !conditions.is_empty() {
-            join_clauses.push(format!("FROM (SELECT * FROM {} WHERE {}) AS {}", 
-                first_table, conditions.join(" AND "), first_table));
-        } else {
-            join_clauses.push(format!("FROM {}", first_table));
-        }
-    } else {
-        join_clauses.push(format!("FROM {}", first_table));
-    }
-    
-    // FULL OUTER JOIN clauses with per-input time filtering
-    for (i, table_name) in table_names[1..].iter().enumerate() {
-        let input_idx = i + 1;
-        let join_condition = format!("{}.{} = {}.{}", 
-            first_table, config.time_column, table_name, config.time_column);
+    for (scope_idx, (_scope_key, input_indices)) in scope_groups.iter().enumerate() {
+        let cte_name = format!("scope{}", scope_idx);
+        scope_cte_names.push(cte_name.clone());
         
-        if let Some(range) = &config.inputs[input_idx].range {
-            let mut conditions = vec![join_condition];
-            if let Some(begin) = &range.begin {
-                let _validated = validate_timestamp(begin)?;
-                conditions.push(format!("{}.{} >= '{}'", table_name, config.time_column, begin));
+        if input_indices.len() == 1 {
+            // Single input for this scope - just SELECT with optional WHERE
+            let idx = input_indices[0];
+            let table_name = &table_names[idx];
+            let input = &config.inputs[idx];
+            
+            if let Some(range) = &input.range {
+                let mut conditions = Vec::new();
+                if let Some(begin) = &range.begin {
+                    let _validated = validate_timestamp(begin)?;
+                    conditions.push(format!("{} >= '{}'", config.time_column, begin));
+                }
+                if let Some(end) = &range.end {
+                    let _validated = validate_timestamp(end)?;
+                    conditions.push(format!("{} <= '{}'", config.time_column, end));
+                }
+                if !conditions.is_empty() {
+                    ctes.push(format!("{} AS (SELECT * FROM {} WHERE {})", 
+                        cte_name, table_name, conditions.join(" AND ")));
+                } else {
+                    ctes.push(format!("{} AS (SELECT * FROM {})", cte_name, table_name));
+                }
+            } else {
+                ctes.push(format!("{} AS (SELECT * FROM {})", cte_name, table_name));
             }
-            if let Some(end) = &range.end {
-                let _validated = validate_timestamp(end)?;
-                conditions.push(format!("{}.{} <= '{}'", table_name, config.time_column, end));
-            }
-            join_clauses.push(format!(
-                "FULL OUTER JOIN (SELECT * FROM {} WHERE {}) AS {} ON {}",
-                table_name,
-                conditions[1..].join(" AND "),
-                table_name,
-                conditions[0]
-            ));
         } else {
-            join_clauses.push(format!(
-                "FULL OUTER JOIN {} ON {}",
-                table_name, join_condition
-            ));
+            // Multiple inputs with same scope - UNION BY NAME
+            let mut union_parts = Vec::new();
+            for &idx in input_indices {
+                let table_name = &table_names[idx];
+                let input = &config.inputs[idx];
+                
+                if let Some(range) = &input.range {
+                    let mut conditions = Vec::new();
+                    if let Some(begin) = &range.begin {
+                        let _validated = validate_timestamp(begin)?;
+                        conditions.push(format!("{} >= '{}'", config.time_column, begin));
+                    }
+                    if let Some(end) = &range.end {
+                        let _validated = validate_timestamp(end)?;
+                        conditions.push(format!("{} <= '{}'", config.time_column, end));
+                    }
+                    if !conditions.is_empty() {
+                        union_parts.push(format!("SELECT * FROM {} WHERE {}", 
+                            table_name, conditions.join(" AND ")));
+                    } else {
+                        union_parts.push(format!("SELECT * FROM {}", table_name));
+                    }
+                } else {
+                    union_parts.push(format!("SELECT * FROM {}", table_name));
+                }
+            }
+            ctes.push(format!("{} AS ({})", cte_name, union_parts.join(" UNION BY NAME ")));
         }
     }
 
-    // Assemble the complete SQL
-    let select_clause = format!("  {}", coalesce_clause);
-    let columns_clause = column_selections
-        .iter()
-        .map(|col| format!("  {}", col))
-        .collect::<Vec<_>>()
-        .join(",\n");
+    // Now FULL OUTER JOIN all the scope CTEs
+    let first_scope = &scope_cte_names[0];
+    let mut join_sql = format!("FROM {}", first_scope);
     
+    for scope_name in &scope_cte_names[1..] {
+        join_sql.push_str(&format!(
+            "\nFULL OUTER JOIN {} ON {}.{} = {}.{}",
+            scope_name, first_scope, config.time_column, scope_name, config.time_column
+        ));
+    }
+
+    // Build COALESCE for timestamp from all scopes
+    let timestamp_coalesce = if scope_cte_names.len() == 1 {
+        format!("{}.{}", first_scope, config.time_column)
+    } else {
+        let coalesce_parts: Vec<String> = scope_cte_names
+            .iter()
+            .map(|name| format!("{}.{}", name, config.time_column))
+            .collect();
+        format!("COALESCE({}) AS {}", coalesce_parts.join(", "), config.time_column)
+    };
+
+    // Select all columns from each scope CTE
+    let mut column_selections = vec![timestamp_coalesce];
+    for scope_name in &scope_cte_names {
+        column_selections.push(format!("{}.* EXCLUDE ({})", scope_name, config.time_column));
+    }
+
+    let with_clause = if !ctes.is_empty() {
+        format!("WITH\n{}\n", ctes.join(",\n"))
+    } else {
+        String::new()
+    };
+
     let sql = format!(
-        "SELECT\n{},\n{}\n{}\nORDER BY {}",
-        select_clause,
-        columns_clause,
-        join_clauses.join("\n"),
+        "{}SELECT\n  {}\n{}\nORDER BY {}",
+        with_clause,
+        column_selections.join(",\n  "),
+        join_sql,
         config.time_column
     );
     
