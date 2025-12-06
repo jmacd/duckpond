@@ -113,22 +113,20 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
     // Build column selections with EXCLUDE
     let mut column_selections: Vec<String> = vec![];
     
-    // Always include all columns from first input
-    column_selections.push(format!("{}.* EXCLUDE ({})", first_table, config.time_column));
-    
-    // For additional inputs, we need to handle potential schema overlap
-    // Since we can't introspect schemas here, we use a heuristic:
-    // - If there are only 2 inputs, assume different schemas (old behavior)
-    // - If there are 3+ inputs, the middle ones likely overlap with first (time-partitioned)
-    //   so we skip selecting their columns - the COALESCE timestamp + first input columns suffice
-    if table_names.len() == 2 {
-        // Two inputs - assume different schemas (e.g., vulink + at500)
-        column_selections.push(format!("{}.* EXCLUDE ({})", table_names[1], config.time_column));
-    } else {
-        // Three+ inputs - only select from first input to avoid duplicates
-        // The JOIN will still include all rows, just using first input's schema
-        // and selecting from last input if it has unique columns
-        column_selections.push(format!("{}.* EXCLUDE ({})", table_names.last().unwrap(), config.time_column));
+    // Select columns from ALL inputs (excluding timestamp from each)
+    // For inputs with the same scope (time-partitioned data), they have identical columns
+    // and we only need to select from the first occurrence. For inputs with different scopes,
+    // we select from all to get the union of columns.
+    let mut seen_scopes = std::collections::HashSet::new();
+    for (i, input) in config.inputs.iter().enumerate() {
+        let scope_key = input.scope.as_deref().unwrap_or("");
+        if !seen_scopes.contains(scope_key) || scope_key.is_empty() {
+            let table_name = &table_names[i];
+            column_selections.push(format!("{}.* EXCLUDE ({})", table_name, config.time_column));
+            if !scope_key.is_empty() {
+                _ = seen_scopes.insert(scope_key);
+            }
+        }
     }
 
     // Build JOIN clauses with per-input time filtering
