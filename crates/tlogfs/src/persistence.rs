@@ -693,6 +693,81 @@ impl State {
             .get_factory_for_node(id)
             .await
     }
+
+    /// Create a ProviderContext from this State
+    /// 
+    /// This allows State to be used with factories that expect a ProviderContext.
+    /// The returned context holds Arc references to this State as implementations
+    /// of the provider traits.
+    pub fn as_provider_context(&self) -> provider::ProviderContext {
+        provider::ProviderContext::new(
+            Arc::new(self.clone()) as Arc<dyn provider::SessionProvider>,
+            Arc::new(self.clone()) as Arc<dyn provider::TemplateVariableProvider>,
+            Arc::new(self.clone()) as Arc<dyn provider::TableProviderCache>,
+        )
+    }
+}
+
+// Provider trait implementations for State
+// These allow State to be used as the implementation behind ProviderContext
+
+#[async_trait]
+impl provider::SessionProvider for State {
+    async fn session_context(&self) -> Result<Arc<SessionContext>, provider::Error> {
+        // Delegate to existing State method
+        self.session_context()
+            .await
+            .map_err(|e| provider::Error::SessionContext(e.to_string()))
+    }
+}
+
+impl provider::TemplateVariableProvider for State {
+    fn get_template_variables(&self) -> Result<HashMap<String, serde_json::Value>, provider::Error> {
+        // Return a snapshot of template variables
+        let vars = self.template_variables
+            .lock()
+            .map_err(|e| provider::Error::MutexPoisoned(e.to_string()))?
+            .clone();
+        Ok(vars)
+    }
+
+    fn set_template_variables(&self, vars: HashMap<String, serde_json::Value>) -> Result<(), provider::Error> {
+        // Update template variables
+        *self.template_variables
+            .lock()
+            .map_err(|e| provider::Error::MutexPoisoned(e.to_string()))? = vars;
+        Ok(())
+    }
+}
+
+impl provider::TableProviderCache for State {
+    fn get(&self, key: &dyn std::any::Any) -> Option<Arc<dyn datafusion::catalog::TableProvider>> {
+        // Downcast key to TableProviderKey and query cache
+        let key = key.downcast_ref::<TableProviderKey>()?;
+        self.table_provider_cache
+            .lock()
+            .expect("Failed to acquire table provider cache lock")
+            .get(key)
+            .cloned()
+    }
+
+    fn set(
+        &self,
+        key: Box<dyn std::any::Any + Send + Sync>,
+        provider: Arc<dyn datafusion::catalog::TableProvider>,
+    ) -> Result<(), provider::Error> {
+        // Downcast key to TableProviderKey
+        let key = *key.downcast::<TableProviderKey>()
+            .map_err(|_| provider::Error::InvalidCacheKey)?;
+        
+        // Insert into cache
+        _ = self.table_provider_cache
+            .lock()
+            .expect("Failed to acquire table provider cache lock")
+            .insert(key, provider);
+        
+        Ok(())
+    }
 }
 
 #[async_trait]

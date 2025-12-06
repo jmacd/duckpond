@@ -10,6 +10,18 @@ pub enum Error {
     #[error("Decompression error: {0}")]
     DecompressionError(String),
 
+    /// Invalid cache key type
+    #[error("Invalid cache key type")]
+    InvalidCacheKey,
+
+    /// Mutex poisoned error
+    #[error("Mutex poisoned: {0}")]
+    MutexPoisoned(String),
+
+    /// Session context error
+    #[error("Session context error: {0}")]
+    SessionContext(String),
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
