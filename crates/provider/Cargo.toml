@@ -25,6 +25,9 @@ thiserror.workspace = true
 tinyfs.workspace = true
 datafusion.workspace = true
 futures.workspace = true
+serde_json.workspace = true
+uuid7.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -3627,16 +3627,19 @@ dependencies = [
  "arrow-schema",
  "async-compression",
  "async-trait",
+ "chrono",
  "datafusion",
  "datafusion-common",
  "futures",
  "serde",
+ "serde_json",
  "serde_qs",
  "tempfile",
  "thiserror 2.0.17",
  "tinyfs",
  "tokio",
  "url",
+ "uuid7",
 ]
 
 [[package]]

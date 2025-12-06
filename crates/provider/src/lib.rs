@@ -1,9 +1,14 @@
-//! Provider: URL-Based file access
+//! Provider: URL-Based file access and factory infrastructure
 
+mod context;
 mod error;
 mod null_padding;
 mod scope_prefix;
 
+pub use context::{
+    FactoryContext, PondMetadata, ProviderContext,
+    SessionProvider, TableProviderCache, TemplateVariableProvider,
+};
 pub use error::{Error, Result};
 pub use null_padding::null_padding_table;
 pub use scope_prefix::ScopePrefixTableProvider;
