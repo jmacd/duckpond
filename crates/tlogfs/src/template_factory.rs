@@ -400,12 +400,18 @@ impl tinyfs::Metadata for TemplateFile {
 /// Create template directory with context (factory function)
 fn create_template_directory(
     config: Value,
-    context: FactoryContext,
+    context: provider::FactoryContext,
 ) -> TinyFSResult<tinyfs::DirHandle> {
     let spec: TemplateSpec = from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
 
-    let template_dir = TemplateDirectory::new(spec, context.clone());
+    // Convert to legacy FactoryContext for TemplateDirectory which hasn't migrated yet
+    let legacy_ctx = FactoryContext {
+        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+        file_id: context.file_id,
+        pond_metadata: context.pond_metadata.clone(),
+    };
+    let template_dir = TemplateDirectory::new(spec, legacy_ctx);
     Ok(template_dir.create_handle())
 }
 

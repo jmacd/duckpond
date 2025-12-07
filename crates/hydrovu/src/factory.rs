@@ -10,7 +10,7 @@ use clap::Parser;
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
 use tlogfs::TLogFSError;
-use tlogfs::factory::{ExecutionMode, FactoryCommand, FactoryContext};
+use tlogfs::factory::{ExecutionContext, ExecutionMode, FactoryCommand, FactoryContext};
 
 /// HydroVu command-line interface
 #[derive(Debug, Parser)]
@@ -136,12 +136,12 @@ async fn create_directory_structure(
 async fn execute_hydrovu(
     config: Value,
     context: FactoryContext,
-    ctx: tlogfs::factory::ExecutionContext,
+    ctx: ExecutionContext,
 ) -> Result<(), TLogFSError> {
     log::info!("🌊 HYDROVU FACTORY");
     log::info!("   Context: {:?}", ctx);
 
-    let cmd: HydroVuCommand = ctx.to_command()?;
+    let cmd: HydroVuCommand = ctx.to_command::<HydroVuCommand, TLogFSError>()?;
 
     log::info!("   Command: {:?}", cmd);
 

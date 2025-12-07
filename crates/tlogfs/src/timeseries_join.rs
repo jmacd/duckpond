@@ -436,12 +436,18 @@ impl QueryableFile for TimeseriesJoinFile {
 
 fn create_timeseries_join_handle(
     config: Value,
-    context: FactoryContext,
+    context: provider::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: TimeseriesJoinConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-join config: {}", e)))?;
 
-    let join_file = TimeseriesJoinFile::new(cfg, context);
+    // Convert to legacy FactoryContext for TimeseriesJoinFile which hasn't migrated yet
+    let legacy_ctx = FactoryContext {
+        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+        file_id: context.file_id,
+        pond_metadata: context.pond_metadata.clone(),
+    };
+    let join_file = TimeseriesJoinFile::new(cfg, legacy_ctx);
     Ok(join_file.create_handle())
 }
 
@@ -467,12 +473,13 @@ register_dynamic_factory!(
     name: "timeseries-join",
     description: "Create time series join files with automatic COALESCE and FULL OUTER JOIN",
     file: create_timeseries_join_handle,
-    validate: validate_timeseries_join_config,
-    try_as_queryable: |file| {
-        file.as_any()
-            .downcast_ref::<TimeseriesJoinFile>()
-            .map(|f| f as &dyn QueryableFile)
-    }
+    validate: validate_timeseries_join_config
+    // TODO(Step 8+): Implement QueryableFile trait for TimeseriesJoinFile using provider::QueryableFile
+    // try_as_queryable: |file| {
+    //     file.as_any()
+    //         .downcast_ref::<TimeseriesJoinFile>()
+    //         .map(|f| f as &dyn QueryableFile)
+    // }
 );
 
 #[cfg(test)]

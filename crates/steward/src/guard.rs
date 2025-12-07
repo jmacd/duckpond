@@ -704,8 +704,10 @@ impl<'a> StewardTransactionGuard<'a> {
         let pond_metadata = self.control_table.get_pond_metadata();
 
         // Create factory context with pond metadata
-        let factory_context = tlogfs::factory::FactoryContext::with_metadata(
-            factory_tx.state()?,
+        let state = factory_tx.state()?;
+        let provider_context = state.as_provider_context();
+        let factory_context = provider::FactoryContext::with_metadata(
+            provider_context,
             parent_node_id,
             pond_metadata.clone(),
         );

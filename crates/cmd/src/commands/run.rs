@@ -146,11 +146,12 @@ async fn run_command_impl(
     };
 
     // Create factory context with pond metadata (pre-loaded above)
-    let factory_context =
-        tlogfs::factory::FactoryContext::with_metadata(tx.state()?, node_id, pond_metadata);
+    let state = tx.state()?;
+    let provider_context = state.as_provider_context();
+    let factory_context = provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
 
     // Execute the configuration using the factory registry in write mode
-    tlogfs::factory::FactoryRegistry::execute(
+    tlogfs::factory::FactoryRegistry::execute::<tlogfs::TLogFSError>(
         &factory_name,
         &config_bytes,
         factory_context,

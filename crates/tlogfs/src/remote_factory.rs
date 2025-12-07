@@ -218,28 +218,38 @@ fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
 
 async fn execute_remote(
     config: Value,
-    context: FactoryContext,
+    context: provider::FactoryContext,
     ctx: crate::factory::ExecutionContext,
 ) -> Result<(), TLogFSError> {
     let config: RemoteConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
+    
+    // Extract State for remote operations
+    let state = crate::factory::extract_state(&context)?;
 
     log::info!("🌐 REMOTE FACTORY");
     log::info!("   Storage URL: {}", config.url.as_declassified());
     log::info!("   Context: {:?}", ctx);
 
-    let cmd: RemoteCommand = ctx.to_command()?;
+    let cmd: RemoteCommand = ctx.to_command::<RemoteCommand, TLogFSError>()?;
 
     log::info!("   Command: {:?}", cmd);
 
     // Build object store
     let store = build_object_store(&config)?;
 
+    // Create legacy context for internal functions that haven't migrated yet
+    let legacy_ctx = FactoryContext {
+        state: state.clone(),
+        file_id: context.file_id,
+        pond_metadata: context.pond_metadata.clone(),
+    };
+
     // Dispatch to command handler
     match cmd {
-        RemoteCommand::Push => execute_push(store, context, config).await,
-        RemoteCommand::Pull => execute_pull(store, context, config).await,
-        RemoteCommand::Replicate => execute_replicate_subcommand(config, context).await,
+        RemoteCommand::Push => execute_push(store, legacy_ctx.clone(), config).await,
+        RemoteCommand::Pull => execute_pull(store, legacy_ctx.clone(), config).await,
+        RemoteCommand::Replicate => execute_replicate_subcommand(config, legacy_ctx.clone()).await,
         RemoteCommand::ListBundles { verbose } => {
             execute_list_bundles_subcommand(store, config, context.pond_metadata.as_ref(), verbose)
                 .await
@@ -1004,12 +1014,14 @@ async fn create_backup_bundle(
     Ok(())
 }
 
-crate::register_executable_factory!(
+provider::register_executable_factory!(
     name: "remote",
     description: "S3-compatible remote storage configuration and validation",
     validate: validate_remote_config,
-    initialize: |_config, _context| Box::pin(async { Ok(()) }),
-    execute: execute_remote
+    initialize: |_config, _context| async { Ok::<(), tinyfs::Error>(()) },
+    execute: |config, context, ctx| async move {
+        execute_remote(config, context, ctx).await.map_err(|e: TLogFSError| tinyfs::Error::Other(e.to_string()))
+    }
 );
 
 /// Represents a file change in a Delta Lake commit

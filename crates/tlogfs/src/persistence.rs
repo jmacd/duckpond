@@ -80,6 +80,9 @@ pub struct State {
     inner: Arc<Mutex<InnerState>>,
     /// TinyFS ObjectStore instance - shared with SessionContext
     object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
+    /// The DataFusion SessionContext - stored outside the lock to avoid deadlocks
+    /// This is the same instance stored in inner.session_context
+    session_context: Arc<SessionContext>,
     /// Template variables for CLI variable expansion - mutable shared state
     template_variables: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
     /// Cache for TableProvider instances to avoid repeated ListingTable creation and schema inference
@@ -423,11 +426,13 @@ impl OpLogPersistence {
             panic!("🚨 TRANSACTION GUARD VIOLATION");
         }
 
+        let inner_state = InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?;
+        let session_context = inner_state.session_context.clone();
+        
         let state = State {
-            inner: Arc::new(Mutex::new(
-                InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?,
-            )),
+            inner: Arc::new(Mutex::new(inner_state)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
+            session_context,
             template_variables: Arc::new(std::sync::Mutex::new(HashMap::new())),
             table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
@@ -697,76 +702,21 @@ impl State {
     /// Create a ProviderContext from this State
     /// 
     /// This allows State to be used with factories that expect a ProviderContext.
-    /// The returned context holds Arc references to this State as implementations
-    /// of the provider traits.
+    /// Create a ProviderContext from this State with concrete values (no trait objects!)
+    /// This is synchronous and lock-free - it accesses session_context directly
     pub fn as_provider_context(&self) -> provider::ProviderContext {
-        provider::ProviderContext::new(
-            Arc::new(self.clone()) as Arc<dyn provider::SessionProvider>,
-            Arc::new(self.clone()) as Arc<dyn provider::TemplateVariableProvider>,
-            Arc::new(self.clone()) as Arc<dyn provider::TableProviderCache>,
-        )
-    }
-}
-
-// Provider trait implementations for State
-// These allow State to be used as the implementation behind ProviderContext
-
-#[async_trait]
-impl provider::SessionProvider for State {
-    async fn session_context(&self) -> Result<Arc<SessionContext>, provider::Error> {
-        // Delegate to existing State method
-        self.session_context()
-            .await
-            .map_err(|e| provider::Error::SessionContext(e.to_string()))
-    }
-}
-
-impl provider::TemplateVariableProvider for State {
-    fn get_template_variables(&self) -> Result<HashMap<String, serde_json::Value>, provider::Error> {
-        // Return a snapshot of template variables
-        let vars = self.template_variables
+        // Get current template variables
+        let template_vars = self.template_variables
             .lock()
-            .map_err(|e| provider::Error::MutexPoisoned(e.to_string()))?
+            .expect("Failed to lock template variables")
             .clone();
-        Ok(vars)
-    }
-
-    fn set_template_variables(&self, vars: HashMap<String, serde_json::Value>) -> Result<(), provider::Error> {
-        // Update template variables
-        *self.template_variables
-            .lock()
-            .map_err(|e| provider::Error::MutexPoisoned(e.to_string()))? = vars;
-        Ok(())
-    }
-}
-
-impl provider::TableProviderCache for State {
-    fn get(&self, key: &dyn std::any::Any) -> Option<Arc<dyn datafusion::catalog::TableProvider>> {
-        // Downcast key to TableProviderKey and query cache
-        let key = key.downcast_ref::<TableProviderKey>()?;
-        self.table_provider_cache
-            .lock()
-            .expect("Failed to acquire table provider cache lock")
-            .get(key)
-            .cloned()
-    }
-
-    fn set(
-        &self,
-        key: Box<dyn std::any::Any + Send + Sync>,
-        provider: Arc<dyn datafusion::catalog::TableProvider>,
-    ) -> Result<(), provider::Error> {
-        // Downcast key to TableProviderKey
-        let key = *key.downcast::<TableProviderKey>()
-            .map_err(|_| provider::Error::InvalidCacheKey)?;
         
-        // Insert into cache
-        _ = self.table_provider_cache
-            .lock()
-            .expect("Failed to acquire table provider cache lock")
-            .insert(key, provider);
-        
-        Ok(())
+        // Create provider context with concrete values
+        provider::ProviderContext::new(
+            self.session_context.clone(),
+            template_vars,
+            Arc::new(self.clone()) as Arc<dyn std::any::Any + Send + Sync>,
+        )
     }
 }
 
@@ -3141,7 +3091,8 @@ mod node_factory {
         })?;
 
         // Create context with all template variables (vars, export, and any other keys)
-        let context = FactoryContext::new(state.clone(), id);
+        let legacy_context = FactoryContext::new(state.clone(), id);
+        let context = legacy_context.to_provider_context();
 
         debug!("🔍 create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}", 
                  factory_type, oplog_entry.file_type, config_content.len());

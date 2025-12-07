@@ -1,11 +1,10 @@
 //! Provider context and factory context for dynamic node creation
 //!
 //! This module defines the abstraction layer between factories and persistence implementations.
-//! ProviderContext is a concrete struct that holds trait objects for implementation injection,
-//! while FactoryContext provides the complete context for factory operations.
+//! ProviderContext is a concrete struct with direct access to DataFusion session and State handle.
 
-use async_trait::async_trait;
 use datafusion::execution::context::SessionContext;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tinyfs::FileID;
@@ -13,109 +12,77 @@ use tinyfs::FileID;
 /// Result type for provider operations
 pub type Result<T> = std::result::Result<T, crate::Error>;
 
-/// Internal trait for DataFusion session access
-/// 
-/// Implemented by persistence layers (tlogfs::State) to provide
-/// SessionContext to factories for SQL execution.
-#[async_trait]
-pub trait SessionProvider: Send + Sync {
-    /// Get shared DataFusion session for SQL execution
-    async fn session_context(&self) -> Result<Arc<SessionContext>>;
-}
-
-/// Internal trait for template variable management
+/// Provider context - concrete struct with direct access to session and state
 ///
-/// Implemented by persistence layers to provide CLI variable expansion
-/// for Tera templates used in export stages.
-pub trait TemplateVariableProvider: Send + Sync {
-    /// Get current template variables snapshot
-    fn get_template_variables(&self) -> Result<HashMap<String, serde_json::Value>>;
-    
-    /// Update template variables
-    fn set_template_variables(&self, vars: HashMap<String, serde_json::Value>) -> Result<()>;
-}
-
-/// Internal trait for TableProvider caching
-///
-/// Implemented by persistence layers to cache expensive TableProvider instances
-/// and avoid repeated schema inference and file scanning.
-pub trait TableProviderCache: Send + Sync {
-    /// Get cached TableProvider by key
-    fn get(&self, key: &dyn std::any::Any) -> Option<Arc<dyn datafusion::catalog::TableProvider>>;
-    
-    /// Set cached TableProvider for a key
-    fn set(&self, key: Box<dyn std::any::Any + Send + Sync>, provider: Arc<dyn datafusion::catalog::TableProvider>) -> Result<()>;
-}
-
-/// Provider context - concrete struct holding implementation details
-///
-/// This struct provides the essential operations that factories need from a persistence layer:
-/// - Access to DataFusion SessionContext for SQL execution
-/// - Template variable management for CLI expansion
+/// This struct provides factories with:
+/// - Direct access to DataFusion SessionContext for SQL execution
+/// - Template variable management for CLI expansion  
 /// - Table provider caching for performance optimization
+/// - Opaque handle back to originating State for persistence operations
 ///
-/// Implementation is injected via trait objects:
-/// - SessionProvider - Provides DataFusion SessionContext
-/// - TemplateVariableProvider - Manages template variables
-/// - TableProviderCache - Caches TableProvider instances
-///
-/// This design avoids `Arc<dyn ProviderContext>` and allows clean injection
-/// of tlogfs::State or test implementations.
+/// All fields are concrete - no trait objects to downcast.
 #[derive(Clone)]
 pub struct ProviderContext {
-    session: Arc<dyn SessionProvider>,
-    template_vars: Arc<dyn TemplateVariableProvider>,
-    table_cache: Arc<dyn TableProviderCache>,
+    /// DataFusion session for SQL execution (direct access, no async needed)
+    pub datafusion_session: Arc<SessionContext>,
+    
+    /// Template variables for Tera CLI expansion
+    pub template_variables: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
+    
+    /// Table provider cache for performance
+    pub table_provider_cache: Arc<std::sync::Mutex<HashMap<String, Arc<dyn datafusion::catalog::TableProvider>>>>,
+    
+    /// Opaque handle to originating State (tlogfs can downcast this)
+    pub state_handle: Arc<dyn Any + Send + Sync>,
 }
 
 impl ProviderContext {
-    /// Create a new provider context with injected implementations
+    /// Create a new provider context from concrete values
     pub fn new(
-        session: Arc<dyn SessionProvider>,
-        template_vars: Arc<dyn TemplateVariableProvider>,
-        table_cache: Arc<dyn TableProviderCache>,
+        datafusion_session: Arc<SessionContext>,
+        template_variables: HashMap<String, serde_json::Value>,
+        state_handle: Arc<dyn Any + Send + Sync>,
     ) -> Self {
         Self {
-            session,
-            template_vars,
-            table_cache,
+            datafusion_session,
+            template_variables: Arc::new(std::sync::Mutex::new(template_variables)),
+            table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            state_handle,
         }
     }
     
-    /// Get shared DataFusion session for SQL execution
-    ///
-    /// Returns Arc<SessionContext> which is already thread-safe by design.
-    /// The SessionContext handles internal synchronization for concurrent
-    /// table provider registration and query execution.
-    pub async fn session_context(&self) -> Result<Arc<SessionContext>> {
-        self.session.session_context().await
-    }
-    
-    /// Get template variables for CLI expansion (read-only access)
+    /// Get template variables snapshot
     pub fn get_template_variables(&self) -> Result<HashMap<String, serde_json::Value>> {
-        self.template_vars.get_template_variables()
+        self.template_variables
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|e| crate::Error::MutexPoisoned(e.to_string()))
     }
     
-    /// Set template variables (controlled mutation)
+    /// Set template variables
     pub fn set_template_variables(&self, vars: HashMap<String, serde_json::Value>) -> Result<()> {
-        self.template_vars.set_template_variables(vars)
+        *self.template_variables
+            .lock()
+            .map_err(|e| crate::Error::MutexPoisoned(e.to_string()))? = vars;
+        Ok(())
     }
     
-    /// Get cached TableProvider by key (performance optimization)
-    pub fn get_table_provider_cache(
-        &self,
-        key: &dyn std::any::Any,
-    ) -> Option<Arc<dyn datafusion::catalog::TableProvider>> {
-        self.table_cache.get(key)
+    /// Get cached TableProvider by cache key
+    pub fn get_table_provider_cache(&self, key: &str) -> Option<Arc<dyn datafusion::catalog::TableProvider>> {
+        self.table_provider_cache
+            .lock()
+            .ok()?
+            .get(key)
+            .cloned()
     }
     
-    /// Set cached TableProvider for a key
-    pub fn set_table_provider_cache(
-        &self,
-        key: Box<dyn std::any::Any + Send + Sync>,
-        provider: Arc<dyn datafusion::catalog::TableProvider>,
-    ) -> Result<()> {
-        self.table_cache.set(key, provider)
+    /// Set cached TableProvider
+    pub fn set_table_provider_cache(&self, key: String, provider: Arc<dyn datafusion::catalog::TableProvider>) -> Result<()> {
+        _ = self.table_provider_cache
+            .lock()
+            .map_err(|e| crate::Error::MutexPoisoned(e.to_string()))?
+            .insert(key, provider);
+        Ok(())
     }
 }
 

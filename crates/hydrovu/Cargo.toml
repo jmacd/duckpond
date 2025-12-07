@@ -42,6 +42,7 @@ tempfile.workspace = true
 tokio.workspace = true
 tinyfs.workspace = true
 tlogfs.workspace = true
+provider.workspace = true
 url.workspace = true
 uuid7.workspace = true
 

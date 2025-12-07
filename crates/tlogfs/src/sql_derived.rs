@@ -51,7 +51,8 @@ use tokio::io::AsyncWrite;
 /// Helper function to convert a File trait object to QueryableFile trait object
 /// Uses both the factory registry system and direct type checking for non-factory types
 pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn QueryableFile> {
-    use crate::factory::DYNAMIC_FACTORIES;
+    // Commented during Step 7 migration - will re-enable in Step 8+
+    // use crate::factory::DYNAMIC_FACTORIES;
     use crate::file::OpLogFile;
     use crate::temporal_reduce::TemporalReduceSqlFile;
 
@@ -68,14 +69,17 @@ pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn QueryableFile> {
         return Some(temporal_file as &dyn QueryableFile);
     }
 
-    // Finally, try factory-registered downcast functions (for SqlDerivedFile and others)
-    for factory in DYNAMIC_FACTORIES.iter() {
-        if let Some(try_downcast) = factory.try_as_queryable
-            && let Some(queryable) = try_downcast(file)
-        {
-            return Some(queryable);
-        }
-    }
+    // TODO(Step 8+): Re-enable factory-registered downcast functions once factories migrate to provider
+    // Currently disabled because factory registry uses provider::QueryableFile while tlogfs uses
+    // its own QueryableFile trait with &State instead of &ProviderContext.
+    // 
+    // for factory in DYNAMIC_FACTORIES.iter() {
+    //     if let Some(try_downcast) = factory.try_as_queryable
+    //         && let Some(queryable) = try_downcast(file)
+    //     {
+    //         return Some(queryable);
+    //     }
+    // }
 
     None
 }
@@ -543,23 +547,35 @@ impl Metadata for SqlDerivedFile {
 
 fn create_sql_derived_table_handle(
     config: Value,
-    context: FactoryContext,
+    context: provider::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
-    let sql_file = SqlDerivedFile::new(cfg, context.clone(), SqlDerivedMode::Table)?;
+    // Convert to legacy FactoryContext for SqlDerivedFile which hasn't migrated yet
+    let legacy_ctx = FactoryContext {
+        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+        file_id: context.file_id,
+        pond_metadata: context.pond_metadata.clone(),
+    };
+    let sql_file = SqlDerivedFile::new(cfg, legacy_ctx, SqlDerivedMode::Table)?;
     Ok(sql_file.create_handle())
 }
 
 fn create_sql_derived_series_handle(
     config: Value,
-    context: FactoryContext,
+    context: provider::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
-    let sql_file = SqlDerivedFile::new(cfg, context.clone(), SqlDerivedMode::Series)?;
+    // Convert to legacy FactoryContext for SqlDerivedFile which hasn't migrated yet
+    let legacy_ctx = FactoryContext {
+        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+        file_id: context.file_id,
+        pond_metadata: context.pond_metadata.clone(),
+    };
+    let sql_file = SqlDerivedFile::new(cfg, legacy_ctx, SqlDerivedMode::Series)?;
     Ok(sql_file.create_handle())
 }
 
@@ -605,28 +621,20 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
 }
 
 // Register the factories
+// TODO(Step 8+): Re-enable try_as_queryable after QueryableFile migration
 register_dynamic_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
     file: create_sql_derived_table_handle,
-    validate: validate_sql_derived_config,
-    try_as_queryable: |file| {
-        file.as_any()
-            .downcast_ref::<SqlDerivedFile>()
-            .map(|f| f as &dyn QueryableFile)
-    }
+    validate: validate_sql_derived_config
 );
 
+// TODO(Step 8+): Re-enable try_as_queryable after QueryableFile migration
 register_dynamic_factory!(
     name: "sql-derived-series",
     description: "Create SQL-derived tables from multiple FileSeries sources",
     file: create_sql_derived_series_handle,
-    validate: validate_sql_derived_config,
-    try_as_queryable: |file| {
-        file.as_any()
-            .downcast_ref::<SqlDerivedFile>()
-            .map(|f| f as &dyn QueryableFile)
-    }
+    validate: validate_sql_derived_config
 );
 
 impl SqlDerivedFile {

@@ -87,10 +87,13 @@ pub use txn_metadata::{PondTxnMetadata, PondUserMetadata};
 // Re-export query interfaces for DataFusion integration
 pub use query::{execute_sql_on_file, get_file_schema};
 
-// Re-export factory types and macros for easy access
+// Re-export factory types for easy access
 pub use factory::{
     ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, FactoryContext, FactoryRegistry, PondMetadata,
 };
+
+// Note: Macros are #[macro_export] so they're automatically available at crate::macro_name
+// No need to re-export them here
 
 // Test factory for unit/integration testing executable factory system
 pub mod test_factory;

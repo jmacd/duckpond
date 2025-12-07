@@ -287,12 +287,18 @@ impl std::fmt::Debug for TimeseriesPivotFile {
 
 fn create_timeseries_pivot_handle(
     config: Value,
-    context: FactoryContext,
+    context: provider::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: TimeseriesPivotConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-pivot config: {}", e)))?;
 
-    let pivot_file = TimeseriesPivotFile::new(cfg, context);
+    // Convert to legacy FactoryContext for TimeseriesPivotFile which hasn't migrated yet
+    let legacy_ctx = FactoryContext {
+        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+        file_id: context.file_id,
+        pond_metadata: context.pond_metadata.clone(),
+    };
+    let pivot_file = TimeseriesPivotFile::new(cfg, legacy_ctx);
     Ok(pivot_file.create_handle())
 }
 
@@ -317,16 +323,12 @@ fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
         .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
 }
 
+// TODO(Step 8+): Re-enable try_as_queryable after QueryableFile migration
 register_dynamic_factory!(
     name: "timeseries-pivot",
-    description: "Pivot specific columns across multiple time series inputs matched by pattern",
+    description: "Pivot a timeseries by value column",
     file: create_timeseries_pivot_handle,
-    validate: validate_timeseries_pivot_config,
-    try_as_queryable: |file| {
-        file.as_any()
-            .downcast_ref::<TimeseriesPivotFile>()
-            .map(|f| f as &dyn QueryableFile)
-    }
+    validate: validate_timeseries_pivot_config
 );
 
 #[cfg(test)]

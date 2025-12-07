@@ -36,14 +36,14 @@ pub struct DynamicDirConfig {
 /// Dynamic directory that creates entries using configured factories
 pub struct DynamicDirDirectory {
     config: DynamicDirConfig,
-    context: FactoryContext,
+    context: provider::FactoryContext,
     /// Cache of created nodes to avoid recreating them on each access
     entry_cache: tokio::sync::RwLock<HashMap<String, Node>>,
 }
 
 impl DynamicDirDirectory {
     #[must_use]
-    pub fn new(config: DynamicDirConfig, context: FactoryContext) -> Self {
+    pub fn new(config: DynamicDirConfig, context: provider::FactoryContext) -> Self {
         let entries_count = config.entries.len();
         debug!("DynamicDirDirectory::new - creating directory with {entries_count} entries");
 
@@ -238,7 +238,7 @@ impl Metadata for DynamicDirDirectory {
 }
 
 // Factory functions for the linkme registration system
-fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle> {
+fn create_dynamic_dir_handle(config: Value, context: provider::FactoryContext) -> TinyFSResult<DirHandle> {
     let config: DynamicDirConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
 
@@ -514,7 +514,9 @@ entries:
         };
 
         // Create the dynamic directory
-        let dynamic_dir = DynamicDirDirectory::new(config, context);
+        let provider_context = context.state.as_provider_context();
+        let provider_factory_context = provider::FactoryContext::new(provider_context, context.file_id);
+        let dynamic_dir = DynamicDirDirectory::new(config, provider_factory_context);
 
         // Test that we can get the configured entry
         let result = dynamic_dir.get("template_dir").await;
@@ -571,7 +573,9 @@ entries:
             ],
         };
 
-        let dynamic_dir = DynamicDirDirectory::new(config, context);
+        let provider_context = context.state.as_provider_context();
+        let provider_factory_context = provider::FactoryContext::new(provider_context, context.file_id);
+        let dynamic_dir = DynamicDirDirectory::new(config, provider_factory_context);
 
         // Test entries listing
         let entries_stream = dynamic_dir.entries().await.unwrap();
@@ -666,7 +670,9 @@ entries:
         // Parse config and create DynamicDirDirectory directly
         let config_value = serde_yaml::from_str(config).unwrap();
         let dir_config: DynamicDirConfig = serde_json::from_value(config_value).unwrap();
-        let dynamic_dir = DynamicDirDirectory::new(dir_config, context);
+        let provider_context = context.state.as_provider_context();
+        let provider_factory_context = provider::FactoryContext::new(provider_context, context.file_id);
+        let dynamic_dir = DynamicDirDirectory::new(dir_config, provider_factory_context);
 
         // Get entries stream and collect
         let entries_stream = dynamic_dir.entries().await.unwrap();

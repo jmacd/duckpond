@@ -62,3 +62,15 @@ pub enum TLogFSError {
     #[error("Internal error: {0}")]
     Internal(String),
 }
+
+impl From<String> for TLogFSError {
+    fn from(s: String) -> Self {
+        TLogFSError::Internal(s)
+    }
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for TLogFSError {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        TLogFSError::Internal(e.to_string())
+    }
+}

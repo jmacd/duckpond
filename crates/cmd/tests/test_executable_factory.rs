@@ -80,8 +80,9 @@ async fn create_test_config(
         .await?;
 
     // Initialize the factory
-    let context = FactoryContext::new(state.clone(), parent_node_id);
-    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context).await?;
+    let provider_context = state.as_provider_context();
+    let context = provider::FactoryContext::new(provider_context, parent_node_id);
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context).await?;
 
     _ = tx.commit().await?;
     Ok(())
@@ -155,12 +156,13 @@ repeat_count: 5
         .expect("Failed to create config node");
 
     // Initialize and execute in the SAME transaction
-    let context = FactoryContext::new(state.clone(), parent_node_id);
-    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context.clone())
+    let provider_context = state.as_provider_context();
+    let context = provider::FactoryContext::new(provider_context, parent_node_id);
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context.clone())
         .await
         .expect("Failed to initialize factory");
 
-    FactoryRegistry::execute(
+    FactoryRegistry::execute::<tlogfs::TLogFSError>(
         "test-executor",
         config_yaml.as_bytes(),
         context,

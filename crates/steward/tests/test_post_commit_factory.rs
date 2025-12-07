@@ -55,8 +55,9 @@ repeat_count: 3
     let factory_node_id = factory_node.id();
 
     // Initialize the factory
-    let context1 = FactoryContext::new(state1.clone(), factory_node_id);
-    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context1).await?;
+    let provider_context1 = state1.as_provider_context();
+    let context1 = provider::FactoryContext::new(provider_context1, factory_node_id);
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context1).await?;
 
     debug!("DEBUG: About to commit tx1...");
 
@@ -231,8 +232,9 @@ repeat_count: 1
         )
         .await?;
 
-    let context1 = FactoryContext::new(state1.clone(), factory_node.id());
-    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context1).await?;
+    let provider_context1 = state1.as_provider_context();
+    let context1 = provider::FactoryContext::new(provider_context1, factory_node.id());
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context1).await?;
     _ = tx1.commit().await?;
 
     // Now do a read-only transaction using the transact helper
@@ -311,8 +313,9 @@ repeat_count: 1
             )
             .await?;
 
-        let context = FactoryContext::new(state1.clone(), factory_node.id());
-        FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context).await?;
+        let provider_context = state1.as_provider_context();
+        let context = provider::FactoryContext::new(provider_context, factory_node.id());
+        FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context).await?;
     }
 
     _ = tx1.commit().await?;

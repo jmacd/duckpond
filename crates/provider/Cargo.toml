@@ -28,6 +28,9 @@ futures.workspace = true
 serde_json.workspace = true
 uuid7.workspace = true
 chrono.workspace = true
+linkme.workspace = true
+paste.workspace = true
+clap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

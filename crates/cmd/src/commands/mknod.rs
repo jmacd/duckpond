@@ -167,10 +167,11 @@ async fn mknod_impl(
     let state = tx
         .state()
         .map_err(|e| anyhow!("Failed to get state: {}", e))?;
-    let context = tlogfs::factory::FactoryContext::new(state, parent_node_id);
+    let provider_context = state.as_provider_context();
+    let context = provider::FactoryContext::new(provider_context, parent_node_id);
 
     // Run factory initialization if it exists (e.g., create directories)
-    FactoryRegistry::initialize(factory_type, &config_bytes, context)
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(factory_type, &config_bytes, context)
         .await
         .map_err(|e| anyhow!("Factory initialization failed: {}", e))?;
 

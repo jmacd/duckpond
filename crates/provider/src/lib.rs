@@ -3,14 +3,18 @@
 mod context;
 mod error;
 mod null_padding;
+pub mod registry;
 mod scope_prefix;
 
 pub use context::{
     FactoryContext, PondMetadata, ProviderContext,
-    SessionProvider, TableProviderCache, TemplateVariableProvider,
 };
 pub use error::{Error, Result};
 pub use null_padding::null_padding_table;
+pub use registry::{
+    ConfigFile, DynamicFactory, ExecutionContext, ExecutionMode,
+    FactoryCommand, FactoryRegistry, QueryableFile, DYNAMIC_FACTORIES,
+};
 pub use scope_prefix::ScopePrefixTableProvider;
 
 use std::pin::Pin;

@@ -41,6 +41,7 @@ linkme = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
+provider = { workspace = true }
 paste = { workspace = true }
 peak_alloc = { workspace = true }
 serde = { workspace = true }

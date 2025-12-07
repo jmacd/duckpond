@@ -972,7 +972,7 @@ impl tinyfs::Metadata for TemporalReduceSiteDirectory {
 /// Create a temporal reduce directory from configuration and context
 fn create_temporal_reduce_directory(
     config: Value,
-    context: FactoryContext,
+    context: provider::FactoryContext,
 ) -> TinyFSResult<DirHandle> {
     let temporal_config: TemporalReduceConfig =
         serde_json::from_value(config.clone()).map_err(|e| {
@@ -982,7 +982,13 @@ fn create_temporal_reduce_directory(
             ))
         })?;
 
-    let directory = TemporalReduceDirectory::new(temporal_config, context.clone())?;
+    // Convert to legacy FactoryContext for TemporalReduceDirectory which hasn't migrated yet
+    let legacy_ctx = FactoryContext {
+        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+        file_id: context.file_id,
+        pond_metadata: context.pond_metadata.clone(),
+    };
+    let directory = TemporalReduceDirectory::new(temporal_config, legacy_ctx)?;
     Ok(directory.create_handle())
 }
 

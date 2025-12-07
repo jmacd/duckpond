@@ -519,15 +519,16 @@ async fn execute_sync_impl(
 
     let pond_metadata = control_table.get_pond_metadata().clone();
 
-    // Create factory context for ControlReader mode
-    let factory_context =
-        tlogfs::factory::FactoryContext::with_metadata(tx.state()?, node_id, pond_metadata);
+    // Create factory context for ControlWriter mode
+    let state = tx.state()?;
+    let provider_context = state.as_provider_context();
+    let factory_context = provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
 
     // Pass factory mode as arg
     let args = vec![factory_mode];
 
     // Execute the factory in ControlWriter mode
-    tlogfs::factory::FactoryRegistry::execute(
+    tlogfs::factory::FactoryRegistry::execute::<tlogfs::TLogFSError>(
         &factory_name,
         &config_bytes,
         factory_context,
