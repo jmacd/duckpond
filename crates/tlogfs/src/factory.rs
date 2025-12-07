@@ -18,6 +18,9 @@ pub use provider::registry::{
 // Re-export PondMetadata from provider
 pub use provider::PondMetadata;
 
+// Re-export dynamic_dir types from provider
+pub use provider::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
+
 // NOTE: We do NOT re-export provider's registration macros because they expect
 // provider::FactoryContext. Instead, we define our own macros below that wrap
 // tlogfs functions (using tlogfs::FactoryContext) and convert to provider types.

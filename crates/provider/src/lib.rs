@@ -1,14 +1,17 @@
 //! Provider: URL-Based file access and factory infrastructure
 
 mod context;
+pub mod dynamic_dir;
 mod error;
 mod null_padding;
 pub mod registry;
 mod scope_prefix;
+pub mod test_factory;
 
 pub use context::{
     FactoryContext, PondMetadata, ProviderContext,
 };
+pub use dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 pub use error::{Error, Result};
 pub use null_padding::null_padding_table;
 pub use registry::{

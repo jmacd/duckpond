@@ -68,9 +68,6 @@ pub mod template_factory;
 // TinyFS ObjectStore implementation for DataFusion ListingTable integration
 pub mod tinyfs_object_store;
 
-// Dynamic directory factory for composing other factories
-pub mod dynamic_dir;
-
 // File-table duality integration for TinyFS and DataFusion
 pub mod file_table;
 
@@ -94,9 +91,6 @@ pub use factory::{
 
 // Note: Macros are #[macro_export] so they're automatically available at crate::macro_name
 // No need to re-export them here
-
-// Test factory for unit/integration testing executable factory system
-pub mod test_factory;
 
 // Remote storage factory for S3-compatible object stores
 pub mod remote_factory;

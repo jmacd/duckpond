@@ -5,7 +5,7 @@ use log::debug;
 use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
 use tinyfs::FS;
-use tlogfs::{FactoryContext, FactoryRegistry};
+use tlogfs::FactoryRegistry;
 
 /// Test that post-commit factories are discovered and executed after a write transaction
 #[tokio::test]
