@@ -49,37 +49,39 @@ use tokio::io::AsyncWrite;
 // Removed unused imports - using functions from file_table.rs instead
 
 /// Helper function to convert a File trait object to QueryableFile trait object
-/// Uses both the factory registry system and direct type checking for non-factory types
+/// 
+/// This uses a generic downcast approach: since QueryableFile: File, any concrete type
+/// T: QueryableFile can be downcast from &dyn File via as_any(). We leverage Rust's
+/// type system by attempting to downcast through each known QueryableFile implementation.
+/// 
+/// This is more maintainable than a factory registry because:
+/// 1. Works for both factory-created and non-factory files (OpLogFile, TemporalReduceSqlFile)
+/// 2. Type-safe - compiler ensures all QueryableFile impls are File
+/// 3. Centralized - all QueryableFile types in one place
 pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn provider::QueryableFile> {
-    // Commented during Step 7 migration - will re-enable in Step 8+
-    // use crate::factory::DYNAMIC_FACTORIES;
     use crate::file::OpLogFile;
     use crate::temporal_reduce::TemporalReduceSqlFile;
+    use crate::timeseries_join::TimeseriesJoinFile;
+    use crate::timeseries_pivot::TimeseriesPivotFile;
 
     let file_any = file.as_any();
 
-    // First, try the most common non-factory QueryableFile types
-    // OpLogFile is the basic TLogFS file type, check it first
-    if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
-        return Some(oplog_file as &dyn provider::QueryableFile);
+    // Try each QueryableFile implementation
+    if let Some(f) = file_any.downcast_ref::<OpLogFile>() {
+        return Some(f as &dyn provider::QueryableFile);
     }
-
-    // Try TemporalReduceSqlFile (created by directory factory, not file factory)
-    if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
-        return Some(temporal_file as &dyn provider::QueryableFile);
+    if let Some(f) = file_any.downcast_ref::<SqlDerivedFile>() {
+        return Some(f as &dyn provider::QueryableFile);
     }
-
-    // TODO(Step 8+): Re-enable factory-registered downcast functions once factories migrate to provider
-    // Currently disabled because factory registry uses provider::QueryableFile while tlogfs uses
-    // its own QueryableFile trait with &State instead of &ProviderContext.
-    // 
-    // for factory in DYNAMIC_FACTORIES.iter() {
-    //     if let Some(try_downcast) = factory.try_as_queryable
-    //         && let Some(queryable) = try_downcast(file)
-    //     {
-    //         return Some(queryable);
-    //     }
-    // }
+    if let Some(f) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
+        return Some(f as &dyn provider::QueryableFile);
+    }
+    if let Some(f) = file_any.downcast_ref::<TimeseriesJoinFile>() {
+        return Some(f as &dyn provider::QueryableFile);
+    }
+    if let Some(f) = file_any.downcast_ref::<TimeseriesPivotFile>() {
+        return Some(f as &dyn provider::QueryableFile);
+    }
 
     None
 }
@@ -621,7 +623,6 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
 }
 
 // Register the factories
-// TODO(Step 8+): Re-enable try_as_queryable after QueryableFile migration
 register_dynamic_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
@@ -629,7 +630,6 @@ register_dynamic_factory!(
     validate: validate_sql_derived_config
 );
 
-// TODO(Step 8+): Re-enable try_as_queryable after QueryableFile migration
 register_dynamic_factory!(
     name: "sql-derived-series",
     description: "Create SQL-derived tables from multiple FileSeries sources",

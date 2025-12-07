@@ -474,12 +474,6 @@ register_dynamic_factory!(
     description: "Create time series join files with automatic COALESCE and FULL OUTER JOIN",
     file: create_timeseries_join_handle,
     validate: validate_timeseries_join_config
-    // TODO(Step 8+): Implement QueryableFile trait for TimeseriesJoinFile using provider::QueryableFile
-    // try_as_queryable: |file| {
-    //     file.as_any()
-    //         .downcast_ref::<TimeseriesJoinFile>()
-    //         .map(|f| f as &dyn QueryableFile)
-    // }
 );
 
 #[cfg(test)]

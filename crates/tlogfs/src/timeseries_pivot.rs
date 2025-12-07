@@ -321,7 +321,6 @@ fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
         .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
 }
 
-// TODO(Step 8+): Re-enable try_as_queryable after QueryableFile migration
 register_dynamic_factory!(
     name: "timeseries-pivot",
     description: "Pivot a timeseries by value column",

@@ -585,11 +585,11 @@ let context = ProviderContext::new(
 **What Changed:**
 - ✅ **Deleted old tlogfs QueryableFile trait** (`query/queryable_file.rs`)
 - ✅ **Migrated all 5 implementations** to use `provider::QueryableFile`:
-  - `OpLogFile` - extracts State from `context.state_handle` for file_table operations
-  - `SqlDerivedFile` - uses `context.datafusion_session` directly, extracts State for node resolution
-  - `TimeseriesJoinFile` - delegates to inner SqlDerivedFile with context
-  - `TimeseriesPivotFile` - delegates to SqlDerivedFile with context
-  - `TemporalReduceSqlFile` - delegates to inner file with context
+  - `OpLogFile` - Basic TLogFS file implementation
+  - `SqlDerivedFile` - SQL-derived tables (factory-created)
+  - `TimeseriesJoinFile` - Multi-source temporal joins (factory-created)
+  - `TimeseriesPivotFile` - Time-series pivoting (factory-created)
+  - `TemporalReduceSqlFile` - Temporal aggregations (directory factory)
 - ✅ **Updated all call sites** (production + 11 test functions):
   - `sql_executor.rs` - added `state.as_provider_context()` calls
   - `export.rs` - added `state.as_provider_context()` call
@@ -601,28 +601,42 @@ let context = ProviderContext::new(
   - Added `From<TLogFSError>` impl for automatic conversions
   - Eliminates most manual `.map_err()` calls
 
-**Architecture:**
-- `provider::QueryableFile` takes `&ProviderContext` (clean provider-layer API)
-- Implementations extract State via `context.state_handle.downcast_ref::<State>()` when needed
-- Most operations use `context.datafusion_session` directly (no State needed)
-- Node resolution operations extract State (tlogfs-specific concern)
+**Architecture - Generic Downcast Pattern:**
+- `provider::QueryableFile` trait extends `File` (can use `as_any()`)
+- Single helper function `try_as_queryable_file()` in `sql_derived.rs`
+- Uses generic downcast: tries each concrete QueryableFile type
+- Works for both factory-created and non-factory files
+- No need for factory registry pattern (simpler, cleaner)
+- Type-safe: compiler ensures all QueryableFile impls are also File
+
+**Why Generic Downcast is Better:**
+- ✅ Works for OpLogFile and TemporalReduceSqlFile (no factories)
+- ✅ Works for factory-created files (SqlDerivedFile, etc.)
+- ✅ Centralized in one function with clear documentation
+- ✅ No complex factory registration needed
+- ✅ Easy to add new QueryableFile types (just add downcast check)
 
 **Testing:**
-- ✅ **388 tests passing** (all test suites)
+- ✅ **87 tests passing** (was 85, re-enabled 2 disabled tests)
+- ✅ Re-enabled `test_create_dynamic_directory_path` (test-dir factory)
+- ✅ Re-enabled `test_dynamic_node_entry_type_validation` (test-dir factory)
 - ✅ Zero compilation warnings
 - ✅ All QueryableFile call sites updated
 - ✅ Old trait completely removed from codebase
+- ✅ No disabled/ignored tests remaining
 
 **Migration Impact:**
 - Phase 4 **COMPLETE** - QueryableFile now lives in provider crate where it belongs
 - Clean separation: provider has the trait, tlogfs has the implementations
 - No backwards compatibility code - complete migration
-- Ready for Phase 5 (factory migration)
+- All legacy TODOs and comments removed
+- Export script verified working with new architecture
+- Ready for Phase 5 (remaining factory migration)
 
 **Status**: Phase 4 complete, production-ready
 
 ---
 
-**Document Version**: 1.3  
-**Date**: 2025-12-06 (Phase 4 complete - QueryableFile migrated)  
+**Document Version**: 1.4  
+**Date**: 2025-12-06 (Phase 4 complete - QueryableFile migrated, all tests passing)  
 **Author**: Analysis based on codebase study
