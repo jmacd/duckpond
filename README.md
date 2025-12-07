@@ -1,11 +1,11 @@
 # Duckpond
 
-Duckpond is a very small data lake. :-)
+Duckpond is a very small data lake.
 
 Duckpond is built by the [Caspar Water System](https://github.com/jmacd/caspar.water).
 
 Duckpond writes timeseries data into multi-Parquet file databases and
-assembles them for export using DuckDB.  A sibling project [Noyo Blue
+assembles them for export using DataFusion.  A sibling project [Noyo Blue
 Economy](https://github.com/jmacd/noyo-blue-econ) shows how to combine
 this output within [Observable
 Framework](https://observablehq.com/framework/) markdown.
@@ -123,7 +123,7 @@ directory named `/Derive/{UUID}/{spec.name}`.
 
 Use the Combine resource to merge a set of files with different names
 and identical schemas.  This is accomplished by an automatically
-generated UNION statement executed by DuckDB.
+generated FULL OUTER JOIN with COALLESCE statements.
 
 ```
 apiVersion: www.hydrovu.com/v1

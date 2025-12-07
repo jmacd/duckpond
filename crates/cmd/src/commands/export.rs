@@ -1440,8 +1440,9 @@ async fn execute_direct_copy_query(
 
                     if let Some(queryable_file) = queryable_file {
                         let state = tx.state()?;
+                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
-                            .as_table_provider(node_id, &state)
+                            .as_table_provider(node_id, &provider_context)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to get table provider: {}", e))?;
 

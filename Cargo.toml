@@ -19,7 +19,7 @@ repository = "https://github.com/duckpond"
 readme = "README.md"
 license = "LICENSE.txt"
 categories = ["small data", "local first", "industrial", "telemetry", "water system"]
-keywords = ["arrow", "datafusion", "duckdb", "observable framework", "opentelemetry"]
+keywords = ["arrow", "datafusion", "observable framework", "opentelemetry"]
 description = "data management for a small industrial system"
 
 [workspace.dependencies]

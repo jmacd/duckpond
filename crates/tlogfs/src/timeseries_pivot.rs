@@ -15,12 +15,10 @@
 
 use crate::error::TLogFSError;
 use crate::factory::FactoryContext;
-use crate::persistence::State;
-use crate::query::QueryableFile;
+
 use crate::register_dynamic_factory;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
-use datafusion::catalog::TableProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -206,12 +204,12 @@ impl tinyfs::Metadata for TimeseriesPivotFile {
 }
 
 #[async_trait]
-impl QueryableFile for TimeseriesPivotFile {
+impl provider::QueryableFile for TimeseriesPivotFile {
     async fn as_table_provider(
         &self,
         id: FileID,
-        state: &State,
-    ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
+        context: &provider::ProviderContext,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, provider::Error> {
         log::debug!(
             "🔍 TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
             self.config.pattern,
@@ -229,7 +227,7 @@ impl QueryableFile for TimeseriesPivotFile {
         );
 
         if matched_inputs.is_empty() {
-            return Err(TLogFSError::Internal(
+            return Err(provider::Error::Arrow(
                 "Timeseries-pivot pattern matched no inputs".to_string()
             ));
         }
@@ -267,10 +265,10 @@ impl QueryableFile for TimeseriesPivotFile {
             sql_config,
             self.context.clone(),
             SqlDerivedMode::Series,
-        )?;
+        ).map_err(|e| provider::Error::Arrow(e.to_string()))?;
 
         // Delegate to SqlDerivedFile - it handles everything from here
-        sql_file.as_table_provider(id, state).await
+        sql_file.as_table_provider(id, context).await
     }
 }
 

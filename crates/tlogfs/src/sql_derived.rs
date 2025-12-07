@@ -32,7 +32,7 @@
 
 use crate::factory::FactoryContext;
 use tinyfs::FileID;
-use crate::query::queryable_file::QueryableFile;
+
 use crate::register_dynamic_factory;
 use provider::ScopePrefixTableProvider;
 use async_trait::async_trait;
@@ -50,7 +50,7 @@ use tokio::io::AsyncWrite;
 
 /// Helper function to convert a File trait object to QueryableFile trait object
 /// Uses both the factory registry system and direct type checking for non-factory types
-pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn QueryableFile> {
+pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn provider::QueryableFile> {
     // Commented during Step 7 migration - will re-enable in Step 8+
     // use crate::factory::DYNAMIC_FACTORIES;
     use crate::file::OpLogFile;
@@ -61,12 +61,12 @@ pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn QueryableFile> {
     // First, try the most common non-factory QueryableFile types
     // OpLogFile is the basic TLogFS file type, check it first
     if let Some(oplog_file) = file_any.downcast_ref::<OpLogFile>() {
-        return Some(oplog_file as &dyn QueryableFile);
+        return Some(oplog_file as &dyn provider::QueryableFile);
     }
 
     // Try TemporalReduceSqlFile (created by directory factory, not file factory)
     if let Some(temporal_file) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
-        return Some(temporal_file as &dyn QueryableFile);
+        return Some(temporal_file as &dyn provider::QueryableFile);
     }
 
     // TODO(Step 8+): Re-enable factory-registered downcast functions once factories migrate to provider
@@ -715,7 +715,7 @@ impl SqlDerivedFile {
 
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
-impl QueryableFile for SqlDerivedFile {
+impl provider::QueryableFile for SqlDerivedFile {
     /// Create TableProvider for SqlDerivedFile using DataFusion's ViewTable
     ///
     /// This approach creates a ViewTable that wraps the SqlDerivedFile's SQL query,
@@ -723,8 +723,13 @@ impl QueryableFile for SqlDerivedFile {
     async fn as_table_provider(
         &self,
         id: FileID,
-        state: &crate::persistence::State,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+        context: &provider::ProviderContext,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, provider::Error> {
+        // Extract State for tlogfs-internal operations (node resolution, etc.)
+        let state = context.state_handle
+            .downcast_ref::<crate::persistence::State>()
+            .ok_or_else(|| provider::Error::StateHandle("Invalid state handle - not a tlogfs State".to_string()))?;
+
         // Check cache first for SqlDerivedFile ViewTable
         let cache_key = crate::persistence::TableProviderKey::new(
             id,
@@ -837,7 +842,7 @@ impl QueryableFile for SqlDerivedFile {
                             "🔍 SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider..."
                         );
                         match queryable_file
-                            .as_table_provider(file_id, state)
+                            .as_table_provider(file_id, context)
                             .await
                         {
                             Ok(provider) => {
@@ -867,7 +872,7 @@ impl QueryableFile for SqlDerivedFile {
                             "❌ SQL-DERIVED: File for pattern '{}' does not implement QueryableFile trait",
                             pattern_name
                         );
-                        return Err(crate::error::TLogFSError::ArrowMessage(format!(
+                        return Err(provider::Error::Arrow(format!(
                             "File for pattern '{}' does not implement QueryableFile trait",
                             pattern_name
                         )));
@@ -901,14 +906,14 @@ impl QueryableFile for SqlDerivedFile {
                                     urls.push(url_pattern);
                                 }
                                 None => {
-                                    return Err(crate::error::TLogFSError::ArrowMessage(format!(
+                                    return Err(provider::Error::Arrow(format!(
                                         "Multi-file pattern '{}' contains non-OpLogFile - only OpLogFiles support multi-URL aggregation",
                                         pattern_name
                                     )));
                                 }
                             }
                         } else {
-                            return Err(crate::error::TLogFSError::ArrowMessage(format!(
+                            return Err(provider::Error::Arrow(format!(
                                 "File for pattern '{}' does not implement QueryableFile trait",
                                 pattern_name
                             )));
@@ -917,7 +922,7 @@ impl QueryableFile for SqlDerivedFile {
 
                     // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
                     if urls.is_empty() {
-                        return Err(crate::error::TLogFSError::ArrowMessage(format!(
+                        return Err(provider::Error::Arrow(format!(
                             "No valid URLs found for pattern '{}'",
                             pattern_name
                         )));
@@ -1096,6 +1101,7 @@ impl QueryableFile for SqlDerivedFile {
 mod tests {
     use super::*;
     use crate::persistence::OpLogPersistence;
+    use provider::QueryableFile;
     use arrow_array::record_batch;
     use tempfile::TempDir;
     use tinyfs::FS;
@@ -1133,9 +1139,11 @@ mod tests {
 
         // Get table provider
         let state_ref = tx_guard.state()?;
+        let provider_context = state_ref.as_provider_context();
         let table_provider = sql_derived_file
-            .as_table_provider(FileID::root(), &state_ref)
-            .await?;
+            .as_table_provider(FileID::root(), &provider_context)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         debug!("execute_sql_derived_direct: Got table provider");
 
@@ -2028,8 +2036,9 @@ query: ""
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
+        let provider_context = state.as_provider_context();
         let table_provider = sql_derived_file
-            .as_table_provider(FileID::root(), &state)
+            .as_table_provider(FileID::root(), &provider_context)
             .await
             .unwrap();
 
@@ -2089,8 +2098,9 @@ query: ""
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
+        let provider_context = state.as_provider_context();
         let table_provider = sql_derived_file
-            .as_table_provider(FileID::root(), &state)
+            .as_table_provider(FileID::root(), &provider_context)
             .await
             .unwrap();
 
@@ -2153,8 +2163,9 @@ query: ""
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
+        let provider_context = state.as_provider_context();
         let table_provider = sql_derived_file
-            .as_table_provider(FileID::root(), &state)
+            .as_table_provider(FileID::root(), &provider_context)
             .await
             .unwrap();
 
@@ -2222,8 +2233,9 @@ query: ""
         // Use the new QueryableFile approach with ViewTable (no materialization)
         let tx_guard_mut = tx_guard;
         let state = tx_guard_mut.state().unwrap();
+        let provider_context = state.as_provider_context();
         let table_provider = sql_derived_file
-            .as_table_provider(FileID::root(), &state)
+            .as_table_provider(FileID::root(), &provider_context)
             .await
             .unwrap();
 
@@ -3151,10 +3163,11 @@ query: ""
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let state = tx_guard_mut.state().unwrap();
                         let file_id = daily_node.id;
+                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
                             .as_table_provider(
                                 file_id,
-                                &state,
+                                &provider_context,
                             )
                             .await
                             .unwrap();
@@ -3289,8 +3302,9 @@ query: ""
                     // Verify we can actually create a table provider from it
                     let queryable = queryable_file.unwrap();
                     let file_id = node_path.node.id;
+                    let provider_context = state.as_provider_context();
                     let table_provider = queryable
-                        .as_table_provider(file_id, &state)
+                        .as_table_provider(file_id, &provider_context)
                         .await
                         .unwrap();
 
@@ -3463,8 +3477,9 @@ query: ""
                             file_id.node_id()
                         );
 
+                        let provider_context = debug_state.as_provider_context();
                         match queryable_file
-                            .as_table_provider(file_id, &debug_state)
+                            .as_table_provider(file_id, &provider_context)
                             .await
                         {
                             Ok(table_provider) => {
@@ -3566,10 +3581,11 @@ query: ""
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let state = tx_guard.state().unwrap();
                         let file_id = daily_node.id;
+                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
                             .as_table_provider(
                                 file_id,
-                                &state,
+                                &provider_context,
                             )
                             .await
                             .unwrap();

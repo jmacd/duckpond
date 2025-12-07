@@ -22,6 +22,22 @@ pub enum Error {
     #[error("Session context error: {0}")]
     SessionContext(String),
 
+    /// DataFusion error
+    #[error("DataFusion error: {0}")]
+    DataFusionError(#[from] datafusion::error::DataFusionError),
+
+    /// Arrow error
+    #[error("Arrow error: {0}")]
+    Arrow(String),
+
+    /// State handle error (invalid downcast)
+    #[error("State handle error: {0}")]
+    StateHandle(String),
+
+    /// TLogFS error (for implementations in tlogfs crate)
+    #[error("TLogFS error: {0}")]
+    TLogFS(String),
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

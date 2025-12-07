@@ -74,3 +74,9 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for TLogFSError {
         TLogFSError::Internal(e.to_string())
     }
 }
+
+impl From<TLogFSError> for provider::Error {
+    fn from(e: TLogFSError) -> Self {
+        provider::Error::TLogFS(e.to_string())
+    }
+}

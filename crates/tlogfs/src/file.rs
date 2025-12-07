@@ -371,7 +371,7 @@ impl AsyncWrite for OpLogFileWriter {
 
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
-impl crate::query::QueryableFile for OpLogFile {
+impl provider::QueryableFile for OpLogFile {
     /// Create TableProvider for OpLogFile by delegating to existing logic
     ///
     /// Follows anti-duplication: reuses existing create_listing_table_provider
@@ -379,13 +379,19 @@ impl crate::query::QueryableFile for OpLogFile {
     async fn as_table_provider(
         &self,
         id: FileID,
-        state: &State,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
+        context: &provider::ProviderContext,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, provider::Error> {
         log::debug!(
             "📋 DELEGATING OpLogFile to create_listing_table_provider: id={id}",
         );
+        // Extract State from context for tlogfs-internal operation
+        let state = context.state_handle
+            .downcast_ref::<State>()
+            .ok_or_else(|| provider::Error::StateHandle("Invalid state handle - not a tlogfs State".to_string()))?;
         // Delegate to existing create_listing_table_provider - no duplication
-        crate::file_table::create_listing_table_provider(id, state).await
+        crate::file_table::create_listing_table_provider(id, state)
+            .await
+            .map_err(|e| provider::Error::Arrow(e.to_string()))
     }
 }
 

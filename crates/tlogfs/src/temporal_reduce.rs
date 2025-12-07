@@ -40,7 +40,7 @@
 //! Each file contains time-bucketed aggregations using SQL GROUP BY operations.
 
 use crate::factory::FactoryContext;
-use crate::query::QueryableFile;
+
 use crate::register_dynamic_factory;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
@@ -215,8 +215,9 @@ impl TemporalReduceSqlFile {
         let table_provider = if let Some(queryable_file) =
             crate::sql_derived::try_as_queryable_file(&**file_guard)
         {
+            let provider_context = self.context.state.as_provider_context();
             queryable_file
-                .as_table_provider(file_id, &self.context.state)
+                .as_table_provider(file_id, &provider_context)
                 .await
                 .map_err(|e| {
                     tinyfs::Error::Other(format!(
@@ -429,21 +430,21 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
 }
 
 #[async_trait]
-impl QueryableFile for TemporalReduceSqlFile {
+impl provider::QueryableFile for TemporalReduceSqlFile {
     async fn as_table_provider(
         &self,
         id: tinyfs::FileID,
-        state: &crate::persistence::State,
-    ) -> Result<Arc<dyn TableProvider>, crate::error::TLogFSError> {
+        context: &provider::ProviderContext,
+    ) -> Result<Arc<dyn TableProvider>, provider::Error> {
         log::debug!(
             "📋 DELEGATING TemporalReduceSqlFile to inner file: id={id}",
         );
         self.ensure_inner()
             .await
-            .map_err(crate::error::TLogFSError::TinyFS)?;
+            .map_err(|e| provider::Error::TinyFs(e))?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().expect("safelock");
-        inner.as_table_provider(id, state).await
+        inner.as_table_provider(id, context).await
     }
 }
 
@@ -1189,8 +1190,9 @@ mod tests {
                     let queryable_file = crate::sql_derived::try_as_queryable_file(&**file_guard)
                         .expect("Temporal-reduce should create QueryableFile");
 
+                    let provider_context = state.as_provider_context();
                     let table_provider = queryable_file
-                        .as_table_provider(file_id, &state)
+                        .as_table_provider(file_id, &provider_context)
                         .await
                         .unwrap();
 

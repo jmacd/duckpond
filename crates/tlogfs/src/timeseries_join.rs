@@ -4,7 +4,7 @@
 //! by timestamp, automatically generating the COALESCE + FULL OUTER JOIN + EXCLUDE SQL.
 
 use crate::factory::FactoryContext;
-use crate::query::QueryableFile;
+
 use crate::register_dynamic_factory;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
@@ -411,24 +411,24 @@ impl tinyfs::Metadata for TimeseriesJoinFile {
 }
 
 #[async_trait]
-impl QueryableFile for TimeseriesJoinFile {
+impl provider::QueryableFile for TimeseriesJoinFile {
     async fn as_table_provider(
         &self,
         id: tinyfs::FileID,
-        state: &crate::persistence::State,
-    ) -> Result<Arc<dyn TableProvider>, crate::error::TLogFSError> {
+        context: &provider::ProviderContext,
+    ) -> Result<Arc<dyn TableProvider>, provider::Error> {
         log::debug!(
             "📋 DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: id={id}",
         );
         self.ensure_inner()
             .await
-            .map_err(crate::error::TLogFSError::TinyFS)?;
+            .map_err(|e| provider::Error::TinyFs(e))?;
 
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard
             .as_ref()
             .expect("inner initialized by ensure_inner");
-        inner.as_table_provider(id, state).await
+        inner.as_table_provider(id, context).await
     }
 }
 
@@ -486,6 +486,7 @@ register_dynamic_factory!(
 mod tests {
     use super::*;
     use crate::persistence::OpLogPersistence;
+    use provider::QueryableFile;
     use arrow::array::{Float64Array, TimestampSecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
@@ -640,8 +641,9 @@ mod tests {
         let join_file = TimeseriesJoinFile::new(config, context);
         
         // Test as_table_provider
+        let provider_context = state.as_provider_context();
         let table_provider = join_file
-            .as_table_provider(FileID::root(), &state)
+            .as_table_provider(FileID::root(), &provider_context)
             .await
             .unwrap();
 
@@ -766,8 +768,9 @@ mod tests {
         };
 
         let join_file = TimeseriesJoinFile::new(config, context);
+        let provider_context = state.as_provider_context();
         let table_provider = join_file
-            .as_table_provider(root_id, &state)
+            .as_table_provider(root_id, &provider_context)
             .await
             .unwrap();
 
@@ -940,8 +943,9 @@ mod tests {
         };
 
         let join_file = TimeseriesJoinFile::new(config, context);
+        let provider_context = state.as_provider_context();
         let table_provider = join_file
-            .as_table_provider(root_id, &state)
+            .as_table_provider(root_id, &provider_context)
             .await
             .unwrap();
 

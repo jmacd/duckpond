@@ -83,9 +83,11 @@ pub async fn execute_sql_on_file<'a>(
 
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
                         let state = tx.state()?;
+                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
-                            .as_table_provider(node_path.id(), &state)
-                            .await?;
+                            .as_table_provider(node_path.id(), &provider_context)
+                            .await
+                            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
                         drop(file_guard);
 
                         _ = ctx
@@ -183,9 +185,11 @@ pub async fn get_file_schema(
 
                     // Get QueryableFile and table provider
                     if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
-                            .as_table_provider(node_path.id(), state)
-                            .await?;
+                            .as_table_provider(node_path.id(), &provider_context)
+                            .await
+                            .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
                         drop(file_guard);
 
                         // Get schema directly from table provider

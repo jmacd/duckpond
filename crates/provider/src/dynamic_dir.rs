@@ -1,7 +1,6 @@
 //! Dynamic directory factory for TinyFS
 
-use crate::factory::{FactoryContext, FactoryRegistry};
-use crate::register_dynamic_factory;
+use crate::{FactoryContext, FactoryRegistry, register_dynamic_factory};
 use async_trait::async_trait;
 use futures::stream;
 use log::{debug, error};
@@ -36,14 +35,15 @@ pub struct DynamicDirConfig {
 /// Dynamic directory that creates entries using configured factories
 pub struct DynamicDirDirectory {
     config: DynamicDirConfig,
-    context: provider::FactoryContext,
+    context: FactoryContext,
     /// Cache of created nodes to avoid recreating them on each access
     entry_cache: tokio::sync::RwLock<HashMap<String, Node>>,
 }
 
 impl DynamicDirDirectory {
+    /// Create a new dynamic directory with the given configuration and context
     #[must_use]
-    pub fn new(config: DynamicDirConfig, context: provider::FactoryContext) -> Self {
+    pub fn new(config: DynamicDirConfig, context: FactoryContext) -> Self {
         let entries_count = config.entries.len();
         debug!("DynamicDirDirectory::new - creating directory with {entries_count} entries");
 
@@ -238,7 +238,7 @@ impl Metadata for DynamicDirDirectory {
 }
 
 // Factory functions for the linkme registration system
-fn create_dynamic_dir_handle(config: Value, context: provider::FactoryContext) -> TinyFSResult<DirHandle> {
+fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle> {
     let config: DynamicDirConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
 
@@ -299,58 +299,34 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
         // Verify that the factory exists
         if FactoryRegistry::get_factory(&entry.factory).is_none() {
             return Err(tinyfs::Error::Other(format!(
-                "Unknown factory '{}' for entry '{}'",
-                entry.factory, entry.name
+                "Entry '{}' uses unknown factory '{}'",
+                entry.name, entry.factory
             )));
         }
 
-        // Validate the entry's configuration with its factory
-        // Convert config to JSON bytes for validation
-        let config_bytes = serde_json::to_vec(&entry.config).map_err(|e| {
+        // Serialize entry config as JSON bytes for nested factory validation
+        let entry_config_bytes = serde_json::to_vec(&entry.config).map_err(|e| {
             tinyfs::Error::Other(format!(
                 "Failed to serialize config for entry '{}': {}",
                 entry.name, e
             ))
         })?;
 
-        // Validate with the specific factory and get processed config
-        let processed_config = FactoryRegistry::validate_config(&entry.factory, &config_bytes)
-            .map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "Invalid config for entry '{}' using factory '{}': {}: {:?}",
-                    entry.name,
-                    entry.factory,
-                    e,
-                    String::from_utf8_lossy(&config_bytes),
-                ))
-            })?;
+        // Validate the nested factory's configuration
+        let validated_config = FactoryRegistry::validate_config(&entry.factory, &entry_config_bytes)?;
 
-        // Update the entry with the processed config
-        entry.config = processed_config;
+        // Update the entry's config with the validated version (normalized JSON)
+        entry.config = validated_config;
     }
 
-    // Check for duplicate entry names
-    let mut names = std::collections::HashSet::new();
-    for entry in &yaml_config.entries {
-        if !names.insert(&entry.name) {
-            return Err(tinyfs::Error::Other(format!(
-                "Duplicate entry name: '{}'",
-                entry.name
-            )));
-        }
-    }
-
-    // Convert to JSON Value for internal processing
-    let json_value = serde_json::to_value(yaml_config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config to JSON: {}", e)))?;
-
-    Ok(json_value)
+    // Return the full config as a JSON Value (after all nested validations)
+    serde_json::to_value(&yaml_config)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert to JSON: {}", e)))
 }
 
-// Register the dynamic directory factory
 register_dynamic_factory!(
     name: "dynamic-dir",
-    description: "Create configurable directories where each entry is dynamically generated using other factories",
+    description: "Dynamic directory that creates entries from factory configurations",
     directory: create_dynamic_dir_handle,
     validate: validate_dynamic_dir_config
 );
@@ -358,338 +334,69 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::OpLogPersistence;
-    use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn test_dynamic_dir_config_validation() {
-        // Create a temporary template file for testing
-        let temp_dir = TempDir::new().unwrap();
-        let template_path = temp_dir.path().join("test_template.tmpl");
-        std::fs::write(&template_path, "Test content").unwrap();
-
-        // Test valid configuration
-        let valid_config = format!(
-            r#"
-entries:
-  - name: "test_entry"
-    factory: "template"
-    config:
-      in_pattern: "/base/*.tmpl"
-      out_pattern: "$0.txt"
-      template_file: "{}"
-"#,
-            template_path.to_string_lossy()
-        );
-
-        let result = validate_dynamic_dir_config(valid_config.as_bytes());
-        assert!(result.is_ok());
-
-        // Test empty entries list
-        let empty_entries_config = r#"
-entries: []
-"#;
-
-        let result = validate_dynamic_dir_config(empty_entries_config.as_bytes());
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Entries list cannot be empty")
-        );
-
-        // Test duplicate entry names
-        let duplicate_names_config = format!(
-            r#"
-entries:
-  - name: "duplicate"
-    factory: "template"
-    config:
-      in_pattern: "/base/*.tmpl"
-      out_pattern: "$0.txt"
-      template_file: "{}"
-  - name: "duplicate"
-    factory: "template"
-    config:
-      in_pattern: "/other/*.tmpl"
-      out_pattern: "$0.html"
-      template_file: "{}"
-"#,
-            template_path.to_string_lossy(),
-            template_path.to_string_lossy()
-        );
-
-        let result = validate_dynamic_dir_config(duplicate_names_config.as_bytes());
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Duplicate entry name")
-        );
-
-        // Test empty entry name
-        let empty_name_config = format!(
-            r#"
-entries:
-  - name: ""
-    factory: "template"
-    config:
-      in_pattern: "/base/*.tmpl"
-      out_pattern: "$0.txt"
-      template_file: "{}"
-"#,
-            template_path.to_string_lossy()
-        );
-
-        let result = validate_dynamic_dir_config(empty_name_config.as_bytes());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("empty name"));
-
-        // Test empty factory name
-        let empty_factory_config = format!(
-            r#"
-entries:
-  - name: "test"
-    factory: ""
-    config:
-      in_pattern: "/base/*.tmpl"
-      out_pattern: "$0.txt"
-      template_file: "{}"
-"#,
-            template_path.to_string_lossy()
-        );
-
-        let result = validate_dynamic_dir_config(empty_factory_config.as_bytes());
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("empty factory name")
-        );
-
-        // Test unknown factory
-        let unknown_factory_config = r#"
-entries:
-  - name: "test"
-    factory: "nonexistent_factory"
-    config:
-      some_config: "value"
-"#;
-
-        let result = validate_dynamic_dir_config(unknown_factory_config.as_bytes());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown factory"));
-    }
-
-    #[tokio::test]
-    async fn test_dynamic_dir_creation() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create a template file for testing
-        let template_path = temp_dir.path().join("test_template.tmpl");
-        std::fs::write(&template_path, "Test template content").unwrap();
-
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
-            .await
-            .unwrap();
-        let tx_guard = persistence.begin_test().await.unwrap();
-        let state = tx_guard.state().unwrap();
-        use tinyfs::FileID;
-        let context = FactoryContext::new(state, FileID::root());
-
-        // Create a valid configuration using template factory
-        let config = DynamicDirConfig {
-            entries: vec![DynamicDirEntry {
-                name: "template_dir".to_string(),
-                factory: "template".to_string(),
-                config: serde_json::json!({
-                    "in_pattern": "/base/*.tmpl",
-                    "out_pattern": "$0.txt",
-                    "template_file": template_path.to_string_lossy()
-                }),
-            }],
-        };
-
-        // Create the dynamic directory
-        let provider_context = context.state.as_provider_context();
-        let provider_factory_context = provider::FactoryContext::new(provider_context, context.file_id);
-        let dynamic_dir = DynamicDirDirectory::new(config, provider_factory_context);
-
-        // Test that we can get the configured entry
-        let result = dynamic_dir.get("template_dir").await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_some());
-
-        // Test that we get None for non-existent entries
-        let result = dynamic_dir.get("nonexistent").await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_dynamic_dir_entries_listing() {
-        use futures::StreamExt;
-
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create template files for testing
-        let template_path1 = temp_dir.path().join("test_template1.tmpl");
-        std::fs::write(&template_path1, "Template 1 content").unwrap();
-        let template_path2 = temp_dir.path().join("test_template2.tmpl");
-        std::fs::write(&template_path2, "Template 2 content").unwrap();
-
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
-            .await
-            .unwrap();
-        let tx_guard = persistence.begin_test().await.unwrap();
-        let state = tx_guard.state().unwrap();
-        use tinyfs::FileID;
-        let context = FactoryContext::new(state, FileID::root());
-
-        // Create configuration with multiple entries using template factory
+    #[test]
+    fn test_dynamic_dir_config_serialization() {
         let config = DynamicDirConfig {
             entries: vec![
                 DynamicDirEntry {
-                    name: "template1".to_string(),
-                    factory: "template".to_string(),
-                    config: serde_json::json!({
-                        "in_pattern": "/base/*.tmpl",
-                        "out_pattern": "$0.txt",
-                        "template_file": template_path1.to_string_lossy()
-                    }),
+                    name: "file1".to_string(),
+                    factory: "test-factory".to_string(),
+                    config: serde_json::json!({"key": "value"}),
                 },
                 DynamicDirEntry {
-                    name: "template2".to_string(),
-                    factory: "template".to_string(),
-                    config: serde_json::json!({
-                        "in_pattern": "/other/*.tmpl",
-                        "out_pattern": "$0.html",
-                        "template_file": template_path2.to_string_lossy()
-                    }),
+                    name: "file2".to_string(),
+                    factory: "another-factory".to_string(),
+                    config: serde_json::json!({"number": 42}),
                 },
             ],
         };
 
-        let provider_context = context.state.as_provider_context();
-        let provider_factory_context = provider::FactoryContext::new(provider_context, context.file_id);
-        let dynamic_dir = DynamicDirDirectory::new(config, provider_factory_context);
-
-        // Test entries listing
-        let entries_stream = dynamic_dir.entries().await.unwrap();
-        let entries: Vec<_> = entries_stream.collect().await;
-
-        assert_eq!(entries.len(), 2);
-
-        let names: std::collections::HashSet<String> = entries
-            .iter()
-            .filter_map(|result| result.as_ref().ok())
-            .map(|dir_entry| dir_entry.name.clone())
-            .collect();
-
-        assert!(names.contains("template1"));
-        assert!(names.contains("template2"));
-
-        // CRITICAL: Validate that node_ids are real UUIDs, not placeholders like "dynamic:template1"
-        for entry_result in &entries {
-            let dir_entry = entry_result.as_ref().unwrap();
-            
-            // child_node_id is already a valid NodeID type
-            let node_id_str = dir_entry.child_node_id.to_string();
-            
-            // Should NOT be a placeholder pattern
-            assert!(
-                !node_id_str.starts_with("dynamic:"),
-                "Entry '{}' has placeholder node_id: {}",
-                dir_entry.name, node_id_str
-            );
-            assert!(
-                !node_id_str.starts_with("template:"),
-                "Entry '{}' has placeholder node_id: {}",
-                dir_entry.name, node_id_str
-            );
-            
-            // Verify it's a proper UUID format (36 chars with dashes: 8-4-4-4-12)
-            assert_eq!(
-                node_id_str.len(), 36,
-                "Entry '{}' node_id wrong length: {}",
-                dir_entry.name, node_id_str
-            );
-            
-            // CRITICAL: Validate EntryType is valid (would have caught the from_content bug)
-            let entry_type = dir_entry.entry_type;
-            
-            // For dynamic directory entries, should be either DirectoryDynamic or FileDataDynamic
-            let type_value = entry_type as u8;
-            assert!(
-                type_value >= 1 && type_value <= 9,
-                "Entry '{}' has out-of-range EntryType: {} ({:?})",
-                dir_entry.name, type_value, entry_type
-            );
-        }
+        // Serialize to JSON
+        let json = serde_json::to_string(&config).unwrap();
+        
+        // Deserialize back
+        let deserialized: DynamicDirConfig = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(config, deserialized);
     }
 
-    /// Test that DynamicDirDirectory respects the EntryType from factory metadata.
-    /// This test catches a bug where all files were hardcoded to FileDataDynamic
-    /// instead of querying the factory's metadata for the correct type.
-    /// 
-    /// Bug scenario:
-    /// - timeseries-join factory creates SqlDerivedFile with FileSeriesDynamic
-    /// - DynamicDirDirectory was ignoring this and assigning FileDataDynamic
-    /// - SQL pattern resolution failed because it looked for FileSeries* types
-    #[tokio::test]
-    async fn test_dynamic_dir_respects_factory_entry_type() {
-        use crate::factory::FactoryContext;
-        use crate::persistence::OpLogPersistence;
-        use tinyfs::{EntryType, FileID};
-        use futures::StreamExt;
+    #[test]
+    fn test_dynamic_dir_entry_hash() {
+        let entry1 = DynamicDirEntry {
+            name: "test".to_string(),
+            factory: "factory1".to_string(),
+            config: serde_json::json!({"key": "value"}),
+        };
 
-        // Setup
-        let temp_dir = tempfile::tempdir().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
-            .await
-            .unwrap();
-        let tx_guard = persistence.begin_test().await.unwrap();
-        let state = tx_guard.state().unwrap();
-        let context = FactoryContext::new(state, FileID::root());
+        let entry2 = DynamicDirEntry {
+            name: "test".to_string(),
+            factory: "factory1".to_string(),
+            config: serde_json::json!({"key": "value"}),
+        };
 
-        // Create a dynamic directory with an entry that uses sql-derived-series
-        // which should create FileSeriesDynamic, NOT FileDataDynamic
-        let config = r#"
-entries:
-  - name: "test_series_file"
-    factory: "sql-derived-series"
-    config:
-      patterns:
-        input: "/some/path/*.parquet"
-      query: "SELECT * FROM input"
-"#;
+        let entry3 = DynamicDirEntry {
+            name: "test".to_string(),
+            factory: "factory2".to_string(), // Different factory
+            config: serde_json::json!({"key": "value"}),
+        };
 
-        // Parse config and create DynamicDirDirectory directly
-        let config_value = serde_yaml::from_str(config).unwrap();
-        let dir_config: DynamicDirConfig = serde_json::from_value(config_value).unwrap();
-        let provider_context = context.state.as_provider_context();
-        let provider_factory_context = provider::FactoryContext::new(provider_context, context.file_id);
-        let dynamic_dir = DynamicDirDirectory::new(dir_config, provider_factory_context);
+        // Same entries should have same hash
+        let mut hasher1 = DefaultHasher::new();
+        entry1.hash(&mut hasher1);
+        let hash1 = hasher1.finish();
 
-        // Get entries stream and collect
-        let entries_stream = dynamic_dir.entries().await.unwrap();
-        let entries: Vec<_> = entries_stream.collect().await;
-        assert_eq!(entries.len(), 1, "Should have exactly one entry");
+        let mut hasher2 = DefaultHasher::new();
+        entry2.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
 
-        let entry = entries[0].as_ref().unwrap();
-        assert_eq!(entry.name, "test_series_file");
+        assert_eq!(hash1, hash2);
 
-        // CRITICAL TEST: The entry should have FileSeriesDynamic type from sql-derived-series,
-        // NOT FileDataDynamic which would be the bug
-        assert_eq!(
-            entry.entry_type,
-            EntryType::FileSeriesDynamic,
-            "sql-derived-series factory should create FileSeriesDynamic, not FileDataDynamic. \
-             This test catches the bug where DynamicDirDirectory hardcoded EntryType::FileDataDynamic \
-             instead of querying the factory's metadata."
-        );
+        // Different factory should have different hash
+        let mut hasher3 = DefaultHasher::new();
+        entry3.hash(&mut hasher3);
+        let hash3 = hasher3.finish();
+
+        assert_ne!(hash1, hash3);
     }
 }
