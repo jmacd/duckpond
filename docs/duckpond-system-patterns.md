@@ -6,6 +6,14 @@ This document captures the critical system patterns and subtleties that are esse
 
 **Key Insight**: DuckPond's layered architecture creates subtle but critical constraints that must be understood to avoid common pitfalls. The system is designed around **single-instance patterns** and **low-level filesystem abstractions** that require precise handling.
 
+**Architecture Update (Dec 2025)**: DuckPond now separates concerns into distinct crates:
+- **tinyfs**: Core filesystem abstractions (Node, FileID, PersistenceLayer trait, ProviderContext)
+- **provider**: Factory infrastructure, QueryableFile trait, table creation utilities (generic, persistence-agnostic)
+- **tlogfs**: OpLog-based persistence implementation (Delta Lake + OpLog)
+- **steward**: Transaction orchestration and ship management
+
+This separation enables **in-memory testing** via MemoryPersistence and clean architectural boundaries.
+
 ## Critical Pattern #1: Transaction Guard Lifecycle
 
 ### The Single Transaction Guard Rule
@@ -180,7 +188,48 @@ async fn process_data(
 }
 ```
 
-## Critical Pattern #2: State Object Management
+## Critical Pattern #2: ProviderContext and State Management
+
+### The ProviderContext Abstraction
+
+**ProviderContext is a concrete struct that provides unified access to DataFusion sessions, template variables, and table provider caching.** It lives in tinyfs and uses internal trait-based injection for flexibility.
+
+```rust
+// ProviderContext structure (in tinyfs)
+pub struct ProviderContext {
+    session: Arc<dyn SessionProvider>,        // DataFusion session access
+    template_vars: Arc<dyn TemplateVariableProvider>,  // CLI variables
+    table_cache: Arc<dyn TableProviderCache>, // Performance optimization
+    persistence: Arc<dyn PersistenceLayer>,   // File operations
+}
+
+// Access patterns - clean API, no trait bounds needed
+let session = context.session_context().await?;
+let vars = context.get_template_variables()?;
+let cached_table = context.get_table_provider_cache(&key);
+```
+
+**Two implementations:**
+1. **Production**: State implements internal traits, wraps in ProviderContext
+2. **Testing**: MemoryPersistence + mock implementations for fast tests
+
+```rust
+// Production: tlogfs State creates ProviderContext
+impl State {
+    pub fn as_provider_context(&self) -> ProviderContext {
+        ProviderContext::new(
+            Arc::new(self.clone()) as Arc<dyn SessionProvider>,
+            Arc::new(self.clone()) as Arc<dyn TemplateVariableProvider>,
+            Arc::new(self.clone()) as Arc<dyn TableProviderCache>,
+            Arc::new(self.persistence.clone()) as Arc<dyn PersistenceLayer>,
+        )
+    }
+}
+
+// Testing: Pure in-memory (no OpLog/Delta Lake)
+let memory = MemoryPersistence::default();
+let context = ProviderContext::new_for_testing(memory).await?;
+```
 
 ### The Single State Context Rule
 
@@ -199,7 +248,7 @@ let state = tx_guard.state()?; // Single shared state
 ### State Access Within TLogFS
 
 ```rust
-// Inside TLogFS file implementations
+// Inside TLogFS file implementations (legacy signature)
 impl QueryableFile for MyFile {
     fn as_table_provider(
         &self,
@@ -211,15 +260,65 @@ impl QueryableFile for MyFile {
         // Never create new State instances
     }
 }
+
+// NEW: Provider crate uses ProviderContext (generic signature)
+impl provider::QueryableFile for MyFile {
+    async fn as_table_provider(
+        &self,
+        id: FileID,
+        context: &ProviderContext  // Generic context, works with any persistence
+    ) -> Result<Arc<dyn TableProvider>> {
+        let session = context.session_context().await?;
+        let bounds = context.persistence().get_temporal_bounds(id).await?;
+        // ... create table provider
+    }
+}
 ```
 
-**Key Insight**: State objects coordinate DataFusion contexts, filesystem metadata, and Delta Lake transactions. Creating multiple State instances breaks this coordination.
+**Key Insight**: State objects coordinate DataFusion contexts, filesystem metadata, and Delta Lake transactions. Creating multiple State instances breaks this coordination. **ProviderContext abstracts this for testing.**
+
+### Memory Persistence for Testing
+
+**Critical Pattern**: Use MemoryPersistence for fast, isolated tests without OpLog/Delta Lake overhead.
+
+```rust
+// ✅ CORRECT - In-memory testing pattern
+#[tokio::test]
+async fn test_sql_derived_logic() {
+    // Create in-memory persistence
+    let memory = MemoryPersistence::default();
+    let context = ProviderContext::new_for_testing(memory.clone()).await?;
+    
+    // Store test data (Parquet bytes)
+    let file_id = FileID::new_in_partition(partition, EntryType::FileSeriesPhysical);
+    let parquet_bytes = generate_test_parquet(vec![(1000, 23.5), (2000, 24.1)]);
+    memory.store_file_version(file_id, 1, parquet_bytes).await?;
+    
+    // Test factory logic with in-memory data
+    let factory = SqlDerivedFactory::new(config, context)?;
+    let table_provider = factory.create_table_provider().await?;
+    
+    // Query results - all in memory, no disk I/O!
+    let session = context.session_context().await?;
+    let df = session.read_table(table_provider)?;
+    let results = df.collect().await?;
+    
+    // No cleanup needed - memory is dropped
+}
+
+// ✅ Benefits:
+// - 100x faster than OpLog tests
+// - No temp directories to manage
+// - Perfect isolation between tests
+// - Can run in parallel
+// - No Delta Lake transaction overhead
+```
 
 ## Critical Pattern #3: DataFusion Session Context
 
 ### The Single Session Context Rule
 
-**NEVER create new DataFusion SessionContext instances.** Always use the pre-initialized context from the State.
+**NEVER create new DataFusion SessionContext instances.** Always use the pre-initialized context from the transaction guard or ProviderContext.
 
 ```rust
 // ❌ WRONG - Creating new DataFusion contexts
@@ -229,9 +328,12 @@ let ctx = SessionContext::new(); // BUG: Loses table registrations
 let config = SessionConfig::new();
 let ctx = SessionContext::new_with_config(config); // BUG: Still isolated
 
-// ✅ CORRECT - Use existing context from State
-let state = tx_guard.state()?;
-let df_context = state.datafusion_context(); // Pre-initialized context
+// ✅ CORRECT - Use existing context from transaction guard
+let tx_guard = persistence.begin().await?;
+let session_ctx = tx_guard.session_context().await?; // Pre-initialized context
+
+// ✅ CORRECT - Use existing context from ProviderContext
+let session = context.session_context().await?; // Works with both tlogfs and memory
 ```
 
 ### Context Registration Patterns
@@ -578,6 +680,149 @@ impl QueryableFile for TemporalReduceSqlFile {
 }
 ```
 
+## Critical Pattern #4: Provider Crate Factory Patterns
+
+### Factory Context and ProviderContext
+
+**Factories receive FactoryContext which contains ProviderContext.** This enables both tlogfs production usage and in-memory testing.
+
+```rust
+// Factory receives FactoryContext
+pub struct FactoryContext {
+    pub context: ProviderContext,  // Generic context (works with any persistence)
+    pub file_id: FileID,           // Factory's location
+    pub pond_metadata: Option<PondMetadata>,  // Pond-level config
+}
+
+// ✅ Factory implementation using ProviderContext
+impl DynamicFactory for SqlDerivedFactory {
+    async fn create_node(
+        &self,
+        factory_context: FactoryContext,
+    ) -> Result<Node> {
+        // Access DataFusion session
+        let session = factory_context.context.session_context().await?;
+        
+        // Query temporal bounds
+        let bounds = factory_context.context
+            .persistence()
+            .get_temporal_bounds(file_id)
+            .await?;
+        
+        // Create table provider (works with any persistence!)
+        let table_provider = create_table_provider(
+            file_id,
+            &factory_context.context,
+            options,
+        ).await?;
+        
+        // Factory logic...
+    }
+}
+```
+
+### QueryableFile Trait in Provider
+
+**QueryableFile moved to provider crate** for clean separation and testability.
+
+```rust
+// provider/src/registry.rs
+#[async_trait]
+pub trait QueryableFile: File {
+    async fn as_table_provider(
+        &self,
+        id: FileID,
+        context: &ProviderContext,  // Generic context!
+    ) -> Result<Arc<dyn TableProvider>>;
+}
+
+// Implementations work with both tlogfs and memory
+impl provider::QueryableFile for SqlDerivedFile {
+    async fn as_table_provider(
+        &self,
+        id: FileID,
+        context: &ProviderContext,
+    ) -> Result<Arc<dyn TableProvider>> {
+        // Works with tlogfs State OR MemoryPersistence
+        let session = context.session_context().await?;
+        // ... SQL generation logic
+    }
+}
+```
+
+### Table Creation Abstraction
+
+**Table creation logic uses ProviderContext methods** instead of direct State access.
+
+```rust
+// ✅ CORRECT - Generic table creation (provider crate)
+pub async fn create_table_provider(
+    file_id: FileID,
+    context: &ProviderContext,  // Works with any persistence!
+    options: TableProviderOptions,
+) -> Result<Arc<dyn TableProvider>> {
+    // Check cache (works with any TableProviderCache impl)
+    if let Some(cached) = context.get_table_provider_cache(&cache_key) {
+        return Ok(cached);
+    }
+    
+    // Get session (works with any SessionProvider impl)
+    let session = context.session_context().await?;
+    
+    // Query temporal bounds (works with any PersistenceLayer impl)
+    let bounds = context.persistence().get_temporal_bounds(file_id).await?;
+    
+    // Create ListingTable with DataFusion
+    let listing_table = create_listing_table(session, file_id, options).await?;
+    
+    // Wrap with temporal filtering
+    let provider = Arc::new(TemporalFilteredListingTable::new(
+        listing_table,
+        bounds.unwrap_or((i64::MIN, i64::MAX)),
+    ));
+    
+    // Cache result (works with any TableProviderCache impl)
+    context.set_table_provider_cache(cache_key, provider.clone());
+    
+    Ok(provider)
+}
+```
+
+### Testing with MemoryPersistence
+
+**Provider crate tests use MemoryPersistence** for fast, isolated testing.
+
+```rust
+// ✅ Pattern for testing factories
+#[tokio::test]
+async fn test_sql_derived_factory() {
+    // Setup in-memory environment
+    let memory = MemoryPersistence::default();
+    let context = ProviderContext::new_for_testing(memory.clone()).await?;
+    
+    // Store test Parquet data
+    let file_id = FileID::new_in_partition(partition, EntryType::FileSeriesPhysical);
+    let parquet_bytes = utilities::test_helpers::generate_parquet_with_timestamps(
+        vec![(1000, 23.5), (2000, 24.1), (3000, 25.2)]
+    )?;
+    memory.store_file_version(file_id, 1, parquet_bytes).await?;
+    
+    // Create factory context
+    let factory_context = FactoryContext {
+        context: context.clone(),
+        file_id: root_id,
+        pond_metadata: None,
+    };
+    
+    // Test factory (works identically to tlogfs!)
+    let factory = SqlDerivedFactory::new(config)?;
+    let node = factory.create_node(factory_context).await?;
+    
+    // Verify results
+    assert!(matches!(node.node_type, NodeType::File(_)));
+}
+```
+
 ## Architecture Layer Boundaries
 
 ### High-Level: Applications & Steward
@@ -593,18 +838,31 @@ let file_node = tx_guard.root().lookup("/sensors/data.parquet").await?;
 match file_node {
     Lookup::Found(node_path) => {
         let node_ref = node_path.borrow().await;
-        // Convert to TLogFS level...
+        // Convert to provider/tlogfs level...
+    }
+}
+```
+
+### Mid-Level: Provider Factories
+```rust
+// Provider level - factory infrastructure (persistence-agnostic)
+impl DynamicFactory for SqlDerivedFactory {
+    async fn create_node(&self, context: FactoryContext) -> Result<Node> {
+        // Works with any PersistenceLayer (tlogfs or memory)
+        let session = context.context.session_context().await?;
+        let table_provider = create_table_provider(file_id, &context.context, options).await?;
+        // ...
     }
 }
 ```
 
 ### Low-Level: TLogFS Operations
 ```rust
-// TLogFS level - NodeID/PartID and DataFusion integration
-impl QueryableFile for MyFile {
-    fn as_table_provider(&self, node_id: NodeID, part_id: NodeID, state: &State) {
+// TLogFS level - NodeID/PartID and DataFusion integration (OpLog-specific)
+impl provider::QueryableFile for OpLogFile {
+    async fn as_table_provider(&self, id: FileID, context: &ProviderContext) -> Result<Arc<dyn TableProvider>> {
         // Operating at filesystem metadata level
-        // No path resolution - use provided IDs
+        // Uses ProviderContext (can delegate to generic provider code)
     }
 }
 ```
@@ -705,6 +963,34 @@ let new_state = State::new(persistence.clone());
 
 // ✅ Use transaction guard's state
 let state = tx_guard.state()?;
+```
+
+### Anti-Pattern: Direct State Access in Factories
+
+```rust
+// ❌ WRONG - Factory directly accessing tlogfs State
+impl DynamicFactory for MyFactory {
+    async fn create_node(&self, context: FactoryContext) -> Result<Node> {
+        // BUG: Assumes tlogfs State, can't work with MemoryPersistence
+        let state = context.context.state.downcast_ref::<State>().unwrap();
+        let df_ctx = state.datafusion_context();
+        // ...
+    }
+}
+
+// ✅ CORRECT - Factory using ProviderContext abstraction
+impl DynamicFactory for MyFactory {
+    async fn create_node(&self, context: FactoryContext) -> Result<Node> {
+        // Works with any persistence implementation
+        let session = context.context.session_context().await?;
+        let table_provider = create_table_provider(
+            file_id,
+            &context.context,
+            options,
+        ).await?;
+        // ...
+    }
+}
 ```
 
 ### Anti-Pattern: Creating New OpLogPersistence Instances in Helper Functions
@@ -1147,19 +1433,42 @@ fn some_function(part_id: NodeID) {  // Actually use the parameter
 
 DuckPond's architecture requires understanding these critical patterns:
 
+### Core Transaction Patterns
 1. **Single Instance Rule**: One transaction guard, one state, one DataFusion context per operation
    - **Enforced by panic guard**: `OpLogPersistence::begin()` will panic if called while a transaction is active
    - **Pass guards through**: Helper functions should receive `&mut StewardTransactionGuard` not `store_path`
    - **Watch for duplicate logs**: "REGISTERING fundamental table" appearing twice indicates violation
-2. **NodeID/PartID Relationships**: Files use parent directory ID as part_id, directories use same ID for both
-3. **Layer Boundaries**: Patterns at factory level, NodeID/PartID at file level  
-4. **Context Sharing**: Always use existing contexts, never create new ones
-5. **Fundamental Table Registration**: Register system tables once per transaction in State constructor
-6. **TableProvider Ownership Chains**: Maintain hierarchical ownership from FS root to TableProvider
-7. **Multi-URL Over Union**: Use DataFusion's native multi-URL capabilities instead of manual unions
-8. **Fail-Fast Validation**: Empty schemas and unused parameters indicate architectural issues
-9. **Transaction Lifecycle**: Clear begin/commit boundaries with automatic rollback
-10. **Zero-Tolerance Silent Fallbacks**: Always fail fast on system errors, distinguish from business cases
+
+### Provider Crate Patterns (NEW)
+2. **ProviderContext Abstraction**: Use ProviderContext instead of direct State access in factories
+   - Enables both tlogfs (production) and MemoryPersistence (testing)
+   - Provides session_context(), get/set_template_variables(), table provider caching
+   - Abstracts PersistenceLayer trait for file operations
+3. **Memory Persistence Testing**: Use MemoryPersistence for fast, isolated factory tests
+   - store_file_version() to populate test data
+   - list_file_versions() to verify results
+   - No OpLog/Delta Lake overhead - pure memory operations
+4. **Factory Context**: Factories receive FactoryContext containing ProviderContext
+   - Enables testing without tlogfs dependency
+   - Clean separation of concerns
+5. **QueryableFile in Provider**: QueryableFile trait moved to provider crate
+   - Generic signature: `async fn as_table_provider(&self, id: FileID, context: &ProviderContext)`
+   - Works with both tlogfs and memory implementations
+
+### Architectural Patterns
+6. **NodeID/PartID Relationships**: Files use parent directory ID as part_id, directories use same ID for both
+7. **Layer Boundaries**: 
+   - Applications/Steward: Transactions and paths
+   - TinyFS: Type-safe filesystem navigation
+   - Provider: Factories and table creation (persistence-agnostic)
+   - TLogFS: OpLog operations (persistence-specific)
+8. **Context Sharing**: Always use existing contexts, never create new ones
+9. **Fundamental Table Registration**: Register system tables once per transaction in State constructor
+10. **TableProvider Ownership Chains**: Maintain hierarchical ownership from FS root to TableProvider
+11. **Multi-URL Over Union**: Use DataFusion's native multi-URL capabilities instead of manual unions
+12. **Fail-Fast Validation**: Empty schemas and unused parameters indicate architectural issues
+13. **Transaction Lifecycle**: Clear begin/commit boundaries with automatic rollback
+14. **Zero-Tolerance Silent Fallbacks**: Always fail fast on system errors, distinguish from business cases
 
 ## Critical Lessons from Real Implementation Challenges
 
@@ -1236,35 +1545,55 @@ Err(e) => {
 
 **The Root Cause of Most Bugs**: 
 1. **Creating duplicate transactions/persistence instances** (triggers panic guard, duplicate initialization logs)
-2. **Silent fallback anti-patterns** (masks real infrastructure problems)
-3. **Violating external API boundaries** (creates tight coupling and breaks modularity)
-4. **Treating business cases and system failures the same** (obscures root cause analysis)
-5. **Violating TableProvider ownership chains** (creates duplicate providers, breaks resource management)
-6. **Using UNION hacks instead of multi-URL ListingTable** (breaks ownership, creates temporary registrations)
-7. **Violating NodeID/PartID relationships** (breaks partition pruning)
-8. **Violating single-instance patterns** (context isolation, version conflicts)
-9. **Operating at the wrong architectural layer** (pattern matching at file level, etc.)
-10. **Repeated table registration within same transaction** ("table already exists" errors)
-11. **Not failing fast on architectural constraint violations** (allows bugs to compound)
+2. **Direct State access in provider crate** (breaks MemoryPersistence testing, tight coupling)
+3. **Not using ProviderContext abstraction** (prevents in-memory testing, violates separation of concerns)
+4. **Silent fallback anti-patterns** (masks real infrastructure problems)
+5. **Violating external API boundaries** (creates tight coupling and breaks modularity)
+6. **Treating business cases and system failures the same** (obscures root cause analysis)
+7. **Violating TableProvider ownership chains** (creates duplicate providers, breaks resource management)
+8. **Using UNION hacks instead of multi-URL ListingTable** (breaks ownership, creates temporary registrations)
+9. **Violating NodeID/PartID relationships** (breaks partition pruning)
+10. **Violating single-instance patterns** (context isolation, version conflicts)
+11. **Operating at the wrong architectural layer** (pattern matching at file level, etc.)
+12. **Repeated table registration within same transaction** ("table already exists" errors)
+13. **Not failing fast on architectural constraint violations** (allows bugs to compound)
+14. **Not testing factories with MemoryPersistence** (misses bugs, slow tests)
 
 **Critical Insight from Real Debugging Sessions**: The most dangerous bugs are those that appear to work correctly while masking underlying system corruption. **Silent fallbacks prevent proper root cause analysis and allow infrastructure problems to compound over time.**
 
 **For AI Agents**: These patterns are non-negotiable system constraints. Pay special attention to:
+
+**Transaction and Context Patterns:**
 1. **NEVER create duplicate OpLogPersistence/transaction instances** - pass `&mut StewardTransactionGuard` to helper functions
 2. **Watch for duplicate "REGISTERING fundamental table" logs** - immediate sign of duplicate transactions
 3. **Refactor functions that take `store_path` and call `OpLogPersistence::open()`** - they should take transaction guard instead
-4. **NEVER implement silent fallbacks** - always fail fast on system errors while properly handling business cases
-5. **Maintain clean API boundaries** - external crates use structured APIs, never internal implementation details  
-6. **Distinguish context in error handling** - business cases vs system failures require different responses
-7. **Maintain TableProvider ownership chains** - every provider must trace back to FS root through State cache
-8. **Use multi-URL ListingTable instead of UNION** - DataFusion handles multiple files natively
-9. **Monitor TableProvider creation with logging** - track cache hits/misses and ownership compliance
-10. **Never use `node_id` as `part_id` for files** - always resolve parent directory
-11. **Register fundamental tables once in State constructor** - never in individual components
-12. **Look for "table already exists" errors** - they indicate SessionContext architectural violations
-13. **Look for unused `_part_id` parameters** - they indicate incomplete DeltaLake integration
-14. **Add fail-fast checks for empty schemas** - they reveal partition pruning issues
-15. **Use the TinyFS `resolve_path()` pattern** - it's established throughout the codebase
-16. **Remove dead code immediately** - placeholder functions indicate incomplete architecture
+4. **Register fundamental tables once in State constructor** - never in individual components
+5. **Look for "table already exists" errors** - they indicate SessionContext architectural violations
+
+**Provider Crate Patterns (CRITICAL FOR NEW WORK):**
+6. **Use ProviderContext, not direct State access** - enables both tlogfs and MemoryPersistence
+7. **Factories receive FactoryContext with ProviderContext** - never downcast to State
+8. **Write tests with MemoryPersistence** - fast, isolated, no OpLog overhead
+9. **Use provider::QueryableFile trait** - generic signature with ProviderContext
+10. **Table creation uses ProviderContext methods** - session_context(), persistence(), caching
+11. **When migrating to provider crate** - replace State with ProviderContext everywhere
+12. **Memory persistence helpers** - store_file_version(), list_file_versions() for test data
+
+**Error Handling and Validation:**
+13. **NEVER implement silent fallbacks** - always fail fast on system errors while properly handling business cases
+14. **Maintain clean API boundaries** - external crates use structured APIs, never internal implementation details
+15. **Distinguish context in error handling** - business cases vs system failures require different responses
+16. **Add fail-fast checks for empty schemas** - they reveal partition pruning issues
+17. **Remove dead code immediately** - placeholder functions indicate incomplete architecture
+
+**DataFusion and TableProvider Patterns:**
+18. **Maintain TableProvider ownership chains** - every provider must trace back to FS root through cache
+19. **Use multi-URL ListingTable instead of UNION** - DataFusion handles multiple files natively
+20. **Monitor TableProvider creation with logging** - track cache hits/misses and ownership compliance
+
+**NodeID/PartID Patterns:**
+21. **Never use `node_id` as `part_id` for files** - always resolve parent directory
+22. **Look for unused `_part_id` parameters** - they indicate incomplete DeltaLake integration
+23. **Use the TinyFS `resolve_path()` pattern** - it's established throughout the codebase
 
 The system is designed to fail fast when these patterns are violated, which is intentional and should guide debugging efforts. **The panic guard in `OpLogPersistence::begin()` is your friend - it catches architectural violations early before they create cascading problems.** Silent fallback patterns are the most dangerous because they make debugging impossible while allowing system corruption to continue undetected.

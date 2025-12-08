@@ -165,6 +165,37 @@ impl MemoryPersistence {
     pub async fn set_temporal_bounds(&self, id: FileID, min_time: i64, max_time: i64) {
         _ = self.state.lock().await.temporal_bounds.insert(id, (min_time, max_time));
     }
+
+    /// Store a file version for testing
+    /// 
+    /// Adds a new version of a file to the in-memory storage. Versions are stored
+    /// in order and can be retrieved via list_file_versions() or read_file_version().
+    pub async fn store_file_version(
+        &self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+    ) -> Result<()> {
+        self.state.lock().await.store_file_version(id, version, content).await
+    }
+
+    /// Store a file version with extended metadata (for testing)
+    pub async fn store_file_version_with_metadata(
+        &self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+        entry_type: EntryType,
+        extended_metadata: Option<HashMap<String, String>>,
+    ) -> Result<()> {
+        self.state.lock().await.store_file_version_with_metadata(
+            id,
+            version,
+            content,
+            entry_type,
+            extended_metadata,
+        ).await
+    }
 }
 
 impl State {
@@ -208,6 +239,45 @@ impl State {
             NodeType::File(handle) => handle.metadata().await,
             _ => Err(Error::Other("Non-file metadata unimplemented".to_string())),
         }
+    }
+
+    async fn store_file_version(
+        &mut self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+    ) -> Result<()> {
+        self.store_file_version_with_metadata(
+            id,
+            version,
+            content,
+            id.entry_type(),
+            None,
+        ).await
+    }
+
+    async fn store_file_version_with_metadata(
+        &mut self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+        entry_type: EntryType,
+        extended_metadata: Option<HashMap<String, String>>,
+    ) -> Result<()> {
+        let file_version = MemoryFileVersion {
+            version,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            content,
+            entry_type,
+            extended_metadata,
+        };
+
+        self.file_versions
+            .entry(id)
+            .or_insert_with(Vec::new)
+            .push(file_version);
+
+        Ok(())
     }
 
     async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>> {
