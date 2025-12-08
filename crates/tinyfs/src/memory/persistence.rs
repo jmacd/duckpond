@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::memory::MemoryDirectory;
 use crate::node::{FileID, Node, NodeType};
 use crate::persistence::{FileVersionInfo, PersistenceLayer};
+use crate::transaction_guard::TransactionState;
 use crate::{EntryType, NodeMetadata};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -21,7 +22,11 @@ struct MemoryFileVersion {
 /// In-memory persistence layer for testing and derived file computation
 /// This implements the PersistenceLayer trait using in-memory storage
 #[derive(Clone)]
-pub struct MemoryPersistence(Arc<Mutex<State>>);
+pub struct MemoryPersistence {
+    state: Arc<Mutex<State>>,
+    /// Transaction state for enforcing single-writer pattern
+    pub txn_state: Arc<TransactionState>,
+}
 
 pub struct State {
     // Store multiple versions of each file: (node_id, part_id) -> Vec<MemoryFileVersion>
@@ -47,7 +52,10 @@ impl Default for State {
 
 impl Default for MemoryPersistence {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(State::default())))
+        Self {
+            state: Arc::new(Mutex::new(State::default())),
+            txn_state: Arc::new(TransactionState::new()),
+        }
     }
 }
 
@@ -58,26 +66,31 @@ impl PersistenceLayer for MemoryPersistence {
         self
     }
 
+    /// Get the transaction state for this persistence layer
+    fn transaction_state(&self) -> Arc<TransactionState> {
+        self.txn_state.clone()
+    }
+
     // Node operations
     async fn load_node(&self, id: FileID) -> Result<Node> {
-        self.0.lock().await.load_node(id).await
+        self.state.lock().await.load_node(id).await
     }
 
     async fn store_node(&self, node: &Node) -> Result<()> {
-        self.0.lock().await.store_node(node).await
+        self.state.lock().await.store_node(node).await
     }
 
     // Factory methods for creating nodes directly with persistence
     async fn create_file_node(&self, id: FileID) -> Result<Node> {
-        self.0.lock().await.create_file_node(id).await
+        self.state.lock().await.create_file_node(id).await
     }
 
     async fn create_directory_node(&self, id: FileID) -> Result<Node> {
-        self.0.lock().await.create_directory_node(id).await
+        self.state.lock().await.create_directory_node(id).await
     }
 
     async fn create_symlink_node(&self, id: FileID, target: &std::path::Path) -> Result<Node> {
-        self.0.lock().await.create_symlink_node(id, target).await
+        self.state.lock().await.create_symlink_node(id, target).await
     }
 
     async fn create_dynamic_node(
@@ -86,7 +99,7 @@ impl PersistenceLayer for MemoryPersistence {
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<Node> {
-        self.0
+        self.state
             .lock()
             .await
             .create_dynamic_node(id, factory_type, config_content)
@@ -94,7 +107,7 @@ impl PersistenceLayer for MemoryPersistence {
     }
 
     async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>> {
-        self.0.lock().await.get_dynamic_node_config(id).await
+        self.state.lock().await.get_dynamic_node_config(id).await
     }
 
     async fn update_dynamic_node_config(
@@ -103,7 +116,7 @@ impl PersistenceLayer for MemoryPersistence {
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<()> {
-        self.0
+        self.state
             .lock()
             .await
             .update_dynamic_node_config(id, factory_type, config_content)
@@ -111,15 +124,15 @@ impl PersistenceLayer for MemoryPersistence {
     }
 
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
-        self.0.lock().await.metadata(id).await
+        self.state.lock().await.metadata(id).await
     }
 
     async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>> {
-        self.0.lock().await.list_file_versions(id).await
+        self.state.lock().await.list_file_versions(id).await
     }
 
     async fn read_file_version(&self, id: FileID, version: u64) -> Result<Vec<u8>> {
-        self.0.lock().await.read_file_version(id, version).await
+        self.state.lock().await.read_file_version(id, version).await
     }
 
     async fn set_extended_attributes(
@@ -127,7 +140,7 @@ impl PersistenceLayer for MemoryPersistence {
         id: FileID,
         attributes: HashMap<String, String>,
     ) -> Result<()> {
-        self.0
+        self.state
             .lock()
             .await
             .set_extended_attributes(id, attributes)

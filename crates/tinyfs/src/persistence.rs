@@ -1,9 +1,11 @@
+use crate::transaction_guard::TransactionState;
 use crate::EntryType;
 use crate::error::Result;
 use crate::node::{FileID, Node};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Information about a specific version of a file
 #[derive(Debug, Clone)]
@@ -27,6 +29,11 @@ pub struct FileVersionInfo {
 pub trait PersistenceLayer: Send + Sync {
     /// Downcast support for accessing concrete implementation methods
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Get the transaction state for this persistence layer
+    ///
+    /// This allows transaction guards to be created from the persistence layer
+    fn transaction_state(&self) -> Arc<TransactionState>;
 
     async fn load_node(&self, file_id: FileID) -> Result<Node>;
 

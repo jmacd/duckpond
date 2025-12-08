@@ -12,6 +12,7 @@
 use crate::error::Result;
 use crate::node::{FileID, Node};
 use crate::persistence::{FileVersionInfo, PersistenceLayer};
+use crate::transaction_guard::TransactionState;
 use async_trait::async_trait;
 use log::debug;
 use std::collections::HashMap;
@@ -110,6 +111,10 @@ impl<P: PersistenceLayer> CachingPersistence<P> {
 impl<P: PersistenceLayer + Send + Sync + 'static> PersistenceLayer for CachingPersistence<P> {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn transaction_state(&self) -> Arc<TransactionState> {
+        self.inner.transaction_state()
     }
 
     /// Load node with caching

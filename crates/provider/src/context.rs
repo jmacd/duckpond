@@ -95,7 +95,8 @@ impl ProviderContext {
     /// The guard provides access to the filesystem and automatically cleans up on drop.
     pub fn begin_transaction(&self) -> tinyfs::Result<tinyfs::TransactionGuard> {
         let fs = self.filesystem();
-        tinyfs::TransactionGuard::begin(fs)
+        let txn_state = self.persistence.transaction_state();
+        txn_state.begin(fs, None)
     }
 }
 

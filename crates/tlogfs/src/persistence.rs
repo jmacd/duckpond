@@ -24,6 +24,7 @@ use std::sync::Arc;
 use tinyfs::{
     EntryType, FS, FileID, FileVersionInfo, Node, NodeMetadata, NodeType,
     Result as TinyFSResult, persistence::PersistenceLayer,
+    transaction_guard::TransactionState as TinyFsTransactionState,
 };
 use tokio::sync::Mutex;
 
@@ -33,6 +34,8 @@ pub struct OpLogPersistence {
     pub(crate) fs: Option<FS>,
     pub(crate) state: Option<State>,
     pub(crate) last_txn_seq: i64, // Track last committed transaction sequence for validation
+    /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
+    pub(crate) txn_state: Arc<TinyFsTransactionState>,
 }
 
 /// In-memory directory state during a transaction
@@ -90,6 +93,8 @@ pub struct State {
     table_provider_cache: Arc<
         std::sync::Mutex<HashMap<TableProviderKey, Arc<dyn datafusion::catalog::TableProvider>>>,
     >,
+    /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
+    txn_state: Arc<TinyFsTransactionState>,
 }
 
 
@@ -203,6 +208,7 @@ impl OpLogPersistence {
             fs: None,
             state: None,
             last_txn_seq: 0, // No transactions yet - bundles will provide them
+            txn_state: Arc::new(TinyFsTransactionState::new()),
         })
     }
 
@@ -268,6 +274,7 @@ impl OpLogPersistence {
             fs: None,
             state: None,
             last_txn_seq: 0, // Will be updated below
+            txn_state: Arc::new(TinyFsTransactionState::new()),
         };
 
         // Initialize root directory ONLY when creating a new pond
@@ -419,11 +426,9 @@ impl OpLogPersistence {
         metadata: &PondTxnMetadata,
         is_write: bool,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
-        // Prevent multiple concurrent transactions on the same
-        // OpLogPersistence This is a programming error that indicates
-        // improper transaction guard lifecycle management.
+        // Sanity check - state/fs should be None between transactions
         if self.state.is_some() || self.fs.is_some() {
-            panic!("🚨 TRANSACTION GUARD VIOLATION");
+            panic!("🚨 INTERNAL ERROR: state/fs is Some at begin_impl start");
         }
 
         let inner_state = InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?;
@@ -435,6 +440,7 @@ impl OpLogPersistence {
             session_context,
             template_variables: Arc::new(std::sync::Mutex::new(HashMap::new())),
             table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            txn_state: self.txn_state.clone(),
         };
 
         // Complete SessionContext setup with ObjectStore registration
@@ -445,10 +451,17 @@ impl OpLogPersistence {
 
         state.begin_impl().await?;
 
-        self.fs = Some(FS::new(state.clone()).await?);
+        let fs = FS::new(state.clone()).await?;
+        self.fs = Some(fs.clone());
         self.state = Some(state);
 
-        Ok(TransactionGuard::new(self, metadata, is_write))
+        // Create the tinyfs transaction guard (this marks the transaction as active)
+        let tinyfs_guard = self.txn_state.begin(fs, Some(metadata.txn_seq))
+            .map_err(|e| TLogFSError::Transaction { 
+                message: format!("Failed to begin tinyfs transaction: {}", e)
+            })?;
+
+        Ok(TransactionGuard::new(tinyfs_guard, self, metadata, is_write))
     }
 
     /// Commit a transaction with metadata and return the committed version
@@ -470,6 +483,8 @@ impl OpLogPersistence {
         self.table = deltalake::open_table(self.path.to_string_lossy().to_string()).await?;
         debug!("🔄 Reloaded table after commit, new version: {:?}", self.table.version());
         self.last_txn_seq = new_seq;
+
+        // Note: txn_state clearing is handled by tinyfs::TransactionGuard drop
 
         Ok(res)
     }
@@ -724,6 +739,10 @@ impl State {
 impl PersistenceLayer for State {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn transaction_state(&self) -> Arc<TinyFsTransactionState> {
+        self.txn_state.clone()
     }
 
     async fn load_node(&self, id: FileID) -> TinyFSResult<Node> {
