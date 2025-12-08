@@ -253,8 +253,6 @@ pub struct TableProviderOptions {
     /// Multiple file URLs/paths to combine into a single table
     /// If empty, will use the node_id/part_id pattern (existing behavior)
     pub additional_urls: Vec<String>,
-    // Future expansion: pub temporal_filter: Option<(i64, i64)>,
-    // Future expansion: pub partition_pruning: bool,
 }
 
 /// Single configurable function for creating table providers
@@ -347,27 +345,37 @@ pub async fn create_table_provider(
     let listing_table = ListingTable::try_new(config_with_schema)
         .map_err(|e| TLogFSError::ArrowMessage(format!("ListingTable creation failed: {}", e)))?;
 
-    // Get temporal overrides from the current version of this FileSeries using fail-fast method
-    let temporal_overrides = state
-        .get_temporal_overrides_for_node_id(file_id)
-        .await?;
+    // Determine temporal bounds for TemporalFilteredListingTable wrapper
+    // 
+    // NOTE: Temporal bounds are per-FileSeries metadata for data quality filtering
+    // (set via `pond set-temporal-bounds`). They filter out garbage data outside the
+    // file's valid time range.
+    //
+    // CURRENT: Only applied to single-file queries via TemporalFilteredListingTable
+    // FUTURE: Multi-file queries should have per-file bounds enforced at Parquet scan level
+    let (min_time, max_time) = if options.additional_urls.is_empty() {
+        // Single-file case: query temporal bounds from persistence
+        debug!("Querying temporal bounds from persistence for file_id={}", file_id);
+        let temporal_overrides = state.get_temporal_overrides_for_node_id(file_id).await?;
 
-    // EXPLICIT BUSINESS LOGIC: For FileSeries without temporal overrides, use unbounded ranges
-    // This is legitimate business logic - some series span all time by design
-    let (min_time, max_time) = temporal_overrides.unwrap_or_else(|| {
+        temporal_overrides.unwrap_or_else(|| {
+            debug!(
+                "No temporal bounds for FileSeries {} - using unbounded (no data quality filtering)",
+                file_id
+            );
+            (i64::MIN, i64::MAX)
+        })
+    } else {
+        // Multi-file case: no temporal filtering at this level
+        // TODO: Implement per-file temporal bounds at Parquet reader level
         debug!(
-            "No temporal overrides found for FileSeries {} - using unbounded time range",
-            file_id
+            "Multi-file query ({} URLs) - temporal bounds enforcement deferred to Parquet reader (not yet implemented)",
+            options.additional_urls.len()
         );
         (i64::MIN, i64::MAX)
-    });
+    };
+    
     debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}");
-
-    if temporal_overrides.is_some() {
-        debug!("⚠️ TEMPORAL OVERRIDES FOUND - creating TemporalFilteredListingTable wrapper");
-    } else {
-        debug!("⚠️ NO TEMPORAL OVERRIDES - using fallback bounds (i64::MIN, i64::MAX)");
-    }
 
     let table_provider = Arc::new(TemporalFilteredListingTable::new(
         listing_table,

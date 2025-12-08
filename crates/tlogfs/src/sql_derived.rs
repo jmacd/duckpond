@@ -578,6 +578,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     // Multiple files: use multi-URL ListingTable approach (maintains ownership chain)
                     // Following anti-duplication: use existing create_table_provider_for_multiple_urls pattern
                     let mut urls = Vec::new();
+                    let mut file_ids = Vec::new();
                     for node_path in queryable_files {
                         let file_id = node_path.id();
                         let file_handle = node_path.as_file().await.map_err(|e| {
@@ -601,6 +602,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                         crate::file_table::VersionSelection::AllVersions
                                             .to_url_pattern(&file_id);
                                     urls.push(url_pattern);
+                                    file_ids.push(file_id);
                                 }
                                 None => {
                                     return Err(tinyfs::Error::Other(format!(
@@ -625,12 +627,10 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         )));
                     }
 
-                    // Create single TableProvider with multiple URLs - maintains ownership chain
-                    // Use direct create_table_provider with additional_urls to avoid TransactionGuard dependency
+                    // Create table provider options for multi-file query
+                    // Note: Temporal bounds (from pond set-temporal-bounds) should be enforced
+                    // at the Parquet reader level, not here at the factory level
                     use crate::file_table::{TableProviderOptions, create_table_provider};
-
-                    let dummy_file_id = FileID::root();
-
                     let options = TableProviderOptions {
                         additional_urls: urls.clone(),
                         ..Default::default()
@@ -642,7 +642,9 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         urls.len()
                     );
 
-                    let provider = create_table_provider(dummy_file_id, state, options).await
+                    // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
+                    let representative_file_id = file_ids.first().copied().unwrap_or(FileID::root());
+                    let provider = create_table_provider(representative_file_id, state, options).await
                         .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                     
                     // Apply optional provider wrapper (e.g., null_padding_table)

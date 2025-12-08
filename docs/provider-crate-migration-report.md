@@ -511,18 +511,180 @@ let context = ProviderContext::new(
 
 ---
 
+## Critical Design Issue: Temporal Bounds Architecture
+
+### Current Problem
+
+**Temporal bounds are implemented incorrectly in the State/persistence layer**, causing architectural confusion:
+
+1. **Single-file special case**: When processing one file, we use its FileID to look up temporal bounds
+2. **Multi-file hack**: When processing multiple files, we use `FileID::root()` as a dummy, which "accidentally works" because root has no FileSeries records
+3. **Misleading semantics**: Temporal bounds are per-FileSeries metadata, not per-query metadata
+4. **Wrong abstraction layer**: `create_table_provider()` queries State for temporal bounds, coupling table creation to tlogfs implementation
+
+### Root Cause
+
+Temporal bounds were made first-class in `OplogEntry` (separate columns `min_time`/`max_time`) to avoid parsing map-valued metadata columns for performance. This was a **tlogfs optimization** that leaked into the **tinyfs abstraction**.
+
+**The confusion:**
+- Temporal bounds ARE metadata (property of a FileSeries node)
+- tlogfs stores them separately for performance (valid optimization)
+- But the API treats them as a State-level concern (wrong layer)
+
+### Correct Architecture
+
+**Temporal bounds should be node-level metadata in tinyfs:**
+
+```rust
+// tinyfs/src/persistence.rs
+pub trait PersistenceLayer {
+    // Existing
+    async fn get_metadata(&self, id: FileID) -> Result<NodeMetadata>;
+    
+    // NEW: Temporal bounds are first-class for FileSeries
+    async fn get_temporal_bounds(&self, id: FileID) -> Result<Option<(i64, i64)>>;
+}
+
+// tinyfs/src/metadata.rs
+pub struct NodeMetadata {
+    pub version: u64,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+    pub entry_type: EntryType,
+    pub timestamp: i64,
+    // NOT here - handled separately via get_temporal_bounds()
+}
+```
+
+**Why separate from NodeMetadata map:**
+1. **Performance**: Commonly used for Parquet filtering (deserializing map is expensive)
+2. **Type safety**: `Option<(i64, i64)>` vs parsing JSON
+3. **Query optimization**: Can index temporal bounds for range queries
+
+**Implementation strategy:**
+- tinyfs trait defines the API
+- tlogfs implements it efficiently (OplogEntry columns)
+- MemoryPersistence implements it simply (HashMap<FileID, (i64, i64)>)
+
+### Migration Impact
+
+**file_table::create_table_provider() signature change:**
+
+```rust
+// BEFORE (tlogfs-coupled)
+pub async fn create_table_provider(
+    file_id: FileID,
+    state: &crate::persistence::State,  // ← Concrete tlogfs type
+    options: TableProviderOptions,
+) -> Result<Arc<dyn TableProvider>>
+
+// AFTER (tinyfs abstraction)
+pub async fn create_table_provider(
+    context: &ProviderContext,  // ← Has PersistenceLayer
+    options: TableProviderOptions,  // ← Contains file_ids + temporal bounds
+) -> Result<Arc<dyn TableProvider>>
+
+// TableProviderOptions expanded:
+pub struct TableProviderOptions {
+    pub version_selection: VersionSelection,
+    pub additional_urls: Vec<String>,
+    
+    // NEW: Explicit temporal bounds per file
+    // - None = query from persistence for the file_id
+    // - Some(bounds_vec) = use provided bounds (one per URL)
+    pub temporal_bounds: Option<Vec<TemporalBounds>>,
+}
+
+pub struct TemporalBounds {
+    pub file_id: FileID,  // Which file these bounds apply to
+    pub min_time: i64,
+    pub max_time: i64,
+}
+```
+
+**Call sites update:**
+
+```rust
+// Single file (sql_derived.rs)
+let temporal_bounds = context.persistence
+    .get_temporal_bounds(file_id)
+    .await?
+    .map(|(min, max)| vec![TemporalBounds { file_id, min_time: min, max_time: max }]);
+
+let options = TableProviderOptions {
+    version_selection: VersionSelection::LatestVersion,
+    additional_urls: vec![],
+    temporal_bounds,
+};
+
+let provider = create_table_provider(context, options).await?;
+
+// Multi-file (sql_derived.rs)
+let mut temporal_bounds = Vec::new();
+for (file_id, url) in file_urls {
+    if let Some((min, max)) = context.persistence.get_temporal_bounds(file_id).await? {
+        temporal_bounds.push(TemporalBounds { file_id, min_time: min, max_time: max });
+    }
+}
+
+let options = TableProviderOptions {
+    version_selection: VersionSelection::AllVersions,
+    additional_urls: urls,
+    temporal_bounds: Some(temporal_bounds),  // Explicit bounds for each file
+};
+
+let provider = create_table_provider(context, options).await?;
+```
+
+**No more dummy FileID, no more "accidentally works", proper semantics.**
+
+### Benefits
+
+1. ✅ **Correct abstraction**: Temporal bounds are node metadata, accessed via PersistenceLayer trait
+2. ✅ **Testable**: MemoryPersistence can implement get_temporal_bounds() for in-memory testing
+3. ✅ **No dummy FileID**: Multi-file queries explicitly pass bounds for each file
+4. ✅ **Clear semantics**: TemporalBounds struct documents which file each range applies to
+5. ✅ **Decoupled**: file_table can move to provider crate (no tlogfs State dependency)
+6. ✅ **Performance**: tlogfs keeps efficient OplogEntry columns, just accessed via trait method
+7. ✅ **Flexible**: Future persistence implementations can optimize as needed
+
+### Migration Steps
+
+1. **Add to tinyfs::PersistenceLayer trait**:
+   ```rust
+   async fn get_temporal_bounds(&self, id: FileID) -> Result<Option<(i64, i64)>>;
+   ```
+
+2. **Implement in tlogfs::State**:
+   - Rename existing `get_temporal_overrides_for_node_id()` → impl for trait method
+   - No logic changes, just API alignment
+
+3. **Implement in tinyfs::MemoryPersistence**:
+   ```rust
+   temporal_bounds: Arc<RwLock<HashMap<FileID, (i64, i64)>>>,
+   ```
+
+4. **Update TableProviderOptions**:
+   - Add `temporal_bounds: Option<Vec<TemporalBounds>>` field
+   - Update create_table_provider() to use provided bounds or query persistence
+
+5. **Update sql_derived.rs call sites**:
+   - Single file: query temporal bounds, pass in options
+   - Multi file: query bounds for each file, pass vector in options
+
+6. **Move file_table to provider crate**:
+   - No longer depends on tlogfs::State
+   - Can now be tested with MemoryPersistence
+
 ## Open Questions
 
 1. **Bundle operations**: Should remote_factory stay in tlogfs or move with abstraction?
    - **Recommendation**: Keep in tlogfs, it's transaction-level not factory-level
 
-2. **TableProvider caching**: Part of ProviderContext or separate concern?
-   - **Recommendation**: Include in ProviderContext for flexibility
-
-3. **PondMetadata**: Provider or tlogfs?
+2. **PondMetadata**: Provider or tlogfs?
    - **Recommendation**: Provider - it's metadata about the pond, not persistence
 
-4. **ConfigFile**: Where does it live?
+3. **ConfigFile**: Where does it live?
    - **Recommendation**: Provider - it's a factory artifact
 
 ---
@@ -637,6 +799,33 @@ let context = ProviderContext::new(
 
 ---
 
-**Document Version**: 1.4  
-**Date**: 2025-12-06 (Phase 4 complete - QueryableFile migrated, all tests passing)  
+---
+
+### 2025-12-08: Temporal Bounds Architecture Analysis
+
+**Critical Finding:**
+- Temporal bounds are implemented at the wrong abstraction layer
+- Current design uses dummy `FileID::root()` for multi-file queries (accidental correctness)
+- Temporal bounds are node-level metadata, should be in PersistenceLayer trait
+- Current coupling to tlogfs::State blocks migration of file_table and sql_derived to provider
+
+**Correct Design:**
+- Add `get_temporal_bounds(FileID)` to tinyfs::PersistenceLayer trait
+- tlogfs implements efficiently using OplogEntry columns (no change to storage)
+- MemoryPersistence implements using HashMap (enables in-memory testing)
+- TableProviderOptions gets `temporal_bounds: Option<Vec<TemporalBounds>>` field
+- Call sites explicitly pass bounds (no dummy FileID, no "accidentally works")
+- file_table can move to provider crate (no tlogfs dependency)
+
+**Migration Priority:**
+- Fix temporal bounds abstraction BEFORE moving remaining factories
+- This unblocks sql_derived and file_table migration to provider
+- Essential for in-memory testing of QueryableFile implementations
+
+**Status**: Design complete, ready for implementation
+
+---
+
+**Document Version**: 1.5  
+**Date**: 2025-12-08 (Temporal bounds architecture analysis - critical for Phase 5)  
 **Author**: Analysis based on codebase study
