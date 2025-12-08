@@ -395,6 +395,10 @@ impl tinyfs::File for TimeseriesJoinFile {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
+        Some(self)
+    }
 }
 
 #[async_trait]
@@ -411,18 +415,16 @@ impl tinyfs::Metadata for TimeseriesJoinFile {
 }
 
 #[async_trait]
-impl provider::QueryableFile for TimeseriesJoinFile {
+impl tinyfs::QueryableFile for TimeseriesJoinFile {
     async fn as_table_provider(
         &self,
         id: tinyfs::FileID,
-        context: &provider::ProviderContext,
-    ) -> Result<Arc<dyn TableProvider>, provider::Error> {
+        context: &tinyfs::ProviderContext,
+    ) -> tinyfs::Result<Arc<dyn TableProvider>> {
         log::debug!(
-            "📋 DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: id={id}",
+            "DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: id={id}",
         );
-        self.ensure_inner()
-            .await
-            .map_err(|e| provider::Error::TinyFs(e))?;
+        self.ensure_inner().await?;
 
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard

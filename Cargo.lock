@@ -4835,6 +4835,8 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "bytes",
+ "chrono",
+ "datafusion",
  "deltalake",
  "futures",
  "log",

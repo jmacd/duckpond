@@ -1,6 +1,5 @@
 //! Provider: URL-Based file access and factory infrastructure
 
-mod context;
 #[cfg(test)]
 mod context_tests;
 pub mod dynamic_dir;
@@ -8,12 +7,15 @@ mod error;
 mod null_padding;
 pub mod registry;
 mod scope_prefix;
+pub mod sql_derived;
+mod sql_derived_types;
+mod sql_transform;
 pub mod test_factory;
 mod tinyfs_path;
+mod version_selection;
 
-pub use context::{
-    FactoryContext, PondMetadata, ProviderContext,
-};
+// Re-export context types from tinyfs (they moved there to break circular dependency)
+pub use tinyfs::{FactoryContext, PondMetadata, ProviderContext};
 pub use dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 pub use error::{Error, Result};
 pub use null_padding::null_padding_table;
@@ -22,7 +24,11 @@ pub use registry::{
     FactoryCommand, FactoryRegistry, QueryableFile, DYNAMIC_FACTORIES,
 };
 pub use scope_prefix::ScopePrefixTableProvider;
+pub use sql_derived::SqlDerivedConfig;
+pub use sql_derived_types::{SqlDerivedMode, SqlTransformOptions};
+pub use sql_transform::transform_sql;
 pub use tinyfs_path::TinyFsPathBuilder;
+pub use version_selection::VersionSelection;
 
 use std::pin::Pin;
 use tokio::io::AsyncRead;

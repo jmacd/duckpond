@@ -33,11 +33,10 @@
 use crate::factory::FactoryContext;
 use tinyfs::FileID;
 
-use crate::register_dynamic_factory;
+use crate::register_queryable_file_factory;
 use provider::ScopePrefixTableProvider;
 use async_trait::async_trait;
 use log::debug;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,135 +45,11 @@ use tinyfs::{
 };
 use tokio::io::AsyncWrite;
 
-// Removed unused imports - using functions from file_table.rs instead
+// Re-export types from provider
+pub use provider::{SqlDerivedConfig, SqlDerivedMode, SqlTransformOptions};
 
-/// Helper function to convert a File trait object to QueryableFile trait object
-/// 
-/// This uses a generic downcast approach: since QueryableFile: File, any concrete type
-/// T: QueryableFile can be downcast from &dyn File via as_any(). We leverage Rust's
-/// type system by attempting to downcast through each known QueryableFile implementation.
-/// 
-/// This is more maintainable than a factory registry because:
-/// 1. Works for both factory-created and non-factory files (OpLogFile, TemporalReduceSqlFile)
-/// 2. Type-safe - compiler ensures all QueryableFile impls are File
-/// 3. Centralized - all QueryableFile types in one place
-pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn provider::QueryableFile> {
-    use crate::file::OpLogFile;
-    use crate::temporal_reduce::TemporalReduceSqlFile;
-    use crate::timeseries_join::TimeseriesJoinFile;
-    use crate::timeseries_pivot::TimeseriesPivotFile;
-
-    let file_any = file.as_any();
-
-    // Try each QueryableFile implementation
-    if let Some(f) = file_any.downcast_ref::<OpLogFile>() {
-        return Some(f as &dyn provider::QueryableFile);
-    }
-    if let Some(f) = file_any.downcast_ref::<SqlDerivedFile>() {
-        return Some(f as &dyn provider::QueryableFile);
-    }
-    if let Some(f) = file_any.downcast_ref::<TemporalReduceSqlFile>() {
-        return Some(f as &dyn provider::QueryableFile);
-    }
-    if let Some(f) = file_any.downcast_ref::<TimeseriesJoinFile>() {
-        return Some(f as &dyn provider::QueryableFile);
-    }
-    if let Some(f) = file_any.downcast_ref::<TimeseriesPivotFile>() {
-        return Some(f as &dyn provider::QueryableFile);
-    }
-
-    None
-}
-
-/// Options for SQL transformation and table name replacement
-#[derive(Default, Clone)]
-pub struct SqlTransformOptions {
-    /// Replace multiple table names with mappings (for patterns)
-    pub table_mappings: Option<HashMap<String, String>>,
-    /// Replace a single source table name (for simple cases)  
-    pub source_replacement: Option<String>,
-}
-
-/// Mode for SQL-derived operations
-#[derive(Debug, Clone, PartialEq, Hash)]
-pub enum SqlDerivedMode {
-    /// FileTable mode: single files only, errors if pattern matches >1 file
-    Table,
-    /// FileSeries mode: handles multiple files and versions
-    Series,
-}
-
-/// Configuration for SQL-derived file generation
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct SqlDerivedConfig {
-    /// Named patterns for matching files. Each pattern name becomes a table in the SQL query.
-    /// Each pattern can match multiple files which are automatically harmonized with UNION ALL BY NAME.
-    /// Example: {"vulink": "/data/vulink*.series", "at500": "/data/at500*.series"}
-    #[serde(default)]
-    pub patterns: HashMap<String, String>,
-
-    /// SQL query to execute on the source data. Defaults to "SELECT * FROM source" if not specified
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub query: Option<String>,
-    
-    /// Optional scope prefixes to apply to table columns (internal use by derivative factories)
-    /// Maps table name to (scope_prefix, time_column_name)
-    /// NOT serialized - must be set programmatically by factories like timeseries-join
-    #[serde(skip, default)]
-    pub scope_prefixes: Option<HashMap<String, (String, String)>>,
-    
-    /// Optional closure to wrap TableProviders before registration
-    /// Used by timeseries-pivot to inject null_padding_table wrapping
-    /// NOT serialized - must be set programmatically
-    #[serde(skip, default)]
-    pub provider_wrapper: Option<Arc<dyn Fn(Arc<dyn datafusion::catalog::TableProvider>) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> + Send + Sync>>,
-}
-
-impl SqlDerivedConfig {
-    /// Create a new SqlDerivedConfig with patterns and optional query
-    pub fn new(patterns: HashMap<String, String>, query: Option<String>) -> Self {
-        Self {
-            patterns,
-            query,
-            scope_prefixes: None,
-            provider_wrapper: None,
-        }
-    }
-    
-    /// Create a new SqlDerivedConfig with scope prefixes for column renaming
-    pub fn new_scoped(
-        patterns: HashMap<String, String>,
-        query: Option<String>,
-        scope_prefixes: HashMap<String, (String, String)>,
-    ) -> Self {
-        Self {
-            patterns,
-            query,
-            scope_prefixes: Some(scope_prefixes),
-            provider_wrapper: None,
-        }
-    }
-    
-    /// Builder method to add a provider wrapper closure
-    pub fn with_provider_wrapper<F>(mut self, wrapper: F) -> Self 
-    where
-        F: Fn(Arc<dyn datafusion::catalog::TableProvider>) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> + Send + Sync + 'static,
-    {
-        self.provider_wrapper = Some(Arc::new(wrapper));
-        self
-    }
-}
-
-impl std::fmt::Debug for SqlDerivedConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SqlDerivedConfig")
-            .field("patterns", &self.patterns)
-            .field("query", &self.query)
-            .field("scope_prefixes", &self.scope_prefixes)
-            .field("provider_wrapper", &self.provider_wrapper.as_ref().map(|_| "<closure>"))
-            .finish()
-    }
-}
+// Re-export try_as_queryable_file from file module for backward compatibility
+pub use crate::file::try_as_queryable_file;
 
 /// Represents a resolved file with its path and NodeID
 #[derive(Clone)]
@@ -329,177 +204,9 @@ impl SqlDerivedFile {
     /// String replacement is reliable for table names - no fallbacks needed
     #[must_use]
     pub fn get_effective_sql(&self, options: &SqlTransformOptions) -> String {
-        let default_query: String;
-        let original_sql = if let Some(query) = &self.config.query {
-            query.as_str()
-        } else {
-            // Generate smart default based on patterns
-            if self.config.patterns.len() == 1 {
-                let pattern_name = self.config.patterns.keys().next().expect("checked");
-                default_query = format!("SELECT * FROM {}", pattern_name);
-                &default_query
-            } else {
-		// @@@
-                "SELECT * FROM <specify_pattern_name>"
-            }
-        };
-
-        debug!("Original SQL query: {original_sql}");
-
-        // Direct string replacement - reliable and deterministic
-        let result = self.apply_table_transformations(original_sql, options);
+        let result = self.config.get_effective_sql(options);
         debug!("Transformed SQL result: {result}");
         result
-    }
-
-    /// Apply table name transformations to SQL query using LogicalPlan transformation
-    /// This properly handles table references without touching column names in quotes
-    fn apply_table_transformations(
-        &self,
-        original_sql: &str,
-        options: &SqlTransformOptions,
-    ) -> String {
-        // If no transformations needed, return original
-        if options.table_mappings.is_none() && options.source_replacement.is_none() {
-            return original_sql.to_string();
-        }
-
-        // Parse SQL into LogicalPlan, transform table references, then unparse back to SQL
-        // This ensures we only replace actual table references, not column names or string literals
-        use datafusion::sql::parser::DFParser;
-        use datafusion::sql::sqlparser::dialect::GenericDialect;
-        
-        let dialect = GenericDialect {};
-        
-        // Parse the SQL
-        let statements = match DFParser::parse_sql_with_dialect(original_sql, &dialect) {
-            Ok(stmts) => stmts,
-            Err(e) => {
-                debug!("Failed to parse SQL for transformation, falling back to original: {}", e);
-                return original_sql.to_string();
-            }
-        };
-        
-        if statements.is_empty() {
-            return original_sql.to_string();
-        }
-        
-        // Get the first statement (we only expect one SELECT)
-        let mut statement = statements[0].clone();
-        
-        // Apply transformations to table names in the AST
-        use datafusion::sql::sqlparser::ast::{Query, SetExpr, Select, TableFactor};
-        use datafusion::sql::parser::Statement as DFStatement;
-        
-        fn replace_table_names_in_statement(
-            statement: &mut DFStatement,
-            table_mappings: Option<&HashMap<String, String>>,
-            source_replacement: Option<&str>,
-        ) {
-            match statement {
-                DFStatement::Statement(boxed) => {
-                    if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut() {
-                        replace_table_names_in_query(query, table_mappings, source_replacement);
-                    }
-                }
-                _ => {}
-            }
-        }
-        
-        fn replace_table_names_in_query(
-            query: &mut Box<Query>,
-            table_mappings: Option<&HashMap<String, String>>,
-            source_replacement: Option<&str>,
-        ) {
-            // Handle CTEs (WITH clauses)
-            if let Some(ref mut with) = query.with {
-                for cte_table in &mut with.cte_tables {
-                    replace_table_names_in_query(&mut cte_table.query, table_mappings, source_replacement);
-                }
-            }
-            
-            // Handle main query body
-            replace_table_names_in_set_expr(&mut query.body, table_mappings, source_replacement);
-        }
-        
-        fn replace_table_names_in_set_expr(
-            set_expr: &mut SetExpr,
-            table_mappings: Option<&HashMap<String, String>>,
-            source_replacement: Option<&str>,
-        ) {
-            match set_expr {
-                SetExpr::Select(select) => {
-                    replace_table_names_in_select(select, table_mappings, source_replacement);
-                }
-                SetExpr::SetOperation { left, right, .. } => {
-                    // Handle UNION, INTERSECT, EXCEPT operations
-                    replace_table_names_in_set_expr(left, table_mappings, source_replacement);
-                    replace_table_names_in_set_expr(right, table_mappings, source_replacement);
-                }
-                SetExpr::Query(query) => {
-                    replace_table_names_in_query(query, table_mappings, source_replacement);
-                }
-                _ => {}
-            }
-        }
-        
-        fn replace_table_names_in_select(
-            select: &mut Box<Select>,
-            table_mappings: Option<&HashMap<String, String>>,
-            source_replacement: Option<&str>,
-        ) {
-            // Replace in FROM clause
-            for table_with_joins in &mut select.from {
-                replace_table_name(&mut table_with_joins.relation, table_mappings, source_replacement);
-                
-                // Replace in JOINs
-                for join in &mut table_with_joins.joins {
-                    replace_table_name(&mut join.relation, table_mappings, source_replacement);
-                }
-            }
-        }
-        
-        fn replace_table_name(
-            table_factor: &mut TableFactor,
-            table_mappings: Option<&HashMap<String, String>>,
-            source_replacement: Option<&str>,
-        ) {
-            if let TableFactor::Table { name, alias, .. } = table_factor {
-                let table_name = name.to_string();
-                
-                if let Some(mappings) = table_mappings {
-                    if let Some(replacement) = mappings.get(&table_name) {
-                        debug!("Replacing table reference '{}' with '{}' in AST", table_name, replacement);
-                        use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart, TableAlias};
-                        
-                        // If no existing alias, add one using the original table name
-                        // This allows column references like "sensor_a.timestamp" to still work
-                        if alias.is_none() {
-                            *alias = Some(TableAlias {
-                                name: Ident::new(&table_name),
-                                columns: vec![],
-                            });
-                        }
-                        
-                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement.clone()))]);
-                    }
-                } else if let Some(replacement) = source_replacement {
-                    if table_name == "source" {
-                        debug!("Replacing 'source' with '{}' in AST", replacement);
-                        use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
-                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
-                    }
-                }
-            } else if let TableFactor::Derived { subquery, .. } = table_factor {
-                // Recursively handle subqueries
-                replace_table_names_in_query(subquery, table_mappings, source_replacement);
-            }
-        }
-        
-        replace_table_names_in_statement(&mut statement, options.table_mappings.as_ref(), options.source_replacement.as_deref());
-        
-        // Unparse the transformed AST back to SQL
-        statement.to_string()
     }
 }
 
@@ -521,6 +228,10 @@ impl File for SqlDerivedFile {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
+        Some(self)
     }
 }
 
@@ -622,19 +333,28 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
         .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
 }
 
-// Register the factories
-register_dynamic_factory!(
+// Downcast function for SqlDerivedFile
+fn try_as_sql_derived_queryable(file: &dyn File) -> Option<&dyn provider::QueryableFile> {
+    file.as_any()
+        .downcast_ref::<SqlDerivedFile>()
+        .map(|f| f as &dyn provider::QueryableFile)
+}
+
+// Register the factories with QueryableFile support
+register_queryable_file_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
     file: create_sql_derived_table_handle,
-    validate: validate_sql_derived_config
+    validate: validate_sql_derived_config,
+    try_as_queryable: try_as_sql_derived_queryable
 );
 
-register_dynamic_factory!(
+register_queryable_file_factory!(
     name: "sql-derived-series",
     description: "Create SQL-derived tables from multiple FileSeries sources",
     file: create_sql_derived_series_handle,
-    validate: validate_sql_derived_config
+    validate: validate_sql_derived_config,
+    try_as_queryable: try_as_sql_derived_queryable
 );
 
 impl SqlDerivedFile {
@@ -662,16 +382,7 @@ impl SqlDerivedFile {
     /// as specified by the user. Use this when you need the full query semantics preserved.
     #[must_use]
     pub fn get_effective_sql_query(&self) -> String {
-        self.get_effective_sql(&SqlTransformOptions {
-            table_mappings: Some(
-                self.get_config()
-                    .patterns
-                    .keys()
-                    .map(|k| (k.clone(), k.clone()))
-                    .collect(),
-            ),
-            source_replacement: None,
-        })
+        self.config.get_effective_sql_query()
     }
 
     /// Generate deterministic table name for caching based on SQL query, pattern config, and file content
@@ -715,7 +426,7 @@ impl SqlDerivedFile {
 
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
-impl provider::QueryableFile for SqlDerivedFile {
+impl tinyfs::QueryableFile for SqlDerivedFile {
     /// Create TableProvider for SqlDerivedFile using DataFusion's ViewTable
     ///
     /// This approach creates a ViewTable that wraps the SqlDerivedFile's SQL query,
@@ -723,13 +434,13 @@ impl provider::QueryableFile for SqlDerivedFile {
     async fn as_table_provider(
         &self,
         id: FileID,
-        context: &provider::ProviderContext,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, provider::Error> {
-        // Extract State for tlogfs-internal operations (node resolution, etc.)
+        context: &tinyfs::ProviderContext,
+    ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        // Extract State from ProviderContext
         let state = context.persistence
             .as_any()
             .downcast_ref::<crate::persistence::State>()
-            .ok_or_else(|| provider::Error::StateHandle("Persistence is not a tlogfs State".to_string()))?;
+            .ok_or_else(|| tinyfs::Error::Other("Persistence is not a tlogfs State".to_string()))?;
 
         // Check cache first for SqlDerivedFile ViewTable
         let cache_key = crate::persistence::TableProviderKey::new(
@@ -747,7 +458,8 @@ impl provider::QueryableFile for SqlDerivedFile {
         debug!("💾 CACHE MISS: Creating new ViewTable for node_id: {id}");
 
         // Get SessionContext from state to set up tables
-        let ctx = state.session_context().await?;
+        let ctx = state.session_context().await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
         // Create mapping from user pattern names to unique internal table names
         let mut table_mappings = HashMap::new();
@@ -809,7 +521,8 @@ impl provider::QueryableFile for SqlDerivedFile {
                 // This enables DataFusion table provider and query plan caching
                 let deterministic_name = self
                     .generate_deterministic_table_name(pattern_name, pattern, &queryable_files)
-                    .await?;
+                    .await
+                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                 // CRITICAL: DataFusion converts table names to lowercase, so we must register with lowercase names
                 // to avoid case-sensitivity mismatches between registration and SQL queries
                 let unique_table_name =
@@ -831,7 +544,7 @@ impl provider::QueryableFile for SqlDerivedFile {
                         file_id.node_id()
                     );
                     let file_handle = node_path.as_file().await.map_err(|e| {
-                        crate::error::TLogFSError::ArrowMessage(format!(
+                        tinyfs::Error::Other(format!(
                             "Failed to get file handle: {}",
                             e
                         ))
@@ -854,7 +567,7 @@ impl provider::QueryableFile for SqlDerivedFile {
                                 // Apply optional provider wrapper (e.g., null_padding_table)
                                 if let Some(wrapper) = &self.config.provider_wrapper {
                                     debug!("Applying provider wrapper to table '{}'", pattern_name);
-                                    wrapper(provider)?
+                                    wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
                                 } else {
                                     provider
                                 }
@@ -873,7 +586,7 @@ impl provider::QueryableFile for SqlDerivedFile {
                             "❌ SQL-DERIVED: File for pattern '{}' does not implement QueryableFile trait",
                             pattern_name
                         );
-                        return Err(provider::Error::Arrow(format!(
+                        return Err(tinyfs::Error::Other(format!(
                             "File for pattern '{}' does not implement QueryableFile trait",
                             pattern_name
                         )));
@@ -885,7 +598,7 @@ impl provider::QueryableFile for SqlDerivedFile {
                     for node_path in queryable_files {
                         let file_id = node_path.id();
                         let file_handle = node_path.as_file().await.map_err(|e| {
-                            crate::error::TLogFSError::ArrowMessage(format!(
+                            tinyfs::Error::Other(format!(
                                 "Failed to get file handle: {}",
                                 e
                             ))
@@ -907,14 +620,14 @@ impl provider::QueryableFile for SqlDerivedFile {
                                     urls.push(url_pattern);
                                 }
                                 None => {
-                                    return Err(provider::Error::Arrow(format!(
+                                    return Err(tinyfs::Error::Other(format!(
                                         "Multi-file pattern '{}' contains non-OpLogFile - only OpLogFiles support multi-URL aggregation",
                                         pattern_name
                                     )));
                                 }
                             }
                         } else {
-                            return Err(provider::Error::Arrow(format!(
+                            return Err(tinyfs::Error::Other(format!(
                                 "File for pattern '{}' does not implement QueryableFile trait",
                                 pattern_name
                             )));
@@ -923,7 +636,7 @@ impl provider::QueryableFile for SqlDerivedFile {
 
                     // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
                     if urls.is_empty() {
-                        return Err(provider::Error::Arrow(format!(
+                        return Err(tinyfs::Error::Other(format!(
                             "No valid URLs found for pattern '{}'",
                             pattern_name
                         )));
@@ -946,12 +659,13 @@ impl provider::QueryableFile for SqlDerivedFile {
                         urls.len()
                     );
 
-                    let provider = create_table_provider(dummy_file_id, state, options).await?;
+                    let provider = create_table_provider(dummy_file_id, state, options).await
+                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                     
                     // Apply optional provider wrapper (e.g., null_padding_table)
                     if let Some(wrapper) = &self.config.provider_wrapper {
                         debug!("Applying provider wrapper to multi-file table '{}'", pattern_name);
-                        wrapper(provider)?
+                        wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
                     } else {
                         provider
                     }
@@ -991,7 +705,7 @@ impl provider::QueryableFile for SqlDerivedFile {
                                     listing_table_provider,
                                     scope_prefix.clone(),
                                     time_column.clone(),
-                                )?);
+                                ).map_err(|e| tinyfs::Error::Other(e.to_string()))?);
                                 use datafusion::catalog::TableProvider;
                                 debug!(
                                     "🔧 SQL-DERIVED: Wrapped table '{}' schema: {:?}",
@@ -1017,7 +731,7 @@ impl provider::QueryableFile for SqlDerivedFile {
                                 unique_table_name,
                                 e
                             );
-                            crate::error::TLogFSError::ArrowMessage(format!(
+                            tinyfs::Error::Other(format!(
                                 "Failed to register table '{}': {}",
                                 unique_table_name, e
                             ))
@@ -1076,7 +790,7 @@ impl provider::QueryableFile for SqlDerivedFile {
                     e
                 );
                 log::error!("❌ SQL-DERIVED: Failed SQL was: {}", effective_sql);
-                crate::error::TLogFSError::ArrowMessage(format!(
+                tinyfs::Error::Other(format!(
                     "Failed to parse SQL into LogicalPlan: {}",
                     e
                 ))

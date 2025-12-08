@@ -90,6 +90,25 @@ impl File for MemoryFile {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn as_queryable(&self) -> Option<&dyn crate::file::QueryableFile> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl crate::file::QueryableFile for MemoryFile {
+    async fn as_table_provider(
+        &self,
+        _id: crate::FileID,
+        _context: &crate::ProviderContext,
+    ) -> error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        // For now, return an error - memory files don't support SQL queries yet
+        // This will be implemented when needed for memory-based tables
+        Err(error::Error::Other(
+            "MemoryFile does not yet support SQL queries".to_string()
+        ))
+    }
 }
 
 impl MemoryFile {

@@ -13,7 +13,6 @@
 //!     - "AT500_Bottom.DO.mg/L"
 //! ```
 
-use crate::error::TLogFSError;
 use crate::factory::FactoryContext;
 
 use crate::register_dynamic_factory;
@@ -188,6 +187,10 @@ impl tinyfs::File for TimeseriesPivotFile {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
+        Some(self)
+    }
 }
 
 #[async_trait]
@@ -204,12 +207,12 @@ impl tinyfs::Metadata for TimeseriesPivotFile {
 }
 
 #[async_trait]
-impl provider::QueryableFile for TimeseriesPivotFile {
+impl tinyfs::QueryableFile for TimeseriesPivotFile {
     async fn as_table_provider(
         &self,
         id: FileID,
-        context: &provider::ProviderContext,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, provider::Error> {
+        context: &tinyfs::ProviderContext,
+    ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
         log::debug!(
             "🔍 TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
             self.config.pattern,
@@ -217,8 +220,7 @@ impl provider::QueryableFile for TimeseriesPivotFile {
         );
 
         // Resolve pattern to get current matched inputs
-        let matched_inputs = self.resolve_pattern().await
-            .map_err(TLogFSError::TinyFS)?;
+        let matched_inputs = self.resolve_pattern().await?;
         
         log::debug!(
             "📋 TIMESERIES-PIVOT: Pattern matched {} inputs: {:?}",
@@ -227,7 +229,7 @@ impl provider::QueryableFile for TimeseriesPivotFile {
         );
 
         if matched_inputs.is_empty() {
-            return Err(provider::Error::Arrow(
+            return Err(tinyfs::Error::Other(
                 "Timeseries-pivot pattern matched no inputs".to_string()
             ));
         }
@@ -257,7 +259,7 @@ impl provider::QueryableFile for TimeseriesPivotFile {
         let sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
             .with_provider_wrapper(move |provider| {
                 provider::null_padding_table(provider, expected_columns.clone())
-                    .map_err(|e| TLogFSError::DataFusion(e))
+                    .map_err(provider::Error::from)
             });
 
         // Use SqlDerivedSeries factory to create the file
@@ -265,7 +267,7 @@ impl provider::QueryableFile for TimeseriesPivotFile {
             sql_config,
             self.context.clone(),
             SqlDerivedMode::Series,
-        ).map_err(|e| provider::Error::Arrow(e.to_string()))?;
+        )?;
 
         // Delegate to SqlDerivedFile - it handles everything from here
         sql_file.as_table_provider(id, context).await

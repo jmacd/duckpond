@@ -411,6 +411,10 @@ impl tinyfs::File for TemporalReduceSqlFile {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
+        Some(self)
+    }
 }
 
 #[async_trait]
@@ -430,18 +434,16 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
 }
 
 #[async_trait]
-impl provider::QueryableFile for TemporalReduceSqlFile {
+impl tinyfs::QueryableFile for TemporalReduceSqlFile {
     async fn as_table_provider(
         &self,
         id: tinyfs::FileID,
-        context: &provider::ProviderContext,
-    ) -> Result<Arc<dyn TableProvider>, provider::Error> {
+        context: &tinyfs::ProviderContext,
+    ) -> tinyfs::Result<Arc<dyn TableProvider>> {
         log::debug!(
-            "📋 DELEGATING TemporalReduceSqlFile to inner file: id={id}",
+            "DELEGATING TemporalReduceSqlFile to inner file: id={id}",
         );
-        self.ensure_inner()
-            .await
-            .map_err(|e| provider::Error::TinyFs(e))?;
+        self.ensure_inner().await?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().expect("safelock");
         inner.as_table_provider(id, context).await

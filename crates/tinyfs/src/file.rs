@@ -28,6 +28,28 @@ pub trait File: Metadata + Send + Sync {
 
     /// Allow downcasting to concrete file types
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Try to upcast this File to QueryableFile if it supports SQL queries
+    /// 
+    /// Default implementation returns None. Files that implement QueryableFile
+    /// should override this to return Some(self).
+    fn as_queryable(&self) -> Option<&dyn QueryableFile> {
+        None
+    }
+}
+
+/// Trait for files that can be queried via DataFusion SQL
+#[async_trait]
+pub trait QueryableFile: File {
+    /// Convert this file into a DataFusion TableProvider for SQL queries
+    /// 
+    /// The id parameter identifies the file, and context provides access to
+    /// the persistence layer and other resources needed for query execution.
+    async fn as_table_provider(
+        &self,
+        id: crate::FileID,
+        context: &crate::ProviderContext,
+    ) -> error::Result<Arc<dyn datafusion::catalog::TableProvider>>;
 }
 
 impl Handle {

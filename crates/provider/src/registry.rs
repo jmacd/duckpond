@@ -7,7 +7,7 @@
 // linkme uses #[link_section] which is considered unsafe by rustc
 #![allow(unsafe_code)]
 
-use crate::{FactoryContext, Error as ProviderError};
+use crate::FactoryContext;
 use async_trait::async_trait;
 use clap::Parser;
 use linkme::distributed_slice;
@@ -16,7 +16,7 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tinyfs::{AsyncReadSeek, DirHandle, EntryType, File, FileHandle, FileID, Metadata, NodeMetadata};
+use tinyfs::{AsyncReadSeek, DirHandle, EntryType, File, FileHandle, Metadata, NodeMetadata};
 use tinyfs::Result as TinyFSResult;
 use tokio::sync::Mutex;
 
@@ -97,19 +97,8 @@ impl ExecutionContext {
     }
 }
 
-/// Trait for queryable files that can be used as DataFusion table providers
-/// 
-/// This is defined here (not in tlogfs) because it's factory-related and
-/// generic across persistence implementations.
-#[async_trait]
-pub trait QueryableFile: File {
-    /// Convert this file into a DataFusion TableProvider for SQL queries
-    async fn as_table_provider(
-        &self,
-        id: FileID,
-        context: &crate::ProviderContext,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, ProviderError>;
-}
+// Re-export QueryableFile from tinyfs for backward compatibility
+pub use tinyfs::QueryableFile;
 
 /// A factory descriptor that can create dynamic nodes
 ///
@@ -275,6 +264,22 @@ impl FactoryRegistry {
         } else {
             Ok(())
         }
+    }
+
+    /// Try to cast a File to QueryableFile by iterating through all registered factories
+    /// 
+    /// This uses the factory registry instead of hardcoding types, making it properly extensible.
+    /// Each factory that creates QueryableFile implementations registers its downcast function.
+    #[must_use]
+    pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn QueryableFile> {
+        for factory in DYNAMIC_FACTORIES.iter() {
+            if let Some(try_fn) = factory.try_as_queryable {
+                if let Some(queryable) = try_fn(file) {
+                    return Some(queryable);
+                }
+            }
+        }
+        None
     }
 
     /// Execute a factory command

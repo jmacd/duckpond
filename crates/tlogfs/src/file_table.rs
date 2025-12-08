@@ -29,51 +29,8 @@ use datafusion::physical_plan::projection::ProjectionExec;
 use log::debug;
 use std::any::Any;
 
-/// Version selection for ListingTable
-#[derive(Clone, Debug, Hash, PartialEq, Eq, Default)]
-pub enum VersionSelection {
-    /// All versions (replaces SeriesTable)
-    #[default]
-    AllVersions,
-    /// Latest version only (replaces TinyFsTableProvider)
-    LatestVersion,
-    /// Specific version (replaces NodeVersionTable)
-    SpecificVersion(u64),
-}
-
-impl VersionSelection {
-    /// Centralized debug logging for version selection
-    /// Eliminates duplicate debug logging patterns throughout the codebase
-    pub fn log_debug(&self, node_id: &tinyfs::NodeID) {
-        match self {
-            VersionSelection::AllVersions => {
-                debug!("Version selection: ALL versions for node {node_id}");
-            }
-            VersionSelection::LatestVersion => {
-                debug!("Version selection: LATEST version for node {node_id}");
-            }
-            VersionSelection::SpecificVersion(version) => {
-                debug!("Version selection: SPECIFIC version {version} for node {node_id}");
-            }
-        }
-    }
-
-    /// Generate URL pattern for this version selection
-    /// Eliminates duplicate URL pattern generation throughout the codebase
-    #[must_use]
-    pub fn to_url_pattern(&self, file_id: &tinyfs::FileID) -> String {
-        match self {
-            VersionSelection::AllVersions | VersionSelection::LatestVersion => {
-                crate::tinyfs_object_store::TinyFsPathBuilder::url_all_versions(file_id)
-            }
-            VersionSelection::SpecificVersion(version) => {
-                crate::tinyfs_object_store::TinyFsPathBuilder::url_specific_version(
-                    file_id, *version,
-                )
-            }
-        }
-    }
-}
+// Re-export VersionSelection from provider
+pub use provider::VersionSelection;
 
 /// Wrapper that applies temporal filtering to a ListingTable
 pub struct TemporalFilteredListingTable {

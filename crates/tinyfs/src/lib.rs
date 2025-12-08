@@ -3,6 +3,7 @@
 pub mod arrow;
 pub mod async_helpers;
 pub mod caching_persistence;
+pub mod context;
 mod dir;
 mod entry_type;
 mod error;
@@ -21,8 +22,9 @@ pub mod tree_format;
 mod wd;
 
 // Public exports - Core filesystem API
+pub use context::{FactoryContext, PondMetadata, ProviderContext};
 pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
-pub use file::{AsyncReadSeek, File, Handle as FileHandle};
+pub use file::{AsyncReadSeek, File, Handle as FileHandle, QueryableFile};
 pub use fs::FS;
 pub use node::{FileID, Node, NodeID, PartID, NodePath, NodeType};
 pub use wd::{CopyDestination, Lookup, Visitor, WD};

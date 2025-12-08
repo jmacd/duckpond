@@ -6,9 +6,9 @@
 use datafusion::execution::context::SessionContext;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tinyfs::{FileID, PersistenceLayer};
+use crate::{FileID, PersistenceLayer};
 
-/// Result type for provider operations
+/// Result type for tinyfs context operations
 pub type Result<T> = std::result::Result<T, crate::Error>;
 
 /// Provider context - holds tinyfs Persistence for transaction management
@@ -55,14 +55,14 @@ impl ProviderContext {
         self.template_variables
             .lock()
             .map(|guard| guard.clone())
-            .map_err(|e| crate::Error::MutexPoisoned(e.to_string()))
+            .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))
     }
     
     /// Set template variables
     pub fn set_template_variables(&self, vars: HashMap<String, serde_json::Value>) -> Result<()> {
         *self.template_variables
             .lock()
-            .map_err(|e| crate::Error::MutexPoisoned(e.to_string()))? = vars;
+            .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))? = vars;
         Ok(())
     }
     
@@ -79,21 +79,21 @@ impl ProviderContext {
     pub fn set_table_provider_cache(&self, key: String, provider: Arc<dyn datafusion::catalog::TableProvider>) -> Result<()> {
         _ = self.table_provider_cache
             .lock()
-            .map_err(|e| crate::Error::MutexPoisoned(e.to_string()))?
+            .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))?
             .insert(key, provider);
         Ok(())
     }
 
     /// Create a filesystem from the persistence layer
-    pub fn filesystem(&self) -> tinyfs::FS {
-        tinyfs::FS::from_arc(self.persistence.clone())
+    pub fn filesystem(&self) -> crate::FS {
+        crate::FS::from_arc(self.persistence.clone())
     }
 
     /// Begin a transaction with the transaction guard pattern
     ///
     /// Returns a TransactionGuard that enforces the single-transaction rule.
     /// The guard provides access to the filesystem and automatically cleans up on drop.
-    pub fn begin_transaction(&self) -> tinyfs::Result<tinyfs::TransactionGuard> {
+    pub fn begin_transaction(&self) -> crate::Result<crate::TransactionGuard> {
         let fs = self.filesystem();
         let txn_state = self.persistence.transaction_state();
         txn_state.begin(fs, None)

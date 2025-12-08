@@ -139,6 +139,10 @@ impl File for OpLogFile {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
+        Some(self)
+    }
 }
 
 /// Writer integrated with Delta Lake transactions
@@ -371,7 +375,7 @@ impl AsyncWrite for OpLogFileWriter {
 
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
-impl provider::QueryableFile for OpLogFile {
+impl tinyfs::QueryableFile for OpLogFile {
     /// Create TableProvider for OpLogFile by delegating to existing logic
     ///
     /// Follows anti-duplication: reuses existing create_listing_table_provider
@@ -379,45 +383,29 @@ impl provider::QueryableFile for OpLogFile {
     async fn as_table_provider(
         &self,
         id: FileID,
-        context: &provider::ProviderContext,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, provider::Error> {
+        context: &tinyfs::ProviderContext,
+    ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
         log::debug!(
-            "📋 DELEGATING OpLogFile to create_listing_table_provider: id={id}",
+            "DELEGATING OpLogFile to create_listing_table_provider: id={id}",
         );
-        // Extract State from context for tlogfs-internal operation
+        // Extract State from ProviderContext
         let state = context.persistence
             .as_any()
             .downcast_ref::<State>()
-            .ok_or_else(|| provider::Error::StateHandle("Persistence is not a tlogfs State".to_string()))?;
+            .ok_or_else(|| TinyFSError::Other("Persistence is not a tlogfs State".to_string()))?;
         // Delegate to existing create_listing_table_provider - no duplication
         crate::file_table::create_listing_table_provider(id, state)
             .await
-            .map_err(|e| provider::Error::Arrow(e.to_string()))
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))
     }
 }
 
 // /// Create a table provider from multiple file URLs
-// /// This is a convenience function following anti-duplication principles
-// pub async fn create_table_provider_for_multiple_urls(
-//     urls: Vec<String>,
-//     tx: &mut crate::transaction_guard::TransactionGuard<'_>,
-// ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-//     log::debug!(
-//         "📋 CREATING TableProvider for multiple URLs: {} files",
-//         urls.len()
-//     );
-//     use crate::file_table::{TableProviderOptions, create_table_provider};
-//     use tinyfs::NodeID;
-
-//     // Use dummy node IDs since we're providing explicit URLs
-//     let dummy_node_id = NodeID::root();
-//     let dummy_part_id = NodeID::root();
-
-//     let options = TableProviderOptions {
-//         additional_urls: urls,
-//         ..Default::default()
-//     };
-
-//     let state = tx.state()?;
-//     create_table_provider(dummy_node_id, dummy_part_id, &state, options).await
-// }
+/// Helper function to convert a File trait object to QueryableFile trait object
+/// 
+/// Simply delegates to the File::as_queryable() method which each QueryableFile
+/// implementation overrides to return itself.
+#[inline]
+pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn tinyfs::QueryableFile> {
+    file.as_queryable()
+}
