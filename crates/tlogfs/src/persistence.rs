@@ -837,6 +837,12 @@ impl PersistenceLayer for State {
             .set_extended_attributes(id, attributes)
             .await
     }
+
+    async fn get_temporal_bounds(&self, id: FileID) -> TinyFSResult<Option<(i64, i64)>> {
+        self.get_temporal_overrides_for_node_id(id)
+            .await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))
+    }
 }
 
 impl State {

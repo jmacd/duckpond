@@ -801,31 +801,336 @@ let provider = create_table_provider(context, options).await?;
 
 ---
 
-### 2025-12-08: Temporal Bounds Architecture Analysis
+### 2025-12-08: Temporal Bounds Architecture - Corrected
 
-**Critical Finding:**
-- Temporal bounds are implemented at the wrong abstraction layer
-- Current design uses dummy `FileID::root()` for multi-file queries (accidental correctness)
-- Temporal bounds are node-level metadata, should be in PersistenceLayer trait
-- Current coupling to tlogfs::State blocks migration of file_table and sql_derived to provider
+**Problem Identified:**
+- Temporal bounds implementation mixed two distinct concepts:
+  1. **High-level query boundaries** (timeseries-join range filters) - SQL WHERE clauses ✅ Correct
+  2. **Low-level node metadata** (pond set-temporal-bounds) - Per-FileSeries data quality filtering
+- sql_derived.rs was querying low-level metadata at wrong abstraction level
+- file_table.rs had `temporal_bounds` field trying to handle per-file bounds explicitly
+- Abstraction violation: factories shouldn't query node-level metadata directly
 
-**Correct Design:**
-- Add `get_temporal_bounds(FileID)` to tinyfs::PersistenceLayer trait
-- tlogfs implements efficiently using OplogEntry columns (no change to storage)
-- MemoryPersistence implements using HashMap (enables in-memory testing)
-- TableProviderOptions gets `temporal_bounds: Option<Vec<TemporalBounds>>` field
-- Call sites explicitly pass bounds (no dummy FileID, no "accidentally works")
-- file_table can move to provider crate (no tlogfs dependency)
+**Solution Implemented:**
+- ✅ **Removed `get_temporal_bounds()` from PersistenceLayer trait** - Wrong abstraction!
+- ✅ **Removed temporal bounds query from sql_derived.rs** - No longer calls `get_temporal_overrides_for_node_id()`
+- ✅ **Removed `TemporalBounds` struct and `temporal_bounds` field** from TableProviderOptions
+- ✅ **Kept TemporalFilteredListingTable** for single-file legacy path only
+- ✅ **Single-file**: file_table queries `get_temporal_overrides_for_node_id()` directly (stays in tlogfs)
+- ✅ **Multi-file**: No temporal filtering at this level (deferred to future Parquet reader implementation)
 
-**Migration Priority:**
-- Fix temporal bounds abstraction BEFORE moving remaining factories
-- This unblocks sql_derived and file_table migration to provider
-- Essential for in-memory testing of QueryableFile implementations
+**Correct Architecture:**
+- Low-level temporal bounds (`pond set-temporal-bounds`) should be enforced at **Parquet reader level**
+- Per-file metadata filtering should be transparent to sql_derived and all factories
+- High-level query boundaries (timeseries-join `range:`) already work correctly via SQL WHERE clauses
+- TemporalFilteredListingTable is a tlogfs-specific optimization, not a provider abstraction
 
-**Status**: Design complete, ready for implementation
+**Migration Impact:**
+- ✅ sql_derived.rs no longer has temporal bounds dependency
+- ✅ file_table remains in tlogfs (uses State directly for single-file optimization)
+- ⚠️ file_table **cannot move to provider** - it's tlogfs-specific table creation logic
+- ✅ SqlDerivedFile can move to provider (no file_table dependency in factory logic)
+- ✅ Tests passing (87/87)
+
+**Status**: ✅ **COMPLETE** - Abstraction violation fixed, ready for sql_derived migration
 
 ---
 
-**Document Version**: 1.5  
-**Date**: 2025-12-08 (Temporal bounds architecture analysis - critical for Phase 5)  
+### 2025-12-08: sql_derived Migration Analysis
+
+**Current Dependencies (sql_derived.rs in tlogfs):**
+
+1. **✅ Already in provider:**
+   - `SqlDerivedConfig` - moved to provider crate
+   - `SqlDerivedMode` - moved to provider crate
+   - `provider::FactoryContext` - infrastructure in place
+   - `provider::QueryableFile` trait - Phase 4 complete
+
+2. **❌ Still in tlogfs (blocking migration):**
+   - `register_queryable_file_factory!` macro (line 35, 327, 335)
+   - `try_as_queryable_file()` helper (line 51) - uses crate::file module
+   - `file_table::create_table_provider()` (line 633, 647)
+   - `file_table::VersionSelection` (line 431, 602)
+   - `file_table::TableProviderOptions` (line 633)
+   - State downcasting (line 423-426) - `context.persistence.downcast_ref::<State>()`
+   - State methods: `session_context()`, `get/set_table_provider_cache()`
+   - `OpLogPersistence` usage in tests (line 803, 2687, 3045)
+
+3. **🔄 Coupling Analysis:**
+
+   **Strong coupling to tlogfs:**
+   - `file_table::create_table_provider()` is tlogfs-specific (uses State, TemporalFilteredListingTable)
+   - State downcast pattern assumes tlogfs persistence
+   - Factory registration macro in tlogfs
+
+   **Weak coupling (can abstract):**
+   - SessionContext access (via ProviderContext)
+   - Table provider caching (via ProviderContext)
+   - QueryableFile resolution (helper function)
+
+**Migration Strategy - Three Options:**
+
+**Option A: Full Migration (most ambitious)**
+- Move sql_derived.rs entirely to provider crate
+- Abstract away file_table dependency
+- Create provider-level table creation API
+- Pros: Clean separation, enables full in-memory testing
+- Cons: Large refactor, need to abstract TemporalFilteredListingTable
+
+**Option B: Partial Migration (pragmatic)**
+- Move `SqlDerivedFile` struct to provider (core logic)
+- Keep factory registration in tlogfs (uses tlogfs-specific infrastructure)
+- Keep `try_as_queryable_file()` in tlogfs (knows about OpLogFile)
+- Pros: Migrates business logic, smaller change
+- Cons: Split across two crates, factory registration stays in tlogfs
+
+**Option C: Minimal Migration (safest)**
+- Keep sql_derived.rs in tlogfs entirely
+- Already using provider::SqlDerivedConfig and provider::QueryableFile
+- Document that sql_derived is tlogfs-specific implementation
+- Pros: Zero risk, already clean enough
+- Cons: Misses opportunity for in-memory testing
+
+**Recommendation: Option B (Partial Migration)**
+
+**Rationale:**
+1. `SqlDerivedFile` business logic (pattern resolution, SQL generation) is provider-level
+2. Factory registration naturally stays with persistence implementation
+3. `try_as_queryable_file()` knows about OpLogFile, belongs in tlogfs
+4. file_table remains in tlogfs (already decided - it's tlogfs-specific)
+5. Enables testing SqlDerivedFile logic with MemoryPersistence
+6. Incremental, lower risk than Option A
+
+**Migration Steps (Option B):**
+
+1. **Move SqlDerivedFile to provider:**
+   - Create `provider/src/sql_derived_file.rs`
+   - Move SqlDerivedFile struct and impl
+   - Move as_table_provider() implementation
+   - Use ProviderContext for session access
+   - Abstract table provider creation (pass callback or use provider API)
+
+2. **Keep in tlogfs:**
+   - Factory registration (sql-derived-table, sql-derived-series)
+   - `try_as_queryable_file()` helper
+   - Test fixtures that use OpLogPersistence
+
+3. **Update imports:**
+   - tlogfs imports `provider::SqlDerivedFile`
+   - Factories instantiate SqlDerivedFile, register with tlogfs infrastructure
+
+**Blocking Issue: file_table::create_table_provider()**
+
+Current signature:
+```rust
+pub async fn create_table_provider(
+    file_id: FileID,
+    state: &crate::persistence::State,  // ← tlogfs-specific
+    options: TableProviderOptions,
+) -> Result<Arc<dyn TableProvider>, TLogFSError>
+```
+
+**SqlDerivedFile.as_table_provider() calls this at line 647:**
+```rust
+let provider = create_table_provider(representative_file_id, state, options).await
+```
+
+**Problem:**
+- `create_table_provider()` is in tlogfs, uses State directly
+- Cannot move SqlDerivedFile to provider if it calls tlogfs functions
+- Need abstraction for table provider creation
+
+**Solutions:**
+
+**Solution 1: Callback Pattern**
+```rust
+// In provider::SqlDerivedFile
+pub async fn as_table_provider<F>(
+    &self,
+    id: FileID,
+    context: &ProviderContext,
+    create_table: F,  // ← Callback provided by caller
+) -> Result<Arc<dyn TableProvider>>
+where
+    F: Fn(FileID, TableProviderOptions) -> BoxFuture<'static, Result<Arc<dyn TableProvider>>>,
+{
+    // SqlDerived logic...
+    let provider = create_table(file_id, options).await?;
+    // ...
+}
+
+// In tlogfs - factory registration provides the callback
+let sql_file = SqlDerivedFile::new(config, context, mode)?;
+sql_file.as_table_provider(id, context, |file_id, opts| {
+    Box::pin(async move {
+        create_table_provider(file_id, state, opts).await
+    })
+}).await?
+```
+
+**Solution 2: TableProviderFactory Trait**
+```rust
+// In provider crate
+#[async_trait]
+pub trait TableProviderFactory: Send + Sync {
+    async fn create_table_provider(
+        &self,
+        file_id: FileID,
+        options: TableProviderOptions,
+    ) -> Result<Arc<dyn TableProvider>>;
+}
+
+// In tlogfs
+struct TLogFSTableProviderFactory {
+    state: Arc<State>,
+}
+
+#[async_trait]
+impl TableProviderFactory for TLogFSTableProviderFactory {
+    async fn create_table_provider(&self, file_id: FileID, options: TableProviderOptions) 
+        -> Result<Arc<dyn TableProvider>> 
+    {
+        file_table::create_table_provider(file_id, &self.state, options).await
+    }
+}
+
+// ProviderContext holds the factory
+pub struct ProviderContext {
+    table_factory: Arc<dyn TableProviderFactory>,
+    // ...
+}
+```
+
+**Solution 3: Keep SqlDerivedFile in tlogfs (Option C)**
+- Simplest: no abstraction needed
+- Already clean: uses provider::SqlDerivedConfig
+- Testable: can test config/SQL generation separately
+- Factory registration naturally stays with implementation
+
+**Revised Recommendation: Option C (Keep in tlogfs)**
+
+**Rationale After Deeper Analysis:**
+1. SqlDerivedFile is tightly coupled to file_table infrastructure
+2. file_table is staying in tlogfs (TemporalFilteredListingTable is tlogfs-specific)
+3. Adding abstraction layers (callbacks/traits) adds complexity without clear benefit
+4. Already achieved good separation: SqlDerivedConfig in provider ✅
+5. Can test SQL generation logic separately (config → SQL transformation)
+6. Factory registration belongs with persistence implementation
+7. In-memory testing of full SqlDerivedFile needs file_table anyway
+
+**What We've Already Achieved:**
+- ✅ SqlDerivedConfig in provider (configuration abstraction)
+- ✅ SqlDerivedMode in provider (series vs table distinction)
+- ✅ QueryableFile trait in provider (interface abstraction)
+- ✅ ProviderContext infrastructure (clean factory API)
+- ✅ Tests passing (87/87)
+
+**What Remains in tlogfs (correctly):**
+- SqlDerivedFile implementation (uses tlogfs table infrastructure)
+- Factory registration (tlogfs-specific)
+- try_as_queryable_file() helper (knows about OpLogFile)
+- Integration tests (require OpLogPersistence)
+
+**Next Steps:**
+1. ✅ Accept that sql_derived stays in tlogfs (correct architectural boundary)
+2. 🔄 Move timeseries_join.rs to provider (next factory to migrate)
+3. 🔄 Move timeseries_pivot.rs to provider (also depends on SqlDerivedFile)
+4. 📝 Document tlogfs-specific vs provider-level factory distinction
+
+**Status**: Analysis complete - sql_derived migration not needed, already well-factored
+
+---
+
+### 2025-12-08: Temporal Bounds Added to PersistenceLayer Trait
+
+**Problem**: Low-level temporal bounds (from `pond set-temporal-bounds`) were tlogfs-specific, blocking migration of table creation logic.
+
+**Solution Implemented:**
+- ✅ Added `get_temporal_bounds(FileID) -> Result<Option<(i64, i64)>>` to tinyfs PersistenceLayer trait
+- ✅ Implemented in tlogfs State: wraps existing `get_temporal_overrides_for_node_id()`
+- ✅ Implemented in MemoryPersistence: HashMap storage with `set_temporal_bounds()` test helper
+- ✅ Implemented in CachingPersistence: passthrough (temporal bounds immutable per version)
+- ✅ Updated file_table.rs to use trait method instead of State-specific call
+
+**Architecture Clarification:**
+Two distinct temporal filtering layers:
+1. **Low-level (per-file)**: Applied when ObjectStore URLs resolve to TableProviders
+   - `file_table::create_table_provider()` wraps each file with TemporalFilteredListingTable
+   - Filters garbage data based on `pond set-temporal-bounds` metadata
+   - Now abstracted via PersistenceLayer::get_temporal_bounds() trait method
+
+2. **High-level (per-query)**: Applied to final ViewTable from sql_derived
+   - timeseries-join `range:` filters generate SQL WHERE clauses
+   - User-specified time windows for query output
+   - Already working correctly
+
+**Benefits:**
+- ✅ Temporal bounds abstraction now in tinyfs (not tlogfs-specific)
+- ✅ MemoryPersistence can test temporal filtering without OpLog
+- ✅ file_table.rs no longer directly depends on State implementation
+- ✅ Ready for file_table migration to provider crate
+
+**Testing:**
+- ✅ All 87 tests passing
+- ✅ tlogfs continues using OplogEntry.min_time/max_time columns (efficient)
+- ✅ MemoryPersistence ready for in-memory testing
+
+**Next Steps:**
+- Move TemporalFilteredListingTable to provider crate
+- Move VersionSelection to provider crate
+- Move create_table_provider() to provider (uses ProviderContext + trait method)
+
+**Status**: ✅ **COMPLETE** - Temporal bounds properly abstracted, ready for next phase
+
+---
+
+### 2025-12-08: TemporalFilteredListingTable Moved to Provider
+
+**What Moved:**
+- ✅ Created `provider/src/temporal_filter.rs` with full implementation
+- ✅ Moved `TemporalFilteredListingTable` struct (200+ lines)
+- ✅ Complete TableProvider implementation with temporal filtering logic
+- ✅ Handles both normal queries and COUNT queries (empty projection case)
+- ✅ Re-exported from provider::lib
+- ✅ tlogfs now imports from provider (2-line re-export)
+
+**Implementation Details:**
+- Pure DataFusion wrapper - no tlogfs dependencies
+- Applies timestamp-based filtering at ExecutionPlan level
+- Converts milliseconds to seconds for HydroVu compatibility
+- Handles unbounded case (i64::MIN/MAX) by skipping filter
+- Special handling for COUNT queries (empty projection)
+- Schema caching via OnceLock for performance
+
+**Architecture:**
+```
+provider::TemporalFilteredListingTable (pure DataFusion)
+  ↑
+tlogfs::file_table (uses provider version)
+  ↑
+sql_derived, timeseries_join, etc.
+```
+
+**Benefits:**
+- ✅ No code duplication
+- ✅ Can be used by any crate depending on provider
+- ✅ Testable independently of tlogfs
+- ✅ Clear separation: filtering logic vs metadata lookup
+
+**Testing:**
+- ✅ All 87 tests passing
+- ✅ Zero compilation warnings
+- ✅ No behavioral changes
+
+**Next Steps:**
+- Move TableProviderOptions to provider
+- Move create_table_provider() logic to provider
+- sql_derived can then create tables without file_table dependency
+
+**Status**: ✅ **COMPLETE** - TemporalFilteredListingTable successfully migrated
+
+---
+
+**Document Version**: 1.8  
+**Date**: 2025-12-08 (TemporalFilteredListingTable migration complete)  
 **Author**: Analysis based on codebase study

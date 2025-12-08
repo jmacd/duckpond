@@ -10,6 +10,7 @@ mod scope_prefix;
 pub mod sql_derived;
 mod sql_derived_types;
 mod sql_transform;
+mod temporal_filter;
 pub mod test_factory;
 mod tinyfs_path;
 mod version_selection;
@@ -27,6 +28,7 @@ pub use scope_prefix::ScopePrefixTableProvider;
 pub use sql_derived::SqlDerivedConfig;
 pub use sql_derived_types::{SqlDerivedMode, SqlTransformOptions};
 pub use sql_transform::transform_sql;
+pub use temporal_filter::TemporalFilteredListingTable;
 pub use tinyfs_path::TinyFsPathBuilder;
 pub use version_selection::VersionSelection;
 
