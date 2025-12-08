@@ -6,3 +6,4 @@
 
 pub mod banner;
 pub mod perf_trace;
+pub mod test_helpers;

@@ -33,12 +33,16 @@ linkme.workspace = true
 paste.workspace = true
 clap.workspace = true
 log.workspace = true
+bytes.workspace = true
+object_store.workspace = true
+async-stream.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
 datafusion-common.workspace = true
 arrow-array.workspace = true
+utilities = { path = "../utilities" }
 
 [lints]
 workspace = true

@@ -143,7 +143,7 @@ impl<'a> StewardTransactionGuard<'a> {
     /// This allows direct operations on the same ObjectStore that DataFusion uses
     pub async fn object_store(
         &mut self,
-    ) -> Result<Arc<tlogfs::tinyfs_object_store::TinyFsObjectStore>, tlogfs::TLogFSError> {
+    ) -> Result<Arc<tlogfs::TinyFsObjectStore<tlogfs::persistence::State>>, tlogfs::TLogFSError> {
         self.data_tx
             .as_mut()
             .ok_or_else(|| {

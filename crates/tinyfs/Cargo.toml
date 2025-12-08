@@ -34,10 +34,10 @@ datafusion.workspace = true
 deltalake.workspace = true
 tokio-util.workspace = true
 serde_arrow.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
-bytes.workspace = true
 
 [lints]
 workspace = true

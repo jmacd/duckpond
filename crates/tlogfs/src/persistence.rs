@@ -82,7 +82,7 @@ pub struct InnerState {
 pub struct State {
     inner: Arc<Mutex<InnerState>>,
     /// TinyFS ObjectStore instance - shared with SessionContext
-    object_store: Arc<tokio::sync::OnceCell<Arc<crate::tinyfs_object_store::TinyFsObjectStore>>>,
+    object_store: Arc<tokio::sync::OnceCell<Arc<crate::TinyFsObjectStore<Self>>>>,
     /// The DataFusion SessionContext - stored outside the lock to avoid deadlocks
     /// This is the same instance stored in inner.session_context
     session_context: Arc<SessionContext>,
@@ -934,7 +934,7 @@ impl State {
     /// Get the TinyFS ObjectStore instance if it has been created
     /// This provides direct access to the same ObjectStore that DataFusion uses
     #[must_use]
-    pub fn object_store(&self) -> Option<Arc<crate::tinyfs_object_store::TinyFsObjectStore>> {
+    pub fn object_store(&self) -> Option<Arc<crate::TinyFsObjectStore<Self>>> {
         self.object_store.get().cloned()
     }
 

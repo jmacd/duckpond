@@ -9,13 +9,12 @@
 //! Example usage:
 //! ```no_run
 //! use std::sync::Arc;
-//! use tlogfs::tinyfs_object_store::TinyFsObjectStore;
+//! use provider::TinyFsObjectStore;
 //! use datafusion::datasource::listing::{ListingTableUrl, ListingTableConfig, ListingOptions, ListingTable};
 //! use datafusion::datasource::file_format::parquet::ParquetFormat;
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! # use tlogfs::persistence::State;
-//! # let persistence: State = todo!();
+//! # async fn example<P: tinyfs::PersistenceLayer>() -> Result<(), Box<dyn std::error::Error>> {
+//! # let persistence: P = todo!();
 //! let tinyfs_store = TinyFsObjectStore::new(persistence);
 //! let table_url = ListingTableUrl::parse("tinyfs:///node/some_node_id")?;
 //! let config = ListingTableConfig::new(table_url)
@@ -118,20 +117,20 @@ struct CachedVersionMeta {
 ///
 /// This store maps ObjectStore paths to TinyFS file handles:
 /// - Path format: "/node/{node_id}"
-/// - Uses file handles created by factories (which have State access)
+/// - Generic over any PersistenceLayer implementation
 /// - Provides file discovery and streaming access for DataFusion ListingTable
-pub struct TinyFsObjectStore {
+pub struct TinyFsObjectStore<P: PersistenceLayer> {
     /// Persistence layer for dynamic file discovery and version access
-    persistence: crate::persistence::State,
+    persistence: P,
     /// Metadata cache: maps clean path (without metadata) to version metadata
     /// Populated during list() calls, consumed by get_range() to avoid redundant queries
     metadata_cache: Arc<Mutex<HashMap<String, CachedVersionMeta>>>,
 }
 
-impl TinyFsObjectStore {
-    /// Create a new TinyFS ObjectStore
+impl<P: PersistenceLayer> TinyFsObjectStore<P> {
+    /// Create a new TinyFS ObjectStore from any PersistenceLayer
     #[must_use]
-    pub fn new(persistence: crate::persistence::State) -> Self {
+    pub fn new(persistence: P) -> Self {
         Self {
             persistence,
             metadata_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -210,13 +209,13 @@ impl TinyFsObjectStore {
     }
 }
 
-impl fmt::Display for TinyFsObjectStore {
+impl<P: PersistenceLayer> fmt::Display for TinyFsObjectStore<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TinyFsObjectStore")
     }
 }
 
-impl fmt::Debug for TinyFsObjectStore {
+impl<P: PersistenceLayer> fmt::Debug for TinyFsObjectStore<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TinyFsObjectStore")
             .field("persistence", &"<Persistence>")
@@ -226,7 +225,7 @@ impl fmt::Debug for TinyFsObjectStore {
 }
 
 #[async_trait]
-impl ObjectStore for TinyFsObjectStore {
+impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P> {
     async fn put_opts(
         &self,
         _location: &ObjectPath,

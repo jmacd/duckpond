@@ -225,9 +225,9 @@ pub async fn create_listing_table_provider_with_options<'a>(
 pub(crate) async fn register_tinyfs_object_store(
     ctx: &SessionContext,
     persistence_state: crate::persistence::State,
-) -> Result<Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {
+) -> Result<Arc<crate::TinyFsObjectStore<crate::persistence::State>>, TLogFSError> {
     // Create ONE ObjectStore with access to entire TinyFS via transaction
-    let object_store = Arc::new(crate::tinyfs_object_store::TinyFsObjectStore::new(
+    let object_store = Arc::new(crate::TinyFsObjectStore::new(
         persistence_state,
     ));
 

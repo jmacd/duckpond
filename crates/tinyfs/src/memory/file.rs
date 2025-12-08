@@ -100,14 +100,60 @@ impl File for MemoryFile {
 impl crate::file::QueryableFile for MemoryFile {
     async fn as_table_provider(
         &self,
-        _id: crate::FileID,
-        _context: &crate::ProviderContext,
+        id: crate::FileID,
+        context: &crate::ProviderContext,
     ) -> error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        // For now, return an error - memory files don't support SQL queries yet
-        // This will be implemented when needed for memory-based tables
-        Err(error::Error::Other(
-            "MemoryFile does not yet support SQL queries".to_string()
-        ))
+        use datafusion::datasource::listing::{ListingTableUrl, ListingTableConfig, ListingOptions};
+        use datafusion::datasource::file_format::parquet::ParquetFormat;
+        use datafusion::datasource::listing::ListingTable;
+        
+        // Use the same pattern as tlogfs: create a ListingTable with a tinyfs:// URL
+        // The TinyFsObjectStore (registered in SessionContext) handles reading from MemoryPersistence
+        
+        // Build URL pattern for this file: tinyfs:///node/{node_id}/part/{part_id}
+        let url_pattern = format!(
+            "tinyfs:///node/{}/part/{}",
+            id.node_id(),
+            id.part_id()
+        );
+        
+        let table_url = ListingTableUrl::parse(&url_pattern)
+            .map_err(|e| error::Error::Other(format!("Failed to parse table URL: {}", e)))?;
+        
+        // Create ListingTable configuration with Parquet format
+        let file_format = Arc::new(ParquetFormat::default());
+        let listing_options = ListingOptions::new(file_format);
+        let config = ListingTableConfig::new(table_url).with_listing_options(listing_options);
+        
+        // Infer schema from the SessionContext (which will use the registered ObjectStore)
+        let ctx = &context.datafusion_session;
+        let config_with_schema = config
+            .infer_schema(&ctx.state())
+            .await
+            .map_err(|e| error::Error::Other(format!("Schema inference failed: {}", e)))?;
+        
+        // Create ListingTable
+        let listing_table = ListingTable::try_new(config_with_schema)
+            .map_err(|e| error::Error::Other(format!("ListingTable creation failed: {}", e)))?;
+        
+        // Get temporal bounds for filtering (if any)
+        let (min_time, max_time) = context.persistence
+            .get_temporal_bounds(id)
+            .await?
+            .unwrap_or((i64::MIN, i64::MAX));
+        
+        // Wrap in TemporalFilteredListingTable for consistent behavior with tlogfs
+        // Note: Need to import TemporalFilteredListingTable from provider crate
+        // For now, return ListingTable directly - temporal filtering can be added when needed
+        if min_time != i64::MIN || max_time != i64::MAX {
+            log::debug!(
+                "MemoryFile temporal bounds [{}, {}] available but TemporalFilteredListingTable not yet integrated",
+                min_time, max_time
+            );
+            // TODO: Wrap in provider::TemporalFilteredListingTable once provider is accessible from tinyfs
+        }
+        
+        Ok(Arc::new(listing_table))
     }
 }
 

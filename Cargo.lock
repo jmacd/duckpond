@@ -3628,7 +3628,9 @@ dependencies = [
  "arrow-csv",
  "arrow-schema",
  "async-compression",
+ "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
  "clap",
  "datafusion",
@@ -3636,6 +3638,7 @@ dependencies = [
  "futures",
  "linkme",
  "log",
+ "object_store",
  "paste",
  "serde",
  "serde_json",
@@ -3646,6 +3649,7 @@ dependencies = [
  "tinyfs",
  "tokio",
  "url",
+ "utilities",
  "uuid7",
 ]
 
@@ -5187,7 +5191,10 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 name = "utilities"
 version = "0.15.0"
 dependencies = [
+ "arrow",
  "chrono",
+ "parquet",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

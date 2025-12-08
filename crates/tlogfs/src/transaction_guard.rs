@@ -85,7 +85,7 @@ impl<'a> TransactionGuard<'a> {
     /// using the State's object_store method for proper architecture.
     pub async fn object_store(
         &mut self,
-    ) -> Result<std::sync::Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {
+    ) -> Result<std::sync::Arc<crate::TinyFsObjectStore<State>>, TLogFSError> {
         let state = self.state()?;
         // Ensure SessionContext and ObjectStore are initialized
         _ = state.session_context().await?;

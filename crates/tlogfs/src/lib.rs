@@ -66,7 +66,8 @@ pub mod schema_validation;
 pub mod template_factory;
 
 // TinyFS ObjectStore implementation for DataFusion ListingTable integration
-pub mod tinyfs_object_store;
+// Re-export from provider crate where it's now generically implemented
+pub use provider::TinyFsObjectStore;
 
 // File-table duality integration for TinyFS and DataFusion
 pub mod file_table;

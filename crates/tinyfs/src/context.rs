@@ -98,6 +98,35 @@ impl ProviderContext {
         let txn_state = self.persistence.transaction_state();
         txn_state.begin(fs, None)
     }
+
+    /// Create a minimal test context with sensible defaults
+    ///
+    /// This is a convenience constructor for testing that creates a ProviderContext with:
+    /// - Fresh DataFusion SessionContext (default configuration)
+    /// - Empty template variables HashMap
+    /// - Provided persistence layer
+    ///
+    /// This enables testing provider code without requiring tlogfs State.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use tinyfs::{ProviderContext, MemoryPersistence};
+    /// use std::sync::Arc;
+    ///
+    /// let persistence = Arc::new(MemoryPersistence::default());
+    /// let context = ProviderContext::new_for_testing(persistence);
+    /// ```
+    pub fn new_for_testing(persistence: Arc<dyn PersistenceLayer>) -> Self {
+        use std::collections::HashMap;
+        
+        // Create default DataFusion session
+        let datafusion_session = Arc::new(SessionContext::new());
+        
+        // Empty template variables (tests don't typically need CLI expansion)
+        let template_variables = HashMap::new();
+        
+        Self::new(datafusion_session, template_variables, persistence)
+    }
 }
 
 /// Factory context for creating dynamic nodes
