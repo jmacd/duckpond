@@ -3,8 +3,6 @@
 //! This factory simplifies the common pattern of joining multiple time series sources
 //! by timestamp, automatically generating the COALESCE + FULL OUTER JOIN + EXCLUDE SQL.
 
-use crate::factory::FactoryContext;
-
 use crate::register_dynamic_factory;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
@@ -170,14 +168,14 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
 /// Wraps SqlDerivedFile with auto-generated join SQL
 pub struct TimeseriesJoinFile {
     config: TimeseriesJoinConfig,
-    context: FactoryContext,
+    context: provider::FactoryContext,
     // Lazy-initialized SqlDerivedFile
     inner: Arc<tokio::sync::Mutex<Option<SqlDerivedFile>>>,
 }
 
 impl TimeseriesJoinFile {
     #[must_use]
-    pub fn new(config: TimeseriesJoinConfig, context: FactoryContext) -> Self {
+    pub fn new(config: TimeseriesJoinConfig, context: provider::FactoryContext) -> Self {
         Self {
             config,
             context,
@@ -443,13 +441,7 @@ fn create_timeseries_join_handle(
     let cfg: TimeseriesJoinConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-join config: {}", e)))?;
 
-    // Convert to legacy FactoryContext for TimeseriesJoinFile which hasn't migrated yet
-    let legacy_ctx = FactoryContext {
-        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
-        file_id: context.file_id,
-        pond_metadata: context.pond_metadata.clone(),
-    };
-    let join_file = TimeseriesJoinFile::new(cfg, legacy_ctx);
+    let join_file = TimeseriesJoinFile::new(cfg, context);
     Ok(join_file.create_handle())
 }
 
@@ -481,7 +473,7 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::OpLogPersistence;
+    use crate::persistence::{OpLogPersistence, State};
     use provider::QueryableFile;
     use arrow::array::{Float64Array, TimestampSecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -490,8 +482,13 @@ mod tests {
     use std::io::Cursor;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tinyfs::EntryType;
+    use tinyfs::{EntryType, FileID};
 
+    /// Helper: convert tlogfs State to provider::FactoryContext for tests
+    fn test_context(state: &State, file_id: FileID) -> provider::FactoryContext {
+        let provider_context = state.as_provider_context();
+        provider::FactoryContext::new(provider_context, file_id)
+    }
 
     #[test]
     fn test_validation_errors() {
@@ -616,7 +613,7 @@ mod tests {
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
         use tinyfs::FileID;
-        let context = FactoryContext::new(state.clone(), FileID::root());
+        let context = test_context(&state, FileID::root());
 
         let config = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),
@@ -664,7 +661,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeseries_join_with_scope_prefixes() {
-        use crate::factory::FactoryContext;
         use crate::persistence::OpLogPersistence;
         use arrow::array::{Float64Array, TimestampSecondArray};
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -745,7 +741,7 @@ mod tests {
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
         let root_id = FileID::root();
-        let context = FactoryContext::new(state.clone(), root_id);
+        let context = test_context(&state, root_id);
 
         let config = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),
@@ -798,7 +794,6 @@ mod tests {
     async fn test_timeseries_join_same_scope_non_overlapping_ranges() {
         // Test the Silver case: two Vulink devices with same scope but non-overlapping time ranges
         // This should use UNION BY NAME and produce proper column names with scope prefix
-        use crate::factory::FactoryContext;
         use crate::persistence::OpLogPersistence;
         use arrow::array::{Float64Array, TimestampSecondArray};
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -909,7 +904,7 @@ mod tests {
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
         let root_id = FileID::root();
-        let context = FactoryContext::new(state.clone(), root_id);
+        let context = test_context(&state, root_id);
 
         let config = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),

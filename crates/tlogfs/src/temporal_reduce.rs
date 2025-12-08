@@ -39,8 +39,6 @@
 //!
 //! Each file contains time-bucketed aggregations using SQL GROUP BY operations.
 
-use crate::factory::FactoryContext;
-
 use crate::register_dynamic_factory;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
@@ -123,7 +121,7 @@ pub struct TemporalReduceSqlFile {
     duration: Duration,
     source_node: Node,
     source_path: String, // For SQL pattern reference
-    context: FactoryContext,
+    context: provider::FactoryContext,
     // Lazy-initialized actual SQL file
     inner: Arc<tokio::sync::Mutex<Option<SqlDerivedFile>>>,
     // CACHE: Discovered columns to avoid repeated schema discovery
@@ -139,7 +137,7 @@ impl TemporalReduceSqlFile {
         duration: Duration,
         source_node: Node,
         source_path: String,
-        context: FactoryContext,
+        context: provider::FactoryContext,
     ) -> Self {
         Self {
             config,
@@ -171,9 +169,7 @@ impl TemporalReduceSqlFile {
 
         // Get the correct part_id (parent directory's node_id) using TinyFS resolve_path() pattern
         // For files, part_id should be the parent directory's node_id, not the file's node_id
-        let fs = tinyfs::FS::new(self.context.state.clone())
-            .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        let fs = self.context.context.filesystem();
         let tinyfs_root = fs.root().await?;
 
         // Parse the source_path to get parent directory
@@ -215,9 +211,8 @@ impl TemporalReduceSqlFile {
         let table_provider = if let Some(queryable_file) =
             crate::sql_derived::try_as_queryable_file(&**file_guard)
         {
-            let provider_context = self.context.state.as_provider_context();
             queryable_file
-                .as_table_provider(file_id, &provider_context)
+                .as_table_provider(file_id, &self.context.context)
                 .await
                 .map_err(|e| {
                     tinyfs::Error::Other(format!(
@@ -526,7 +521,7 @@ async fn generate_temporal_sql(
     config: &TemporalReduceConfig,
     interval: Duration,
     _source_path: &str,
-    _context: &FactoryContext,
+    _context: &provider::FactoryContext,
     pattern_name: &str,
 ) -> TinyFSResult<String> {
     let interval = duration_to_sql_interval(interval);
@@ -617,12 +612,12 @@ fn extract_time_unit_from_interval(interval: &str) -> &str {
 /// Dynamic directory for temporal reduce operations
 pub struct TemporalReduceDirectory {
     config: TemporalReduceConfig,
-    context: FactoryContext,
+    context: provider::FactoryContext,
     parsed_resolutions: Vec<(String, Duration)>,
 }
 
 impl TemporalReduceDirectory {
-    pub fn new(config: TemporalReduceConfig, context: FactoryContext) -> TinyFSResult<Self> {
+    pub fn new(config: TemporalReduceConfig, context: provider::FactoryContext) -> TinyFSResult<Self> {
         // Parse all resolutions upfront
         let mut parsed_resolutions = Vec::new();
 
@@ -650,9 +645,7 @@ impl TemporalReduceDirectory {
 
         let mut source_files = Vec::new();
 
-        let fs = tinyfs::FS::new(self.context.state.clone())
-            .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        let fs = self.context.context.filesystem();
 
         // Use collect_matches to find source files with the given pattern
         match fs.root().await?.collect_matches(&pattern).await {
@@ -706,9 +699,7 @@ impl TemporalReduceDirectory {
 
     /// Get source node by path from discovered source files
     async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<Node> {
-        let fs = tinyfs::FS::new(self.context.state.clone())
-            .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        let fs = self.context.context.filesystem();
 
         let matches = fs.root().await?.collect_matches(source_path).await?;
 
@@ -843,7 +834,7 @@ pub struct TemporalReduceSiteDirectory {
     source_path: String,
     source_node: Node,
     config: TemporalReduceConfig,
-    context: FactoryContext,
+    context: provider::FactoryContext,
     parsed_resolutions: Vec<(String, Duration)>,
 }
 
@@ -854,7 +845,7 @@ impl TemporalReduceSiteDirectory {
         source_path: String,
         source_node: Node,
         config: TemporalReduceConfig,
-        context: FactoryContext,
+        context: provider::FactoryContext,
         parsed_resolutions: Vec<(String, Duration)>,
     ) -> Self {
         Self {
@@ -985,13 +976,7 @@ fn create_temporal_reduce_directory(
             ))
         })?;
 
-    // Convert to legacy FactoryContext for TemporalReduceDirectory which hasn't migrated yet
-    let legacy_ctx = FactoryContext {
-        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
-        file_id: context.file_id,
-        pond_metadata: context.pond_metadata.clone(),
-    };
-    let directory = TemporalReduceDirectory::new(temporal_config, legacy_ctx)?;
+    let directory = TemporalReduceDirectory::new(temporal_config, context)?;
     Ok(directory.create_handle())
 }
 
@@ -1032,8 +1017,8 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factory::{FactoryContext, FactoryRegistry};
-    use crate::persistence::OpLogPersistence;
+    use crate::factory::FactoryRegistry;
+    use crate::persistence::{OpLogPersistence, State};
     use arrow::array::{Float64Array, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
@@ -1041,6 +1026,12 @@ mod tests {
     use tempfile::TempDir;
     use tinyfs::arrow::SimpleParquetExt;
     use tinyfs::{EntryType, FileID, NodeType};
+
+    /// Helper: convert tlogfs State to provider::FactoryContext for tests
+    fn test_context(state: &State, file_id: FileID) -> provider::FactoryContext {
+        let provider_context = state.as_provider_context();
+        provider::FactoryContext::new(provider_context, file_id)
+    }
 
     /// Comprehensive integration test for temporal-reduce factory
     ///
@@ -1143,7 +1134,7 @@ mod tests {
                 ],
             };
 
-            let context = FactoryContext::new(state.clone(), FileID::root());
+            let context = test_context(&state, FileID::root());
             let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
             let temporal_handle = temporal_dir.create_handle();
 

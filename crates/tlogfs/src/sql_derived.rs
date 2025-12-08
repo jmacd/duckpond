@@ -30,7 +30,6 @@
 //! For detailed architecture, performance analysis, and predicate pushdown strategies,
 //! see [`crates/docs/sql-derived-design.md`](../docs/sql-derived-design.md).
 
-use crate::factory::FactoryContext;
 use tinyfs::FileID;
 
 use crate::register_queryable_file_factory;
@@ -55,14 +54,14 @@ pub use crate::file::try_as_queryable_file;
 #[derive(Clone)]
 pub struct SqlDerivedFile {
     config: SqlDerivedConfig,
-    context: FactoryContext,
+    context: provider::FactoryContext,
     mode: SqlDerivedMode,
 }
 
 impl SqlDerivedFile {
     pub fn new(
         config: SqlDerivedConfig,
-        context: FactoryContext,
+        context: provider::FactoryContext,
         mode: SqlDerivedMode,
     ) -> TinyFSResult<Self> {
         Ok(Self {
@@ -83,12 +82,8 @@ impl SqlDerivedFile {
         pattern: &str,
         entry_type: EntryType,
     ) -> TinyFSResult<Vec<tinyfs::NodePath>> {
-        // STEP 1: Build TinyFS from State (transaction context from FactoryContext)
-        let fs = tinyfs::FS::new(self.context.state.clone())
-            .await
-            .map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to create TinyFS from state: {}", e))
-            })?;
+        // STEP 1: Build TinyFS from persistence via ProviderContext
+        let fs = self.context.context.filesystem();
         let tinyfs_root = fs
             .root()
             .await
@@ -265,13 +260,7 @@ fn create_sql_derived_table_handle(
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
-    // Convert to legacy FactoryContext for SqlDerivedFile which hasn't migrated yet
-    let legacy_ctx = FactoryContext {
-        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
-        file_id: context.file_id,
-        pond_metadata: context.pond_metadata.clone(),
-    };
-    let sql_file = SqlDerivedFile::new(cfg, legacy_ctx, SqlDerivedMode::Table)?;
+    let sql_file = SqlDerivedFile::new(cfg, context, SqlDerivedMode::Table)?;
     Ok(sql_file.create_handle())
 }
 
@@ -282,13 +271,7 @@ fn create_sql_derived_series_handle(
     let cfg: SqlDerivedConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
 
-    // Convert to legacy FactoryContext for SqlDerivedFile which hasn't migrated yet
-    let legacy_ctx = FactoryContext {
-        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
-        file_id: context.file_id,
-        pond_metadata: context.pond_metadata.clone(),
-    };
-    let sql_file = SqlDerivedFile::new(cfg, legacy_ctx, SqlDerivedMode::Series)?;
+    let sql_file = SqlDerivedFile::new(cfg, context, SqlDerivedMode::Series)?;
     Ok(sql_file.create_handle())
 }
 
@@ -358,9 +341,9 @@ register_queryable_file_factory!(
 );
 
 impl SqlDerivedFile {
-    /// Get the factory context for accessing the state
+    /// Get the factory context
     #[must_use]
-    pub fn get_context(&self) -> &FactoryContext {
+    pub fn get_context(&self) -> &provider::FactoryContext {
         &self.context
     }
 
@@ -821,6 +804,15 @@ mod tests {
     use tempfile::TempDir;
     use tinyfs::FS;
     use tinyfs::arrow::SimpleParquetExt;
+
+    /// Helper to create provider::FactoryContext from State for tests
+    fn test_context(state: &crate::persistence::State, file_id: FileID) -> provider::FactoryContext {
+        provider::FactoryContext {
+            context: state.as_provider_context(),
+            file_id,
+            pond_metadata: None,
+        }
+    }
 
     /// Helper function to get a string array from any column, handling different Arrow string types
     fn get_string_array(
@@ -1306,7 +1298,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1476,7 +1468,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1653,7 +1645,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1732,7 +1724,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create SQL-derived file without specifying query (should use default)
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1797,7 +1789,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with FileSeries source
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1862,7 +1854,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with multi-version FileSeries source
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -1925,7 +1917,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file that should union all 3 versions
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2015,7 +2007,7 @@ query: ""
         let state = tx_guard.state().unwrap();
 
         // Create the SQL-derived file with read-only state context
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2220,7 +2212,7 @@ query: ""
             let root = fs.root().await.unwrap();
 
             // Create the first SQL-derived file (filters and transforms original data)
-            let context = FactoryContext::new(state.clone(), FileID::root());
+            let context = test_context(&state, FileID::root());
             let first_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
@@ -2278,7 +2270,7 @@ query: ""
             let tx_guard = persistence.begin_test().await.unwrap();
             let state = tx_guard.state().unwrap();
 
-            let context = FactoryContext::new(state, FileID::root());
+            let context = test_context(&state, FileID::root());
             let second_config = SqlDerivedConfig {
                 patterns: {
                     let mut map = HashMap::new();
@@ -2549,7 +2541,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state.clone(), FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -2690,7 +2682,6 @@ query: ""
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
 
-        use crate::factory::FactoryContext;
         use crate::persistence::OpLogPersistence;
         use crate::temporal_reduce::{
             AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
@@ -2787,7 +2778,7 @@ query: ""
         let bdock_sql_derived = {
             let tx_guard = persistence.begin_test().await.unwrap();
             let state = tx_guard.state().unwrap();
-            let context = FactoryContext::new(state, FileID::root());
+            let context = test_context(&state, FileID::root());
 
             let config = SqlDerivedConfig {
                 patterns: {
@@ -2808,7 +2799,7 @@ query: ""
         let temporal_reduce_dir = {
             let tx_guard = persistence.begin_test().await.unwrap();
             let state = tx_guard.state().unwrap();
-            let context = FactoryContext::new(state, FileID::root());
+            let context = test_context(&state, FileID::root());
 
             let config = TemporalReduceConfig {
                 in_pattern: "/sensors/stations/*".to_string(), // Use pattern to match parquet data
@@ -3049,7 +3040,6 @@ query: ""
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
 
-        use crate::factory::FactoryContext;
         use crate::persistence::OpLogPersistence;
         use crate::temporal_reduce::{
             AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
@@ -3134,7 +3124,7 @@ query: ""
         {
             let tx_guard = persistence.begin_test().await.unwrap();
             let state = tx_guard.state().unwrap();
-            let context = FactoryContext::new(state, FileID::root());
+            let context = test_context(&state, FileID::root());
 
             // Define temporal-reduce config with wildcard schema discovery
             let temporal_config = TemporalReduceConfig {
@@ -3496,7 +3486,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();
@@ -3595,7 +3585,7 @@ query: ""
         let tx_guard = persistence.begin_test().await.unwrap();
         let state = tx_guard.state().unwrap();
 
-        let context = FactoryContext::new(state, FileID::root());
+        let context = test_context(&state, FileID::root());
         let config = SqlDerivedConfig {
             patterns: {
                 let mut map = HashMap::new();

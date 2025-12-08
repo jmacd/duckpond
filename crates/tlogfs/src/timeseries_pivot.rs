@@ -13,8 +13,6 @@
 //!     - "AT500_Bottom.DO.mg/L"
 //! ```
 
-use crate::factory::FactoryContext;
-
 use crate::register_dynamic_factory;
 use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
@@ -47,18 +45,18 @@ fn default_time_column() -> String {
 /// File implementation that dynamically generates pivot SQL based on current schemas
 pub struct TimeseriesPivotFile {
     config: TimeseriesPivotConfig,
-    context: FactoryContext,
+    context: provider::FactoryContext,
 }
 
 impl TimeseriesPivotFile {
-    pub fn new(config: TimeseriesPivotConfig, context: FactoryContext) -> Self {
+    pub fn new(config: TimeseriesPivotConfig, context: provider::FactoryContext) -> Self {
         Self { config, context }
     }
 
     /// Resolve pattern to matched inputs, extracting captured site names
     async fn resolve_pattern(&self) -> TinyFSResult<Vec<(String, String)>> {
-        // Build TinyFS from state
-        let fs = tinyfs::FS::new(self.context.state.clone()).await?;
+        // Get filesystem from ProviderContext
+        let fs = self.context.context.filesystem();
         let tinyfs_root = fs.root().await?;
 
         // Use collect_matches to find matching files with captured groups
@@ -292,13 +290,7 @@ fn create_timeseries_pivot_handle(
     let cfg: TimeseriesPivotConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-pivot config: {}", e)))?;
 
-    // Convert to legacy FactoryContext for TimeseriesPivotFile which hasn't migrated yet
-    let legacy_ctx = FactoryContext {
-        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
-        file_id: context.file_id,
-        pond_metadata: context.pond_metadata.clone(),
-    };
-    let pivot_file = TimeseriesPivotFile::new(cfg, legacy_ctx);
+    let pivot_file = TimeseriesPivotFile::new(cfg, context);
     Ok(pivot_file.create_handle())
 }
 
@@ -333,6 +325,14 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::State;
+    use tinyfs::FileID;
+
+    /// Helper: convert tlogfs State to provider::FactoryContext for tests
+    fn test_context(state: &State, file_id: FileID) -> provider::FactoryContext {
+        let provider_context = state.as_provider_context();
+        provider::FactoryContext::new(provider_context, file_id)
+    }
 
     // Helper to create a TimeseriesPivotFile for SQL generation testing
     fn create_test_pivot_file(config: TimeseriesPivotConfig) -> TimeseriesPivotFile {
@@ -351,7 +351,7 @@ mod tests {
         });
         
         let state = tx_guard.state().unwrap();
-	let context = FactoryContext::new(state.clone(), FileID::root());
+	let context = test_context(&state, FileID::root());
         
         TimeseriesPivotFile { config, context }
     }
