@@ -1,12 +1,15 @@
 //! Provider: URL-Based file access and factory infrastructure
 
 mod context;
+#[cfg(test)]
+mod context_tests;
 pub mod dynamic_dir;
 mod error;
 mod null_padding;
 pub mod registry;
 mod scope_prefix;
 pub mod test_factory;
+mod tinyfs_path;
 
 pub use context::{
     FactoryContext, PondMetadata, ProviderContext,
@@ -19,6 +22,7 @@ pub use registry::{
     FactoryCommand, FactoryRegistry, QueryableFile, DYNAMIC_FACTORIES,
 };
 pub use scope_prefix::ScopePrefixTableProvider;
+pub use tinyfs_path::TinyFsPathBuilder;
 
 use std::pin::Pin;
 use tokio::io::AsyncRead;

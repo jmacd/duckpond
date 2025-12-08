@@ -20,6 +20,7 @@ struct MemoryFileVersion {
 
 /// In-memory persistence layer for testing and derived file computation
 /// This implements the PersistenceLayer trait using in-memory storage
+#[derive(Clone)]
 pub struct MemoryPersistence(Arc<Mutex<State>>);
 
 pub struct State {

@@ -16,6 +16,7 @@ mod path;
 pub mod persistence;
 mod symlink;
 pub mod testing;
+pub mod transaction_guard;
 pub mod tree_format;
 mod wd;
 
@@ -36,6 +37,7 @@ pub use memory::persistence::MemoryPersistence;
 pub use metadata::{Metadata, NodeMetadata};
 pub use persistence::{FileVersionInfo, PersistenceLayer};
 pub use symlink::{Handle as SymlinkHandle, Symlink};
+pub use transaction_guard::TransactionGuard;
 
 #[cfg(test)]
 mod tests;

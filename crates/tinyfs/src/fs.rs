@@ -31,6 +31,16 @@ impl FS {
         })
     }
 
+    /// Creates a filesystem from an Arc<dyn PersistenceLayer>
+    /// Does not add caching - assumes the persistence layer is already wrapped if needed
+    #[must_use]
+    pub fn from_arc(persistence: Arc<dyn PersistenceLayer>) -> Self {
+        FS {
+            persistence,
+            busy: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
     /// Returns a working directory context for the root directory
     /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {

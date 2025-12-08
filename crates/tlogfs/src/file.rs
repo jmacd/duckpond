@@ -385,9 +385,10 @@ impl provider::QueryableFile for OpLogFile {
             "📋 DELEGATING OpLogFile to create_listing_table_provider: id={id}",
         );
         // Extract State from context for tlogfs-internal operation
-        let state = context.state_handle
+        let state = context.persistence
+            .as_any()
             .downcast_ref::<State>()
-            .ok_or_else(|| provider::Error::StateHandle("Invalid state handle - not a tlogfs State".to_string()))?;
+            .ok_or_else(|| provider::Error::StateHandle("Persistence is not a tlogfs State".to_string()))?;
         // Delegate to existing create_listing_table_provider - no duplication
         crate::file_table::create_listing_table_provider(id, state)
             .await

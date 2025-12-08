@@ -711,11 +711,11 @@ impl State {
             .expect("Failed to lock template variables")
             .clone();
         
-        // Create provider context with concrete values
+        // Create provider context with State as the persistence layer
         provider::ProviderContext::new(
             self.session_context.clone(),
             template_vars,
-            Arc::new(self.clone()) as Arc<dyn std::any::Any + Send + Sync>,
+            Arc::new(self.clone()) as Arc<dyn PersistenceLayer>,
         )
     }
 }

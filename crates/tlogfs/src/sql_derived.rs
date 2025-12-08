@@ -726,9 +726,10 @@ impl provider::QueryableFile for SqlDerivedFile {
         context: &provider::ProviderContext,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, provider::Error> {
         // Extract State for tlogfs-internal operations (node resolution, etc.)
-        let state = context.state_handle
+        let state = context.persistence
+            .as_any()
             .downcast_ref::<crate::persistence::State>()
-            .ok_or_else(|| provider::Error::StateHandle("Invalid state handle - not a tlogfs State".to_string()))?;
+            .ok_or_else(|| provider::Error::StateHandle("Persistence is not a tlogfs State".to_string()))?;
 
         // Check cache first for SqlDerivedFile ViewTable
         let cache_key = crate::persistence::TableProviderKey::new(

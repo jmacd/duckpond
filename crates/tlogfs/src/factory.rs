@@ -106,14 +106,15 @@ pub async fn factory_execute(
 
 /// Extract State from provider::FactoryContext
 ///
-/// Simple helper to downcast the state_handle back to concrete State.
+/// Simple helper to downcast the persistence layer back to concrete State.
 /// This is the mechanical bridge - allows factories to access State directly.
 pub fn extract_state(pctx: &provider::FactoryContext) -> Result<State, TLogFSError> {
-    // Downcast the opaque state_handle to State
-    let state_ref = pctx.context.state_handle
+    // Downcast the persistence layer to State
+    let state_ref = pctx.context.persistence
+        .as_any()
         .downcast_ref::<State>()
         .ok_or_else(|| TLogFSError::Internal(
-            "ProviderContext was not created from tlogfs::State - cannot extract".to_string()
+            "Persistence layer was not created from tlogfs::State - cannot extract".to_string()
         ))?;
     
     // Clone the State (it's cheap - Arc-based internally)

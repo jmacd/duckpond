@@ -1,24 +1,23 @@
 //! Provider context and factory context for dynamic node creation
 //!
 //! This module defines the abstraction layer between factories and persistence implementations.
-//! ProviderContext is a concrete struct with direct access to DataFusion session and State handle.
+//! ProviderContext holds a tinyfs Persistence layer for transaction management.
 
 use datafusion::execution::context::SessionContext;
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tinyfs::FileID;
+use tinyfs::{FileID, PersistenceLayer};
 
 /// Result type for provider operations
 pub type Result<T> = std::result::Result<T, crate::Error>;
 
-/// Provider context - concrete struct with direct access to session and state
+/// Provider context - holds tinyfs Persistence for transaction management
 ///
 /// This struct provides factories with:
 /// - Direct access to DataFusion SessionContext for SQL execution
 /// - Template variable management for CLI expansion  
 /// - Table provider caching for performance optimization
-/// - Opaque handle back to originating State for persistence operations
+/// - tinyfs Persistence layer for creating transaction guards
 ///
 /// All fields are concrete - no trait objects to downcast.
 #[derive(Clone)]
@@ -32,8 +31,8 @@ pub struct ProviderContext {
     /// Table provider cache for performance
     pub table_provider_cache: Arc<std::sync::Mutex<HashMap<String, Arc<dyn datafusion::catalog::TableProvider>>>>,
     
-    /// Opaque handle to originating State (tlogfs can downcast this)
-    pub state_handle: Arc<dyn Any + Send + Sync>,
+    /// TinyFS persistence layer for transaction management
+    pub persistence: Arc<dyn PersistenceLayer>,
 }
 
 impl ProviderContext {
@@ -41,13 +40,13 @@ impl ProviderContext {
     pub fn new(
         datafusion_session: Arc<SessionContext>,
         template_variables: HashMap<String, serde_json::Value>,
-        state_handle: Arc<dyn Any + Send + Sync>,
+        persistence: Arc<dyn PersistenceLayer>,
     ) -> Self {
         Self {
             datafusion_session,
             template_variables: Arc::new(std::sync::Mutex::new(template_variables)),
             table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            state_handle,
+            persistence,
         }
     }
     
@@ -83,6 +82,20 @@ impl ProviderContext {
             .map_err(|e| crate::Error::MutexPoisoned(e.to_string()))?
             .insert(key, provider);
         Ok(())
+    }
+
+    /// Create a filesystem from the persistence layer
+    pub fn filesystem(&self) -> tinyfs::FS {
+        tinyfs::FS::from_arc(self.persistence.clone())
+    }
+
+    /// Begin a transaction with the transaction guard pattern
+    ///
+    /// Returns a TransactionGuard that enforces the single-transaction rule.
+    /// The guard provides access to the filesystem and automatically cleans up on drop.
+    pub fn begin_transaction(&self) -> tinyfs::Result<tinyfs::TransactionGuard> {
+        let fs = self.filesystem();
+        tinyfs::TransactionGuard::begin(fs)
     }
 }
 
