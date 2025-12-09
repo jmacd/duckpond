@@ -1434,19 +1434,24 @@ pub async fn create_table_provider_generic(
 - **Result**: provider crate builds clean, 31 provider tests + 87 tlogfs tests pass
 - **Temporary code**: tlogfs wrapper will be removed in Phase D after sql_derived migration
 
-**Phase C: SqlDerivedFile Refactoring** 🔜 **NEXT** (~2 hours)
-1. ⏳ Remove State downcast from as_table_provider() (15 min)
-2. ⏳ Replace ~15 state.* calls with context.* calls (60 min)
-3. ⏳ Update create_table_provider call to use provider version (15 min)
-4. ⏳ Test with tlogfs and MemoryPersistence (30 min)
+**Phase C: SqlDerivedFile Refactoring** ✅ **COMPLETE** (~2 hours)
+1. ✅ Removed State downcast from as_table_provider() - now uses ProviderContext directly
+2. ✅ Replaced State method calls with ProviderContext equivalents:
+   - `state.get_table_provider_cache()` → `context.get_table_provider_cache()`
+   - `state.session_context().await?` → `&context.datafusion_session` (direct access)
+   - `state.set_table_provider_cache()` → `context.set_table_provider_cache()?`
+3. ✅ Updated create_table_provider call: `crate::file_table::create_table_provider(file_id, state, options)` → `provider::create_table_provider(file_id, context, options)`
+4. ✅ Updated cache key: `crate::persistence::TableProviderKey` → `provider::TableProviderKey` with `.to_cache_string()`
+5. ✅ Removed unused import: `use crate::file_table::create_table_provider`
+- **Result**: 87 tlogfs tests pass, no State downcast in production code path
 
-**Phase D: Move to Provider Crate** 🔜 **AFTER C** (~1 hour)
+**Phase D: Move to Provider Crate** 🔜 **NEXT** (~1 hour)
 1. ⏳ Create provider/src/sql_derived_file.rs (20 min)
 2. ⏳ Move SqlDerivedFile + helper functions (20 min)
 3. ⏳ Update factory registration (10 min)
 4. ⏳ Remove tlogfs wrapper (was only temporary) (10 min)
 
-**Total estimate**: ~6 hours | **Completed**: ~3 hours (50%) | **Remaining**: ~3 hours
+**Total estimate**: ~6 hours | **Completed**: ~5 hours (83%) | **Remaining**: ~1 hour
 
 **Critical Insight**: The main blocker is not infrastructure (TableProviderOptions, etc.) but rather the **440+ lines of State-specific code** in SqlDerivedFile::as_table_provider() that need to be refactored to use ProviderContext methods. This is mechanical but requires careful testing.
 

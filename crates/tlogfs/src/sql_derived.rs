@@ -419,19 +419,13 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
         id: FileID,
         context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        // Extract State from ProviderContext
-        let state = context.persistence
-            .as_any()
-            .downcast_ref::<crate::persistence::State>()
-            .ok_or_else(|| tinyfs::Error::Other("Persistence is not a tlogfs State".to_string()))?;
-
         // Check cache first for SqlDerivedFile ViewTable
-        let cache_key = crate::persistence::TableProviderKey::new(
+        let cache_key = provider::TableProviderKey::new(
             id,
-            crate::file_table::VersionSelection::LatestVersion,
-        );
+            provider::VersionSelection::LatestVersion,
+        ).to_cache_string();
 
-        if let Some(cached_provider) = state.get_table_provider_cache(&cache_key) {
+        if let Some(cached_provider) = context.get_table_provider_cache(&cache_key) {
             debug!(
                 "🚀 CACHE HIT: Returning cached ViewTable for node_id: {id}"
             );
@@ -440,9 +434,8 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
 
         debug!("💾 CACHE MISS: Creating new ViewTable for node_id: {id}");
 
-        // Get SessionContext from state to set up tables
-        let ctx = state.session_context().await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        // Get SessionContext directly from ProviderContext
+        let ctx = &context.datafusion_session;
 
         // Create mapping from user pattern names to unique internal table names
         let mut table_mappings = HashMap::new();
@@ -630,8 +623,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     // Create table provider options for multi-file query
                     // Note: Temporal bounds (from pond set-temporal-bounds) should be enforced
                     // at the Parquet reader level, not here at the factory level
-                    use crate::file_table::{TableProviderOptions, create_table_provider};
-                    let options = TableProviderOptions {
+                    let options = provider::TableProviderOptions {
                         additional_urls: urls.clone(),
                         ..Default::default()
                     };
@@ -644,7 +636,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
 
                     // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
                     let representative_file_id = file_ids.first().copied().unwrap_or(FileID::root());
-                    let provider = create_table_provider(representative_file_id, state, options).await
+                    let provider = provider::create_table_provider(representative_file_id, context, options).await
                         .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                     
                     // Apply optional provider wrapper (e.g., null_padding_table)
@@ -790,7 +782,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
         let table_provider = Arc::new(view_table);
 
         // Cache the ViewTable for future reuse
-        state.set_table_provider_cache(cache_key, table_provider.clone());
+        context.set_table_provider_cache(cache_key, table_provider.clone())?;
         debug!("💾 CACHED: Stored ViewTable for node_id: {id}");
 
         Ok(table_provider)

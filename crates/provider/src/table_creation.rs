@@ -1,4 +1,4 @@
-//! TableProvider creation for DuckPond
+ //! TableProvider creation for DuckPond
 //!
 //! This module provides the core logic for creating DataFusion TableProviders from FileID references.
 //! It abstracts away persistence implementation details by accepting ProviderContext instead of State.
