@@ -99,26 +99,8 @@ pub struct State {
 
 
 
-/// Cache key for TableProvider instances in TLogFS queries
-/// Combines node_id, part_id, and version selection to uniquely identify table configurations
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct TableProviderKey {
-    pub id: FileID,
-    pub version_selection: crate::file_table::VersionSelection,
-}
-
-impl TableProviderKey {
-    #[must_use]
-    pub fn new(
-        id: FileID,
-        version_selection: crate::file_table::VersionSelection,
-    ) -> Self {
-        Self {
-            id,
-            version_selection,
-        }
-    }
-}
+// Re-export TableProviderKey from provider for backward compatibility
+pub use provider::TableProviderKey;
 
 impl OpLogPersistence {
     /// Get the Delta table for query operations

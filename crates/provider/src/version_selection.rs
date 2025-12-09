@@ -47,6 +47,17 @@ impl VersionSelection {
             }
         }
     }
+
+    /// Convert to cache key string
+    /// Used for TableProvider caching to avoid schema inference overhead
+    #[must_use]
+    pub fn to_cache_string(&self) -> String {
+        match self {
+            VersionSelection::AllVersions => "all".to_string(),
+            VersionSelection::LatestVersion => "latest".to_string(),
+            VersionSelection::SpecificVersion(version) => format!("v{version}"),
+        }
+    }
 }
 
 #[cfg(test)]

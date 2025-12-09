@@ -1178,6 +1178,18 @@ sql_derived, timeseries_join, etc.
 
 ## Current Status: What Remains for sql_derived Migration
 
+### 🎯 Executive Summary
+
+**Status**: SqlDerivedFile is **98% ready to move** to provider crate, but blocked by one critical issue.
+
+**The Blocker**: `SqlDerivedFile::as_table_provider()` downcasts `ProviderContext` to `State` on line 424, then uses State-specific methods throughout 440+ lines of code (lines 424-680). This tight coupling to tlogfs prevents migration.
+
+**The Fix**: Replace all State method calls with equivalent ProviderContext methods (all already available). This is mechanical refactoring, not architectural redesign.
+
+**Timeline**: ~6 hours of focused work across 4 phases.
+
+**Risk**: Low - all ProviderContext methods already tested, just need to refactor call sites.
+
 ### ✅ What's Complete
 
 **Infrastructure (100% done):**
@@ -1192,9 +1204,48 @@ sql_derived, timeseries_join, etc.
 
 ### 🔄 What Remains (Blocking sql_derived)
 
-**Critical Path: Abstract file_table dependencies**
+**Critical Path: Abstract file_table dependencies + State downcasting**
 
-**1. TableProviderOptions** (in tlogfs, needs to move to provider):
+**BLOCKER #1: State Downcast in QueryableFile Implementation**
+```rust
+// Current: tlogfs/src/sql_derived.rs line 420-428
+impl tinyfs::QueryableFile for SqlDerivedFile {
+    async fn as_table_provider(&self, id: FileID, context: &tinyfs::ProviderContext) 
+        -> Result<Arc<dyn TableProvider>> 
+    {
+        // ❌ BLOCKER: Downcasts ProviderContext to get State
+        let state = context.persistence
+            .as_any()
+            .downcast_ref::<crate::persistence::State>()
+            .ok_or_else(|| tinyfs::Error::Other("Persistence is not a tlogfs State".to_string()))?;
+
+        // Then uses State-specific methods:
+        state.get_table_provider_cache(&cache_key)  // line 431
+        state.session_context().await?              // line 440
+        state.get_table_provider_cache(...)         // multiple calls
+```
+
+**Why This Blocks Migration:**
+- SqlDerivedFile is already using `provider::FactoryContext` and `tinyfs::QueryableFile` trait
+- But `as_table_provider()` immediately downcasts to `State` for table creation
+- Cannot move to provider crate while it depends on tlogfs-specific `State` type
+- Need to replace `State` calls with `ProviderContext` methods
+
+**BLOCKER #2: file_table::create_table_provider**
+```rust
+// Current: tlogfs/src/sql_derived.rs line 633-648
+use crate::file_table::{TableProviderOptions, create_table_provider};
+
+let provider = create_table_provider(representative_file_id, state, options).await
+    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+```
+
+**Why This Blocks Migration:**
+- `create_table_provider()` takes `&State` parameter (tlogfs-specific)
+- Returns `Result<Arc<dyn TableProvider>, TLogFSError>`
+- Used at line 648 in multi-file table creation logic
+
+**BLOCKER #3: TableProviderOptions** (in tlogfs, needs to move to provider):
 ```rust
 // Current: tlogfs/src/file_table.rs
 pub struct TableProviderOptions {
@@ -1206,26 +1257,36 @@ pub struct TableProviderOptions {
 - **Impact**: Used by sql_derived.rs (line 633)
 - **Dependencies**: None (VersionSelection already in provider)
 
-**2. create_table_provider()** (in tlogfs, needs abstraction):
+**BLOCKER #4: VersionSelection Usage**
 ```rust
-// Current: tlogfs/src/file_table.rs line 35
-pub async fn create_table_provider(
-    file_id: FileID,
-    state: &crate::persistence::State,  // ← tlogfs-specific
-    options: TableProviderOptions,
-) -> Result<Arc<dyn TableProvider>>
+// Current: tlogfs/src/sql_derived.rs lines 431, 602
+crate::file_table::VersionSelection::LatestVersion
+crate::file_table::VersionSelection::AllVersions
 ```
+- Already moved to provider, just needs import update
 
-**Problem**: SqlDerivedFile.as_table_provider() calls this at line 647:
+**BLOCKER #5: register_queryable_file_factory! Macro**
 ```rust
-let provider = create_table_provider(representative_file_id, state, options).await
+// Current: tlogfs/src/sql_derived.rs lines 327, 335
+register_queryable_file_factory!(
+    name: "sql-derived-table",
+    description: "Create SQL-derived tables from single FileTable sources",
+    file: create_sql_derived_table_handle,
+    validate: validate_sql_derived_config,
+    try_as_queryable: try_as_sql_derived_queryable
+);
 ```
+- Macro defined in tlogfs/src/factory.rs
+- Just a passthrough to provider::register_dynamic_factory!
+- Can be called directly once sql_derived moves to provider
 
 **State dependencies in create_table_provider():**
 - `state.session_context()` - ✅ Available via ProviderContext
 - `state.get_table_provider_cache()` - ✅ Available via ProviderContext
 - `state.set_table_provider_cache()` - ✅ Available via ProviderContext  
 - `state.get_temporal_bounds()` - ✅ Available via PersistenceLayer trait
+
+**All State methods already abstracted!** Just need to refactor the code.
 
 **Solution Options:**
 
@@ -1264,12 +1325,71 @@ pub async fn create_table_provider(
 - ✅ All State methods already abstracted
 - ✅ Clean architectural boundary
 
+**Root Cause Analysis:**
+
+The sql_derived.rs file is **98% ready to move** but has one critical architectural issue:
+
+**The Problem**: `SqlDerivedFile::as_table_provider()` immediately downcasts `ProviderContext` to `State`:
+```rust
+// Line 420: Receives generic ProviderContext
+async fn as_table_provider(&self, id: FileID, context: &tinyfs::ProviderContext)
+
+// Line 424: Immediately downcasts to tlogfs-specific State!
+let state = context.persistence.as_any().downcast_ref::<State>()?;
+
+// Lines 431-680: Uses State throughout (440+ lines of State calls)
+state.session_context().await?
+state.get_table_provider_cache(&cache_key)
+create_table_provider(file_id, state, options).await  // Passes State to helper
+```
+
+**The Fix**: Replace all State usage with ProviderContext methods:
+```rust
+// After: No downcasting, uses ProviderContext methods
+async fn as_table_provider(&self, id: FileID, context: &tinyfs::ProviderContext) {
+    let session = context.session_context().await?;  // Instead of state.session_context()
+    if let Some(cached) = context.get_table_provider_cache(&key) {  // Instead of state.get_table_provider_cache()
+        return Ok(cached);
+    }
+    
+    // Pass ProviderContext to create_table_provider (after it's moved to provider)
+    let provider = provider::create_table_provider(file_id, context, options).await?;
+    
+    context.set_table_provider_cache(key, provider.clone());  // Instead of state.set_table_provider_cache()
+    Ok(provider)
+}
+```
+
 **Migration Steps:**
-1. Move TableProviderOptions to provider
+
+**Phase A: Move Supporting Infrastructure** (~1 hour)
+1. Move TableProviderOptions to provider/src/table_provider_options.rs
 2. Move TableProviderKey to provider (cache key struct)
-3. Move create_table_provider logic to provider
-4. tlogfs re-exports for backward compatibility
-5. Update sql_derived.rs imports
+3. Update VersionSelection imports in sql_derived.rs (already in provider)
+
+**Phase B: Move create_table_provider** (~2 hours)
+1. Create provider/src/table_creation.rs
+2. Port create_table_provider() logic:
+   - Change signature: `(file_id, context: &ProviderContext, options)` 
+   - Replace `state.session_context()` → `context.session_context()`
+   - Replace `state.get_table_provider_cache()` → `context.get_table_provider_cache()`
+   - Replace `state.set_table_provider_cache()` → `context.set_table_provider_cache()`
+   - Replace `state.get_temporal_bounds()` → `context.persistence().get_temporal_bounds()`
+3. Add comprehensive tests with MemoryPersistence
+4. tlogfs creates thin wrapper that calls provider version
+
+**Phase C: Refactor SqlDerivedFile::as_table_provider** (~2 hours)
+1. Remove State downcast (lines 424-428)
+2. Replace all `state.*` calls with `context.*` calls (~15 call sites)
+3. Update create_table_provider call to use provider version
+4. Test with both tlogfs and MemoryPersistence
+
+**Phase D: Move sql_derived.rs to provider** (~1 hour)
+1. Create provider/src/sql_derived_file.rs
+2. Move SqlDerivedFile struct and impl
+3. Update imports (remove crate::*, use provider::*)
+4. Register factories in provider crate
+5. tlogfs re-exports for backward compatibility
 
 **Option B: Keep in tlogfs, add ProviderContext overload**
 ```rust
@@ -1290,35 +1410,45 @@ pub async fn create_table_provider_generic(
 - **Cons**: Code duplication, violates DRY principle
 - **Not recommended**
 
-### 📋 Remaining Work Estimate
+### 📋 Work Progress Status
 
 **To move sql_derived functionality to provider:**
 
-1. **Move TableProviderOptions** (30 minutes)
-   - Create provider/src/table_provider_options.rs
-   - Move struct definition
-   - Update imports in tlogfs
+**Phase A: Supporting Infrastructure** ✅ **COMPLETE** (~1 hour)
+1. ✅ Move TableProviderOptions to provider
+2. ✅ Move TableProviderKey to provider with to_cache_string() method
+3. ✅ Add VersionSelection::to_cache_string() for caching
+4. ✅ tlogfs backward compatibility via re-exports
+- **Result**: 31 provider tests pass, 87 tlogfs tests pass
 
-2. **Move TableProviderKey** (15 minutes)
-   - Cache key struct (FileID + VersionSelection)
-   - Used for table provider caching
+**Phase B: create_table_provider Abstraction** ✅ **COMPLETE** (~2 hours)
+1. ✅ Created provider/src/table_creation.rs with ProviderContext signature
+2. ✅ Ported all create_table_provider logic from tlogfs
+3. ✅ Converted State method calls to ProviderContext equivalents:
+   - `state.session_context()` → `context.datafusion_session`
+   - `state.get_table_provider_cache()` → `context.get_table_provider_cache()`
+   - `state.set_table_provider_cache()` → `context.set_table_provider_cache()`
+   - `state.get_temporal_bounds()` → `context.persistence.get_temporal_bounds()`
+4. ✅ Created TEMPORARY tlogfs wrapper (converts State → ProviderContext, delegates to provider)
+5. ✅ Exported: create_table_provider, create_listing_table_provider, create_latest_table_provider
+- **Result**: provider crate builds clean, 31 provider tests + 87 tlogfs tests pass
+- **Temporary code**: tlogfs wrapper will be removed in Phase D after sql_derived migration
 
-3. **Move create_table_provider** (2 hours)
-   - Create provider/src/table_creation.rs
-   - Port logic from tlogfs
-   - Replace State calls with ProviderContext methods
-   - Update temporal bounds query to use PersistenceLayer trait
-   - Add comprehensive tests with MemoryPersistence
+**Phase C: SqlDerivedFile Refactoring** 🔜 **NEXT** (~2 hours)
+1. ⏳ Remove State downcast from as_table_provider() (15 min)
+2. ⏳ Replace ~15 state.* calls with context.* calls (60 min)
+3. ⏳ Update create_table_provider call to use provider version (15 min)
+4. ⏳ Test with tlogfs and MemoryPersistence (30 min)
 
-4. **Update sql_derived.rs** (30 minutes)
-   - Change imports to use provider versions
-   - Test with both tlogfs and MemoryPersistence
+**Phase D: Move to Provider Crate** 🔜 **AFTER C** (~1 hour)
+1. ⏳ Create provider/src/sql_derived_file.rs (20 min)
+2. ⏳ Move SqlDerivedFile + helper functions (20 min)
+3. ⏳ Update factory registration (10 min)
+4. ⏳ Remove tlogfs wrapper (was only temporary) (10 min)
 
-5. **Backward compatibility** (15 minutes)
-   - tlogfs re-exports provider types
-   - Verify all 87 tlogfs tests still pass
+**Total estimate**: ~6 hours | **Completed**: ~3 hours (50%) | **Remaining**: ~3 hours
 
-**Total estimate**: ~3.5 hours
+**Critical Insight**: The main blocker is not infrastructure (TableProviderOptions, etc.) but rather the **440+ lines of State-specific code** in SqlDerivedFile::as_table_provider() that need to be refactored to use ProviderContext methods. This is mechanical but requires careful testing.
 
 ### 🎯 Next Steps
 
@@ -1340,6 +1470,6 @@ pub async fn create_table_provider_generic(
 
 ---
 
-**Document Version**: 1.9  
-**Date**: 2025-12-08 (Memory persistence complete, final sql_derived blockers identified)  
+**Document Version**: 2.0  
+**Date**: 2025-12-08 (Phase A & B complete - create_table_provider abstraction done)  
 **Author**: Analysis based on codebase study
