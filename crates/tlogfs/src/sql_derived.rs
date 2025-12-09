@@ -32,7 +32,6 @@
 
 use tinyfs::FileID;
 
-use crate::register_queryable_file_factory;
 use provider::ScopePrefixTableProvider;
 use async_trait::async_trait;
 use log::debug;
@@ -321,7 +320,7 @@ fn try_as_sql_derived_queryable(file: &dyn File) -> Option<&dyn provider::Querya
 }
 
 // Register the factories with QueryableFile support
-register_queryable_file_factory!(
+provider::register_dynamic_factory!(
     name: "sql-derived-table",
     description: "Create SQL-derived tables from single FileTable sources",
     file: create_sql_derived_table_handle,
@@ -329,7 +328,7 @@ register_queryable_file_factory!(
     try_as_queryable: try_as_sql_derived_queryable
 );
 
-register_queryable_file_factory!(
+provider::register_dynamic_factory!(
     name: "sql-derived-series",
     description: "Create SQL-derived tables from multiple FileSeries sources",
     file: create_sql_derived_series_handle,
