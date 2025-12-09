@@ -4,7 +4,6 @@
 //! without requiring the caller to understand the underlying DataFusion setup.
 
 use crate::error::TLogFSError;
-use crate::sql_derived::try_as_queryable_file;
 use crate::transaction_guard::TransactionGuard;
 use datafusion::physical_plan::SendableRecordBatchStream; // Import the canonical version
 
@@ -81,7 +80,7 @@ pub async fn execute_sql_on_file<'a>(
 		    let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 
-                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    if let Some(queryable_file) = file_guard.as_queryable() {
                         let state = tx.state()?;
                         let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
@@ -184,7 +183,7 @@ pub async fn get_file_schema(
                     // };
 
                     // Get QueryableFile and table provider
-                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    if let Some(queryable_file) = file_guard.as_queryable() {
                         let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
                             .as_table_provider(node_path.id(), &provider_context)

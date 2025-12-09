@@ -1436,7 +1436,7 @@ async fn execute_direct_copy_query(
                     let node_id = node_path.id();
 
                     // Register table with our unique name
-                    let queryable_file = tlogfs::sql_derived::try_as_queryable_file(&**file_guard);
+                    let queryable_file = file_guard.as_queryable();
 
                     if let Some(queryable_file) = queryable_file {
                         let state = tx.state()?;

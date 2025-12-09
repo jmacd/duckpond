@@ -399,13 +399,3 @@ impl tinyfs::QueryableFile for OpLogFile {
             .map_err(|e| tinyfs::Error::Other(e.to_string()))
     }
 }
-
-// /// Create a table provider from multiple file URLs
-/// Helper function to convert a File trait object to QueryableFile trait object
-/// 
-/// Simply delegates to the File::as_queryable() method which each QueryableFile
-/// implementation overrides to return itself.
-#[inline]
-pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn tinyfs::QueryableFile> {
-    file.as_queryable()
-}

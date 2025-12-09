@@ -47,9 +47,6 @@ use tokio::io::AsyncWrite;
 // Re-export types from provider
 pub use provider::{SqlDerivedConfig, SqlDerivedMode, SqlTransformOptions};
 
-// Re-export try_as_queryable_file from file module for backward compatibility
-pub use crate::file::try_as_queryable_file;
-
 /// Represents a resolved file with its path and NodeID
 #[derive(Clone)]
 pub struct SqlDerivedFile {
@@ -377,7 +374,7 @@ impl SqlDerivedFile {
         pattern_name: &str,
         pattern: &str,
         queryable_files: &[tinyfs::NodePath],
-    ) -> Result<String, crate::error::TLogFSError> {
+    ) -> Result<String, tinyfs::Error> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -527,7 +524,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     })?;
                     let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
-                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    if let Some(queryable_file) = file_guard.as_queryable() {
                         debug!(
                             "🔍 SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider..."
                         );
@@ -582,7 +579,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         })?;
                         let file_arc = file_handle.handle.get_file().await;
                         let file_guard = file_arc.lock().await;
-                        if let Some(_queryable_file) = try_as_queryable_file(&**file_guard) {
+                        if let Some(_queryable_file) = file_guard.as_queryable() {
                             // For files that implement QueryableFile, we need to get their URL pattern
                             // This maintains the ownership chain: FS Root → State → Cache → Single TableProvider
                             
@@ -2895,7 +2892,7 @@ query: ""
                     // Access the file through the public API and downcast using as_any()
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
-                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    if let Some(queryable_file) = file_guard.as_queryable() {
                         let file_id = daily_node.id;
                         let table_provider = queryable_file
                             .as_table_provider(
@@ -2975,9 +2972,9 @@ query: ""
 
     /// Test that OpLogFile is properly detected as QueryableFile
     ///
-    /// This test verifies that our try_as_queryable_file function correctly identifies
-    /// OpLogFile instances as queryable, which is critical for the "cat" command and
-    /// other operations that need to execute SQL queries over basic TLogFS files.
+    /// This test verifies that OpLogFile correctly implements QueryableFile via as_queryable(),
+    /// which is critical for the "cat" command and other operations that need to execute
+    /// SQL queries over basic TLogFS files.
     /// This test would fail if OpLogFile detection was commented out.
     #[tokio::test]
     async fn test_oplog_file_queryable_detection() {
@@ -3013,8 +3010,8 @@ query: ""
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 
-                    // This is the critical test: try_as_queryable_file should find OpLogFile
-                    let queryable_file = try_as_queryable_file(&**file_guard);
+                    // This is the critical test: OpLogFile should implement QueryableFile
+                    let queryable_file = file_guard.as_queryable();
                     assert!(
                         queryable_file.is_some(),
                         "OpLogFile should be detected as QueryableFile"
@@ -3186,7 +3183,7 @@ query: ""
                         metadata.entry_type
                     );
 
-                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    if let Some(queryable_file) = file_guard.as_queryable() {
                         log::debug!("   - File {} implements QueryableFile", path_str);
                         let file_id = node_path.node.id;
                         log::debug!(
@@ -3294,7 +3291,7 @@ query: ""
                     // Access the file through the public API and downcast using as_any()
                     let file_arc = file_handle.get_file().await;
                     let file_guard = file_arc.lock().await;
-                    if let Some(queryable_file) = try_as_queryable_file(&**file_guard) {
+                    if let Some(queryable_file) = file_guard.as_queryable() {
                         let file_id = daily_node.id;
                         let table_provider = queryable_file
                             .as_table_provider(

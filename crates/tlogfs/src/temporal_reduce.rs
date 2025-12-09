@@ -209,7 +209,7 @@ impl TemporalReduceSqlFile {
 
         // In temporal reduce context, source files are always QueryableFile implementations
         let table_provider = if let Some(queryable_file) =
-            crate::sql_derived::try_as_queryable_file(&**file_guard)
+            file_guard.as_queryable()
         {
             queryable_file
                 .as_table_provider(file_id, &self.context.context)
@@ -1180,7 +1180,7 @@ mod tests {
                     let file_guard = file_arc.lock().await;
 
                     // Get table provider to query the data
-                    let queryable_file = crate::sql_derived::try_as_queryable_file(&**file_guard)
+                    let queryable_file = file_guard.as_queryable()
                         .expect("Temporal-reduce should create QueryableFile");
 
                     let provider_context = state.as_provider_context();
