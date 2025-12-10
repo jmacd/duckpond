@@ -4,7 +4,7 @@
 //! by timestamp, automatically generating the COALESCE + FULL OUTER JOIN + EXCLUDE SQL.
 
 use crate::register_dynamic_factory;
-use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use provider::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use datafusion::catalog::TableProvider;

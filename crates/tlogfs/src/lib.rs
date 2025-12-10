@@ -47,9 +47,6 @@ pub mod factory;
 // Data taxonomy for sensitive configuration fields
 pub mod data_taxonomy;
 
-// SQL-derived dynamic node factory
-pub mod sql_derived;
-
 // Temporal reduce dynamic factory
 pub mod temporal_reduce;
 

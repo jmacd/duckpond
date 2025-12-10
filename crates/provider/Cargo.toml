@@ -43,6 +43,12 @@ tokio.workspace = true
 datafusion-common.workspace = true
 arrow-array.workspace = true
 utilities = { path = "../utilities" }
+env_logger.workspace = true
+tlogfs = { path = "../tlogfs" }
+parquet.workspace = true
+hydrovu = { path = "../hydrovu" }
+tokio-util.workspace = true
+arrow-cast.workspace = true
 
 [lints]
 workspace = true

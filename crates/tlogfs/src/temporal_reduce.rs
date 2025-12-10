@@ -40,7 +40,7 @@
 //! Each file contains time-bucketed aggregations using SQL GROUP BY operations.
 
 use crate::register_dynamic_factory;
-use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use provider::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use futures::stream::{self, Stream};

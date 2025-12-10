@@ -14,7 +14,7 @@
 //! ```
 
 use crate::register_dynamic_factory;
-use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use provider::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
