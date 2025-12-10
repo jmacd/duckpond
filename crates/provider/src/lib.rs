@@ -9,6 +9,7 @@ mod csv_timeseries_integration_test;
 mod compression;
 mod csv;
 mod error;
+mod excelhtml;
 mod format;
 mod format_registry;
 mod null_padding;
@@ -26,6 +27,7 @@ mod version_selection;
 // Re-export context types from tinyfs (they moved there to break circular dependency)
 pub use compression::decompress;
 pub use csv::{CsvOptions, CsvProvider};
+pub use excelhtml::ExcelHtmlProvider;
 pub use factory::dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 pub use error::{Error, Result};
 pub use format::FormatProvider;

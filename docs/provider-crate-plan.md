@@ -13,10 +13,17 @@
 **Layer 2: Format Providers**
 - ✅ `crates/provider/src/format.rs` - FormatProvider trait
 - ✅ `crates/provider/src/csv.rs` - CSV provider with schema inference
+- ✅ `crates/provider/src/excelhtml.rs` - **ExcelHTML provider for HydroVu exports**
+  - ✅ Uses `tl` crate for HTML parsing
+  - ✅ Extracts data from `<table id="isi-report">`
+  - ✅ Parses dataHeader rows for column names
+  - ✅ Streams data rows as Arrow RecordBatches
+  - ✅ **Test result: 5728 rows parsed from sample file**
+  - ✅ Registered as `excelhtml:///` scheme
 - ✅ `crates/provider/src/sync_bridge.rs` - AsyncToSyncReader bridge
 - ✅ Infinite CSV streaming test (100K rows, 391 batches)
 - ✅ Query parameter support (delimiter, batch_size, etc.)
-- ✅ Integration tests: `tests/csv_integration_tests.rs`
+- ✅ Integration tests: `tests/csv_integration_tests.rs`, `tests/excel_html_integration_tests.rs`
 
 **Layer 3: Provider API**
 - ✅ `crates/provider/src/provider_api.rs` - URL → TableProvider conversion

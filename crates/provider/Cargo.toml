@@ -38,6 +38,7 @@ object_store.workspace = true
 async-stream.workspace = true
 humantime.workspace = true
 tera.workspace = true
+tl = "0.7.8"
 
 [dev-dependencies]
 tempfile.workspace = true
