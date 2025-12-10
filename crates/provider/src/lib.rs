@@ -4,7 +4,10 @@ pub mod factory;
 
 #[cfg(test)]
 mod context_tests;
+mod compression;
+mod csv;
 mod error;
+mod format;
 mod null_padding;
 pub mod registry;
 mod scope_prefix;
@@ -17,8 +20,11 @@ mod tinyfs_path;
 mod version_selection;
 
 // Re-export context types from tinyfs (they moved there to break circular dependency)
+pub use compression::decompress;
+pub use csv::{CsvOptions, CsvProvider};
 pub use factory::dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 pub use error::{Error, Result};
+pub use format::FormatProvider;
 pub use null_padding::null_padding_table;
 pub use registry::{
     ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
@@ -40,14 +46,27 @@ pub use version_selection::VersionSelection;
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
-/// URL for accessing files with optional compression
+/// URL for accessing files with format conversion and optional compression
+/// 
+/// Format: `scheme://[compression]/path/pattern?query_params`
+/// 
+/// - `scheme`: Format name (csv, oteljson, etc.) - indicates FormatProvider
+/// - `host`: Optional compression (zstd, gzip, bzip2)
+/// - `path`: TinyFS path or glob pattern
+/// - `query`: Format-specific options (delimiter, batch_size, etc.)
+/// 
+/// Examples:
+/// - `csv:///data/file.csv?delimiter=;`
+/// - `oteljson://zstd/logs/**/*.json.zstd?batch_size=2048`
+/// - `csv://gzip/metrics/*.csv.gz?has_header=false`
 #[derive(Debug, Clone)]
 pub struct Url {
     inner: url::Url,
 }
 
 impl Url {
-    /// Parse URL from string
+    /// Parse URL from string using standard url crate
+    /// Returns error if fragment, port, username, or password are present
     pub fn parse(url_str: &str) -> Result<Self> {
         let inner = url::Url::parse(url_str)?;
 
@@ -67,64 +86,69 @@ impl Url {
         Ok(Self { inner })
     }
 
-    /// Get URL scheme (e.g., "file")
+    /// Get format scheme (e.g., "csv", "oteljson")
     pub fn scheme(&self) -> &str {
         self.inner.scheme()
     }
 
     /// Get optional compression from host (e.g., "zstd", "gzip")
     pub fn compression(&self) -> Option<&str> {
-        self.inner.host_str()
+        let host = self.inner.host_str()?;
+        if host.is_empty() {
+            None
+        } else {
+            Some(host)
+        }
     }
 
-    /// Get path component
+    /// Get TinyFS path or pattern
     pub fn path(&self) -> &str {
         self.inner.path()
+    }
+
+    /// Parse query parameters into strongly-typed struct using serde_qs
+    /// 
+    /// Example:
+    /// ```ignore
+    /// #[derive(Deserialize)]
+    /// struct CsvOptions {
+    ///     delimiter: char,
+    ///     has_header: bool,
+    /// }
+    /// 
+    /// let url = Url::parse("csv:///file.csv?delimiter=;&has_header=false")?;
+    /// let options: CsvOptions = url.query_params()?;
+    /// ```
+    pub fn query_params<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
+        match self.inner.query() {
+            None => serde_qs::from_str("").map_err(|e| {
+                Error::InvalidUrl(format!("query parameter parsing failed: {}", e))
+            }),
+            Some(query) => serde_qs::from_str(query).map_err(|e| {
+                Error::InvalidUrl(format!("query parameter parsing failed: {}", e))
+            }),
+        }
     }
 }
 
 /// Trait for URL access to Tinyfs.
 #[async_trait::async_trait]
 pub trait FileProvider {
-    /// Open a URL
+    /// Open a URL with optional decompression
     async fn open_url(&self, url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>>;
 }
 
 #[async_trait::async_trait]
 impl FileProvider for tinyfs::FS {
-    /// Open a file for reading with optional decompression
+    /// Open a file for reading with optional decompression (Layer 1)
     async fn open_url(&self, url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
         // Get reader from TinyFS
         let reader = self.root().await?.async_reader_path(url.path()).await?;
 
-        // Wrap with decompression if needed
-        decompress_reader(reader, url.compression())
-    }
-}
+        // Cast AsyncReadSeek to AsyncRead before decompression
+        let reader: Pin<Box<dyn AsyncRead + Send>> = reader as Pin<Box<dyn AsyncRead + Send>>;
 
-/// Wrap AsyncRead with decompression
-fn decompress_reader(
-    reader: Pin<Box<dyn tinyfs::AsyncReadSeek>>,
-    compression: Option<&str>,
-) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
-    match compression {
-        None | Some("none") => {
-            // No compression - cast AsyncReadSeek to AsyncRead
-            Ok(reader as Pin<Box<dyn AsyncRead + Send>>)
-        }
-        Some("zstd") => {
-            use async_compression::tokio::bufread::ZstdDecoder;
-            let buf_reader = tokio::io::BufReader::new(reader);
-            Ok(Box::pin(ZstdDecoder::new(buf_reader)))
-        }
-        Some("gzip") => {
-            use async_compression::tokio::bufread::GzipDecoder;
-            let buf_reader = tokio::io::BufReader::new(reader);
-            Ok(Box::pin(GzipDecoder::new(buf_reader)))
-        }
-        Some(other) => Err(Error::DecompressionError(format!(
-            "Unsupported compression: {}",
-            other
-        ))),
+        // Wrap with decompression if needed (uses Layer 1 compression module)
+        decompress(reader, url.compression())
     }
 }
