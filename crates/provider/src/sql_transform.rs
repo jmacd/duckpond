@@ -3,7 +3,7 @@
 //! Provides AST-based SQL transformation to replace table references while preserving
 //! column names, string literals, and query structure.
 
-use crate::SqlTransformOptions;
+use crate::factory::sql_derived::SqlTransformOptions;
 use datafusion::sql::parser::DFParser;
 use datafusion::sql::parser::Statement as DFStatement;
 use datafusion::sql::sqlparser::ast::{Query, Select, SetExpr, TableFactor};

@@ -45,12 +45,27 @@ use tinyfs::{
 };
 use tokio::io::AsyncWrite;
 
-// Re-export types from provider
-pub use crate::{SqlDerivedMode, SqlTransformOptions};
-
 // ============================================================================
 // Configuration Types
 // ============================================================================
+
+/// Mode for SQL-derived operations
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SqlDerivedMode {
+    /// FileTable mode: single files only, errors if pattern matches >1 file
+    Table,
+    /// FileSeries mode: handles multiple files and versions
+    Series,
+}
+
+/// Options for SQL transformation and table name replacement
+#[derive(Default, Clone, Debug)]
+pub struct SqlTransformOptions {
+    /// Replace multiple table names with mappings (for patterns)
+    pub table_mappings: Option<HashMap<String, String>>,
+    /// Replace a single source table name (for simple cases)  
+    pub source_replacement: Option<String>,
+}
 
 /// Configuration for SQL-derived file generation
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -1101,237 +1116,6 @@ mod tests {
 
         Ok(result_batches)
     }
-
-    // /// Helper function to set up test environment with sample Parquet data
-    // async fn setup_test_data() -> FS {
-    //     // Create TinyFS with memory persistence
-    //     let fs = tinyfs::memory::new_fs().await;
-    //     let root = fs.root().await.unwrap();
-
-    //     // Create test Parquet data with meaningful content
-    //     use arrow::array::{Int32Array, StringArray};
-    //     use arrow::datatypes::{DataType, Field, Schema};
-    //     use arrow::record_batch::RecordBatch;
-    //     use parquet::arrow::ArrowWriter;
-    //     use std::io::Cursor;
-
-    //     let schema = Arc::new(Schema::new(vec![
-    //         Field::new("id", DataType::Int32, false),
-    //         Field::new("name", DataType::Utf8, false),
-    //         Field::new("value", DataType::Int32, false),
-    //     ]));
-
-    //     let batch = RecordBatch::try_new(
-    //         schema.clone(),
-    //         vec![
-    //             Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
-    //             Arc::new(StringArray::from(vec![
-    //                 "Alice", "Bob", "Charlie", "David", "Eve",
-    //             ])),
-    //             Arc::new(Int32Array::from(vec![100, 200, 150, 300, 250])),
-    //         ],
-    //     )
-    //     .unwrap();
-
-    //     // Write to Parquet format
-    //     let mut parquet_buffer = Vec::new();
-    //     {
-    //         let cursor = Cursor::new(&mut parquet_buffer);
-    //         let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
-    //         writer.write(&batch).unwrap();
-    //         _ = writer.close().unwrap();
-    //     }
-
-    //     // Create the source data file using TinyFS convenience API
-    //     use tinyfs::async_helpers::convenience;
-    //     let _data_file = convenience::create_file_path_with_type(
-    //         &root,
-    //         "/data.parquet",
-    //         &parquet_buffer,
-    //         EntryType::FileTablePhysical,
-    //     )
-    //     .await
-    //     .unwrap();
-
-    //     fs
-    // }
-
-    // /// Helper function to set up test environment with FileTable data
-    // async fn setup_file_table_test_data() -> FS {
-    //     // Create TinyFS with memory persistence
-    //     let fs = tinyfs::memory::new_fs().await;
-    //     let root = fs.root().await.unwrap();
-
-    //     // Create test Parquet data with meaningful content (different from FileTable test)
-    //     use arrow::array::{Int32Array, StringArray};
-    //     use arrow::datatypes::{DataType, Field, Schema};
-    //     use arrow::record_batch::RecordBatch;
-    //     use parquet::arrow::ArrowWriter;
-    //     use std::io::Cursor;
-
-    //     let schema = Arc::new(Schema::new(vec![
-    //         Field::new("sensor_id", DataType::Int32, false),
-    //         Field::new("location", DataType::Utf8, false),
-    //         Field::new("reading", DataType::Int32, false),
-    //     ]));
-
-    //     let batch = RecordBatch::try_new(
-    //         schema.clone(),
-    //         vec![
-    //             Arc::new(Int32Array::from(vec![101, 102, 103, 104, 105])),
-    //             Arc::new(StringArray::from(vec![
-    //                 "Building A",
-    //                 "Building B",
-    //                 "Building C",
-    //                 "Building A",
-    //                 "Building B",
-    //             ])),
-    //             Arc::new(Int32Array::from(vec![75, 82, 68, 90, 77])),
-    //         ],
-    //     )
-    //     .unwrap();
-
-    //     // Write to Parquet format
-    //     let mut parquet_buffer = Vec::new();
-    //     {
-    //         let cursor = Cursor::new(&mut parquet_buffer);
-    //         let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
-    //         writer.write(&batch).unwrap();
-    //         _ = writer.close().unwrap();
-    //     }
-
-    //     let buffer_len = parquet_buffer.len();
-    //     let preview = if buffer_len >= 8 {
-    //         format!(
-    //             "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}...",
-    //             parquet_buffer[0],
-    //             parquet_buffer[1],
-    //             parquet_buffer[2],
-    //             parquet_buffer[3],
-    //             parquet_buffer[4],
-    //             parquet_buffer[5],
-    //             parquet_buffer[6],
-    //             parquet_buffer[7]
-    //         )
-    //     } else {
-    //         format!("{:02x?}", &parquet_buffer[..buffer_len.min(8)])
-    //     };
-    //     let suffix = if buffer_len >= 8 {
-    //         format!(
-    //             "...{:02x} {:02x} {:02x} {:02x}",
-    //             parquet_buffer[buffer_len - 4],
-    //             parquet_buffer[buffer_len - 3],
-    //             parquet_buffer[buffer_len - 2],
-    //             parquet_buffer[buffer_len - 1]
-    //         )
-    //     } else {
-    //         "".to_string()
-    //     };
-    //     debug!(
-    //         "Created Parquet buffer: {buffer_len} bytes, starts with: {preview}, ends with: {suffix}"
-    //     );
-
-    //     // Create the source data as FileTable for SQL testing
-    //     use tinyfs::async_helpers::convenience;
-    //     let _table_file = convenience::create_file_path_with_type(
-    //         &root,
-    //         "/sensor_data.parquet",
-    //         &parquet_buffer,
-    //         EntryType::FileTablePhysical, // Use FileTable for SQL functionality tests
-    //     )
-    //     .await
-    //     .unwrap();
-
-    //     // Validate the Parquet file by trying to read it directly
-    //     debug!("Validating Parquet file by reading metadata directly...");
-    //     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    //     use tokio_util::bytes::Bytes;
-    //     let test_bytes = Bytes::from(parquet_buffer.clone());
-    //     match ParquetRecordBatchReaderBuilder::try_new(test_bytes) {
-    //         Ok(reader_builder) => {
-    //             let metadata = reader_builder.metadata();
-    //             let num_row_groups = metadata.num_row_groups();
-    //             debug!("Parquet validation SUCCESS: {num_row_groups} row groups");
-    //         }
-    //         Err(e) => {
-    //             debug!("Parquet validation FAILED: {e}");
-    //         }
-    //     }
-
-    //     fs
-    // }
-
-    // /// Helper function to set up multi-version FileSeries test data
-    // /// Note: MemoryPersistence doesn't support versioning, so this creates separate files
-    // async fn setup_file_series_multi_version_data(
-    //     fs: &FS,
-    //     num_versions: usize,
-    // ) {
-    //     use arrow::array::{Int32Array, StringArray};
-    //     use arrow::datatypes::{DataType, Field, Schema};
-    //     use arrow::record_batch::RecordBatch;
-    //     use parquet::arrow::ArrowWriter;
-    //     use std::io::Cursor;
-
-    //     let schema = Arc::new(Schema::new(vec![
-    //         Field::new("sensor_id", DataType::Int32, false),
-    //         Field::new("location", DataType::Utf8, false),
-    //         Field::new("reading", DataType::Int32, false),
-    //     ]));
-
-    //     let root = fs.root().await.unwrap();
-
-    //     for version in 1..=num_versions {
-    //         // Create different data for each version
-    //         let base_sensor_id = 100 + (version * 10) as i32;
-    //         let base_reading = 70 + (version * 10) as i32;
-
-    //         let batch = RecordBatch::try_new(
-    //             schema.clone(),
-    //             vec![
-    //                 Arc::new(Int32Array::from(vec![
-    //                     base_sensor_id + 1,
-    //                     base_sensor_id + 2,
-    //                     base_sensor_id + 3,
-    //                 ])),
-    //                 Arc::new(StringArray::from(vec![
-    //                     format!("Building {}", version),
-    //                     format!("Building {}", version),
-    //                     format!("Building {}", version),
-    //                 ])),
-    //                 Arc::new(Int32Array::from(vec![
-    //                     base_reading,
-    //                     base_reading + 5,
-    //                     base_reading + 10,
-    //                 ])),
-    //             ],
-    //         )
-    //         .unwrap();
-
-    //         // Write to Parquet format
-    //         let mut parquet_buffer = Vec::new();
-    //         {
-    //             let cursor = Cursor::new(&mut parquet_buffer);
-    //             let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-    //             writer.write(&batch).unwrap();
-    //             _ = writer.close().unwrap();
-    //         }
-
-    //         // Since MemoryPersistence doesn't support versioning, create separate files
-    //         let filename = format!("/multi_sensor_data_v{}.parquet", version);
-    //         let mut writer = root
-    //             .async_writer_path_with_type(
-    //                 &filename,
-    //                 EntryType::FileTablePhysical,
-    //             )
-    //             .await
-    //             .unwrap();
-    //         use tokio::io::AsyncWriteExt;
-    //         writer.write_all(&parquet_buffer).await.unwrap();
-    //         writer.flush().await.unwrap();
-    //         writer.shutdown().await.unwrap();
-    //     }
-    // }
 
     #[tokio::test]
     async fn test_sql_derived_config_validation() {
@@ -2912,7 +2696,7 @@ query: ""
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
 
-        use crate::temporal_reduce::{
+        use crate::factory::temporal_reduce::{
             AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
         };
         use arrow::array::{Float64Array, StringArray, TimestampSecondArray};
@@ -3239,7 +3023,7 @@ query: ""
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
 
-        use crate::temporal_reduce::{
+        use crate::factory::temporal_reduce::{
             AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
         };
         use arrow::array::{Float64Array, TimestampSecondArray};
@@ -4181,4 +3965,26 @@ query: ""
 
         statement.to_string()
     }
+
+    #[test]
+    fn test_sql_derived_mode_serialization() {
+        let table_mode = SqlDerivedMode::Table;
+        let series_mode = SqlDerivedMode::Series;
+
+        assert_eq!(table_mode, SqlDerivedMode::Table);
+        assert_eq!(series_mode, SqlDerivedMode::Series);
+        assert_ne!(table_mode, series_mode);
+    }
+
+    #[test]
+    fn test_sql_transform_options() {
+        let opts = SqlTransformOptions {
+            table_mappings: Some([("old".to_string(), "new".to_string())].into()),
+            source_replacement: None,
+        };
+
+        assert!(opts.table_mappings.is_some());
+        assert!(opts.source_replacement.is_none());
+    }
 }
+
