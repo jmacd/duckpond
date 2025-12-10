@@ -202,7 +202,7 @@ impl TimeseriesJoinFile {
             // Generate SQL using UNION BY NAME for same-scope inputs, then FULL OUTER JOIN
             let (sql_query, patterns, scope_prefixes) = self.generate_union_join_sql().await?;
 
-            eprintln!("🔍 Generated SQL:\n{}", sql_query);
+            log::debug!("🔍 Generated SQL:\n{}", sql_query);
 
             // Create SqlDerivedConfig with scope prefixes (SqlDerivedFile will apply them)
             let sql_config = if scope_prefixes.is_empty() {
@@ -271,13 +271,13 @@ impl TimeseriesJoinFile {
                 .push(i);
         }
 
-        eprintln!(
+        log::debug!(
             "🔍 TIMESERIES-JOIN: Grouped {} inputs into {} scope groups",
             self.config.inputs.len(),
             scope_groups.len()
         );
         for (scope, indices) in &scope_groups {
-            eprintln!("  Scope '{}': inputs {:?}", scope, indices);
+            log::debug!("  Scope '{}': inputs {:?}", scope, indices);
         }
 
         // Build CTEs:
@@ -349,7 +349,7 @@ impl TimeseriesJoinFile {
             }
         }
 
-        eprintln!(
+        log::debug!(
             "🔍 TIMESERIES-JOIN: Created {} combined scope tables",
             scope_table_names.len()
         );
@@ -411,8 +411,8 @@ impl TimeseriesJoinFile {
             self.config.time_column
         );
 
-        eprintln!("🔍 TIMESERIES-JOIN: Generated SQL:\n{}", sql);
-        eprintln!("🔍 TIMESERIES-JOIN: Scope prefixes: {:?}", scope_prefixes);
+        log::debug!("🔍 TIMESERIES-JOIN: Generated SQL:\n{}", sql);
+        log::debug!("🔍 TIMESERIES-JOIN: Scope prefixes: {:?}", scope_prefixes);
 
         Ok((sql, patterns, scope_prefixes))
     }
