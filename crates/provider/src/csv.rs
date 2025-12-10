@@ -458,3 +458,9 @@ mod tests {
                  total_rows, batch_count);
     }
 }
+
+// Register CSV format provider using linkme
+crate::register_format_provider!(
+    scheme: "csv",
+    provider: CsvProvider::new
+);

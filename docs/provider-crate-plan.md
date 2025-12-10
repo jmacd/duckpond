@@ -1,5 +1,73 @@
 # Provider Crate: URL-Based File Format Abstraction
 
+## Implementation Status (Updated 2025-01-23)
+
+### ✅ COMPLETE: Phase 1 Foundation (Layers 1-3)
+
+**Layer 1: Compression Module**
+- ✅ `crates/provider/src/compression.rs` - Standalone decompression utilities
+- ✅ Supports zstd, gzip, bzip2 via async-compression
+- ✅ Works with any AsyncRead (binary, text, config files)
+- ✅ Integration tests: `tests/compression_tests.rs`
+
+**Layer 2: Format Providers**
+- ✅ `crates/provider/src/format.rs` - FormatProvider trait
+- ✅ `crates/provider/src/csv.rs` - CSV provider with schema inference
+- ✅ `crates/provider/src/sync_bridge.rs` - AsyncToSyncReader bridge
+- ✅ Infinite CSV streaming test (100K rows, 391 batches)
+- ✅ Query parameter support (delimiter, batch_size, etc.)
+- ✅ Integration tests: `tests/csv_integration_tests.rs`
+
+**Layer 3: Provider API**
+- ✅ `crates/provider/src/provider_api.rs` - URL → TableProvider conversion
+- ✅ `crates/provider/src/format_registry.rs` - Linkme-based format registration
+- ✅ `crates/provider/src/url.rs` - URL validation and parsing
+- ✅ CSV provider registration via `register_format_provider!` macro
+- ✅ **Glob pattern expansion** - Uses TinyFS `collect_matches()` for multi-file unions
+- ✅ Schema validation across multi-file unions
+- ✅ Full integration test: URL → FormatProvider → TableProvider → SQL
+- ✅ Multi-file test: 3 files × 5 rows = 15 total (glob `csv:///data*.csv`)
+- ✅ Tests passing: `cargo test --package provider --lib provider_api`
+
+**Key Files**:
+```
+crates/provider/src/
+├── compression.rs          # Layer 1: decompress() utility
+├── format.rs              # Layer 2: FormatProvider trait
+├── csv.rs                 # Layer 2: CSV implementation + registration
+├── sync_bridge.rs         # Layer 2: Async→Sync bridge
+├── provider_api.rs        # Layer 3: Provider API
+├── format_registry.rs     # Layer 3: Linkme registry + macro
+├── url.rs                 # Layer 3: URL validation
+└── lib.rs                 # Public API exports
+```
+
+### 🚧 TODO: Remaining Implementation
+
+**Next Steps** (in priority order):
+
+1. **OtelJson Format Provider** (Layer 2 extension) ✅ **PRIORITY**
+   - Implement `crates/provider/src/oteljson.rs`
+   - Register with `register_format_provider!(scheme: "oteljson", provider: OtelJsonProvider::new)`
+   - Test with actual OpenTelemetry JSON logs
+
+2. **Factory Integration** (Phase 2) - **Enable gradual migration**
+   - Update timeseries_join to accept `csv:///pattern` URLs in input.pattern field
+   - Backward compatible: keep supporting raw patterns without scheme
+   - When URL scheme detected, use Provider API for format conversion
+   - Example migration path:
+     ```yaml
+     # Old way (still works)
+     pattern: "/data/sensors/*.series"
+     
+     # New way (with format conversion)
+     pattern: "csv:///data/sensors/*.csv"
+     ```
+
+3. **CLI Integration** (Phase 3)
+   - Add `pond cat csv:///pattern` support
+   - SQL queries over CSV files
+
 ## Executive Summary
 
 The `provider` crate will create a URL-based abstraction layer for accessing files in TLogFS with automatic format conversion. It simplifies the current factory system by using URL schemes to indicate format converters, enabling straightforward data pipeline configuration.

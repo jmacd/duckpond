@@ -10,7 +10,9 @@ mod compression;
 mod csv;
 mod error;
 mod format;
+mod format_registry;
 mod null_padding;
+mod provider_api;
 pub mod registry;
 mod scope_prefix;
 mod sql_transform;
@@ -27,7 +29,9 @@ pub use csv::{CsvOptions, CsvProvider};
 pub use factory::dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 pub use error::{Error, Result};
 pub use format::FormatProvider;
+pub use format_registry::{FormatRegistry, FormatProviderEntry, FORMAT_PROVIDERS};
 pub use null_padding::null_padding_table;
+pub use provider_api::Provider;
 pub use registry::{
     ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
     FactoryRegistry, QueryableFile,
