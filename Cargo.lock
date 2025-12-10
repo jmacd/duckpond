@@ -3649,6 +3649,7 @@ dependencies = [
  "serde_qs",
  "serde_yaml",
  "tempfile",
+ "tera",
  "thiserror 2.0.17",
  "tinyfs",
  "tokio",

@@ -9,38 +9,9 @@
 //!
 //! Wrap sensitive configuration fields with the appropriate classified type:
 //!
-//! ```rust
-//! use tlogfs::data_taxonomy::{ApiKey, ApiSecret};
-//! use serde::{Serialize, Deserialize};
-//!
-//! #[derive(Serialize, Deserialize)]
-//! struct MyConfig {
-//!     pub client_id: ApiKey<String>,       // Shows as "[REDACTED]" when serialized
-//!     pub client_secret: ApiSecret<String>, // Shows as "[REDACTED]" when serialized
-//!     pub endpoint: String,                 // Normal field, not classified
-//! }
-//! ```
-//!
 //! # Programmatic Access
 //!
 //! To access the actual value of a classified field, use `.as_declassified()`:
-//!
-//! ```rust
-//! use tlogfs::data_taxonomy::{ApiKey, ApiSecret};
-//! use serde::{Serialize, Deserialize};
-//!
-//! #[derive(Serialize, Deserialize)]
-//! struct MyConfig {
-//!     pub client_id: ApiKey<String>,
-//!     pub client_secret: ApiSecret<String>,
-//! }
-//!
-//! # let config = MyConfig {
-//! #     client_id: ApiKey::new("test-id".to_string()),
-//! #     client_secret: ApiSecret::new("test-secret".to_string()),
-//! # };
-//! let actual_client_id: &String = config.client_id.as_declassified();
-//! ```
 //!
 //! # Integration with Serde
 //!

@@ -5,29 +5,10 @@
 //! node IDs, enabling native predicate pushdown and streaming execution.
 //!
 //! Path format: "/node/{node_id}" maps to TinyFS node ID
-//!
-//! Example usage:
-//! ```no_run
-//! use std::sync::Arc;
-//! use provider::TinyFsObjectStore;
-//! use datafusion::datasource::listing::{ListingTableUrl, ListingTableConfig, ListingOptions, ListingTable};
-//! use datafusion::datasource::file_format::parquet::ParquetFormat;
-//!
-//! # async fn example<P: tinyfs::PersistenceLayer>() -> Result<(), Box<dyn std::error::Error>> {
-//! # let persistence: P = todo!();
-//! let tinyfs_store = TinyFsObjectStore::new(persistence);
-//! let table_url = ListingTableUrl::parse("tinyfs:///node/some_node_id")?;
-//! let config = ListingTableConfig::new(table_url)
-//!     .with_listing_options(ListingOptions::new(Arc::new(ParquetFormat::default())));
-//! let table = ListingTable::try_new(config)?;
-//! # Ok(())
-//! # }
-//! ```
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
-
 use std::ops::Range;
 
 use async_trait::async_trait;
@@ -37,63 +18,10 @@ use object_store::{
     GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions,
     PutPayload, PutResult, Result as ObjectStoreResult, path::Path as ObjectPath,
 };
-
 use tinyfs::PersistenceLayer;
 use uuid7;
-
 use log::debug;
-
-/// Centralized TinyFS path handling following partition → node → version hierarchy
-pub struct TinyFsPathBuilder;
-
-impl TinyFsPathBuilder {
-    // /// Create path for all versions: "part/{part_id}/node/{node_id}/version/"
-    // #[must_use]
-    // pub fn all_versions(file_id: &tinyfs::FileID) -> String {
-    //     format!("part/{}/node/{}/version/", file_id.part_id(), file_id.node_id())
-    // }
-
-    /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"
-    #[must_use]
-    pub fn specific_version(file_id: &tinyfs::FileID, version: u64) -> String {
-        format!(
-            "part/{}/node/{}/version/{}.parquet",
-            file_id.part_id(),
-            file_id.node_id(),
-            version
-        )
-    }
-
-    // /// Create tinyfs:// URL for all versions
-    // #[must_use]
-    // pub fn url_all_versions(file_id: &tinyfs::FileID) -> String {
-    //     format!("tinyfs:///{}", Self::all_versions(file_id))
-    // }
-
-    // /// Create tinyfs:// URL for specific version
-    // #[must_use]
-    // pub fn url_specific_version(
-    //     file_id: &tinyfs::FileID,
-    //     version: u64,
-    // ) -> String {
-    //     format!(
-    //         "tinyfs:///{}",
-    //         Self::specific_version(file_id, version)
-    //     )
-    // }
-
-    // /// Create path for directory entries: "directory/{node_id}"
-    // #[must_use]
-    // pub fn directory(node_id: &tinyfs::NodeID) -> String {
-    //     format!("directory/{}", node_id)
-    // }
-
-    // /// Create tinyfs:// URL for directory entries
-    // #[must_use]
-    // pub fn url_directory(node_id: &tinyfs::NodeID) -> String {
-    //     format!("tinyfs:///{}", Self::directory(node_id))
-    // }
-}
+use crate::tinyfs_path::TinyFsPathBuilder;
 
 /// File series information for ObjectStore registry
 #[derive(Debug, Clone)]

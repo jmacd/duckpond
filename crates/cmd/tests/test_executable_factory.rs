@@ -12,7 +12,7 @@ use steward::PondUserMetadata;
 use tempfile::TempDir;
 use tinyfs::FS;
 use tlogfs::FactoryRegistry;
-use tlogfs::factory::ExecutionContext;
+use provider::registry::ExecutionContext;
 
 /// Helper to create a test ship and workspace
 async fn setup_test_ship() -> (ShipContext, TempDir) {

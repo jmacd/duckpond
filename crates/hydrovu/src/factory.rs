@@ -10,7 +10,8 @@ use clap::Parser;
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
 use tlogfs::TLogFSError;
-use tlogfs::factory::{ExecutionContext, ExecutionMode, FactoryCommand, FactoryContext};
+use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
+use provider::FactoryContext;
 
 /// HydroVu command-line interface
 #[derive(Debug, Parser)]
@@ -100,8 +101,12 @@ async fn create_directory_structure(
 ) -> TinyFSResult<()> {
     log::debug!("Creating HydroVu directory structure");
 
+    // Extract State from provider context
+    let state = tlogfs::extract_state(context)
+        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
     // Create FS from State - this is SAFE here because create_dynamic_file_node has returned and released its lock
-    let fs = tinyfs::FS::new(context.state.clone()).await?;
+    let fs = tinyfs::FS::new(state.clone()).await?;
 
     let root = fs.root().await?;
 
@@ -178,14 +183,17 @@ async fn execute_collect(
             )))
         })?;
 
+    // Extract State from provider context
+    let state = tlogfs::extract_state(&context)?;
+
     // Create filesystem from state
-    let fs = tinyfs::FS::new(context.state.clone())
+    let fs = tinyfs::FS::new(state.clone())
         .await
         .map_err(TLogFSError::TinyFS)?;
 
     // Run collection within the existing transaction
     let result = collector
-        .collect_data(&context.state, &fs)
+        .collect_data(&state, &fs)
         .await
         .map_err(|e| {
             TLogFSError::TinyFS(tinyfs::Error::Other(format!(
@@ -223,7 +231,7 @@ async fn execute_collect(
 // Register the factory
 // Note: No file parameter - executable factories don't need create_file
 // Config bytes ARE the file content (YAML), handled by ConfigFile wrapper
-tlogfs::register_executable_factory!(
+provider::register_executable_factory!(
     name: "hydrovu",
     description: "HydroVu data collector configuration",
     validate: validate_hydrovu_config,

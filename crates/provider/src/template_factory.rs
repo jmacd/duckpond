@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tera::{Context as TeraContext, Error, Tera, Value, from_value};
 use tokio::sync::Mutex;
 
-use crate::factory::FactoryContext;
+use crate::FactoryContext;
 use tinyfs::{
     AsyncReadSeek, Directory, EntryType, FS, File, FileHandle, Node, NodeMetadata,
     Result as TinyFSResult,
@@ -59,9 +59,7 @@ impl TemplateDirectory {
 
         let mut template_files = Vec::new();
 
-        let fs = FS::new(self.context.state.clone())
-            .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        let fs = FS::from_arc(self.context.context.persistence.clone());
 
         // Use collect_matches to find template files with the given pattern
         match fs.root().await?.collect_matches(&pattern).await {
@@ -242,9 +240,7 @@ impl TemplateDirectory {
     /// Get template content from template_file (pond path)
     async fn get_template_content(&self) -> TinyFSResult<String> {
         // Read template file from pond filesystem
-        let fs = FS::new(self.context.state.clone())
-            .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+        let fs = FS::from_arc(self.context.context.persistence.clone());
 
         let template_path = &self.config.template_file;
         debug!("Reading template file from pond: {}", template_path);
@@ -324,7 +320,7 @@ impl TemplateFile {
 
         // Get FRESH template variables from state during rendering (not cached context)
         // This ensures we see export data added after factory creation
-        let fresh_template_variables = (*self.context.state.get_template_variables()).clone();
+        let fresh_template_variables = self.context.context.template_variables.lock().unwrap().clone();
         debug!(
             "🎨 RENDER: Fresh template variables during rendering: {:?}",
             fresh_template_variables.keys().collect::<Vec<_>>()
@@ -409,19 +405,12 @@ impl tinyfs::Metadata for TemplateFile {
 /// Create template directory with context (factory function)
 fn create_template_directory(
     config: Value,
-    context: provider::FactoryContext,
+    context: FactoryContext,
 ) -> TinyFSResult<tinyfs::DirHandle> {
     let spec: TemplateSpec = from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid template spec: {}", e)))?;
 
-    // Convert to legacy FactoryContext for TemplateDirectory which hasn't migrated yet
-    let legacy_ctx = FactoryContext {
-        state: crate::factory::extract_state(&context)
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?,
-        file_id: context.file_id,
-        pond_metadata: context.pond_metadata.clone(),
-    };
-    let template_dir = TemplateDirectory::new(spec, legacy_ctx);
+    let template_dir = TemplateDirectory::new(spec, context);
     Ok(template_dir.create_handle())
 }
 

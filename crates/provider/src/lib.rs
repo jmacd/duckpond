@@ -14,6 +14,7 @@ mod table_creation;
 mod table_provider_options;
 mod temporal_filter;
 pub mod temporal_reduce;
+pub mod template_factory;
 pub mod test_factory;
 pub mod timeseries_join;
 pub mod timeseries_pivot;

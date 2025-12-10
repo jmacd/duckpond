@@ -3,7 +3,7 @@ use super::error::TLogFSError;
 use super::schema::{DirectoryEntry, ForArrow, OplogEntry};
 use super::symlink::OpLogSymlink;
 use super::transaction_guard::TransactionGuard;
-use crate::factory::{FactoryContext, FactoryRegistry};
+use provider::{FactoryContext, FactoryRegistry};
 use crate::txn_metadata::{PondTxnMetadata, PondUserMetadata};
 use arrow::array::DictionaryArray;
 use arrow::array::{Int64Array, StringArray};
@@ -3180,8 +3180,11 @@ mod node_factory {
         })?;
 
         // Create context with all template variables (vars, export, and any other keys)
-        let legacy_context = FactoryContext::new(state.clone(), id);
-        let context = legacy_context.to_provider_context();
+        let context = FactoryContext {
+            context: state.as_provider_context(),
+            file_id: id,
+            pond_metadata: None,
+        };
 
         debug!(
             "🔍 create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}",
@@ -3236,7 +3239,7 @@ mod node_factory {
                             "🔍 Executable factory '{}' - using config as file content",
                             factory_type
                         );
-                        let config_file = crate::factory::ConfigFile::new(config_content.clone());
+                        let config_file = provider::ConfigFile::new(config_content.clone());
                         NodeType::File(config_file.create_handle())
                     }
                 } else {
@@ -3248,7 +3251,7 @@ mod node_factory {
             }
             _ => {
                 // Unknown entry type - shouldn't happen
-                let config_file = crate::factory::ConfigFile::new(config_content.clone());
+                let config_file = provider::ConfigFile::new(config_content.clone());
                 let file_handle = config_file.create_handle();
                 NodeType::File(file_handle)
             }

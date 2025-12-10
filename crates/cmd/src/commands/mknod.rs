@@ -4,7 +4,7 @@ use crate::template_utils;
 use anyhow::{Result, anyhow};
 use log::debug;
 use std::fs;
-use tlogfs::factory::FactoryRegistry;
+use provider::FactoryRegistry;
 
 /// Create a dynamic node in the pond using transaction guard pattern
 pub async fn mknod_command(

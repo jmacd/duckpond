@@ -3,7 +3,8 @@
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
 use log::{debug, error};
-use tlogfs::factory::ExecutionContext;
+use provider::registry::ExecutionContext;
+use provider::FactoryRegistry;
 use tokio::io::AsyncReadExt;
 
 /// Execute a run configuration
@@ -152,7 +153,7 @@ async fn run_command_impl(
         provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
 
     // Execute the configuration using the factory registry in write mode
-    tlogfs::factory::FactoryRegistry::execute::<tlogfs::TLogFSError>(
+    FactoryRegistry::execute::<tlogfs::TLogFSError>(
         &factory_name,
         &config_bytes,
         factory_context,

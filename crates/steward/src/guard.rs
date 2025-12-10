@@ -9,7 +9,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tinyfs::FS;
-use tlogfs::factory::ExecutionContext;
+use provider::registry::ExecutionContext;
+use provider::FactoryRegistry;
 use tlogfs::transaction_guard::TransactionGuard;
 
 /// Configuration for a post-commit factory to be executed
@@ -724,7 +725,7 @@ impl<'a> StewardTransactionGuard<'a> {
         let args = vec![factory_mode.to_string()];
 
         // Execute the factory as a ControlWriter.
-        let result = tlogfs::factory::FactoryRegistry::execute(
+        let result = FactoryRegistry::execute(
             factory_name,
             config_bytes,
             factory_context,

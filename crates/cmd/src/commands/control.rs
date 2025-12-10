@@ -9,7 +9,8 @@
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
-use tlogfs::factory::ExecutionContext;
+use provider::registry::ExecutionContext;
+use provider::FactoryRegistry;
 use tokio::io::AsyncReadExt;
 
 /// Recent transaction record from control table query
@@ -529,7 +530,7 @@ async fn execute_sync_impl(
     let args = vec![factory_mode];
 
     // Execute the factory in ControlWriter mode
-    tlogfs::factory::FactoryRegistry::execute::<tlogfs::TLogFSError>(
+    FactoryRegistry::execute::<tlogfs::TLogFSError>(
         &factory_name,
         &config_bytes,
         factory_context,
