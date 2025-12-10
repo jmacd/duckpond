@@ -1,17 +1,22 @@
- //! TableProvider creation for DuckPond
+
+//! TableProvider creation for DuckPond
 //!
 //! This module provides the core logic for creating DataFusion TableProviders from FileID references.
 //! It abstracts away persistence implementation details by accepting ProviderContext instead of State.
 
-use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::TableProvider;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use log::debug;
 use std::sync::Arc;
 use tinyfs::{FileID, ProviderContext};
 
-use crate::{TableProviderKey, TableProviderOptions, TemporalFilteredListingTable, VersionSelection};
 use crate::Result;
+use crate::{
+    TableProviderKey, TableProviderOptions, TemporalFilteredListingTable, VersionSelection,
+};
 
 /// Create a TableProvider from a FileID with configurable options
 ///
@@ -46,26 +51,29 @@ pub async fn create_table_provider(
     context: &ProviderContext,
     options: TableProviderOptions,
 ) -> Result<Arc<dyn TableProvider>> {
-    debug!("create_table_provider called for file_id: {}", file_id.node_id());
+    debug!(
+        "create_table_provider called for file_id: {}",
+        file_id.node_id()
+    );
 
     // Use centralized debug logging to eliminate duplication
     options.version_selection.log_debug(&file_id.node_id());
 
     // Check cache first (only for simple cases without additional_urls)
     if options.additional_urls.is_empty() {
-        let cache_key = TableProviderKey::new(
-            file_id,
-            options.version_selection.clone(),
-        ).to_cache_string();
+        let cache_key =
+            TableProviderKey::new(file_id, options.version_selection.clone()).to_cache_string();
 
         if let Some(cached_provider) = context.get_table_provider_cache(&cache_key) {
             debug!(
-                "🚀 CACHE HIT: Returning cached TableProvider for file_id: {}", file_id.node_id()
+                "🚀 CACHE HIT: Returning cached TableProvider for file_id: {}",
+                file_id.node_id()
             );
             return Ok(cached_provider);
         } else {
             debug!(
-                "💾 CACHE MISS: Creating new TableProvider for file_id: {}", file_id.node_id()
+                "💾 CACHE MISS: Creating new TableProvider for file_id: {}",
+                file_id.node_id()
             );
         }
     } else {
@@ -114,7 +122,7 @@ pub async fn create_table_provider(
     let listing_table = ListingTable::try_new(config_with_schema)?;
 
     // Determine temporal bounds for TemporalFilteredListingTable wrapper
-    // 
+    //
     // NOTE: Temporal bounds are per-FileSeries metadata for data quality filtering
     // (set via `pond set-temporal-bounds`). They filter out garbage data outside the
     // file's valid time range.
@@ -123,12 +131,13 @@ pub async fn create_table_provider(
     // FUTURE: Multi-file queries should have per-file bounds enforced at Parquet scan level
     let (min_time, max_time) = if options.additional_urls.is_empty() {
         // Single-file case: query temporal bounds from persistence layer
-        debug!("Querying temporal bounds from persistence for file_id={}", file_id);
-        
+        debug!(
+            "Querying temporal bounds from persistence for file_id={}",
+            file_id
+        );
+
         // Use tinyfs persistence layer through context
-        let temporal_overrides = context.persistence
-            .get_temporal_bounds(file_id)
-            .await?;
+        let temporal_overrides = context.persistence.get_temporal_bounds(file_id).await?;
 
         temporal_overrides.unwrap_or_else(|| {
             debug!(
@@ -146,7 +155,7 @@ pub async fn create_table_provider(
         );
         (i64::MIN, i64::MAX)
     };
-    
+
     debug!("Creating TemporalFilteredListingTable with bounds: {min_time} to {max_time}");
 
     let table_provider = Arc::new(TemporalFilteredListingTable::new(
@@ -165,11 +174,9 @@ pub async fn create_table_provider(
 
     // Cache the result (only for simple cases without additional_urls)
     if options.additional_urls.is_empty() {
-        let cache_key = TableProviderKey::new(
-            file_id,
-            options.version_selection.clone(),
-        ).to_cache_string();
-        
+        let cache_key =
+            TableProviderKey::new(file_id, options.version_selection.clone()).to_cache_string();
+
         context.set_table_provider_cache(cache_key, table_provider.clone())?;
         debug!("💾 CACHED: Stored TableProvider for file_id: {file_id}");
     }

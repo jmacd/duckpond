@@ -129,22 +129,17 @@ async fn mknod_impl(
         )
         .await?
     } else {
-        root.create_dynamic_path(
-            path,
-            entry_type,
-            factory_type,
-            config_bytes.clone(),
-        )
-        .await
-        .map_err(|e| match e {
-            tinyfs::Error::AlreadyExists(_) => {
-                anyhow!(
-                    "Dynamic node already exists at path '{}'. Use --overwrite to replace it.",
-                    path
-                )
-            }
-            e => anyhow!("Failed to create dynamic node: {}", e),
-        })?
+        root.create_dynamic_path(path, entry_type, factory_type, config_bytes.clone())
+            .await
+            .map_err(|e| match e {
+                tinyfs::Error::AlreadyExists(_) => {
+                    anyhow!(
+                        "Dynamic node already exists at path '{}'. Use --overwrite to replace it.",
+                        path
+                    )
+                }
+                e => anyhow!("Failed to create dynamic node: {}", e),
+            })?
     };
 
     // Node is created, lock is released - now run factory initialization

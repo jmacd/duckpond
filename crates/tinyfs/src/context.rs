@@ -3,10 +3,10 @@
 //! This module defines the abstraction layer between factories and persistence implementations.
 //! ProviderContext holds a tinyfs Persistence layer for transaction management.
 
+use crate::{FileID, PersistenceLayer};
 use datafusion::execution::context::SessionContext;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::{FileID, PersistenceLayer};
 
 /// Result type for tinyfs context operations
 pub type Result<T> = std::result::Result<T, crate::Error>;
@@ -24,13 +24,14 @@ pub type Result<T> = std::result::Result<T, crate::Error>;
 pub struct ProviderContext {
     /// DataFusion session for SQL execution (direct access, no async needed)
     pub datafusion_session: Arc<SessionContext>,
-    
+
     /// Template variables for Tera CLI expansion
     pub template_variables: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
-    
+
     /// Table provider cache for performance
-    pub table_provider_cache: Arc<std::sync::Mutex<HashMap<String, Arc<dyn datafusion::catalog::TableProvider>>>>,
-    
+    pub table_provider_cache:
+        Arc<std::sync::Mutex<HashMap<String, Arc<dyn datafusion::catalog::TableProvider>>>>,
+
     /// TinyFS persistence layer for transaction management
     pub persistence: Arc<dyn PersistenceLayer>,
 }
@@ -49,7 +50,7 @@ impl ProviderContext {
             persistence,
         }
     }
-    
+
     /// Get template variables snapshot
     pub fn get_template_variables(&self) -> Result<HashMap<String, serde_json::Value>> {
         self.template_variables
@@ -57,27 +58,32 @@ impl ProviderContext {
             .map(|guard| guard.clone())
             .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))
     }
-    
+
     /// Set template variables
     pub fn set_template_variables(&self, vars: HashMap<String, serde_json::Value>) -> Result<()> {
-        *self.template_variables
+        *self
+            .template_variables
             .lock()
             .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))? = vars;
         Ok(())
     }
-    
+
     /// Get cached TableProvider by cache key
-    pub fn get_table_provider_cache(&self, key: &str) -> Option<Arc<dyn datafusion::catalog::TableProvider>> {
-        self.table_provider_cache
-            .lock()
-            .ok()?
-            .get(key)
-            .cloned()
+    pub fn get_table_provider_cache(
+        &self,
+        key: &str,
+    ) -> Option<Arc<dyn datafusion::catalog::TableProvider>> {
+        self.table_provider_cache.lock().ok()?.get(key).cloned()
     }
-    
+
     /// Set cached TableProvider
-    pub fn set_table_provider_cache(&self, key: String, provider: Arc<dyn datafusion::catalog::TableProvider>) -> Result<()> {
-        _ = self.table_provider_cache
+    pub fn set_table_provider_cache(
+        &self,
+        key: String,
+        provider: Arc<dyn datafusion::catalog::TableProvider>,
+    ) -> Result<()> {
+        _ = self
+            .table_provider_cache
             .lock()
             .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))?
             .insert(key, provider);
@@ -118,13 +124,13 @@ impl ProviderContext {
     /// ```
     pub fn new_for_testing(persistence: Arc<dyn PersistenceLayer>) -> Self {
         use std::collections::HashMap;
-        
+
         // Create default DataFusion session
         let datafusion_session = Arc::new(SessionContext::new());
-        
+
         // Empty template variables (tests don't typically need CLI expansion)
         let template_variables = HashMap::new();
-        
+
         Self::new(datafusion_session, template_variables, persistence)
     }
 }

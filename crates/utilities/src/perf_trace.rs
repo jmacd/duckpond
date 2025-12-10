@@ -49,7 +49,7 @@ impl PerfTrace {
     #[must_use]
     pub fn start(function_name: impl Into<String>) -> Self {
         let call_num = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
-        
+
         Self {
             call_num,
             function_name: function_name.into(),
@@ -101,31 +101,28 @@ impl PerfTrace {
 impl Drop for PerfTrace {
     fn drop(&mut self) {
         let elapsed_ms = self.elapsed_ms();
-        
+
         // Format: PERF_TRACE|call_num|function|param1=val1|param2=val2|...|elapsed_ms|metric1=val1|metric2=val2|...
         let params_str = if self.params.is_empty() {
             String::new()
         } else {
             format!("|{}", self.params.join("|"))
         };
-        
+
         let metrics_str = if self.metrics.is_empty() {
             String::new()
         } else {
-            let metric_strs: Vec<String> = self.metrics
+            let metric_strs: Vec<String> = self
+                .metrics
                 .iter()
                 .map(|(name, value)| format!("{}={}", name, value))
                 .collect();
             format!("|{}", metric_strs.join("|"))
         };
-        
+
         eprintln!(
             "PERF_TRACE|{}|{}{}|elapsed_ms={}{}",
-            self.call_num,
-            self.function_name,
-            params_str,
-            elapsed_ms,
-            metrics_str
+            self.call_num, self.function_name, params_str, elapsed_ms, metrics_str
         );
     }
 }
@@ -145,19 +142,18 @@ impl Drop for PerfTrace {
 pub fn extract_caller(module_prefix: &str, exclude_function: &str) -> String {
     let backtrace = std::backtrace::Backtrace::capture();
     let backtrace_str = backtrace.to_string();
-    
+
     // Find the first frame that matches the module but isn't the excluded function
     backtrace_str
         .lines()
-        .find(|line| {
-            line.contains(module_prefix) && !line.contains(exclude_function)
-        })
+        .find(|line| line.contains(module_prefix) && !line.contains(exclude_function))
         .and_then(|line| {
             // Extract function name - look for pattern like "module::prefix::function_name"
             if let Some(pos) = line.find(module_prefix) {
                 let rest = &line[pos + module_prefix.len()..];
                 // Take function name up to :: or {{
-                let end = rest.find("::")
+                let end = rest
+                    .find("::")
                     .or_else(|| rest.find("{{"))
                     .unwrap_or(rest.len());
                 Some(rest[..end].to_string())
@@ -178,7 +174,7 @@ mod tests {
         trace.param("id", 123);
         trace.param("name", "test");
         trace.metric("records", 42);
-        
+
         // Trace will log on drop
         drop(trace);
     }
@@ -187,7 +183,7 @@ mod tests {
     fn test_perf_trace_timing() {
         let trace = PerfTrace::start("timing_test");
         std::thread::sleep(std::time::Duration::from_millis(10));
-        
+
         let elapsed = trace.elapsed_ms();
         assert!(elapsed >= 10, "Expected at least 10ms, got {}", elapsed);
     }

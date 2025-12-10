@@ -1,4 +1,3 @@
-
 /// Provider error types
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

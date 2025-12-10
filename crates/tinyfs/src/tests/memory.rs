@@ -409,7 +409,7 @@ async fn test_create_dynamic_file_path() {
 
     // Create a dynamic file using the path-based API
     let config_content = b"factory_type: test\nvalue: 42";
-    
+
     let dynamic_node = root
         .create_dynamic_path(
             "/config/test.yaml",
@@ -421,13 +421,19 @@ async fn test_create_dynamic_file_path() {
         .unwrap();
 
     // Verify the node was created
-    assert_eq!(dynamic_node.id().entry_type(), crate::EntryType::FileDataDynamic);
-    
+    assert_eq!(
+        dynamic_node.id().entry_type(),
+        crate::EntryType::FileDataDynamic
+    );
+
     // Verify we can resolve it
     let (_, lookup) = root.resolve_path("/config/test.yaml").await.unwrap();
     match lookup {
         crate::Lookup::Found(node_path) => {
-            assert_eq!(node_path.id().entry_type(), crate::EntryType::FileDataDynamic);
+            assert_eq!(
+                node_path.id().entry_type(),
+                crate::EntryType::FileDataDynamic
+            );
             assert_eq!(node_path.path(), std::path::Path::new("/config/test.yaml"));
         }
         _ => panic!("Expected to find the dynamic file"),
@@ -441,7 +447,7 @@ async fn test_create_dynamic_directory_path() {
 
     // Create a dynamic directory using the path-based API
     let config_content = b"query: SELECT * FROM data";
-    
+
     let dynamic_node = root
         .create_dynamic_path(
             "/virtual_data",
@@ -453,13 +459,19 @@ async fn test_create_dynamic_directory_path() {
         .unwrap();
 
     // Verify the node was created
-    assert_eq!(dynamic_node.id().entry_type(), crate::EntryType::DirectoryDynamic);
-    
+    assert_eq!(
+        dynamic_node.id().entry_type(),
+        crate::EntryType::DirectoryDynamic
+    );
+
     // Verify we can resolve it
     let (_, lookup) = root.resolve_path("/virtual_data").await.unwrap();
     match lookup {
         crate::Lookup::Found(node_path) => {
-            assert_eq!(node_path.id().entry_type(), crate::EntryType::DirectoryDynamic);
+            assert_eq!(
+                node_path.id().entry_type(),
+                crate::EntryType::DirectoryDynamic
+            );
             assert_eq!(node_path.path(), std::path::Path::new("/virtual_data"));
         }
         _ => panic!("Expected to find the dynamic directory"),

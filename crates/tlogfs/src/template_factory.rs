@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 
 use crate::factory::FactoryContext;
 use tinyfs::{
-    AsyncReadSeek, Directory, EntryType, FS, File, FileHandle, NodeMetadata,
-    Result as TinyFSResult, Node,
+    AsyncReadSeek, Directory, EntryType, FS, File, FileHandle, Node, NodeMetadata,
+    Result as TinyFSResult,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,9 +138,16 @@ impl Directory for TemplateDirectory {
                 id_bytes.extend_from_slice(self.config.template_file.as_bytes());
                 // Use this template directory's NodeID as the PartID for children
                 let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-                let file_id = tinyfs::FileID::from_content(parent_part_id, EntryType::FileDataDynamic, &id_bytes);
+                let file_id = tinyfs::FileID::from_content(
+                    parent_part_id,
+                    EntryType::FileDataDynamic,
+                    &id_bytes,
+                );
 
-                let node_ref = Node::new(file_id, tinyfs::NodeType::File(template_file.create_handle()));
+                let node_ref = Node::new(
+                    file_id,
+                    tinyfs::NodeType::File(template_file.create_handle()),
+                );
 
                 // Cache the node
                 {
@@ -164,7 +171,8 @@ impl Directory for TemplateDirectory {
 
     async fn entries(
         &self,
-    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>> {
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>>
+    {
         debug!("TemplateDirectory::entries - listing discovered template files");
 
         // Discover template files from in_pattern
@@ -204,7 +212,8 @@ impl Directory for TemplateDirectory {
                     entries.push(Err(tinyfs::Error::Other(error_msg)));
                 }
                 Err(e) => {
-                    let error_msg = format!("Failed to create template file '{}': {}", expanded_name, e);
+                    let error_msg =
+                        format!("Failed to create template file '{}': {}", expanded_name, e);
                     error!("TemplateDirectory::entries - {error_msg}");
                     entries.push(Err(tinyfs::Error::Other(error_msg)));
                 }
@@ -407,7 +416,8 @@ fn create_template_directory(
 
     // Convert to legacy FactoryContext for TemplateDirectory which hasn't migrated yet
     let legacy_ctx = FactoryContext {
-        state: crate::factory::extract_state(&context).map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+        state: crate::factory::extract_state(&context)
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?,
         file_id: context.file_id,
         pond_metadata: context.pond_metadata.clone(),
     };

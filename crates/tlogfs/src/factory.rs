@@ -3,16 +3,16 @@
 //! This module provides backward compatibility for code that imports from tlogfs::factory.
 //! The actual factory infrastructure has moved to the provider crate.
 
-use crate::persistence::State;
 use crate::TLogFSError;
+use crate::persistence::State;
 use tinyfs::FileID;
 
 // Re-export everything from provider::registry
 // Note: QueryableFile is NOT re-exported here because tlogfs has its own QueryableFile trait
 // that uses State instead of ProviderContext. This will be migrated later.
 pub use provider::registry::{
-    ConfigFile, DynamicFactory, ExecutionContext, ExecutionMode,
-    FactoryCommand, FactoryRegistry, DYNAMIC_FACTORIES,
+    ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
+    FactoryRegistry,
 };
 
 // Re-export PondMetadata from provider
@@ -26,7 +26,7 @@ pub use provider::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 // tlogfs functions (using tlogfs::FactoryContext) and convert to provider types.
 
 /// Legacy FactoryContext that uses State directly
-/// 
+///
 /// This maintains backward compatibility with existing factories that expect State.
 /// New code should use provider::FactoryContext with provider::ProviderContext.
 #[derive(Clone)]
@@ -53,11 +53,7 @@ impl FactoryContext {
 
     /// Create a factory context with pond metadata
     #[must_use]
-    pub fn with_metadata(
-        state: State,
-        file_id: FileID,
-        pond_metadata: PondMetadata,
-    ) -> Self {
+    pub fn with_metadata(state: State, file_id: FileID, pond_metadata: PondMetadata) -> Self {
         Self {
             state,
             file_id,
@@ -110,13 +106,17 @@ pub async fn factory_execute(
 /// This is the mechanical bridge - allows factories to access State directly.
 pub fn extract_state(pctx: &provider::FactoryContext) -> Result<State, TLogFSError> {
     // Downcast the persistence layer to State
-    let state_ref = pctx.context.persistence
+    let state_ref = pctx
+        .context
+        .persistence
         .as_any()
         .downcast_ref::<State>()
-        .ok_or_else(|| TLogFSError::Internal(
-            "Persistence layer was not created from tlogfs::State - cannot extract".to_string()
-        ))?;
-    
+        .ok_or_else(|| {
+            TLogFSError::Internal(
+                "Persistence layer was not created from tlogfs::State - cannot extract".to_string(),
+            )
+        })?;
+
     // Clone the State (it's cheap - Arc-based internally)
     Ok(state_ref.clone())
 }
@@ -181,7 +181,7 @@ macro_rules! register_queryable_file_factory {
 }
 
 /// Register an executable factory (for command-line invocation)
-/// 
+///
 /// This macro wraps provider::register_executable_factory! and converts
 /// provider::FactoryContext to tlogfs::FactoryContext for backward compatibility.
 #[macro_export]

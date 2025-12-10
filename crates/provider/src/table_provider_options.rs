@@ -14,7 +14,7 @@ use tinyfs::FileID;
 pub struct TableProviderOptions {
     /// Version selection strategy (LatestVersion, AllVersions, or SpecificVersion)
     pub version_selection: VersionSelection,
-    
+
     /// Multiple file URLs/paths to combine into a single table
     /// If empty, will use the node_id/part_id pattern (existing behavior)
     pub additional_urls: Vec<String>,
@@ -28,7 +28,7 @@ pub struct TableProviderOptions {
 pub struct TableProviderKey {
     /// The file being accessed
     pub file_id: FileID,
-    
+
     /// Version selection strategy
     pub version_selection: VersionSelection,
 }
@@ -48,6 +48,10 @@ impl TableProviderKey {
     /// Format: "file_id:node_id:part_id:version_selection"
     /// Example: "12345:node123:part456:latest"
     pub fn to_cache_string(&self) -> String {
-        format!("{}:{}", self.file_id, self.version_selection.to_cache_string())
+        format!(
+            "{}:{}",
+            self.file_id,
+            self.version_selection.to_cache_string()
+        )
     }
 }

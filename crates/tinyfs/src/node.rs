@@ -1,11 +1,11 @@
-use std::path::Path;
-use std::path::PathBuf;
-use uuid7::Uuid;
-use serde::{Serialize, Deserialize};
 use crate::EntryType;
 use crate::dir::Pathed;
 use crate::error::Error;
 use crate::error::Result;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::path::PathBuf;
+use uuid7::Uuid;
 
 /// Root directory gets a special deterministic UUID7
 /// Only version (7) and variant (2) fields are set per UUID7 format
@@ -15,8 +15,8 @@ pub const ROOT_UUID: &str = "00000000-0000-7100-8000-000000000000";
 #[must_use]
 pub fn root_uuid() -> Uuid {
     ROOT_UUID
-         .parse::<Uuid>()
-         .expect("ROOT_UUID should be a valid UUID7")
+        .parse::<Uuid>()
+        .expect("ROOT_UUID should be a valid UUID7")
 }
 
 /// Unique identifier for a node in the filesystem
@@ -31,13 +31,9 @@ impl NodeID {
     /// Create NodeID from existing UUID7 string
     #[must_use]
     pub fn new(uuid_str: String) -> Self {
-        let uuid = uuid_str
-            .parse::<Uuid>()
-            .expect("Invalid UUID7 string");
+        let uuid = uuid_str.parse::<Uuid>().expect("Invalid UUID7 string");
         Self(uuid)
     }
-
-
 
     /// Get shortened display version (8 chars like git)
     /// TODO use the data-privacy feature
@@ -77,15 +73,15 @@ impl NodeID {
     /// Generate a new UUID7-based NodeID
     #[must_use]
     fn generate(et: EntryType) -> Self {
-	let mut b: [u8; 16] = uuid7::uuid7().into();
-	let val = 0x70 | et as u8;
-	b[6] = val;
+        let mut b: [u8; 16] = uuid7::uuid7().into();
+        let val = 0x70 | et as u8;
+        b[6] = val;
         Self(Uuid::from(b))
     }
 
     fn entry_type(&self) -> EntryType {
-	let b: [u8; 16] = self.0.into();
-	EntryType::try_from(b[6] & 0xf).expect("coded")
+        let b: [u8; 16] = self.0.into();
+        EntryType::try_from(b[6] & 0xf).expect("coded")
     }
 }
 
@@ -95,25 +91,25 @@ impl PartID {
     pub fn new(uuid_str: String) -> Self {
         Self(NodeID::new(uuid_str))
     }
-    
+
     /// Wrap a NodeID as a PartID (for when we know it represents a partition)
     #[must_use]
     pub fn from_node_id(node_id: NodeID) -> Self {
         Self(node_id)
     }
-    
+
     /// Get the root PartID (same as root NodeID)
     #[must_use]
     pub fn root() -> Self {
         Self(NodeID(root_uuid()))
     }
-    
+
     /// Get the wrapped NodeID
     #[must_use]
     pub fn to_node_id(&self) -> NodeID {
         self.0
     }
-    
+
     /// Parse from UUID7 hex string
     pub fn from_hex_string(uuid_str: &str) -> std::result::Result<Self, String> {
         NodeID::from_hex_string(uuid_str).map(Self)
@@ -132,51 +128,49 @@ pub struct FileID {
 impl FileID {
     #[must_use]
     pub fn new_from_ids(part_id: PartID, node_id: NodeID) -> Self {
-	Self { part_id, node_id }
+        Self { part_id, node_id }
     }
 
     #[must_use]
     pub fn is_root(&self) -> bool {
-	*self == Self::root()
+        *self == Self::root()
     }
 
     #[must_use]
     pub fn node_id(&self) -> NodeID {
-	self.node_id
+        self.node_id
     }
 
     #[must_use]
     pub fn part_id(&self) -> PartID {
-	self.part_id
+        self.part_id
     }
 
     /// Root directory has a special UUID7
     #[must_use]
     pub fn root() -> Self {
         let uuid = root_uuid();
-        Self{
-	    node_id: NodeID(uuid),
-	    part_id: PartID(NodeID(uuid))}
+        Self {
+            node_id: NodeID(uuid),
+            part_id: PartID(NodeID(uuid)),
+        }
     }
 
     #[must_use]
     pub fn new_physical_dir_id() -> Self {
-	let node_id = NodeID::generate(EntryType::DirectoryPhysical);
-	let part_id = PartID(node_id);
-	Self {
-	    node_id,
-	    part_id,
-	}
+        let node_id = NodeID::generate(EntryType::DirectoryPhysical);
+        let part_id = PartID(node_id);
+        Self { node_id, part_id }
     }
 
     /// Create FileID for a physical directory using an existing NodeID
     /// Physical directories are self-partitioned (part_id == node_id)
     #[must_use]
     pub fn from_physical_dir_node_id(node_id: NodeID) -> Self {
-	Self {
-	    part_id: PartID(node_id),
-	    node_id,
-	}
+        Self {
+            part_id: PartID(node_id),
+            node_id,
+        }
     }
 
     /// Create FileID in a specific partition with a new node ID
@@ -199,15 +193,15 @@ impl FileID {
     #[must_use]
     pub fn from_content(parent_part_id: PartID, entry_type: EntryType, content: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
-        
+
         // Create SHA-256 hash of content
         let mut hasher = Sha256::new();
         hasher.update(content);
         let hash = hasher.finalize();
-        
+
         // Use a fixed timestamp for deterministic IDs
         let timestamp = 1u64;
-        
+
         // Extract bits for the random part
         let bits = u128::from_be_bytes([
             hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8],
@@ -215,15 +209,15 @@ impl FileID {
         ]);
         let rand_a = ((bits >> 66) & 0xFFF) as u16; // 12 bits
         let rand_b = ((bits >> 4) & 0x3FFF_FFFF_FFFF_FFFF) as u64; // 62 bits
-        
+
         // Create UUID7 with our timestamp and random bits
         let uuid = Uuid::from_fields_v7(timestamp, rand_a, rand_b);
-        
+
         // Set the EntryType in byte 6's lower nibble
         let mut bytes: [u8; 16] = uuid.into();
         bytes[6] = 0x70 | (entry_type as u8);
         let node_id = NodeID(Uuid::from(bytes));
-        
+
         Self {
             part_id: parent_part_id,
             node_id,
@@ -232,34 +226,34 @@ impl FileID {
 
     #[must_use]
     pub fn new_child_id(&self, et: EntryType) -> Self {
-	if et == EntryType::DirectoryPhysical {
-	    Self::new_physical_dir_id()
-	} else {
-	    Self {
-		part_id: self.part_id,
-		node_id: NodeID::generate(et),
-	    }
-	}
+        if et == EntryType::DirectoryPhysical {
+            Self::new_physical_dir_id()
+        } else {
+            Self {
+                part_id: self.part_id,
+                node_id: NodeID::generate(et),
+            }
+        }
     }
 
     #[must_use]
     pub fn entry_type(&self) -> EntryType {
-	self.node_id.entry_type()
+        self.node_id.entry_type()
     }
 
     #[must_use]
     pub fn child_id(&self, child: NodeID) -> Self {
-	if child.entry_type() == EntryType::DirectoryPhysical {
-	    Self {
-		node_id: child,
-		part_id: PartID(child),
-	    }
-	} else {
-	    Self {
-		node_id: child,
-		part_id: self.part_id,
-	    }
-	}	
+        if child.entry_type() == EntryType::DirectoryPhysical {
+            Self {
+                node_id: child,
+                part_id: PartID(child),
+            }
+        } else {
+            Self {
+                node_id: child,
+                part_id: self.part_id,
+            }
+        }
     }
 }
 
@@ -302,10 +296,7 @@ pub type SymlinkNode = Pathed<crate::symlink::Handle>;
 impl Node {
     #[must_use]
     pub fn new(id: FileID, node_type: NodeType) -> Self {
-        Self {
-	    id,
-	    node_type,
-	}
+        Self { id, node_type }
     }
 
     /// Get the FileID for this node
@@ -330,15 +321,12 @@ impl Node {
 impl NodePath {
     #[must_use]
     pub fn new(node: Node, path: PathBuf) -> Self {
-	Self {
-	    node,
-	    path,
-	}
+        Self { node, path }
     }
-    
+
     #[must_use]
     pub fn is_root(&self) -> bool {
-	self.id() == FileID::root()
+        self.id() == FileID::root()
     }
 
     #[must_use]
@@ -350,7 +338,7 @@ impl NodePath {
     pub fn entry_type(&self) -> EntryType {
         self.node.id().entry_type()
     }
-    
+
     #[must_use]
     pub fn basename(&self) -> String {
         crate::path::basename(&self.path).unwrap_or_default()
@@ -372,41 +360,47 @@ impl NodePath {
     }
 
     pub async fn into_dir(&self) -> Option<DirNode> {
-	let node_type = &self.node.node_type;
+        let node_type = &self.node.node_type;
         if let NodeType::Directory(d) = node_type {
             Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
-	    None
+            None
         }
     }
 
     pub async fn as_dir(&self) -> Result<DirNode> {
-	self.into_dir().await.ok_or_else(|| Error::not_a_directory(self.path.clone()))
+        self.into_dir()
+            .await
+            .ok_or_else(|| Error::not_a_directory(self.path.clone()))
     }
 
     pub async fn into_file(&self) -> Option<FileNode> {
         if let NodeType::File(d) = &self.node.node_type {
             Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
-	    None
-	}
+            None
+        }
     }
-    
+
     pub async fn as_file(&self) -> Result<FileNode> {
-	self.into_file().await.ok_or_else(|| Error::not_a_file(self.path.clone()))
+        self.into_file()
+            .await
+            .ok_or_else(|| Error::not_a_file(self.path.clone()))
     }
 
     pub async fn into_symlink(&self) -> Option<SymlinkNode> {
         if let NodeType::Symlink(d) = &self.node.node_type {
             Some(Pathed::new(self.path.clone(), d.clone()))
         } else {
-	    None
+            None
         }
     }
 
     pub async fn as_symlink(&self) -> Result<SymlinkNode> {
-	self.into_symlink().await.ok_or_else(|| Error::not_a_symlink(self.path.clone()))
-    }    
+        self.into_symlink()
+            .await
+            .ok_or_else(|| Error::not_a_symlink(self.path.clone()))
+    }
 }
 
 impl std::fmt::Debug for NodeType {
@@ -421,18 +415,18 @@ impl std::fmt::Debug for NodeType {
 
 impl std::fmt::Display for FileID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	write!(f, "<{}/[{}]>", self.part_id.0.0, self.node_id.0)
+        write!(f, "<{}/[{}]>", self.part_id.0.0, self.node_id.0)
     }
 }
 
 impl std::fmt::Display for NodeID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	write!(f, "{}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
 impl std::fmt::Display for PartID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	write!(f, "{}", self.0)
+        write!(f, "{}", self.0)
     }
 }

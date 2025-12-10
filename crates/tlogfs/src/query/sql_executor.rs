@@ -55,9 +55,9 @@ pub async fn execute_sql_on_file<'a>(
                     //let file_arc = file_handle.handle.get_file().await;
                     //let file_guard = file_arc.lock().await;
 
-		    // @@@ This appears to be dead code: it wasn't necessary because
-		    // the node.id().part_id() is the parent partition we needed.
-		    //
+                    // @@@ This appears to be dead code: it wasn't necessary because
+                    // the node.id().part_id() is the parent partition we needed.
+                    //
                     // Simple and direct: get NodeIDs without unnecessary conversions
                     // let node_id = node_path.id();
                     // let part_id = {
@@ -77,7 +77,7 @@ pub async fn execute_sql_on_file<'a>(
 
                     // Single workflow: Use QueryableFile trait dispatch instead of type checking
 
-		    let file_arc = file_handle.handle.get_file().await;
+                    let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 
                     if let Some(queryable_file) = file_guard.as_queryable() {
@@ -122,7 +122,8 @@ pub async fn execute_sql_on_file<'a>(
                 }
                 _ => Err(TLogFSError::ArrowMessage(format!(
                     "Path {} points to unsupported entry type for table operations: {}",
-                    path, node_path.entry_type()
+                    path,
+                    node_path.entry_type()
                 ))),
             }
         }

@@ -43,15 +43,13 @@ impl Directory for MemoryDirectory {
         Ok(())
     }
 
-    async fn entries(
-        &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
+    async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
         let mut items = Vec::new();
         for (name, node) in &self.entries {
             let dir_entry = DirectoryEntry::new(
                 name.clone(),
                 node.id().node_id(),
-		node.entry_type(),
+                node.entry_type(),
                 0, // Version not tracked in memory @@@
             );
             items.push(Ok(dir_entry));

@@ -3638,6 +3638,7 @@ dependencies = [
  "datafusion-common",
  "env_logger",
  "futures",
+ "humantime",
  "hydrovu",
  "linkme",
  "log",

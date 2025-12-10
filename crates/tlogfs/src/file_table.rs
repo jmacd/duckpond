@@ -4,8 +4,8 @@
 /// to expose both file-oriented and table-oriented interfaces.
 use crate::error::TLogFSError;
 
-use std::sync::Arc;
 use log::debug;
+use std::sync::Arc;
 
 // DataFusion imports
 use datafusion::catalog::TableProvider;
@@ -28,11 +28,14 @@ pub async fn create_table_provider(
     state: &crate::persistence::State,
     options: TableProviderOptions,
 ) -> Result<Arc<dyn TableProvider>, TLogFSError> {
-    log::debug!("tlogfs::create_table_provider (temporary wrapper) called for file_id: {}", file_id.node_id());
+    log::debug!(
+        "tlogfs::create_table_provider (temporary wrapper) called for file_id: {}",
+        file_id.node_id()
+    );
 
     // Convert State to ProviderContext and delegate to provider crate
     let context = state.as_provider_context();
-    
+
     provider::create_table_provider(file_id, &context, options)
         .await
         .map_err(|e| TLogFSError::ArrowMessage(format!("Provider error: {}", e)))
@@ -86,9 +89,7 @@ pub(crate) async fn register_tinyfs_object_store(
     persistence_state: crate::persistence::State,
 ) -> Result<Arc<crate::TinyFsObjectStore<crate::persistence::State>>, TLogFSError> {
     // Create ONE ObjectStore with access to entire TinyFS via transaction
-    let object_store = Arc::new(crate::TinyFsObjectStore::new(
-        persistence_state,
-    ));
+    let object_store = Arc::new(crate::TinyFsObjectStore::new(persistence_state));
 
     // Register with SessionContext
     let url = url::Url::parse("tinyfs:///")

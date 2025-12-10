@@ -223,7 +223,7 @@ async fn execute_remote(
 ) -> Result<(), TLogFSError> {
     let config: RemoteConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
-    
+
     // Extract State for remote operations
     let state = crate::factory::extract_state(&context)?;
 

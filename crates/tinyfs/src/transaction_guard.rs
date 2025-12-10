@@ -6,8 +6,8 @@
 //! Each persistence layer embeds a `TransactionState` which tracks active transactions.
 //! The guard ensures only one active transaction per persistence layer at a time.
 
-use crate::fs::FS;
 use crate::Result;
+use crate::fs::FS;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -49,7 +49,9 @@ impl TransactionState {
     /// Returns an error if a transaction is already active.
     /// This enforces the single-transaction pattern.
     pub fn begin(&self, fs: FS, sequence: Option<i64>) -> Result<TransactionGuard> {
-        let mut state = self.inner.lock()
+        let mut state = self
+            .inner
+            .lock()
             .map_err(|_| crate::Error::Other("Transaction mutex poisoned".into()))?;
 
         if state.active {
@@ -65,7 +67,8 @@ impl TransactionState {
                 - Forgetting to pass transaction context through async functions\n\
                 - Opening a transaction inside a factory (factories receive context)\n\
                 \n\
-                See docs/duckpond-system-patterns.md for correct transaction patterns.".into()
+                See docs/duckpond-system-patterns.md for correct transaction patterns."
+                    .into(),
             ));
         }
 
@@ -73,8 +76,8 @@ impl TransactionState {
         state.sequence = sequence;
         drop(state); // Release lock immediately
 
-        Ok(TransactionGuard { 
-            fs, 
+        Ok(TransactionGuard {
+            fs,
             state_ref: self.inner.clone(),
             sequence,
         })
@@ -84,12 +87,14 @@ impl TransactionState {
     ///
     /// Returns an error if a transaction is already active.
     pub fn mark_active(&self, sequence: Option<i64>) -> Result<()> {
-        let mut state = self.inner.lock()
+        let mut state = self
+            .inner
+            .lock()
             .map_err(|_| crate::Error::Other("Transaction mutex poisoned".into()))?;
 
         if state.active {
             return Err(crate::Error::Other(
-                "FATAL: Attempted to mark transaction active while one is already active.".into()
+                "FATAL: Attempted to mark transaction active while one is already active.".into(),
             ));
         }
 
@@ -108,9 +113,7 @@ impl TransactionState {
 
     /// Check if a transaction is currently active
     pub fn is_active(&self) -> bool {
-        self.inner.lock()
-            .map(|state| state.active)
-            .unwrap_or(false)
+        self.inner.lock().map(|state| state.active).unwrap_or(false)
     }
 }
 
@@ -125,11 +128,11 @@ impl TransactionState {
 /// # use tinyfs::{FS, TransactionState};
 /// # async fn example(fs: FS, txn_state: &TransactionState) -> tinyfs::Result<()> {
 /// let guard = txn_state.begin(fs, None)?;
-/// 
+///
 /// // Use filesystem through the guard
 /// let root = guard.root().await?;
 /// let file = root.create_file_at("/data.txt").await?;
-/// 
+///
 /// // Guard automatically releases on drop
 /// # Ok(())
 /// # }
@@ -159,7 +162,7 @@ impl Drop for TransactionGuard {
 
 impl Deref for TransactionGuard {
     type Target = FS;
-    
+
     fn deref(&self) -> &Self::Target {
         &self.fs
     }
@@ -175,48 +178,64 @@ mod tests {
         let persistence = MemoryPersistence::default();
         let txn_state = TransactionState::new();
         let fs = FS::new(persistence).await.expect("Failed to create FS");
-        
+
         assert!(!txn_state.is_active());
-        
-        let _guard = txn_state.begin(fs, None).expect("Should create transaction");
+
+        let _guard = txn_state
+            .begin(fs, None)
+            .expect("Should create transaction");
         assert!(txn_state.is_active());
-        
+
         drop(_guard);
         assert!(!txn_state.is_active());
     }
 
     #[tokio::test]
-    #[should_panic(expected = "FATAL: Attempted to create a second transaction while one is already active")]
+    #[should_panic(
+        expected = "FATAL: Attempted to create a second transaction while one is already active"
+    )]
     async fn test_double_transaction_panics() {
         let persistence = MemoryPersistence::default();
         let txn_state = TransactionState::new();
-        let fs1 = FS::new(persistence.clone()).await.expect("Failed to create FS");
+        let fs1 = FS::new(persistence.clone())
+            .await
+            .expect("Failed to create FS");
         let fs2 = FS::new(persistence).await.expect("Failed to create FS");
-        
-        let _guard1 = txn_state.begin(fs1, None).expect("First transaction should succeed");
+
+        let _guard1 = txn_state
+            .begin(fs1, None)
+            .expect("First transaction should succeed");
         // This should panic because txn_state is already borrowed mutably
-        let _guard2 = txn_state.begin(fs2, None).expect("Second transaction should panic");
+        let _guard2 = txn_state
+            .begin(fs2, None)
+            .expect("Second transaction should panic");
     }
 
     #[tokio::test]
     async fn test_sequential_transactions_allowed() {
         let persistence = MemoryPersistence::default();
         let txn_state = TransactionState::new();
-        
+
         {
-            let fs = FS::new(persistence.clone()).await.expect("Failed to create FS");
-            let _guard = txn_state.begin(fs, None).expect("First transaction should succeed");
+            let fs = FS::new(persistence.clone())
+                .await
+                .expect("Failed to create FS");
+            let _guard = txn_state
+                .begin(fs, None)
+                .expect("First transaction should succeed");
             assert!(txn_state.is_active());
         }
-        
+
         assert!(!txn_state.is_active());
-        
+
         {
             let fs = FS::new(persistence).await.expect("Failed to create FS");
-            let _guard = txn_state.begin(fs, None).expect("Second transaction should succeed");
+            let _guard = txn_state
+                .begin(fs, None)
+                .expect("Second transaction should succeed");
             assert!(txn_state.is_active());
         }
-        
+
         assert!(!txn_state.is_active());
     }
 
@@ -225,8 +244,10 @@ mod tests {
         let persistence = MemoryPersistence::default();
         let txn_state = TransactionState::new();
         let fs = FS::new(persistence).await.expect("Failed to create FS");
-        
-        let guard = txn_state.begin(fs, Some(42)).expect("Should create transaction");
+
+        let guard = txn_state
+            .begin(fs, Some(42))
+            .expect("Should create transaction");
         assert_eq!(guard.sequence(), Some(42));
     }
 }

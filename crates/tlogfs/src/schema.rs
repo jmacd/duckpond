@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tinyfs::{FileID, PartID, NodeID, EntryType};
+use tinyfs::{EntryType, FileID, NodeID, PartID};
 
 /// Extended attributes - immutable metadata set at file creation
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -237,7 +237,7 @@ pub enum StorageFormat {
     /// Small files, symlinks, and dynamic nodes - content stored inline in OplogEntry
     #[serde(rename = "inline")]
     Inline,
-    
+
     /// Physical directories - full directory snapshot stored in content field
     #[serde(rename = "fulldir")]
     FullDir,
@@ -380,7 +380,7 @@ impl OplogEntry {
             "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
             id.entry_type()
         );
-        
+
         let size = content.len() as u64;
         Self {
             part_id: id.part_id(),
@@ -420,7 +420,7 @@ impl OplogEntry {
             "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
             id.entry_type()
         );
-        
+
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
@@ -457,7 +457,7 @@ impl OplogEntry {
             "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
             id.entry_type()
         );
-        
+
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
@@ -511,7 +511,7 @@ impl OplogEntry {
             "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
             id.entry_type()
         );
-        
+
         let size = content.len() as u64;
         Self {
             part_id: id.part_id(),
@@ -528,7 +528,7 @@ impl OplogEntry {
             min_override: None, // No overrides by default
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
-            factory: None, // Physical file, no factory
+            factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Small FileSeries use inline storage
             txn_seq,
         }
@@ -555,7 +555,7 @@ impl OplogEntry {
             id.entry_type()
         );
         assert_eq!(EntryType::FileSeriesPhysical, id.entry_type());
-        
+
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
@@ -571,7 +571,7 @@ impl OplogEntry {
             min_override: None, // No overrides by default
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
-            factory: None, // Physical file, no factory
+            factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Large FileSeries use inline format (content is external)
             txn_seq,
         }
@@ -674,7 +674,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
-            format: StorageFormat::Inline, // Config is always inline
+            format: StorageFormat::Inline,           // Config is always inline
             txn_seq,
         }
     }
@@ -814,9 +814,7 @@ pub fn encode_directory_entries(
 
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
-    debug!(
-        "encode_directory_entries() - created batch with {row_count} rows, {col_count} columns"
-    );
+    debug!("encode_directory_entries() - created batch with {row_count} rows, {col_count} columns");
 
     let mut buffer = Vec::new();
     let options = IpcWriteOptions::default();

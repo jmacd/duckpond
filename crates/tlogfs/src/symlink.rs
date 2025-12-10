@@ -3,7 +3,7 @@ use crate::persistence::State;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tinyfs::{Metadata, FileID, NodeMetadata, Symlink, persistence::PersistenceLayer};
+use tinyfs::{FileID, Metadata, NodeMetadata, Symlink, persistence::PersistenceLayer};
 
 /// Clean architecture symlink implementation
 /// Stores target path locally until persisted, then loads from persistence layer

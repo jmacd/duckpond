@@ -22,9 +22,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::{
-    EntryType, FS, FileID, FileVersionInfo, Node, NodeMetadata, NodeType,
-    Result as TinyFSResult, persistence::PersistenceLayer,
-    transaction_guard::TransactionState as TinyFsTransactionState,
+    EntryType, FS, FileID, FileVersionInfo, Node, NodeMetadata, NodeType, Result as TinyFSResult,
+    persistence::PersistenceLayer, transaction_guard::TransactionState as TinyFsTransactionState,
 };
 use tokio::sync::Mutex;
 
@@ -96,8 +95,6 @@ pub struct State {
     /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
     txn_state: Arc<TinyFsTransactionState>,
 }
-
-
 
 // Re-export TableProviderKey from provider for backward compatibility
 pub use provider::TableProviderKey;
@@ -309,7 +306,9 @@ impl OpLogPersistence {
 
     pub(crate) fn state(&self) -> Result<State, TLogFSError> {
         if self.state.is_none() {
-            panic!("❌ CRITICAL BUG: state() called but self.state is None! This should never happen during an active transaction.");
+            panic!(
+                "❌ CRITICAL BUG: state() called but self.state is None! This should never happen during an active transaction."
+            );
         }
         self.state.clone().ok_or(TLogFSError::Missing)
     }
@@ -413,9 +412,10 @@ impl OpLogPersistence {
             panic!("🚨 INTERNAL ERROR: state/fs is Some at begin_impl start");
         }
 
-        let inner_state = InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?;
+        let inner_state =
+            InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?;
         let session_context = inner_state.session_context.clone();
-        
+
         let state = State {
             inner: Arc::new(Mutex::new(inner_state)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
@@ -438,12 +438,19 @@ impl OpLogPersistence {
         self.state = Some(state);
 
         // Create the tinyfs transaction guard (this marks the transaction as active)
-        let tinyfs_guard = self.txn_state.begin(fs, Some(metadata.txn_seq))
-            .map_err(|e| TLogFSError::Transaction { 
-                message: format!("Failed to begin tinyfs transaction: {}", e)
+        let tinyfs_guard = self
+            .txn_state
+            .begin(fs, Some(metadata.txn_seq))
+            .map_err(|e| TLogFSError::Transaction {
+                message: format!("Failed to begin tinyfs transaction: {}", e),
             })?;
 
-        Ok(TransactionGuard::new(tinyfs_guard, self, metadata, is_write))
+        Ok(TransactionGuard::new(
+            tinyfs_guard,
+            self,
+            metadata,
+            is_write,
+        ))
     }
 
     /// Commit a transaction with metadata and return the committed version
@@ -459,11 +466,14 @@ impl OpLogPersistence {
             .ok_or(TLogFSError::Missing)?
             .commit_impl(metadata, self.table.clone())
             .await?;
-        
+
         // Reload the table from disk to pick up the committed changes
         // This ensures subsequent transactions see the new data
         self.table = deltalake::open_table(self.path.to_string_lossy().to_string()).await?;
-        debug!("🔄 Reloaded table after commit, new version: {:?}", self.table.version());
+        debug!(
+            "🔄 Reloaded table after commit, new version: {:?}",
+            self.table.version()
+        );
         self.last_txn_seq = new_seq;
 
         // Note: txn_state clearing is handled by tinyfs::TransactionGuard drop
@@ -669,11 +679,7 @@ impl State {
         &self,
         id: FileID,
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
-        self.inner
-            .lock()
-            .await
-            .async_file_reader(id)
-            .await
+        self.inner.lock().await.async_file_reader(id).await
     }
 
     /// Add an arbitrary OplogEntry record to pending transaction state
@@ -685,29 +691,23 @@ impl State {
 
     /// Get the factory name for a specific node from the oplog
     /// Returns None if the node has no associated factory (static files/directories)
-    pub async fn get_factory_for_node(
-        &self,
-        id: FileID,
-    ) -> Result<Option<String>, TLogFSError> {
-        self.inner
-            .lock()
-            .await
-            .get_factory_for_node(id)
-            .await
+    pub async fn get_factory_for_node(&self, id: FileID) -> Result<Option<String>, TLogFSError> {
+        self.inner.lock().await.get_factory_for_node(id).await
     }
 
     /// Create a ProviderContext from this State
-    /// 
+    ///
     /// This allows State to be used with factories that expect a ProviderContext.
     /// Create a ProviderContext from this State with concrete values (no trait objects!)
     /// This is synchronous and lock-free - it accesses session_context directly
     pub fn as_provider_context(&self) -> provider::ProviderContext {
         // Get current template variables
-        let template_vars = self.template_variables
+        let template_vars = self
+            .template_variables
             .lock()
             .expect("Failed to lock template variables")
             .clone();
-        
+
         // Create provider context with State as the persistence layer
         provider::ProviderContext::new(
             self.session_context.clone(),
@@ -855,11 +855,7 @@ impl State {
     /// Ensure directory is loaded into in-memory state
     /// If not present, loads from OpLog and caches with modified: false
     pub async fn ensure_directory_loaded(&self, id: FileID) -> Result<(), TLogFSError> {
-        self.inner
-            .lock()
-            .await
-            .ensure_directory_loaded(id)
-            .await
+        self.inner.lock().await.ensure_directory_loaded(id).await
     }
 
     /// Get a directory entry from in-memory state
@@ -882,11 +878,7 @@ impl State {
         &self,
         dir_id: FileID,
     ) -> Result<Vec<tinyfs::DirectoryEntry>, TLogFSError> {
-        Ok(self
-            .inner
-            .lock()
-            .await
-            .get_all_directory_entries(dir_id))
+        Ok(self.inner.lock().await.get_all_directory_entries(dir_id))
     }
 
     /// Insert a directory entry into in-memory state
@@ -962,7 +954,8 @@ impl State {
         // Query for committed records from Delta Lake
         let sql = format!(
             "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
-            id.part_id(), id.node_id(),
+            id.part_id(),
+            id.node_id(),
         );
 
         let committed_records = match inner.session_context.sql(&sql).await {
@@ -1034,11 +1027,18 @@ impl State {
         }
 
         // FAIL-FAST: Find latest version or fail explicitly
-        let latest_version = file_series_records.iter()
+        let latest_version = file_series_records
+            .iter()
             .max_by_key(|r| r.version)
             .ok_or_else(|| {
-                debug!("❌ FAIL-FAST: No records found to determine latest version for node_id {id}");
-                TLogFSError::Transaction { message: format!("Cannot find latest version for temporal overrides: node_id {id}") }
+                debug!(
+                    "❌ FAIL-FAST: No records found to determine latest version for node_id {id}"
+                );
+                TLogFSError::Transaction {
+                    message: format!(
+                        "Cannot find latest version for temporal overrides: node_id {id}"
+                    ),
+                }
             })?;
 
         let version = latest_version.version;
@@ -1102,8 +1102,10 @@ impl InnerState {
         );
 
         // Register the fundamental delta_table for direct DeltaTable queries
-        debug!("📋 REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}", 
-            table.version());
+        debug!(
+            "📋 REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}",
+            table.version()
+        );
         _ = ctx
             .register_table("delta_table", Arc::new(table.clone()))
             .map_err(|e| {
@@ -1140,16 +1142,21 @@ impl InnerState {
     /// - Steward layer during pond initialization (with proper metadata)
     /// - Tests (with test metadata)
     pub async fn initialize_root_directory(&mut self) -> Result<(), TLogFSError> {
-         let root_id = FileID::root();
+        let root_id = FileID::root();
 
         // Initialize root directory in memory as empty (will be written to OpLog at commit)
-        _ = self.directories.insert(root_id, DirectoryState::new_empty());
+        _ = self
+            .directories
+            .insert(root_id, DirectoryState::new_empty());
         // Mark as modified so flush writes it
         if let Some(dir_state) = self.directories.get_mut(&root_id) {
             dir_state.modified = true;
         }
 
-        debug!("Initialized root directory {} in memory, marked as modified", root_id);
+        debug!(
+            "Initialized root directory {} in memory, marked as modified",
+            root_id
+        );
 
         Ok(())
     }
@@ -1166,13 +1173,19 @@ impl InnerState {
         let entries = self.query_directory_entries(id).await?;
 
         // Cache in memory with modified: false
-        _ = self.directories.insert(id, DirectoryState::new_unmodified(entries));
+        _ = self
+            .directories
+            .insert(id, DirectoryState::new_unmodified(entries));
         Ok(())
     }
 
     /// Get a directory entry from in-memory state
     /// Directory must be loaded first via ensure_directory_loaded
-    fn get_directory_entry(&self, dir_id: FileID, entry_name: &str) -> Option<tinyfs::DirectoryEntry> {
+    fn get_directory_entry(
+        &self,
+        dir_id: FileID,
+        entry_name: &str,
+    ) -> Option<tinyfs::DirectoryEntry> {
         self.directories
             .get(&dir_id)
             .and_then(|dir_state| dir_state.mapping.get(entry_name).cloned())
@@ -1190,8 +1203,14 @@ impl InnerState {
     /// Insert a directory entry into in-memory state
     /// Directory must be loaded first via ensure_directory_loaded
     /// Checks for duplicates and marks directory as modified
-    fn insert_directory_entry(&mut self, dir_id: FileID, entry: tinyfs::DirectoryEntry) -> Result<(), TLogFSError> {
-        let dir_state = self.directories.get_mut(&dir_id)
+    fn insert_directory_entry(
+        &mut self,
+        dir_id: FileID,
+        entry: tinyfs::DirectoryEntry,
+    ) -> Result<(), TLogFSError> {
+        let dir_state = self
+            .directories
+            .get_mut(&dir_id)
             .ok_or_else(|| TLogFSError::Internal(format!("Directory {} not loaded", dir_id)))?;
 
         // Check for duplicate entry (O(1) lookup)
@@ -1206,7 +1225,10 @@ impl InnerState {
         _ = dir_state.mapping.insert(entry.name.clone(), entry);
         dir_state.modified = true;
 
-        debug!("Inserted entry into directory {}, marked as modified", dir_id);
+        debug!(
+            "Inserted entry into directory {}, marked as modified",
+            dir_id
+        );
         Ok(())
     }
 
@@ -1645,22 +1667,34 @@ impl InnerState {
 
         // Debug: log what we're about to commit
         for (i, record) in records.iter().enumerate() {
-            debug!("  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, factory={:?}", 
-                i, record.part_id, record.node_id, record.file_type, record.version,
+            debug!(
+                "  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, factory={:?}",
+                i,
+                record.part_id,
+                record.node_id,
+                record.file_type,
+                record.version,
                 record.content.as_ref().map(|c| c.len()).unwrap_or(0),
-                record.factory);
+                record.factory
+            );
         }
 
         // Convert records to RecordBatch
-        debug!("🔄 About to serialize {} records with serde_arrow", records.len());
+        debug!(
+            "🔄 About to serialize {} records with serde_arrow",
+            records.len()
+        );
         let batches = vec![serde_arrow::to_record_batch(
             &OplogEntry::for_arrow(),
             &records,
         )?];
 
-        debug!("📊 RecordBatch created with {} batches, batch[0] has {} rows", 
-               batches.len(), batches[0].num_rows());
-        
+        debug!(
+            "📊 RecordBatch created with {} batches, batch[0] has {} rows",
+            batches.len(),
+            batches[0].num_rows()
+        );
+
         // DEBUG: Print first few values from part_id and node_id columns
         if batches[0].num_rows() > 0 {
             use arrow::array::StringArray;
@@ -1668,10 +1702,18 @@ impl InnerState {
             let node_id_col = batches[0].column(1);
             debug!("🔍 First 3 rows of RecordBatch:");
             for i in 0..batches[0].num_rows().min(3) {
-                debug!("   Row {}: part_id={:?}, node_id={:?}",
+                debug!(
+                    "   Row {}: part_id={:?}, node_id={:?}",
                     i,
-                    part_id_col.as_any().downcast_ref::<StringArray>().map(|a| a.value(i)),
-                    node_id_col.as_any().downcast_ref::<StringArray>().map(|a| a.value(i)));
+                    part_id_col
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .map(|a| a.value(i)),
+                    node_id_col
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .map(|a| a.value(i))
+                );
             }
         }
 
@@ -1684,7 +1726,10 @@ impl InnerState {
 
         let version = write_op.await?;
 
-        debug!("✅ Delta write completed successfully, new table version: {:?}", version.version());
+        debug!(
+            "✅ Delta write completed successfully, new table version: {:?}",
+            version.version()
+        );
 
         self.records.clear();
         self.directories.clear();
@@ -1734,9 +1779,7 @@ impl InnerState {
         content_ref: crate::file_writer::ContentRef,
         metadata: crate::file_writer::FileMetadata,
     ) -> Result<(), TLogFSError> {
-        debug!(
-            "store_file_content_ref_transactional called for node_id={id}"
-        );
+        debug!("store_file_content_ref_transactional called for node_id={id}");
 
         // Create OplogEntry from content reference
         let now = Utc::now().timestamp_micros();
@@ -1784,7 +1827,7 @@ impl InnerState {
                                 _ = extended_attrs.set_timestamp_column(&timestamp_column);
 
                                 OplogEntry::new_file_series(
-				    id,
+                                    id,
                                     now,
                                     version, // Use proper version counter
                                     content,
@@ -1804,8 +1847,7 @@ impl InnerState {
                     _ => {
                         // Regular small file
                         OplogEntry::new_small_file(
-                            id, now,
-                            version, // Use proper version counter
+                            id, now, version, // Use proper version counter
                             content, txn_seq,
                         )
                     }
@@ -2010,9 +2052,15 @@ impl InnerState {
                 self.txn_seq,
             );
 
-            debug!("📝 FLUSH CREATING RECORD: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, format={:?}", 
-                   record.part_id, record.node_id, record.file_type, record.version, 
-                   record.content.as_ref().map(|c| c.len()).unwrap_or(0), record.format);
+            debug!(
+                "📝 FLUSH CREATING RECORD: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, format={:?}",
+                record.part_id,
+                record.node_id,
+                record.file_type,
+                record.version,
+                record.content.as_ref().map(|c| c.len()).unwrap_or(0),
+                record.format
+            );
 
             self.records.push(record);
         }
@@ -2027,7 +2075,7 @@ impl InnerState {
 
     /// Create a dynamic directory node with factory configuration
     /// Create a dynamic node with factory configuration (used by `mknod` command)
-    /// 
+    ///
     /// NOTE: Most dynamic nodes (created by DynamicDirDirectory, TemplateDirectory, etc.)
     /// do NOT need this method - they are created on-the-fly from configuration when
     /// their parent directory is accessed. This method is only for explicitly creating
@@ -2043,7 +2091,10 @@ impl InnerState {
     ) -> Result<Node, TLogFSError> {
         debug!(
             "create_dynamic_node: id={}, entry_type={:?}, factory_type='{}', txn_seq={}",
-            id, id.entry_type(), factory_type, self.txn_seq
+            id,
+            id.entry_type(),
+            factory_type,
+            self.txn_seq
         );
 
         let now = Utc::now().timestamp_micros();
@@ -2061,10 +2112,18 @@ impl InnerState {
 
         debug!(
             "📝 CREATING DYNAMIC NODE OPLOG ENTRY: part_id={}, node_id={}, file_type={:?}, version={}, factory={:?}, content_len={:?}, extended_attrs={:?}, format={:?}, txn_seq={}",
-            oplog_entry.part_id, oplog_entry.node_id, oplog_entry.file_type, oplog_entry.version,
-            oplog_entry.factory, oplog_entry.content.as_ref().map(|c| c.len()),
-            oplog_entry.extended_attributes.as_ref().map(|s| &s[0..s.len().min(100)]),
-            oplog_entry.format, oplog_entry.txn_seq
+            oplog_entry.part_id,
+            oplog_entry.node_id,
+            oplog_entry.file_type,
+            oplog_entry.version,
+            oplog_entry.factory,
+            oplog_entry.content.as_ref().map(|c| c.len()),
+            oplog_entry
+                .extended_attributes
+                .as_ref()
+                .map(|s| &s[0..s.len().min(100)]),
+            oplog_entry.format,
+            oplog_entry.txn_seq
         );
 
         // Add to pending records
@@ -2093,7 +2152,7 @@ impl InnerState {
                 let dir_state = DirectoryState::new_empty();
                 // Don't mark as modified - OpLog entry already created above with empty content
                 _ = self.directories.insert(id, dir_state);
-                
+
                 // Create directory node
                 node_factory::create_directory_node(id, state)
             }
@@ -2103,7 +2162,7 @@ impl InnerState {
                         "create_dynamic_node called with non-dynamic EntryType: {:?}",
                         id.entry_type()
                     ),
-                })
+                });
             }
         };
 
@@ -2127,11 +2186,26 @@ impl InnerState {
                 let config_content = if record.file_type == EntryType::DirectoryDynamic {
                     // Extract from extended_attributes
                     if let Some(attrs_json) = &record.extended_attributes {
-                        let attrs: serde_json::Value = serde_json::from_str(attrs_json)
-                            .map_err(|e| TLogFSError::ArrowMessage(format!("Invalid JSON in extended_attributes: {}", e)))?;
-                        if let Some(config_b64) = attrs.get("factory_config").and_then(|v| v.as_str()) {
-                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, config_b64)
-                                .map_err(|e| TLogFSError::ArrowMessage(format!("Invalid base64 in factory_config: {}", e)))?
+                        let attrs: serde_json::Value =
+                            serde_json::from_str(attrs_json).map_err(|e| {
+                                TLogFSError::ArrowMessage(format!(
+                                    "Invalid JSON in extended_attributes: {}",
+                                    e
+                                ))
+                            })?;
+                        if let Some(config_b64) =
+                            attrs.get("factory_config").and_then(|v| v.as_str())
+                        {
+                            base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                config_b64,
+                            )
+                            .map_err(|e| {
+                                TLogFSError::ArrowMessage(format!(
+                                    "Invalid base64 in factory_config: {}",
+                                    e
+                                ))
+                            })?
                         } else {
                             continue;
                         }
@@ -2142,7 +2216,7 @@ impl InnerState {
                     // For files, use content field
                     record.content.clone().unwrap_or_default()
                 };
-                
+
                 return Ok(Some((factory_type.clone(), config_content)));
             }
         }
@@ -2158,11 +2232,24 @@ impl InnerState {
             let config_content = if record.file_type == EntryType::DirectoryDynamic {
                 // Extract from extended_attributes
                 if let Some(attrs_json) = &record.extended_attributes {
-                    let attrs: serde_json::Value = serde_json::from_str(attrs_json)
-                        .map_err(|e| TLogFSError::ArrowMessage(format!("Invalid JSON in extended_attributes: {}", e)))?;
+                    let attrs: serde_json::Value =
+                        serde_json::from_str(attrs_json).map_err(|e| {
+                            TLogFSError::ArrowMessage(format!(
+                                "Invalid JSON in extended_attributes: {}",
+                                e
+                            ))
+                        })?;
                     if let Some(config_b64) = attrs.get("factory_config").and_then(|v| v.as_str()) {
-                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, config_b64)
-                            .map_err(|e| TLogFSError::ArrowMessage(format!("Invalid base64 in factory_config: {}", e)))?
+                        base64::Engine::decode(
+                            &base64::engine::general_purpose::STANDARD,
+                            config_b64,
+                        )
+                        .map_err(|e| {
+                            TLogFSError::ArrowMessage(format!(
+                                "Invalid base64 in factory_config: {}",
+                                e
+                            ))
+                        })?
                     } else {
                         return Ok(None);
                     }
@@ -2173,7 +2260,7 @@ impl InnerState {
                 // For files, use content field
                 record.content.clone().unwrap_or_default()
             };
-            
+
             Ok(Some((factory_type.clone(), config_content)))
         } else {
             Ok(None)
@@ -2192,14 +2279,19 @@ impl InnerState {
 
         // Verify the node exists and is a dynamic node by checking if it has a factory field
         // We don't try to parse the existing config since it might be malformed (that's why we're overwriting)
-        let has_factory = self.records.iter().any(|r| {
-            r.node_id == id.node_id() && r.part_id == id.part_id() && r.factory.is_some()
-        });
+        let has_factory = self
+            .records
+            .iter()
+            .any(|r| r.node_id == id.node_id() && r.part_id == id.part_id() && r.factory.is_some());
 
         if !has_factory {
             // Check committed records
             let records = self.query_records(id).await?;
-            if !records.first().map(|r| r.factory.is_some()).unwrap_or(false) {
+            if !records
+                .first()
+                .map(|r| r.factory.is_some())
+                .unwrap_or(false)
+            {
                 return Err(TLogFSError::NodeNotFound {
                     path: format!("id:{}", id).into(),
                 });
@@ -2261,7 +2353,7 @@ impl InnerState {
                         let batch = &batches[0];
                         debug!("🔍 Query returned {} rows", batch.num_rows());
                         debug!("🔍 Schema: {:?}", batch.schema());
-                        
+
                         // Print first row details
                         if batch.num_rows() > 0 {
                             for (i, field) in batch.schema().fields().iter().enumerate() {
@@ -2269,7 +2361,7 @@ impl InnerState {
                                 debug!("  Column {}: {} = {:?}", i, field.name(), col);
                             }
                         }
-                        
+
                         let records: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)?;
                         Ok(records.into_iter().next().expect("one"))
                     }
@@ -2304,7 +2396,8 @@ impl InnerState {
         // Note: file_type values in database are serialized as 'dir:physical' and 'dir:dynamic'
         let sql = format!(
             "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' AND file_type IN ('dir:physical', 'dir:dynamic') ORDER BY version DESC LIMIT 1",
-            id.part_id(), id.node_id()
+            id.part_id(),
+            id.node_id()
         );
 
         let committed_record = match self.session_context.sql(&sql).await {
@@ -2404,7 +2497,10 @@ impl InnerState {
         // During a transaction, directories created by store_node() exist in self.directories
         // but don't have OpLog records in self.records until flush_directory_operations() is called at commit
         if self.directories.contains_key(&id) {
-            debug!("load_node: found directory {} in self.directories (not yet flushed to OpLog)", id);
+            debug!(
+                "load_node: found directory {} in self.directories (not yet flushed to OpLog)",
+                id
+            );
             // Create directory node directly - it exists in memory
             return node_factory::create_directory_node(id, state);
         }
@@ -2424,10 +2520,7 @@ impl InnerState {
         }
     }
 
-    async fn get_factory_for_node(
-        &self,
-        id: FileID,
-    ) -> Result<Option<String>, TLogFSError> {
+    async fn get_factory_for_node(&self, id: FileID) -> Result<Option<String>, TLogFSError> {
         debug!("get_factory_for_node {id}");
 
         // Query Delta Lake for the most recent record for this node
@@ -2512,8 +2605,7 @@ impl InnerState {
             .await
             .map_err(error_utils::to_tinyfs_error)?;
 
-        let oplog_entry =
-            OplogEntry::new_inline(id, now, next_version, content, self.txn_seq);
+        let oplog_entry = OplogEntry::new_inline(id, now, next_version, content, self.txn_seq);
 
         self.records.push(oplog_entry);
         Ok(())
@@ -2554,19 +2646,11 @@ impl InnerState {
         content: Vec<u8>,
     ) -> Result<(), TLogFSError> {
         let now = Utc::now().timestamp_micros();
-        
-        let next_version = self
-            .get_next_version_for_node(id)
-            .await?;
-        
-        let oplog_entry = OplogEntry::new_inline(
-            id,
-            now,
-            next_version,
-            content,
-            self.txn_seq,
-        );
-        
+
+        let next_version = self.get_next_version_for_node(id).await?;
+
+        let oplog_entry = OplogEntry::new_inline(id, now, next_version, content, self.txn_seq);
+
         self.records.push(oplog_entry);
         Ok(())
     }
@@ -2728,7 +2812,11 @@ impl InnerState {
         let pending_record = self
             .records
             .iter()
-            .find(|r| r.part_id == id.part_id() && r.node_id == id.node_id() && r.version == version as i64)
+            .find(|r| {
+                r.part_id == id.part_id()
+                    && r.node_id == id.node_id()
+                    && r.version == version as i64
+            })
             .cloned();
 
         let target_record = {
@@ -2776,9 +2864,7 @@ impl InnerState {
         id: FileID,
         attributes: HashMap<String, String>,
     ) -> TinyFSResult<()> {
-        debug!(
-            "set_extended_attributes searching for node_id={id}"
-        );
+        debug!("set_extended_attributes searching for node_id={id}");
         let records_count = self.records.len();
         debug!("set_extended_attributes current pending records count: {records_count}");
 
@@ -2865,15 +2951,11 @@ impl InnerState {
 
         // Set the temporal override fields directly in the OplogEntry
         if let Some(min_ts) = min_override {
-            info!(
-                "set_extended_attributes setting min_override to {min_ts} for node {id}"
-            );
+            info!("set_extended_attributes setting min_override to {min_ts} for node {id}");
             self.records[index].min_override = Some(min_ts);
         }
         if let Some(max_ts) = max_override {
-            info!(
-                "set_extended_attributes setting max_override to {max_ts} for node {id}"
-            );
+            info!("set_extended_attributes setting max_override to {max_ts} for node {id}");
             self.records[index].max_override = Some(max_ts);
         }
 
@@ -3087,7 +3169,7 @@ mod node_factory {
     ) -> Result<Node, tinyfs::Error> {
         // Note: Node caching is now handled by CachingPersistence decorator in tinyfs
         // No need for manual caching here
-        
+
         // Get configuration from the oplog entry
         // For ALL dynamic nodes, config is stored as-is in content field (original YAML bytes)
         let config_content = oplog_entry.content.as_ref().ok_or_else(|| {
@@ -3101,18 +3183,26 @@ mod node_factory {
         let legacy_context = FactoryContext::new(state.clone(), id);
         let context = legacy_context.to_provider_context();
 
-        debug!("🔍 create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}", 
-                 factory_type, oplog_entry.file_type, config_content.len());
+        debug!(
+            "🔍 create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}",
+            factory_type,
+            oplog_entry.file_type,
+            config_content.len()
+        );
 
         // Use context-aware factory registry to create the appropriate node type
         let node_type = match oplog_entry.file_type {
             EntryType::DirectoryDynamic => {
-                debug!("🔍 Calling FactoryRegistry::create_directory for '{}'", factory_type);
+                debug!(
+                    "🔍 Calling FactoryRegistry::create_directory for '{}'",
+                    factory_type
+                );
                 let dir_handle = FactoryRegistry::create_directory(
                     factory_type,
                     config_content,
                     context.clone(),
-                ).map_err(|e| {
+                )
+                .map_err(|e| {
                     debug!("❌ FactoryRegistry::create_directory failed: {}", e);
                     e
                 })?;
@@ -3124,12 +3214,17 @@ mod node_factory {
                 if let Some(factory) = FactoryRegistry::get_factory(factory_type) {
                     if factory.create_file.is_some() {
                         // File factory - call create_file
-                        debug!("🔍 Calling FactoryRegistry::create_file for '{}'", factory_type);
+                        debug!(
+                            "🔍 Calling FactoryRegistry::create_file for '{}'",
+                            factory_type
+                        );
                         let file_handle = FactoryRegistry::create_file(
                             factory_type,
                             config_content,
                             context.clone(),
-                        ).await.map_err(|e| {
+                        )
+                        .await
+                        .map_err(|e| {
                             debug!("❌ FactoryRegistry::create_file failed: {}", e);
                             e
                         })?;
@@ -3137,12 +3232,18 @@ mod node_factory {
                         NodeType::File(file_handle)
                     } else {
                         // Executable factory - config IS the file content
-                        debug!("🔍 Executable factory '{}' - using config as file content", factory_type);
+                        debug!(
+                            "🔍 Executable factory '{}' - using config as file content",
+                            factory_type
+                        );
                         let config_file = crate::factory::ConfigFile::new(config_content.clone());
                         NodeType::File(config_file.create_handle())
                     }
                 } else {
-                    return Err(tinyfs::Error::Other(format!("Unknown factory: {}", factory_type)));
+                    return Err(tinyfs::Error::Other(format!(
+                        "Unknown factory: {}",
+                        factory_type
+                    )));
                 }
             }
             _ => {
@@ -3153,7 +3254,7 @@ mod node_factory {
             }
         };
 
-	let node = Node::new(id, node_type);
+        let node = Node::new(id, node_type);
 
         // Note: Node caching is now handled by CachingPersistence decorator in tinyfs
         // The node will be automatically cached when returned

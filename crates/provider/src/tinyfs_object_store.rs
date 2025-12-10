@@ -24,8 +24,8 @@
 //! # }
 //! ```
 
-use std::fmt;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use std::ops::Range;
@@ -55,13 +55,12 @@ impl TinyFsPathBuilder {
 
     /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"
     #[must_use]
-    pub fn specific_version(
-        file_id: &tinyfs::FileID,
-        version: u64,
-    ) -> String {
+    pub fn specific_version(file_id: &tinyfs::FileID, version: u64) -> String {
         format!(
             "part/{}/node/{}/version/{}.parquet",
-            file_id.part_id(), file_id.node_id(), version
+            file_id.part_id(),
+            file_id.node_id(),
+            version
         )
     }
 
@@ -71,7 +70,7 @@ impl TinyFsPathBuilder {
     //     format!("tinyfs:///{}", Self::all_versions(file_id))
     // }
 
-    // /// Create tinyfs:// URL for specific version  
+    // /// Create tinyfs:// URL for specific version
     // #[must_use]
     // pub fn url_specific_version(
     //     file_id: &tinyfs::FileID,
@@ -107,7 +106,7 @@ struct FileSeriesInfo {
 
 /// Metadata for a file version (cached from list() call)
 #[derive(Debug, Clone)]
-#[allow(dead_code)]  // Fields are cached for future use; currently only presence check matters
+#[allow(dead_code)] // Fields are cached for future use; currently only presence check matters
 struct CachedVersionMeta {
     size: u64,
     sha256: Option<String>,
@@ -198,7 +197,11 @@ impl<P: PersistenceLayer> TinyFsObjectStore<P> {
         match parse_tinyfs_path(path_str) {
             Ok(parsed) => {
                 // Create series key using FileID components
-                let series_key = format!("node/{}/part/{}", parsed.file_id.node_id(), parsed.file_id.part_id());
+                let series_key = format!(
+                    "node/{}/part/{}",
+                    parsed.file_id.node_id(),
+                    parsed.file_id.part_id()
+                );
                 Ok((series_key, parsed.version))
             }
             Err(err) => Err(object_store::Error::Generic {
@@ -341,10 +344,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         // Get version-specific content using read_file_version (which returns Vec<u8>)
         let version_data = self
             .persistence
-            .read_file_version(
-                series_info.file_id,
-                version_to_read,
-            )
+            .read_file_version(series_info.file_id, version_to_read)
             .await
             .map_err(|e| object_store::Error::Generic {
                 store: "TinyFS",
@@ -429,27 +429,29 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
 
         // OPTIMIZATION: Check cache first to avoid database query
         let location_str = location.as_ref();
-        
+
         // Parse the path to get node_id and part_id
         let parsed_path =
             parse_tinyfs_path(location_str).map_err(|err| object_store::Error::Generic {
                 store: "TinyFS",
                 source: err.into(),
             })?;
-        
+
         // Try to get metadata from cache
         let cached_metadata = if let Ok(cache) = self.metadata_cache.lock() {
             cache.get(location_str).cloned()
         } else {
             None
         };
-        
+
         let has_cached_metadata = cached_metadata.is_some();
-        
+
         if has_cached_metadata {
             debug!("✅ ObjectStore get_range: metadata found in cache, skipping version query");
         } else {
-            debug!("⚠️ ObjectStore get_range: no cached metadata, will query for latest version if needed");
+            debug!(
+                "⚠️ ObjectStore get_range: no cached metadata, will query for latest version if needed"
+            );
         }
 
         // FAIL-FAST: Version must be specified in path for file series
@@ -469,10 +471,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         // Get version-specific content using read_file_version
         let version_data = match self
             .persistence
-            .read_file_version(
-                parsed_path.file_id,
-                version_to_read,
-            )
+            .read_file_version(parsed_path.file_id, version_to_read)
             .await
         {
             Ok(data) => {
@@ -656,7 +655,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
 
                                 // Use clean path (DataFusion-compatible format)
                                 let clean_path = version_path.clone();
-                                
+
                                 // OPTIMIZATION: Cache metadata to avoid re-querying in get_range()
                                 // Store metadata keyed by clean path for later retrieval
                                 let cache_key = clean_path.clone();
@@ -664,7 +663,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
                                     size: version_info.size,
                                     sha256: version_info.sha256.clone(),
                                 };
-                                
+
                                 // Insert into cache (lock briefly, then release)
                                 if let Ok(mut cache) = metadata_cache.lock() {
                                     let _ = cache.insert(cache_key, cached_meta);
@@ -812,10 +811,7 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
     };
 
     let file_id = tinyfs::FileID::new_from_ids(part_id, node_id);
-    Ok(TinyFsPath {
-        file_id,
-        version,
-    })
+    Ok(TinyFsPath { file_id, version })
 }
 
 /// Extract FileID from a tinyfs:// path using canonical parser
@@ -823,7 +819,5 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
 /// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version" -> Some(file_id)
 /// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version/1.parquet" -> Some(file_id)
 fn extract_node_and_part_ids_from_path(path: &str) -> Option<tinyfs::FileID> {
-    parse_tinyfs_path(path)
-        .ok()
-        .map(|parsed| parsed.file_id)
+    parse_tinyfs_path(path).ok().map(|parsed| parsed.file_id)
 }

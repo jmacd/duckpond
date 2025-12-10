@@ -14,7 +14,7 @@
 //! ```
 
 use crate::register_dynamic_factory;
-use provider::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,10 +29,10 @@ use tokio::sync::Mutex;
 pub struct TimeseriesPivotConfig {
     /// Pattern to match input files (e.g., "/combined/*")
     pub pattern: String,
-    
+
     /// List of column names to pivot across all matched inputs
     pub columns: Vec<String>,
-    
+
     /// Time column name (default: "timestamp")
     #[serde(default = "default_time_column")]
     pub time_column: String,
@@ -45,11 +45,11 @@ fn default_time_column() -> String {
 /// File implementation that dynamically generates pivot SQL based on current schemas
 pub struct TimeseriesPivotFile {
     config: TimeseriesPivotConfig,
-    context: provider::FactoryContext,
+    context: crate::FactoryContext,
 }
 
 impl TimeseriesPivotFile {
-    pub fn new(config: TimeseriesPivotConfig, context: provider::FactoryContext) -> Self {
+    pub fn new(config: TimeseriesPivotConfig, context: crate::FactoryContext) -> Self {
         Self { config, context }
     }
 
@@ -75,13 +75,14 @@ impl TimeseriesPivotFile {
             // Get path string
             let path_buf = node_path.path();
             let path_str = path_buf.to_string_lossy().to_string();
-            
+
             let alias = if !captured_groups.is_empty() {
                 // Use first captured group as site name (index 0)
                 captured_groups[0].clone()
             } else {
                 // If no capture, use the last path component
-                path_buf.file_name()
+                path_buf
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .to_string()
@@ -104,7 +105,7 @@ impl TimeseriesPivotFile {
         }
 
         let mut patterns = HashMap::new();
-        
+
         // Register each matched input with its pattern
         for (alias, path) in matched_inputs {
             _ = patterns.insert(alias.clone(), path.clone());
@@ -126,15 +127,16 @@ impl TimeseriesPivotFile {
         // So after sql_derived replaces "Silver" -> "sql_derived_silver_xxx" in table references,
         // the column names still use the original alias: sql_derived_silver_xxx."Silver.Column"
         let mut column_selections = vec![format!("all_timestamps.{}", self.config.time_column)];
-        
+
         for (alias, _) in matched_inputs {
             for column in &self.config.columns {
                 // Reference format: table."Scope.Column"
                 // e.g., Silver."Silver.AT500_Surface.DO.mg/L"
                 // After sql_derived replacement: sql_derived_silver_xxx."Silver.AT500_Surface.DO.mg/L"
                 column_selections.push(format!(
-                    "{}.\"{}\"", 
-                    alias, format!("{}.{}", alias, column)
+                    "{}.\"{}\"",
+                    alias,
+                    format!("{}.{}", alias, column)
                 ));
             }
         }
@@ -219,7 +221,7 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
 
         // Resolve pattern to get current matched inputs
         let matched_inputs = self.resolve_pattern().await?;
-        
+
         log::debug!(
             "📋 TIMESERIES-PIVOT: Pattern matched {} inputs: {:?}",
             matched_inputs.len(),
@@ -228,13 +230,13 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
 
         if matched_inputs.is_empty() {
             return Err(tinyfs::Error::Other(
-                "Timeseries-pivot pattern matched no inputs".to_string()
+                "Timeseries-pivot pattern matched no inputs".to_string(),
             ));
         }
 
         // Generate SQL - SqlDerivedFile will handle missing columns gracefully
         let (sql, patterns) = self.generate_pivot_sql(&matched_inputs);
-        
+
         log::debug!("📝 TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
 
         // Build scope_prefixes map for each table
@@ -256,16 +258,13 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
         // Create SqlDerivedFile config with scope prefixes and null_padding wrapper
         let sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
             .with_provider_wrapper(move |provider| {
-                provider::null_padding_table(provider, expected_columns.clone())
-                    .map_err(provider::Error::from)
+                crate::null_padding_table(provider, expected_columns.clone())
+                    .map_err(crate::Error::from)
             });
 
         // Use SqlDerivedSeries factory to create the file
-        let sql_file = SqlDerivedFile::new(
-            sql_config,
-            self.context.clone(),
-            SqlDerivedMode::Series,
-        )?;
+        let sql_file =
+            SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
 
         // Delegate to SqlDerivedFile - it handles everything from here
         sql_file.as_table_provider(id, context).await
@@ -285,7 +284,7 @@ impl std::fmt::Debug for TimeseriesPivotFile {
 
 fn create_timeseries_pivot_handle(
     config: Value,
-    context: provider::FactoryContext,
+    context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: TimeseriesPivotConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-pivot config: {}", e)))?;
@@ -300,11 +299,11 @@ fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
 
     let cfg: TimeseriesPivotConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
-    
+
     if cfg.pattern.is_empty() {
         return Err(tinyfs::Error::Other("Pattern cannot be empty".to_string()));
     }
-    
+
     if cfg.columns.is_empty() {
         return Err(tinyfs::Error::Other(
             "At least one column must be specified".to_string(),
@@ -330,9 +329,9 @@ mod tests {
     use std::sync::Arc;
     use tinyfs::{FileID, MemoryPersistence, ProviderContext};
 
-    /// Helper to create provider::FactoryContext from ProviderContext for tests
-    fn test_context(context: &ProviderContext, file_id: FileID) -> provider::FactoryContext {
-        provider::FactoryContext {
+    /// Helper to create crate::FactoryContext from ProviderContext for tests
+    fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
+        crate::FactoryContext {
             context: context.clone(),
             file_id,
             pond_metadata: None,
@@ -343,7 +342,7 @@ mod tests {
     fn create_test_environment() -> ProviderContext {
         let persistence = MemoryPersistence::default();
         let session = Arc::new(SessionContext::new());
-        let object_store = Arc::new(provider::TinyFsObjectStore::new(persistence.clone()));
+        let object_store = Arc::new(crate::TinyFsObjectStore::new(persistence.clone()));
         let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
         _ = session.register_object_store(&url, object_store);
         ProviderContext::new(session, HashMap::new(), Arc::new(persistence))
@@ -354,7 +353,7 @@ mod tests {
         // Create a mock context for testing - we only need it for SQL generation
         let provider_context = create_test_environment();
         let context = test_context(&provider_context, FileID::root());
-        
+
         TimeseriesPivotFile { config, context }
     }
 
@@ -376,7 +375,10 @@ mod tests {
 
         // Check patterns mapping
         assert_eq!(patterns.len(), 2);
-        assert_eq!(patterns.get("Silver"), Some(&"/combined/silver".to_string()));
+        assert_eq!(
+            patterns.get("Silver"),
+            Some(&"/combined/silver".to_string())
+        );
         assert_eq!(patterns.get("BDock"), Some(&"/combined/bdock".to_string()));
 
         // Check SQL structure - column names have scope prefix from ScopePrefixTableProvider
@@ -403,9 +405,7 @@ mod tests {
             time_column: "timestamp".to_string(),
         };
 
-        let matched_inputs = vec![
-            ("OnlySite".to_string(), "/data/site1".to_string()),
-        ];
+        let matched_inputs = vec![("OnlySite".to_string(), "/data/site1".to_string())];
 
         let pivot_file = create_test_pivot_file(config);
         let (sql, patterns) = pivot_file.generate_pivot_sql(&matched_inputs);

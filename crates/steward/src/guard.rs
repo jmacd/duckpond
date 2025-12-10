@@ -143,7 +143,8 @@ impl<'a> StewardTransactionGuard<'a> {
     /// This allows direct operations on the same ObjectStore that DataFusion uses
     pub async fn object_store(
         &mut self,
-    ) -> Result<Arc<tlogfs::TinyFsObjectStore<tlogfs::persistence::State>>, tlogfs::TLogFSError> {
+    ) -> Result<Arc<tlogfs::TinyFsObjectStore<tlogfs::persistence::State>>, tlogfs::TLogFSError>
+    {
         self.data_tx
             .as_mut()
             .ok_or_else(|| {
@@ -587,14 +588,21 @@ impl<'a> StewardTransactionGuard<'a> {
         for (node_path, _captures) in matches {
             let config_path_str = node_path.path().to_string_lossy().to_string();
             let config_file_id = node_path.id();
-            debug!("Found post-commit config: {} (id={})", config_path_str, config_file_id);
+            debug!(
+                "Found post-commit config: {} (id={})",
+                config_path_str, config_file_id
+            );
 
             // Get parent directory ID (needed for factory context)
             let parent_path = node_path.dirname();
             let (parent_wd, _lookup) = match root.resolve_path(&parent_path).await {
                 Ok(result) => result,
                 Err(e) => {
-                    log::warn!("Failed to resolve parent path {}: {}", parent_path.display(), e);
+                    log::warn!(
+                        "Failed to resolve parent path {}: {}",
+                        parent_path.display(),
+                        e
+                    );
                     continue;
                 }
             };

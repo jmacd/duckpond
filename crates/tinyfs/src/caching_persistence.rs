@@ -122,19 +122,13 @@ impl<P: PersistenceLayer + Send + Sync + 'static> PersistenceLayer for CachingPe
         // Check cache first
         if let Some(cached) = self.get_cached(id).await {
             self.record_hit().await;
-            debug!(
-                "CachingPersistence: cache HIT for load_node({})",
-                id
-            );
+            debug!("CachingPersistence: cache HIT for load_node({})", id);
             return Ok(cached);
         }
 
         // Cache miss - load from inner persistence
         self.record_miss().await;
-        debug!(
-            "CachingPersistence: cache MISS for load_node({})",
-            id
-        );
+        debug!("CachingPersistence: cache MISS for load_node({})", id);
 
         let node = self.inner.load_node(id).await?;
 
@@ -151,10 +145,7 @@ impl<P: PersistenceLayer + Send + Sync + 'static> PersistenceLayer for CachingPe
 
     /// Create file node with caching
     async fn create_file_node(&self, id: FileID) -> Result<Node> {
-        debug!(
-            "CachingPersistence: create_file_node({})",
-            id
-        );
+        debug!("CachingPersistence: create_file_node({})", id);
 
         let node = self.inner.create_file_node(id).await?;
 
@@ -166,10 +157,7 @@ impl<P: PersistenceLayer + Send + Sync + 'static> PersistenceLayer for CachingPe
 
     /// Create directory node with caching
     async fn create_directory_node(&self, id: FileID) -> Result<Node> {
-        debug!(
-            "CachingPersistence: create_directory_node({})",
-            id
-        );
+        debug!("CachingPersistence: create_directory_node({})", id);
 
         let node = self.inner.create_directory_node(id).await?;
 
@@ -183,8 +171,7 @@ impl<P: PersistenceLayer + Send + Sync + 'static> PersistenceLayer for CachingPe
     async fn create_symlink_node(&self, id: FileID, target: &Path) -> Result<Node> {
         debug!(
             "CachingPersistence: create_symlink_node({}, {:?})",
-            id,
-            target
+            id, target
         );
 
         let node = self.inner.create_symlink_node(id, target).await?;
@@ -204,8 +191,7 @@ impl<P: PersistenceLayer + Send + Sync + 'static> PersistenceLayer for CachingPe
     ) -> Result<Node> {
         debug!(
             "CachingPersistence: create_dynamic_node({}, factory={})",
-            id,
-            factory_type
+            id, factory_type
         );
 
         let node = self

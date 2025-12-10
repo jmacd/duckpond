@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::caching_persistence::CachingPersistence;
 use crate::EntryType;
+use crate::caching_persistence::CachingPersistence;
 use crate::error::*;
 use crate::node::*;
 use crate::persistence::{FileVersionInfo, PersistenceLayer};
@@ -24,7 +24,7 @@ impl FS {
     pub async fn new<P: PersistenceLayer + 'static>(persistence: P) -> Result<Self> {
         // Wrap persistence layer with caching decorator for transparent node caching
         let cached_persistence = CachingPersistence::new(persistence);
-        
+
         Ok(FS {
             persistence: Arc::new(cached_persistence),
             busy: Arc::new(Mutex::new(HashSet::new())),
@@ -59,7 +59,7 @@ impl FS {
     /// Create a new node with persistence
     pub(crate) async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<Node> {
         let id = parent_id.new_child_id(node_type.entry_type().await?);
-	let node = Node::new(id, node_type);
+        let node = Node::new(id, node_type);
         self.persistence.store_node(&node).await?;
         Ok(node)
     }
@@ -101,10 +101,7 @@ impl FS {
         let id = parent_id.new_child_id(EntryType::Symlink);
 
         let target_path = std::path::Path::new(target);
-        self
-            .persistence
-            .create_symlink_node(id, target_path)
-            .await
+        self.persistence.create_symlink_node(id, target_path).await
     }
 
     /// List all versions of a file
@@ -114,11 +111,7 @@ impl FS {
 
     /// Read a specific version of a file
     /// @@@ BAD
-    pub(crate) async fn read_file_version(
-        &self,
-        id: FileID,
-        version: u64,
-    ) -> Result<Vec<u8>> {
+    pub(crate) async fn read_file_version(&self, id: FileID, version: u64) -> Result<Vec<u8>> {
         self.persistence.read_file_version(id, version).await
     }
 

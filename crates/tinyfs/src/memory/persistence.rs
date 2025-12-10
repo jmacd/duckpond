@@ -95,7 +95,11 @@ impl PersistenceLayer for MemoryPersistence {
     }
 
     async fn create_symlink_node(&self, id: FileID, target: &std::path::Path) -> Result<Node> {
-        self.state.lock().await.create_symlink_node(id, target).await
+        self.state
+            .lock()
+            .await
+            .create_symlink_node(id, target)
+            .await
     }
 
     async fn create_dynamic_node(
@@ -159,15 +163,20 @@ impl PersistenceLayer for MemoryPersistence {
 
 impl MemoryPersistence {
     /// Set temporal bounds for a FileSeries node (for testing)
-    /// 
+    ///
     /// Parallel to tlogfs OplogEntry.min_time/max_time columns.
     /// Used to test low-level temporal filtering at the table provider level.
     pub async fn set_temporal_bounds(&self, id: FileID, min_time: i64, max_time: i64) {
-        _ = self.state.lock().await.temporal_bounds.insert(id, (min_time, max_time));
+        _ = self
+            .state
+            .lock()
+            .await
+            .temporal_bounds
+            .insert(id, (min_time, max_time));
     }
 
     /// Store a file version for testing
-    /// 
+    ///
     /// Adds a new version of a file to the in-memory storage. Versions are stored
     /// in order and can be retrieved via list_file_versions() or read_file_version().
     pub async fn store_file_version(
@@ -176,7 +185,11 @@ impl MemoryPersistence {
         version: u64,
         content: Vec<u8>,
     ) -> Result<()> {
-        self.state.lock().await.store_file_version(id, version, content).await
+        self.state
+            .lock()
+            .await
+            .store_file_version(id, version, content)
+            .await
     }
 
     /// Store a file version with extended metadata (for testing)
@@ -188,13 +201,11 @@ impl MemoryPersistence {
         entry_type: EntryType,
         extended_metadata: Option<HashMap<String, String>>,
     ) -> Result<()> {
-        self.state.lock().await.store_file_version_with_metadata(
-            id,
-            version,
-            content,
-            entry_type,
-            extended_metadata,
-        ).await
+        self.state
+            .lock()
+            .await
+            .store_file_version_with_metadata(id, version, content, entry_type, extended_metadata)
+            .await
     }
 }
 
@@ -247,13 +258,8 @@ impl State {
         version: u64,
         content: Vec<u8>,
     ) -> Result<()> {
-        self.store_file_version_with_metadata(
-            id,
-            version,
-            content,
-            id.entry_type(),
-            None,
-        ).await
+        self.store_file_version_with_metadata(id, version, content, id.entry_type(), None)
+            .await
     }
 
     async fn store_file_version_with_metadata(

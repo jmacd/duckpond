@@ -6,9 +6,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tinyfs::{
-    AsyncReadSeek, Error as TinyFSError, File, FileID, Metadata, NodeID, NodeMetadata,
+    AsyncReadSeek, Error as TinyFSError, File, FileID, Metadata, NodeID, NodeMetadata, PartID,
     persistence::PersistenceLayer,
-    PartID,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
@@ -385,11 +384,10 @@ impl tinyfs::QueryableFile for OpLogFile {
         id: FileID,
         context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        log::debug!(
-            "DELEGATING OpLogFile to create_listing_table_provider: id={id}",
-        );
+        log::debug!("DELEGATING OpLogFile to create_listing_table_provider: id={id}",);
         // Extract State from ProviderContext
-        let state = context.persistence
+        let state = context
+            .persistence
             .as_any()
             .downcast_ref::<State>()
             .ok_or_else(|| TinyFSError::Other("Persistence is not a tlogfs State".to_string()))?;

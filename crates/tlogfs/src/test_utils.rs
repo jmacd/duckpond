@@ -8,13 +8,13 @@ use crate::persistence::OpLogPersistence;
 use crate::transaction_guard::TransactionGuard;
 use log::info;
 use std::future::Future;
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 // Re-export commonly used test helpers from utilities crate
 pub use utilities::test_helpers::{
-    generate_parquet_from_batch, generate_parquet_with_sensor_data,
-    generate_parquet_with_timestamps, generate_simple_table_parquet, SensorBatchBuilder,
-    TestSchemas, TimestampBatchBuilder,
+    SensorBatchBuilder, TestSchemas, TimestampBatchBuilder, generate_parquet_from_batch,
+    generate_parquet_with_sensor_data, generate_parquet_with_timestamps,
+    generate_simple_table_parquet,
 };
 
 /// Test helper error type for tlogfs tests (supports both utilities and tlogfs errors)

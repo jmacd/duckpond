@@ -10,12 +10,12 @@
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::TableType;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
-use datafusion::physical_plan::{ExecutionPlan, DisplayAs, DisplayFormatType};
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use std::any::Any;
 use std::sync::Arc;
 
@@ -46,7 +46,7 @@ impl ScopePrefixTableProvider {
     ) -> DataFusionResult<Self> {
         let original_schema = inner.schema();
         let prefixed_schema = Self::create_prefixed_schema(&original_schema, &scope, &time_column)?;
-        
+
         Ok(Self {
             inner,
             scope,
@@ -71,11 +71,7 @@ impl ScopePrefixTableProvider {
                 } else {
                     // Prefix other columns with scope
                     let new_name = format!("{}.{}", scope, field.name());
-                    Field::new(
-                        new_name,
-                        field.data_type().clone(),
-                        field.is_nullable(),
-                    )
+                    Field::new(new_name, field.data_type().clone(), field.is_nullable())
                 }
             })
             .collect();
@@ -111,25 +107,24 @@ impl TableProvider for ScopePrefixTableProvider {
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         // Rewrite filter expressions to use original column names
-        let rewritten_filters: Vec<Expr> = filters
-            .iter()
-            .map(|expr| self.rewrite_expr(expr))
-            .collect();
-        
+        let rewritten_filters: Vec<Expr> =
+            filters.iter().map(|expr| self.rewrite_expr(expr)).collect();
+
         // Pass projection and rewritten filters through to inner
-        let plan = self.inner.scan(state, projection, &rewritten_filters, limit).await?;
-        
+        let plan = self
+            .inner
+            .scan(state, projection, &rewritten_filters, limit)
+            .await?;
+
         // Calculate output schema based on projection
         let output_schema = if let Some(proj) = projection {
-            let projected_fields: Vec<_> = proj
-                .iter()
-                .map(|&i| self.schema.field(i).clone())
-                .collect();
+            let projected_fields: Vec<_> =
+                proj.iter().map(|&i| self.schema.field(i).clone()).collect();
             Arc::new(Schema::new(projected_fields))
         } else {
             self.schema.clone()
         };
-        
+
         // Wrap the execution plan to rename columns in output batches
         Ok(Arc::new(ScopePrefixExec::new(
             plan,
@@ -146,7 +141,7 @@ impl TableProvider for ScopePrefixTableProvider {
         // Rewrite filters to use original column names, then ask inner provider
         let rewritten: Vec<Expr> = filters.iter().map(|f| self.rewrite_expr(f)).collect();
         let rewritten_refs: Vec<&Expr> = rewritten.iter().collect();
-        
+
         // Delegate to inner provider - it knows best whether it can handle these filters
         self.inner.supports_filters_pushdown(&rewritten_refs)
     }
@@ -155,11 +150,11 @@ impl TableProvider for ScopePrefixTableProvider {
 impl ScopePrefixTableProvider {
     /// Rewrite an expression to use original column names instead of prefixed names
     fn rewrite_expr(&self, expr: &Expr) -> Expr {
-        use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
         use datafusion::common::Column;
-        
+        use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
+
         let prefix = format!("{}.", self.scope);
-        
+
         expr.clone()
             .transform(|e| {
                 Ok(if let Expr::Column(col) = &e {
@@ -198,7 +193,7 @@ impl ScopePrefixExec {
         time_column: String,
     ) -> Self {
         let properties = Self::compute_properties(&output_schema, &inner);
-        
+
         Self {
             inner,
             output_schema,
@@ -207,14 +202,14 @@ impl ScopePrefixExec {
             properties,
         }
     }
-    
+
     fn compute_properties(
         schema: &SchemaRef,
         inner: &Arc<dyn ExecutionPlan>,
     ) -> datafusion::physical_plan::PlanProperties {
         use datafusion::physical_expr::EquivalenceProperties;
         use datafusion::physical_plan::PlanProperties;
-        
+
         let inner_props = inner.properties();
         PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -288,7 +283,7 @@ impl ExecutionPlan for ScopePrefixExec {
         context: Arc<datafusion::execution::TaskContext>,
     ) -> DataFusionResult<datafusion::physical_plan::SendableRecordBatchStream> {
         let inner_stream = self.inner.execute(partition, context)?;
-        
+
         Ok(Box::pin(ScopePrefixStream::new(
             inner_stream,
             self.output_schema.clone(),
@@ -328,14 +323,11 @@ impl futures::Stream for ScopePrefixStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         use futures::StreamExt;
-        
+
         match self.inner.poll_next_unpin(cx) {
             std::task::Poll::Ready(Some(Ok(batch))) => {
                 // Just rename columns - projection already handled by inner
-                match RecordBatch::try_new(
-                    self.output_schema.clone(),
-                    batch.columns().to_vec(),
-                ) {
+                match RecordBatch::try_new(self.output_schema.clone(), batch.columns().to_vec()) {
                     Ok(new_batch) => std::task::Poll::Ready(Some(Ok(new_batch))),
                     Err(e) => std::task::Poll::Ready(Some(Err(DataFusionError::ArrowError(
                         Box::new(e),
@@ -410,11 +402,19 @@ mod tests {
         assert_eq!(results[0].schema().field(1).name(), "Site1.temp");
 
         // Verify data values
-        let timestamp_col = results[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let timestamp_col = results[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         assert_eq!(timestamp_col.value(0), 1);
         assert_eq!(timestamp_col.value(4), 5);
 
-        let temp_col = results[0].column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let temp_col = results[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
         assert_eq!(temp_col.value(0), 10.0);
         assert_eq!(temp_col.value(4), 50.0);
 
@@ -437,7 +437,7 @@ mod tests {
         // Create a temporary directory and parquet file
         let temp_dir = TempDir::new().unwrap();
         let parquet_path = temp_dir.path().join("test.parquet");
-        
+
         // Write to parquet file
         let file = File::create(&parquet_path).unwrap();
         let props = WriterProperties::builder().build();
@@ -450,9 +450,13 @@ mod tests {
         cfg.options_mut().execution.parquet.pushdown_filters = true;
         cfg.options_mut().execution.parquet.reorder_filters = true;
         let ctx = SessionContext::new_with_config(cfg);
-        ctx.register_parquet("inner_table", parquet_path.to_str().unwrap(), Default::default())
-            .await?;
-        
+        ctx.register_parquet(
+            "inner_table",
+            parquet_path.to_str().unwrap(),
+            Default::default(),
+        )
+        .await?;
+
         // Get the parquet table provider
         let parquet_provider = ctx.table_provider("inner_table").await?;
 
@@ -561,7 +565,11 @@ mod tests {
         assert_eq!(results[0].schema().field(2).name(), "Mixed.value");
 
         // Verify Int32 data
-        let count_col = results[0].column(1).as_any().downcast_ref::<Int32Array>().unwrap();
+        let count_col = results[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
         assert_eq!(count_col.value(1), 20);
 
         Ok(())

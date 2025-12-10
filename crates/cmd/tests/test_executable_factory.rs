@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use steward::PondUserMetadata;
 use tempfile::TempDir;
 use tinyfs::FS;
-use tlogfs::factory::ExecutionContext;
 use tlogfs::FactoryRegistry;
+use tlogfs::factory::ExecutionContext;
 
 /// Helper to create a test ship and workspace
 async fn setup_test_ship() -> (ShipContext, TempDir) {
@@ -82,7 +82,12 @@ async fn create_test_config(
     // Initialize the factory
     let provider_context = state.as_provider_context();
     let context = provider::FactoryContext::new(provider_context, parent_node_id);
-    FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context).await?;
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context,
+    )
+    .await?;
 
     _ = tx.commit().await?;
     Ok(())
@@ -158,9 +163,13 @@ repeat_count: 5
     // Initialize and execute in the SAME transaction
     let provider_context = state.as_provider_context();
     let context = provider::FactoryContext::new(provider_context, parent_node_id);
-    FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context.clone())
-        .await
-        .expect("Failed to initialize factory");
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context.clone(),
+    )
+    .await
+    .expect("Failed to initialize factory");
 
     FactoryRegistry::execute::<tlogfs::TLogFSError>(
         "test-executor",

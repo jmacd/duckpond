@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 //! Steward - Transaction coordination and audit logging
 //!
 //! Steward manages transaction lifecycle for the data filesystem (TLogFS),

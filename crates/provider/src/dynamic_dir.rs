@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tinyfs::{
-    DirHandle, Directory, EntryType, Metadata, NodeMetadata, Result as TinyFSResult, Node,
+    DirHandle, Directory, EntryType, Metadata, Node, NodeMetadata, Result as TinyFSResult,
 };
 
 /// Configuration for a single directory entry
@@ -87,14 +87,20 @@ impl DynamicDirDirectory {
 
         // Create the appropriate node type based on the factory's capabilities
         let node_type = if creates_directory {
-            let dir_handle = FactoryRegistry::create_directory(&entry.factory, &config_bytes, self.context.clone())?;
+            let dir_handle = FactoryRegistry::create_directory(
+                &entry.factory,
+                &config_bytes,
+                self.context.clone(),
+            )?;
             debug!(
                 "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
                 entry.name
             );
             tinyfs::NodeType::Directory(dir_handle)
         } else {
-            let file_handle = FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone()).await?;
+            let file_handle =
+                FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone())
+                    .await?;
             debug!(
                 "DynamicDirDirectory::create_entry_node - created file for entry '{}'",
                 entry.name
@@ -181,7 +187,9 @@ impl Directory for DynamicDirDirectory {
     async fn entries(
         &self,
     ) -> tinyfs::Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = tinyfs::Result<tinyfs::DirectoryEntry>> + Send>>,
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = tinyfs::Result<tinyfs::DirectoryEntry>> + Send>,
+        >,
     > {
         let entries_count = self.config.entries.len();
         debug!("DynamicDirDirectory::entries - listing {entries_count} configured entries");
@@ -244,7 +252,7 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
 
     // Note: Node caching is now handled automatically by CachingPersistence decorator
     // No need for manual caching here - the decorator will cache this node by FileID
-    
+
     // Instrument: log parent_id, entry names, and config hash for debugging
     let parent_node_id = context.file_id.part_id();
     let entry_names: Vec<_> = config.entries.iter().map(|e| e.name.clone()).collect();
@@ -313,7 +321,8 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
         })?;
 
         // Validate the nested factory's configuration
-        let validated_config = FactoryRegistry::validate_config(&entry.factory, &entry_config_bytes)?;
+        let validated_config =
+            FactoryRegistry::validate_config(&entry.factory, &entry_config_bytes)?;
 
         // Update the entry's config with the validated version (normalized JSON)
         entry.config = validated_config;
@@ -354,10 +363,10 @@ mod tests {
 
         // Serialize to JSON
         let json = serde_json::to_string(&config).unwrap();
-        
+
         // Deserialize back
         let deserialized: DynamicDirConfig = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(config, deserialized);
     }
 

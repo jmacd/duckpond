@@ -40,7 +40,10 @@ fn validate_test_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
 }
 
 /// Initialize test factory - creates a simple output directory
-async fn initialize_test(config: Value, _context: crate::FactoryContext) -> Result<(), tinyfs::Error> {
+async fn initialize_test(
+    config: Value,
+    _context: crate::FactoryContext,
+) -> Result<(), tinyfs::Error> {
     let test_config: TestConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
 
@@ -84,7 +87,7 @@ async fn execute_test(
         log::debug!("[{}] {}", i, parsed_config.message);
     }
 
-    // If file_to_read is specified, read and verify it  
+    // If file_to_read is specified, read and verify it
     if parsed_config.file_to_read.is_some() {
         log::warn!("File reading temporarily disabled during Step 7 migration");
     }
@@ -96,12 +99,8 @@ async fn execute_test(
         parsed_config.repeat_count, parsed_config.message, ctx
     );
 
-    std::fs::write(result_path, result_content).map_err(|e| {
-        tinyfs::Error::Other(format!(
-            "Failed to write result: {}",
-            e
-        ))
-    })?;
+    std::fs::write(result_path, result_content)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to write result: {}", e)))?;
 
     log::info!(
         "Test factory execution completed, result written to {}",
@@ -143,7 +142,7 @@ fn create_test_dir(
 ) -> TinyFSResult<tinyfs::DirHandle> {
     let _test_config: tinyfs::testing::TestDirectoryConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
-    
+
     // Create an empty dynamic directory for testing
     // TestDirectoryConfig only has name/metadata, not actual file specs
     let dynamic_config = crate::DynamicDirConfig { entries: vec![] };
@@ -172,7 +171,10 @@ fn validate_test_file_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
 }
 
 /// Create a test file handle
-fn create_test_file(config: Value, _context: crate::FactoryContext) -> TinyFSResult<tinyfs::FileHandle> {
+fn create_test_file(
+    config: Value,
+    _context: crate::FactoryContext,
+) -> TinyFSResult<tinyfs::FileHandle> {
     let parsed: tinyfs::testing::TestFileConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
 

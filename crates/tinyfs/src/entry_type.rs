@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
 
 /// Node type identifiers for directory entries and persistence
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -43,7 +43,6 @@ pub enum EntryType {
 }
 
 impl EntryType {
-
     /// Check if this entry is a file (any format, physical or dynamic)
     #[must_use]
     pub fn is_file(&self) -> bool {

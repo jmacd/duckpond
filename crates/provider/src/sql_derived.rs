@@ -34,7 +34,9 @@ use tinyfs::FileID;
 
 use crate::ScopePrefixTableProvider;
 use async_trait::async_trait;
+use datafusion::catalog::TableProvider;
 use log::debug;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,8 +44,6 @@ use tinyfs::{
     AsyncReadSeek, EntryType, File, FileHandle, Metadata, NodeMetadata, Result as TinyFSResult,
 };
 use tokio::io::AsyncWrite;
-use datafusion::catalog::TableProvider;
-use serde::{Deserialize, Serialize};
 
 // Re-export types from provider
 pub use crate::{SqlDerivedMode, SqlTransformOptions};
@@ -64,18 +64,24 @@ pub struct SqlDerivedConfig {
     /// SQL query to execute on the source data. Defaults to "SELECT * FROM source" if not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
-    
+
     /// Optional scope prefixes to apply to table columns (internal use by derivative factories)
     /// Maps table name to (scope_prefix, time_column_name)
     /// NOT serialized - must be set programmatically by factories like timeseries-join
     #[serde(skip, default)]
     pub scope_prefixes: Option<HashMap<String, (String, String)>>,
-    
+
     /// Optional closure to wrap TableProviders before registration
     /// Used by timeseries-pivot to inject null_padding_table wrapping
     /// NOT serialized - must be set programmatically
     #[serde(skip, default)]
-    pub provider_wrapper: Option<Arc<dyn Fn(Arc<dyn TableProvider>) -> Result<Arc<dyn TableProvider>, crate::Error> + Send + Sync>>,
+    pub provider_wrapper: Option<
+        Arc<
+            dyn Fn(Arc<dyn TableProvider>) -> Result<Arc<dyn TableProvider>, crate::Error>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl SqlDerivedConfig {
@@ -88,7 +94,7 @@ impl SqlDerivedConfig {
             provider_wrapper: None,
         }
     }
-    
+
     /// Create a new SqlDerivedConfig with scope prefixes for column renaming
     pub fn new_scoped(
         patterns: HashMap<String, String>,
@@ -102,11 +108,14 @@ impl SqlDerivedConfig {
             provider_wrapper: None,
         }
     }
-    
+
     /// Builder method to add a provider wrapper closure
-    pub fn with_provider_wrapper<F>(mut self, wrapper: F) -> Self 
+    pub fn with_provider_wrapper<F>(mut self, wrapper: F) -> Self
     where
-        F: Fn(Arc<dyn TableProvider>) -> Result<Arc<dyn TableProvider>, crate::Error> + Send + Sync + 'static,
+        F: Fn(Arc<dyn TableProvider>) -> Result<Arc<dyn TableProvider>, crate::Error>
+            + Send
+            + Sync
+            + 'static,
     {
         self.provider_wrapper = Some(Arc::new(wrapper));
         self
@@ -158,7 +167,10 @@ impl std::fmt::Debug for SqlDerivedConfig {
             .field("patterns", &self.patterns)
             .field("query", &self.query)
             .field("scope_prefixes", &self.scope_prefixes)
-            .field("provider_wrapper", &self.provider_wrapper.as_ref().map(|_| "<closure>"))
+            .field(
+                "provider_wrapper",
+                &self.provider_wrapper.as_ref().map(|_| "<closure>"),
+            )
             .finish()
     }
 }
@@ -275,7 +287,7 @@ impl SqlDerivedFile {
         for (node_path, _captured) in matches {
             let file_id = node_path.id();
             let actual_entry_type = file_id.entry_type();
-            
+
             debug!(
                 "🔍 Checking file at path '{}': file_id={}, actual_entry_type={:?}, requested_entry_type={:?}",
                 node_path.path().display(),
@@ -283,14 +295,12 @@ impl SqlDerivedFile {
                 actual_entry_type,
                 entry_type
             );
-            
+
             // Check if this node matches the requested entry_type (encoded in FileID)
             if actual_entry_type == entry_type {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
-                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
-                        file_id
-                    }
+                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => file_id,
                     _ => FileID::new_from_ids(file_id.part_id(), file_id.node_id()),
                 };
                 if seen.insert(dedup_key) {
@@ -539,15 +549,11 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
         context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn TableProvider>> {
         // Check cache first for SqlDerivedFile ViewTable
-        let cache_key = crate::TableProviderKey::new(
-            id,
-            crate::VersionSelection::LatestVersion,
-        ).to_cache_string();
+        let cache_key = crate::TableProviderKey::new(id, crate::VersionSelection::LatestVersion)
+            .to_cache_string();
 
         if let Some(cached_provider) = context.get_table_provider_cache(&cache_key) {
-            debug!(
-                "🚀 CACHE HIT: Returning cached ViewTable for node_id: {id}"
-            );
+            debug!("🚀 CACHE HIT: Returning cached ViewTable for node_id: {id}");
             return Ok(cached_provider);
         }
 
@@ -639,10 +645,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         file_id.node_id()
                     );
                     let file_handle = node_path.as_file().await.map_err(|e| {
-                        tinyfs::Error::Other(format!(
-                            "Failed to get file handle: {}",
-                            e
-                        ))
+                        tinyfs::Error::Other(format!("Failed to get file handle: {}", e))
                     })?;
                     let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
@@ -650,10 +653,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         debug!(
                             "🔍 SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider..."
                         );
-                        match queryable_file
-                            .as_table_provider(file_id, context)
-                            .await
-                        {
+                        match queryable_file.as_table_provider(file_id, context).await {
                             Ok(provider) => {
                                 debug!(
                                     "✅ SQL-DERIVED: Successfully created table provider for file_id={}",
@@ -662,7 +662,8 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                 // Apply optional provider wrapper (e.g., null_padding_table)
                                 if let Some(wrapper) = &self.config.provider_wrapper {
                                     debug!("Applying provider wrapper to table '{}'", pattern_name);
-                                    wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                                    wrapper(provider)
+                                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?
                                 } else {
                                     provider
                                 }
@@ -694,17 +695,14 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     for node_path in queryable_files {
                         let file_id = node_path.id();
                         let file_handle = node_path.as_file().await.map_err(|e| {
-                            tinyfs::Error::Other(format!(
-                                "Failed to get file handle: {}",
-                                e
-                            ))
+                            tinyfs::Error::Other(format!("Failed to get file handle: {}", e))
                         })?;
                         let file_arc = file_handle.handle.get_file().await;
                         let file_guard = file_arc.lock().await;
                         if let Some(_queryable_file) = file_guard.as_queryable() {
                             // For files that implement QueryableFile, we need to get their URL pattern
                             // This maintains the ownership chain: FS Root → State → Cache → Single TableProvider
-                            
+
                             // Generate URL pattern - works for both OpLogFile and MemoryFile
                             // Format: tinyfs:///part/{part_id}/node/{node_id}/version/
                             let url_pattern = format!(
@@ -745,13 +743,19 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     );
 
                     // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
-                    let representative_file_id = file_ids.first().copied().unwrap_or(FileID::root());
-                    let provider = crate::create_table_provider(representative_file_id, context, options).await
-                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                    
+                    let representative_file_id =
+                        file_ids.first().copied().unwrap_or(FileID::root());
+                    let provider =
+                        crate::create_table_provider(representative_file_id, context, options)
+                            .await
+                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
                     // Apply optional provider wrapper (e.g., null_padding_table)
                     if let Some(wrapper) = &self.config.provider_wrapper {
-                        debug!("Applying provider wrapper to multi-file table '{}'", pattern_name);
+                        debug!(
+                            "Applying provider wrapper to multi-file table '{}'",
+                            pattern_name
+                        );
                         wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
                     } else {
                         provider
@@ -775,38 +779,52 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         "🔍 SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...",
                         unique_table_name, pattern_name
                     );
-                    
+
                     // Wrap with ScopePrefixTableProvider if scope prefix is configured
-                    let final_table_provider: Arc<dyn TableProvider> = 
-                        if let Some(scope_prefixes) = &self.config.scope_prefixes {
+                    let final_table_provider: Arc<dyn TableProvider> = if let Some(scope_prefixes) =
+                        &self.config.scope_prefixes
+                    {
+                        log::debug!(
+                            "🔧 SQL-DERIVED: Checking scope_prefixes for pattern '{}'. Available keys: {:?}",
+                            pattern_name,
+                            scope_prefixes.keys().collect::<Vec<_>>()
+                        );
+                        if let Some((scope_prefix, time_column)) =
+                            scope_prefixes.get(pattern_name.as_str())
+                        {
                             log::debug!(
-                                "🔧 SQL-DERIVED: Checking scope_prefixes for pattern '{}'. Available keys: {:?}",
-                                pattern_name, scope_prefixes.keys().collect::<Vec<_>>()
+                                "🔧 SQL-DERIVED: Wrapping table '{}' (pattern '{}') with scope prefix '{}'",
+                                unique_table_name,
+                                pattern_name,
+                                scope_prefix
                             );
-                            if let Some((scope_prefix, time_column)) = scope_prefixes.get(pattern_name.as_str()) {
-                                log::debug!(
-                                    "🔧 SQL-DERIVED: Wrapping table '{}' (pattern '{}') with scope prefix '{}'",
-                                    unique_table_name, pattern_name, scope_prefix
-                                );
-                                let wrapped = Arc::new(ScopePrefixTableProvider::new(
+                            let wrapped = Arc::new(
+                                ScopePrefixTableProvider::new(
                                     listing_table_provider,
                                     scope_prefix.clone(),
                                     time_column.clone(),
-                                ).map_err(|e| tinyfs::Error::Other(e.to_string()))?);
-                                use datafusion::catalog::TableProvider;
-                                debug!(
-                                    "🔧 SQL-DERIVED: Wrapped table '{}' schema: {:?}",
-                                    unique_table_name,
-                                    wrapped.schema().fields().iter().map(|f| f.name()).collect::<Vec<_>>()
-                                );
+                                )
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+                            );
+                            use datafusion::catalog::TableProvider;
+                            debug!(
+                                "🔧 SQL-DERIVED: Wrapped table '{}' schema: {:?}",
+                                unique_table_name,
                                 wrapped
-                            } else {
-                                listing_table_provider
-                            }
+                                    .schema()
+                                    .fields()
+                                    .iter()
+                                    .map(|f| f.name())
+                                    .collect::<Vec<_>>()
+                            );
+                            wrapped
                         } else {
                             listing_table_provider
-                        };
-                    
+                        }
+                    } else {
+                        listing_table_provider
+                    };
+
                     _ = ctx
                         .register_table(
                             datafusion::sql::TableReference::bare(unique_table_name.as_str()),
@@ -877,10 +895,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     e
                 );
                 log::error!("❌ SQL-DERIVED: Failed SQL was: {}", effective_sql);
-                tinyfs::Error::Other(format!(
-                    "Failed to parse SQL into LogicalPlan: {}",
-                    e
-                ))
+                tinyfs::Error::Other(format!("Failed to parse SQL into LogicalPlan: {}", e))
             })?
             .logical_plan()
             .clone();
@@ -902,15 +917,15 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProviderContext;
     use crate::QueryableFile;
     use arrow_array::record_batch;
+    use datafusion::execution::context::SessionContext;
+    use std::collections::HashMap;
     use tinyfs::FS;
-    use tinyfs::arrow::SimpleParquetExt;
     use tinyfs::MemoryPersistence;
     use tinyfs::PartID;
-    use datafusion::execution::context::SessionContext;
-    use crate::ProviderContext;
-    use std::collections::HashMap;
+    use tinyfs::arrow::SimpleParquetExt;
 
     // ========================================================================
     // SqlDerivedConfig Tests
@@ -920,7 +935,7 @@ mod tests {
     fn test_sql_derived_config_new() {
         let patterns = [("table1".to_string(), "/path/*.series".to_string())].into();
         let config = SqlDerivedConfig::new(patterns, Some("SELECT * FROM table1".to_string()));
-        
+
         assert_eq!(config.patterns.len(), 1);
         assert!(config.query.is_some());
         assert!(config.scope_prefixes.is_none());
@@ -930,10 +945,14 @@ mod tests {
     #[test]
     fn test_sql_derived_config_scoped() {
         let patterns = [("table1".to_string(), "/path/*.series".to_string())].into();
-        let scope_prefixes = [("table1".to_string(), ("scope_".to_string(), "timestamp".to_string()))].into();
-        
+        let scope_prefixes = [(
+            "table1".to_string(),
+            ("scope_".to_string(), "timestamp".to_string()),
+        )]
+        .into();
+
         let config = SqlDerivedConfig::new_scoped(patterns, None, scope_prefixes);
-        
+
         assert!(config.scope_prefixes.is_some());
         assert_eq!(config.scope_prefixes.as_ref().unwrap().len(), 1);
     }
@@ -942,10 +961,10 @@ mod tests {
     fn test_sql_derived_config_serialization() {
         let patterns = [("table1".to_string(), "/path/*.series".to_string())].into();
         let config = SqlDerivedConfig::new(patterns, Some("SELECT * FROM table1".to_string()));
-        
+
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: SqlDerivedConfig = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(config.patterns, deserialized.patterns);
         assert_eq!(config.query, deserialized.query);
     }
@@ -962,7 +981,7 @@ mod tests {
             pond_metadata: None,
         }
     }
-    
+
     /// Helper to create test environment with MemoryPersistence
     /// Returns (FS, ProviderContext) that share the SAME persistence instance
     /// This maintains the single-instance pattern - both FS and ProviderContext
@@ -970,19 +989,19 @@ mod tests {
     async fn create_test_environment() -> (FS, ProviderContext) {
         // Create ONE persistence instance
         let persistence = MemoryPersistence::default();
-        
+
         // Create FS from that persistence
         let fs = FS::new(persistence.clone())
             .await
             .expect("Failed to create FS");
-        
+
         // Create ProviderContext from SAME persistence
         let session = Arc::new(SessionContext::new());
         let object_store = Arc::new(crate::TinyFsObjectStore::new(persistence.clone()));
         let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
         _ = session.register_object_store(&url, object_store);
         let provider_context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
-        
+
         (fs, provider_context)
     }
 
@@ -998,22 +1017,24 @@ mod tests {
         entry_type: EntryType,
     ) -> Result<FileID, Box<dyn std::error::Error>> {
         let root = fs.root().await?;
-        
+
         // Create the file in FS (this creates the directory entry and node)
         let mut writer = root.async_writer_path_with_type(path, entry_type).await?;
         use tokio::io::AsyncWriteExt;
         writer.write_all(&parquet_data).await?;
         writer.shutdown().await?;
-        
+
         // Get the FileID that was created
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
-        
+
         // ALSO store in persistence so TinyFsObjectStore can read it
         // This is the key: MemoryFile stores content internally, but TinyFsObjectStore
         // reads from persistence.read_file_version(), so we need both
-        persistence.store_file_version(file_id, 1, parquet_data).await?;
-        
+        persistence
+            .store_file_version(file_id, 1, parquet_data)
+            .await?;
+
         Ok(file_id)
     }
 
@@ -1259,7 +1280,7 @@ mod tests {
     //     ]));
 
     //     let root = fs.root().await.unwrap();
-        
+
     //     for version in 1..=num_versions {
     //         // Create different data for each version
     //         let base_sensor_id = 100 + (version * 10) as i32;
@@ -1386,7 +1407,9 @@ query: ""
     async fn test_sql_derived_pattern_matching() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
@@ -1421,9 +1444,15 @@ query: ""
             _ = writer.close().unwrap();
         }
 
-        _ = create_parquet_file(&fs, persistence, "/sensor_data1.parquet", parquet_buffer1, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/sensor_data1.parquet",
+            parquet_buffer1,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Create sensor_data2.parquet
         let batch2 = RecordBatch::try_new(
@@ -1444,9 +1473,15 @@ query: ""
             _ = writer.close().unwrap();
         }
 
-        _ = create_parquet_file(&fs, persistence, "/sensor_data2.parquet", parquet_buffer2, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/sensor_data2.parquet",
+            parquet_buffer2,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Now test pattern matching across both files
         let context = test_context(&provider_context, FileID::root());
@@ -1497,7 +1532,9 @@ query: ""
     async fn test_sql_derived_recursive_pattern_matching() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
@@ -1505,42 +1542,48 @@ query: ""
         // Set up FileSeries files in different directories
         // Create /sensors/building_a/data.parquet
 
-            use arrow::array::{Int32Array, StringArray};
-            use arrow::datatypes::{DataType, Field, Schema};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
+        use arrow::array::{Int32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::io::Cursor;
 
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("sensor_id", DataType::Int32, false),
-                Field::new("location", DataType::Utf8, false),
-                Field::new("reading", DataType::Int32, false),
-            ]));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("sensor_id", DataType::Int32, false),
+            Field::new("location", DataType::Utf8, false),
+            Field::new("reading", DataType::Int32, false),
+        ]));
 
-            let batch_a = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(Int32Array::from(vec![301])),
-                    Arc::new(StringArray::from(vec!["Building A"])),
-                    Arc::new(Int32Array::from(vec![100])),
-                ],
-            )
-            .unwrap();
+        let batch_a = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![301])),
+                Arc::new(StringArray::from(vec!["Building A"])),
+                Arc::new(Int32Array::from(vec![100])),
+            ],
+        )
+        .unwrap();
 
-            let mut parquet_buffer_a = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer_a);
-                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-                writer.write(&batch_a).unwrap();
-                _ = writer.close().unwrap();
-            }
+        let mut parquet_buffer_a = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer_a);
+            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+            writer.write(&batch_a).unwrap();
+            _ = writer.close().unwrap();
+        }
 
-            // Create directory first, then file
-            _ = root.create_dir_path("/sensors").await.unwrap();
-            _ = root.create_dir_path("/sensors/building_a").await.unwrap();
-            _ = create_parquet_file(&fs, persistence, "/sensors/building_a/data.parquet", parquet_buffer_a, EntryType::FileTablePhysical)
-                .await
-                .unwrap();
+        // Create directory first, then file
+        _ = root.create_dir_path("/sensors").await.unwrap();
+        _ = root.create_dir_path("/sensors/building_a").await.unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/sensors/building_a/data.parquet",
+            parquet_buffer_a,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Create /sensors/building_b/data.parquet
         let schema = Arc::new(Schema::new(vec![
@@ -1568,9 +1611,15 @@ query: ""
         }
 
         _ = root.create_dir_path("/sensors/building_b").await.unwrap();
-        _ = create_parquet_file(&fs, persistence, "/sensors/building_b/data.parquet", parquet_buffer_b, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/sensors/building_b/data.parquet",
+            parquet_buffer_b,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Add a small delay to ensure the async writer background task completes
         tokio::task::yield_now().await;
@@ -1637,7 +1686,9 @@ query: ""
     async fn test_sql_derived_multiple_patterns() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
@@ -1645,41 +1696,47 @@ query: ""
         // Set up FileSeries files in different locations matching different patterns
         // Create files in /metrics/ directory
 
-            use arrow::array::{Int32Array, StringArray};
-            use arrow::datatypes::{DataType, Field, Schema};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
+        use arrow::array::{Int32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::io::Cursor;
 
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("sensor_id", DataType::Int32, false),
-                Field::new("location", DataType::Utf8, false),
-                Field::new("reading", DataType::Int32, false),
-            ]));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("sensor_id", DataType::Int32, false),
+            Field::new("location", DataType::Utf8, false),
+            Field::new("reading", DataType::Int32, false),
+        ]));
 
-            // Metrics file 1
-            let batch_metrics = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(Int32Array::from(vec![401, 402])),
-                    Arc::new(StringArray::from(vec!["Metrics Room A", "Metrics Room B"])),
-                    Arc::new(Int32Array::from(vec![120, 125])),
-                ],
-            )
-            .unwrap();
+        // Metrics file 1
+        let batch_metrics = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![401, 402])),
+                Arc::new(StringArray::from(vec!["Metrics Room A", "Metrics Room B"])),
+                Arc::new(Int32Array::from(vec![120, 125])),
+            ],
+        )
+        .unwrap();
 
-            let mut parquet_buffer = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer);
-                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-                writer.write(&batch_metrics).unwrap();
-                _ = writer.close().unwrap();
-            }
+        let mut parquet_buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer);
+            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+            writer.write(&batch_metrics).unwrap();
+            _ = writer.close().unwrap();
+        }
 
-            _ = root.create_dir_path("/metrics").await.unwrap();
-            _ = create_parquet_file(&fs, persistence, "/metrics/data.parquet", parquet_buffer, EntryType::FileTablePhysical)
-                .await
-                .unwrap();
+        _ = root.create_dir_path("/metrics").await.unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/metrics/data.parquet",
+            parquet_buffer,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Create files in /logs/ directory
         let schema = Arc::new(Schema::new(vec![
@@ -1708,9 +1765,15 @@ query: ""
         }
 
         _ = root.create_dir_path("/logs").await.unwrap();
-        _ = create_parquet_file(&fs, persistence, "/logs/info.parquet", parquet_buffer, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/logs/info.parquet",
+            parquet_buffer,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Test multiple patterns combining files from different directories
         let context = test_context(&provider_context, FileID::root());
@@ -1778,7 +1841,9 @@ query: ""
     async fn test_sql_derived_default_query() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
@@ -1819,9 +1884,15 @@ query: ""
             _ = writer.close().unwrap();
         }
 
-        _ = create_parquet_file(&fs, persistence, "/sensor_data.parquet", parquet_buffer, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/sensor_data.parquet",
+            parquet_buffer,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Create SQL-derived file without specifying query (should use default)
         let context = test_context(&provider_context, FileID::root());
@@ -1873,7 +1944,9 @@ query: ""
     async fn test_sql_derived_file_series_single_version() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
@@ -1914,9 +1987,15 @@ query: ""
             _ = writer.close().unwrap();
         }
 
-        _ = create_parquet_file(&fs, persistence, "/sensor_data.parquet", parquet_buffer, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/sensor_data.parquet",
+            parquet_buffer,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Create the SQL-derived file with FileSeries source
         let context = test_context(&provider_context, FileID::root());
@@ -1967,7 +2046,9 @@ query: ""
     async fn test_sql_derived_file_series_two_versions() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
@@ -2019,9 +2100,15 @@ query: ""
             }
 
             let filename = format!("/multi_sensor_data_v{}.parquet", version);
-            _ = create_parquet_file(&fs, persistence, &filename, parquet_buffer, EntryType::FileTablePhysical)
-                .await
-                .unwrap();
+            _ = create_parquet_file(
+                &fs,
+                persistence,
+                &filename,
+                parquet_buffer,
+                EntryType::FileTablePhysical,
+            )
+            .await
+            .unwrap();
         }
 
         // Create the SQL-derived file with multi-version FileSeries source
@@ -2073,7 +2160,9 @@ query: ""
     async fn test_sql_derived_file_series_three_versions() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
@@ -2125,9 +2214,15 @@ query: ""
             }
 
             let filename = format!("/multi_sensor_data_v{}.parquet", version);
-            _ = create_parquet_file(&fs, persistence, &filename, parquet_buffer, EntryType::FileTablePhysical)
-                .await
-                .unwrap();
+            _ = create_parquet_file(
+                &fs,
+                persistence,
+                &filename,
+                parquet_buffer,
+                EntryType::FileTablePhysical,
+            )
+            .await
+            .unwrap();
         }
 
         // Create the SQL-derived file that should union all 3 versions
@@ -2204,7 +2299,9 @@ query: ""
     async fn test_sql_derived_factory_creation() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
@@ -2241,9 +2338,15 @@ query: ""
             _ = writer.close().unwrap();
         }
 
-        _ = create_parquet_file(&fs, persistence, "/data.parquet", parquet_buffer, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/data.parquet",
+            parquet_buffer,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Create the SQL-derived file with read-only state context
         let context = test_context(&provider_context, FileID::root());
@@ -2431,7 +2534,9 @@ query: ""
     async fn test_sql_derived_chain() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
@@ -2468,9 +2573,15 @@ query: ""
             _ = writer.close().unwrap();
         }
 
-        _ = create_parquet_file(&fs, persistence, "/data.parquet", parquet_buffer, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/data.parquet",
+            parquet_buffer,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
 
         // Test chaining: Create two SQL-derived nodes, where one refers to the other
         // Create the first SQL-derived file (filters and transforms original data)
@@ -2491,13 +2602,12 @@ query: ""
             query: Some("SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value".to_string()),
             ..Default::default()
         };
-	
+
         let first_sql_file =
             SqlDerivedFile::new(first_config, context.clone(), SqlDerivedMode::Table).unwrap();
-	
-            // Execute the first SQL-derived query using direct table provider scanning
-        let first_result_batches =
-            execute_sql_derived_direct(&first_sql_file, &provider_context)
+
+        // Execute the first SQL-derived query using direct table provider scanning
+        let first_result_batches = execute_sql_derived_direct(&first_sql_file, &provider_context)
             .await
             .unwrap();
 
@@ -2517,14 +2627,20 @@ query: ""
             }
             parquet_buffer
         };
-	
+
         // Store the first result as an intermediate Parquet file
-        _ = create_parquet_file(&fs, persistence, "/intermediate.parquet", first_result_data, EntryType::FileTablePhysical)
-            .await
-            .unwrap();
-	
-	// Second query: Create the second SQL-derived node that chains from the first
-	{
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/intermediate.parquet",
+            first_result_data,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
+
+        // Second query: Create the second SQL-derived node that chains from the first
+        {
             // Generate unique FileID for second SQL file based on its query content
             let second_query = "SELECT name, adjusted_value * 2 as final_value FROM intermediate WHERE adjusted_value > 250 ORDER BY final_value DESC";
             let second_file_id = FileID::from_content(
@@ -2534,26 +2650,29 @@ query: ""
             );
             let context = test_context(&provider_context, second_file_id);
             let second_config = SqlDerivedConfig {
-		patterns: {
+                patterns: {
                     let mut map = HashMap::new();
-                    _ = map.insert("intermediate".to_string(), "/intermediate.parquet".to_string());
+                    _ = map.insert(
+                        "intermediate".to_string(),
+                        "/intermediate.parquet".to_string(),
+                    );
                     map
-		},
-		query: Some(second_query.to_string()),
-		..Default::default()
+                },
+                query: Some(second_query.to_string()),
+                ..Default::default()
             };
 
             let second_sql_file =
-		SqlDerivedFile::new(second_config, context, SqlDerivedMode::Table).unwrap();
-	    
+                SqlDerivedFile::new(second_config, context, SqlDerivedMode::Table).unwrap();
+
             // Execute the final chained result using direct table provider scanning
             let result_batches = execute_sql_derived_direct(&second_sql_file, &provider_context)
-		.await
-		.unwrap();
-	
+                .await
+                .unwrap();
+
             assert!(!result_batches.is_empty(), "Should have at least one batch");
             let result_batch = &result_batches[0];
-	    
+
             // Verify the chained transformation worked correctly
             // Original data: Alice=100, Bob=200, Charlie=150, David=300, Eve=250
             // First query: WHERE value >= 200, SELECT value + 50 as adjusted_value
@@ -2562,29 +2681,29 @@ query: ""
             //   -> David=700, Eve=600 (Bob excluded because 250 is not > 250)
             assert_eq!(result_batch.num_rows(), 2);
             assert_eq!(result_batch.num_columns(), 2);
-	    
+
             // Check column names
-        let schema = result_batch.schema();
-        assert_eq!(schema.field(0).name(), "name");
-        assert_eq!(schema.field(1).name(), "final_value");
-	
-        // Check data - should be ordered by final_value DESC
-        use arrow::array::Int64Array;
-        let names = get_string_array(result_batch, 0);
-        let final_values = result_batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-	
-        assert_eq!(names.value(0), "David"); // (300 + 50) * 2 = 700 (highest)
-        assert_eq!(final_values.value(0), 700);
-	
-        assert_eq!(names.value(1), "Eve"); // (250 + 50) * 2 = 600 (second)
-        assert_eq!(final_values.value(1), 600);
-	
-        // Bob would be (200 + 50) * 2 = 500, but excluded because 250 is not > 250
-	}
+            let schema = result_batch.schema();
+            assert_eq!(schema.field(0).name(), "name");
+            assert_eq!(schema.field(1).name(), "final_value");
+
+            // Check data - should be ordered by final_value DESC
+            use arrow::array::Int64Array;
+            let names = get_string_array(result_batch, 0);
+            let final_values = result_batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+
+            assert_eq!(names.value(0), "David"); // (300 + 50) * 2 = 700 (highest)
+            assert_eq!(final_values.value(0), 700);
+
+            assert_eq!(names.value(1), "Eve"); // (250 + 50) * 2 = 600 (second)
+            assert_eq!(final_values.value(1), 600);
+
+            // Bob would be (200 + 50) * 2 = 500, but excluded because 250 is not > 250
+        }
 
         // ## Observations from This Test
         //
@@ -2601,7 +2720,7 @@ query: ""
         // - Current approach: scan 5 rows → materialize 3 → scan 3 → return 2
         // - Optimized approach: scan 2 rows → return 2 (60% less I/O)
     }
-    
+
     /// Test SQL-derived factory with multiple file versions and wildcard patterns
     ///
     /// This test validates the functionality we implemented for the HydroVu dynamic configuration,
@@ -2619,7 +2738,9 @@ query: ""
     async fn test_sql_derived_factory_multi_version_wildcard_pattern() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
@@ -2664,9 +2785,15 @@ query: ""
                 .create_dir_path("/hydrovu/devices/station_a")
                 .await
                 .unwrap();
-            create_parquet_file(&fs, persistence, "/hydrovu/devices/station_a/SensorA_v1.series", parquet_buffer, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap()
+            create_parquet_file(
+                &fs,
+                persistence,
+                "/hydrovu/devices/station_a/SensorA_v1.series",
+                parquet_buffer,
+                EntryType::FileSeriesPhysical,
+            )
+            .await
+            .unwrap()
         };
 
         // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity
@@ -2706,7 +2833,10 @@ query: ""
             }
 
             // Write new version to same path - store as version 2 using same FileID
-            persistence.store_file_version(file_id_a, 2, parquet_buffer).await.unwrap();
+            persistence
+                .store_file_version(file_id_a, 2, parquet_buffer)
+                .await
+                .unwrap();
         }
 
         // Create File B: timestamps 1-6 with columns: timestamp, pressure
@@ -2749,9 +2879,15 @@ query: ""
                 .create_dir_path("/hydrovu/devices/station_b")
                 .await
                 .unwrap();
-            _ = create_parquet_file(&fs, persistence, "/hydrovu/devices/station_b/PressureB.series", parquet_buffer, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
+            _ = create_parquet_file(
+                &fs,
+                persistence,
+                "/hydrovu/devices/station_b/PressureB.series",
+                parquet_buffer,
+                EntryType::FileSeriesPhysical,
+            )
+            .await
+            .unwrap();
         }
 
         // Test SQL-derived factory with wildcard pattern (like our successful HydroVu config)
@@ -2893,7 +3029,7 @@ query: ""
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
 
-        use tlogfs::temporal_reduce::{
+        use crate::temporal_reduce::{
             AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
         };
         use arrow::array::{Float64Array, StringArray, TimestampSecondArray};
@@ -2906,14 +3042,15 @@ query: ""
 
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days
         {
-
             // Create schema for sensor data: timestamp, station_id, temperature, humidity
             let schema = Arc::new(Schema::new(vec![
                 Field::new(
@@ -2969,10 +3106,15 @@ query: ""
             _ = root.create_dir_path("/sensors").await.unwrap();
             _ = root.create_dir_path("/sensors/stations").await.unwrap();
 
-            _ = create_parquet_file(&fs, persistence, "/sensors/stations/all_data.series", parquet_buffer, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
-
+            _ = create_parquet_file(
+                &fs,
+                persistence,
+                "/sensors/stations/all_data.series",
+                parquet_buffer,
+                EntryType::FileSeriesPhysical,
+            )
+            .await
+            .unwrap();
         }
 
         // Step 2: Create SQL-derived node that filters for BDock station only
@@ -3059,20 +3201,19 @@ query: ""
                     if let Some(queryable_file) = file_guard.as_queryable() {
                         let file_id = daily_node.id;
                         let table_provider = queryable_file
-                            .as_table_provider(
-                                file_id,
-                                &provider_context,
-                            )
+                            .as_table_provider(file_id, &provider_context)
                             .await
                             .unwrap();
 
                         // Execute the temporal-reduce query using the proper public API
-                        _ = provider_context.datafusion_session
+                        _ = provider_context
+                            .datafusion_session
                             .register_table("temporal_reduce_table", table_provider)
                             .unwrap();
 
                         // Execute query to get results
-                        let dataframe = provider_context.datafusion_session
+                        let dataframe = provider_context
+                            .datafusion_session
                             .sql("SELECT * FROM temporal_reduce_table")
                             .await
                             .unwrap();
@@ -3190,7 +3331,10 @@ query: ""
                         .unwrap();
 
                     // Test that we can register it with DataFusion (simulating "cat" command behavior)
-                    _ = provider_context.datafusion_session.register_table("test_table", table_provider).unwrap();
+                    _ = provider_context
+                        .datafusion_session
+                        .register_table("test_table", table_provider)
+                        .unwrap();
 
                     log::debug!(
                         "✅ OpLogFile successfully detected as QueryableFile and registered with DataFusion"
@@ -3212,7 +3356,7 @@ query: ""
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
 
-        use tlogfs::temporal_reduce::{
+        use crate::temporal_reduce::{
             AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
         };
         use arrow::array::{Float64Array, TimestampSecondArray};
@@ -3222,14 +3366,15 @@ query: ""
 
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days using proper TinyFS Arrow integration
         {
-
             // Create 3 days of hourly data (72 records total) using Arrow test support macros
             let base_timestamp = 1640995200; // 2022-01-01 00:00:00 UTC
             let mut timestamps = Vec::new();
@@ -3294,7 +3439,6 @@ query: ""
             )
             .await
             .unwrap();
-
         }
 
         // Step 2: Test wildcard schema discovery within the same transaction as data access
@@ -3350,10 +3494,7 @@ query: ""
                     if let Some(queryable_file) = file_guard.as_queryable() {
                         log::debug!("   - File {} implements QueryableFile", path_str);
                         let file_id = node_path.node.id;
-                        log::debug!(
-                            "   - Using file_id: {}",
-                            file_id.node_id()
-                        );
+                        log::debug!("   - Using file_id: {}", file_id.node_id());
 
                         match queryable_file
                             .as_table_provider(file_id, &provider_context)
@@ -3428,7 +3569,11 @@ query: ""
                         log::debug!("   - Actual file type name: {}", type_name);
                     }
                 } else {
-                    log::debug!("   - Match {} is not a file: {:?}", i, node_path.node.node_type);
+                    log::debug!(
+                        "   - Match {} is not a file: {:?}",
+                        i,
+                        node_path.node.node_type
+                    );
                 }
             }
 
@@ -3458,20 +3603,19 @@ query: ""
                     if let Some(queryable_file) = file_guard.as_queryable() {
                         let file_id = daily_node.id;
                         let table_provider = queryable_file
-                            .as_table_provider(
-                                file_id,
-                                &provider_context,
-                            )
+                            .as_table_provider(file_id, &provider_context)
                             .await
                             .unwrap();
 
                         // Execute the temporal-reduce query using the proper public API
-                        _ = provider_context.datafusion_session
+                        _ = provider_context
+                            .datafusion_session
                             .register_table("wildcard_temporal_table", table_provider)
                             .unwrap();
 
                         // Execute query to get results
-                        let dataframe = provider_context.datafusion_session
+                        let dataframe = provider_context
+                            .datafusion_session
                             .sql("SELECT * FROM wildcard_temporal_table")
                             .await
                             .unwrap();
@@ -3545,14 +3689,15 @@ query: ""
     async fn test_pattern_matching_finds_physical_and_dynamic_types() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Create two files with the same schema but different EntryTypes
         {
-
             _ = root.create_dir_path("/test").await.unwrap();
 
             use arrow::array::{Int32Array, TimestampMillisecondArray};
@@ -3588,10 +3733,15 @@ query: ""
                 _ = writer.close().unwrap();
             }
 
-            _ = create_parquet_file(&fs, persistence, "/test/physical.series", parquet_buffer, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
-
+            _ = create_parquet_file(
+                &fs,
+                persistence,
+                "/test/physical.series",
+                parquet_buffer,
+                EntryType::FileSeriesPhysical,
+            )
+            .await
+            .unwrap();
         }
 
         {
@@ -3629,9 +3779,15 @@ query: ""
                 _ = writer.close().unwrap();
             }
 
-            _ = create_parquet_file(&fs, persistence, "/test/physical2.series", parquet_buffer, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
+            _ = create_parquet_file(
+                &fs,
+                persistence,
+                "/test/physical2.series",
+                parquet_buffer,
+                EntryType::FileSeriesPhysical,
+            )
+            .await
+            .unwrap();
         }
 
         // Test: SqlDerivedFile should find multiple Physical files with pattern matching
@@ -3670,7 +3826,9 @@ query: ""
     async fn test_table_names_are_lowercase() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
@@ -3678,41 +3836,47 @@ query: ""
         // Create a file with uppercase in the path
         _ = root.create_dir_path("/Sensors").await.unwrap();
 
-            use arrow::array::{Int32Array, TimestampMillisecondArray};
-            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
+        use arrow::array::{Int32Array, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::io::Cursor;
 
-            let schema = Arc::new(Schema::new(vec![
-                Field::new(
-                    "timestamp",
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new("Temperature", DataType::Int32, false),
-            ]));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("Temperature", DataType::Int32, false),
+        ]));
 
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
-                    Arc::new(Int32Array::from(vec![20, 25, 30])),
-                ],
-            )
-            .unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
+                Arc::new(Int32Array::from(vec![20, 25, 30])),
+            ],
+        )
+        .unwrap();
 
-            let mut parquet_buffer = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer);
-                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-                writer.write(&batch).unwrap();
-                _ = writer.close().unwrap();
-            }
+        let mut parquet_buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer);
+            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+            writer.write(&batch).unwrap();
+            _ = writer.close().unwrap();
+        }
 
-            _ = create_parquet_file(&fs, persistence, "/Sensors/Temperature.series", parquet_buffer, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/Sensors/Temperature.series",
+            parquet_buffer,
+            EntryType::FileSeriesPhysical,
+        )
+        .await
+        .unwrap();
 
         // Test: SqlDerivedFile with mixed-case pattern name should work
         let context = test_context(&provider_context, FileID::root());
@@ -3750,26 +3914,32 @@ query: ""
     fn test_ast_table_replacement_preserves_column_names() {
         // Test case: Column name contains table name - should NOT be replaced
         let original_sql = r#"SELECT Silver."Silver.AT500_Surface.DO.mg/L" FROM Silver"#;
-        
+
         let mut table_mappings = HashMap::new();
         _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_12345".to_string());
-        
+
         let options = SqlTransformOptions {
             table_mappings: Some(table_mappings),
             source_replacement: None,
         };
-        
+
         let transformed = apply_table_transformations_test(original_sql, &options);
-        
+
         // Table name should be replaced in FROM clause
-        assert!(transformed.contains("sql_derived_silver_12345"), 
-            "Table reference should be replaced, got: {}", transformed);
-        
+        assert!(
+            transformed.contains("sql_derived_silver_12345"),
+            "Table reference should be replaced, got: {}",
+            transformed
+        );
+
         // Column name should NOT be replaced - should still contain "Silver."
-        assert!(transformed.contains(r#""Silver.AT500_Surface.DO.mg/L""#), 
-            "Column name should be preserved, got: {}", transformed);
+        assert!(
+            transformed.contains(r#""Silver.AT500_Surface.DO.mg/L""#),
+            "Column name should be preserved, got: {}",
+            transformed
+        );
     }
-    
+
     /// Test AST transformation handles multiple table references correctly
     #[test]
     fn test_ast_table_replacement_multiple_tables() {
@@ -3780,31 +3950,43 @@ query: ""
             FROM Silver
             JOIN BDock ON Silver.timestamp = BDock.timestamp
         "#;
-        
+
         let mut table_mappings = HashMap::new();
         _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_abc".to_string());
         _ = table_mappings.insert("BDock".to_string(), "sql_derived_bdock_def".to_string());
-        
+
         let options = SqlTransformOptions {
             table_mappings: Some(table_mappings),
             source_replacement: None,
         };
-        
+
         let transformed = apply_table_transformations_test(original_sql, &options);
-        
+
         // Both table references should be replaced
-        assert!(transformed.contains("sql_derived_silver_abc"), 
-            "Silver table should be replaced, got: {}", transformed);
-        assert!(transformed.contains("sql_derived_bdock_def"), 
-            "BDock table should be replaced, got: {}", transformed);
-        
+        assert!(
+            transformed.contains("sql_derived_silver_abc"),
+            "Silver table should be replaced, got: {}",
+            transformed
+        );
+        assert!(
+            transformed.contains("sql_derived_bdock_def"),
+            "BDock table should be replaced, got: {}",
+            transformed
+        );
+
         // Column names should be preserved with original scope prefixes
-        assert!(transformed.contains(r#""Silver.WaterTemp""#), 
-            "Silver column name should be preserved, got: {}", transformed);
-        assert!(transformed.contains(r#""BDock.WaterTemp""#), 
-            "BDock column name should be preserved, got: {}", transformed);
+        assert!(
+            transformed.contains(r#""Silver.WaterTemp""#),
+            "Silver column name should be preserved, got: {}",
+            transformed
+        );
+        assert!(
+            transformed.contains(r#""BDock.WaterTemp""#),
+            "BDock column name should be preserved, got: {}",
+            transformed
+        );
     }
-    
+
     /// Test AST transformation handles subqueries
     #[test]
     fn test_ast_table_replacement_subquery() {
@@ -3813,86 +3995,107 @@ query: ""
                 SELECT Silver."Silver.Value" FROM Silver
             ) AS subquery
         "#;
-        
+
         let mut table_mappings = HashMap::new();
         _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_xyz".to_string());
-        
+
         let options = SqlTransformOptions {
             table_mappings: Some(table_mappings),
             source_replacement: None,
         };
-        
+
         let transformed = apply_table_transformations_test(original_sql, &options);
-        
+
         // Table in subquery should be replaced
-        assert!(transformed.contains("sql_derived_silver_xyz"), 
-            "Table in subquery should be replaced, got: {}", transformed);
-        
+        assert!(
+            transformed.contains("sql_derived_silver_xyz"),
+            "Table in subquery should be replaced, got: {}",
+            transformed
+        );
+
         // Column name in subquery should be preserved
-        assert!(transformed.contains(r#""Silver.Value""#), 
-            "Column name in subquery should be preserved, got: {}", transformed);
+        assert!(
+            transformed.contains(r#""Silver.Value""#),
+            "Column name in subquery should be preserved, got: {}",
+            transformed
+        );
     }
-    
+
     /// Test that non-matching table names are not replaced
     #[test]
     fn test_ast_table_replacement_no_match() {
         let original_sql = r#"SELECT timestamp, value FROM OtherTable"#;
-        
+
         let mut table_mappings = HashMap::new();
         _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_123".to_string());
-        
+
         let options = SqlTransformOptions {
             table_mappings: Some(table_mappings),
             source_replacement: None,
         };
-        
+
         let transformed = apply_table_transformations_test(original_sql, &options);
-        
+
         // Original table name should remain unchanged
-        assert!(transformed.contains("OtherTable"), 
-            "Non-matching table should not be replaced, got: {}", transformed);
-        
+        assert!(
+            transformed.contains("OtherTable"),
+            "Non-matching table should not be replaced, got: {}",
+            transformed
+        );
+
         // Should NOT contain the replacement
-        assert!(!transformed.contains("sql_derived_silver_123"), 
-            "Replacement should not appear for non-matching table, got: {}", transformed);
+        assert!(
+            !transformed.contains("sql_derived_silver_123"),
+            "Replacement should not appear for non-matching table, got: {}",
+            transformed
+        );
     }
-    
+
     /// Test source replacement pattern
     #[test]
     fn test_ast_source_replacement() {
         let original_sql = r#"SELECT timestamp, value FROM source WHERE value > 10"#;
-        
+
         let options = SqlTransformOptions {
             table_mappings: None,
             source_replacement: Some("my_actual_table".to_string()),
         };
-        
+
         let transformed = apply_table_transformations_test(original_sql, &options);
-        
+
         // 'source' should be replaced with actual table name
-        assert!(transformed.contains("my_actual_table"), 
-            "Source should be replaced, got: {}", transformed);
-        assert!(!transformed.contains(" source "), 
-            "Original 'source' should not remain, got: {}", transformed);
+        assert!(
+            transformed.contains("my_actual_table"),
+            "Source should be replaced, got: {}",
+            transformed
+        );
+        assert!(
+            !transformed.contains(" source "),
+            "Original 'source' should not remain, got: {}",
+            transformed
+        );
     }
-    
+
     /// Test that no transformations returns original SQL unchanged
     #[test]
     fn test_ast_no_transformations() {
         let original_sql = r#"SELECT * FROM MyTable"#;
-        
+
         let options = SqlTransformOptions {
             table_mappings: None,
             source_replacement: None,
         };
-        
+
         let transformed = apply_table_transformations_test(original_sql, &options);
-        
+
         // Should return original SQL if no transformations
-        assert_eq!(transformed.trim(), original_sql.trim(), 
-            "SQL without transformations should be unchanged");
+        assert_eq!(
+            transformed.trim(),
+            original_sql.trim(),
+            "SQL without transformations should be unchanged"
+        );
     }
-    
+
     /// Test complex SQL with CTEs and window functions preserves structure
     #[test]
     fn test_ast_complex_sql_structure() {
@@ -3905,32 +4108,44 @@ query: ""
             )
             SELECT * FROM ranked WHERE rn <= 10
         "#;
-        
+
         let mut table_mappings = HashMap::new();
         _ = table_mappings.insert("Silver".to_string(), "sql_derived_silver_999".to_string());
-        
+
         let options = SqlTransformOptions {
             table_mappings: Some(table_mappings),
             source_replacement: None,
         };
-        
+
         let transformed = apply_table_transformations_test(original_sql, &options);
-        
+
         // Table name should be replaced
-        assert!(transformed.contains("sql_derived_silver_999"), 
-            "Table should be replaced in CTE, got: {}", transformed);
-        
+        assert!(
+            transformed.contains("sql_derived_silver_999"),
+            "Table should be replaced in CTE, got: {}",
+            transformed
+        );
+
         // Column name with scope prefix should be preserved
-        assert!(transformed.contains(r#""Silver.Value""#), 
-            "Column name should be preserved in CTE, got: {}", transformed);
-        
+        assert!(
+            transformed.contains(r#""Silver.Value""#),
+            "Column name should be preserved in CTE, got: {}",
+            transformed
+        );
+
         // CTE structure should be preserved
-        assert!(transformed.to_uppercase().contains("WITH"), 
-            "CTE keyword should be preserved, got: {}", transformed);
-        assert!(transformed.to_uppercase().contains("ROW_NUMBER"), 
-            "Window function should be preserved, got: {}", transformed);
+        assert!(
+            transformed.to_uppercase().contains("WITH"),
+            "CTE keyword should be preserved, got: {}",
+            transformed
+        );
+        assert!(
+            transformed.to_uppercase().contains("ROW_NUMBER"),
+            "Window function should be preserved, got: {}",
+            transformed
+        );
     }
-    
+
     /// Helper function for testing apply_table_transformations without needing a full SqlDerivedFile
     fn apply_table_transformations_test(
         original_sql: &str,
@@ -3943,25 +4158,25 @@ query: ""
 
         use datafusion::sql::parser::DFParser;
         use datafusion::sql::sqlparser::dialect::GenericDialect;
-        
+
         let dialect = GenericDialect {};
-        
+
         let statements = match DFParser::parse_sql_with_dialect(original_sql, &dialect) {
             Ok(stmts) => stmts,
             Err(e) => {
                 panic!("Failed to parse SQL: {}", e);
             }
         };
-        
+
         if statements.is_empty() {
             return original_sql.to_string();
         }
-        
+
         let mut statement = statements[0].clone();
-        
-        use datafusion::sql::sqlparser::ast::{Query, SetExpr, Select, TableFactor};
+
         use datafusion::sql::parser::Statement as DFStatement;
-        
+        use datafusion::sql::sqlparser::ast::{Query, Select, SetExpr, TableFactor};
+
         fn replace_table_names_in_statement(
             statement: &mut DFStatement,
             table_mappings: Option<&HashMap<String, String>>,
@@ -3969,14 +4184,15 @@ query: ""
         ) {
             match statement {
                 DFStatement::Statement(boxed) => {
-                    if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut() {
+                    if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut()
+                    {
                         replace_table_names_in_query(query, table_mappings, source_replacement);
                     }
                 }
                 _ => {}
             }
         }
-        
+
         fn replace_table_names_in_query(
             query: &mut Box<Query>,
             table_mappings: Option<&HashMap<String, String>>,
@@ -3985,14 +4201,18 @@ query: ""
             // Handle CTEs (WITH clauses)
             if let Some(ref mut with) = query.with {
                 for cte_table in &mut with.cte_tables {
-                    replace_table_names_in_query(&mut cte_table.query, table_mappings, source_replacement);
+                    replace_table_names_in_query(
+                        &mut cte_table.query,
+                        table_mappings,
+                        source_replacement,
+                    );
                 }
             }
-            
+
             // Handle main query body
             replace_table_names_in_set_expr(&mut query.body, table_mappings, source_replacement);
         }
-        
+
         fn replace_table_names_in_set_expr(
             set_expr: &mut SetExpr,
             table_mappings: Option<&HashMap<String, String>>,
@@ -4013,21 +4233,25 @@ query: ""
                 _ => {}
             }
         }
-        
+
         fn replace_table_names_in_select(
             select: &mut Box<Select>,
             table_mappings: Option<&HashMap<String, String>>,
             source_replacement: Option<&str>,
         ) {
             for table_with_joins in &mut select.from {
-                replace_table_name(&mut table_with_joins.relation, table_mappings, source_replacement);
-                
+                replace_table_name(
+                    &mut table_with_joins.relation,
+                    table_mappings,
+                    source_replacement,
+                );
+
                 for join in &mut table_with_joins.joins {
                     replace_table_name(&mut join.relation, table_mappings, source_replacement);
                 }
             }
         }
-        
+
         fn replace_table_name(
             table_factor: &mut TableFactor,
             table_mappings: Option<&HashMap<String, String>>,
@@ -4035,11 +4259,13 @@ query: ""
         ) {
             if let TableFactor::Table { name, alias, .. } = table_factor {
                 let table_name = name.to_string();
-                
+
                 if let Some(mappings) = table_mappings {
                     if let Some(replacement) = mappings.get(&table_name) {
-                        use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart, TableAlias};
-                        
+                        use datafusion::sql::sqlparser::ast::{
+                            Ident, ObjectName, ObjectNamePart, TableAlias,
+                        };
+
                         // If no existing alias, add one using the original table name
                         if alias.is_none() {
                             *alias = Some(TableAlias {
@@ -4047,22 +4273,29 @@ query: ""
                                 columns: vec![],
                             });
                         }
-                        
-                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement.clone()))]);
+
+                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                            replacement.clone(),
+                        ))]);
                     }
                 } else if let Some(replacement) = source_replacement {
                     if table_name == "source" {
                         use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
-                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
+                        *name =
+                            ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
                     }
                 }
             } else if let TableFactor::Derived { subquery, .. } = table_factor {
                 replace_table_names_in_query(subquery, table_mappings, source_replacement);
             }
         }
-        
-        replace_table_names_in_statement(&mut statement, options.table_mappings.as_ref(), options.source_replacement.as_deref());
-        
+
+        replace_table_names_in_statement(
+            &mut statement,
+            options.table_mappings.as_ref(),
+            options.source_replacement.as_deref(),
+        );
+
         statement.to_string()
     }
 }

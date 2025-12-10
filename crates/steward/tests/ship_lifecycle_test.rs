@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 use anyhow::Result;
 use log::debug;
 use steward::{PondUserMetadata, Ship};

@@ -102,15 +102,15 @@ impl TableProvider for NullPaddingTableProvider {
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
-        ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
         use datafusion::common::tree_node::TreeNode;
-        
+
         let inner_schema = self.inner.schema();
-        
+
         // Separate filters into those that reference inner columns vs padded columns
         let mut inner_filters = Vec::new();
         let mut results = Vec::new();
-        
+
         for filter in filters {
             let mut references_padded = false;
             let _ = filter.apply(|expr| {
@@ -122,7 +122,7 @@ impl TableProvider for NullPaddingTableProvider {
                 }
                 Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
             });
-            
+
             if references_padded {
                 // Filter references padded columns - can't push to inner
                 results.push(TableProviderFilterPushDown::Unsupported);
@@ -131,11 +131,11 @@ impl TableProvider for NullPaddingTableProvider {
                 inner_filters.push(*filter);
             }
         }
-        
+
         // Ask inner provider about filters it can handle
         if !inner_filters.is_empty() {
             let inner_support = self.inner.supports_filters_pushdown(&inner_filters)?;
-            
+
             // Merge results: padded column filters are Unsupported, others use inner's answer
             let mut inner_idx = 0;
             for i in 0..filters.len() {
@@ -146,7 +146,7 @@ impl TableProvider for NullPaddingTableProvider {
                 }
             }
         }
-        
+
         Ok(results)
     }
 
@@ -158,7 +158,7 @@ impl TableProvider for NullPaddingTableProvider {
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         use datafusion::common::tree_node::TreeNode;
-        
+
         // Filter out any predicates that reference padded columns
         // Only push down filters that reference columns in the inner schema
         // Note: DataFusion's optimizer already handles filter simplification at the query planning level,
@@ -181,7 +181,7 @@ impl TableProvider for NullPaddingTableProvider {
             })
             .cloned()
             .collect();
-        
+
         // Push down projection to inner table for columns that exist there.
         // Map from extended schema indices to inner schema indices.
         let num_inner_fields = inner_schema.fields().len();
@@ -918,10 +918,10 @@ mod tests {
         // Create a temporary directory and parquet file
         let temp_dir = TempDir::new().unwrap();
         let parquet_path = temp_dir.path().join("test.parquet");
-        
+
         // Create test data
         let batch = record_batch!(("value", Int32, [1, 2, 3, 4, 5]))?;
-        
+
         // Write to parquet file
         let file = File::create(&parquet_path).unwrap();
         let props = WriterProperties::builder().build();
@@ -934,9 +934,13 @@ mod tests {
         cfg.options_mut().execution.parquet.pushdown_filters = true;
         cfg.options_mut().execution.parquet.reorder_filters = true;
         let ctx = SessionContext::new_with_config(cfg);
-        ctx.register_parquet("inner_table", parquet_path.to_str().unwrap(), Default::default())
-            .await?;
-        
+        ctx.register_parquet(
+            "inner_table",
+            parquet_path.to_str().unwrap(),
+            Default::default(),
+        )
+        .await?;
+
         // Get the parquet table provider
         let parquet_provider = ctx.table_provider("inner_table").await?;
 
@@ -996,10 +1000,10 @@ mod tests {
         // Create a temporary directory and parquet file
         let temp_dir = TempDir::new().unwrap();
         let parquet_path = temp_dir.path().join("test.parquet");
-        
+
         // Create test data
         let batch = record_batch!(("value", Int32, [1, 2, 3, 4, 5]))?;
-        
+
         // Write to parquet file
         let file = File::create(&parquet_path).unwrap();
         let props = WriterProperties::builder().build();
@@ -1012,9 +1016,13 @@ mod tests {
         cfg.options_mut().execution.parquet.pushdown_filters = true;
         cfg.options_mut().execution.parquet.reorder_filters = true;
         let ctx = SessionContext::new_with_config(cfg);
-        ctx.register_parquet("inner_table", parquet_path.to_str().unwrap(), Default::default())
-            .await?;
-        
+        ctx.register_parquet(
+            "inner_table",
+            parquet_path.to_str().unwrap(),
+            Default::default(),
+        )
+        .await?;
+
         // Get the parquet table provider
         let parquet_provider = ctx.table_provider("inner_table").await?;
 
@@ -1029,16 +1037,26 @@ mod tests {
         // DataFusion's ExprSimplifier + our filter classification handles this:
         // - "extra IS NOT NULL" on always-NULL column → 0 rows
         // - "extra IS NULL" on always-NULL column → all rows
-        
-        let df = ctx.sql("SELECT value FROM test WHERE extra IS NOT NULL").await?;
-        let results = df.collect().await?;
-        let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 0, "IS NOT NULL on padded column should return no rows");
 
-        let df = ctx.sql("SELECT value FROM test WHERE extra IS NULL").await?;
+        let df = ctx
+            .sql("SELECT value FROM test WHERE extra IS NOT NULL")
+            .await?;
         let results = df.collect().await?;
         let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 5, "IS NULL on padded column should return all rows");
+        assert_eq!(
+            total_rows, 0,
+            "IS NOT NULL on padded column should return no rows"
+        );
+
+        let df = ctx
+            .sql("SELECT value FROM test WHERE extra IS NULL")
+            .await?;
+        let results = df.collect().await?;
+        let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            total_rows, 5,
+            "IS NULL on padded column should return all rows"
+        );
 
         Ok(())
     }

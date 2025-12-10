@@ -70,7 +70,7 @@ async fn test_create_commit_reopen_read_root() {
     let mut persistence = OpLogPersistence::create_test(&store_path)
         .await
         .expect("Failed to create persistence layer");
-    
+
     debug!("OpLogPersistence created successfully");
 
     // Step 2: Begin a transaction and verify we can access root
@@ -79,7 +79,7 @@ async fn test_create_commit_reopen_read_root() {
         .begin_test()
         .await
         .expect("Failed to begin transaction");
-    
+
     let root1 = tx1.root().await.expect("Failed to get root directory");
     debug!("✅ Got root directory in first transaction");
 
@@ -93,7 +93,7 @@ async fn test_create_commit_reopen_read_root() {
     }
     debug!("Root directory has {} entries", entries1.len());
     assert_eq!(entries1.len(), 0, "Root should be empty initially");
-    
+
     // Step 3: Commit the transaction
     debug!("Step 3: Committing first transaction");
     tx1.commit_test()
@@ -107,10 +107,13 @@ async fn test_create_commit_reopen_read_root() {
         .begin_test()
         .await
         .expect("Failed to begin second transaction");
-    
-    let root2 = tx2.root().await.expect("Failed to get root in second transaction");
+
+    let root2 = tx2
+        .root()
+        .await
+        .expect("Failed to get root in second transaction");
     debug!("✅ Got root directory in second transaction");
-    
+
     // List the root directory again (should still be empty)
     let mut entries_stream2 = root2.entries().await.expect("Failed to get entries stream");
     let mut entries2 = Vec::new();
@@ -118,9 +121,12 @@ async fn test_create_commit_reopen_read_root() {
         let entry = entry_result.expect("Failed to read entry");
         entries2.push(entry);
     }
-    debug!("Root directory has {} entries in second transaction", entries2.len());
+    debug!(
+        "Root directory has {} entries in second transaction",
+        entries2.len()
+    );
     assert_eq!(entries2.len(), 0, "Root should still be empty");
-    
+
     // No need to commit read transaction
     debug!("✅ Test passed - can create, commit, and read empty root");
 }
@@ -139,16 +145,19 @@ async fn test_create_file_commit_reopen_read() {
     // Step 2: Create a simple file
     debug!("Step 2: Creating a file");
     {
-        let tx = persistence.begin_test().await.expect("Failed to begin transaction");
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
         let root = tx.root().await.expect("Failed to get root");
-        
+
         // Write a simple text file
         root.write_file_path_from_slice("test.txt", b"Hello, World!")
             .await
             .expect("Failed to write file");
-        
+
         debug!("✅ File created");
-        
+
         tx.commit_test().await.expect("Failed to commit");
         debug!("✅ Transaction committed");
     }
@@ -156,19 +165,23 @@ async fn test_create_file_commit_reopen_read() {
     // Step 3: Read the file back in a new transaction
     debug!("Step 3: Reading file in new transaction");
     {
-        let tx = persistence.begin_test().await.expect("Failed to begin second transaction");
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin second transaction");
         let root = tx.root().await.expect("Failed to get root");
-        
+
         // Read the file
-        let content = root.read_file_path_to_vec("test.txt")
+        let content = root
+            .read_file_path_to_vec("test.txt")
             .await
             .expect("Failed to read file");
-        
+
         let content_str = String::from_utf8(content).expect("Invalid UTF-8");
         debug!("✅ Read file content: '{}'", content_str);
-        
+
         assert_eq!(content_str, "Hello, World!", "File content should match");
-        
+
         debug!("✅ Test passed - can create file, commit, and read back");
     }
 }
@@ -187,25 +200,32 @@ async fn test_create_series_commit_reopen_read_simple() {
     // Step 2: Create a simple series file
     debug!("Step 2: Creating a file:series");
     {
-        let tx = persistence.begin_test().await.expect("Failed to begin transaction");
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
         let root = tx.root().await.expect("Failed to get root");
-        
+
         // Create test data as a RecordBatch
         let batch = record_batch!(
             ("timestamp", Int64, [1704067200000_i64]),
             ("value", Float64, [42.0_f64])
-        ).expect("Failed to create batch");
-        
+        )
+        .expect("Failed to create batch");
+
         debug!("Created RecordBatch with {} rows", batch.num_rows());
-        
+
         // Write the series
         let (min_time, max_time) = root
             .create_series_from_batch("test.series", &batch, Some("timestamp"))
             .await
             .expect("Failed to create series");
-        
-        debug!("✅ Series created with time range: {} to {}", min_time, max_time);
-        
+
+        debug!(
+            "✅ Series created with time range: {} to {}",
+            min_time, max_time
+        );
+
         tx.commit_test().await.expect("Failed to commit");
         debug!("✅ Transaction committed");
     }
@@ -213,25 +233,32 @@ async fn test_create_series_commit_reopen_read_simple() {
     // Step 3: Read the series back in a new transaction
     debug!("Step 3: Reading series in new transaction");
     {
-        let tx = persistence.begin_test().await.expect("Failed to begin second transaction");
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin second transaction");
         let root = tx.root().await.expect("Failed to get root");
-        
+
         // Check if file exists
         let exists = root.exists(std::path::Path::new("test.series")).await;
         debug!("File exists: {}", exists);
         assert!(exists, "Series file should exist after commit");
-        
+
         // Read the series back
-        let read_batch = root.read_table_as_batch("test.series")
+        let read_batch = root
+            .read_table_as_batch("test.series")
             .await
             .expect("Failed to read series");
-        
-        debug!("✅ Read RecordBatch with {} rows, {} columns", 
-               read_batch.num_rows(), read_batch.num_columns());
-        
+
+        debug!(
+            "✅ Read RecordBatch with {} rows, {} columns",
+            read_batch.num_rows(),
+            read_batch.num_columns()
+        );
+
         assert_eq!(read_batch.num_rows(), 1, "Should have 1 row");
         assert_eq!(read_batch.num_columns(), 2, "Should have 2 columns");
-        
+
         debug!("✅ Test passed - can create series, commit, and read back");
     }
 }
@@ -249,24 +276,32 @@ async fn test_create_series_in_subdir() {
     // Create a series in a subdirectory
     debug!("Creating series in subdirectory");
     {
-        let tx = persistence.begin_test().await.expect("Failed to begin transaction");
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
         let root = tx.root().await.expect("Failed to get root");
-        
+
         // Create subdirectory
         debug!("Creating test/ subdirectory");
-        let _test_dir = root.create_dir_path("test").await.expect("Failed to create directory");
-        
+        let _test_dir = root
+            .create_dir_path("test")
+            .await
+            .expect("Failed to create directory");
+
         // Create series in subdirectory
         let batch = record_batch!(
             ("timestamp", Int64, [1704067200000_i64]),
             ("value", Float64, [42.0_f64])
-        ).expect("Failed to create batch");
-        
+        )
+        .expect("Failed to create batch");
+
         debug!("Writing series to test/data.series");
-        let _time_range = root.create_series_from_batch("test/data.series", &batch, Some("timestamp"))
+        let _time_range = root
+            .create_series_from_batch("test/data.series", &batch, Some("timestamp"))
             .await
             .expect("Failed to create series");
-        
+
         debug!("✅ Series created, committing...");
         tx.commit_test().await.expect("Failed to commit");
         debug!("✅ Committed");
@@ -275,21 +310,25 @@ async fn test_create_series_in_subdir() {
     // Read back in new transaction
     debug!("Reading back in new transaction");
     {
-        let tx = persistence.begin_test().await.expect("Failed to begin read transaction");
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin read transaction");
         let root = tx.root().await.expect("Failed to get root");
-        
+
         let exists = root.exists(std::path::Path::new("test/data.series")).await;
         debug!("File exists: {}", exists);
         assert!(exists, "File should exist");
-        
-        let read_batch = root.read_table_as_batch("test/data.series")
+
+        let read_batch = root
+            .read_table_as_batch("test/data.series")
             .await
             .expect("Failed to read series");
-        
+
         debug!("✅ Read {} rows", read_batch.num_rows());
         assert_eq!(read_batch.num_rows(), 1);
     }
-    
+
     debug!("✅ Test passed");
 }
 
@@ -1381,7 +1420,7 @@ async fn test_symlink_create_and_read() {
         .expect("Failed to create persistence layer");
 
     debug!("=== TX1: Create symlink and read in same transaction ===");
-    
+
     let tx1 = persistence
         .begin_test()
         .await
@@ -1409,13 +1448,15 @@ async fn test_symlink_create_and_read() {
         .read_file_path_to_vec("/link")
         .await
         .expect("Failed to read file through symlink in TX1");
-    
+
     assert_eq!(
-        content,
-        b"Hello, symlink!",
+        content, b"Hello, symlink!",
         "Should be able to read file through symlink in same transaction"
     );
-    debug!("✅ Read file content through symlink in TX1: {:?}", String::from_utf8_lossy(&content));
+    debug!(
+        "✅ Read file content through symlink in TX1: {:?}",
+        String::from_utf8_lossy(&content)
+    );
 
     // Commit TX1
     debug!("Committing TX1");
@@ -1423,10 +1464,7 @@ async fn test_symlink_create_and_read() {
 
     debug!("\n=== TX2: Read symlink in new transaction ===");
 
-    let tx2 = persistence
-        .begin_test()
-        .await
-        .expect("Failed to begin TX2");
+    let tx2 = persistence.begin_test().await.expect("Failed to begin TX2");
 
     let root2 = tx2.root().await.expect("Failed to get root in TX2");
 
@@ -1436,13 +1474,15 @@ async fn test_symlink_create_and_read() {
         .read_file_path_to_vec("/link")
         .await
         .expect("Failed to read file through symlink in TX2");
-    
+
     assert_eq!(
-        content2,
-        b"Hello, symlink!",
+        content2, b"Hello, symlink!",
         "Should be able to read file through symlink in new transaction"
     );
-    debug!("✅ Read file content through symlink in TX2: {:?}", String::from_utf8_lossy(&content2));
+    debug!(
+        "✅ Read file content through symlink in TX2: {:?}",
+        String::from_utf8_lossy(&content2)
+    );
 
     debug!("\n✅ TEST PASSED!");
     debug!("- Created symlink in TX1");
@@ -1463,7 +1503,7 @@ async fn test_create_dynamic_file_path() {
         .expect("Failed to create persistence layer");
 
     debug!("=== Testing dynamic file creation with path API ===");
-    
+
     let tx = persistence
         .begin_test()
         .await
@@ -1481,9 +1521,10 @@ async fn test_create_dynamic_file_path() {
     // Create a dynamic file with factory name and YAML config
     debug!("Creating dynamic file: /config/test.yaml");
     let test_file_config = tinyfs::testing::TestFileConfig::simple("SELECT 1");
-    let config_content = test_file_config.to_yaml_bytes()
+    let config_content = test_file_config
+        .to_yaml_bytes()
         .expect("Failed to serialize test file config");
-    
+
     let dynamic_node = root
         .create_dynamic_path(
             "/config/test.yaml",
@@ -1496,7 +1537,7 @@ async fn test_create_dynamic_file_path() {
 
     debug!("✅ Created dynamic file with factory: test-file");
     debug!("   Node ID: {:?}", dynamic_node.id());
-    
+
     // Verify EntryType is correctly embedded in the FileID
     let file_id = dynamic_node.id();
     let entry_type = file_id.entry_type();
@@ -1512,7 +1553,7 @@ async fn test_create_dynamic_file_path() {
         .read_file_path_to_vec("/config/test.yaml")
         .await
         .expect("Failed to read dynamic file");
-    
+
     // Content from test-file factory is the "content" field, not the YAML config
     assert_eq!(
         String::from_utf8_lossy(&read_content),
@@ -1527,10 +1568,7 @@ async fn test_create_dynamic_file_path() {
 
     // Read in new transaction
     debug!("Reading dynamic file in new transaction");
-    let tx2 = persistence
-        .begin_test()
-        .await
-        .expect("Failed to begin TX2");
+    let tx2 = persistence.begin_test().await.expect("Failed to begin TX2");
 
     let root2 = tx2.root().await.expect("Failed to get root in TX2");
 
@@ -1539,7 +1577,7 @@ async fn test_create_dynamic_file_path() {
         .get_node_path(std::path::Path::new("/config/test.yaml"))
         .await
         .expect("Failed to get node");
-    
+
     let file_id2 = node_path2.id();
     let entry_type2 = file_id2.entry_type();
     assert_eq!(
@@ -1547,13 +1585,16 @@ async fn test_create_dynamic_file_path() {
         tinyfs::EntryType::FileDataDynamic,
         "Persisted dynamic file should have valid FileDataDynamic EntryType"
     );
-    debug!("✅ Persisted FileID has correct EntryType: {:?}", entry_type2);
+    debug!(
+        "✅ Persisted FileID has correct EntryType: {:?}",
+        entry_type2
+    );
 
     let content2 = root2
         .read_file_path_to_vec("/config/test.yaml")
         .await
         .expect("Failed to read file in TX2");
-    
+
     // Content from test-file factory is the "content" field, not the YAML config
     assert_eq!(
         String::from_utf8_lossy(&content2),
@@ -1576,7 +1617,7 @@ async fn test_create_dynamic_directory_path() {
     // Use fixed path so we can inspect Delta files after test
     let store_path = "/tmp/tlogfs_dynamic_dir_test";
     let _ = std::fs::remove_dir_all(&store_path); // Clean up from previous run
-    
+
     println!("\n🔍 Test store path: {}", store_path);
 
     let mut persistence = OpLogPersistence::create_test(&store_path)
@@ -1584,7 +1625,7 @@ async fn test_create_dynamic_directory_path() {
         .expect("Failed to create persistence layer");
 
     debug!("=== Testing dynamic directory creation with path API ===");
-    
+
     let tx = persistence
         .begin_test()
         .await
@@ -1602,9 +1643,10 @@ async fn test_create_dynamic_directory_path() {
     // Create a dynamic directory with factory name and YAML config
     debug!("Creating dynamic directory: /factories/processors");
     let test_dir_config = tinyfs::testing::TestDirectoryConfig::simple("processors");
-    let config_content = test_dir_config.to_yaml_bytes()
+    let config_content = test_dir_config
+        .to_yaml_bytes()
         .expect("Failed to serialize test dir config");
-    
+
     let dynamic_dir = root
         .create_dynamic_path(
             "/factories/processors",
@@ -1632,7 +1674,7 @@ async fn test_create_dynamic_directory_path() {
     // Inspect what Delta Lake actually wrote
     println!("\n🔍 After TX1 commit - inspecting Delta Lake files:");
     println!("📁 Store path: {}", store_path);
-    
+
     // List _delta_log directory
     let delta_log_path = format!("{}/_delta_log", store_path);
     if let Ok(entries) = std::fs::read_dir(&delta_log_path) {
@@ -1641,7 +1683,7 @@ async fn test_create_dynamic_directory_path() {
             println!("  - {}", entry.file_name().to_string_lossy());
         }
     }
-    
+
     // List main directory for Parquet files
     if let Ok(entries) = std::fs::read_dir(&store_path) {
         println!("📂 Main directory:");
@@ -1652,15 +1694,12 @@ async fn test_create_dynamic_directory_path() {
             }
         }
     }
-    
+
     println!("\n💡 Use: ./catparquet.sh {} <file>.parquet", store_path);
     println!("💡 to inspect the actual data written\n");
 
     // Verify in new transaction
-    let tx2 = persistence
-        .begin_test()
-        .await
-        .expect("Failed to begin TX2");
+    let tx2 = persistence.begin_test().await.expect("Failed to begin TX2");
 
     let root2 = tx2.root().await.expect("Failed to get root in TX2");
 
@@ -1668,7 +1707,7 @@ async fn test_create_dynamic_directory_path() {
     let result = root2
         .get_node_path(std::path::Path::new("/factories/processors"))
         .await;
-    
+
     let _node_path = result.expect("Dynamic directory should persist");
     debug!("✅ Dynamic directory persisted correctly");
 
@@ -1679,7 +1718,7 @@ async fn test_create_dynamic_directory_path() {
 }
 
 /// Test that would have caught the EntryType bug in FileID::from_content
-/// 
+///
 /// This test creates dynamic nodes (both files and directories), commits them,
 /// then reads them back and verifies:
 /// 1. FileIDs are valid and parseable
@@ -1688,7 +1727,7 @@ async fn test_create_dynamic_directory_path() {
 #[tokio::test]
 async fn test_dynamic_node_entry_type_validation() {
     let store_path = test_dir();
-    
+
     println!("\n🔍 Testing dynamic node EntryType validation");
 
     let mut persistence = OpLogPersistence::create_test(&store_path)
@@ -1705,17 +1744,19 @@ async fn test_dynamic_node_entry_type_validation() {
 
     // Create parent directory
     println!("Creating parent directory: /dynamic-test");
-    let _ = root.create_dir_path("/dynamic-test")
+    let _ = root
+        .create_dir_path("/dynamic-test")
         .await
         .expect("Failed to create parent directory");
 
     // Create dynamic file using test-file factory
     println!("Creating dynamic file: /dynamic-test/test.yaml");
-    let test_file_config = tinyfs::testing::TestFileConfig::simple("test content from dynamic file");
+    let test_file_config =
+        tinyfs::testing::TestFileConfig::simple("test content from dynamic file");
     let file_config_bytes = test_file_config
         .to_yaml_bytes()
         .expect("Failed to serialize test file config");
-    
+
     let dynamic_file = root
         .create_dynamic_path(
             "/dynamic-test/test.yaml",
@@ -1728,7 +1769,7 @@ async fn test_dynamic_node_entry_type_validation() {
 
     let file_id = dynamic_file.id();
     println!("✅ Created dynamic file with ID: {:?}", file_id);
-    
+
     // Verify EntryType is valid immediately after creation
     let file_entry_type = file_id.entry_type();
     println!("  EntryType from FileID: {:?}", file_entry_type);
@@ -1744,7 +1785,7 @@ async fn test_dynamic_node_entry_type_validation() {
     let dir_config_bytes = test_dir_config
         .to_yaml_bytes()
         .expect("Failed to serialize test dir config");
-    
+
     let dynamic_dir = root
         .create_dynamic_path(
             "/dynamic-test/subdir",
@@ -1757,7 +1798,7 @@ async fn test_dynamic_node_entry_type_validation() {
 
     let dir_id = dynamic_dir.id();
     println!("✅ Created dynamic directory with ID: {:?}", dir_id);
-    
+
     // Verify EntryType is valid immediately after creation
     let dir_entry_type = dir_id.entry_type();
     println!("  EntryType from FileID: {:?}", dir_entry_type);
@@ -1791,10 +1832,13 @@ async fn test_dynamic_node_entry_type_validation() {
 
     let read_file_id = file_node.id();
     println!("✅ Read back dynamic file with ID: {:?}", read_file_id);
-    
+
     // This is the critical test: can we parse the EntryType from the persisted FileID?
     let read_file_entry_type = read_file_id.entry_type();
-    println!("  EntryType from persisted FileID: {:?}", read_file_entry_type);
+    println!(
+        "  EntryType from persisted FileID: {:?}",
+        read_file_entry_type
+    );
     assert_eq!(
         read_file_entry_type,
         tinyfs::EntryType::FileDataDynamic,
@@ -1809,8 +1853,7 @@ async fn test_dynamic_node_entry_type_validation() {
     let content_str = String::from_utf8_lossy(&file_content);
     println!("  File content: {:?}", content_str);
     assert_eq!(
-        content_str,
-        "test content from dynamic file",
+        content_str, "test content from dynamic file",
         "Dynamic file content should match"
     );
 
@@ -1823,10 +1866,13 @@ async fn test_dynamic_node_entry_type_validation() {
 
     let read_dir_id = dir_node.id();
     println!("✅ Read back dynamic directory with ID: {:?}", read_dir_id);
-    
+
     // This is the critical test: can we parse the EntryType from the persisted FileID?
     let read_dir_entry_type = read_dir_id.entry_type();
-    println!("  EntryType from persisted FileID: {:?}", read_dir_entry_type);
+    println!(
+        "  EntryType from persisted FileID: {:?}",
+        read_dir_entry_type
+    );
     assert_eq!(
         read_dir_entry_type,
         tinyfs::EntryType::DirectoryDynamic,
@@ -1839,7 +1885,11 @@ async fn test_dynamic_node_entry_type_validation() {
         .into_dir()
         .await
         .expect("Node should be a directory");
-    let mut entries_stream = dir_node_handle.handle.entries().await.expect("Failed to get entries");
+    let mut entries_stream = dir_node_handle
+        .handle
+        .entries()
+        .await
+        .expect("Failed to get entries");
     let mut entry_count = 0;
     while let Some(entry_result) = entries_stream.next().await {
         let _entry = entry_result.expect("Failed to read entry");

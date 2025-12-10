@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 pub mod arrow;
 pub mod async_helpers;
 pub mod caching_persistence;
@@ -26,7 +24,7 @@ pub use context::{FactoryContext, PondMetadata, ProviderContext};
 pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
 pub use file::{AsyncReadSeek, File, Handle as FileHandle, QueryableFile};
 pub use fs::FS;
-pub use node::{FileID, Node, NodeID, PartID, NodePath, NodeType};
+pub use node::{FileID, Node, NodeID, NodePath, NodeType, PartID};
 pub use wd::{CopyDestination, Lookup, Visitor, WD};
 
 // Buffer utilities for tests and special cases
@@ -46,4 +44,3 @@ mod tests;
 
 #[cfg(test)]
 mod metadata_impl_tests;
-

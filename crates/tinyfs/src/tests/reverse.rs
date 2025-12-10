@@ -4,11 +4,10 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-
 use super::super::memory::new_fs;
-use crate::dir::DirectoryEntry;
 use crate::async_helpers::convenience;
 use crate::dir::Directory;
+use crate::dir::DirectoryEntry;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
 use crate::fs::FS;
@@ -65,7 +64,10 @@ impl Directory for ReverseDirectory {
         use futures::StreamExt;
         while let Some(result) = entry_stream.next().await {
             let dir_entry = result?;
-            let np = dir.get(&dir_entry.name).await?.ok_or_else(|| error::Error::NotFound(dir_entry.name.into()))?;
+            let np = dir
+                .get(&dir_entry.name)
+                .await?
+                .ok_or_else(|| error::Error::NotFound(dir_entry.name.into()))?;
             sub.push(np);
         }
 

@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use common::ShipContext;

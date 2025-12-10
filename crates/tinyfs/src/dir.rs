@@ -4,10 +4,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::AsyncWrite;
 
+use crate::EntryType;
 use crate::error::*;
 use crate::metadata::Metadata;
 use crate::node::*;
-use crate::EntryType;
 use async_trait::async_trait;
 use futures::stream::Stream;
 
@@ -53,9 +53,7 @@ pub trait Directory: Metadata + Send + Sync {
     /// Returns a stream of directory entries (lightweight metadata) without loading full nodes.
     /// Callers should use batch loading to load multiple nodes efficiently.
     /// Returns DirectoryEntry which contains the name, so no tuple needed.
-    async fn entries(
-        &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>>;
+    async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>>;
 }
 
 /// A handle for a refcounted directory.

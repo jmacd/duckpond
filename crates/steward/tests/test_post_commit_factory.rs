@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 use anyhow::Result;
 use log::debug;
 use steward::{PondUserMetadata, Ship};
@@ -57,7 +55,12 @@ repeat_count: 3
     // Initialize the factory
     let provider_context1 = state1.as_provider_context();
     let context1 = provider::FactoryContext::new(provider_context1, factory_node_id);
-    FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context1).await?;
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context1,
+    )
+    .await?;
 
     debug!("DEBUG: About to commit tx1...");
 
@@ -234,7 +237,12 @@ repeat_count: 1
 
     let provider_context1 = state1.as_provider_context();
     let context1 = provider::FactoryContext::new(provider_context1, factory_node.id());
-    FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context1).await?;
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context1,
+    )
+    .await?;
     _ = tx1.commit().await?;
 
     // Now do a read-only transaction using the transact helper
@@ -315,7 +323,12 @@ repeat_count: 1
 
         let provider_context = state1.as_provider_context();
         let context = provider::FactoryContext::new(provider_context, factory_node.id());
-        FactoryRegistry::initialize::<tlogfs::TLogFSError>("test-executor", config_yaml.as_bytes(), context).await?;
+        FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+            "test-executor",
+            config_yaml.as_bytes(),
+            context,
+        )
+        .await?;
     }
 
     _ = tx1.commit().await?;

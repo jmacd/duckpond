@@ -114,8 +114,8 @@ impl<'tx> FileWriter<'tx> {
     /// Finalize the write operation with content analysis and transaction storage
     pub async fn finish(mut self) -> Result<WriteResult, TLogFSError> {
         let total_written = self.total_written;
-	let id = self.id;
-	
+        let id = self.id;
+
         debug!("Finalizing FileWriter for node {id}, total written: {total_written} bytes");
 
         // Create AsyncRead + AsyncSeek interface for content analysis

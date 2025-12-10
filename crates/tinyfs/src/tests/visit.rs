@@ -152,22 +152,26 @@ impl Directory for VisitDirectory {
         let result = root.visit_with_visitor(&self.pattern, &mut visitor).await;
         // @@@
         _ = result?;
-        let items: Vec<_> = visitor.items.into_iter().map(|(name, _node_ref)| {
-            // Convert Node to DirectoryEntry (without awaiting - use placeholder)
-            // Use a deterministic FileID for testing (part_id=root for test simplicity)
-            let file_id = crate::FileID::from_content(
-                crate::PartID::root(),
-                crate::EntryType::FileDataDynamic,
-                format!("visit:{}", name).as_bytes()
-            );
-            let dir_entry = DirectoryEntry::new(
-                name.clone(),
-                file_id.node_id(),
-                crate::EntryType::FileDataDynamic,
-                0,
-            );
-            Ok(dir_entry)
-        }).collect();
+        let items: Vec<_> = visitor
+            .items
+            .into_iter()
+            .map(|(name, _node_ref)| {
+                // Convert Node to DirectoryEntry (without awaiting - use placeholder)
+                // Use a deterministic FileID for testing (part_id=root for test simplicity)
+                let file_id = crate::FileID::from_content(
+                    crate::PartID::root(),
+                    crate::EntryType::FileDataDynamic,
+                    format!("visit:{}", name).as_bytes(),
+                );
+                let dir_entry = DirectoryEntry::new(
+                    name.clone(),
+                    file_id.node_id(),
+                    crate::EntryType::FileDataDynamic,
+                    0,
+                );
+                Ok(dir_entry)
+            })
+            .collect();
         Ok(Box::pin(stream::iter(items)))
     }
 }

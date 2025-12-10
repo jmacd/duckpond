@@ -16,7 +16,6 @@ pub mod buffer_helpers {
         _ = reader.read_to_end(&mut buffer).await?;
         Ok(buffer)
     }
-
 }
 
 /// Convenience functions for tests and small files

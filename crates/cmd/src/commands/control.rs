@@ -522,7 +522,8 @@ async fn execute_sync_impl(
     // Create factory context for ControlWriter mode
     let state = tx.state()?;
     let provider_context = state.as_provider_context();
-    let factory_context = provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
+    let factory_context =
+        provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
 
     // Pass factory mode as arg
     let args = vec![factory_mode];

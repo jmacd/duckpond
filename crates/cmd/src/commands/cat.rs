@@ -28,24 +28,30 @@ async fn write_stream_to_stdout(
 
     let mut total_rows = first_batch.num_rows();
     let mut batch_count = 1;
-    
-    writer.write(&first_batch)
+
+    writer
+        .write(&first_batch)
         .map_err(|e| anyhow::anyhow!("Failed to write batch to parquet: {}", e))?;
 
     // Stream remaining batches
     while let Some(batch_result) = stream.next().await {
-        let batch = batch_result
-            .map_err(|e| anyhow::anyhow!("Failed to read batch from stream: {}", e))?;
+        let batch =
+            batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch from stream: {}", e))?;
         total_rows += batch.num_rows();
         batch_count += 1;
-        writer.write(&batch)
+        writer
+            .write(&batch)
             .map_err(|e| anyhow::anyhow!("Failed to write batch to parquet: {}", e))?;
     }
 
-    let _metadata = writer.close()
+    let _metadata = writer
+        .close()
         .map_err(|e| anyhow::anyhow!("Failed to close parquet writer: {}", e))?;
 
-    debug!("Streamed parquet data to stdout ({} rows in {} batches)", total_rows, batch_count);
+    debug!(
+        "Streamed parquet data to stdout ({} rows in {} batches)",
+        total_rows, batch_count
+    );
     Ok(())
 }
 
@@ -63,16 +69,22 @@ fn write_batches_to_buffer(batches: &[RecordBatch], output: &mut String) -> Resu
     let mut total_rows = 0;
     for batch in batches {
         total_rows += batch.num_rows();
-        writer.write(batch)
+        writer
+            .write(batch)
             .map_err(|e| anyhow::anyhow!("Failed to write batch to parquet: {}", e))?;
     }
 
-    let _metadata = writer.close()
+    let _metadata = writer
+        .close()
         .map_err(|e| anyhow::anyhow!("Failed to close parquet writer: {}", e))?;
 
     output.push_str(&String::from_utf8_lossy(&buffer));
-    debug!("Buffered {} bytes of parquet data for testing ({} rows in {} batches)", 
-           buffer.len(), total_rows, batches.len());
+    debug!(
+        "Buffered {} bytes of parquet data for testing ({} rows in {} batches)",
+        buffer.len(),
+        total_rows,
+        batches.len()
+    );
     Ok(())
 }
 
@@ -80,7 +92,7 @@ fn write_batches_to_buffer(batches: &[RecordBatch], output: &mut String) -> Resu
 pub async fn cat_command(
     ship_context: &ShipContext,
     path: &str,
-    display: &str,  // Output format: "raw" (parquet bytes) or "table" (ASCII formatted)
+    display: &str, // Output format: "raw" (parquet bytes) or "table" (ASCII formatted)
     output: Option<&mut String>,
     _time_start: Option<i64>,
     _time_end: Option<i64>,
@@ -146,7 +158,7 @@ async fn cat_impl(
         // NOTE: We cannot use async_reader() for file:series because it only returns ONE version.
         // file:series can have multiple versions that need to be combined, which requires DataFusion.
         // file:table typically has one version, but for consistency we use DataFusion for both.
-        // 
+        //
         // For raw output, we use DataFusion with SELECT * and then write the results as parquet.
         // This gives us a combined parquet file with all versions of the series.
 
@@ -186,8 +198,9 @@ async fn cat_impl(
             }
 
             // Format and display the results as ASCII table
-            let formatted = format_query_results(&batches)
-                .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", path, e))?;
+            let formatted = format_query_results(&batches).map_err(|e| {
+                anyhow::anyhow!("Failed to format query results for '{}': {}", path, e)
+            })?;
 
             // @@@ Buffering whole content?
             if let Some(output_buffer) = output {
@@ -197,15 +210,17 @@ async fn cat_impl(
             }
 
             let batch_count = batches.len();
-            debug!("Successfully formatted {total_rows} rows in {batch_count} batches from: {path}");
+            debug!(
+                "Successfully formatted {total_rows} rows in {batch_count} batches from: {path}"
+            );
         } else {
             // Raw parquet output - stream directly without formatting
             if output.is_some() {
                 // Testing mode - collect batches then write to buffer
                 let mut batches = Vec::new();
                 while let Some(batch_result) = stream.next().await {
-                    let batch = batch_result
-                        .map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
+                    let batch =
+                        batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
                     batches.push(batch);
                 }
                 write_batches_to_buffer(&batches, output.unwrap())?;
@@ -248,7 +263,6 @@ async fn cat_impl(
 }
 
 /// Write RecordBatch stream as parquet format to output (streaming, low memory)
-
 
 // DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
 // Stream copy function for non-display mode

@@ -36,6 +36,7 @@ log.workspace = true
 bytes.workspace = true
 object_store.workspace = true
 async-stream.workspace = true
+humantime.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

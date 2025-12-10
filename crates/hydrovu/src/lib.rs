@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 mod client;
 mod models;
 
@@ -341,17 +339,14 @@ impl HydroVuCollector {
             })?;
 
         // Convert to wide records
-        let wide_records = WideRecord::from_location_readings(
-            &location_readings,
-            &names.units,
-            &names.parameters,
-        )
-        .map_err(|e| {
-            steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Invalid timestamp in API response: {e}"),
-            )))
-        })?;
+        let wide_records =
+            WideRecord::from_location_readings(&location_readings, &names.units, &names.parameters)
+                .map_err(|e| {
+                    steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid timestamp in API response: {e}"),
+                    )))
+                })?;
 
         if wide_records.is_empty() {
             debug!("No new records for device {device_id}");

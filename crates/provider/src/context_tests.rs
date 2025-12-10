@@ -14,18 +14,16 @@ mod tests {
         // Create a provider context with memory persistence
         let persistence = MemoryPersistence::default();
         let session = Arc::new(SessionContext::new());
-        let context = ProviderContext::new(
-            session,
-            HashMap::new(),
-            Arc::new(persistence),
-        );
+        let context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
 
         // Begin a transaction using the guard pattern
-        let guard = context.begin_transaction().expect("Should create transaction");
+        let guard = context
+            .begin_transaction()
+            .expect("Should create transaction");
 
         // Access filesystem through the guard
         let root = guard.root().await.expect("Should get root");
-        
+
         // Verify root exists
         assert_eq!(root.node_path().path, PathBuf::from("/"));
 
@@ -33,7 +31,9 @@ mod tests {
         drop(guard);
 
         // Can create another transaction after the first one is dropped
-        let _guard2 = context.begin_transaction().expect("Should create second transaction");
+        let _guard2 = context
+            .begin_transaction()
+            .expect("Should create second transaction");
     }
 
     #[tokio::test]
@@ -41,16 +41,12 @@ mod tests {
         // Create a provider context
         let persistence = MemoryPersistence::default();
         let session = Arc::new(SessionContext::new());
-        let context = ProviderContext::new(
-            session,
-            HashMap::new(),
-            Arc::new(persistence),
-        );
+        let context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
 
         // Get filesystem directly (no guard - for cases where guard isn't needed)
         let fs = context.filesystem();
         let root = fs.root().await.expect("Should get root");
-        
+
         assert_eq!(root.node_path().path, PathBuf::from("/"));
     }
 }

@@ -1,7 +1,7 @@
-use crate::transaction_guard::TransactionState;
 use crate::EntryType;
 use crate::error::Result;
 use crate::node::{FileID, Node};
+use crate::transaction_guard::TransactionState;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
@@ -37,11 +37,11 @@ pub trait PersistenceLayer: Send + Sync {
 
     async fn load_node(&self, file_id: FileID) -> Result<Node>;
 
-    async fn store_node(&self, node: &Node,) -> Result<()>;
+    async fn store_node(&self, node: &Node) -> Result<()>;
 
-    async fn create_file_node(&self, file_id: FileID,) -> Result<Node>;
+    async fn create_file_node(&self, file_id: FileID) -> Result<Node>;
 
-    async fn create_directory_node(&self, id: FileID,) -> Result<Node>;
+    async fn create_directory_node(&self, id: FileID) -> Result<Node>;
 
     async fn create_symlink_node(&self, id: FileID, target: &Path) -> Result<Node>;
 
@@ -52,10 +52,7 @@ pub trait PersistenceLayer: Send + Sync {
         config_content: Vec<u8>,
     ) -> Result<Node>;
 
-    async fn get_dynamic_node_config(
-        &self,
-        id: FileID,
-    ) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
+    async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
 
     async fn update_dynamic_node_config(
         &self,
@@ -70,18 +67,11 @@ pub trait PersistenceLayer: Send + Sync {
 
     /// List all versions of a file, returning metadata for each version
     /// Returns versions in chronological order (oldest to newest)
-    async fn list_file_versions(
-        &self,
-        id: FileID,
-    ) -> Result<Vec<FileVersionInfo>>;
+    async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>>;
 
     /// Read content of a specific version of a file
     /// If version is None, reads the latest version
-    async fn read_file_version(
-        &self,
-        id: FileID,
-        version: u64,
-    ) -> Result<Vec<u8>>;
+    async fn read_file_version(&self, id: FileID, version: u64) -> Result<Vec<u8>>;
 
     /// Set extended attributes on an existing node
     /// This should modify the pending version of the node in the current transaction
@@ -92,10 +82,10 @@ pub trait PersistenceLayer: Send + Sync {
     ) -> Result<()>;
 
     /// Get temporal bounds for a FileSeries node
-    /// 
+    ///
     /// Returns the time range (min_time, max_time) that this FileSeries covers,
     /// used for data quality filtering at the Parquet reader level.
-    /// 
+    ///
     /// This is similar to node metadata but optimized for performance:
     /// - tlogfs stores temporal bounds in dedicated OplogEntry columns (not in attributes map)
     /// - This allows efficient queries without deserializing JSON metadata

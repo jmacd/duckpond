@@ -4,7 +4,7 @@
 //! by timestamp, automatically generating the COALESCE + FULL OUTER JOIN + EXCLUDE SQL.
 
 use crate::register_dynamic_factory;
-use provider::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use datafusion::catalog::TableProvider;
@@ -21,7 +21,7 @@ pub struct TimeRange {
     /// Optional start time (ISO 8601 format)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub begin: Option<String>,
-    
+
     /// Optional end time (ISO 8601 format)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<String>,
@@ -32,11 +32,11 @@ pub struct TimeRange {
 pub struct TimeseriesInput {
     /// Glob pattern for matching time series files
     pub pattern: String,
-    
+
     /// Optional time range filter for this specific input
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<TimeRange>,
-    
+
     /// Optional scope prefix to add to all column names (e.g.,
     /// "temperature" -> "BDock.temperature")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,7 +49,7 @@ pub struct TimeseriesJoinConfig {
     /// Name of the timestamp column (defaults to "timestamp")
     #[serde(default = "default_time_column")]
     pub time_column: String,
-    
+
     /// List of input sources with patterns and optional time ranges
     pub inputs: Vec<TimeseriesInput>,
 }
@@ -71,11 +71,13 @@ fn validate_timestamp(ts_str: &str) -> TinyFSResult<DateTime<Utc>> {
 }
 
 /// Generate SQL query for timeseries join with per-input time ranges
-/// 
+///
 /// Strategy: Use FULL OUTER JOIN on timestamp to preserve all unique timestamps.
 /// To handle duplicate column names (when multiple inputs have same scope), we use
 /// explicit STRUCT() to group each input's columns, then unnest with unique names.
-fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(String, HashMap<String, String>)> {
+fn generate_timeseries_join_sql(
+    config: &TimeseriesJoinConfig,
+) -> TinyFSResult<(String, HashMap<String, String>)> {
     if config.inputs.is_empty() {
         return Err(tinyfs::Error::Other(
             "At least one input must be specified".to_string(),
@@ -90,7 +92,8 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
 
     // Generate table aliases and patterns map
     let mut patterns = HashMap::new();
-    let table_names: Vec<String> = config.inputs
+    let table_names: Vec<String> = config
+        .inputs
         .iter()
         .enumerate()
         .map(|(i, input)| {
@@ -102,10 +105,10 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
 
     // Build CTEs for each input with optional time range filtering
     let mut ctes = Vec::new();
-    
+
     for (i, (table_name, input)) in table_names.iter().zip(config.inputs.iter()).enumerate() {
         let cte_name = format!("filtered{}", i);
-        
+
         if let Some(range) = &input.range {
             let mut conditions = Vec::new();
             if let Some(begin) = &range.begin {
@@ -117,8 +120,12 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
                 conditions.push(format!("{} <= '{}'", config.time_column, end));
             }
             if !conditions.is_empty() {
-                ctes.push(format!("{} AS (SELECT * FROM {} WHERE {})", 
-                    cte_name, table_name, conditions.join(" AND ")));
+                ctes.push(format!(
+                    "{} AS (SELECT * FROM {} WHERE {})",
+                    cte_name,
+                    table_name,
+                    conditions.join(" AND ")
+                ));
             } else {
                 ctes.push(format!("{} AS (SELECT * FROM {})", cte_name, table_name));
             }
@@ -130,7 +137,7 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
     // Build FULL OUTER JOIN chain for all inputs
     let first_cte = "filtered0";
     let mut join_sql = format!("FROM {}", first_cte);
-    
+
     for i in 1..config.inputs.len() {
         let cte_name = format!("filtered{}", i);
         join_sql.push_str(&format!(
@@ -160,7 +167,7 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
         join_sql,
         config.time_column
     );
-    
+
     Ok((sql, patterns))
 }
 
@@ -168,14 +175,14 @@ fn generate_timeseries_join_sql(config: &TimeseriesJoinConfig) -> TinyFSResult<(
 /// Wraps SqlDerivedFile with auto-generated join SQL
 pub struct TimeseriesJoinFile {
     config: TimeseriesJoinConfig,
-    context: provider::FactoryContext,
+    context: crate::FactoryContext,
     // Lazy-initialized SqlDerivedFile
     inner: Arc<tokio::sync::Mutex<Option<SqlDerivedFile>>>,
 }
 
 impl TimeseriesJoinFile {
     #[must_use]
-    pub fn new(config: TimeseriesJoinConfig, context: provider::FactoryContext) -> Self {
+    pub fn new(config: TimeseriesJoinConfig, context: crate::FactoryContext) -> Self {
         Self {
             config,
             context,
@@ -191,10 +198,10 @@ impl TimeseriesJoinFile {
                 "🔍 TIMESERIES-JOIN: Generating schema-aware SQL for {} inputs",
                 self.config.inputs.len()
             );
-            
+
             // Generate SQL using UNION BY NAME for same-scope inputs, then FULL OUTER JOIN
             let (sql_query, patterns, scope_prefixes) = self.generate_union_join_sql().await?;
-            
+
             eprintln!("🔍 Generated SQL:\n{}", sql_query);
 
             // Create SqlDerivedConfig with scope prefixes (SqlDerivedFile will apply them)
@@ -206,70 +213,83 @@ impl TimeseriesJoinFile {
 
             // Create SqlDerivedFile in Series mode
             log::debug!("🔍 TIMESERIES-JOIN: Creating SqlDerivedFile with SqlDerivedMode::Series");
-            let sql_file = SqlDerivedFile::new(
-                sql_config,
-                self.context.clone(),
-                SqlDerivedMode::Series,
-            )?;
+            let sql_file =
+                SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
             log::debug!("✅ TIMESERIES-JOIN: Successfully created SqlDerivedFile");
             *inner_guard = Some(sql_file);
         }
         Ok(())
     }
-    
+
     /// Generate SQL using UNION BY NAME for same-scope inputs, then FULL OUTER JOIN different scopes
     /// Returns: (sql_query, patterns, scope_prefixes)
-    /// 
+    ///
     /// Strategy:
     /// 1. Group inputs by scope
     /// 2. Create CTEs that UNION BY NAME inputs with the same scope
     /// 3. FULL OUTER JOIN the scope CTEs
     /// 4. Let ScopePrefixTableProvider (via SqlDerivedConfig) apply the scope prefixes to inputN tables
-    async fn generate_union_join_sql(&self) -> TinyFSResult<(String, HashMap<String, String>, HashMap<String, (String, String)>)> {
+    async fn generate_union_join_sql(
+        &self,
+    ) -> TinyFSResult<(
+        String,
+        HashMap<String, String>,
+        HashMap<String, (String, String)>,
+    )> {
         use std::collections::BTreeMap;
-        
+
         // Build patterns map - one pattern per input
         // AND build scope_prefixes map - one entry per input that has a scope
         let mut patterns = HashMap::new();
         let mut scope_prefixes = HashMap::new();
-        
+
         for (i, input) in self.config.inputs.iter().enumerate() {
             let table_name = format!("input{}", i);
             _ = patterns.insert(table_name.clone(), input.pattern.clone());
-            
+
             // Register scope prefix for this input's table
             if let Some(ref scope) = input.scope {
                 let _ = scope_prefixes.insert(
                     table_name.clone(),
-                    (scope.clone(), self.config.time_column.clone())
+                    (scope.clone(), self.config.time_column.clone()),
                 );
             }
         }
-        
+
         // Group inputs by scope for UNION BY NAME
         let mut scope_groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        
+
         for (i, input) in self.config.inputs.iter().enumerate() {
             // Use scope as key, or generate unique key for None scopes
-            let scope_key = input.scope.clone().unwrap_or_else(|| format!("_none_{}", i));
-            scope_groups.entry(scope_key).or_insert_with(|| Vec::new()).push(i);
+            let scope_key = input
+                .scope
+                .clone()
+                .unwrap_or_else(|| format!("_none_{}", i));
+            scope_groups
+                .entry(scope_key)
+                .or_insert_with(|| Vec::new())
+                .push(i);
         }
-        
-        eprintln!("🔍 TIMESERIES-JOIN: Grouped {} inputs into {} scope groups", self.config.inputs.len(), scope_groups.len());
+
+        eprintln!(
+            "🔍 TIMESERIES-JOIN: Grouped {} inputs into {} scope groups",
+            self.config.inputs.len(),
+            scope_groups.len()
+        );
         for (scope, indices) in &scope_groups {
             eprintln!("  Scope '{}': inputs {:?}", scope, indices);
         }
-        
+
         // Build CTEs:
         // 1. Filtered CTEs for each input (with range filters)
         // 2. Combined CTEs for each scope group (UNION BY NAME if multiple inputs)
         let mut ctes = Vec::new();
-        
+
         // Step 1: Create filtered CTEs for each input
         for (i, input) in self.config.inputs.iter().enumerate() {
             let table_name = format!("input{}", i);
             let filtered_name = format!("filtered{}", i);
-            
+
             if let Some(range) = &input.range {
                 let mut conditions = Vec::new();
                 if let Some(begin) = &range.begin {
@@ -281,38 +301,59 @@ impl TimeseriesJoinFile {
                     conditions.push(format!("{} <= '{}'", self.config.time_column, end));
                 }
                 if !conditions.is_empty() {
-                    ctes.push(format!("{} AS (SELECT * FROM {} WHERE {})", 
-                        filtered_name, table_name, conditions.join(" AND ")));
+                    ctes.push(format!(
+                        "{} AS (SELECT * FROM {} WHERE {})",
+                        filtered_name,
+                        table_name,
+                        conditions.join(" AND ")
+                    ));
                 } else {
-                    ctes.push(format!("{} AS (SELECT * FROM {})", filtered_name, table_name));
+                    ctes.push(format!(
+                        "{} AS (SELECT * FROM {})",
+                        filtered_name, table_name
+                    ));
                 }
             } else {
-                ctes.push(format!("{} AS (SELECT * FROM {})", filtered_name, table_name));
+                ctes.push(format!(
+                    "{} AS (SELECT * FROM {})",
+                    filtered_name, table_name
+                ));
             }
         }
-        
+
         // Step 2: Create combined CTEs for each scope group using UNION BY NAME
         let mut scope_table_names: Vec<String> = Vec::new();
-        
+
         for (scope_idx, (_scope, input_indices)) in scope_groups.iter().enumerate() {
             let scope_table = format!("scope_combined{}", scope_idx);
             scope_table_names.push(scope_table.clone());
-            
+
             if input_indices.len() == 1 {
                 // Single input in this scope - just select from it
                 let input_idx = input_indices[0];
-                ctes.push(format!("{} AS (SELECT * FROM filtered{})", scope_table, input_idx));
+                ctes.push(format!(
+                    "{} AS (SELECT * FROM filtered{})",
+                    scope_table, input_idx
+                ));
             } else {
                 // Multiple inputs - UNION BY NAME
-                let union_parts: Vec<String> = input_indices.iter()
+                let union_parts: Vec<String> = input_indices
+                    .iter()
                     .map(|idx| format!("SELECT * FROM filtered{}", idx))
                     .collect();
-                ctes.push(format!("{} AS ({})", scope_table, union_parts.join("\nUNION BY NAME\n")));
+                ctes.push(format!(
+                    "{} AS ({})",
+                    scope_table,
+                    union_parts.join("\nUNION BY NAME\n")
+                ));
             }
         }
-        
-        eprintln!("🔍 TIMESERIES-JOIN: Created {} combined scope tables", scope_table_names.len());
-        
+
+        eprintln!(
+            "🔍 TIMESERIES-JOIN: Created {} combined scope tables",
+            scope_table_names.len()
+        );
+
         // Step 3: FULL OUTER JOIN all scope tables
         let mut join_sql = format!("FROM {}", scope_table_names[0]);
         if scope_table_names.len() > 1 {
@@ -327,27 +368,35 @@ impl TimeseriesJoinFile {
                 ));
             }
         }
-        
+
         // Step 4: SELECT all columns
         // Let ScopePrefixTableProvider handle the prefixing for inputN tables
         let mut select_parts = Vec::new();
-        
+
         // COALESCE timestamp
         if scope_table_names.len() > 1 {
-            let timestamp_coalesce: Vec<String> = scope_table_names.iter()
+            let timestamp_coalesce: Vec<String> = scope_table_names
+                .iter()
                 .map(|t| format!("{}.{}", t, self.config.time_column))
                 .collect();
-            select_parts.push(format!("COALESCE({}) AS {}", timestamp_coalesce.join(", "), self.config.time_column));
-            
+            select_parts.push(format!(
+                "COALESCE({}) AS {}",
+                timestamp_coalesce.join(", "),
+                self.config.time_column
+            ));
+
             // Select all other columns from each scope table (excluding timestamp)
             for table_name in &scope_table_names {
-                select_parts.push(format!("{}.* EXCLUDE ({})", table_name, self.config.time_column));
+                select_parts.push(format!(
+                    "{}.* EXCLUDE ({})",
+                    table_name, self.config.time_column
+                ));
             }
         } else {
             // Only one scope - just select everything
             select_parts.push("*".to_string());
         }
-        
+
         let with_clause = if !ctes.is_empty() {
             format!("WITH\n{}\n", ctes.join(",\n"))
         } else {
@@ -361,10 +410,10 @@ impl TimeseriesJoinFile {
             join_sql,
             self.config.time_column
         );
-        
+
         eprintln!("🔍 TIMESERIES-JOIN: Generated SQL:\n{}", sql);
         eprintln!("🔍 TIMESERIES-JOIN: Scope prefixes: {:?}", scope_prefixes);
-        
+
         Ok((sql, patterns, scope_prefixes))
     }
 
@@ -419,9 +468,7 @@ impl tinyfs::QueryableFile for TimeseriesJoinFile {
         id: tinyfs::FileID,
         context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn TableProvider>> {
-        log::debug!(
-            "DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: id={id}",
-        );
+        log::debug!("DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: id={id}",);
         self.ensure_inner().await?;
 
         let inner_guard = self.inner.lock().await;
@@ -436,7 +483,7 @@ impl tinyfs::QueryableFile for TimeseriesJoinFile {
 
 fn create_timeseries_join_handle(
     config: Value,
-    context: provider::FactoryContext,
+    context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
     let cfg: TimeseriesJoinConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-join config: {}", e)))?;
@@ -473,20 +520,20 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provider::QueryableFile;
+    use crate::QueryableFile;
     use arrow::array::{Float64Array, TimestampSecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
+    use datafusion::execution::context::SessionContext;
     use parquet::arrow::ArrowWriter;
+    use std::collections::HashMap;
     use std::io::Cursor;
     use std::sync::Arc;
-    use tinyfs::{EntryType, FileID, FS, MemoryPersistence, ProviderContext};
-    use datafusion::execution::context::SessionContext;
-    use std::collections::HashMap;
+    use tinyfs::{EntryType, FS, FileID, MemoryPersistence, ProviderContext};
 
-    /// Helper to create provider::FactoryContext from ProviderContext for tests
-    fn test_context(context: &ProviderContext, file_id: FileID) -> provider::FactoryContext {
-        provider::FactoryContext {
+    /// Helper to create crate::FactoryContext from ProviderContext for tests
+    fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
+        crate::FactoryContext {
             context: context.clone(),
             file_id,
             pond_metadata: None,
@@ -497,9 +544,11 @@ mod tests {
     /// Returns (FS, ProviderContext) that share the SAME persistence instance
     async fn create_test_environment() -> (FS, ProviderContext) {
         let persistence = MemoryPersistence::default();
-        let fs = FS::new(persistence.clone()).await.expect("Failed to create FS");
+        let fs = FS::new(persistence.clone())
+            .await
+            .expect("Failed to create FS");
         let session = Arc::new(SessionContext::new());
-        let object_store = Arc::new(provider::TinyFsObjectStore::new(persistence.clone()));
+        let object_store = Arc::new(crate::TinyFsObjectStore::new(persistence.clone()));
         let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
         _ = session.register_object_store(&url, object_store);
         let provider_context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
@@ -520,14 +569,16 @@ mod tests {
         file_writer.write_all(&parquet_data).await?;
         file_writer.flush().await?;
         file_writer.shutdown().await?;
-        
+
         // Get the FileID that was created
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
-        
+
         // Store in persistence (version 1 for MemoryPersistence)
-        persistence.store_file_version(file_id, 1, parquet_data.into()).await?;
-        
+        persistence
+            .store_file_version(file_id, 1, parquet_data.into())
+            .await?;
+
         Ok(file_id)
     }
 
@@ -543,13 +594,11 @@ mod tests {
         // Single input
         let config_single = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),
-            inputs: vec![
-                TimeseriesInput {
-                    pattern: "/solo.series".to_string(),
-                    scope: None,
-                    range: None,
-                },
-            ],
+            inputs: vec![TimeseriesInput {
+                pattern: "/solo.series".to_string(),
+                scope: None,
+                range: None,
+            }],
         };
         assert!(generate_timeseries_join_sql(&config_single).is_err());
 
@@ -578,13 +627,19 @@ mod tests {
     #[tokio::test]
     async fn test_timeseries_join_factory_integration() {
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
         // Create source1.series with timestamps [1, 2, 3] and temp_a column
         let schema1 = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
             Field::new("temp_a", DataType::Float64, false),
         ]));
 
@@ -593,7 +648,8 @@ mod tests {
         let batch1 = RecordBatch::try_new(
             schema1.clone(),
             vec![Arc::new(timestamps1), Arc::new(temps1)],
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut parquet_buffer1 = Vec::new();
         {
@@ -603,13 +659,23 @@ mod tests {
             _ = writer1.close().unwrap();
         }
 
-        _ = create_parquet_file(&fs, persistence, "/source1.series", parquet_buffer1, EntryType::FileSeriesPhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/source1.series",
+            parquet_buffer1,
+            EntryType::FileSeriesPhysical,
+        )
+        .await
+        .unwrap();
 
         // Create source2.series with timestamps [2, 3, 4] and temp_b column
         let schema2 = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
             Field::new("temp_b", DataType::Float64, false),
         ]));
 
@@ -618,7 +684,8 @@ mod tests {
         let batch2 = RecordBatch::try_new(
             schema2.clone(),
             vec![Arc::new(timestamps2), Arc::new(temps2)],
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut parquet_buffer2 = Vec::new();
         {
@@ -628,9 +695,15 @@ mod tests {
             _ = writer2.close().unwrap();
         }
 
-        _ = create_parquet_file(&fs, persistence, "/source2.series", parquet_buffer2, EntryType::FileSeriesPhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/source2.series",
+            parquet_buffer2,
+            EntryType::FileSeriesPhysical,
+        )
+        .await
+        .unwrap();
 
         // Now create the timeseries join
         let context = test_context(&provider_context, FileID::root());
@@ -652,7 +725,7 @@ mod tests {
         };
 
         let join_file = TimeseriesJoinFile::new(config, context);
-        
+
         // Test as_table_provider
         let table_provider = join_file
             .as_table_provider(FileID::root(), &provider_context)
@@ -663,15 +736,18 @@ mod tests {
         let ctx = &provider_context.datafusion_session;
         _ = ctx.register_table("joined", table_provider).unwrap();
 
-        let df = ctx.sql("SELECT * FROM joined ORDER BY timestamp").await.unwrap();
+        let df = ctx
+            .sql("SELECT * FROM joined ORDER BY timestamp")
+            .await
+            .unwrap();
         let batches = df.collect().await.unwrap();
 
         assert!(!batches.is_empty());
         let batch = &batches[0];
-        
+
         // Should have timestamps [1, 2, 3, 4] due to FULL OUTER JOIN
         assert_eq!(batch.num_rows(), 4);
-        
+
         // Should have columns: timestamp, temp_a, temp_b
         assert_eq!(batch.num_columns(), 3);
     }
@@ -679,13 +755,19 @@ mod tests {
     #[tokio::test]
     async fn test_timeseries_join_with_scope_prefixes() {
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
         // Create source1.series with temp column
         let schema1 = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
             Field::new("temp", DataType::Float64, false),
         ]));
         let timestamps1 = TimestampSecondArray::from(vec![1, 2, 3]);
@@ -693,7 +775,8 @@ mod tests {
         let batch1 = RecordBatch::try_new(
             schema1.clone(),
             vec![Arc::new(timestamps1), Arc::new(temps1)],
-        ).unwrap();
+        )
+        .unwrap();
         let mut parquet_buffer1 = Vec::new();
         {
             let cursor = Cursor::new(&mut parquet_buffer1);
@@ -701,13 +784,23 @@ mod tests {
             writer1.write(&batch1).unwrap();
             _ = writer1.close().unwrap();
         }
-        _ = create_parquet_file(&fs, persistence, "/source1.series", parquet_buffer1, EntryType::FileSeriesPhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/source1.series",
+            parquet_buffer1,
+            EntryType::FileSeriesPhysical,
+        )
+        .await
+        .unwrap();
 
         // Create source2.series with pressure column
         let schema2 = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
             Field::new("pressure", DataType::Float64, false),
         ]));
         let timestamps2 = TimestampSecondArray::from(vec![2, 3, 4]);
@@ -715,7 +808,8 @@ mod tests {
         let batch2 = RecordBatch::try_new(
             schema2.clone(),
             vec![Arc::new(timestamps2), Arc::new(pressures)],
-        ).unwrap();
+        )
+        .unwrap();
         let mut parquet_buffer2 = Vec::new();
         {
             let cursor = Cursor::new(&mut parquet_buffer2);
@@ -723,9 +817,15 @@ mod tests {
             writer2.write(&batch2).unwrap();
             _ = writer2.close().unwrap();
         }
-        _ = create_parquet_file(&fs, persistence, "/source2.series", parquet_buffer2, EntryType::FileSeriesPhysical)
-            .await
-            .unwrap();
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/source2.series",
+            parquet_buffer2,
+            EntryType::FileSeriesPhysical,
+        )
+        .await
+        .unwrap();
 
         // Test with scope prefixes
         let root_id = FileID::root();
@@ -756,23 +856,40 @@ mod tests {
         // Query to verify scoped column names - use direct scan to avoid SQL optimizer
         let ctx = &provider_context.datafusion_session;
         let df_state = ctx.state();
-        let plan = table_provider.scan(&df_state, None, &[], None).await.unwrap();
-        
+        let plan = table_provider
+            .scan(&df_state, None, &[], None)
+            .await
+            .unwrap();
+
         let task_ctx = ctx.task_ctx();
         let stream = plan.execute(0, task_ctx).unwrap();
-        
+
         use futures::StreamExt;
-        let batches: Vec<_> = stream.collect::<Vec<_>>().await.into_iter().map(|r| r.unwrap()).collect();
+        let batches: Vec<_> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
 
         assert!(!batches.is_empty());
         let batch = &batches[0];
         let schema = batch.schema();
-        
+
         // Verify column names include scope prefixes
         let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(column_names.contains(&"timestamp"), "Should have timestamp column");
-        assert!(column_names.contains(&"BDock.temp"), "Should have BDock.temp column");
-        assert!(column_names.contains(&"ADock.pressure"), "Should have ADock.pressure column");
+        assert!(
+            column_names.contains(&"timestamp"),
+            "Should have timestamp column"
+        );
+        assert!(
+            column_names.contains(&"BDock.temp"),
+            "Should have BDock.temp column"
+        );
+        assert!(
+            column_names.contains(&"ADock.pressure"),
+            "Should have ADock.pressure column"
+        );
     }
 
     #[tokio::test]
@@ -780,79 +897,114 @@ mod tests {
         // Test the Silver case: two Vulink devices with same scope but non-overlapping time ranges
         // This should use UNION BY NAME and produce proper column names with scope prefix
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context.persistence.as_any()
+        let persistence = provider_context
+            .persistence
+            .as_any()
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
-            // Create vulink1.series with temp and conductivity columns (timestamps 1-3)
-            let schema1 = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
-                Field::new("temp", DataType::Float64, false),
-                Field::new("conductivity", DataType::Float64, false),
-            ]));
-            let timestamps1 = TimestampSecondArray::from(vec![1, 2, 3]);
-            let temps1 = Float64Array::from(vec![10.0, 20.0, 30.0]);
-            let cond1 = Float64Array::from(vec![100.0, 110.0, 120.0]);
-            let batch1 = RecordBatch::try_new(
-                schema1.clone(),
-                vec![Arc::new(timestamps1), Arc::new(temps1), Arc::new(cond1)],
-            ).unwrap();
-            let mut parquet_buffer1 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer1);
-                let mut writer1 = ArrowWriter::try_new(cursor, schema1, None).unwrap();
-                writer1.write(&batch1).unwrap();
-                _ = writer1.close().unwrap();
-            }
-            _ = create_parquet_file(&fs, persistence, "/vulink1.series", parquet_buffer1, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
+        // Create vulink1.series with temp and conductivity columns (timestamps 1-3)
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
+            Field::new("temp", DataType::Float64, false),
+            Field::new("conductivity", DataType::Float64, false),
+        ]));
+        let timestamps1 = TimestampSecondArray::from(vec![1, 2, 3]);
+        let temps1 = Float64Array::from(vec![10.0, 20.0, 30.0]);
+        let cond1 = Float64Array::from(vec![100.0, 110.0, 120.0]);
+        let batch1 = RecordBatch::try_new(
+            schema1.clone(),
+            vec![Arc::new(timestamps1), Arc::new(temps1), Arc::new(cond1)],
+        )
+        .unwrap();
+        let mut parquet_buffer1 = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer1);
+            let mut writer1 = ArrowWriter::try_new(cursor, schema1, None).unwrap();
+            writer1.write(&batch1).unwrap();
+            _ = writer1.close().unwrap();
+        }
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/vulink1.series",
+            parquet_buffer1,
+            EntryType::FileSeriesPhysical,
+        )
+        .await
+        .unwrap();
 
-            // Create vulink2.series with same schema (timestamps 5-7, non-overlapping)
-            let schema2 = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
-                Field::new("temp", DataType::Float64, false),
-                Field::new("conductivity", DataType::Float64, false),
-            ]));
-            let timestamps2 = TimestampSecondArray::from(vec![5, 6, 7]);
-            let temps2 = Float64Array::from(vec![40.0, 50.0, 60.0]);
-            let cond2 = Float64Array::from(vec![130.0, 140.0, 150.0]);
-            let batch2 = RecordBatch::try_new(
-                schema2.clone(),
-                vec![Arc::new(timestamps2), Arc::new(temps2), Arc::new(cond2)],
-            ).unwrap();
-            let mut parquet_buffer2 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer2);
-                let mut writer2 = ArrowWriter::try_new(cursor, schema2, None).unwrap();
-                writer2.write(&batch2).unwrap();
-                _ = writer2.close().unwrap();
-            }
-            _ = create_parquet_file(&fs, persistence, "/vulink2.series", parquet_buffer2, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
+        // Create vulink2.series with same schema (timestamps 5-7, non-overlapping)
+        let schema2 = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
+            Field::new("temp", DataType::Float64, false),
+            Field::new("conductivity", DataType::Float64, false),
+        ]));
+        let timestamps2 = TimestampSecondArray::from(vec![5, 6, 7]);
+        let temps2 = Float64Array::from(vec![40.0, 50.0, 60.0]);
+        let cond2 = Float64Array::from(vec![130.0, 140.0, 150.0]);
+        let batch2 = RecordBatch::try_new(
+            schema2.clone(),
+            vec![Arc::new(timestamps2), Arc::new(temps2), Arc::new(cond2)],
+        )
+        .unwrap();
+        let mut parquet_buffer2 = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer2);
+            let mut writer2 = ArrowWriter::try_new(cursor, schema2, None).unwrap();
+            writer2.write(&batch2).unwrap();
+            _ = writer2.close().unwrap();
+        }
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/vulink2.series",
+            parquet_buffer2,
+            EntryType::FileSeriesPhysical,
+        )
+        .await
+        .unwrap();
 
-            // Create at500.series with different columns (timestamps 2-6, overlapping both)
-            let schema3 = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
-                Field::new("pressure", DataType::Float64, false),
-            ]));
-            let timestamps3 = TimestampSecondArray::from(vec![2, 4, 6]);
-            let pressures = Float64Array::from(vec![1000.0, 1010.0, 1020.0]);
-            let batch3 = RecordBatch::try_new(
-                schema3.clone(),
-                vec![Arc::new(timestamps3), Arc::new(pressures)],
-            ).unwrap();
-            let mut parquet_buffer3 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer3);
-                let mut writer3 = ArrowWriter::try_new(cursor, schema3, None).unwrap();
-                writer3.write(&batch3).unwrap();
-                _ = writer3.close().unwrap();
-            }
-            _ = create_parquet_file(&fs, persistence, "/at500.series", parquet_buffer3, EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
+        // Create at500.series with different columns (timestamps 2-6, overlapping both)
+        let schema3 = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
+            Field::new("pressure", DataType::Float64, false),
+        ]));
+        let timestamps3 = TimestampSecondArray::from(vec![2, 4, 6]);
+        let pressures = Float64Array::from(vec![1000.0, 1010.0, 1020.0]);
+        let batch3 = RecordBatch::try_new(
+            schema3.clone(),
+            vec![Arc::new(timestamps3), Arc::new(pressures)],
+        )
+        .unwrap();
+        let mut parquet_buffer3 = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer3);
+            let mut writer3 = ArrowWriter::try_new(cursor, schema3, None).unwrap();
+            writer3.write(&batch3).unwrap();
+            _ = writer3.close().unwrap();
+        }
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/at500.series",
+            parquet_buffer3,
+            EntryType::FileSeriesPhysical,
+        )
+        .await
+        .unwrap();
 
         // Test with same scope for both Vulinks
         let root_id = FileID::root();
@@ -894,33 +1046,55 @@ mod tests {
         // Query to verify scoped column names and UNION BY NAME behavior
         let ctx = &provider_context.datafusion_session;
         let df_state = ctx.state();
-        let plan = table_provider.scan(&df_state, None, &[], None).await.unwrap();
-        
+        let plan = table_provider
+            .scan(&df_state, None, &[], None)
+            .await
+            .unwrap();
+
         let task_ctx = ctx.task_ctx();
         let stream = plan.execute(0, task_ctx).unwrap();
-        
+
         use futures::StreamExt;
-        let batches: Vec<_> = stream.collect::<Vec<_>>().await.into_iter().map(|r| r.unwrap()).collect();
+        let batches: Vec<_> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
 
         assert!(!batches.is_empty());
         let batch = &batches[0];
         let schema = batch.schema();
-        
+
         // Verify column names
         let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         println!("Column names: {:?}", column_names);
-        
-        assert!(column_names.contains(&"timestamp"), "Should have timestamp column");
-        assert!(column_names.contains(&"Vulink.temp"), "Should have Vulink.temp column");
-        assert!(column_names.contains(&"Vulink.conductivity"), "Should have Vulink.conductivity column");
-        assert!(column_names.contains(&"AT500_Surface.pressure"), "Should have AT500_Surface.pressure column");
-        
+
+        assert!(
+            column_names.contains(&"timestamp"),
+            "Should have timestamp column"
+        );
+        assert!(
+            column_names.contains(&"Vulink.temp"),
+            "Should have Vulink.temp column"
+        );
+        assert!(
+            column_names.contains(&"Vulink.conductivity"),
+            "Should have Vulink.conductivity column"
+        );
+        assert!(
+            column_names.contains(&"AT500_Surface.pressure"),
+            "Should have AT500_Surface.pressure column"
+        );
+
         // Debug: print actual timestamps
         use arrow::array::AsArray;
-        let timestamp_col = batch.column(0).as_primitive::<arrow::datatypes::TimestampSecondType>();
+        let timestamp_col = batch
+            .column(0)
+            .as_primitive::<arrow::datatypes::TimestampSecondType>();
         let timestamps: Vec<i64> = timestamp_col.iter().map(|v| v.unwrap()).collect();
         println!("Actual timestamps: {:?}", timestamps);
-        
+
         // Verify we have all unique timestamps from all sources (1,2,3,4,5,6,7)
         assert_eq!(batch.num_rows(), 7, "Should have 7 unique timestamps");
     }

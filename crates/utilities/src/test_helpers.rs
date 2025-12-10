@@ -545,9 +545,11 @@ mod tests {
     fn test_empty_builder_fails() {
         let result = SensorBatchBuilder::new().build();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No data added to builder"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No data added to builder")
+        );
     }
 }

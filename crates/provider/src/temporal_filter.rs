@@ -7,24 +7,24 @@ use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{Constraints, DataFusionError, Result as DataFusionResult, ScalarValue};
-use datafusion::datasource::listing::ListingTable;
 use datafusion::datasource::TableType;
+use datafusion::datasource::listing::ListingTable;
 use datafusion::logical_expr::{Expr, Operator, TableProviderFilterPushDown};
-use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::ExecutionPlan;
 use log::debug;
 use std::any::Any;
 use std::sync::Arc;
 
 /// Wrapper that applies temporal filtering to a ListingTable
-/// 
+///
 /// Used for low-level per-file data quality filtering based on temporal bounds
 /// metadata (from `pond set-temporal-bounds`). This filters out garbage data
 /// outside the file's valid time range at the table provider level.
-/// 
+///
 /// For unbounded files, use `(i64::MIN, i64::MAX)` to disable filtering.
 pub struct TemporalFilteredListingTable {
     listing_table: ListingTable,
@@ -35,7 +35,7 @@ pub struct TemporalFilteredListingTable {
 
 impl TemporalFilteredListingTable {
     /// Create a new temporal filtered listing table
-    /// 
+    ///
     /// # Arguments
     /// * `listing_table` - The underlying ListingTable to wrap
     /// * `min_time` - Minimum timestamp in milliseconds (use i64::MIN for unbounded)

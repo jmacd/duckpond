@@ -31,7 +31,7 @@ mod tests {
     fn test_sql_derived_mode_serialization() {
         let table_mode = SqlDerivedMode::Table;
         let series_mode = SqlDerivedMode::Series;
-        
+
         assert_eq!(table_mode, SqlDerivedMode::Table);
         assert_eq!(series_mode, SqlDerivedMode::Series);
         assert_ne!(table_mode, series_mode);
@@ -43,7 +43,7 @@ mod tests {
             table_mappings: Some([("old".to_string(), "new".to_string())].into()),
             source_replacement: None,
         };
-        
+
         assert!(opts.table_mappings.is_some());
         assert!(opts.source_replacement.is_none());
     }

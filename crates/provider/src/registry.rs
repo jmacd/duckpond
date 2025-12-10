@@ -16,8 +16,8 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tinyfs::{AsyncReadSeek, DirHandle, EntryType, File, FileHandle, Metadata, NodeMetadata};
 use tinyfs::Result as TinyFSResult;
+use tinyfs::{AsyncReadSeek, DirHandle, EntryType, File, FileHandle, Metadata, NodeMetadata};
 use tokio::sync::Mutex;
 
 /// Execution mode for factory operations
@@ -137,7 +137,9 @@ pub struct DynamicFactory {
         fn(
             config: Value,
             context: FactoryContext,
-        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>>,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        >,
     >,
 
     /// Execute factory command (optional, for executable factories)
@@ -147,7 +149,9 @@ pub struct DynamicFactory {
             config: Value,
             context: FactoryContext,
             ctx: ExecutionContext,
-        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>>,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        >,
     >,
 }
 
@@ -231,7 +235,10 @@ impl FactoryRegistry {
         let factory = Self::get_factory(factory_name)
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
 
-        match (factory.create_directory.is_some(), factory.create_file.is_some()) {
+        match (
+            factory.create_directory.is_some(),
+            factory.create_file.is_some(),
+        ) {
             (true, false) => Ok(true),
             (false, true) => Ok(false),
             (true, true) => Err(tinyfs::Error::Other(format!(
@@ -254,8 +261,12 @@ impl FactoryRegistry {
     where
         E: From<tinyfs::Error> + From<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let factory = Self::get_factory(factory_name)
-            .ok_or_else(|| E::from(tinyfs::Error::Other(format!("Unknown factory: {}", factory_name))))?;
+        let factory = Self::get_factory(factory_name).ok_or_else(|| {
+            E::from(tinyfs::Error::Other(format!(
+                "Unknown factory: {}",
+                factory_name
+            )))
+        })?;
 
         let config_value = (factory.validate_config)(config).map_err(E::from)?;
 
@@ -267,7 +278,7 @@ impl FactoryRegistry {
     }
 
     /// Try to cast a File to QueryableFile by iterating through all registered factories
-    /// 
+    ///
     /// This uses the factory registry instead of hardcoding types, making it properly extensible.
     /// Each factory that creates QueryableFile implementations registers its downcast function.
     #[must_use]
@@ -292,13 +303,19 @@ impl FactoryRegistry {
     where
         E: From<tinyfs::Error> + From<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let factory = Self::get_factory(factory_name)
-            .ok_or_else(|| E::from(tinyfs::Error::Other(format!("Unknown factory: {}", factory_name))))?;
+        let factory = Self::get_factory(factory_name).ok_or_else(|| {
+            E::from(tinyfs::Error::Other(format!(
+                "Unknown factory: {}",
+                factory_name
+            )))
+        })?;
 
         let config_value = (factory.validate_config)(config).map_err(E::from)?;
 
         if let Some(execute_fn) = factory.execute {
-            execute_fn(config_value, context, ctx).await.map_err(E::from)
+            execute_fn(config_value, context, ctx)
+                .await
+                .map_err(E::from)
         } else {
             Err(E::from(tinyfs::Error::Other(format!(
                 "Factory '{}' does not support execution",

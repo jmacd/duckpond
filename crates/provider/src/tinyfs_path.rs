@@ -12,7 +12,11 @@ impl TinyFsPathBuilder {
     /// Create path for all versions: "part/{part_id}/node/{node_id}/version/"
     #[must_use]
     pub fn all_versions(file_id: &FileID) -> String {
-        format!("part/{}/node/{}/version/", file_id.part_id(), file_id.node_id())
+        format!(
+            "part/{}/node/{}/version/",
+            file_id.part_id(),
+            file_id.node_id()
+        )
     }
 
     /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"

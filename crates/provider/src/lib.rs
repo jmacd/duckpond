@@ -13,27 +13,32 @@ mod sql_transform;
 mod table_creation;
 mod table_provider_options;
 mod temporal_filter;
+pub mod temporal_reduce;
 pub mod test_factory;
+pub mod timeseries_join;
+pub mod timeseries_pivot;
 mod tinyfs_object_store;
 mod tinyfs_path;
 mod version_selection;
 
 // Re-export context types from tinyfs (they moved there to break circular dependency)
-pub use tinyfs::{FactoryContext, PondMetadata, ProviderContext};
 pub use dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 pub use error::{Error, Result};
 pub use null_padding::null_padding_table;
 pub use registry::{
-    ConfigFile, DynamicFactory, ExecutionContext, ExecutionMode,
-    FactoryCommand, FactoryRegistry, QueryableFile, DYNAMIC_FACTORIES,
+    ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
+    FactoryRegistry, QueryableFile,
 };
 pub use scope_prefix::ScopePrefixTableProvider;
 pub use sql_derived::SqlDerivedConfig;
 pub use sql_derived_types::{SqlDerivedMode, SqlTransformOptions};
 pub use sql_transform::transform_sql;
-pub use table_creation::{create_table_provider, create_listing_table_provider, create_latest_table_provider};
+pub use table_creation::{
+    create_latest_table_provider, create_listing_table_provider, create_table_provider,
+};
 pub use table_provider_options::{TableProviderKey, TableProviderOptions};
 pub use temporal_filter::TemporalFilteredListingTable;
+pub use tinyfs::{FactoryContext, PondMetadata, ProviderContext};
 pub use tinyfs_object_store::TinyFsObjectStore;
 pub use tinyfs_path::TinyFsPathBuilder;
 pub use version_selection::VersionSelection;
@@ -51,7 +56,7 @@ impl Url {
     /// Parse URL from string
     pub fn parse(url_str: &str) -> Result<Self> {
         let inner = url::Url::parse(url_str)?;
-        
+
         if inner.fragment().is_some() {
             return Err(Error::InvalidUrl("fragment not allowed".into()));
         }
@@ -64,20 +69,20 @@ impl Url {
         if inner.password().is_some() {
             return Err(Error::InvalidUrl("password not allowed".into()));
         }
-        
+
         Ok(Self { inner })
     }
-    
+
     /// Get URL scheme (e.g., "file")
     pub fn scheme(&self) -> &str {
         self.inner.scheme()
     }
-    
+
     /// Get optional compression from host (e.g., "zstd", "gzip")
     pub fn compression(&self) -> Option<&str> {
         self.inner.host_str()
     }
-    
+
     /// Get path component
     pub fn path(&self) -> &str {
         self.inner.path()
@@ -95,11 +100,11 @@ pub trait FileProvider {
 impl FileProvider for tinyfs::FS {
     /// Open a file for reading with optional decompression
     async fn open_url(&self, url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
-	// Get reader from TinyFS
-	let reader = self.root().await?.async_reader_path(url.path()).await?;
-	
-	// Wrap with decompression if needed
-	decompress_reader(reader, url.compression())
+        // Get reader from TinyFS
+        let reader = self.root().await?.async_reader_path(url.path()).await?;
+
+        // Wrap with decompression if needed
+        decompress_reader(reader, url.compression())
     }
 }
 
@@ -123,9 +128,9 @@ fn decompress_reader(
             let buf_reader = tokio::io::BufReader::new(reader);
             Ok(Box::pin(GzipDecoder::new(buf_reader)))
         }
-        Some(other) => Err(Error::DecompressionError(
-            format!("Unsupported compression: {}", other),
-        )),
+        Some(other) => Err(Error::DecompressionError(format!(
+            "Unsupported compression: {}",
+            other
+        ))),
     }
 }
-

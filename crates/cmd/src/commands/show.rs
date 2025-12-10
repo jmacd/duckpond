@@ -701,11 +701,13 @@ fn format_operations_from_batches(
         // Format each row
         for i in 0..batch.num_rows() {
             let part_id_str = part_ids.value(i);
-            let part_id = tinyfs::PartID::from_hex_string(part_id_str)
-                .map_err(|e| steward::StewardError::Dyn(format!("Invalid part_id: {}", e).into()))?;
+            let part_id = tinyfs::PartID::from_hex_string(part_id_str).map_err(|e| {
+                steward::StewardError::Dyn(format!("Invalid part_id: {}", e).into())
+            })?;
             let node_id_str = node_ids.value(i);
-            let node_id = tinyfs::NodeID::from_hex_string(node_id_str)
-                .map_err(|e| steward::StewardError::Dyn(format!("Invalid node_id: {}", e).into()))?;
+            let node_id = tinyfs::NodeID::from_hex_string(node_id_str).map_err(|e| {
+                steward::StewardError::Dyn(format!("Invalid node_id: {}", e).into())
+            })?;
             let file_type = file_types.value(i);
             let version = versions.value(i);
             let size = if sizes.is_null(i) { -1 } else { sizes.value(i) };
@@ -774,12 +776,13 @@ fn format_operations_from_batches(
 
     for (part_id_str, ops) in sorted_partitions {
         // Parse part_id string back to PartID to construct directory FileID
-        let part_id = tinyfs::PartID::from_hex_string(&part_id_str)
-            .map_err(|e| steward::StewardError::Dyn(format!("Invalid part_id in map: {}", e).into()))?;
-        
+        let part_id = tinyfs::PartID::from_hex_string(&part_id_str).map_err(|e| {
+            steward::StewardError::Dyn(format!("Invalid part_id in map: {}", e).into())
+        })?;
+
         // For directory partitions, the FileID is self-partitioned (part_id == node_id)
         let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(part_id.to_node_id());
-        
+
         let path_display = path_map
             .get(&dir_file_id.to_string())
             .map(|s| s.as_str())
@@ -822,9 +825,7 @@ fn format_operations_from_batches(
 }
 
 /// Decode directory content and return entries with their names and node IDs
-fn decode_directory_entries(
-    content_bytes: &[u8],
-) -> Result<Vec<tlogfs::DirectoryEntry>, String> {
+fn decode_directory_entries(content_bytes: &[u8]) -> Result<Vec<tlogfs::DirectoryEntry>, String> {
     // Use the public helper from tlogfs
     let entries = tlogfs::schema::decode_directory_entries(content_bytes)
         .map_err(|e| format!("Failed to decode: {}", e))?;

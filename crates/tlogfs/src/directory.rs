@@ -5,8 +5,7 @@ use log::debug;
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::{
-    DirHandle, Directory, Metadata, NodeMetadata, Node, FileID,
-    persistence::PersistenceLayer,
+    DirHandle, Directory, FileID, Metadata, Node, NodeMetadata, persistence::PersistenceLayer,
 };
 use tokio::sync::Mutex;
 
@@ -45,22 +44,27 @@ impl Metadata for OpLogDirectory {
 impl Directory for OpLogDirectory {
     async fn get(&self, name: &str) -> tinyfs::Result<Option<Node>> {
         debug!("OpLogDirectory::get('{name}')");
-        
+
         // Load directory state into memory if not already present
-        self.state.ensure_directory_loaded(self.id).await
+        self.state
+            .ensure_directory_loaded(self.id)
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
-        
+
         // Get entry from in-memory state
-        let entry_opt = self.state.get_directory_entry(self.id, name).await
+        let entry_opt = self
+            .state
+            .get_directory_entry(self.id, name)
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get directory entry: {}", e)))?;
-        
+
         let Some(entry) = entry_opt else {
             debug!("OpLogDirectory::get: entry '{name}' not found");
             return Ok(None);
         };
-        
+
         debug!("OpLogDirectory::get: found entry '{name}'!");
-        
+
         // Construct FileID based on entry type:
         // - Physical directories: part_id == node_id (self-partitioned)
         // - Everything else: part_id == parent's part_id
@@ -69,7 +73,7 @@ impl Directory for OpLogDirectory {
         } else {
             FileID::new_from_ids(self.id.part_id(), entry.child_node_id)
         };
-        
+
         // Load the child node
         let child_node = self.state.load_node(child_file_id).await?;
         Ok(Some(child_node))
@@ -77,11 +81,13 @@ impl Directory for OpLogDirectory {
 
     async fn insert(&mut self, name: String, node: Node) -> tinyfs::Result<()> {
         debug!("OpLogDirectory::insert('{name}', {:?})", node.id());
-        
+
         // Ensure directory is loaded in memory
-        self.state.ensure_directory_loaded(self.id).await
+        self.state
+            .ensure_directory_loaded(self.id)
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
-        
+
         // Create the new entry
         let node_id = node.id();
         let new_entry = tinyfs::DirectoryEntry::new(
@@ -90,29 +96,42 @@ impl Directory for OpLogDirectory {
             node_id.entry_type(),
             1, // version_last_modified - will be set properly at flush time
         );
-        
+
         // Insert into in-memory state (checks for duplicates and marks as modified)
-        self.state.insert_directory_entry(self.id, new_entry).await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to insert directory entry: {}", e)))?;
-        
+        self.state
+            .insert_directory_entry(self.id, new_entry)
+            .await
+            .map_err(|e| {
+                tinyfs::Error::Other(format!("Failed to insert directory entry: {}", e))
+            })?;
+
         Ok(())
     }
 
     async fn entries(
         &self,
-    ) -> tinyfs::Result<Pin<Box<dyn Stream<Item = tinyfs::Result<tinyfs::DirectoryEntry>> + Send>>> {
+    ) -> tinyfs::Result<Pin<Box<dyn Stream<Item = tinyfs::Result<tinyfs::DirectoryEntry>> + Send>>>
+    {
         debug!("OpLogDirectory::entries() called for directory {}", self.id);
-        
+
         // Load directory state into memory if not already present
-        self.state.ensure_directory_loaded(self.id).await
+        self.state
+            .ensure_directory_loaded(self.id)
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
-        
+
         // Get all entries from in-memory state
-        let entries = self.state.get_all_directory_entries(self.id).await
+        let entries = self
+            .state
+            .get_all_directory_entries(self.id)
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get directory entries: {}", e)))?;
-        
-        debug!("OpLogDirectory::entries() - returning {} entries", entries.len());
-        
+
+        debug!(
+            "OpLogDirectory::entries() - returning {} entries",
+            entries.len()
+        );
+
         // Convert Vec<DirectoryEntry> into a stream
         let stream = futures::stream::iter(entries.into_iter().map(Ok));
         Ok(Box::pin(stream))

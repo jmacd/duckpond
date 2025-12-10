@@ -67,9 +67,11 @@ pub async fn detect_overlaps_command(
 
         for (node_path, _captured) in matches {
             if let Some(file_node) = node_path.into_file().await {
-                let metadata = file_node.metadata().await
+                let metadata = file_node
+                    .metadata()
+                    .await
                     .map_err(|e| anyhow!("Failed to get metadata: {}", e))?;
-                    
+
                 if metadata.entry_type.is_series_file() {
                     let path_str = node_path.path().to_string_lossy().to_string();
 
@@ -115,8 +117,12 @@ pub async fn detect_overlaps_command(
             .map_err(|e| anyhow!("Failed to get records for {}: {}", path_str, e))?;
 
         // Filter out empty versions (size == 0) to avoid Parquet parsing errors
-        let versions: Vec<_> = records.into_iter()
-            .filter(|r| !matches!(r.format, tlogfs::schema::StorageFormat::Inline) && r.size.unwrap_or(0) > 0)
+        let versions: Vec<_> = records
+            .into_iter()
+            .filter(|r| {
+                !matches!(r.format, tlogfs::schema::StorageFormat::Inline)
+                    && r.size.unwrap_or(0) > 0
+            })
             .collect();
 
         let version_count = versions.len();

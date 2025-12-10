@@ -40,7 +40,7 @@
 //! Each file contains time-bucketed aggregations using SQL GROUP BY operations.
 
 use crate::register_dynamic_factory;
-use provider::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use futures::stream::{self, Stream};
@@ -121,7 +121,7 @@ pub struct TemporalReduceSqlFile {
     duration: Duration,
     source_node: Node,
     source_path: String, // For SQL pattern reference
-    context: provider::FactoryContext,
+    context: crate::FactoryContext,
     // Lazy-initialized actual SQL file
     inner: Arc<tokio::sync::Mutex<Option<SqlDerivedFile>>>,
     // CACHE: Discovered columns to avoid repeated schema discovery
@@ -137,7 +137,7 @@ impl TemporalReduceSqlFile {
         duration: Duration,
         source_node: Node,
         source_path: String,
-        context: provider::FactoryContext,
+        context: crate::FactoryContext,
     ) -> Self {
         Self {
             config,
@@ -202,23 +202,22 @@ impl TemporalReduceSqlFile {
         // Get the file handle from the node - extract from node_type
         let file_handle = match &self.source_node.node_type {
             NodeType::File(handle) => handle.clone(),
-            _ => return Err(tinyfs::Error::Other("Source node is not a file".to_string())),
+            _ => {
+                return Err(tinyfs::Error::Other(
+                    "Source node is not a file".to_string(),
+                ));
+            }
         };
         let file_arc = file_handle.get_file().await;
         let file_guard = file_arc.lock().await;
 
         // In temporal reduce context, source files are always QueryableFile implementations
-        let table_provider = if let Some(queryable_file) =
-            file_guard.as_queryable()
-        {
+        let table_provider = if let Some(queryable_file) = file_guard.as_queryable() {
             queryable_file
                 .as_table_provider(file_id, &self.context.context)
                 .await
                 .map_err(|e| {
-                    tinyfs::Error::Other(format!(
-                        "QueryableFile table provider error: {}",
-                        e
-                    ))
+                    tinyfs::Error::Other(format!("QueryableFile table provider error: {}", e))
                 })?
         } else {
             return Err(tinyfs::Error::Other("Source file does not implement QueryableFile - temporal reduce requires queryable sources".to_string()));
@@ -299,7 +298,7 @@ impl TemporalReduceSqlFile {
                             }
                         }
                     }
-                    
+
                     // Replace the patterns with the matched columns
                     agg.columns = Some(matched_columns.clone());
                     log::debug!(
@@ -435,9 +434,7 @@ impl tinyfs::QueryableFile for TemporalReduceSqlFile {
         id: tinyfs::FileID,
         context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn TableProvider>> {
-        log::debug!(
-            "DELEGATING TemporalReduceSqlFile to inner file: id={id}",
-        );
+        log::debug!("DELEGATING TemporalReduceSqlFile to inner file: id={id}",);
         self.ensure_inner().await?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().expect("safelock");
@@ -521,7 +518,7 @@ async fn generate_temporal_sql(
     config: &TemporalReduceConfig,
     interval: Duration,
     _source_path: &str,
-    _context: &provider::FactoryContext,
+    _context: &crate::FactoryContext,
     pattern_name: &str,
 ) -> TinyFSResult<String> {
     let interval = duration_to_sql_interval(interval);
@@ -612,12 +609,12 @@ fn extract_time_unit_from_interval(interval: &str) -> &str {
 /// Dynamic directory for temporal reduce operations
 pub struct TemporalReduceDirectory {
     config: TemporalReduceConfig,
-    context: provider::FactoryContext,
+    context: crate::FactoryContext,
     parsed_resolutions: Vec<(String, Duration)>,
 }
 
 impl TemporalReduceDirectory {
-    pub fn new(config: TemporalReduceConfig, context: provider::FactoryContext) -> TinyFSResult<Self> {
+    pub fn new(config: TemporalReduceConfig, context: crate::FactoryContext) -> TinyFSResult<Self> {
         // Parse all resolutions upfront
         let mut parsed_resolutions = Vec::new();
 
@@ -736,7 +733,8 @@ impl TemporalReduceDirectory {
         id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
         // Use this temporal reduce directory's NodeID as the PartID for children
         let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-        let file_id = tinyfs::FileID::from_content(parent_part_id, EntryType::DirectoryDynamic, &id_bytes);
+        let file_id =
+            tinyfs::FileID::from_content(parent_part_id, EntryType::DirectoryDynamic, &id_bytes);
 
         Node::new(file_id, NodeType::Directory(site_directory.create_handle()))
     }
@@ -783,7 +781,8 @@ impl Directory for TemporalReduceDirectory {
 
     async fn entries(
         &self,
-    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>> {
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>>
+    {
         // Discover all source files - fail fast on error
         let source_files = self.discover_source_files().await?;
 
@@ -798,7 +797,10 @@ impl Directory for TemporalReduceDirectory {
         for (site_name, _source_path) in sites {
             // Get the actual node to extract its real node_id - fail fast on error
             let node = self.get(&site_name).await?.ok_or_else(|| {
-                tinyfs::Error::Other(format!("Failed to create temporal-reduce site '{}'", site_name))
+                tinyfs::Error::Other(format!(
+                    "Failed to create temporal-reduce site '{}'",
+                    site_name
+                ))
             })?;
             let dir_entry = tinyfs::DirectoryEntry::new(
                 site_name.clone(),
@@ -834,7 +836,7 @@ pub struct TemporalReduceSiteDirectory {
     source_path: String,
     source_node: Node,
     config: TemporalReduceConfig,
-    context: provider::FactoryContext,
+    context: crate::FactoryContext,
     parsed_resolutions: Vec<(String, Duration)>,
 }
 
@@ -845,7 +847,7 @@ impl TemporalReduceSiteDirectory {
         source_path: String,
         source_node: Node,
         config: TemporalReduceConfig,
-        context: provider::FactoryContext,
+        context: crate::FactoryContext,
         parsed_resolutions: Vec<(String, Duration)>,
     ) -> Self {
         Self {
@@ -886,13 +888,14 @@ impl TemporalReduceSiteDirectory {
 impl Directory for TemporalReduceSiteDirectory {
     async fn entries(
         &self,
-    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>> {
+    ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>>
+    {
         let mut entries = vec![];
 
         // Create DirectoryEntry for each resolution without creating the file yet
         for (res_str, _duration) in &self.parsed_resolutions {
             let filename = format!("res={}.series", res_str);
-            
+
             // Create deterministic FileID for this entry - note: we already have the EntryType from dir_entry below
             let mut id_bytes = Vec::new();
             id_bytes.extend_from_slice(self.site_name.as_bytes());
@@ -902,7 +905,11 @@ impl Directory for TemporalReduceSiteDirectory {
             id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
             // Use this temporal reduce site directory's NodeID as the PartID for children
             let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-            let file_id = tinyfs::FileID::from_content(parent_part_id, EntryType::FileSeriesDynamic, &id_bytes);
+            let file_id = tinyfs::FileID::from_content(
+                parent_part_id,
+                EntryType::FileSeriesDynamic,
+                &id_bytes,
+            );
 
             let dir_entry = tinyfs::DirectoryEntry::new(
                 filename.clone(),
@@ -933,7 +940,11 @@ impl Directory for TemporalReduceSiteDirectory {
                 id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
                 // Use this temporal reduce site directory's NodeID as the PartID for children
                 let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-                let file_id = tinyfs::FileID::from_content(parent_part_id, EntryType::FileSeriesDynamic, &id_bytes);
+                let file_id = tinyfs::FileID::from_content(
+                    parent_part_id,
+                    EntryType::FileSeriesDynamic,
+                    &id_bytes,
+                );
 
                 let node_ref = Node::new(file_id, NodeType::File(sql_file));
                 return Ok(Some(node_ref));
@@ -966,7 +977,7 @@ impl tinyfs::Metadata for TemporalReduceSiteDirectory {
 /// Create a temporal reduce directory from configuration and context
 fn create_temporal_reduce_directory(
     config: Value,
-    context: provider::FactoryContext,
+    context: crate::FactoryContext,
 ) -> TinyFSResult<DirHandle> {
     let temporal_config: TemporalReduceConfig =
         serde_json::from_value(config.clone()).map_err(|e| {
@@ -1017,18 +1028,18 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factory::FactoryRegistry;
+    use crate::FactoryRegistry;
     use arrow::array::{Float64Array, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
-    use std::sync::Arc;
-    use tinyfs::{EntryType, FileID, NodeType, FS, MemoryPersistence, ProviderContext};
     use datafusion::execution::context::SessionContext;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use tinyfs::{EntryType, FS, FileID, MemoryPersistence, NodeType, ProviderContext};
 
-    /// Helper to create provider::FactoryContext from ProviderContext for tests
-    fn test_context(context: &ProviderContext, file_id: FileID) -> provider::FactoryContext {
-        provider::FactoryContext {
+    /// Helper to create crate::FactoryContext from ProviderContext for tests
+    fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
+        crate::FactoryContext {
             context: context.clone(),
             file_id,
             pond_metadata: None,
@@ -1038,9 +1049,11 @@ mod tests {
     /// Helper to create test environment with MemoryPersistence
     async fn create_test_environment() -> (FS, ProviderContext) {
         let persistence = MemoryPersistence::default();
-        let fs = FS::new(persistence.clone()).await.expect("Failed to create FS");
+        let fs = FS::new(persistence.clone())
+            .await
+            .expect("Failed to create FS");
         let session = Arc::new(SessionContext::new());
-        let object_store = Arc::new(provider::TinyFsObjectStore::new(persistence.clone()));
+        let object_store = Arc::new(crate::TinyFsObjectStore::new(persistence.clone()));
         let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
         _ = session.register_object_store(&url, object_store);
         let provider_context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
@@ -1061,14 +1074,16 @@ mod tests {
         file_writer.write_all(&parquet_data).await?;
         file_writer.flush().await?;
         file_writer.shutdown().await?;
-        
+
         // Get the FileID that was created
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
-        
+
         // Store in persistence (version 1 for MemoryPersistence)
-        persistence.store_file_version(file_id, 1, parquet_data.into()).await?;
-        
+        persistence
+            .store_file_version(file_id, 1, parquet_data.into())
+            .await?;
+
         Ok(file_id)
     }
 
@@ -1085,11 +1100,13 @@ mod tests {
         let _ = env_logger::try_init();
 
         let (fs, provider_context) = create_test_environment().await;
-        
+
         // Get persistence for create_parquet_file helper
         // We know it's MemoryPersistence from create_test_environment
         let persistence = Arc::clone(&provider_context.persistence);
-        let persistence = persistence.as_any().downcast_ref::<MemoryPersistence>()
+        let persistence = persistence
+            .as_any()
+            .downcast_ref::<MemoryPersistence>()
             .expect("Should be MemoryPersistence");
 
         // Create source series files with 3 days of hourly data
@@ -1142,12 +1159,25 @@ mod tests {
                 // Write the series file using create_parquet_file helper
                 let mut buf = Vec::new();
                 {
-                    let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(&mut buf, schema.clone(), None).unwrap();
+                    let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(
+                        &mut buf,
+                        schema.clone(),
+                        None,
+                    )
+                    .unwrap();
                     writer.write(&batch).unwrap();
                     let _ = writer.close().unwrap();
                 }
-                
-                let _ = create_parquet_file(&fs, persistence, &filename, buf, EntryType::FileSeriesPhysical).await.unwrap();
+
+                let _ = create_parquet_file(
+                    &fs,
+                    persistence,
+                    &filename,
+                    buf,
+                    EntryType::FileSeriesPhysical,
+                )
+                .await
+                .unwrap();
             }
         }
 
@@ -1190,7 +1220,7 @@ mod tests {
                 site_names.push(entry.name.clone());
             }
             site_names.sort();
-            
+
             // The glob pattern "/sources/*.series" captures just the part matching * (without .series)
             // so we expect "site1", "site2", "site3" as directory names
             assert_eq!(
@@ -1221,7 +1251,8 @@ mod tests {
                     let file_guard = file_arc.lock().await;
 
                     // Get table provider to query the data
-                    let queryable_file = file_guard.as_queryable()
+                    let queryable_file = file_guard
+                        .as_queryable()
                         .expect("Temporal-reduce should create QueryableFile");
 
                     let table_provider = queryable_file
@@ -1234,10 +1265,7 @@ mod tests {
                     let table_name = format!("temporal_{}", site_num);
                     _ = ctx.register_table(&table_name, table_provider).unwrap();
 
-                    let query = format!(
-                        "SELECT * FROM {} ORDER BY timestamp",
-                        table_name
-                    );
+                    let query = format!("SELECT * FROM {} ORDER BY timestamp", table_name);
                     let dataframe = ctx.sql(&query).await.unwrap();
                     let batches = dataframe.collect().await.unwrap();
 

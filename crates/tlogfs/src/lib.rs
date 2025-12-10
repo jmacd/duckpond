@@ -1,5 +1,4 @@
 #![allow(tail_expr_drop_order)]
-#![allow(missing_docs)]
 
 //! TLogFS - A filesystem implementation using Delta Lake for storage
 //!
@@ -46,15 +45,6 @@ pub mod factory;
 
 // Data taxonomy for sensitive configuration fields
 pub mod data_taxonomy;
-
-// Temporal reduce dynamic factory
-pub mod temporal_reduce;
-
-// Timeseries join dynamic factory
-pub mod timeseries_join;
-
-// Timeseries pivot dynamic factory
-pub mod timeseries_pivot;
 
 // Schema validation utilities
 pub mod schema_validation;

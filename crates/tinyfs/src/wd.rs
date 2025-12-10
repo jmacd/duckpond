@@ -93,8 +93,6 @@ impl WD {
         self.dref.get(name).await
     }
 
-
-
     fn is_root(&self) -> bool {
         self.id().is_root()
     }
@@ -198,7 +196,7 @@ impl WD {
                             .fs
                             .create_file_node_pending_write(parent_id, entry_type)
                             .await?;
-                        
+
                         // Store the node so it can be loaded later
                         wd.fs.persistence.store_node(&node).await?;
 
@@ -255,7 +253,7 @@ impl WD {
                 Lookup::NotFound(_, name) => {
                     let parent_id = wd.id();
                     let node = wd.fs.create_symlink_node(parent_id, &target).await?;
-                    
+
                     // Store the node so it can be loaded later
                     wd.fs.persistence.store_node(&node).await?;
 
@@ -485,7 +483,9 @@ impl WD {
                                 // Propagate the real error with context
                                 return Err(Error::Other(format!(
                                     "Failed to access '{}' in path {}: {}",
-                                    name, path.display(), dir_error
+                                    name,
+                                    path.display(),
+                                    dir_error
                                 )));
                             }
                             Ok(None) => {
@@ -505,9 +505,7 @@ impl WD {
                                         let (newsz, relp) =
                                             crate::path::normalize(&target, &stack)?;
                                         if depth >= SYMLINK_LOOP_LIMIT {
-                                            return Err(Error::symlink_loop(
-                                                target,
-                                            ));
+                                            return Err(Error::symlink_loop(target));
                                         }
                                         let (_, handle) =
                                             self.resolve(&stack[0..newsz], relp, depth + 1).await?;
@@ -627,7 +625,7 @@ impl WD {
         T: Send,
     {
         Box::pin(async move {
-	    // @@@ Seems redundant
+            // @@@ Seems redundant
             _ = self.np.as_dir().await?;
 
             // Handle empty pattern case
@@ -647,15 +645,22 @@ impl WD {
                 }
                 WildcardComponent::Wildcard { .. } => {
                     let all_entries = self.get_entries().await?;
-                    debug!("🔍 Wildcard pattern: got {} total entries from directory {}", all_entries.len(), self.id());
+                    debug!(
+                        "🔍 Wildcard pattern: got {} total entries from directory {}",
+                        all_entries.len(),
+                        self.id()
+                    );
 
                     // Filter by name pattern first (no node loading!)
                     let matching_entries: Vec<_> = all_entries
                         .into_iter()
                         .filter(|entry| pattern[0].match_component(&entry.name).is_some())
                         .collect();
-                    debug!("🔍 Wildcard pattern: {} entries matched name pattern", matching_entries.len());
-                    
+                    debug!(
+                        "🔍 Wildcard pattern: {} entries matched name pattern",
+                        matching_entries.len()
+                    );
+
                     // Load matching nodes individually (handles mixed partitions)
                     for entry in matching_entries {
                         if let Some(captured_match) = pattern[0].match_component(&entry.name) {
@@ -663,7 +668,8 @@ impl WD {
                                 debug!("🔍 Wildcard pattern: loaded child '{}'", entry.name);
                                 captured.push(captured_match.expect("wildcard capture"));
                                 self.visit_match_with_visitor(
-                                    child, false, pattern, visited, captured, stack, results, visitor,
+                                    child, false, pattern, visited, captured, stack, results,
+                                    visitor,
                                 )
                                 .await?;
                                 _ = captured.pop();
@@ -697,7 +703,8 @@ impl WD {
                                 if let Some(child) = self.dref.get(&entry.name).await? {
                                     captured.push(entry.name.clone());
                                     self.visit_match_with_visitor(
-                                        child, true, pattern, visited, captured, stack, results, visitor,
+                                        child, true, pattern, visited, captured, stack, results,
+                                        visitor,
                                     )
                                     .await?;
                                     _ = captured.pop();
@@ -709,7 +716,7 @@ impl WD {
                     // Case 2: Match one or more directories - recurse into child directories only
                     // Load directories individually as needed (avoid batch load across partitions)
                     let all_entries = self.get_entries().await?;
-                    
+
                     for entry in all_entries {
                         // Only recurse into directories
                         if entry.entry_type.is_directory() {
@@ -717,7 +724,8 @@ impl WD {
                             if let Some(child) = self.dref.get(&entry.name).await? {
                                 captured.push(entry.name.clone());
                                 self.visit_match_with_visitor(
-                                    child, true, pattern, visited, captured, stack, results, visitor,
+                                    child, true, pattern, visited, captured, stack, results,
+                                    visitor,
                                 )
                                 .await?;
                                 _ = captured.pop();
@@ -746,7 +754,11 @@ impl WD {
         V: Visitor<T>,
         T: Send,
     {
-        debug!("🔍 visit_match_with_visitor: child={}, pattern.len()={}", child.id(), pattern.len());
+        debug!(
+            "🔍 visit_match_with_visitor: child={}, pattern.len()={}",
+            child.id(),
+            pattern.len()
+        );
         // Ensure the same node is does repeat the scan at the same
         // level in the pattern.
         if visited.len() <= pattern.len() {
@@ -975,11 +987,7 @@ impl WD {
                         let id = wd.id().new_child_id(entry_type);
                         let node = wd
                             .fs
-                            .create_dynamic_node(
-                                id,
-                                factory_type,
-                                config_content,
-                            )
+                            .create_dynamic_node(id, factory_type, config_content)
                             .await?;
 
                         // Insert into parent directory with the given name
@@ -1005,7 +1013,7 @@ impl std::fmt::Debug for WD {
 
 impl PartialEq<WD> for WD {
     fn eq(&self, other: &WD) -> bool {
-	self.id() == other.id()
+        self.id() == other.id()
     }
 }
 
