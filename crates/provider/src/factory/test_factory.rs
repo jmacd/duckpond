@@ -302,10 +302,7 @@ impl InfiniteCsvReader {
         // Generate first 100 rows for schema inference (if available)
         let initial_rows = config.row_count.min(100);
         for i in 0..initial_rows {
-            let timestamp = 1700000000 + (i as i64);
-            let value = (i as f64 * 3.14159).sin();
-            let label = format!("label_{}", i % 10);
-            initial_data.push_str(&format!("{},{},{:.6},{}\n", i, timestamp, value, label));
+            initial_data.push_str(&Self::generate_row(i, &config.columns));
         }
         
         Self {
@@ -315,6 +312,25 @@ impl InfiniteCsvReader {
             buffer: initial_data.into_bytes(),
             buffer_pos: 0,
         }
+    }
+
+    /// Generate a single CSV row based on column configuration
+    fn generate_row(index: usize, columns: &[String]) -> String {
+        let mut values = Vec::new();
+        for col in columns {
+            let value = match col.as_str() {
+                "id" => index.to_string(),
+                "timestamp" => (1700000000 + index as i64).to_string(),
+                "value" => format!("{:.6}", (index as f64 * 3.14159).sin()),
+                "label" => format!("label_{}", index % 10),
+                "temperature" => format!("{:.2}", 20.0 + (index as f64 * 0.1).sin() * 5.0),
+                "humidity" => format!("{:.2}", 50.0 + (index as f64 * 0.2).cos() * 20.0),
+                "pressure" => format!("{:.2}", 1013.25 + (index as f64 * 0.15).sin() * 10.0),
+                _ => index.to_string(), // Default: use row index
+            };
+            values.push(value);
+        }
+        format!("{}\n", values.join(","))
     }
 
     /// Fill buffer with next batch of CSV rows
@@ -328,10 +344,7 @@ impl InfiniteCsvReader {
         let end_row = (self.current_row + self.config.batch_size).min(self.config.row_count);
 
         for i in self.current_row..end_row {
-            let timestamp = 1700000000 + (i as i64);
-            let value = (i as f64 * 3.14159).sin();
-            let label = format!("label_{}", i % 10);
-            batch.push_str(&format!("{},{},{:.6},{}\n", i, timestamp, value, label));
+            batch.push_str(&Self::generate_row(i, &self.config.columns));
         }
 
         self.current_row = end_row;

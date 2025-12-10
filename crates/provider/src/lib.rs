@@ -4,6 +4,8 @@ pub mod factory;
 
 #[cfg(test)]
 mod context_tests;
+#[cfg(test)]
+mod csv_timeseries_integration_test;
 mod compression;
 mod csv;
 mod error;
