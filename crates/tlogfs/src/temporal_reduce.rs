@@ -1018,19 +1018,58 @@ register_dynamic_factory!(
 mod tests {
     use super::*;
     use crate::factory::FactoryRegistry;
-    use crate::persistence::{OpLogPersistence, State};
     use arrow::array::{Float64Array, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
-    use tempfile::TempDir;
-    use tinyfs::arrow::SimpleParquetExt;
-    use tinyfs::{EntryType, FileID, NodeType};
+    use tinyfs::{EntryType, FileID, NodeType, FS, MemoryPersistence, ProviderContext};
+    use datafusion::execution::context::SessionContext;
+    use std::collections::HashMap;
 
-    /// Helper: convert tlogfs State to provider::FactoryContext for tests
-    fn test_context(state: &State, file_id: FileID) -> provider::FactoryContext {
-        let provider_context = state.as_provider_context();
-        provider::FactoryContext::new(provider_context, file_id)
+    /// Helper to create provider::FactoryContext from ProviderContext for tests
+    fn test_context(context: &ProviderContext, file_id: FileID) -> provider::FactoryContext {
+        provider::FactoryContext {
+            context: context.clone(),
+            file_id,
+            pond_metadata: None,
+        }
+    }
+
+    /// Helper to create test environment with MemoryPersistence
+    async fn create_test_environment() -> (FS, ProviderContext) {
+        let persistence = MemoryPersistence::default();
+        let fs = FS::new(persistence.clone()).await.expect("Failed to create FS");
+        let session = Arc::new(SessionContext::new());
+        let object_store = Arc::new(provider::TinyFsObjectStore::new(persistence.clone()));
+        let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
+        _ = session.register_object_store(&url, object_store);
+        let provider_context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
+        (fs, provider_context)
+    }
+
+    /// Helper to create a parquet file in both FS and persistence
+    async fn create_parquet_file(
+        fs: &FS,
+        persistence: &MemoryPersistence,
+        path: &str,
+        parquet_data: Vec<u8>,
+        entry_type: EntryType,
+    ) -> Result<FileID, Box<dyn std::error::Error>> {
+        let root = fs.root().await?;
+        let mut file_writer = root.async_writer_path_with_type(path, entry_type).await?;
+        use tokio::io::AsyncWriteExt;
+        file_writer.write_all(&parquet_data).await?;
+        file_writer.flush().await?;
+        file_writer.shutdown().await?;
+        
+        // Get the FileID that was created
+        let node_path = root.get_node_path(path).await?;
+        let file_id = node_path.id();
+        
+        // Store in persistence (version 1 for MemoryPersistence)
+        persistence.store_file_version(file_id, 1, parquet_data.into()).await?;
+        
+        Ok(file_id)
     }
 
     /// Comprehensive integration test for temporal-reduce factory
@@ -1045,15 +1084,17 @@ mod tests {
     async fn test_temporal_reduce_multi_site_daily_aggregation() {
         let _ = env_logger::try_init();
 
-        let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
-            .await
-            .unwrap();
+        let (fs, provider_context) = create_test_environment().await;
+        
+        // Get persistence for create_parquet_file helper
+        // We know it's MemoryPersistence from create_test_environment
+        let persistence = Arc::clone(&provider_context.persistence);
+        let persistence = persistence.as_any().downcast_ref::<MemoryPersistence>()
+            .expect("Should be MemoryPersistence");
 
-        // Transaction 1: Create source series files with 3 days of hourly data
+        // Create source series files with 3 days of hourly data
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
-            let root = tx_guard.root().await.unwrap();
+            let root = fs.root().await.unwrap();
             _ = root.create_dir_path("/sources").await.unwrap();
 
             // Schema: timestamp + temperature + salinity
@@ -1098,20 +1139,20 @@ mod tests {
                 )
                 .unwrap();
 
-                // Write the series file
-                root.write_parquet(&filename, &batch, EntryType::FileSeriesPhysical)
-                    .await
-                    .unwrap();
+                // Write the series file using create_parquet_file helper
+                let mut buf = Vec::new();
+                {
+                    let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(&mut buf, schema.clone(), None).unwrap();
+                    writer.write(&batch).unwrap();
+                    let _ = writer.close().unwrap();
+                }
+                
+                let _ = create_parquet_file(&fs, persistence, &filename, buf, EntryType::FileSeriesPhysical).await.unwrap();
             }
-
-            tx_guard.commit_test().await.unwrap();
         }
 
-        // Transaction 2: Create temporal-reduce directory and verify aggregations
+        // Create temporal-reduce directory and verify aggregations
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
-            let state = tx_guard.state().unwrap();
-
             // Create temporal-reduce configuration
             let config = TemporalReduceConfig {
                 in_pattern: "/sources/*.series".to_string(),
@@ -1134,7 +1175,7 @@ mod tests {
                 ],
             };
 
-            let context = test_context(&state, FileID::root());
+            let context = test_context(&provider_context, FileID::root());
             let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
             let temporal_handle = temporal_dir.create_handle();
 
@@ -1183,14 +1224,13 @@ mod tests {
                     let queryable_file = file_guard.as_queryable()
                         .expect("Temporal-reduce should create QueryableFile");
 
-                    let provider_context = state.as_provider_context();
                     let table_provider = queryable_file
                         .as_table_provider(file_id, &provider_context)
                         .await
                         .unwrap();
 
                     // Execute query to get results
-                    let ctx = state.session_context().await.unwrap();
+                    let ctx = &provider_context.datafusion_session;
                     let table_name = format!("temporal_{}", site_num);
                     _ = ctx.register_table(&table_name, table_provider).unwrap();
 
@@ -1296,8 +1336,6 @@ mod tests {
                     panic!("Expected file node for {}/res=1d.series", site_name);
                 }
             }
-
-            tx_guard.commit_test().await.unwrap();
         }
 
         log::info!("✅ Temporal-reduce integration test completed successfully");

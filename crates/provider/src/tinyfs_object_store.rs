@@ -47,11 +47,11 @@ use log::debug;
 pub struct TinyFsPathBuilder;
 
 impl TinyFsPathBuilder {
-    /// Create path for all versions: "part/{part_id}/node/{node_id}/version/"
-    #[must_use]
-    pub fn all_versions(file_id: &tinyfs::FileID) -> String {
-        format!("part/{}/node/{}/version/", file_id.part_id(), file_id.node_id())
-    }
+    // /// Create path for all versions: "part/{part_id}/node/{node_id}/version/"
+    // #[must_use]
+    // pub fn all_versions(file_id: &tinyfs::FileID) -> String {
+    //     format!("part/{}/node/{}/version/", file_id.part_id(), file_id.node_id())
+    // }
 
     /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"
     #[must_use]
@@ -65,35 +65,35 @@ impl TinyFsPathBuilder {
         )
     }
 
-    /// Create tinyfs:// URL for all versions
-    #[must_use]
-    pub fn url_all_versions(file_id: &tinyfs::FileID) -> String {
-        format!("tinyfs:///{}", Self::all_versions(file_id))
-    }
+    // /// Create tinyfs:// URL for all versions
+    // #[must_use]
+    // pub fn url_all_versions(file_id: &tinyfs::FileID) -> String {
+    //     format!("tinyfs:///{}", Self::all_versions(file_id))
+    // }
 
-    /// Create tinyfs:// URL for specific version  
-    #[must_use]
-    pub fn url_specific_version(
-        file_id: &tinyfs::FileID,
-        version: u64,
-    ) -> String {
-        format!(
-            "tinyfs:///{}",
-            Self::specific_version(file_id, version)
-        )
-    }
+    // /// Create tinyfs:// URL for specific version  
+    // #[must_use]
+    // pub fn url_specific_version(
+    //     file_id: &tinyfs::FileID,
+    //     version: u64,
+    // ) -> String {
+    //     format!(
+    //         "tinyfs:///{}",
+    //         Self::specific_version(file_id, version)
+    //     )
+    // }
 
-    /// Create path for directory entries: "directory/{node_id}"
-    #[must_use]
-    pub fn directory(node_id: &tinyfs::NodeID) -> String {
-        format!("directory/{}", node_id)
-    }
+    // /// Create path for directory entries: "directory/{node_id}"
+    // #[must_use]
+    // pub fn directory(node_id: &tinyfs::NodeID) -> String {
+    //     format!("directory/{}", node_id)
+    // }
 
-    /// Create tinyfs:// URL for directory entries
-    #[must_use]
-    pub fn url_directory(node_id: &tinyfs::NodeID) -> String {
-        format!("tinyfs:///{}", Self::directory(node_id))
-    }
+    // /// Create tinyfs:// URL for directory entries
+    // #[must_use]
+    // pub fn url_directory(node_id: &tinyfs::NodeID) -> String {
+    //     format!("tinyfs:///{}", Self::directory(node_id))
+    // }
 }
 
 /// File series information for ObjectStore registry

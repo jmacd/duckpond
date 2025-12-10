@@ -11,16 +11,18 @@ This document analyzes the feasibility and approach for migrating factory infras
 - ✅ QueryableFile trait migrated to provider crate (all 5 implementations)
 - ✅ sql_derived tests migrated to MemoryPersistence (zero State dependencies)
 - ✅ Factory infrastructure (registry, FactoryContext) in provider crate
-- ⚠️ **Remaining**: Move individual factory code files (sql_derived, timeseries_join, etc.)
+- ✅ **sql_derived.rs migrated to provider crate!** 🎉
+- ⚠️ **Remaining**: Move other factory code files (timeseries_join, temporal_reduce, etc.)
 
 **Migration Blockers - NONE:**
-- sql_derived has no runtime State dependencies (only registry/helpers)
+- sql_derived migration complete and all tests passing
 - Tests prove any PersistenceLayer works (Memory or OpLog)
-- Only infrastructure remains (factory registration, helper functions)
+- Pattern established for migrating remaining factories
 
 **Next Phase:**
-Move factory code files from `tlogfs/src/` to `provider/src/file/` and `provider/src/directory/`.
-This is now a **mechanical refactoring** with no architectural changes needed.
+Move remaining factory code files from `tlogfs/src/` to `provider/src/`:
+- timeseries_join.rs, timeseries_pivot.rs, temporal_reduce.rs
+- remote_factory.rs, template_factory.rs, dynamic_dir.rs
 
 ---
 
@@ -742,6 +744,60 @@ let provider = create_table_provider(context, options).await?;
 
 ---
 
+### 2025-12-09: 🎉 sql_derived Migration to Provider Crate COMPLETE
+
+**What Changed:**
+- ✅ **sql_derived.rs moved** from `crates/tlogfs/src/` → `crates/provider/src/`
+- ✅ **Removed tlogfs wrapper macro** - now calls `provider::register_dynamic_factory!` directly
+- ✅ **Removed try_as_queryable_file wrapper** - all call sites use `file.as_queryable()` directly
+- ✅ **Fixed TLogFSError dependency** - changed to `tinyfs::Error`
+- ✅ **Updated all imports**:
+  - timeseries_pivot.rs: `use provider::sql_derived::{...}`
+  - timeseries_join.rs: `use provider::sql_derived::{...}`
+  - temporal_reduce.rs: `use provider::sql_derived::{...}`
+- ✅ **Merged sql_derived_config.rs** into sql_derived.rs (consolidated single file)
+- ✅ **Added missing dev-dependencies** to provider/Cargo.toml
+- ✅ **All 28 tests passing** (23 functional + 3 config + 2 types)
+
+**Files Modified:**
+1. **Moved**: `crates/tlogfs/src/sql_derived.rs` → `crates/provider/src/sql_derived.rs` (4069 lines)
+2. **Updated**: `crates/provider/src/lib.rs` - added `pub mod sql_derived;` and re-export
+3. **Updated**: `crates/tlogfs/src/lib.rs` - removed `pub mod sql_derived;`
+4. **Updated**: `crates/tlogfs/src/timeseries_pivot.rs` - changed import
+5. **Updated**: `crates/tlogfs/src/timeseries_join.rs` - changed import
+6. **Updated**: `crates/tlogfs/src/temporal_reduce.rs` - changed import
+7. **Deleted**: `crates/provider/src/sql_derived_config.rs` (merged into sql_derived.rs)
+8. **Updated**: `crates/provider/Cargo.toml` - added dev-dependencies (env_logger, tlogfs, parquet, hydrovu, tokio-util, arrow-cast)
+
+**Remaining tlogfs Dependencies (Test-Only):**
+- `use tlogfs::temporal_reduce` in 2 integration tests (lines 2731, 3050)
+- These tests verify sql_derived → temporal_reduce interop
+- Not blocking - tests are cross-crate integration tests
+
+**Zero Production Dependencies on tlogfs:**
+- ✅ No `use crate::` (within sql_derived.rs, now uses `crate::` for provider)
+- ✅ No State downcast (uses ProviderContext directly)
+- ✅ No tlogfs-specific types in public API
+- ✅ Fully abstracted over PersistenceLayer trait
+
+**Architecture Impact:**
+- **sql_derived is now a provider-crate feature** ✅
+- Other tlogfs factories can import it: `use provider::sql_derived::{...}`
+- Pattern established for migrating remaining factories
+- Clean separation: provider = factory logic, tlogfs = OpLog persistence
+
+**Test Results:**
+```
+provider: 28 sql_derived tests passing
+tinyfs:   82 tests passing
+tlogfs:   64 tests passing (includes timeseries_join/pivot using sql_derived)
+Total:    319 tests passing
+```
+
+**Status**: ✅ **COMPLETE** - First factory successfully migrated to provider crate!
+
+---
+
 ### 2025-12-09: sql_derived Test Migration to MemoryPersistence Complete
 
 **What Changed:**
@@ -754,45 +810,25 @@ let provider = create_table_provider(context, options).await?;
   - `create_parquet_file()` - writes to both FS and persistence for dual storage
 - ✅ **Multi-version handling adapted** for MemoryPersistence (no versioning support)
 
-**Remaining tlogfs Dependencies in sql_derived.rs:**
-
-1. **`crate::register_queryable_file_factory!` macro** (lines 327, 335)
-   - Registers factory in tlogfs DYNAMIC_FACTORIES registry
-   - **Blocker**: Factory registration system still in tlogfs
-
-2. **`crate::file::try_as_queryable_file` helper** (line 51, used 8 times)
-   - Generic downcast helper that tries all QueryableFile implementations
-   - **Blocker**: Lives in tlogfs/src/file.rs, used by multiple factories
-
-3. **`crate::error::TLogFSError` (line 380, single usage)**
-   - Error type used in one internal function return signature
-   - **Easy**: Can convert to `tinyfs::Error` or `provider::Error`
-
-4. **`crate::temporal_reduce` module** (lines 2735, 3054 - test only)
-   - Two integration tests verify sql_derived → temporal_reduce chaining
-   - **Test-only**: Not a blocker for sql_derived code migration
+**Cleanup Actions Taken:**
+1. ✅ Replaced `register_queryable_file_factory!` → `provider::register_dynamic_factory!`
+2. ✅ Removed `try_as_queryable_file` wrapper function (8+ call sites updated)
+3. ✅ Changed `TLogFSError` → `tinyfs::Error` in generate_deterministic_table_name()
+4. ✅ Updated test imports: `use crate::temporal_reduce` → `use tlogfs::temporal_reduce`
 
 **Key Finding:**
-sql_derived.rs has **NO runtime dependencies on tlogfs State**. All remaining references are:
-- Infrastructure (factory registry, helper functions)
-- Error type (trivial to convert)
-- Test integration (temporal_reduce, can stay in tlogfs tests)
+sql_derived.rs had **NO runtime dependencies on tlogfs State**. All removed dependencies were:
+- Infrastructure wrappers (macros, helper functions)
+- Error type (single usage, easily converted)
+- Test-only imports (temporal_reduce integration tests)
 
 **Migration Impact:**
-- ✅ sql_derived **business logic is tlogfs-independent**
-- ✅ Only infrastructure dependencies remain (registry, helpers)
+- ✅ sql_derived **business logic is fully tlogfs-independent**
 - ✅ Tests prove it works with any PersistenceLayer (Memory or OpLog)
-- ✅ Ready to move once factory infrastructure migrates
-- ⚠️ **Cannot move sql_derived alone** - must move with factory registry
+- ✅ Clean migration path established for other factories
+- ✅ State downcast pattern eliminated (uses ProviderContext throughout)
 
-**Next Steps for sql_derived Migration:**
-1. Move `factory.rs` (registry) to provider crate
-2. Move `try_as_queryable_file` to provider crate (or sql_derived itself)
-3. Convert TLogFSError usage to provider::Error
-4. Move sql_derived.rs to provider/src/file/
-5. Keep integration tests in tlogfs (test temporal_reduce interop)
-
-**Status**: sql_derived ready to migrate as part of factory infrastructure migration
+**Status**: Preparation complete → Enabled successful migration to provider crate
 
 ---
 

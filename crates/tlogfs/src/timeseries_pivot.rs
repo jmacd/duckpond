@@ -325,33 +325,35 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::State;
-    use tinyfs::FileID;
+    use datafusion::execution::context::SessionContext;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tinyfs::{FileID, MemoryPersistence, ProviderContext};
 
-    /// Helper: convert tlogfs State to provider::FactoryContext for tests
-    fn test_context(state: &State, file_id: FileID) -> provider::FactoryContext {
-        let provider_context = state.as_provider_context();
-        provider::FactoryContext::new(provider_context, file_id)
+    /// Helper to create provider::FactoryContext from ProviderContext for tests
+    fn test_context(context: &ProviderContext, file_id: FileID) -> provider::FactoryContext {
+        provider::FactoryContext {
+            context: context.clone(),
+            file_id,
+            pond_metadata: None,
+        }
+    }
+
+    /// Helper to create test environment with MemoryPersistence
+    fn create_test_environment() -> ProviderContext {
+        let persistence = MemoryPersistence::default();
+        let session = Arc::new(SessionContext::new());
+        let object_store = Arc::new(provider::TinyFsObjectStore::new(persistence.clone()));
+        let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
+        _ = session.register_object_store(&url, object_store);
+        ProviderContext::new(session, HashMap::new(), Arc::new(persistence))
     }
 
     // Helper to create a TimeseriesPivotFile for SQL generation testing
     fn create_test_pivot_file(config: TimeseriesPivotConfig) -> TimeseriesPivotFile {
-        // Create a mock state for testing - we only need it for SQL generation
-        use tempfile::tempdir;
-        let temp_dir = tempdir().unwrap();
-        let store_path = temp_dir.path().to_str().unwrap();
-        
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut persistence = rt.block_on(async {
-            crate::persistence::OpLogPersistence::open(store_path).await.unwrap()
-        });
-        
-        let tx_guard = rt.block_on(async {
-            persistence.begin_test().await.unwrap()
-        });
-        
-        let state = tx_guard.state().unwrap();
-	let context = test_context(&state, FileID::root());
+        // Create a mock context for testing - we only need it for SQL generation
+        let provider_context = create_test_environment();
+        let context = test_context(&provider_context, FileID::root());
         
         TimeseriesPivotFile { config, context }
     }

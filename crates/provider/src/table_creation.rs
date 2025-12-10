@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tinyfs::{FileID, ProviderContext};
 
 use crate::{TableProviderKey, TableProviderOptions, TemporalFilteredListingTable, VersionSelection};
-use crate::{Error, Result};
+use crate::Result;
 
 /// Create a TableProvider from a FileID with configurable options
 ///

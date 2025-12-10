@@ -473,7 +473,6 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::{OpLogPersistence, State};
     use provider::QueryableFile;
     use arrow::array::{Float64Array, TimestampSecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -481,13 +480,55 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use std::io::Cursor;
     use std::sync::Arc;
-    use tempfile::TempDir;
-    use tinyfs::{EntryType, FileID};
+    use tinyfs::{EntryType, FileID, FS, MemoryPersistence, ProviderContext};
+    use datafusion::execution::context::SessionContext;
+    use std::collections::HashMap;
 
-    /// Helper: convert tlogfs State to provider::FactoryContext for tests
-    fn test_context(state: &State, file_id: FileID) -> provider::FactoryContext {
-        let provider_context = state.as_provider_context();
-        provider::FactoryContext::new(provider_context, file_id)
+    /// Helper to create provider::FactoryContext from ProviderContext for tests
+    fn test_context(context: &ProviderContext, file_id: FileID) -> provider::FactoryContext {
+        provider::FactoryContext {
+            context: context.clone(),
+            file_id,
+            pond_metadata: None,
+        }
+    }
+
+    /// Helper to create test environment with MemoryPersistence
+    /// Returns (FS, ProviderContext) that share the SAME persistence instance
+    async fn create_test_environment() -> (FS, ProviderContext) {
+        let persistence = MemoryPersistence::default();
+        let fs = FS::new(persistence.clone()).await.expect("Failed to create FS");
+        let session = Arc::new(SessionContext::new());
+        let object_store = Arc::new(provider::TinyFsObjectStore::new(persistence.clone()));
+        let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
+        _ = session.register_object_store(&url, object_store);
+        let provider_context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
+        (fs, provider_context)
+    }
+
+    /// Helper to create a parquet file in both FS and persistence
+    async fn create_parquet_file(
+        fs: &FS,
+        persistence: &MemoryPersistence,
+        path: &str,
+        parquet_data: Vec<u8>,
+        entry_type: EntryType,
+    ) -> Result<FileID, Box<dyn std::error::Error>> {
+        let root = fs.root().await?;
+        let mut file_writer = root.async_writer_path_with_type(path, entry_type).await?;
+        use tokio::io::AsyncWriteExt;
+        file_writer.write_all(&parquet_data).await?;
+        file_writer.flush().await?;
+        file_writer.shutdown().await?;
+        
+        // Get the FileID that was created
+        let node_path = root.get_node_path(path).await?;
+        let file_id = node_path.id();
+        
+        // Store in persistence (version 1 for MemoryPersistence)
+        persistence.store_file_version(file_id, 1, parquet_data.into()).await?;
+        
+        Ok(file_id)
     }
 
     #[test]
@@ -536,84 +577,63 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeseries_join_factory_integration() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        let (fs, provider_context) = create_test_environment().await;
+        let persistence = provider_context.persistence.as_any()
+            .downcast_ref::<MemoryPersistence>()
+            .expect("Expected MemoryPersistence");
+
+        // Create source1.series with timestamps [1, 2, 3] and temp_a column
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new("temp_a", DataType::Float64, false),
+        ]));
+
+        let timestamps1 = TimestampSecondArray::from(vec![1, 2, 3]);
+        let temps1 = Float64Array::from(vec![10.0, 20.0, 30.0]);
+        let batch1 = RecordBatch::try_new(
+            schema1.clone(),
+            vec![Arc::new(timestamps1), Arc::new(temps1)],
+        ).unwrap();
+
+        let mut parquet_buffer1 = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer1);
+            let mut writer1 = ArrowWriter::try_new(cursor, schema1, None).unwrap();
+            writer1.write(&batch1).unwrap();
+            _ = writer1.close().unwrap();
+        }
+
+        _ = create_parquet_file(&fs, persistence, "/source1.series", parquet_buffer1, EntryType::FileSeriesPhysical)
             .await
             .unwrap();
 
-        // Create test data files
+        // Create source2.series with timestamps [2, 3, 4] and temp_b column
+        let schema2 = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new("temp_b", DataType::Float64, false),
+        ]));
+
+        let timestamps2 = TimestampSecondArray::from(vec![2, 3, 4]);
+        let temps2 = Float64Array::from(vec![15.0, 25.0, 35.0]);
+        let batch2 = RecordBatch::try_new(
+            schema2.clone(),
+            vec![Arc::new(timestamps2), Arc::new(temps2)],
+        ).unwrap();
+
+        let mut parquet_buffer2 = Vec::new();
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
-            let root = tx_guard.root().await.unwrap();
-
-            // Create source1.series with timestamps [1, 2, 3] and temp_a column
-            let schema1 = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
-                Field::new("temp_a", DataType::Float64, false),
-            ]));
-
-            let timestamps1 = TimestampSecondArray::from(vec![1, 2, 3]);
-            let temps1 = Float64Array::from(vec![10.0, 20.0, 30.0]);
-            let batch1 = RecordBatch::try_new(
-                schema1.clone(),
-                vec![Arc::new(timestamps1), Arc::new(temps1)],
-            ).unwrap();
-
-            let mut parquet_buffer1 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer1);
-                let mut writer1 = ArrowWriter::try_new(cursor, schema1, None).unwrap();
-                writer1.write(&batch1).unwrap();
-                _ = writer1.close().unwrap();
-            }
-
-            let mut file_writer1 = root
-                .async_writer_path_with_type("/source1.series", EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
-            use tokio::io::AsyncWriteExt;
-            file_writer1.write_all(&parquet_buffer1).await.unwrap();
-            file_writer1.flush().await.unwrap();
-            file_writer1.shutdown().await.unwrap();
-
-            // Create source2.series with timestamps [2, 3, 4] and temp_b column
-            let schema2 = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
-                Field::new("temp_b", DataType::Float64, false),
-            ]));
-
-            let timestamps2 = TimestampSecondArray::from(vec![2, 3, 4]);
-            let temps2 = Float64Array::from(vec![15.0, 25.0, 35.0]);
-            let batch2 = RecordBatch::try_new(
-                schema2.clone(),
-                vec![Arc::new(timestamps2), Arc::new(temps2)],
-            ).unwrap();
-
-            let mut parquet_buffer2 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer2);
-                let mut writer2 = ArrowWriter::try_new(cursor, schema2, None).unwrap();
-                writer2.write(&batch2).unwrap();
-                _ = writer2.close().unwrap();
-            }
-
-            let mut file_writer2 = root
-                .async_writer_path_with_type("/source2.series", EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
-            file_writer2.write_all(&parquet_buffer2).await.unwrap();
-            file_writer2.flush().await.unwrap();
-            file_writer2.shutdown().await.unwrap();
-
-            tokio::task::yield_now().await;
-            tx_guard.commit_test().await.unwrap();
+            let cursor = Cursor::new(&mut parquet_buffer2);
+            let mut writer2 = ArrowWriter::try_new(cursor, schema2, None).unwrap();
+            writer2.write(&batch2).unwrap();
+            _ = writer2.close().unwrap();
         }
 
+        _ = create_parquet_file(&fs, persistence, "/source2.series", parquet_buffer2, EntryType::FileSeriesPhysical)
+            .await
+            .unwrap();
+
         // Now create the timeseries join
-        let tx_guard = persistence.begin_test().await.unwrap();
-        let state = tx_guard.state().unwrap();
-        use tinyfs::FileID;
-        let context = test_context(&state, FileID::root());
+        let context = test_context(&provider_context, FileID::root());
 
         let config = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),
@@ -634,14 +654,13 @@ mod tests {
         let join_file = TimeseriesJoinFile::new(config, context);
         
         // Test as_table_provider
-        let provider_context = state.as_provider_context();
         let table_provider = join_file
             .as_table_provider(FileID::root(), &provider_context)
             .await
             .unwrap();
 
         // Register and query
-        let ctx = state.session_context().await.unwrap();
+        let ctx = &provider_context.datafusion_session;
         _ = ctx.register_table("joined", table_provider).unwrap();
 
         let df = ctx.sql("SELECT * FROM joined ORDER BY timestamp").await.unwrap();
@@ -655,93 +674,62 @@ mod tests {
         
         // Should have columns: timestamp, temp_a, temp_b
         assert_eq!(batch.num_columns(), 3);
-
-        tx_guard.commit_test().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_timeseries_join_with_scope_prefixes() {
-        use crate::persistence::OpLogPersistence;
-        use arrow::array::{Float64Array, TimestampSecondArray};
-        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-        use tinyfs::{EntryType, FS, FileID};
-        use tempfile::TempDir;
+        let (fs, provider_context) = create_test_environment().await;
+        let persistence = provider_context.persistence.as_any()
+            .downcast_ref::<MemoryPersistence>()
+            .expect("Expected MemoryPersistence");
 
-        let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
+        // Create source1.series with temp column
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new("temp", DataType::Float64, false),
+        ]));
+        let timestamps1 = TimestampSecondArray::from(vec![1, 2, 3]);
+        let temps1 = Float64Array::from(vec![10.0, 20.0, 30.0]);
+        let batch1 = RecordBatch::try_new(
+            schema1.clone(),
+            vec![Arc::new(timestamps1), Arc::new(temps1)],
+        ).unwrap();
+        let mut parquet_buffer1 = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer1);
+            let mut writer1 = ArrowWriter::try_new(cursor, schema1, None).unwrap();
+            writer1.write(&batch1).unwrap();
+            _ = writer1.close().unwrap();
+        }
+        _ = create_parquet_file(&fs, persistence, "/source1.series", parquet_buffer1, EntryType::FileSeriesPhysical)
             .await
             .unwrap();
 
+        // Create source2.series with pressure column
+        let schema2 = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new("pressure", DataType::Float64, false),
+        ]));
+        let timestamps2 = TimestampSecondArray::from(vec![2, 3, 4]);
+        let pressures = Float64Array::from(vec![100.0, 101.0, 102.0]);
+        let batch2 = RecordBatch::try_new(
+            schema2.clone(),
+            vec![Arc::new(timestamps2), Arc::new(pressures)],
+        ).unwrap();
+        let mut parquet_buffer2 = Vec::new();
         {
-            let tx_guard = persistence.begin_test().await.unwrap();
-            let state = tx_guard.state().unwrap();
-            let fs = FS::new(state.clone()).await.unwrap();
-            let root = fs.root().await.unwrap();
-
-            // Create source1.series with temp column
-            let schema1 = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
-                Field::new("temp", DataType::Float64, false),
-            ]));
-            let timestamps1 = TimestampSecondArray::from(vec![1, 2, 3]);
-            let temps1 = Float64Array::from(vec![10.0, 20.0, 30.0]);
-            let batch1 = RecordBatch::try_new(
-                schema1.clone(),
-                vec![Arc::new(timestamps1), Arc::new(temps1)],
-            ).unwrap();
-            let mut parquet_buffer1 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer1);
-                let mut writer1 = ArrowWriter::try_new(cursor, schema1, None).unwrap();
-                writer1.write(&batch1).unwrap();
-                _ = writer1.close().unwrap();
-            }
-            let mut file_writer1 = root
-                .async_writer_path_with_type("/source1.series", EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
-            use tokio::io::AsyncWriteExt;
-            file_writer1.write_all(&parquet_buffer1).await.unwrap();
-            file_writer1.flush().await.unwrap();
-            file_writer1.shutdown().await.unwrap();
-
-            // Create source2.series with pressure column
-            let schema2 = Arc::new(Schema::new(vec![
-                Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
-                Field::new("pressure", DataType::Float64, false),
-            ]));
-            let timestamps2 = TimestampSecondArray::from(vec![2, 3, 4]);
-            let pressures = Float64Array::from(vec![100.0, 101.0, 102.0]);
-            let batch2 = RecordBatch::try_new(
-                schema2.clone(),
-                vec![Arc::new(timestamps2), Arc::new(pressures)],
-            ).unwrap();
-            let mut parquet_buffer2 = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer2);
-                let mut writer2 = ArrowWriter::try_new(cursor, schema2, None).unwrap();
-                writer2.write(&batch2).unwrap();
-                _ = writer2.close().unwrap();
-            }
-            let mut file_writer2 = root
-                .async_writer_path_with_type("/source2.series", EntryType::FileSeriesPhysical)
-                .await
-                .unwrap();
-            file_writer2.write_all(&parquet_buffer2).await.unwrap();
-            file_writer2.flush().await.unwrap();
-            file_writer2.shutdown().await.unwrap();
-
-            tx_guard.commit_test().await.unwrap();
+            let cursor = Cursor::new(&mut parquet_buffer2);
+            let mut writer2 = ArrowWriter::try_new(cursor, schema2, None).unwrap();
+            writer2.write(&batch2).unwrap();
+            _ = writer2.close().unwrap();
         }
+        _ = create_parquet_file(&fs, persistence, "/source2.series", parquet_buffer2, EntryType::FileSeriesPhysical)
+            .await
+            .unwrap();
 
         // Test with scope prefixes
-        let tx_guard = persistence.begin_test().await.unwrap();
-        let state = tx_guard.state().unwrap();
         let root_id = FileID::root();
-        let context = test_context(&state, root_id);
+        let context = test_context(&provider_context, root_id);
 
         let config = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),
@@ -760,14 +748,13 @@ mod tests {
         };
 
         let join_file = TimeseriesJoinFile::new(config, context);
-        let provider_context = state.as_provider_context();
         let table_provider = join_file
             .as_table_provider(root_id, &provider_context)
             .await
             .unwrap();
 
         // Query to verify scoped column names - use direct scan to avoid SQL optimizer
-        let ctx = state.session_context().await.unwrap();
+        let ctx = &provider_context.datafusion_session;
         let df_state = ctx.state();
         let plan = table_provider.scan(&df_state, None, &[], None).await.unwrap();
         
@@ -786,33 +773,16 @@ mod tests {
         assert!(column_names.contains(&"timestamp"), "Should have timestamp column");
         assert!(column_names.contains(&"BDock.temp"), "Should have BDock.temp column");
         assert!(column_names.contains(&"ADock.pressure"), "Should have ADock.pressure column");
-
-        tx_guard.commit_test().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_timeseries_join_same_scope_non_overlapping_ranges() {
         // Test the Silver case: two Vulink devices with same scope but non-overlapping time ranges
         // This should use UNION BY NAME and produce proper column names with scope prefix
-        use crate::persistence::OpLogPersistence;
-        use arrow::array::{Float64Array, TimestampSecondArray};
-        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-        use tinyfs::{EntryType, FS, FileID};
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().unwrap();
-        let mut persistence = OpLogPersistence::create_test(temp_dir.path().to_str().unwrap())
-            .await
-            .unwrap();
-
-        {
-            let tx_guard = persistence.begin_test().await.unwrap();
-            let state = tx_guard.state().unwrap();
-            let fs = FS::new(state.clone()).await.unwrap();
-            let root = fs.root().await.unwrap();
+        let (fs, provider_context) = create_test_environment().await;
+        let persistence = provider_context.persistence.as_any()
+            .downcast_ref::<MemoryPersistence>()
+            .expect("Expected MemoryPersistence");
 
             // Create vulink1.series with temp and conductivity columns (timestamps 1-3)
             let schema1 = Arc::new(Schema::new(vec![
@@ -834,14 +804,9 @@ mod tests {
                 writer1.write(&batch1).unwrap();
                 _ = writer1.close().unwrap();
             }
-            let mut file_writer1 = root
-                .async_writer_path_with_type("/vulink1.series", EntryType::FileSeriesPhysical)
+            _ = create_parquet_file(&fs, persistence, "/vulink1.series", parquet_buffer1, EntryType::FileSeriesPhysical)
                 .await
                 .unwrap();
-            use tokio::io::AsyncWriteExt;
-            file_writer1.write_all(&parquet_buffer1).await.unwrap();
-            file_writer1.flush().await.unwrap();
-            file_writer1.shutdown().await.unwrap();
 
             // Create vulink2.series with same schema (timestamps 5-7, non-overlapping)
             let schema2 = Arc::new(Schema::new(vec![
@@ -863,13 +828,9 @@ mod tests {
                 writer2.write(&batch2).unwrap();
                 _ = writer2.close().unwrap();
             }
-            let mut file_writer2 = root
-                .async_writer_path_with_type("/vulink2.series", EntryType::FileSeriesPhysical)
+            _ = create_parquet_file(&fs, persistence, "/vulink2.series", parquet_buffer2, EntryType::FileSeriesPhysical)
                 .await
                 .unwrap();
-            file_writer2.write_all(&parquet_buffer2).await.unwrap();
-            file_writer2.flush().await.unwrap();
-            file_writer2.shutdown().await.unwrap();
 
             // Create at500.series with different columns (timestamps 2-6, overlapping both)
             let schema3 = Arc::new(Schema::new(vec![
@@ -889,22 +850,13 @@ mod tests {
                 writer3.write(&batch3).unwrap();
                 _ = writer3.close().unwrap();
             }
-            let mut file_writer3 = root
-                .async_writer_path_with_type("/at500.series", EntryType::FileSeriesPhysical)
+            _ = create_parquet_file(&fs, persistence, "/at500.series", parquet_buffer3, EntryType::FileSeriesPhysical)
                 .await
                 .unwrap();
-            file_writer3.write_all(&parquet_buffer3).await.unwrap();
-            file_writer3.flush().await.unwrap();
-            file_writer3.shutdown().await.unwrap();
-
-            tx_guard.commit_test().await.unwrap();
-        }
 
         // Test with same scope for both Vulinks
-        let tx_guard = persistence.begin_test().await.unwrap();
-        let state = tx_guard.state().unwrap();
         let root_id = FileID::root();
-        let context = test_context(&state, root_id);
+        let context = test_context(&provider_context, root_id);
 
         let config = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),
@@ -934,14 +886,13 @@ mod tests {
         };
 
         let join_file = TimeseriesJoinFile::new(config, context);
-        let provider_context = state.as_provider_context();
         let table_provider = join_file
             .as_table_provider(root_id, &provider_context)
             .await
             .unwrap();
 
         // Query to verify scoped column names and UNION BY NAME behavior
-        let ctx = state.session_context().await.unwrap();
+        let ctx = &provider_context.datafusion_session;
         let df_state = ctx.state();
         let plan = table_provider.scan(&df_state, None, &[], None).await.unwrap();
         
@@ -972,7 +923,5 @@ mod tests {
         
         // Verify we have all unique timestamps from all sources (1,2,3,4,5,6,7)
         assert_eq!(batch.num_rows(), 7, "Should have 7 unique timestamps");
-
-        tx_guard.commit_test().await.unwrap();
     }
 }
