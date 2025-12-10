@@ -8,7 +8,6 @@ mod null_padding;
 pub mod registry;
 mod scope_prefix;
 pub mod sql_derived;
-pub mod sql_derived_config;
 mod sql_derived_types;
 mod sql_transform;
 mod table_creation;
@@ -29,7 +28,7 @@ pub use registry::{
     FactoryCommand, FactoryRegistry, QueryableFile, DYNAMIC_FACTORIES,
 };
 pub use scope_prefix::ScopePrefixTableProvider;
-pub use sql_derived_config::SqlDerivedConfig;
+pub use sql_derived::SqlDerivedConfig;
 pub use sql_derived_types::{SqlDerivedMode, SqlTransformOptions};
 pub use sql_transform::transform_sql;
 pub use table_creation::{create_table_provider, create_listing_table_provider, create_latest_table_provider};
