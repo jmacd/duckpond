@@ -3,8 +3,11 @@
 //! Simple factories that don't require external dependencies,
 //! used to test the factory infrastructure.
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::pin::Pin;
+use std::sync::Arc;
 use tinyfs::Result as TinyFSResult;
 
 /// Test factory configuration
@@ -187,4 +190,228 @@ crate::register_dynamic_factory!(
     description: "Test file factory with required YAML config for unit testing",
     file: create_test_file,
     validate: validate_test_file_config
+);
+
+// ============================================================================
+// Test Infinite CSV Stream Factory
+// ============================================================================
+
+/// Configuration for infinite CSV stream
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfiniteCsvConfig {
+    /// Number of rows to generate (for testing, we use finite but large number)
+    #[serde(default = "default_row_count")]
+    pub row_count: usize,
+    /// Batch size for generating rows
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Column names
+    #[serde(default = "default_columns")]
+    pub columns: Vec<String>,
+}
+
+fn default_row_count() -> usize {
+    100_000 // Large enough to test streaming, small enough for tests
+}
+
+fn default_batch_size() -> usize {
+    1024 // Generate 1KB chunks at a time
+}
+
+fn default_columns() -> Vec<String> {
+    vec![
+        "id".to_string(),
+        "timestamp".to_string(),
+        "value".to_string(),
+        "label".to_string(),
+    ]
+}
+
+impl Default for InfiniteCsvConfig {
+    fn default() -> Self {
+        Self {
+            row_count: default_row_count(),
+            batch_size: default_batch_size(),
+            columns: default_columns(),
+        }
+    }
+}
+
+/// Custom File implementation that generates CSV data on-demand
+pub struct InfiniteCsvFile {
+    config: InfiniteCsvConfig,
+}
+
+impl InfiniteCsvFile {
+    pub fn new(config: InfiniteCsvConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait]
+impl tinyfs::File for InfiniteCsvFile {
+    async fn async_reader(&self) -> TinyFSResult<Pin<Box<dyn tinyfs::AsyncReadSeek>>> {
+        // Create a streaming reader that generates CSV data on demand
+        let reader = InfiniteCsvReader::new(self.config.clone());
+        Ok(Box::pin(reader))
+    }
+
+    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+        Err(tinyfs::Error::Other(
+            "Infinite CSV files are read-only".to_string(),
+        ))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[async_trait]
+impl tinyfs::Metadata for InfiniteCsvFile {
+    async fn metadata(&self) -> TinyFSResult<tinyfs::NodeMetadata> {
+        // Estimate size based on row count
+        let header_size = self.config.columns.join(",").len() + 1;
+        let estimated_row_size = 50; // rough estimate
+        let total_size = header_size + (self.config.row_count * estimated_row_size);
+
+        Ok(tinyfs::NodeMetadata {
+            version: 1,
+            size: Some(total_size as u64),
+            sha256: None,
+            entry_type: tinyfs::EntryType::FileDataDynamic,
+            timestamp: 0,
+        })
+    }
+}
+
+/// Streaming reader that generates CSV data on-demand
+struct InfiniteCsvReader {
+    config: InfiniteCsvConfig,
+    position: usize,
+    current_row: usize,
+    buffer: Vec<u8>,
+    buffer_pos: usize,
+}
+
+impl InfiniteCsvReader {
+    fn new(config: InfiniteCsvConfig) -> Self {
+        // Pre-generate header and some initial rows for schema inference
+        let mut initial_data = format!("{}\n", config.columns.join(","));
+        
+        // Generate first 100 rows for schema inference (if available)
+        let initial_rows = config.row_count.min(100);
+        for i in 0..initial_rows {
+            let timestamp = 1700000000 + (i as i64);
+            let value = (i as f64 * 3.14159).sin();
+            let label = format!("label_{}", i % 10);
+            initial_data.push_str(&format!("{},{},{:.6},{}\n", i, timestamp, value, label));
+        }
+        
+        Self {
+            config,
+            position: 0,
+            current_row: initial_rows,
+            buffer: initial_data.into_bytes(),
+            buffer_pos: 0,
+        }
+    }
+
+    /// Fill buffer with next batch of CSV rows
+    fn fill_buffer(&mut self) {
+        if self.current_row >= self.config.row_count {
+            // Reached end
+            return;
+        }
+
+        let mut batch = String::new();
+        let end_row = (self.current_row + self.config.batch_size).min(self.config.row_count);
+
+        for i in self.current_row..end_row {
+            let timestamp = 1700000000 + (i as i64);
+            let value = (i as f64 * 3.14159).sin();
+            let label = format!("label_{}", i % 10);
+            batch.push_str(&format!("{},{},{:.6},{}\n", i, timestamp, value, label));
+        }
+
+        self.current_row = end_row;
+        self.buffer = batch.into_bytes();
+        self.buffer_pos = 0;
+    }
+}
+
+impl tokio::io::AsyncRead for InfiniteCsvReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        // Check if we need more data
+        if self.buffer_pos >= self.buffer.len() {
+            if self.current_row >= self.config.row_count {
+                // EOF
+                return std::task::Poll::Ready(Ok(()));
+            }
+            self.fill_buffer();
+        }
+
+        // Copy from buffer to output
+        let available = &self.buffer[self.buffer_pos..];
+        let to_copy = available.len().min(buf.remaining());
+        buf.put_slice(&available[..to_copy]);
+
+        self.buffer_pos += to_copy;
+        self.position += to_copy;
+
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncSeek for InfiniteCsvReader {
+    fn start_seek(self: Pin<&mut Self>, _position: std::io::SeekFrom) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "InfiniteCsvReader does not support seeking",
+        ))
+    }
+
+    fn poll_complete(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<u64>> {
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "InfiniteCsvReader does not support seeking",
+        )))
+    }
+}
+
+/// Validate infinite CSV configuration
+fn validate_infinite_csv_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
+    let config: InfiniteCsvConfig = serde_yaml::from_slice(config_bytes)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid infinite-csv config: {}", e)))?;
+
+    serde_json::to_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+}
+
+/// Create infinite CSV file handle
+fn create_infinite_csv_file(
+    config: Value,
+    _context: crate::FactoryContext,
+) -> TinyFSResult<tinyfs::FileHandle> {
+    let parsed: InfiniteCsvConfig = serde_json::from_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+
+    let file = InfiniteCsvFile::new(parsed);
+    Ok(tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(
+        Box::new(file) as Box<dyn tinyfs::File>,
+    ))))
+}
+
+crate::register_dynamic_factory!(
+    name: "infinite-csv",
+    description: "Generates infinite CSV stream for testing streaming readers",
+    file: create_infinite_csv_file,
+    validate: validate_infinite_csv_config
 );

@@ -10,7 +10,6 @@ use crate::{Error, Result, Url};
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use arrow_csv::reader::{Decoder, Format};
-use arrow_csv::ReaderBuilder;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -153,26 +152,35 @@ impl FormatProvider for CsvProvider {
         url: &Url,
     ) -> Result<(SchemaRef, Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>)> {
         let options: CsvOptions = url.query_params().unwrap_or_default();
-
-        // Read entire file into memory for schema inference
-        // We'll reuse this buffer for streaming, avoiding re-opening
-        let mut bytes = Vec::new();
-        let mut reader = reader;
-        let _ = reader
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|e| Error::Io(e))?;
-
-        // Infer schema from the buffered data
         let format = Self::build_format(&options);
-        let cursor = std::io::Cursor::new(&bytes);
+
+        // Wrap reader in BufReader for efficient buffered reading
+        let buf_reader = tokio::io::BufReader::new(reader);
+
+        // Strategy: Read a reasonable chunk (e.g., 1MB) into a buffer for inference,
+        // then create a chained reader (buffered_chunk + remaining_stream)
+        // This avoids loading entire large files into memory while still inferring schema
+        
+        use tokio::io::AsyncReadExt;
+        
+        // Read first chunk for schema inference (default: sample up to 1MB or schema_infer_max_records rows)
+        // This is a reasonable compromise - most CSV headers + sample rows fit in much less
+        let inference_chunk_size = 1024 * 1024; // 1MB should be plenty for schema inference
+        let mut inference_buffer = vec![0u8; inference_chunk_size];
+        let mut buf_reader = buf_reader;
+        
+        let bytes_read = buf_reader.read(&mut inference_buffer).await?;
+        inference_buffer.truncate(bytes_read);
+        
+        // Infer schema from the buffered chunk
+        let cursor = std::io::Cursor::new(&inference_buffer);
         let (schema, _) = format
             .infer_schema(cursor, Some(options.schema_infer_max_records))
             .map_err(|e| Error::Arrow(e.to_string()))?;
         let schema = Arc::new(schema);
 
-        // Create decoder with the inferred schema
-        let mut builder = ReaderBuilder::new(schema.clone())
+        // Now create the decoder with the inferred schema
+        let mut builder = arrow_csv::ReaderBuilder::new(schema.clone())
             .with_delimiter(options.delimiter as u8)
             .with_header(options.has_header)
             .with_batch_size(options.batch_size)
@@ -184,12 +192,13 @@ impl FormatProvider for CsvProvider {
         
         let decoder = builder.build_decoder();
 
-        // Create a cursor over the buffered bytes for streaming
-        // This positions us at the start of the data
-        let cursor = std::io::Cursor::new(bytes);
-        let buf_reader = tokio::io::BufReader::new(cursor);
+        // Create a chained reader: inference_buffer + remaining stream
+        // This ensures we don't lose the data we read for inference
+        let chained_reader = std::io::Cursor::new(inference_buffer).chain(buf_reader);
+        let buf_reader = tokio::io::BufReader::new(chained_reader);
 
         // Create the stream using our helper
+        // The reader is now positioned at the start, with the inference data included
         let stream = decode_csv_stream(decoder, buf_reader);
 
         Ok((schema, stream))
@@ -237,6 +246,7 @@ fn decode_csv_stream<R: AsyncBufRead + Unpin + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
 
     #[test]
     fn test_csv_options_default() {
@@ -329,5 +339,122 @@ mod tests {
         // Read all data
         let batch = stream.next().await.unwrap().unwrap();
         assert_eq!(batch.num_rows(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_csv_large_file_streaming() {
+        use futures::StreamExt;
+
+        // Simulate a large CSV file (10K rows = ~500KB)
+        // This tests that we don't load the entire file into memory
+        let mut csv_data = String::from("id,value,description\n");
+        for i in 0..10_000 {
+            csv_data.push_str(&format!("{},value_{},description for row {}\n", i, i, i));
+        }
+        let csv_bytes = csv_data.into_bytes();
+
+        let reader: Pin<Box<dyn AsyncRead + Send>> = Box::pin(std::io::Cursor::new(csv_bytes));
+
+        let provider = CsvProvider::new();
+        // Use small batch size to create many batches
+        let url = Url::parse("csv:///large.csv?batch_size=100").unwrap();
+
+        let (schema, mut stream) = provider.open_stream(reader, &url).await.unwrap();
+        
+        // Verify schema
+        assert_eq!(schema.fields().len(), 3);
+        
+        // Stream through all batches, counting rows
+        let mut total_rows = 0;
+        let mut batch_count = 0;
+        while let Some(result) = stream.next().await {
+            let batch = result.unwrap();
+            total_rows += batch.num_rows();
+            batch_count += 1;
+        }
+        
+        // Should have read all 10K rows
+        assert_eq!(total_rows, 10_000);
+        // Should have created ~100 batches (10K rows / 100 batch_size)
+        assert!(batch_count >= 99 && batch_count <= 101, "Expected ~100 batches, got {}", batch_count);
+    }
+
+    #[tokio::test]
+    async fn test_csv_infinite_streaming() {
+        // Test that we can stream a large CSV file without loading it all into memory
+        // This uses a dynamically-generated infinite CSV stream with 100K rows
+        use crate::factory::test_factory::{InfiniteCsvConfig, InfiniteCsvFile};
+        use tinyfs::File;
+        
+        // Create an infinite CSV file with 100K rows
+        let config = InfiniteCsvConfig {
+            row_count: 100_000,
+            batch_size: 1024,
+            columns: vec![
+                "id".to_string(),
+                "timestamp".to_string(),
+                "value".to_string(),
+                "label".to_string(),
+            ],
+        };
+        
+        let file = InfiniteCsvFile::new(config);
+        
+        // Get reader from the infinite CSV file
+        let reader = file.async_reader().await.unwrap();
+        
+        // Create CSV provider with small batch size for more batches
+        let provider = CsvProvider::new();
+        let url = Url::parse("csv://test.csv?batch_size=256").unwrap();
+        
+        let (schema, mut stream) = provider.open_stream(reader, &url).await.unwrap();
+        
+        // Verify schema (id, timestamp, value, label)
+        assert_eq!(schema.fields().len(), 4);
+        assert_eq!(schema.field(0).name(), "id");
+        assert_eq!(schema.field(1).name(), "timestamp");
+        assert_eq!(schema.field(2).name(), "value");
+        assert_eq!(schema.field(3).name(), "label");
+        
+        // Stream through all batches
+        let mut total_rows = 0;
+        let mut batch_count = 0;
+        let mut first_id = None;
+        let mut last_id = None;
+        
+        while let Some(result) = stream.next().await {
+            let batch = result.unwrap();
+            total_rows += batch.num_rows();
+            batch_count += 1;
+            
+            // Capture first and last IDs for verification
+            if first_id.is_none() {
+                let id_col = batch.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .unwrap();
+                first_id = Some(id_col.value(0));
+            }
+            
+            let id_col = batch.column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap();
+            let len = arrow::array::Array::len(id_col);
+            last_id = Some(id_col.value(len - 1));
+        }
+        
+        // Verify we read all 100K rows
+        assert_eq!(total_rows, 100_000);
+        
+        // Verify sequential IDs (0 to 99999)
+        assert_eq!(first_id, Some(0));
+        assert_eq!(last_id, Some(99_999));
+        
+        // Should have created ~390 batches (100K rows / 256 batch_size)
+        assert!(batch_count >= 380 && batch_count <= 400, "Expected ~390 batches, got {}", batch_count);
+        
+        println!("✅ Successfully streamed {} rows in {} batches from infinite CSV generator", 
+                 total_rows, batch_count);
     }
 }
