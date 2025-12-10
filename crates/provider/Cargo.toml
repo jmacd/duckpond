@@ -45,9 +45,7 @@ datafusion-common.workspace = true
 arrow-array.workspace = true
 utilities.workspace = true
 env_logger.workspace = true
-tlogfs.workspace = true
 parquet.workspace = true
-hydrovu.workspace = true
 tokio-util.workspace = true
 arrow-cast.workspace = true
 
