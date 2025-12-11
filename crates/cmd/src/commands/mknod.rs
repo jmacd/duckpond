@@ -217,9 +217,9 @@ Generated file: {{ filename }}
             // Create config that references the template file
             let config_path = self.temp_dir.path().join("template_config.yaml");
             let config_content = format!(
-                r#"in_pattern: "/base/*.tmpl"
+                r#"in_pattern: "file:///base/*.tmpl"
 out_pattern: "$0.txt"
-template_file: "{}"
+template_file: "file://{}"
 "#,
                 template_file_path.to_string_lossy()
             );
@@ -475,9 +475,9 @@ New file: {{ filename }}
 
         let config_path2 = setup.temp_dir.path().join("template_config2.yaml");
         let config_content2 = format!(
-            r#"in_pattern: "/base/*.tmpl"
+            r#"in_pattern: "file:///base/*.tmpl"
 out_pattern: "$0.html"
-template_file: "{}"
+template_file: "file://{}"
 "#,
             template_file_path2.to_string_lossy()
         );

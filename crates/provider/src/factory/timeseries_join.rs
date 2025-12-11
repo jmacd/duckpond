@@ -40,7 +40,7 @@ pub struct TimeseriesInput {
     /// - `excelhtml:///pattern` - HydroVu HTML exports
     ///
     /// Example: `series:///data/sensors/*.series`
-    pub pattern: String,
+    pub pattern: crate::Url,
 
     /// Optional time range filter for this specific input
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,15 +84,8 @@ impl TimeseriesJoinConfig {
 
         // Validate each input pattern is a valid URL
         for (i, input) in self.inputs.iter().enumerate() {
-            let url = crate::Url::parse(&input.pattern).map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "Input {} has invalid URL pattern '{}': {}",
-                    i, input.pattern, e
-                ))
-            })?;
-
-            // Validate scheme is appropriate for timeseries data
-            let scheme = url.scheme();
+            // URL already validated during deserialization
+            let scheme = input.pattern.scheme();
             match scheme {
                 "series" | "csv" | "excelhtml" => {
                     // Valid timeseries sources
@@ -139,7 +132,7 @@ fn validate_timestamp(ts_str: &str) -> TinyFSResult<DateTime<Utc>> {
 /// explicit STRUCT() to group each input's columns, then unnest with unique names.
 fn generate_timeseries_join_sql(
     config: &TimeseriesJoinConfig,
-) -> TinyFSResult<(String, HashMap<String, String>)> {
+) -> TinyFSResult<(String, HashMap<String, crate::Url>)> {
     if config.inputs.is_empty() {
         return Err(tinyfs::Error::Other(
             "At least one input must be specified".to_string(),
@@ -314,11 +307,8 @@ impl TimeseriesJoinFile {
         for (i, input) in self.config.inputs.iter().enumerate() {
             let table_name = format!("input{}", i);
             
-            // Parse URL from pattern string (validated during config creation)
-            let url = crate::Url::parse(&input.pattern).map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to parse URL for input {}: {}", i, e))
-            })?;
-            _ = patterns.insert(table_name.clone(), url);
+            // Pattern is already a Url (validated during deserialization)
+            _ = patterns.insert(table_name.clone(), input.pattern.clone());
 
             // Register scope prefix for this input's table
             if let Some(ref scope) = input.scope {
@@ -668,7 +658,7 @@ mod tests {
         let config_single = TimeseriesJoinConfig {
             time_column: "timestamp".to_string(),
             inputs: vec![TimeseriesInput {
-                pattern: "/solo.series".to_string(),
+                pattern: crate::Url::parse("series:///solo.series").unwrap(),
                 scope: None,
                 range: None,
             }],
@@ -680,7 +670,7 @@ mod tests {
             time_column: "timestamp".to_string(),
             inputs: vec![
                 TimeseriesInput {
-                    pattern: "/a.series".to_string(),
+                    pattern: crate::Url::parse("series:///a.series").unwrap(),
                     scope: None,
                     range: Some(TimeRange {
                         begin: Some("not-a-timestamp".to_string()),
@@ -688,7 +678,7 @@ mod tests {
                     }),
                 },
                 TimeseriesInput {
-                    pattern: "/b.series".to_string(),
+                    pattern: crate::Url::parse("series:///b.series").unwrap(),
                     scope: None,
                     range: None,
                 },
@@ -785,12 +775,12 @@ mod tests {
             time_column: "timestamp".to_string(),
             inputs: vec![
                 TimeseriesInput {
-                    pattern: "series:///source1.series".to_string(),
+                    pattern: crate::Url::parse("series:///source1.series").unwrap(),
                     scope: None,
                     range: None,
                 },
                 TimeseriesInput {
-                    pattern: "series:///source2.series".to_string(),
+                    pattern: crate::Url::parse("series:///source2.series").unwrap(),
                     scope: None,
                     range: None,
                 },
@@ -908,12 +898,12 @@ mod tests {
             time_column: "timestamp".to_string(),
             inputs: vec![
                 TimeseriesInput {
-                    pattern: "series:///source1.series".to_string(),
+                    pattern: crate::Url::parse("series:///source1.series").unwrap(),
                     scope: Some("BDock".to_string()),
                     range: None,
                 },
                 TimeseriesInput {
-                    pattern: "series:///source2.series".to_string(),
+                    pattern: crate::Url::parse("series:///source2.series").unwrap(),
                     scope: Some("ADock".to_string()),
                     range: None,
                 },
@@ -1087,7 +1077,7 @@ mod tests {
             time_column: "timestamp".to_string(),
             inputs: vec![
                 TimeseriesInput {
-                    pattern: "series:///vulink1.series".to_string(),
+                    pattern: crate::Url::parse("series:///vulink1.series").unwrap(),
                     scope: Some("Vulink".to_string()),
                     range: Some(TimeRange {
                         begin: None,
@@ -1095,7 +1085,7 @@ mod tests {
                     }),
                 },
                 TimeseriesInput {
-                    pattern: "series:///vulink2.series".to_string(),
+                    pattern: crate::Url::parse("series:///vulink2.series").unwrap(),
                     scope: Some("Vulink".to_string()),
                     range: Some(TimeRange {
                         begin: Some("1970-01-01T00:00:05Z".to_string()),
@@ -1103,7 +1093,7 @@ mod tests {
                     }),
                 },
                 TimeseriesInput {
-                    pattern: "series:///at500.series".to_string(),
+                    pattern: crate::Url::parse("series:///at500.series").unwrap(),
                     scope: Some("AT500_Surface".to_string()),
                     range: None,
                 },

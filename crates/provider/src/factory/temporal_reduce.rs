@@ -16,8 +16,8 @@
 //!   - name: "single_site"
 //!     factory: "temporal-reduce"
 //!     config:
-//!       in_pattern: "/combined/*"  # Glob pattern to match source files
-//!       out_pattern: "$0"           # Output pattern using captured groups
+//!       in_pattern: "series:///combined/*"  # URL pattern to match source files
+//!       out_pattern: "$0"           # Output basename pattern using captured groups
 //!       time_column: "timestamp"    # Column containing timestamp
 //!       resolutions: [1h, 2h, 4h, 12h, 24h]
 //!       aggregations:
@@ -95,10 +95,10 @@ pub struct AggregationConfig {
 /// Configuration for the temporal-reduce factory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemporalReduceConfig {
-    /// Input pattern to match source files (supports glob patterns)
-    pub in_pattern: String,
+    /// Input URL pattern to match source files (supports glob patterns)
+    pub in_pattern: crate::Url,
 
-    /// Output pattern using captured groups (e.g., "$0", "$1")
+    /// Output basename pattern using captured groups (e.g., "$0", "$1") - no URL scheme
     pub out_pattern: String,
 
     /// Name of the timestamp column
@@ -645,7 +645,7 @@ impl TemporalReduceDirectory {
 
     /// Discover source files using the in_pattern and generate output names using out_pattern
     async fn discover_source_files(&self) -> TinyFSResult<Vec<(String, String)>> {
-        let pattern = &self.config.in_pattern;
+        let pattern = self.config.in_pattern.path();
         log::debug!(
             "TemporalReduceDirectory::discover_source_files - scanning pattern {}",
             pattern
@@ -656,7 +656,7 @@ impl TemporalReduceDirectory {
         let fs = self.context.context.filesystem();
 
         // Use collect_matches to find source files with the given pattern
-        match fs.root().await?.collect_matches(&pattern).await {
+        match fs.root().await?.collect_matches(pattern).await {
             Ok(matches) => {
                 for (node_path, captured) in matches {
                     let source_path = node_path.path.to_string_lossy().to_string();
@@ -1196,7 +1196,7 @@ mod tests {
         {
             // Create temporal-reduce configuration
             let config = TemporalReduceConfig {
-                in_pattern: "/sources/*.series".to_string(),
+                in_pattern: crate::Url::parse("series:///sources/*.series").unwrap(),
                 out_pattern: "$0".to_string(), // Preserve filename as site directory name
                 time_column: "timestamp".to_string(),
                 resolutions: vec!["1d".to_string()], // Daily aggregation

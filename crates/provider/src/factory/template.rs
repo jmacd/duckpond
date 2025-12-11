@@ -18,9 +18,9 @@ use tinyfs::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateCollection {
-    pub in_pattern: String,    // Glob pattern with wildcard expressions
+    pub in_pattern: crate::Url,    // URL pattern with wildcard expressions
     pub out_pattern: String,   // Output basename with $0, $1 placeholders (no '/' chars)
-    pub template_file: String, // Path to template file WITHIN POND (e.g., "/templates/data.md.tmpl") - REQUIRED
+    pub template_file: crate::Url, // URL to template file WITHIN POND (e.g., "file:///templates/data.md.tmpl") - REQUIRED
 }
 
 // Use TemplateCollection directly as the spec (one collection per mknod)
@@ -54,7 +54,7 @@ impl TemplateDirectory {
 
     /// Discover template files using the in_pattern
     async fn discover_template_files(&self) -> TinyFSResult<Vec<(PathBuf, Vec<String>)>> {
-        let pattern = &self.config.in_pattern;
+        let pattern = self.config.in_pattern.path();
         debug!("TemplateDirectory::discover_template_files - scanning pattern {pattern}");
 
         let mut template_files = Vec::new();
@@ -62,7 +62,7 @@ impl TemplateDirectory {
         let fs = FS::from_arc(self.context.context.persistence.clone());
 
         // Use collect_matches to find template files with the given pattern
-        match fs.root().await?.collect_matches(&pattern).await {
+        match fs.root().await?.collect_matches(pattern).await {
             Ok(matches) => {
                 for (node_path, captured) in matches {
                     let path_str = node_path.path.to_string_lossy().to_string();
@@ -131,9 +131,9 @@ impl Directory for TemplateDirectory {
                 // Generate deterministic FileID for this template file
                 let mut id_bytes = Vec::new();
                 id_bytes.extend_from_slice(filename.as_bytes());
-                id_bytes.extend_from_slice(self.config.in_pattern.as_bytes());
+                id_bytes.extend_from_slice(self.config.in_pattern.to_string().as_bytes());
                 id_bytes.extend_from_slice(self.config.out_pattern.as_bytes());
-                id_bytes.extend_from_slice(self.config.template_file.as_bytes());
+                id_bytes.extend_from_slice(self.config.template_file.to_string().as_bytes());
                 // Use this template directory's NodeID as the PartID for children
                 let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
                 let file_id = tinyfs::FileID::from_content(
@@ -242,7 +242,7 @@ impl TemplateDirectory {
         // Read template file from pond filesystem
         let fs = FS::from_arc(self.context.context.persistence.clone());
 
-        let template_path = &self.config.template_file;
+        let template_path = self.config.template_file.path();
         debug!("Reading template file from pond: {}", template_path);
 
         // Read the template file from the pond
@@ -421,9 +421,10 @@ fn validate_template_config(config: &[u8]) -> TinyFSResult<Value> {
 
     // Validate template_file is a pond path (starts with /)
     debug!("Validating template file path: {}", spec.template_file);
-    if !spec.template_file.starts_with('/') {
+    let template_path = spec.template_file.path();
+    if !template_path.starts_with('/') {
         return Err(tinyfs::Error::Other(format!(
-            "Template file '{}' must be an absolute pond path (e.g., '/templates/data.md.tmpl')",
+            "Template file '{}' must be an absolute pond path (e.g., 'file:///templates/data.md.tmpl')",
             spec.template_file
         )));
     }

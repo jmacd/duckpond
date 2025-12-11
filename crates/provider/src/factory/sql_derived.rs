@@ -2822,7 +2822,7 @@ query: ""
             let context = test_context(&provider_context, FileID::root());
 
             let config = TemporalReduceConfig {
-                in_pattern: "/sensors/stations/*".to_string(), // Use pattern to match parquet data
+                in_pattern: crate::Url::parse("series:///sensors/stations/*").unwrap(), // Use pattern to match parquet data
                 out_pattern: "$0".to_string(),                 // Keep original filename as output
                 time_column: "timestamp".to_string(),
                 resolutions: vec!["1d".to_string()],
@@ -3132,7 +3132,7 @@ query: ""
 
             // Define temporal-reduce config with wildcard schema discovery
             let temporal_config = TemporalReduceConfig {
-                in_pattern: "/sensors/wildcard_test/*".to_string(), // Use pattern to match base_data.series
+                in_pattern: crate::Url::parse("series:///sensors/wildcard_test/*").unwrap(), // Use pattern to match base_data.series
                 out_pattern: "$0".to_string(), // Keep original filename as output
                 time_column: "timestamp".to_string(),
                 resolutions: vec!["1d".to_string()],

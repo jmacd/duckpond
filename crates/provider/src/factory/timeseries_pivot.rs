@@ -7,7 +7,7 @@
 //! ```yaml
 //! factory: "timeseries-pivot"
 //! config:
-//!   pattern: "/combined/*"  # Captures site name
+//!   pattern: "series:///combined/*"  # Captures site name
 //!   columns:
 //!     - "AT500_Surface.DO.mg/L"
 //!     - "AT500_Bottom.DO.mg/L"
@@ -27,8 +27,8 @@ use tokio::sync::Mutex;
 /// Configuration for timeseries-pivot factory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeseriesPivotConfig {
-    /// Pattern to match input files (e.g., "/combined/*")
-    pub pattern: String,
+    /// Pattern to match input files (e.g., "series:///combined/*")
+    pub pattern: crate::Url,
 
     /// List of column names to pivot across all matched inputs
     pub columns: Vec<String>,
@@ -59,8 +59,11 @@ impl TimeseriesPivotFile {
         let fs = self.context.context.filesystem();
         let tinyfs_root = fs.root().await?;
 
+        // Extract filesystem path from URL for pattern matching
+        let pattern_path = self.config.pattern.path();
+        
         // Use collect_matches to find matching files with captured groups
-        let pattern_matches = tinyfs_root.collect_matches(&self.config.pattern).await?;
+        let pattern_matches = tinyfs_root.collect_matches(pattern_path).await?;
 
         if pattern_matches.is_empty() {
             return Err(tinyfs::Error::Other(format!(
@@ -309,10 +312,8 @@ fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
     let cfg: TimeseriesPivotConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
 
-    if cfg.pattern.is_empty() {
-        return Err(tinyfs::Error::Other("Pattern cannot be empty".to_string()));
-    }
-
+    // URL pattern already validated during deserialization
+    
     if cfg.columns.is_empty() {
         return Err(tinyfs::Error::Other(
             "At least one column must be specified".to_string(),
@@ -369,7 +370,7 @@ mod tests {
     #[test]
     fn test_generate_pivot_sql_basic() {
         let config = TimeseriesPivotConfig {
-            pattern: "/combined/*".to_string(),
+            pattern: crate::Url::parse("series:///combined/*").unwrap(),
             columns: vec!["WaterTemp".to_string(), "DO".to_string()],
             time_column: "time".to_string(),
         };
@@ -412,7 +413,7 @@ mod tests {
     #[test]
     fn test_generate_pivot_sql_single_input() {
         let config = TimeseriesPivotConfig {
-            pattern: "/combined/*".to_string(),
+            pattern: crate::Url::parse("series:///combined/*").unwrap(),
             columns: vec!["Temp".to_string()],
             time_column: "timestamp".to_string(),
         };
@@ -431,7 +432,7 @@ mod tests {
     #[test]
     fn test_generate_pivot_sql_empty() {
         let config = TimeseriesPivotConfig {
-            pattern: "/combined/*".to_string(),
+            pattern: crate::Url::parse("series:///combined/*").unwrap(),
             columns: vec!["WaterTemp".to_string()],
             time_column: "time".to_string(),
         };
@@ -449,7 +450,7 @@ mod tests {
     fn test_config_validation() {
         // Valid config - just the config section as JSON/YAML
         let valid_config = r#"
-pattern: "/combined/*"
+pattern: "series:///combined/*"
 columns:
   - "WaterTemp"
   - "DO"
@@ -458,19 +459,19 @@ time_column: "time"
         let result = validate_timeseries_pivot_config(valid_config.as_bytes());
         assert!(result.is_ok(), "Valid config should pass: {:?}", result);
 
-        // Empty pattern should fail
-        let empty_pattern = r#"
-pattern: ""
+        // Invalid URL pattern should fail
+        let invalid_pattern = r#"
+pattern: "not-a-url"
 columns:
   - "WaterTemp"
 time_column: "time"
 "#;
-        let result = validate_timeseries_pivot_config(empty_pattern.as_bytes());
-        assert!(result.is_err(), "Empty pattern should fail");
+        let result = validate_timeseries_pivot_config(invalid_pattern.as_bytes());
+        assert!(result.is_err(), "Invalid URL pattern should fail");
 
         // No columns should fail
         let no_columns = r#"
-pattern: "/combined/*"
+pattern: "series:///combined/*"
 columns: []
 time_column: "time"
 "#;
