@@ -354,10 +354,21 @@ impl TemporalReduceSqlFile {
                 pattern_name,
                 self.source_path
             );
+            
+            // Convert source_path (filesystem path) to URL with series:// scheme
+            // Temporal-reduce works with series files
+            let source_url_str = if self.source_path.starts_with('/') {
+                format!("series://{}", self.source_path)
+            } else {
+                format!("series:///{}", self.source_path)
+            };
+            let source_url = crate::Url::parse(&source_url_str)
+                .map_err(|e| tinyfs::Error::Other(format!("Invalid source path URL '{}': {}", source_url_str, e)))?;
+            
             let sql_config = SqlDerivedConfig {
                 patterns: {
                     let mut patterns = HashMap::new();
-                    _ = patterns.insert(pattern_name.clone(), self.source_path.clone());
+                    _ = patterns.insert(pattern_name.clone(), source_url);
                     patterns
                 },
                 query: Some(sql_query.clone()),

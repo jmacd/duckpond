@@ -70,11 +70,16 @@ pub struct SqlTransformOptions {
 /// Configuration for SQL-derived file generation
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct SqlDerivedConfig {
-    /// Named patterns for matching files. Each pattern name becomes a table in the SQL query.
+    /// Named URL patterns for matching files. Each pattern name becomes a table in the SQL query.
     /// Each pattern can match multiple files which are automatically harmonized with UNION ALL BY NAME.
-    /// Example: {"vulink": "/data/vulink*.series", "at500": "/data/at500*.series"}
+    /// 
+    /// **URL Format**: `scheme:///path/pattern`
+    /// - `series:///pattern` - FileSeries (for sql-derived-series mode)
+    /// - `table:///pattern` - FileTable (for sql-derived-table mode)
+    /// 
+    /// Example: {"vulink": "series:///data/vulink*.series", "at500": "series:///data/at500*.series"}
     #[serde(default)]
-    pub patterns: HashMap<String, String>,
+    pub patterns: HashMap<String, crate::Url>,
 
     /// SQL query to execute on the source data. Defaults to "SELECT * FROM source" if not specified
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,7 +106,7 @@ pub struct SqlDerivedConfig {
 
 impl SqlDerivedConfig {
     /// Create a new SqlDerivedConfig with patterns and optional query
-    pub fn new(patterns: HashMap<String, String>, query: Option<String>) -> Self {
+    pub fn new(patterns: HashMap<String, crate::Url>, query: Option<String>) -> Self {
         Self {
             patterns,
             query,
@@ -112,7 +117,7 @@ impl SqlDerivedConfig {
 
     /// Create a new SqlDerivedConfig with scope prefixes for column renaming
     pub fn new_scoped(
-        patterns: HashMap<String, String>,
+        patterns: HashMap<String, crate::Url>,
         query: Option<String>,
         scope_prefixes: HashMap<String, (String, String)>,
     ) -> Self {
@@ -134,6 +139,32 @@ impl SqlDerivedConfig {
     {
         self.provider_wrapper = Some(Arc::new(wrapper));
         self
+    }
+
+    /// Validate that all patterns are valid URLs with appropriate schemes for the given mode
+    pub fn validate(&self, mode: &SqlDerivedMode) -> TinyFSResult<()> {
+        if self.patterns.is_empty() {
+            return Err(tinyfs::Error::Other(
+                "At least one pattern must be specified".to_string(),
+            ));
+        }
+
+        let expected_schemes: &[&str] = match mode {
+            SqlDerivedMode::Table => &["table"],
+            SqlDerivedMode::Series => &["series"],
+        };
+
+        for (name, url) in &self.patterns {
+            let scheme = url.scheme();
+            if !expected_schemes.contains(&scheme) {
+                return Err(tinyfs::Error::Other(format!(
+                    "Pattern '{}' uses scheme '{}' but mode {:?} requires one of: {:?}",
+                    name, scheme, mode, expected_schemes
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Get the effective SQL query with table name substitution
@@ -203,12 +234,18 @@ pub struct SqlDerivedFile {
 }
 
 impl SqlDerivedFile {
-    /// Create a new SQL-derived file with the specified configuration
+    /// Create a new SQL-derived file with validated URL patterns
+    /// 
+    /// # Errors
+    /// Returns error if pattern validation fails (invalid URLs, mismatched schemes, etc.)
     pub fn new(
         config: SqlDerivedConfig,
         context: crate::FactoryContext,
         mode: SqlDerivedMode,
     ) -> TinyFSResult<Self> {
+        // Validate patterns match the mode
+        config.validate(&mode)?;
+        
         Ok(Self {
             config,
             context,
@@ -222,12 +259,37 @@ impl SqlDerivedFile {
         FileHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 
-    /// Resolve pattern to QueryableFile instances (eliminates ResolvedFile indirection)
+    /// Resolve URL pattern to QueryableFile instances
+    /// 
+    /// URL already validated during config deserialization.
     pub async fn resolve_pattern_to_queryable_files(
         &self,
-        pattern: &str,
+        url: &crate::Url,
         entry_type: EntryType,
     ) -> TinyFSResult<Vec<tinyfs::NodePath>> {
+        // Validate scheme matches entry_type
+        let scheme = url.scheme();
+        let expected_scheme = match entry_type {
+            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "series",
+            EntryType::FileTablePhysical | EntryType::FileTableDynamic => "table",
+            _ => {
+                return Err(tinyfs::Error::Other(format!(
+                    "Unsupported entry_type {:?} for URL pattern",
+                    entry_type
+                )));
+            }
+        };
+        
+        if scheme != expected_scheme {
+            return Err(tinyfs::Error::Other(format!(
+                "URL scheme '{}' doesn't match entry_type {:?} (expected '{}')",
+                scheme, entry_type, expected_scheme
+            )));
+        }
+        
+        // Extract TinyFS path from URL
+        let tinyfs_path = url.path();
+        
         // STEP 1: Build TinyFS from persistence via ProviderContext
         let fs = self.context.context.filesystem();
         let tinyfs_root = fs
@@ -235,45 +297,45 @@ impl SqlDerivedFile {
             .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
 
-        // Check if pattern is an exact path (no wildcards) - use resolve_path() for single targets
-        // This handles cases like "/test-locations/BDock" where we expect exactly one result
+        // Check if path is exact (no wildcards) - use resolve_path() for single targets
         let is_exact_path =
-            !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[');
+            !tinyfs_path.contains('*') && !tinyfs_path.contains('?') && !tinyfs_path.contains('[');
 
         debug!(
-            "resolve_pattern_to_queryable_files: pattern='{pattern}', is_exact_path={is_exact_path}"
+            "resolve_pattern_to_queryable_files: url='{}', tinyfs_path='{}', is_exact_path={}",
+            url, tinyfs_path, is_exact_path
         );
 
         // STEP 2: Use collect_matches to get NodePath instances
         let matches = if is_exact_path {
             // Use resolve_path() for exact paths to handle dynamic nodes correctly
-            match tinyfs_root.resolve_path(pattern).await {
+            match tinyfs_root.resolve_path(tinyfs_path).await {
                 Ok((_wd, tinyfs::Lookup::Found(node_path))) => {
                     vec![(node_path, HashMap::new())] // Empty captured groups for exact matches
                 }
                 Ok((_wd, tinyfs::Lookup::NotFound(_, _))) => {
                     return Err(tinyfs::Error::Other(format!(
                         "Exact path '{}' not found",
-                        pattern
+                        tinyfs_path
                     )));
                 }
                 Ok((_wd, tinyfs::Lookup::Empty(_))) => {
                     return Err(tinyfs::Error::Other(format!(
                         "Exact path '{}' points to empty directory",
-                        pattern
+                        tinyfs_path
                     )));
                 }
                 Err(e) => {
                     return Err(tinyfs::Error::Other(format!(
                         "Failed to resolve exact path '{}': {}",
-                        pattern, e
+                        tinyfs_path, e
                     )));
                 }
             }
         } else {
             // Use collect_matches() for glob patterns - returns Vec<(NodePath, Vec<String>)>
-            let pattern_matches = tinyfs_root.collect_matches(pattern).await.map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", pattern, e))
+            let pattern_matches = tinyfs_root.collect_matches(tinyfs_path).await.map_err(|e| {
+                tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", tinyfs_path, e))
             })?;
 
             // Convert Vec<(NodePath, Vec<String>)> to Vec<(NodePath, HashMap<String, String>)>
@@ -291,7 +353,8 @@ impl SqlDerivedFile {
 
         let matches_count = matches.len();
         debug!(
-            "resolve_pattern_to_queryable_files: found {matches_count} matches for pattern '{pattern}'"
+            "resolve_pattern_to_queryable_files: found {matches_count} matches for url '{}'",
+            url
         );
 
         // STEP 3: Extract files - check entry_type directly from FileID (no metadata fetch needed)
@@ -432,18 +495,13 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     }
 
     // Validate individual patterns
-    for (table_name, pattern) in &yaml_config.patterns {
+    for (table_name, _pattern_url) in &yaml_config.patterns {
         if table_name.is_empty() {
             return Err(tinyfs::Error::Other(
                 "Table name cannot be empty".to_string(),
             ));
         }
-        if pattern.is_empty() {
-            return Err(tinyfs::Error::Other(format!(
-                "Pattern for table '{}' cannot be empty",
-                table_name
-            )));
-        }
+        // Note: URL patterns are already validated during deserialization
     }
 
     // Validate query if provided (now optional)
@@ -519,7 +577,7 @@ impl SqlDerivedFile {
     async fn generate_deterministic_table_name(
         &self,
         pattern_name: &str,
-        pattern: &str,
+        pattern_url: &crate::Url,
         queryable_files: &[tinyfs::NodePath],
     ) -> Result<String, tinyfs::Error> {
         use std::collections::hash_map::DefaultHasher;
@@ -534,8 +592,8 @@ impl SqlDerivedFile {
         let sql_query = self.get_effective_sql_query();
         sql_query.hash(&mut hasher);
 
-        // Hash the pattern string
-        pattern.hash(&mut hasher);
+        // Hash the pattern URL string
+        pattern_url.to_string().hash(&mut hasher);
 
         // Hash the file IDs (sorted for deterministic ordering)
         let mut file_ids: Vec<String> = Vec::new();
@@ -942,13 +1000,26 @@ mod tests {
     use tinyfs::PartID;
     use tinyfs::arrow::SimpleParquetExt;
 
+    // Test helper: Create patterns HashMap from string URL literals
+    fn test_patterns(pairs: &[(&str, &str)]) -> HashMap<String, crate::Url> {
+        pairs
+            .iter()
+            .map(|(name, url_str)| {
+                (
+                    name.to_string(),
+                    crate::Url::parse(url_str).expect("Valid test URL"),
+                )
+            })
+            .collect()
+    }
+
     // ========================================================================
     // SqlDerivedConfig Tests
     // ========================================================================
 
     #[test]
     fn test_sql_derived_config_new() {
-        let patterns = [("table1".to_string(), "/path/*.series".to_string())].into();
+        let patterns = test_patterns(&[("table1", "series:///path/*.series")]);
         let config = SqlDerivedConfig::new(patterns, Some("SELECT * FROM table1".to_string()));
 
         assert_eq!(config.patterns.len(), 1);
@@ -959,7 +1030,7 @@ mod tests {
 
     #[test]
     fn test_sql_derived_config_scoped() {
-        let patterns = [("table1".to_string(), "/path/*.series".to_string())].into();
+        let patterns = test_patterns(&[("table1", "series:///path/*.series")]);
         let scope_prefixes = [(
             "table1".to_string(),
             ("scope_".to_string(), "timestamp".to_string()),
@@ -974,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_sql_derived_config_serialization() {
-        let patterns = [("table1".to_string(), "/path/*.series".to_string())].into();
+        let patterns = test_patterns(&[("table1", "series:///path/*.series")]);
         let config = SqlDerivedConfig::new(patterns, Some("SELECT * FROM table1".to_string()));
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1121,7 +1192,7 @@ mod tests {
     async fn test_sql_derived_config_validation() {
         let valid_config = r#"
 patterns:
-  testdata: "/test/data.parquet"
+  testdata: "table:///test/data.parquet"
 query: "SELECT * FROM source WHERE value > 10"
 "#;
 
@@ -1131,8 +1202,8 @@ query: "SELECT * FROM source WHERE value > 10"
         // Test valid pattern config with multiple patterns
         let valid_pattern_config = r#"
 patterns:
-  data: "/data/*.parquet"
-  metrics: "/metrics/*.parquet"
+  data: "table:///data/*.parquet"
+  metrics: "table:///metrics/*.parquet"
 query: "SELECT * FROM source WHERE value > 10"
 "#;
 
@@ -1142,7 +1213,7 @@ query: "SELECT * FROM source WHERE value > 10"
         // Test valid config without query (should use default)
         let valid_no_query_config = r#"
 patterns:
-  data: "/data/*.parquet"
+  data: "table:///data/*.parquet"
 "#;
 
         let result = validate_sql_derived_config(valid_no_query_config.as_bytes());
@@ -1270,11 +1341,7 @@ query: ""
         // Now test pattern matching across both files
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert("sensor_data".to_string(), "/sensor_data*.parquet".to_string());
-                map
-            },
+            patterns: test_patterns(&[("sensor_data", "table:///sensor_data*.parquet")]),
             query: Some("SELECT location, reading FROM sensor_data WHERE reading > 85 ORDER BY reading DESC".to_string()),
             ..Default::default()
         };
@@ -1411,11 +1478,7 @@ query: ""
         // Now test recursive pattern matching across all nested files
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert("data".to_string(), "/**/data.parquet".to_string());
-                map
-            },
+            patterns: test_patterns(&[("data", "table:////**/data.parquet")]),
             query: Some(
                 "SELECT location, reading, sensor_id FROM data ORDER BY sensor_id".to_string(),
             ),
@@ -1562,12 +1625,10 @@ query: ""
         // Test multiple patterns combining files from different directories
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert("metrics".to_string(), "/metrics/*.parquet".to_string());
-                _ = map.insert("logs".to_string(), "/logs/*.parquet".to_string());
-                map
-            },
+            patterns: test_patterns(&[
+                ("metrics", "table:///metrics/*.parquet"),
+                ("logs", "table:///logs/*.parquet"),
+            ]),
             query: Some("SELECT * FROM metrics UNION ALL SELECT * FROM logs".to_string()),
             ..Default::default()
         };
@@ -1681,14 +1742,7 @@ query: ""
         // Create SQL-derived file without specifying query (should use default)
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert(
-                    "sensor_data".to_string(),
-                    "/sensor_data.parquet".to_string(),
-                );
-                map
-            },
+            patterns: test_patterns(&[("sensor_data", "table:///sensor_data.parquet")]),
             query: None, // No query specified - should default to "SELECT * FROM source"
             ..Default::default()
         };
@@ -1784,11 +1838,7 @@ query: ""
         // Create the SQL-derived file with FileSeries source
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert("sensor_data".to_string(), "/sensor_data.parquet".to_string());
-                map
-            },
+            patterns: test_patterns(&[("sensor_data", "table:///sensor_data.parquet")]),
             query: Some("SELECT location, reading * 1.5 as adjusted_reading FROM sensor_data WHERE reading > 75 ORDER BY adjusted_reading DESC".to_string()),
             ..Default::default()
         };
@@ -1898,11 +1948,7 @@ query: ""
         // Create the SQL-derived file with multi-version FileSeries source
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert("multi_sensor_data".to_string(), "/multi_sensor_data*.parquet".to_string());
-                map
-            },
+            patterns: test_patterns(&[("multi_sensor_data", "table:///multi_sensor_data*.parquet")]),
             query: Some("SELECT location, reading FROM multi_sensor_data WHERE reading > 75 ORDER BY reading DESC".to_string()),
             ..Default::default()
         };
@@ -2012,14 +2058,7 @@ query: ""
         // Create the SQL-derived file that should union all 3 versions
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert(
-                    "multi_sensor_data".to_string(),
-                    "/multi_sensor_data*.parquet".to_string(),
-                );
-                map
-            },
+            patterns: test_patterns(&[("multi_sensor_data", "table:///multi_sensor_data*.parquet")]),
             // This query should return data from all 3 versions
             query: Some(
                 "SELECT location, reading, sensor_id FROM multi_sensor_data ORDER BY sensor_id"
@@ -2135,11 +2174,7 @@ query: ""
         // Create the SQL-derived file with read-only state context
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert("data".to_string(), "/data.parquet".to_string());
-                map
-            },
+            patterns: test_patterns(&[("data", "table:///data.parquet")]),
             query: Some("SELECT name, value * 2 as doubled_value FROM data WHERE value > 150 ORDER BY doubled_value DESC".to_string()),
             ..Default::default()
         };
@@ -2261,11 +2296,7 @@ query: ""
         );
         let context = test_context(&provider_context, first_file_id);
         let first_config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert("data".to_string(), "/data.parquet".to_string());
-                map
-            },
+            patterns: test_patterns(&[("data", "table:///data.parquet")]),
             query: Some("SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value".to_string()),
             ..Default::default()
         };
@@ -2317,14 +2348,7 @@ query: ""
             );
             let context = test_context(&provider_context, second_file_id);
             let second_config = SqlDerivedConfig {
-                patterns: {
-                    let mut map = HashMap::new();
-                    _ = map.insert(
-                        "intermediate".to_string(),
-                        "/intermediate.parquet".to_string(),
-                    );
-                    map
-                },
+                patterns: test_patterns(&[("intermediate", "table:///intermediate.parquet")]),
                 query: Some(second_query.to_string()),
                 ..Default::default()
             };
@@ -2560,13 +2584,10 @@ query: ""
         // Test SQL-derived factory with wildcard pattern (like our successful HydroVu config)
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                // Use separate patterns like in our successful HydroVu config
-                _ = map.insert("sensor_a".to_string(), "/hydrovu/devices/**/SensorA*.series".to_string());
-                _ = map.insert("pressure_b".to_string(), "/hydrovu/devices/**/PressureB*.series".to_string());
-                map
-            },
+            patterns: test_patterns(&[
+                ("sensor_a", "series:///hydrovu/devices/**/SensorA*.series"),
+                ("pressure_b", "series:///hydrovu/devices/**/PressureB*.series"),
+            ]),
             // Use COALESCE pattern like in our fixed HydroVu config to ensure non-nullable timestamps
             query: Some("SELECT COALESCE(sensor_a.timestamp, pressure_b.timestamp) AS timestamp, sensor_a.* EXCLUDE (timestamp), pressure_b.* EXCLUDE (timestamp) FROM sensor_a FULL OUTER JOIN pressure_b ON sensor_a.timestamp = pressure_b.timestamp ORDER BY timestamp".to_string()),
             ..Default::default()
@@ -2703,7 +2724,6 @@ query: ""
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
-        use std::collections::HashMap;
         use std::io::Cursor;
         use std::sync::Arc;
 
@@ -2789,11 +2809,7 @@ query: ""
             let context = test_context(&provider_context, FileID::root());
 
             let config = SqlDerivedConfig {
-                patterns: {
-                    let mut map = HashMap::new();
-                    _ = map.insert("series".to_string(), "/sensors/stations/all_data.series".to_string());
-                    map
-                },
+                patterns: test_patterns(&[("series", "series:///sensors/stations/all_data.series")]),
                 query: Some("SELECT timestamp, temperature, humidity FROM series WHERE station_id = 'BDock' ORDER BY timestamp".to_string()),
                 ..Default::default()
             };
@@ -3460,11 +3476,7 @@ query: ""
         // Test: SqlDerivedFile should find multiple Physical files with pattern matching
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert("data".to_string(), "/test/*.series".to_string());
-                map
-            },
+            patterns: test_patterns(&[("data", "series:///test/*.series")]),
             query: Some("SELECT * FROM data ORDER BY timestamp".to_string()),
             ..Default::default()
         };
@@ -3548,14 +3560,7 @@ query: ""
         // Test: SqlDerivedFile with mixed-case pattern name should work
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: {
-                let mut map = HashMap::new();
-                _ = map.insert(
-                    "TempData".to_string(),
-                    "/Sensors/Temperature.series".to_string(),
-                );
-                map
-            },
+            patterns: test_patterns(&[("TempData", "series:///Sensors/Temperature.series")]),
             query: Some("SELECT * FROM TempData ORDER BY timestamp".to_string()),
             ..Default::default()
         };

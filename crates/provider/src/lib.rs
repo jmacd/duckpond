@@ -74,6 +74,39 @@ pub struct Url {
     inner: url::Url,
 }
 
+impl PartialEq for Url {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.as_str() == other.inner.as_str()
+    }
+}
+
+impl Eq for Url {}
+
+impl serde::Serialize for Url {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.inner.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Url {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Url::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for Url {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner.as_str())
+    }
+}
+
 impl Url {
     /// Parse URL from string using standard url crate
     /// Returns error if fragment, port, username, or password are present

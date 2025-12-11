@@ -67,6 +67,59 @@ fn default_time_column() -> String {
     "timestamp".to_string()
 }
 
+impl TimeseriesJoinConfig {
+    /// Validate that all input patterns are valid URLs with appropriate schemes
+    pub fn validate(&self) -> TinyFSResult<()> {
+        if self.inputs.is_empty() {
+            return Err(tinyfs::Error::Other(
+                "At least one input must be specified".to_string(),
+            ));
+        }
+
+        if self.inputs.len() == 1 {
+            return Err(tinyfs::Error::Other(
+                "Timeseries join requires at least 2 inputs. Use sql-derived-series for single sources.".to_string(),
+            ));
+        }
+
+        // Validate each input pattern is a valid URL
+        for (i, input) in self.inputs.iter().enumerate() {
+            let url = crate::Url::parse(&input.pattern).map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Input {} has invalid URL pattern '{}': {}",
+                    i, input.pattern, e
+                ))
+            })?;
+
+            // Validate scheme is appropriate for timeseries data
+            let scheme = url.scheme();
+            match scheme {
+                "series" | "csv" | "excelhtml" => {
+                    // Valid timeseries sources
+                }
+                _ => {
+                    return Err(tinyfs::Error::Other(format!(
+                        "Input {} uses unsupported scheme '{}' for timeseries data. Supported: series, csv, excelhtml",
+                        i, scheme
+                    )));
+                }
+            }
+
+            // Validate time range timestamps if present
+            if let Some(range) = &input.range {
+                if let Some(begin) = &range.begin {
+                    let _ = validate_timestamp(begin)?;
+                }
+                if let Some(end) = &range.end {
+                    let _ = validate_timestamp(end)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Validate and parse an ISO 8601 timestamp
 fn validate_timestamp(ts_str: &str) -> TinyFSResult<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts_str)
@@ -190,13 +243,19 @@ pub struct TimeseriesJoinFile {
 }
 
 impl TimeseriesJoinFile {
-    #[must_use]
-    pub fn new(config: TimeseriesJoinConfig, context: crate::FactoryContext) -> Self {
-        Self {
+    /// Create a new TimeseriesJoinFile with validated URL patterns
+    /// 
+    /// # Errors
+    /// Returns error if config validation fails (invalid URLs, unsupported schemes, etc.)
+    pub fn new(config: TimeseriesJoinConfig, context: crate::FactoryContext) -> TinyFSResult<Self> {
+        // Validate config immediately on creation
+        config.validate()?;
+        
+        Ok(Self {
             config,
             context,
             inner: Arc::new(tokio::sync::Mutex::new(None)),
-        }
+        })
     }
 
     /// Ensure the inner SqlDerivedFile is created
@@ -242,19 +301,24 @@ impl TimeseriesJoinFile {
         &self,
     ) -> TinyFSResult<(
         String,
-        HashMap<String, String>,
+        HashMap<String, crate::Url>,
         HashMap<String, (String, String)>,
     )> {
         use std::collections::BTreeMap;
 
-        // Build patterns map - one pattern per input
+        // Build patterns map - one URL per input (already validated in config)
         // AND build scope_prefixes map - one entry per input that has a scope
         let mut patterns = HashMap::new();
         let mut scope_prefixes = HashMap::new();
 
         for (i, input) in self.config.inputs.iter().enumerate() {
             let table_name = format!("input{}", i);
-            _ = patterns.insert(table_name.clone(), input.pattern.clone());
+            
+            // Parse URL from pattern string (validated during config creation)
+            let url = crate::Url::parse(&input.pattern).map_err(|e| {
+                tinyfs::Error::Other(format!("Failed to parse URL for input {}: {}", i, e))
+            })?;
+            _ = patterns.insert(table_name.clone(), url);
 
             // Register scope prefix for this input's table
             if let Some(ref scope) = input.scope {
@@ -497,7 +561,7 @@ fn create_timeseries_join_handle(
     let cfg: TimeseriesJoinConfig = serde_json::from_value(config)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-join config: {}", e)))?;
 
-    let join_file = TimeseriesJoinFile::new(cfg, context);
+    let join_file = TimeseriesJoinFile::new(cfg, context)?;
     Ok(join_file.create_handle())
 }
 
@@ -721,19 +785,19 @@ mod tests {
             time_column: "timestamp".to_string(),
             inputs: vec![
                 TimeseriesInput {
-                    pattern: "/source1.series".to_string(),
+                    pattern: "series:///source1.series".to_string(),
                     scope: None,
                     range: None,
                 },
                 TimeseriesInput {
-                    pattern: "/source2.series".to_string(),
+                    pattern: "series:///source2.series".to_string(),
                     scope: None,
                     range: None,
                 },
             ],
         };
 
-        let join_file = TimeseriesJoinFile::new(config, context);
+        let join_file = TimeseriesJoinFile::new(config, context).unwrap();
 
         // Test as_table_provider
         let table_provider = join_file
@@ -844,19 +908,19 @@ mod tests {
             time_column: "timestamp".to_string(),
             inputs: vec![
                 TimeseriesInput {
-                    pattern: "/source1.series".to_string(),
+                    pattern: "series:///source1.series".to_string(),
                     scope: Some("BDock".to_string()),
                     range: None,
                 },
                 TimeseriesInput {
-                    pattern: "/source2.series".to_string(),
+                    pattern: "series:///source2.series".to_string(),
                     scope: Some("ADock".to_string()),
                     range: None,
                 },
             ],
         };
 
-        let join_file = TimeseriesJoinFile::new(config, context);
+        let join_file = TimeseriesJoinFile::new(config, context).unwrap();
         let table_provider = join_file
             .as_table_provider(root_id, &provider_context)
             .await
@@ -1023,7 +1087,7 @@ mod tests {
             time_column: "timestamp".to_string(),
             inputs: vec![
                 TimeseriesInput {
-                    pattern: "/vulink1.series".to_string(),
+                    pattern: "series:///vulink1.series".to_string(),
                     scope: Some("Vulink".to_string()),
                     range: Some(TimeRange {
                         begin: None,
@@ -1031,7 +1095,7 @@ mod tests {
                     }),
                 },
                 TimeseriesInput {
-                    pattern: "/vulink2.series".to_string(),
+                    pattern: "series:///vulink2.series".to_string(),
                     scope: Some("Vulink".to_string()),
                     range: Some(TimeRange {
                         begin: Some("1970-01-01T00:00:05Z".to_string()),
@@ -1039,14 +1103,14 @@ mod tests {
                     }),
                 },
                 TimeseriesInput {
-                    pattern: "/at500.series".to_string(),
+                    pattern: "series:///at500.series".to_string(),
                     scope: Some("AT500_Surface".to_string()),
                     range: None,
                 },
             ],
         };
 
-        let join_file = TimeseriesJoinFile::new(config, context);
+        let join_file = TimeseriesJoinFile::new(config, context).unwrap();
         let table_provider = join_file
             .as_table_provider(root_id, &provider_context)
             .await

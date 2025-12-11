@@ -99,7 +99,7 @@ impl TimeseriesPivotFile {
     fn generate_pivot_sql(
         &self,
         matched_inputs: &[(String, String)], // (site_alias, pattern_path)
-    ) -> (String, HashMap<String, String>) {
+    ) -> (String, HashMap<String, crate::Url>) {
         if matched_inputs.is_empty() {
             return (String::new(), HashMap::new());
         }
@@ -108,7 +108,16 @@ impl TimeseriesPivotFile {
 
         // Register each matched input with its pattern
         for (alias, path) in matched_inputs {
-            _ = patterns.insert(alias.clone(), path.clone());
+            // Convert filesystem path to series:// URL
+            let url_str = if path.starts_with('/') {
+                format!("series://{}", path)
+            } else {
+                format!("series:///{}", path)
+            };
+            // Parse path as URL - if it fails, skip this entry
+            if let Ok(url) = crate::Url::parse(&url_str) {
+                _ = patterns.insert(alias.clone(), url);
+            }
         }
 
         // Build UNION of all timestamps from all inputs
@@ -377,9 +386,12 @@ mod tests {
         assert_eq!(patterns.len(), 2);
         assert_eq!(
             patterns.get("Silver"),
-            Some(&"/combined/silver".to_string())
+            Some(&crate::Url::parse("series:///combined/silver").unwrap())
         );
-        assert_eq!(patterns.get("BDock"), Some(&"/combined/bdock".to_string()));
+        assert_eq!(
+            patterns.get("BDock"),
+            Some(&crate::Url::parse("series:///combined/bdock").unwrap())
+        );
 
         // Check SQL structure - column names have scope prefix from ScopePrefixTableProvider
         assert!(sql.contains("WITH all_timestamps AS"));
