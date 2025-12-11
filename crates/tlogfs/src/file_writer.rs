@@ -9,7 +9,8 @@ use tinyfs::{EntryType, FileID};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWriteExt};
 
 /// Main file writer that supports both small and large files with automatic promotion
-pub struct FileWriter<'tx> {
+/// TODO: Rename to OpLogFileWriter once old implementation is replaced
+pub struct NewFileWriter<'tx> {
     pub(crate) id: FileID,
     pub(crate) storage: WriterStorage,
     pub(crate) total_written: u64,
@@ -63,7 +64,7 @@ pub enum ContentReader {
     File(tokio::fs::File),
 }
 
-impl<'tx> FileWriter<'tx> {
+impl<'tx> NewFileWriter<'tx> {
     // /// Create a new file writer tied to a transaction
     // pub(crate) fn new(
     //     node_id: NodeID,

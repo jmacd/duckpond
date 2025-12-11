@@ -268,14 +268,14 @@ impl AsyncWrite for OpLogFileWriter {
             );
 
             debug!(
-                "OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional"
+                "OpLogFileWriter::poll_shutdown() - about to use new NewFileWriter architecture via store_file_content_ref_transactional"
             );
 
             let future = Box::pin(async move {
-                // Phase 4: Use new FileWriter architecture instead of old update methods
+                // Phase 4: Use new NewFileWriter architecture instead of old update methods
                 // Get the OpLogPersistence to access transaction guard API
                 let result = async {
-                    // Use the new FileWriter pattern through transaction guard API
+                    // Use the new NewFileWriter pattern through transaction guard API
                     state.store_file_content_ref(
                         file_id,
                         crate::file_writer::ContentRef::Small(content.clone()),
@@ -325,18 +325,18 @@ impl AsyncWrite for OpLogFileWriter {
                             }
                         },
                     ).await
-                        .map_err(|e| tinyfs::Error::Other(format!("FileWriter storage failed: {}", e)))
+                        .map_err(|e| tinyfs::Error::Other(format!("NewFileWriter storage failed: {}", e)))
                 }.await;
 
                 match result {
                     Ok(_) => {
                         if entry_type.is_series_file() {
                             debug!(
-                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture"
+                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new NewFileWriter architecture"
                             );
                         } else {
                             debug!(
-                                "OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture"
+                                "OpLogFileWriter::poll_shutdown() - successfully stored content via new NewFileWriter architecture"
                             );
                         }
                     }

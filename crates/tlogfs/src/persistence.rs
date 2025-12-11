@@ -1772,7 +1772,7 @@ impl InnerState {
         Ok(map)
     }
 
-    /// Store file content reference with transaction context (used by transaction guard FileWriter)
+    /// Store file content reference with transaction context (used by transaction guard NewFileWriter)
     pub async fn store_file_content_ref(
         &mut self,
         id: FileID,
