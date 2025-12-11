@@ -39,6 +39,7 @@ async-stream.workspace = true
 humantime.workspace = true
 tera.workspace = true
 tl = "0.7.8"
+opentelemetry-proto = { version = "0.31.0", features = ["gen-tonic-messages", "metrics", "with-serde"] }
 
 [dev-dependencies]
 tempfile.workspace = true

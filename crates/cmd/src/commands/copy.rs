@@ -82,6 +82,7 @@ async fn copy_files_to_directory(
     for source in sources {
         // Strip host:// prefix if present (for copy IN with explicit host:// prefix)
         let (_is_host, clean_source) = parse_host_path(source);
+        log::debug!("parse_host_path: source='{}' -> clean_source='{}'", source, clean_source);
 
         // Extract filename from source path
         let source_filename = std::path::Path::new(&clean_source)
@@ -117,7 +118,7 @@ async fn copy_single_file_to_directory_with_name(
     // Unified streaming copy for all entry types
     let mut source_file = File::open(file_path)
         .await
-        .map_err(|e| format!("Failed to open source file: {}", e))?;
+        .map_err(|e| format!("Failed to open source file '{}': {}", file_path, e))?;
 
     let mut dest_writer = dest_wd
         .async_writer_path_with_type(filename, entry_type)
@@ -383,9 +384,12 @@ async fn copy_in(
                             if sources.len() == 1 {
                                 // Single file to non-existent destination - use format flag only
                                 let source = &sources[0];
+                                
+                                // Strip host:// prefix if present
+                                let (_is_host, clean_source) = parse_host_path(source);
 
                                 // Use the same logic as directory copying, just with the specific filename
-                                copy_single_file_to_directory_with_name(source, &dest_wd, &name, &format).await
+                                copy_single_file_to_directory_with_name(&clean_source, &dest_wd, &name, &format).await
                                     .map_err(|e| steward::StewardError::DataInit(
                                         tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to copy file: {}", e)))
                                     ))?;

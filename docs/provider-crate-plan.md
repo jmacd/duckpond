@@ -49,6 +49,26 @@ crates/provider/src/
 └── lib.rs                 # Public API exports
 ```
 
+### ✅ COMPLETE: URL Pattern Migration (Phase 1.5)
+
+**All Factory Configs Updated to Use Url Type**
+- ✅ Created `crate::Url` type wrapper with Serialize/Deserialize/Display/PartialEq traits
+- ✅ URLs serialize as strings, deserialize with automatic validation
+- ✅ **sql-derived** - `patterns: HashMap<String, Url>` 
+- ✅ **timeseries-join** - `pattern: Url` in each TimeseriesInput
+- ✅ **timeseries-pivot** - `pattern: Url`
+- ✅ **temporal-reduce** - `in_pattern: Url`, `out_pattern: String` (naming template)
+- ✅ **template** - `in_pattern: Url`, `template_file: Url`, `out_pattern: String`
+- ✅ All 83 provider tests passing
+- ✅ All 85 cmd tests passing (updated test configs to use URL schemes)
+- ✅ 370+ tests passing across entire workspace
+
+**Key Design Decisions**:
+- Pattern matching fields use `crate::Url` for validation and scheme detection
+- Naming templates (`out_pattern`) remain `String` (not URLs, just substitution patterns)
+- Path extraction via `.path()` method for filesystem operations
+- URL schemes: `series://`, `table://`, `csv://`, `file://`, etc.
+
 ### 🚧 TODO: Remaining Implementation
 
 **Next Steps** (in priority order):
@@ -59,16 +79,19 @@ crates/provider/src/
    - Test with actual OpenTelemetry JSON logs
 
 2. **Factory Integration** (Phase 2) - **Enable gradual migration**
-   - Update timeseries_join to accept `csv:///pattern` URLs in input.pattern field
-   - Backward compatible: keep supporting raw patterns without scheme
-   - When URL scheme detected, use Provider API for format conversion
+   - ✅ **DONE**: All factories now use Url type for patterns
+   - Update factories to detect URL schemes and use Provider API for format conversion
+   - Maintain backward compatibility with existing `series://` and `table://` schemes
    - Example migration path:
      ```yaml
-     # Old way (still works)
-     pattern: "/data/sensors/*.series"
+     # Existing (still works)
+     pattern: "series:///data/sensors/*.series"
      
-     # New way (with format conversion)
+     # New CSV format support (via Provider API)
      pattern: "csv:///data/sensors/*.csv"
+     
+     # With compression
+     pattern: "csv://gzip/data/sensors/*.csv.gz"
      ```
 
 3. **CLI Integration** (Phase 3)
