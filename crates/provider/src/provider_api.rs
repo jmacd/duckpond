@@ -155,20 +155,6 @@ impl Provider {
         let table = MemTable::try_new(schema, vec![batches])?;
         Ok(Arc::new(table))
     }
-
-    /// Expand a URL pattern to list of matching file paths
-    ///
-    /// Handles TinyFS glob patterns like:
-    /// - `/data/*.csv` - all CSV files in /data
-    /// - `/data/**/*.csv` - recursive CSV search
-    ///
-    /// Returns absolute TinyFS paths (without scheme/compression)
-    pub async fn expand_pattern(&self, _url: &Url) -> Result<Vec<String>> {
-        // TODO: Use TinyFS glob functionality
-        Err(Error::InvalidUrl(
-            "Pattern expansion not yet implemented".to_string(),
-        ))
-    }
 }
 
 #[cfg(test)]

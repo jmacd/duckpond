@@ -27,10 +27,19 @@ pub struct TimeRange {
     pub end: Option<String>,
 }
 
-/// Input source with pattern and optional time range
+/// Input source with URL pattern and optional time range
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeseriesInput {
-    /// Glob pattern for matching time series files
+    /// URL pattern for matching time series files
+    ///
+    /// Supported URL schemes:
+    /// - `series:///pattern` - Builtin TinyFS FileSeries (Parquet)
+    /// - `series://gzip/pattern` - Compressed FileSeries
+    /// - `csv:///pattern` - CSV files (requires format conversion)
+    /// - `csv://gzip/pattern?delimiter=;` - CSV with decompression and options
+    /// - `excelhtml:///pattern` - HydroVu HTML exports
+    ///
+    /// Example: `series:///data/sensors/*.series`
     pub pattern: String,
 
     /// Optional time range filter for this specific input

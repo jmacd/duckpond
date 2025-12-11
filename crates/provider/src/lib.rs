@@ -22,6 +22,7 @@ mod table_provider_options;
 mod temporal_filter;
 mod tinyfs_object_store;
 mod tinyfs_path;
+mod url_pattern_matcher;
 mod version_selection;
 
 // Re-export context types from tinyfs (they moved there to break circular dependency)
@@ -48,6 +49,7 @@ pub use table_provider_options::{TableProviderKey, TableProviderOptions};
 pub use temporal_filter::TemporalFilteredListingTable;
 pub use tinyfs::{FactoryContext, PondMetadata, ProviderContext};
 pub use tinyfs_object_store::TinyFsObjectStore;
+pub use url_pattern_matcher::{MatchedFile, UrlPatternMatcher};
 pub use tinyfs_path::TinyFsPathBuilder;
 pub use version_selection::VersionSelection;
 
