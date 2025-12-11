@@ -613,6 +613,12 @@ impl State {
         self.inner.lock().await.table.clone()
     }
 
+    /// Get the store path for this transaction
+    /// This is used for large file external storage
+    pub async fn store_path(&self) -> PathBuf {
+        self.inner.lock().await.path.clone()
+    }
+
     /// Get template variables for CLI variable expansion
     #[must_use]
     pub fn get_template_variables(&self) -> Arc<HashMap<String, serde_json::Value>> {

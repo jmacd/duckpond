@@ -176,11 +176,8 @@ pub struct HybridWriterResult {
 }
 
 /// Hybrid writer that implements AsyncWrite with incremental hashing and spillover
-#[derive(Default)]
 pub struct HybridWriter {
-    /// Memory buffer for small files
-    memory_buffer: Option<Vec<u8>>,
-    /// Temporary file for large files
+    /// Temporary file for streaming writes (created lazily)
     temp_file: Option<File>,
     /// Path to temporary file
     temp_path: Option<PathBuf>,
@@ -190,22 +187,35 @@ pub struct HybridWriter {
     total_written: usize,
     /// Target pond directory for final file
     pond_path: PathBuf,
+    /// Future for creating temp file
+    create_future: Option<Pin<Box<dyn Future<Output = std::io::Result<(File, PathBuf)>> + Send>>>,
 }
 
 impl HybridWriter {
     pub fn new<P: AsRef<Path>>(pond_path: P) -> Self {
         Self {
-            memory_buffer: Some(Vec::new()),
             temp_file: None,
             temp_path: None,
             hasher: Sha256::new(),
             total_written: 0,
             pond_path: pond_path.as_ref().into(),
+            create_future: None,
         }
+    }
+    
+    pub fn total_written(&self) -> usize {
+        self.total_written
     }
 
     /// Finalize the writer and return content strategy decision
     pub async fn finalize(self) -> std::io::Result<HybridWriterResult> {
+        // Flush and sync temp file if it exists
+        if let Some(mut temp_file) = self.temp_file {
+            use tokio::io::AsyncWriteExt;
+            temp_file.flush().await?;
+            temp_file.sync_all().await?;
+        }
+        
         // Finalize hash computation
         let sha256 = format!("{:x}", self.hasher.finalize());
 
@@ -215,59 +225,35 @@ impl HybridWriter {
         );
 
         let content = if self.total_written >= LARGE_FILE_THRESHOLD {
-            debug!("Large file path - total_written >= threshold");
-            // Large file: ensure it's written to external storage
-            if let Some(buffer) = self.memory_buffer {
-                debug!("Writing large file from memory buffer to external storage");
-                // Still in memory but qualifies as large file - write to external storage
-                let large_files_dir = PathBuf::from(&self.pond_path).join("_large_files");
-                tokio::fs::create_dir_all(&large_files_dir).await?;
+            debug!("Large file: moving temp file to external storage");
+            // Large file: move temp file to final location
+            let temp_path = self.temp_path.ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "No temp file created for large file"
+            ))?;
+            
+            let large_files_dir = self.pond_path.join("_large_files");
+            tokio::fs::create_dir_all(&large_files_dir).await?;
 
-                let final_path = large_file_path(&self.pond_path, &sha256).await?;
-                let final_path_str = format!("{final_path:?}");
-                debug!("Large file final path: {final_path_str}");
+            let final_path = large_file_path(&self.pond_path, &sha256).await?;
+            tokio::fs::rename(&temp_path, &final_path).await?;
 
-                // Write and sync to ensure durability before Delta commit
-                {
-                    use tokio::fs::OpenOptions;
-                    use tokio::io::AsyncWriteExt;
+            // Sync the file after move
+            let file = File::open(&final_path).await?;
+            file.sync_all().await?;
 
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(&final_path)
-                        .await?;
-
-                    file.write_all(&buffer).await?;
-                    file.sync_all().await?; // Ensure data and metadata are synced to disk
-                }
-
-                info!("Successfully wrote large file to {final_path_str}");
-                // Return empty Vec to indicate large file (content stored externally)
-                Vec::new()
-            } else if let Some(temp_path) = self.temp_path {
-                // Already in temp file - move to final location
-                let large_files_dir = PathBuf::from(&self.pond_path).join("_large_files");
-                tokio::fs::create_dir_all(&large_files_dir).await?;
-
-                let final_path = large_file_path(&self.pond_path, &sha256).await?;
-                tokio::fs::rename(&temp_path, &final_path).await?;
-
-                // Sync the file after move to ensure it's durable
-                {
-                    use tokio::fs::OpenOptions;
-                    let file = OpenOptions::new().write(true).open(&final_path).await?;
-                    file.sync_all().await?; // Ensure moved file is synced to disk
-                }
-
-                // Return empty Vec to indicate large file (content stored externally)
-                Vec::new()
-            } else {
-                Vec::new()
-            }
+            info!("Successfully wrote large file to {:?}", final_path);
+            Vec::new() // Empty vec indicates external storage
+        } else if self.temp_path.is_some() {
+            debug!("Small file: reading temp file into memory");
+            // Small file: read temp file into memory and delete it
+            let temp_path = self.temp_path.unwrap();
+            let content = tokio::fs::read(&temp_path).await?;
+            tokio::fs::remove_file(&temp_path).await?;
+            content
         } else {
-            self.memory_buffer.unwrap_or_default()
+            // No data written
+            Vec::new()
         };
 
         Ok(HybridWriterResult {
@@ -286,21 +272,54 @@ impl AsyncWrite for HybridWriter {
     ) -> Poll<Result<usize, std::io::Error>> {
         let this = &mut *self;
 
-        // Update incremental hash
-        this.hasher.update(buf);
-        this.total_written += buf.len();
+        // Lazy initialization: create temp file on first write
+        if this.temp_file.is_none() && this.create_future.is_none() {
+            let pond_path = this.pond_path.clone();
+            this.create_future = Some(Box::pin(async move {
+                let temp_dir = pond_path.join("_large_files");
+                tokio::fs::create_dir_all(&temp_dir).await?;
+                
+                // Create unique temp file using process ID and timestamp
+                let temp_path = temp_dir.join(format!("tmp_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+                let temp_file = File::create(&temp_path).await?;
+                
+                Ok((temp_file, temp_path))
+            }));
+        }
 
-        // For simplicity, we'll only spill during finalize() phase
-        // This avoids the complex async-in-sync polling issue
-        if let Some(ref mut buffer) = this.memory_buffer {
-            // Still in memory mode - just accumulate
-            buffer.extend_from_slice(buf);
-            Poll::Ready(Ok(buf.len()))
-        } else if let Some(ref mut temp_file) = this.temp_file {
-            // In temp file mode
-            Pin::new(temp_file).poll_write(cx, buf)
+        // Poll the creation future if it exists
+        if let Some(future) = this.create_future.as_mut() {
+            match future.as_mut().poll(cx) {
+                Poll::Ready(Ok((file, path))) => {
+                    this.temp_file = Some(file);
+                    this.temp_path = Some(path);
+                    this.create_future = None;
+                    debug!("Created streaming temp file: {:?}", this.temp_path);
+                }
+                Poll::Ready(Err(e)) => {
+                    this.create_future = None;
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        // Now write to the temp file
+        if let Some(ref mut temp_file) = this.temp_file {
+            this.hasher.update(buf);
+            
+            let result = Pin::new(temp_file).poll_write(cx, buf);
+            
+            if let Poll::Ready(Ok(n)) = result {
+                this.total_written += n;
+            }
+            
+            result
         } else {
-            Poll::Ready(Err(std::io::Error::other("Writer in invalid state")))
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Writer in invalid state"
+            )))
         }
     }
 

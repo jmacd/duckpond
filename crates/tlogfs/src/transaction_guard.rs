@@ -3,7 +3,6 @@ use super::persistence::{OpLogPersistence, State};
 use super::txn_metadata::PondTxnMetadata;
 use log::info;
 use std::ops::Deref;
-use std::path::PathBuf;
 use tinyfs::FS;
 use tinyfs::Result as TinyFSResult;
 
@@ -92,11 +91,6 @@ impl<'a> TransactionGuard<'a> {
         state
             .object_store()
             .ok_or_else(|| TLogFSError::ArrowMessage("ObjectStore not initialized".to_string()))
-    }
-
-    /// Deltalake store path
-    pub(crate) fn store_path(&self) -> &PathBuf {
-        &self.persistence.path
     }
 
     /// Commit the transaction
