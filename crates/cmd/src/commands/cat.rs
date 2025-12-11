@@ -130,6 +130,93 @@ pub async fn cat_command(
     }
 }
 
+/// Cat a provider URL (e.g., "oteljson:///otel/file.json")
+#[allow(clippy::print_stdout)]
+async fn cat_provider_url(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    url: &str,
+    display: &str,
+    output: Option<&mut String>,
+    sql_query: Option<&str>,
+) -> Result<()> {
+    debug!("cat_provider_url called with url: {}", url);
+
+    // Get TinyFS from transaction
+    let fs = &**tx;
+    let fs_arc = std::sync::Arc::new(fs.clone());
+
+    // Create Provider instance
+    let provider = provider::Provider::new(fs_arc);
+
+    // Create DataFusion session context
+    let ctx = datafusion::prelude::SessionContext::new();
+
+    // Create TableProvider from URL
+    let table_provider = provider
+        .create_table_provider(url, &ctx)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e)
+        })?;
+
+    // Register table with DataFusion
+    let _ = ctx.register_table("series", table_provider)?;
+
+    // Execute SQL query
+    let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
+    debug!("Executing SQL query: {}", effective_sql_query);
+
+    let df = ctx
+        .sql(effective_sql_query)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to execute SQL query '{}': {}", effective_sql_query, e))?;
+
+    let mut stream = df.execute_stream().await?;
+
+    // Determine output format
+    let use_table_format = display == "table" || sql_query.is_some();
+
+    if use_table_format {
+        // Collect batches for table formatting
+        let mut batches = Vec::new();
+        let mut total_rows = 0;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
+            total_rows += batch.num_rows();
+            batches.push(batch);
+        }
+
+        // Format and display the results as ASCII table
+        let formatted = format_query_results(&batches)
+            .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", url, e))?;
+
+        if let Some(output_buffer) = output {
+            output_buffer.push_str(&formatted);
+        } else {
+            print!("{}", formatted);
+        }
+
+        debug!("Successfully formatted {} rows from: {}", total_rows, url);
+    } else {
+        // Raw parquet output
+        if output.is_some() {
+            // Testing mode - collect batches then write to buffer
+            let mut batches = Vec::new();
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
+                batches.push(batch);
+            }
+            write_batches_to_buffer(&batches, output.unwrap())?;
+        } else {
+            // Production mode - stream directly to stdout
+            write_stream_to_stdout(stream).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Internal implementation of cat command
 #[allow(clippy::print_stdout)]
 async fn cat_impl(
@@ -139,6 +226,11 @@ async fn cat_impl(
     output: Option<&mut String>,
     sql_query: Option<&str>,
 ) -> Result<()> {
+    // Check for provider URL syntax (e.g., "oteljson:///path")
+    if path.contains("://") {
+        return cat_provider_url(tx, path, display, output, sql_query).await;
+    }
+
     let fs = &**tx;
     let root = fs.root().await?;
 

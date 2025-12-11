@@ -1,5 +1,6 @@
 use crate::common::{FileInfoVisitor, ShipContext};
 use anyhow::Result;
+use std::sync::Arc;
 
 /// Describe command - shows file types and schemas for files matching the pattern
 ///
@@ -39,12 +40,71 @@ where
     }
 }
 
+/// Describe a provider URL (e.g., "oteljson:///otel/file.json")
+async fn describe_provider_url(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    _ship_context: &ShipContext,
+    url: &str,
+) -> Result<String> {
+    log::debug!("Describing provider URL: {}", url);
+
+    // Get TinyFS from transaction
+    let fs = &**tx;
+    let fs_arc = Arc::new(fs.clone());
+
+    // Create Provider instance
+    let provider = provider::Provider::new(fs_arc);
+
+    // Create DataFusion session context (needed for API but not used)
+    let ctx = datafusion::prelude::SessionContext::new();
+
+    // Create TableProvider from URL
+    let table_provider = provider
+        .create_table_provider(url, &ctx)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e)
+        })?;
+
+    // Get schema from TableProvider
+    let schema = table_provider.schema();
+    let schema_info = extract_schema_info(&schema, true)?;
+
+    // Parse URL for display
+    let parts: Vec<&str> = url.splitn(2, "://").collect();
+    let provider_name = if parts.len() == 2 { parts[0] } else { "unknown" };
+    let path = if parts.len() == 2 { parts[1] } else { url };
+
+    // Format output
+    let mut output = String::new();
+    output.push_str("=== Provider Schema Description ===\n");
+    output.push_str(&format!("Provider URL: {}\n", url));
+    output.push_str(&format!("Provider: {}\n", provider_name));
+    output.push_str(&format!("Path: {}\n", path));
+    output.push_str(&format!("Schema: {} fields\n\n", schema_info.field_count));
+
+    for field_info in schema_info.fields {
+        output.push_str(&format!("  • {}: {}\n", field_info.name, field_info.data_type));
+    }
+
+    if let Some(timestamp_col) = schema_info.timestamp_column {
+        output.push_str(&format!("\nTimestamp Column: {}\n", timestamp_col));
+    }
+
+    Ok(output)
+}
+
 /// Implementation of describe command
 async fn describe_command_impl(
     tx: &mut steward::StewardTransactionGuard<'_>,
     ship_context: &ShipContext,
     pattern: &str,
 ) -> Result<String> {
+    // Check for provider URL syntax (e.g., "oteljson:///path")
+    if pattern.contains("://") {
+        return describe_provider_url(tx, ship_context, pattern).await;
+    }
+    
     let fs = &**tx;
     let root = fs
         .root()

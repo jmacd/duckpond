@@ -75,8 +75,6 @@ struct Observation {
 struct SchemaInfo {
     /// All unique metric names found (sorted for consistent column ordering)
     metric_names: Vec<String>,
-    /// All unique timestamps found (sorted)
-    timestamps: Vec<i64>,
 }
 
 /// Parse a single JSON line using official OTLP types and extract gauge observations
@@ -117,7 +115,6 @@ fn parse_line(line: &str) -> Result<Vec<Observation>> {
 async fn discover_schema(reader: Pin<Box<dyn AsyncRead + Send>>) -> Result<SchemaInfo> {
     let mut reader = BufReader::new(reader);
     let mut metric_names_set = BTreeSet::new();
-    let mut timestamps_set = BTreeSet::new();
     let mut line = String::new();
 
     loop {
@@ -139,13 +136,11 @@ async fn discover_schema(reader: Pin<Box<dyn AsyncRead + Send>>) -> Result<Schem
         let observations = parse_line(trimmed)?;
         for obs in observations {
             let _ = metric_names_set.insert(obs.metric_name);
-            let _ = timestamps_set.insert(obs.timestamp_ns);
         }
     }
 
     Ok(SchemaInfo {
         metric_names: metric_names_set.into_iter().collect(),
-        timestamps: timestamps_set.into_iter().collect(),
     })
 }
 
@@ -308,7 +303,6 @@ mod tests {
         assert_eq!(schema_info.metric_names.len(), 2);
         assert!(schema_info.metric_names.contains(&"metric_a".to_string()));
         assert!(schema_info.metric_names.contains(&"metric_b".to_string()));
-        assert_eq!(schema_info.timestamps.len(), 2);
     }
 
     #[tokio::test]
