@@ -1688,6 +1688,9 @@ impl InnerState {
             &OplogEntry::for_arrow(),
             &records,
         )?];
+        
+        // Drop records immediately after Arrow conversion to free ~100MB
+        drop(records);
 
         debug!(
             "📊 RecordBatch created with {} batches, batch[0] has {} rows",
