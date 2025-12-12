@@ -77,8 +77,9 @@ impl UrlPatternMatcher {
         let scheme = url.scheme();
         
         match scheme {
-            "series" | "table" | "data" => {
+            "series" | "table" | "data" | "file" => {
                 // Builtin TinyFS types - use direct TinyFS matching
+                // "file" scheme uses EntryType to determine actual type
                 self.match_builtin_type(&url, context).await
             }
             _ => {

@@ -17,7 +17,9 @@ ${EXE} init
 
 ${EXE} mkdir -p /etc
 
-${EXE} copy ${NOYO}/data.md.tmpl /etc
+${EXE} copy host://${NOYO}/data.md.tmpl /etc
+
+${EXE} copy host://${NOYO}/laketech /laketech
 
 # Disable backup
 #${EXE} mkdir /etc/system.d

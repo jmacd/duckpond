@@ -87,12 +87,12 @@ impl TimeseriesJoinConfig {
             // URL already validated during deserialization
             let scheme = input.pattern.scheme();
             match scheme {
-                "series" | "csv" | "excelhtml" => {
-                    // Valid timeseries sources
+                "series" | "csv" | "excelhtml" | "file" => {
+                    // Valid timeseries sources (file uses EntryType to determine type)
                 }
                 _ => {
                     return Err(tinyfs::Error::Other(format!(
-                        "Input {} uses unsupported scheme '{}' for timeseries data. Supported: series, csv, excelhtml",
+                        "Input {} uses unsupported scheme '{}' for timeseries data. Supported: series, csv, excelhtml, file",
                         i, scheme
                     )));
                 }

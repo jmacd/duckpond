@@ -112,8 +112,18 @@ impl std::fmt::Display for Url {
 impl Url {
     /// Parse URL from string using standard url crate
     /// Returns error if fragment, port, username, or password are present
+    /// 
+    /// If the string doesn't contain "://", defaults to "file://" scheme
+    /// The actual file type is determined by EntryType when the file is accessed
     pub fn parse(url_str: &str) -> Result<Self> {
-        let inner = url::Url::parse(url_str)?;
+        // If no scheme is present, default to "file" scheme
+        let normalized_url = if !url_str.contains("://") {
+            format!("file://{}", url_str)
+        } else {
+            url_str.to_string()
+        };
+
+        let inner = url::Url::parse(&normalized_url)?;
 
         if inner.fragment().is_some() {
             return Err(Error::InvalidUrl("fragment not allowed".into()));

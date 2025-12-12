@@ -34,6 +34,18 @@ entries:
           scope: AT500_Bottom
           range:
             begin: 2025-10-16T21:00:00Z
+        - pattern: "excelhtml:///laketech/HydroVu_FB-Bottom*.htm"
+          scope: AT500_Bottom
+          range:
+            end: 2025-10-16T21:00:00Z
+        - pattern: "excelhtml:///laketech/HydroVu_FB-Surface*.htm"
+          scope: AT500_Surface
+          range:
+            end: 2025-10-16T21:00:00Z
+        - pattern: "excelhtml:///laketech/HydroVu_FB-VuLink*.htm"
+          scope: Vulink0
+          range:
+            end: 2025-10-16T21:00:00Z
 
   - name: "BDock"
     factory: "timeseries-join"

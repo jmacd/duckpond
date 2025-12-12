@@ -120,7 +120,7 @@ impl Drop for PerfTrace {
             format!("|{}", metric_strs.join("|"))
         };
 
-        eprintln!(
+        log::debug!(
             "PERF_TRACE|{}|{}{}|elapsed_ms={}{}",
             self.call_num, self.function_name, params_str, elapsed_ms, metrics_str
         );
