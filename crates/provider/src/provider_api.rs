@@ -76,7 +76,7 @@ impl Provider {
     async fn create_table_from_pattern(
         &self,
         url: &Url,
-        format_provider: &dyn FormatProvider,
+        _format_provider: &dyn FormatProvider,
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
         // Get TinyFS root for pattern matching
         let root = self.fs.root().await?;
@@ -90,47 +90,12 @@ impl Provider {
             return Err(Error::InvalidUrl(format!("No files match pattern: {}", pattern)));
         }
 
-        // For now, collect all files into a single MemTable
-        // TODO: Use ListingTable for better performance with large file sets
-        let (schema, all_batches) = {
-            let mut first = true;
-            let mut schema = None;
-            let mut all_batches = Vec::new();
-
-            for (node_path, _captures) in matches {
-                // Create a URL for this specific file
-                let file_url = format!("{}://{}", url.scheme(), node_path.path().display());
-                let file_url = Url::parse(&file_url)?;
-
-                // Open and stream this file
-                let reader = self.fs.open_url(&file_url).await?;
-                let (file_schema, mut stream) = format_provider.open_stream(reader, &file_url).await?;
-
-                if first {
-                    schema = Some(file_schema.clone());
-                    first = false;
-                } else {
-                    // Verify schema compatibility
-                    if schema.as_ref().unwrap() != &file_schema {
-                        return Err(Error::InvalidUrl(format!(
-                            "Schema mismatch in multi-file union at '{}': expected {:?}, got {:?}",
-                            node_path.path().display(), schema, file_schema
-                        )));
-                    }
-                }
-
-                // Collect batches from this file
-                while let Some(result) = stream.next().await {
-                    all_batches.push(result?);
-                }
-            }
-
-            (schema.unwrap(), all_batches)
-        };
-
-        // Create MemTable with all batches
-        let table = MemTable::try_new(schema, vec![all_batches])?;
-        Ok(Arc::new(table))
+        // Pattern matching multiple files - this should not happen!
+        // The factory should iterate over matches and call Provider API for each file
+        return Err(Error::InvalidUrl(format!(
+            "Pattern '{}' matched {} files. Format providers only support single-file URLs. The factory should iterate over matches.",
+            pattern, matches.len()
+        )));
     }
 
     /// Create a MemTable by streaming a single file
@@ -330,7 +295,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_glob_pattern_expansion() -> Result<()> {
-        // Test glob pattern expansion using TinyFS collect_matches
+        // Test that Provider correctly rejects glob patterns
+        // Glob expansion should be handled by the factory layer
         let fs = create_test_fs().await;
         
         // Create multiple CSV files
@@ -350,22 +316,15 @@ mod tests {
         let provider = Provider::new(fs);
         let ctx = SessionContext::new();
 
-        // Create table from glob pattern
-        let table = provider.create_table_provider("csv:///data*.csv", &ctx).await?;
+        // Provider should reject glob patterns - factory handles iteration
+        let result = provider.create_table_provider("csv:///data*.csv", &ctx).await;
+        assert!(result.is_err(), "Provider should reject glob patterns");
+        
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("matched 3 files"), "Error should explain pattern matched multiple files");
+        assert!(err_msg.contains("factory should iterate"), "Error should guide to use factory");
 
-        // Register and query - should union all 3 files (15 total rows)
-        let _ = ctx.register_table("multi", table)?;
-        let df = ctx.sql("SELECT COUNT(*) as cnt FROM multi").await?;
-        let results = df.collect().await?;
-
-        assert_eq!(results.len(), 1);
-        // Verify we got all 15 rows (3 files × 5 rows each)
-        let count_batch = &results[0];
-        let count_array = count_batch.column(0);
-        let count = count_array.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
-        assert_eq!(count.value(0), 15);
-
-        println!("✅ Glob pattern expansion: 3 files × 5 rows = 15 total");
+        println!("✅ Provider correctly rejects glob patterns");
         Ok(())
     }
 }

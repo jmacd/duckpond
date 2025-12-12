@@ -584,7 +584,7 @@ register_dynamic_factory!(
 mod tests {
     use super::*;
     use crate::QueryableFile;
-    use arrow::array::{Float64Array, TimestampSecondArray};
+    use arrow::array::{Array, Float64Array, TimestampSecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use datafusion::execution::context::SessionContext;
@@ -640,6 +640,33 @@ mod tests {
         // Store in persistence (version 1 for MemoryPersistence)
         persistence
             .store_file_version(file_id, 1, parquet_data.into())
+            .await?;
+
+        Ok(file_id)
+    }
+
+    /// Helper to create a text file (e.g., CSV) in both FS and persistence
+    async fn create_text_file(
+        fs: &FS,
+        persistence: &MemoryPersistence,
+        path: &str,
+        content: Vec<u8>,
+        entry_type: EntryType,
+    ) -> Result<FileID, Box<dyn std::error::Error>> {
+        let root = fs.root().await?;
+        let mut file_writer = root.async_writer_path_with_type(path, entry_type).await?;
+        use tokio::io::AsyncWriteExt;
+        file_writer.write_all(&content).await?;
+        file_writer.flush().await?;
+        file_writer.shutdown().await?;
+
+        // Get the FileID that was created
+        let node_path = root.get_node_path(path).await?;
+        let file_id = node_path.id();
+
+        // Store in persistence (version 1 for MemoryPersistence)
+        persistence
+            .store_file_version(file_id, 1, content.into())
             .await?;
 
         Ok(file_id)
@@ -1160,5 +1187,134 @@ mod tests {
 
         // Verify we have all unique timestamps from all sources (1,2,3,4,5,6,7)
         assert_eq!(batch.num_rows(), 7, "Should have 7 unique timestamps");
+    }
+
+    #[tokio::test]
+    async fn test_timeseries_join_csv_different_schemas() {
+        // Test CSV format provider with multiple files having different schemas
+        // This validates the UNION BY NAME logic in sql_derived.rs
+        let (fs, provider_context) = create_test_environment().await;
+        let persistence = provider_context
+            .persistence
+            .as_any()
+            .downcast_ref::<MemoryPersistence>()
+            .expect("Expected MemoryPersistence");
+
+        // Create sensor1.csv with timestamp, temp, humidity
+        let csv1_content = "timestamp,temp,humidity\n\
+                           2024-01-01T00:00:00Z,20.5,65.0\n\
+                           2024-01-01T01:00:00Z,21.0,63.0\n\
+                           2024-01-01T02:00:00Z,21.5,62.0\n";
+        
+        _ = create_text_file(
+            &fs,
+            persistence,
+            "/sensor1.csv",
+            csv1_content.as_bytes().to_vec(),
+            EntryType::FileDataPhysical,
+        )
+        .await
+        .unwrap();
+
+        // Create sensor2.csv with timestamp, temp, pressure (different schema - no humidity, has pressure)
+        let csv2_content = "timestamp,temp,pressure\n\
+                           2024-01-01T01:00:00Z,22.0,1013.0\n\
+                           2024-01-01T02:00:00Z,22.5,1012.0\n\
+                           2024-01-01T03:00:00Z,23.0,1011.0\n";
+        
+        _ = create_text_file(
+            &fs,
+            persistence,
+            "/sensor2.csv",
+            csv2_content.as_bytes().to_vec(),
+            EntryType::FileDataPhysical,
+        )
+        .await
+        .unwrap();
+
+        // Create timeseries-join with CSV patterns
+        let config = TimeseriesJoinConfig {
+            time_column: "timestamp".to_string(),
+            inputs: vec![
+                TimeseriesInput {
+                    pattern: crate::Url::parse("csv:///sensor1.csv").unwrap(),
+                    range: None,
+                    scope: Some("sensor1".to_string()),
+                },
+                TimeseriesInput {
+                    pattern: crate::Url::parse("csv:///sensor2.csv").unwrap(),
+                    range: None,
+                    scope: Some("sensor2".to_string()),
+                },
+            ],
+        };
+
+        let factory_context = test_context(&provider_context, FileID::root());
+
+        let join_file = TimeseriesJoinFile::new(config, factory_context).unwrap();
+
+        // Create table provider - this should succeed with UNION BY NAME handling schema differences
+        let table_provider = join_file
+            .as_table_provider(FileID::root(), &provider_context)
+            .await
+            .expect("Should create table provider");
+
+        // Query the joined data
+        let ctx = SessionContext::new();
+        _ = ctx.register_table("joined", table_provider).unwrap();
+        let df = ctx.sql("SELECT * FROM joined ORDER BY timestamp").await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        assert!(!batches.is_empty(), "Should have results");
+        let batch = &batches[0];
+
+        // Verify schema includes columns from both sensors (with NULL for missing values)
+        let schema = batch.schema();
+        assert!(
+            schema.column_with_name("timestamp").is_some(),
+            "Should have timestamp column"
+        );
+        assert!(
+            schema.column_with_name("sensor1.temp").is_some(),
+            "Should have sensor1.temp column"
+        );
+        assert!(
+            schema.column_with_name("sensor1.humidity").is_some(),
+            "Should have sensor1.humidity column (NULL for sensor2 rows)"
+        );
+        assert!(
+            schema.column_with_name("sensor2.temp").is_some(),
+            "Should have sensor2.temp column"
+        );
+        assert!(
+            schema.column_with_name("sensor2.pressure").is_some(),
+            "Should have sensor2.pressure column (NULL for sensor1 rows)"
+        );
+
+        // Verify we have all timestamps from both sensors (4 unique: 00:00, 01:00, 02:00, 03:00)
+        assert_eq!(batch.num_rows(), 4, "Should have 4 unique timestamps");
+
+        // Verify UNION BY NAME filled NULLs correctly
+        // At 00:00: sensor1 has data, sensor2 should be NULL
+        // At 01:00: both have data
+        // At 02:00: both have data
+        // At 03:00: sensor2 has data, sensor1 should be NULL
+        use arrow::array::AsArray;
+        let sensor1_humidity = batch
+            .column_by_name("sensor1.humidity")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::Float64Type>();
+        let sensor2_pressure = batch
+            .column_by_name("sensor2.pressure")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::Float64Type>();
+
+        // First row (00:00): sensor1.humidity=65.0, sensor2.pressure=NULL
+        assert_eq!(sensor1_humidity.value(0), 65.0);
+        assert!(sensor2_pressure.is_null(0), "sensor2.pressure should be NULL at 00:00");
+
+        // Last row (03:00): sensor1.humidity=NULL, sensor2.pressure=1011.0
+        assert!(sensor1_humidity.is_null(3), "sensor1.humidity should be NULL at 03:00");
+        assert_eq!(sensor2_pressure.value(3), 1011.0);
     }
 }

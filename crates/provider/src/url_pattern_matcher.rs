@@ -109,6 +109,15 @@ impl UrlPatternMatcher {
                 EntryType::FileDataPhysical,
                 EntryType::FileDataDynamic,
             ],
+            "file" => vec![
+                // Accept any file type - actual type determined by EntryType
+                EntryType::FileSeriesPhysical,
+                EntryType::FileSeriesDynamic,
+                EntryType::FileTablePhysical,
+                EntryType::FileTableDynamic,
+                EntryType::FileDataPhysical,
+                EntryType::FileDataDynamic,
+            ],
             scheme => {
                 return Err(Error::InvalidUrl(format!("Unknown builtin type: {}", scheme)));
             }

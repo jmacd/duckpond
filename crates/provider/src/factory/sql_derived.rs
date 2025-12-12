@@ -142,28 +142,16 @@ impl SqlDerivedConfig {
     }
 
     /// Validate that all patterns are valid URLs with appropriate schemes for the given mode
-    pub fn validate(&self, mode: &SqlDerivedMode) -> TinyFSResult<()> {
+    pub fn validate(&self, _mode: &SqlDerivedMode) -> TinyFSResult<()> {
         if self.patterns.is_empty() {
             return Err(tinyfs::Error::Other(
                 "At least one pattern must be specified".to_string(),
             ));
         }
 
-        let expected_schemes: &[&str] = match mode {
-            SqlDerivedMode::Table => &["table"],
-            SqlDerivedMode::Series => &["series"],
-        };
-
-        for (name, url) in &self.patterns {
-            let scheme = url.scheme();
-            if !expected_schemes.contains(&scheme) {
-                return Err(tinyfs::Error::Other(format!(
-                    "Pattern '{}' uses scheme '{}' but mode {:?} requires one of: {:?}",
-                    name, scheme, mode, expected_schemes
-                )));
-            }
-        }
-
+        // All schemes are valid - builtin types (series/table/file) or format providers (csv/excelhtml/oteljson)
+        // The actual data compatibility is verified at runtime when the data is loaded
+        
         Ok(())
     }
 
@@ -280,12 +268,28 @@ impl SqlDerivedFile {
             }
         };
         
-        if scheme != expected_scheme {
+        // Allow: exact match, "file" scheme (uses EntryType), or format providers
+        let is_format_provider = matches!(scheme, "csv" | "excelhtml" | "oteljson");
+        if scheme != expected_scheme && scheme != "file" && !is_format_provider {
             return Err(tinyfs::Error::Other(format!(
-                "URL scheme '{}' doesn't match entry_type {:?} (expected '{}')",
+                "URL scheme '{}' doesn't match entry_type {:?} (expected '{}', 'file', or format provider)",
                 scheme, entry_type, expected_scheme
             )));
         }
+        
+        // For format providers, look for FileDataPhysical/Dynamic instead of the requested entry_type
+        // The format provider will convert them to the appropriate type
+        let lookup_entry_type = if is_format_provider {
+            match entry_type {
+                EntryType::FileSeriesPhysical => EntryType::FileDataPhysical,
+                EntryType::FileSeriesDynamic => EntryType::FileDataDynamic,
+                EntryType::FileTablePhysical => EntryType::FileDataPhysical,
+                EntryType::FileTableDynamic => EntryType::FileDataDynamic,
+                _ => entry_type,
+            }
+        } else {
+            entry_type
+        };
         
         // Extract TinyFS path from URL
         let tinyfs_path = url.path();
@@ -367,15 +371,15 @@ impl SqlDerivedFile {
             let actual_entry_type = file_id.entry_type();
 
             debug!(
-                "🔍 Checking file at path '{}': file_id={}, actual_entry_type={:?}, requested_entry_type={:?}",
+                "🔍 Checking file at path '{}': file_id={}, actual_entry_type={:?}, lookup_entry_type={:?}",
                 node_path.path().display(),
                 file_id,
                 actual_entry_type,
-                entry_type
+                lookup_entry_type
             );
 
-            // Check if this node matches the requested entry_type (encoded in FileID)
-            if actual_entry_type == entry_type {
+            // Check if this node matches the lookup entry_type (what we're searching for)
+            if actual_entry_type == lookup_entry_type {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
                     EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => file_id,
@@ -495,13 +499,22 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     }
 
     // Validate individual patterns
-    for (table_name, _pattern_url) in &yaml_config.patterns {
+    for (table_name, pattern_url) in &yaml_config.patterns {
         if table_name.is_empty() {
             return Err(tinyfs::Error::Other(
                 "Table name cannot be empty".to_string(),
             ));
         }
-        // Note: URL patterns are already validated during deserialization
+        
+        // Validate scheme is recognized (no fallback for unknown schemes)
+        let scheme = pattern_url.scheme();
+        const KNOWN_SCHEMES: &[&str] = &["series", "table", "data", "csv", "excelhtml", "oteljson"];
+        if !KNOWN_SCHEMES.contains(&scheme) {
+            return Err(tinyfs::Error::Other(
+                format!("Unknown URL scheme '{}' in pattern '{}'. Known schemes: {}", 
+                    scheme, pattern_url, KNOWN_SCHEMES.join(", "))
+            ));
+        }
     }
 
     // Validate query if provided (now optional)
@@ -708,8 +721,81 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
 
                 _ = table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
 
-                // Create table provider using QueryableFile trait - handles both OpLogFile and SqlDerivedFile
-                let listing_table_provider = if queryable_files.len() == 1 {
+                // Check if this pattern uses a format provider
+                let scheme = pattern.scheme();
+                let is_format_provider = matches!(scheme, "csv" | "excelhtml" | "oteljson");
+
+                // Create table provider
+                let listing_table_provider = if is_format_provider {
+                    // Format providers: Use Provider API to convert format to series/table
+                    debug!(
+                        "🔍 SQL-DERIVED: Pattern '{}' uses format provider '{}' with {} files",
+                        pattern_name, scheme, queryable_files.len()
+                    );
+                    let fs = self.context.context.filesystem();
+                    let fs_arc = Arc::new(fs);
+                    let provider_api = crate::Provider::new(fs_arc);
+                    let datafusion_ctx = datafusion::prelude::SessionContext::new();
+                    
+                    if queryable_files.len() == 1 {
+                        // Single file: direct format provider conversion
+                        let node_path = &queryable_files[0];
+                        let file_url = format!("{}://{}", scheme, node_path.path().display());
+                        
+                        match provider_api.create_table_provider(&file_url, &datafusion_ctx).await {
+                            Ok(table_provider) => {
+                                debug!("✅ SQL-DERIVED: Format provider created table for single file");
+                                if let Some(wrapper) = &self.config.provider_wrapper {
+                                    wrapper(table_provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                                } else {
+                                    table_provider
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("❌ SQL-DERIVED: Format provider failed for '{}': {}", file_url, e);
+                                return Err(tinyfs::Error::Other(format!("Format provider failed: {}", e)));
+                            }
+                        }
+                    } else {
+                        // Multiple files: create table provider for each, then UNION BY NAME
+                        let mut table_providers = Vec::new();
+                        for node_path in &queryable_files {
+                            let file_url = format!("{}://{}", scheme, node_path.path().display());
+                            match provider_api.create_table_provider(&file_url, &datafusion_ctx).await {
+                                Ok(tp) => table_providers.push(tp),
+                                Err(e) => {
+                                    log::error!("❌ SQL-DERIVED: Format provider failed for '{}': {}", file_url, e);
+                                    return Err(tinyfs::Error::Other(format!("Format provider failed: {}", e)));
+                                }
+                            }
+                        }
+                        
+                        // UNION BY NAME using SQL
+                        let temp_ctx = datafusion::prelude::SessionContext::new();
+                        for (i, tp) in table_providers.iter().enumerate() {
+                            _ = temp_ctx.register_table(&format!("t{}", i), tp.clone())
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                        }
+                        let union_sql = (0..table_providers.len())
+                            .map(|i| format!("SELECT * FROM t{}", i))
+                            .collect::<Vec<_>>()
+                            .join(" UNION ALL BY NAME ");
+                        
+                        let df = temp_ctx.sql(&union_sql).await.map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                        let batches = df.collect().await.map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                        let schema = batches.first().map(|b| b.schema())
+                            .ok_or_else(|| tinyfs::Error::Other("No batches in union".to_string()))?;
+                        let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
+                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                        let provider: Arc<dyn TableProvider> = Arc::new(mem_table);
+                        
+                        if let Some(wrapper) = &self.config.provider_wrapper {
+                            wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                        } else {
+                            provider
+                        }
+                    }
+                } else if queryable_files.len() == 1 {
                     // Single file: use QueryableFile trait dispatch
                     let node_path = &queryable_files[0];
                     let file_id = node_path.id();
@@ -793,46 +879,46 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         }
                     }
 
-                    // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
-                    if urls.is_empty() {
-                        return Err(tinyfs::Error::Other(format!(
-                            "No valid URLs found for pattern '{}'",
-                            pattern_name
-                        )));
-                    }
+                        // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
+                        if urls.is_empty() {
+                            return Err(tinyfs::Error::Other(format!(
+                                "No valid URLs found for pattern '{}'",
+                                pattern_name
+                            )));
+                        }
 
-                    // Create table provider options for multi-file query
-                    // Note: Temporal bounds (from pond set-temporal-bounds) should be enforced
-                    // at the Parquet reader level, not here at the factory level
-                    let options = crate::TableProviderOptions {
-                        additional_urls: urls.clone(),
-                        ..Default::default()
-                    };
+                        // Create table provider options for multi-file query
+                        // Note: Temporal bounds (from pond set-temporal-bounds) should be enforced
+                        // at the Parquet reader level, not here at the factory level
+                        let options = crate::TableProviderOptions {
+                            additional_urls: urls.clone(),
+                            ..Default::default()
+                        };
 
-                    log::debug!(
-                        "📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs",
-                        pattern_name,
-                        urls.len()
-                    );
-
-                    // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
-                    let representative_file_id =
-                        file_ids.first().copied().unwrap_or(FileID::root());
-                    let provider =
-                        crate::create_table_provider(representative_file_id, context, options)
-                            .await
-                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
-                    // Apply optional provider wrapper (e.g., null_padding_table)
-                    if let Some(wrapper) = &self.config.provider_wrapper {
-                        debug!(
-                            "Applying provider wrapper to multi-file table '{}'",
-                            pattern_name
+                        log::debug!(
+                            "📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs",
+                            pattern_name,
+                            urls.len()
                         );
-                        wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
-                    } else {
-                        provider
-                    }
+
+                        // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
+                        let representative_file_id =
+                            file_ids.first().copied().unwrap_or(FileID::root());
+                        let provider =
+                            crate::create_table_provider(representative_file_id, context, options)
+                                .await
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+                        // Apply optional provider wrapper (e.g., null_padding_table)
+                        if let Some(wrapper) = &self.config.provider_wrapper {
+                            debug!(
+                                "Applying provider wrapper to multi-file table '{}'",
+                                pattern_name
+                            );
+                            wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                        } else {
+                            provider
+                        }
                 };
                 // Register the ListingTable as the provider
                 let table_exists = matches!(
@@ -1231,8 +1317,8 @@ query: "SELECT * FROM source"
         // Test empty pattern value in map
         let invalid_config = r#"
 patterns:
-  data: "/data/*.parquet"
-  empty: ""
+  data: "table:///data/*.parquet"
+  invalid: "not-a-valid://url"
 query: "SELECT * FROM source"
 "#;
 

@@ -312,7 +312,15 @@ fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
     let cfg: TimeseriesPivotConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
 
-    // URL pattern already validated during deserialization
+    // Validate scheme is recognized (no fallback for unknown schemes)
+    let scheme = cfg.pattern.scheme();
+    const KNOWN_SCHEMES: &[&str] = &["series", "table", "data", "csv", "excelhtml", "oteljson"];
+    if !KNOWN_SCHEMES.contains(&scheme) {
+        return Err(tinyfs::Error::Other(
+            format!("Unknown URL scheme '{}' in pattern '{}'. Known schemes: {}", 
+                scheme, cfg.pattern, KNOWN_SCHEMES.join(", "))
+        ));
+    }
     
     if cfg.columns.is_empty() {
         return Err(tinyfs::Error::Other(
@@ -461,7 +469,7 @@ time_column: "time"
 
         // Invalid URL pattern should fail
         let invalid_pattern = r#"
-pattern: "not-a-url"
+pattern: "invalid-scheme://bad/url"
 columns:
   - "WaterTemp"
 time_column: "time"
