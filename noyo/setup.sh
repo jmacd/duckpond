@@ -19,7 +19,11 @@ ${EXE} mkdir -p /etc
 
 ${EXE} copy host://${NOYO}/data.md.tmpl /etc
 
-${EXE} copy host://${NOYO}/laketech /laketech
+${EXE} mkdir -p /laketech
+
+${EXE} mknod dynamic-dir /laketech/combined --config-path ${NOYO}/laketech.yaml
+
+${EXE} copy host://${NOYO}/laketech /laketech/data
 
 # Disable backup
 #${EXE} mkdir /etc/system.d

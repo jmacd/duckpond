@@ -13,6 +13,7 @@ use crate::{Error, FileProvider, FormatProvider, FormatRegistry, Result, Url};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use futures::StreamExt;
+use std::future::Future;
 use std::sync::Arc;
 
 /// Provider for creating DataFusion TableProviders from URL patterns
@@ -34,15 +35,17 @@ impl Provider {
     }
 
     /// Create a TableProvider from a URL pattern
+    ///single-file URL
     ///
     /// Uses global format registry to look up format providers by scheme.
-    /// For single files, streams data into MemTable.
-    /// For patterns with wildcards, uses TinyFS collect_matches() to expand pattern
-    /// and creates multi-file union TableProvider.
+    /// Streams data into MemTable.
+    ///
+    /// NOTE: Does NOT support wildcard patterns. Callers must expand patterns
+    /// using TinyFS collect_matches() and call this method for each matched file.
     ///
     /// # Arguments
     ///
-    /// * `url_str` - URL like `csv:///path/*.csv?options` or `csv:///data/file.csv`
+    /// * `url_str` - URL like `csv:///data/file.csv` (NO wildcards)
     /// * `ctx` - DataFusion session context for registration
     ///
     /// # Returns
@@ -55,47 +58,78 @@ impl Provider {
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
         let url = Url::parse(url_str)?;
 
+        // Check for wildcards - caller should expand patterns
+        let path = url.path();
+        if path.contains('*') || path.contains('?') {
+            return Err(Error::InvalidUrl(format!(
+                "URL '{}' contains wildcards. Caller must expand patterns using TinyFS collect_matches() and call create_table_provider() for each file.",
+                url_str
+            )));
+        }
+
         // Get format provider from registry
         let format_provider = FormatRegistry::get_provider(url.scheme())
             .ok_or_else(|| Error::InvalidUrl(format!("Unknown format: {}", url.scheme())))?;
 
-        // Check if pattern contains wildcards
-        let path = url.path();
-        if path.contains('*') || path.contains('?') {
-            // Expand pattern using TinyFS and create multi-file union
-            self.create_table_from_pattern(&url, format_provider.as_ref())
-                .await
-        } else {
-            // Single file - stream into MemTable
-            self.create_memtable_from_url(&url, format_provider.as_ref())
-                .await
-        }
+        // Single file - stream into MemTable
+        self.create_memtable_from_url(&url, format_provider.as_ref())
+            .await
     }
 
-    /// Create a TableProvider from a glob pattern (multiple files)
-    async fn create_table_from_pattern(
+    /// Expand pattern and invoke callback for each matched file
+    ///
+    /// For patterns with wildcards, expands using TinyFS and creates a TableProvider
+    /// for each match, calling the callback with the provider and file path.
+    /// For single files, calls callback once.
+    ///
+    /// # Arguments
+    ///
+    /// * `url_str` - URL pattern (e.g., `excelhtml:///data/*.htm` or `csv:///file.csv`)
+    /// * `callback` - Called for each match with (TableProvider, file_path)
+    ///
+    /// # Returns
+    ///
+    /// Number of files matched
+    pub async fn for_each_match<F, Fut>(
         &self,
-        url: &Url,
-        _format_provider: &dyn FormatProvider,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        // Get TinyFS root for pattern matching
-        let root = self.fs.root().await?;
-        
-        // Use TinyFS collect_matches to expand pattern
-        let pattern = url.path();
-        let matches = root.collect_matches(pattern).await
-            .map_err(|e| Error::InvalidUrl(format!("Pattern expansion failed for '{}': {}", pattern, e)))?;
+        url_str: &str,
+        mut callback: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(Arc<dyn datafusion::catalog::TableProvider>, String) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let url = Url::parse(url_str)?;
+        let path = url.path();
+        let has_wildcards = path.contains('*') || path.contains('?');
 
-        if matches.is_empty() {
-            return Err(Error::InvalidUrl(format!("No files match pattern: {}", pattern)));
+        if has_wildcards {
+            // Expand pattern
+            let root = self.fs.root().await?;
+            let matches = root.collect_matches(path).await
+                .map_err(|e| Error::InvalidUrl(format!("Pattern expansion failed for '{}': {}", path, e)))?;
+
+            if matches.is_empty() {
+                return Err(Error::InvalidUrl(format!("No files match pattern: {}", url_str)));
+            }
+
+            let ctx = SessionContext::new();
+            for (node_path, _captures) in &matches {
+                let file_path = node_path.path();
+                let file_url_str = format!("{}://{}", url.scheme(), file_path.display());
+                
+                let table_provider = self.create_table_provider(&file_url_str, &ctx).await?;
+                callback(table_provider, file_path.display().to_string()).await?;
+            }
+
+            Ok(matches.len())
+        } else {
+            // Single file
+            let ctx = SessionContext::new();
+            let table_provider = self.create_table_provider(url_str, &ctx).await?;
+            callback(table_provider, path.to_string()).await?;
+            Ok(1)
         }
-
-        // Pattern matching multiple files - this should not happen!
-        // The factory should iterate over matches and call Provider API for each file
-        return Err(Error::InvalidUrl(format!(
-            "Pattern '{}' matched {} files. Format providers only support single-file URLs. The factory should iterate over matches.",
-            pattern, matches.len()
-        )));
     }
 
     /// Create a MemTable by streaming a single file

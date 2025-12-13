@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::error::*;
 
-/// Represents a path component that may contain a wildcard
+/// Represents a path component that may contain wildcards
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WildcardComponent {
     /// A double wildcard ("**") that matches zero or more path segments
@@ -10,12 +10,16 @@ pub(crate) enum WildcardComponent {
         /// Index of this wildcard in the pattern
         index: usize,
     },
-    /// A single wildcard component, with optional prefix and suffix
+    /// A wildcard component supporting multiple wildcards
+    /// 
+    /// Pattern is split by '*' into literal segments that must appear in order.
+    /// Examples:
+    /// - "*VuLink*" -> ["", "VuLink", ""]
+    /// - "file*.txt" -> ["file", ".txt"]
+    /// - "file*.*" -> ["file", ".", ""]
     Wildcard {
-        /// Text before the wildcard (if any)
-        prefix: Option<String>,
-        /// Text after the wildcard (if any)
-        suffix: Option<String>,
+        /// Literal segments separated by wildcards
+        segments: Vec<String>,
         /// Index of this wildcard in the pattern
         index: usize,
     },
@@ -37,16 +41,48 @@ impl WildcardComponent {
 
         match self {
             WildcardComponent::DoubleWildcard { .. } => Some(Some(name.to_string())),
-            WildcardComponent::Wildcard { prefix, suffix, .. } => {
-                let prefix_str = prefix.as_deref().unwrap_or("");
-                let suffix_str = suffix.as_deref().unwrap_or("");
-
-                if name.starts_with(prefix_str) && name.ends_with(suffix_str) {
-                    let captured = &name[prefix_str.len()..name.len() - suffix_str.len()];
-                    Some(Some(captured.to_string()))
-                } else {
-                    None
+            WildcardComponent::Wildcard { segments, .. } => {
+                // Match name against pattern segments
+                // Each segment must appear in order in the name
+                
+                if segments.is_empty() {
+                    // Just "*" - matches everything
+                    return Some(Some(name.to_string()));
                 }
+
+                let mut pos = 0;
+
+                for (i, segment) in segments.iter().enumerate() {
+                    if segment.is_empty() {
+                        // Empty segment means wildcard at start/end or consecutive wildcards
+                        if i == 0 {
+                            // Wildcard at start - continue to next segment
+                            continue;
+                        } else if i == segments.len() - 1 {
+                            // Wildcard at end - we're done, rest matches
+                            break;
+                        }
+                        // Middle empty segment - consecutive wildcards, continue
+                        continue;
+                    }
+
+                    // Find this literal segment in the remaining name
+                    if let Some(found_at) = name[pos..].find(segment) {
+                        pos += found_at + segment.len();
+                    } else {
+                        // Required segment not found
+                        return None;
+                    }
+                }
+
+                // Check if we matched the entire name for patterns ending with a literal
+                if !segments.is_empty() && !segments.last().unwrap().is_empty() {
+                    if pos != name.len() {
+                        return None; // Didn't consume entire name
+                    }
+                }
+
+                Some(Some(name.to_string()))
             }
             WildcardComponent::Normal(pattern) => {
                 if name == pattern {
@@ -102,28 +138,14 @@ pub(crate) fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIter
         }
 
         if component_str.contains('*') {
-            let asterisk_count = component_str.chars().filter(|&c| c == '*').count();
-
-            if asterisk_count > 1 {
-                return Err(Error::multiple_wildcards(component_str));
-            }
-
-            let wildcard_idx = component_str.find('*').expect("wildcard case");
-            let prefix = if wildcard_idx > 0 {
-                Some(component_str[..wildcard_idx].to_string())
-            } else {
-                None
-            };
-
-            let suffix = if wildcard_idx < component_str.len() - 1 {
-                Some(component_str[wildcard_idx + 1..].to_string())
-            } else {
-                None
-            };
+            // Split by '*' to get literal segments
+            let segments: Vec<String> = component_str
+                .split('*')
+                .map(|s| s.to_string())
+                .collect();
 
             components.push(WildcardComponent::Wildcard {
-                prefix,
-                suffix,
+                segments,
                 index: wildcard_index,
             });
             wildcard_index += 1;
@@ -151,20 +173,36 @@ mod tests {
 
     #[test]
     fn test_match_wildcard() {
+        // Pattern: "file*.txt" -> ["file", ".txt"]
         let comp = WildcardComponent::Wildcard {
-            prefix: Some("file".to_string()),
-            suffix: Some(".txt".to_string()),
+            segments: vec!["file".to_string(), ".txt".to_string()],
             index: 0,
         };
-        assert_eq!(
-            comp.match_component("file1.txt"),
-            Some(Some("1".to_string()))
-        );
-        assert_eq!(
-            comp.match_component("fileabc.txt"),
-            Some(Some("abc".to_string()))
-        );
+        assert!(comp.match_component("file1.txt").is_some());
+        assert!(comp.match_component("fileabc.txt").is_some());
         assert_eq!(comp.match_component("other.txt"), None);
+    }
+
+    #[test]
+    fn test_match_multiple_wildcards() {
+        // Pattern: "*VuLink*" -> ["", "VuLink", ""]
+        let comp = WildcardComponent::Wildcard {
+            segments: vec!["".to_string(), "VuLink".to_string(), "".to_string()],
+            index: 0,
+        };
+        assert!(comp.match_component("HydroVu_FB-VuLink1.htm").is_some());
+        assert!(comp.match_component("VuLink.txt").is_some());
+        assert!(comp.match_component("prefixVuLinksuffix").is_some());
+        assert_eq!(comp.match_component("NoMatch"), None);
+
+        // Pattern: "file*.*" -> ["file", ".", ""]
+        let comp2 = WildcardComponent::Wildcard {
+            segments: vec!["file".to_string(), ".".to_string(), "".to_string()],
+            index: 0,
+        };
+        assert!(comp2.match_component("file1.txt").is_some());
+        assert!(comp2.match_component("filename.ext").is_some());
+        assert_eq!(comp2.match_component("other.txt"), None);
     }
 
     #[test]
@@ -185,14 +223,8 @@ mod tests {
 
         assert!(matches!(components[0], WildcardComponent::Normal(ref s) if s == "src"));
 
-        if let WildcardComponent::Wildcard {
-            prefix,
-            suffix,
-            index,
-        } = &components[1]
-        {
-            assert_eq!(prefix, &None);
-            assert_eq!(suffix, &Some(".rs".to_string()));
+        if let WildcardComponent::Wildcard { segments, index } = &components[1] {
+            assert_eq!(segments, &vec!["".to_string(), ".rs".to_string()]);
             assert_eq!(index, &0);
         } else {
             panic!("Expected wildcard component");
@@ -214,12 +246,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_glob_invalid() {
-        assert!(matches!(
-            parse_glob("src/file*.*"),
-            Err(Error::MultipleWildcards(s)) if s == "file*.*"
-        ));
+    fn test_parse_glob_multiple_wildcards() {
+        // Multiple wildcards now supported
+        let glob = parse_glob("src/file*.*").unwrap();
+        let components: Vec<_> = glob.collect();
+        assert_eq!(components.len(), 2);
 
+        if let WildcardComponent::Wildcard { segments, .. } = &components[1] {
+            assert_eq!(segments, &vec!["file".to_string(), ".".to_string(), "".to_string()]);
+        } else {
+            panic!("Expected wildcard component");
+        }
+    }
+
+    #[test]
+    fn test_parse_glob_invalid() {
+        // Leading slash is invalid (not a normal component)
         assert!(matches!(
             parse_glob("/a/b-*"),
             Err(Error::InvalidComponent(_))

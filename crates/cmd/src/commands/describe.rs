@@ -40,7 +40,7 @@ where
     }
 }
 
-/// Describe a provider URL (e.g., "oteljson:///otel/file.json")
+/// Describe a provider URL (e.g., "oteljson:///otel/file.json" or "excelhtml:///data/*.htm")
 async fn describe_provider_url(
     tx: &mut steward::StewardTransactionGuard<'_>,
     _ship_context: &ShipContext,
@@ -55,40 +55,58 @@ async fn describe_provider_url(
     // Create Provider instance
     let provider = provider::Provider::new(fs_arc);
 
-    // Create DataFusion session context (needed for API but not used)
-    let ctx = datafusion::prelude::SessionContext::new();
+    use std::cell::RefCell;
+    let results = RefCell::new(Vec::new());
 
-    // Create TableProvider from URL
-    let table_provider = provider
-        .create_table_provider(url, &ctx)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e)
-        })?;
+    // Use clean for_each_match API to handle both single files and patterns
+    let _count = provider.for_each_match(url, |table_provider, file_path| {
+        let url = url.to_string();
+        let results = &results;
+        async move {
+            // Get schema from TableProvider
+            let schema = table_provider.schema();
+            let schema_info = extract_schema_info(&schema, true)
+                .map_err(|e| provider::Error::InvalidUrl(e.to_string()))?;
 
-    // Get schema from TableProvider
-    let schema = table_provider.schema();
-    let schema_info = extract_schema_info(&schema, true)?;
+            // Parse URL for provider name
+            let parsed_url = provider::Url::parse(&url)
+                .map_err(|e| provider::Error::InvalidUrl(e.to_string()))?;
+            let provider_name = parsed_url.scheme();
 
-    // Parse URL for display
-    let parts: Vec<&str> = url.splitn(2, "://").collect();
-    let provider_name = if parts.len() == 2 { parts[0] } else { "unknown" };
-    let path = if parts.len() == 2 { parts[1] } else { url };
+            results.borrow_mut().push((file_path, provider_name.to_string(), schema_info));
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to process URL '{}': {}", url, e))?;
 
-    // Format output
+    let results = results.into_inner();
+
+    // Format output from results
     let mut output = String::new();
-    output.push_str("=== Provider Schema Description ===\n");
-    output.push_str(&format!("Provider URL: {}\n", url));
-    output.push_str(&format!("Provider: {}\n", provider_name));
-    output.push_str(&format!("Path: {}\n", path));
-    output.push_str(&format!("Schema: {} fields\n\n", schema_info.field_count));
-
-    for field_info in schema_info.fields {
-        output.push_str(&format!("  • {}: {}\n", field_info.name, field_info.data_type));
+    
+    if results.len() > 1 {
+        output.push_str(&format!("Pattern matched {} files\n\n", results.len()));
     }
 
-    if let Some(timestamp_col) = schema_info.timestamp_column {
-        output.push_str(&format!("\nTimestamp Column: {}\n", timestamp_col));
+    output.push_str("=== Provider Schema Description ===\n\n");
+
+    for (i, (file_path, provider_name, schema_info)) in results.iter().enumerate() {
+        if i > 0 {
+            output.push_str("\n");
+        }
+
+        output.push_str(&format!("File: {}\n", file_path));
+        output.push_str(&format!("Provider: {}\n", provider_name));
+        output.push_str(&format!("Schema: {} fields\n", schema_info.field_count));
+
+        for field_info in &schema_info.fields {
+            output.push_str(&format!("  • {}: {}\n", field_info.name, field_info.data_type));
+        }
+
+        if let Some(timestamp_col) = &schema_info.timestamp_column {
+            output.push_str(&format!("Timestamp Column: {}\n", timestamp_col));
+        }
     }
 
     Ok(output)

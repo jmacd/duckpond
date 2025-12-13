@@ -1,0 +1,20 @@
+entries:
+  - name: "bottom"
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        input: "excelhtml:///laketech/HydroVu_FB-Bottom*.htm"
+      query:
+  - name: "surface"
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        input: "excelhtml:///laketech/HydroVu_FB-Surface*.htm"
+      query:
+  - name: "vulink"
+    factory: "sql-derived-series"
+    config:
+      patterns:
+        input: "excelhtml:///laketech/HydroVu_FB-VuLink*.htm"
+      query: 
+
