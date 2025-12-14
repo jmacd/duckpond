@@ -36,14 +36,20 @@ entries:
             begin: 2025-10-16T21:00:00Z
         - pattern: "excelhtml:///laketech/data/HydroVu_FB-Bottom*.htm"
           scope: AT500_Bottom
+          transforms:
+            - /etc/hydro_rename
           range:
             end: 2025-10-16T21:00:00Z
         - pattern: "excelhtml:///laketech/data/HydroVu_FB-Surface*.htm"
           scope: AT500_Surface
+          transforms:
+            - /etc/hydro_rename
           range:
             end: 2025-10-16T21:00:00Z
         - pattern: "excelhtml:///laketech/data/HydroVu_FB-VuLink*.htm"
           scope: AT500_Vulink
+          transforms:
+            - /etc/hydro_rename
           range:
             end: 2025-10-16T21:00:00Z
 

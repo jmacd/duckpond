@@ -20,31 +20,10 @@ use async_trait::async_trait;
 use futures::stream::Stream;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::metrics::v1::metric::Data;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
-
-/// OtelJson format options parsed from query parameters
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OtelJsonOptions {
-    /// Batch size for reading (default: 8192)
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
-}
-
-fn default_batch_size() -> usize {
-    8192
-}
-
-impl Default for OtelJsonOptions {
-    fn default() -> Self {
-        Self {
-            batch_size: default_batch_size(),
-        }
-    }
-}
 
 /// OpenTelemetry JSON format provider
 pub struct OtelJsonProvider;

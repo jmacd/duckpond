@@ -1,0 +1,7 @@
+rules:
+  - type: direct
+    from: "Date Time"
+    to: "timestamp"
+  - type: pattern
+    pattern: "^(.+) \\((.+)\\)$"
+    replacement: "$1.$2"

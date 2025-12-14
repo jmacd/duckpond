@@ -48,3 +48,5 @@ ${EXE} mknod dynamic-dir /singled --config-path ${NOYO}/single.yaml
 ${EXE} mknod dynamic-dir /reduced --config-path ${NOYO}/reduce.yaml
 
 ${EXE} mknod dynamic-dir /templates --config-path ${NOYO}/template.yaml
+
+${EXE} mknod column-rename /etc/hyrdro_rename --config-path ${NOYO}/hrename.yaml
