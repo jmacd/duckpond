@@ -34,15 +34,15 @@ entries:
           scope: AT500_Bottom
           range:
             begin: 2025-10-16T21:00:00Z
-        - pattern: "/laketech/combined/bottom"
+        - pattern: "excelhtml:///laketech/data/HydroVu_FB-Bottom*.htm"
           scope: AT500_Bottom
           range:
             end: 2025-10-16T21:00:00Z
-        - pattern: "/laketech/combined/surface"
+        - pattern: "excelhtml:///laketech/data/HydroVu_FB-Surface*.htm"
           scope: AT500_Surface
           range:
             end: 2025-10-16T21:00:00Z
-        - pattern: "/laketech/combined/vulink"
+        - pattern: "excelhtml:///laketech/data/HydroVu_FB-VuLink*.htm"
           scope: AT500_Vulink
           range:
             end: 2025-10-16T21:00:00Z
