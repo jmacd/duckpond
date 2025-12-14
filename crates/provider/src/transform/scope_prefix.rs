@@ -11,7 +11,7 @@
 //!
 //! This is implemented using ColumnRenameTableProvider with a scope-specific rename function.
 
-use crate::column_rename::ColumnRenameTableProvider;
+use crate::transform::column_rename::ColumnRenameTableProvider;
 use datafusion::catalog::TableProvider;
 use datafusion::error::Result as DataFusionResult;
 use std::sync::Arc;

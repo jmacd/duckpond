@@ -14,6 +14,11 @@ use futures::stream::Stream;
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
+pub mod compression;
+pub mod csv;
+pub mod excelhtml;
+pub mod oteljson;
+
 /// Format provider trait - converts file data to Arrow RecordBatches
 ///
 /// For STREAMING formats only (CSV, JSON, etc.) - formats that don't require seek.

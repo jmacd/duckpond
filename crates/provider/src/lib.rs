@@ -1,53 +1,38 @@
 //! Provider: URL-Based file access and factory infrastructure
 
 pub mod factory;
+pub mod registry;
+pub mod transform;
 
-mod column_rename;
-mod compression;
-mod csv;
 mod error;
-mod excelhtml;
 mod format;
 mod format_registry;
-mod oteljson;
-mod null_padding;
 mod provider_api;
-pub mod registry;
-mod scope_prefix;
 mod sql_transform;
 mod table_creation;
 mod table_provider_options;
-mod temporal_filter;
 mod tinyfs_object_store;
 mod tinyfs_path;
 mod url_pattern_matcher;
 mod version_selection;
 
-// Re-export context types from tinyfs (they moved there to break circular dependency)
-pub use compression::decompress;
-pub use csv::{CsvOptions, CsvProvider};
-pub use excelhtml::ExcelHtmlProvider;
 pub use factory::dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 pub use error::{Error, Result};
-pub use oteljson::{OtelJsonOptions, OtelJsonProvider};
 pub use format::FormatProvider;
 pub use format_registry::{FormatRegistry, FormatProviderEntry, FORMAT_PROVIDERS};
-pub use null_padding::null_padding_table;
 pub use provider_api::Provider;
 pub use registry::{
     ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
     FactoryRegistry, QueryableFile,
 };
-pub use scope_prefix::scope_prefix_table_provider;
 pub use factory::sql_derived::SqlDerivedConfig;
 pub use sql_transform::transform_sql;
 pub use table_creation::{
     create_latest_table_provider, create_listing_table_provider, create_table_provider,
 };
 pub use table_provider_options::{TableProviderKey, TableProviderOptions};
-pub use temporal_filter::TemporalFilteredListingTable;
 pub use tinyfs::{FactoryContext, PondMetadata, ProviderContext};
-pub use tinyfs_object_store::TinyFsObjectStore;
+pub use tinyfs_object_store::{register_tinyfs_object_store, TinyFsObjectStore};
 pub use url_pattern_matcher::{MatchedFile, UrlPatternMatcher};
 pub use tinyfs_path::TinyFsPathBuilder;
 pub use version_selection::VersionSelection;
@@ -201,6 +186,6 @@ impl FileProvider for tinyfs::FS {
         let reader: Pin<Box<dyn AsyncRead + Send>> = reader as Pin<Box<dyn AsyncRead + Send>>;
 
         // Wrap with decompression if needed (uses Layer 1 compression module)
-        decompress(reader, url.compression())
+        format::compression::decompress(reader, url.compression())
     }
 }

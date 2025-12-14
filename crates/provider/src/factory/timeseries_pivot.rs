@@ -270,7 +270,7 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
         // Create SqlDerivedFile config with scope prefixes and null_padding wrapper
         let sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
             .with_provider_wrapper(move |provider| {
-                crate::null_padding_table(provider, expected_columns.clone())
+                crate::transform::null_padding::null_padding_table(provider, expected_columns.clone())
                     .map_err(crate::Error::from)
             });
 
@@ -360,9 +360,8 @@ mod tests {
     fn create_test_environment() -> ProviderContext {
         let persistence = MemoryPersistence::default();
         let session = Arc::new(SessionContext::new());
-        let object_store = Arc::new(crate::TinyFsObjectStore::new(persistence.clone()));
-        let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
-        _ = session.register_object_store(&url, object_store);
+        let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
+            .expect("Failed to register TinyFS object store");
         ProviderContext::new(session, HashMap::new(), Arc::new(persistence))
     }
 

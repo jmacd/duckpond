@@ -392,24 +392,17 @@ impl AsyncWrite for OpLogFileWriter {
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
 impl tinyfs::QueryableFile for OpLogFile {
-    /// Create TableProvider for OpLogFile by delegating to existing logic
+    /// Create TableProvider for OpLogFile by delegating to provider crate
     ///
-    /// Follows anti-duplication: reuses existing create_listing_table_provider
-    /// instead of duplicating DataFusion setup logic.
+    /// Follows anti-duplication: uses provider::create_table_provider directly
     async fn as_table_provider(
         &self,
         id: FileID,
         context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        log::debug!("DELEGATING OpLogFile to create_listing_table_provider: id={id}",);
-        // Extract State from ProviderContext
-        let state = context
-            .persistence
-            .as_any()
-            .downcast_ref::<State>()
-            .ok_or_else(|| TinyFSError::Other("Persistence is not a tlogfs State".to_string()))?;
-        // Delegate to existing create_listing_table_provider - no duplication
-        crate::file_table::create_listing_table_provider(id, state)
+        log::debug!("DELEGATING OpLogFile to provider::create_table_provider: id={id}");
+        // Delegate to provider crate - no duplication
+        provider::create_table_provider(id, context, provider::TableProviderOptions::default())
             .await
             .map_err(|e| tinyfs::Error::Other(e.to_string()))
     }

@@ -32,7 +32,7 @@
 
 use tinyfs::FileID;
 
-use crate::scope_prefix_table_provider;
+use crate::transform::scope_prefix::scope_prefix_table_provider;
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use log::debug;
@@ -1252,9 +1252,8 @@ mod tests {
 
         // Create ProviderContext from SAME persistence
         let session = Arc::new(SessionContext::new());
-        let object_store = Arc::new(crate::TinyFsObjectStore::new(persistence.clone()));
-        let url = url::Url::parse("tinyfs:///").expect("Failed to parse tinyfs URL");
-        _ = session.register_object_store(&url, object_store);
+        let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
+            .expect("Failed to register TinyFS object store");
         let provider_context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
 
         (fs, provider_context)

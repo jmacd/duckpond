@@ -749,3 +749,26 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
 fn extract_node_and_part_ids_from_path(path: &str) -> Option<tinyfs::FileID> {
     parse_tinyfs_path(path).ok().map(|parsed| parsed.file_id)
 }
+
+/// Register TinyFsObjectStore with a SessionContext
+///
+/// This is a helper function to register a TinyFsObjectStore with DataFusion's SessionContext,
+/// making TinyFS files accessible via the `tinyfs:///` URL scheme.
+///
+/// Returns the registered ObjectStore for further use if needed.
+pub fn register_tinyfs_object_store<P: PersistenceLayer + Clone + 'static>(
+    ctx: &datafusion::execution::context::SessionContext,
+    persistence: P,
+) -> Result<Arc<TinyFsObjectStore<P>>, Box<dyn std::error::Error + Send + Sync>> {
+    let object_store = Arc::new(TinyFsObjectStore::new(persistence));
+    
+    let url = url::Url::parse("tinyfs:///")
+        .map_err(|e| format!("Failed to parse tinyfs URL: {}", e))?;
+    
+    _ = ctx
+        .runtime_env()
+        .register_object_store(&url, object_store.clone());
+    
+    debug!("Registered TinyFS ObjectStore with SessionContext - ready for any TinyFS path");
+    Ok(object_store)
+}

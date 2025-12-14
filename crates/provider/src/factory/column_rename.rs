@@ -176,7 +176,7 @@ async fn apply_column_rename_transform(
     });
 
     // Wrap with ColumnRenameTableProvider
-    let renamed_provider = crate::column_rename::ColumnRenameTableProvider::new(input, rename_fn)
+    let renamed_provider = crate::transform::column_rename::ColumnRenameTableProvider::new(input, rename_fn)
         .map_err(|e| tinyfs::Error::Other(format!("Failed to create rename provider: {}", e)))?;
 
     Ok(std::sync::Arc::new(renamed_provider))

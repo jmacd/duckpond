@@ -15,7 +15,7 @@ use tinyfs::{FileID, ProviderContext};
 
 use crate::Result;
 use crate::{
-    TableProviderKey, TableProviderOptions, TemporalFilteredListingTable, VersionSelection,
+    TableProviderKey, TableProviderOptions, transform::temporal_filter::TemporalFilteredListingTable, VersionSelection,
 };
 
 /// Create a TableProvider from a FileID with configurable options

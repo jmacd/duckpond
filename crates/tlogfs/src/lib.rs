@@ -67,9 +67,6 @@ pub fn extract_state(pctx: &FactoryContext) -> Result<persistence::State, TLogFS
 // Re-export from provider crate where it's now generically implemented
 pub use provider::TinyFsObjectStore;
 
-// File-table duality integration for TinyFS and DataFusion
-pub mod file_table;
-
 // Re-export key types
 pub use error::TLogFSError;
 pub use persistence::OpLogPersistence;

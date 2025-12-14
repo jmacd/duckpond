@@ -254,7 +254,7 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use crate::factory::test_factory::{InfiniteCsvConfig, InfiniteCsvFile};
-    use crate::{CsvProvider, FileProvider, FormatProvider, Url};
+    use crate::{format::csv::CsvProvider, FileProvider, FormatProvider, Url};
     use datafusion::execution::context::SessionContext;
     use std::sync::Arc;
     use tinyfs::{File, FS, MemoryPersistence};

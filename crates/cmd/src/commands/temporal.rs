@@ -141,10 +141,15 @@ pub async fn detect_overlaps_command(
             let size = record.size.unwrap_or(0);
             debug!("Creating table provider for {path_str} version {version} (size: {size})");
 
-            let table_provider = tlogfs::file_table::create_listing_table_provider_with_options(
+            let state = tx.state()?;
+            let context = state.as_provider_context();
+            let table_provider = provider::create_table_provider(
                 *node_id,
-                tx.transaction_guard()?,
-                tlogfs::file_table::VersionSelection::SpecificVersion(version as u64),
+                &context,
+                provider::TableProviderOptions {
+                    version_selection: provider::VersionSelection::SpecificVersion(version as u64),
+                    additional_urls: Vec::new(),
+                },
             )
             .await
             .map_err(|e| {

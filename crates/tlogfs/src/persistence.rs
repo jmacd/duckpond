@@ -1135,8 +1135,8 @@ impl InnerState {
     async fn complete_session_setup(&self, state: &State) -> Result<(), TLogFSError> {
         // Register the TinyFS ObjectStore with the context
         let _object_store =
-            crate::file_table::register_tinyfs_object_store(&self.session_context, state.clone())
-                .await?;
+            provider::register_tinyfs_object_store(&self.session_context, state.clone())
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register object store: {}", e)))?;
         debug!("✅ Completed SessionContext setup with TinyFS ObjectStore");
         Ok(())
     }
