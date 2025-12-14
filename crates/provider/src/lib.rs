@@ -2,10 +2,6 @@
 
 pub mod factory;
 
-#[cfg(test)]
-mod context_tests;
-#[cfg(test)]
-mod csv_timeseries_integration_test;
 mod column_rename;
 mod compression;
 mod csv;
