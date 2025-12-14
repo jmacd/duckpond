@@ -3774,6 +3774,7 @@ dependencies = [
  "opentelemetry-proto",
  "parquet",
  "paste",
+ "regex",
  "serde",
  "serde_json",
  "serde_qs",

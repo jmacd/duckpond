@@ -1,3 +1,4 @@
+pub mod column_rename;
 pub mod dynamic_dir;
 pub mod sql_derived;
 pub mod template;

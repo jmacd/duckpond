@@ -36,43 +36,59 @@ pub(crate) struct GlobComponentIterator {
 
 impl WildcardComponent {
     /// Check if this component matches the given name
-    pub(crate) fn match_component<S: AsRef<str>>(&self, name: S) -> Option<Option<String>> {
+    /// Returns Some(captures) if match, where captures is a Vec of all wildcard matches
+    pub(crate) fn match_component<S: AsRef<str>>(&self, name: S) -> Option<Vec<String>> {
         let name = name.as_ref();
 
         match self {
-            WildcardComponent::DoubleWildcard { .. } => Some(Some(name.to_string())),
+            WildcardComponent::DoubleWildcard { .. } => Some(vec![name.to_string()]),
             WildcardComponent::Wildcard { segments, .. } => {
                 // Match name against pattern segments
-                // Each segment must appear in order in the name
+                // Capture ALL parts matched by wildcards
                 
                 if segments.is_empty() {
                     // Just "*" - matches everything
-                    return Some(Some(name.to_string()));
+                    return Some(vec![name.to_string()]);
                 }
 
                 let mut pos = 0;
+                let mut captures = Vec::new();
 
-                for (i, segment) in segments.iter().enumerate() {
-                    if segment.is_empty() {
-                        // Empty segment means wildcard at start/end or consecutive wildcards
-                        if i == 0 {
-                            // Wildcard at start - continue to next segment
-                            continue;
-                        } else if i == segments.len() - 1 {
-                            // Wildcard at end - we're done, rest matches
-                            break;
-                        }
-                        // Middle empty segment - consecutive wildcards, continue
-                        continue;
-                    }
-
-                    // Find this literal segment in the remaining name
-                    if let Some(found_at) = name[pos..].find(segment) {
-                        pos += found_at + segment.len();
-                    } else {
-                        // Required segment not found
+                // For each wildcard (between segments), capture what it matched
+                
+                // Handle first segment
+                if !segments[0].is_empty() {
+                    // Pattern starts with literal (e.g., "file*.txt")
+                    if !name.starts_with(&segments[0]) {
                         return None;
                     }
+                    pos = segments[0].len();
+                } else {
+                    // Pattern starts with * (e.g., "*.txt" or "*VuLink*")
+                    // Wildcard is before first segment, capture will start from beginning
+                }
+
+                // Process remaining segments and capture wildcards between them
+                for (i, segment) in segments.iter().enumerate().skip(1) {
+                    let capture_start = pos;
+                    
+                    if !segment.is_empty() {
+                        // Find this literal in the remaining name
+                        if let Some(found_at) = name[pos..].find(segment) {
+                            let capture_end = pos + found_at;
+                            // Capture what the wildcard matched
+                            captures.push(name[capture_start..capture_end].to_string());
+                            pos = capture_end + segment.len();
+                        } else {
+                            return None;
+                        }
+                    } else if i == segments.len() - 1 {
+                        // Last segment is empty, means pattern ends with * (e.g., "VuLink*")
+                        // Capture everything remaining
+                        captures.push(name[capture_start..].to_string());
+                        pos = name.len();
+                    }
+                    // else: empty segment in middle means consecutive wildcards - skip
                 }
 
                 // Check if we matched the entire name for patterns ending with a literal
@@ -82,11 +98,16 @@ impl WildcardComponent {
                     }
                 }
 
-                Some(Some(name.to_string()))
+                // For segments.len() == 1, there's one wildcard at the end
+                if segments.len() == 1 {
+                    captures.push(name[pos..].to_string());
+                }
+
+                Some(captures)
             }
             WildcardComponent::Normal(pattern) => {
                 if name == pattern {
-                    Some(None)
+                    Some(vec![])  // No wildcards, no captures
                 } else {
                     None
                 }
@@ -167,7 +188,7 @@ mod tests {
     #[test]
     fn test_match_exact() {
         let comp = WildcardComponent::Normal("file.txt".to_string());
-        assert_eq!(comp.match_component("file.txt"), Some(None));
+        assert_eq!(comp.match_component("file.txt"), Some(vec![]));
         assert_eq!(comp.match_component("other.txt"), None);
     }
 
@@ -178,30 +199,56 @@ mod tests {
             segments: vec!["file".to_string(), ".txt".to_string()],
             index: 0,
         };
-        assert!(comp.match_component("file1.txt").is_some());
-        assert!(comp.match_component("fileabc.txt").is_some());
+        
+        // Should capture what's between "file" and ".txt"
+        assert_eq!(
+            comp.match_component("file1.txt"),
+            Some(vec!["1".to_string()])
+        );
+        assert_eq!(
+            comp.match_component("fileabc.txt"),
+            Some(vec!["abc".to_string()])
+        );
         assert_eq!(comp.match_component("other.txt"), None);
     }
 
     #[test]
     fn test_match_multiple_wildcards() {
         // Pattern: "*VuLink*" -> ["", "VuLink", ""]
+        // Should capture BOTH sides
         let comp = WildcardComponent::Wildcard {
             segments: vec!["".to_string(), "VuLink".to_string(), "".to_string()],
             index: 0,
         };
-        assert!(comp.match_component("HydroVu_FB-VuLink1.htm").is_some());
-        assert!(comp.match_component("VuLink.txt").is_some());
-        assert!(comp.match_component("prefixVuLinksuffix").is_some());
+        
+        assert_eq!(
+            comp.match_component("HydroVu_FB-VuLink1.htm"),
+            Some(vec!["HydroVu_FB-".to_string(), "1.htm".to_string()])
+        );
+        assert_eq!(
+            comp.match_component("VuLink.txt"),
+            Some(vec!["".to_string(), ".txt".to_string()])
+        );
+        assert_eq!(
+            comp.match_component("prefixVuLinksuffix"),
+            Some(vec!["prefix".to_string(), "suffix".to_string()])
+        );
         assert_eq!(comp.match_component("NoMatch"), None);
 
         // Pattern: "file*.*" -> ["file", ".", ""]
+        // Should capture both the name and extension
         let comp2 = WildcardComponent::Wildcard {
             segments: vec!["file".to_string(), ".".to_string(), "".to_string()],
             index: 0,
         };
-        assert!(comp2.match_component("file1.txt").is_some());
-        assert!(comp2.match_component("filename.ext").is_some());
+        assert_eq!(
+            comp2.match_component("file1.txt"),
+            Some(vec!["1".to_string(), "txt".to_string()])
+        );
+        assert_eq!(
+            comp2.match_component("filename.ext"),
+            Some(vec!["name".to_string(), "ext".to_string()])
+        );
         assert_eq!(comp2.match_component("other.txt"), None);
     }
 
@@ -210,9 +257,9 @@ mod tests {
         let comp = WildcardComponent::DoubleWildcard { index: 0 };
         assert_eq!(
             comp.match_component("anything"),
-            Some(Some("anything".to_string()))
+            Some(vec!["anything".to_string()])
         );
-        assert_eq!(comp.match_component(""), Some(Some("".to_string())));
+        assert_eq!(comp.match_component(""), Some(vec!["".to_string()]));
     }
 
     #[test]
@@ -266,5 +313,129 @@ mod tests {
             parse_glob("/a/b-*"),
             Err(Error::InvalidComponent(_))
         ));
+    }
+
+    #[test]
+    fn test_wildcard_capture_suffix() {
+        // Pattern: "*.template" should capture only the part before .template
+        // *.template -> ["", ".template"]
+        let comp = WildcardComponent::Wildcard {
+            segments: vec!["".to_string(), ".template".to_string()],
+            index: 0,
+        };
+        
+        // Should capture "hello", not "hello.template"
+        assert_eq!(
+            comp.match_component("hello.template"),
+            Some(vec!["hello".to_string()])
+        );
+        
+        // Should capture "world", not "world.template"
+        assert_eq!(
+            comp.match_component("world.template"),
+            Some(vec!["world".to_string()])
+        );
+        
+        // Should not match files without .template suffix
+        assert_eq!(comp.match_component("hello.txt"), None);
+    }
+
+    #[test]
+    fn test_wildcard_capture_prefix() {
+        // Pattern: "file*" should capture only the part after "file"
+        // file* -> ["file", ""]
+        let comp = WildcardComponent::Wildcard {
+            segments: vec!["file".to_string(), "".to_string()],
+            index: 0,
+        };
+        
+        // Should capture "name.txt", not "filename.txt"
+        assert_eq!(
+            comp.match_component("filename.txt"),
+            Some(vec!["name.txt".to_string()])
+        );
+        
+        // Should capture "123", not "file123"
+        assert_eq!(
+            comp.match_component("file123"),
+            Some(vec!["123".to_string()])
+        );
+        
+        // Should capture empty string for exact match
+        assert_eq!(
+            comp.match_component("file"),
+            Some(vec!["".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_wildcard_capture_middle() {
+        // Pattern: "file*.txt" should capture only the middle part
+        // file*.txt -> ["file", ".txt"]
+        let comp = WildcardComponent::Wildcard {
+            segments: vec!["file".to_string(), ".txt".to_string()],
+            index: 0,
+        };
+        
+        // Should capture "name", not "filename.txt"
+        assert_eq!(
+            comp.match_component("filename.txt"),
+            Some(vec!["name".to_string()])
+        );
+        
+        // Should capture "123", not "file123.txt"
+        assert_eq!(
+            comp.match_component("file123.txt"),
+            Some(vec!["123".to_string()])
+        );
+        
+        // Should not match wrong extension
+        assert_eq!(comp.match_component("filename.csv"), None);
+    }
+
+    #[test]
+    fn test_wildcard_capture_just_star() {
+        // Pattern: "*" should capture the entire filename
+        // * -> [""]
+        let comp = WildcardComponent::Wildcard {
+            segments: vec![],
+            index: 0,
+        };
+        
+        // Should capture full filename
+        assert_eq!(
+            comp.match_component("anything.txt"),
+            Some(vec!["anything.txt".to_string()])
+        );
+        
+        assert_eq!(
+            comp.match_component("hello.template"),
+            Some(vec!["hello.template".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_wildcard_capture_data_pattern() {
+        // Pattern: "data*.csv" should capture the number part
+        // data*.csv -> ["data", ".csv"]
+        let comp = WildcardComponent::Wildcard {
+            segments: vec!["data".to_string(), ".csv".to_string()],
+            index: 0,
+        };
+        
+        // Should capture "1", not "data1.csv"
+        assert_eq!(
+            comp.match_component("data1.csv"),
+            Some(vec!["1".to_string()])
+        );
+        
+        // Should capture "123", not "data123.csv"
+        assert_eq!(
+            comp.match_component("data123.csv"),
+            Some(vec!["123".to_string()])
+        );
+        
+        // Should not match wrong prefix
+        assert_eq!(comp.match_component("file1.csv"), None);
     }
 }

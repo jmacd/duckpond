@@ -372,6 +372,7 @@ impl TemporalReduceSqlFile {
                     patterns
                 },
                 query: Some(sql_query.clone()),
+                transforms: None,
                 scope_prefixes: None,
                 provider_wrapper: None,
             };

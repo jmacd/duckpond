@@ -27,6 +27,8 @@ pub enum ExecutionMode {
     PondReadWriter,
     /// Factory operates as a control writer (special mode for system operations)
     ControlWriter,
+    /// Factory applies table-provider transformations (called by other factories)
+    TableTransform,
 }
 
 /// Execution context for factory commands
@@ -53,6 +55,21 @@ impl ExecutionContext {
             mode: ExecutionMode::PondReadWriter,
             args,
         }
+    }
+
+    /// Create a table transform execution context
+    #[must_use]
+    pub fn table_transform() -> Self {
+        Self {
+            mode: ExecutionMode::TableTransform,
+            args: vec![],
+        }
+    }
+
+    /// Get the execution mode
+    #[must_use]
+    pub fn mode(&self) -> ExecutionMode {
+        self.mode
     }
 }
 
@@ -151,6 +168,24 @@ pub struct DynamicFactory {
             ctx: ExecutionContext,
         ) -> Pin<
             Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        >,
+    >,
+
+    /// Apply table provider transformation (optional, for transform factories)
+    /// Takes a config and input TableProvider, returns transformed TableProvider
+    pub apply_table_transform: Option<
+        fn(
+            config: Value,
+            input: Arc<dyn datafusion::catalog::TableProvider>,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Arc<dyn datafusion::catalog::TableProvider>,
+                            Box<dyn std::error::Error + Send + Sync>,
+                        >,
+                    > + Send,
+            >,
         >,
     >,
 }
@@ -346,6 +381,7 @@ macro_rules! register_dynamic_factory {
                 try_as_queryable: None,
                 initialize: None,
                 execute: None,
+                apply_table_transform: None,
             };
         }
     };
@@ -375,6 +411,7 @@ macro_rules! register_dynamic_factory {
                 try_as_queryable: None,
                 initialize: None,
                 execute: None,
+                apply_table_transform: None,
             };
         }
     };
@@ -405,6 +442,7 @@ macro_rules! register_dynamic_factory {
                 try_as_queryable: Some($queryable_fn),
                 initialize: None,
                 execute: None,
+                apply_table_transform: None,
             };
         }
     };
@@ -451,6 +489,43 @@ macro_rules! register_executable_factory {
                 try_as_queryable: None,
                 initialize: Some([<initialize_wrapper_ $name:snake>]),
                 execute: Some([<execute_wrapper_ $name:snake>]),
+                apply_table_transform: None,
+            };
+        }
+    };
+}
+
+/// Register a table transform factory
+#[macro_export]
+macro_rules! register_table_transform_factory {
+    (
+        name: $name:expr,
+        description: $description:expr,
+        validate: $validate_fn:expr,
+        transform: $transform_fn:expr
+    ) => {
+        paste::paste! {
+            fn [<transform_wrapper_ $name:snake>](
+                config: serde_json::Value,
+                input: std::sync::Arc<dyn datafusion::catalog::TableProvider>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, Box<dyn std::error::Error + Send + Sync>>> + Send>> {
+                Box::pin(async move {
+                    $transform_fn(config, input).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                })
+            }
+
+            #[allow(unsafe_code)]
+            #[linkme::distributed_slice($crate::registry::DYNAMIC_FACTORIES)]
+            static [<FACTORY_ $name:snake:upper>]: $crate::registry::DynamicFactory = $crate::registry::DynamicFactory {
+                name: $name,
+                description: $description,
+                create_directory: None,
+                create_file: None,
+                validate_config: $validate_fn,
+                try_as_queryable: None,
+                initialize: None,
+                execute: None,
+                apply_table_transform: Some([<transform_wrapper_ $name:snake>]),
             };
         }
     };

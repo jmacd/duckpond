@@ -663,16 +663,21 @@ impl WD {
 
                     // Load matching nodes individually (handles mixed partitions)
                     for entry in matching_entries {
-                        if let Some(captured_match) = pattern[0].match_component(&entry.name) {
+                        if let Some(wildcard_captures) = pattern[0].match_component(&entry.name) {
                             if let Some(child) = self.dref.get(&entry.name).await? {
                                 debug!("🔍 Wildcard pattern: loaded child '{}'", entry.name);
-                                captured.push(captured_match.expect("wildcard capture"));
+                                // Add all captures from this wildcard component
+                                let captures_count = wildcard_captures.len();
+                                captured.extend(wildcard_captures);
                                 self.visit_match_with_visitor(
                                     child, false, pattern, visited, captured, stack, results,
                                     visitor,
                                 )
                                 .await?;
-                                _ = captured.pop();
+                                // Remove all captures we added
+                                for _ in 0..captures_count {
+                                    _ = captured.pop();
+                                }
                             }
                         }
                     }

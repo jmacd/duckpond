@@ -6,6 +6,7 @@ pub mod factory;
 mod context_tests;
 #[cfg(test)]
 mod csv_timeseries_integration_test;
+mod column_rename;
 mod compression;
 mod csv;
 mod error;
@@ -41,7 +42,7 @@ pub use registry::{
     ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
     FactoryRegistry, QueryableFile,
 };
-pub use scope_prefix::ScopePrefixTableProvider;
+pub use scope_prefix::scope_prefix_table_provider;
 pub use factory::sql_derived::SqlDerivedConfig;
 pub use sql_transform::transform_sql;
 pub use table_creation::{

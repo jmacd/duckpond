@@ -355,8 +355,8 @@ mod tests {
         assert!(result.is_err(), "Provider should reject glob patterns");
         
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("matched 3 files"), "Error should explain pattern matched multiple files");
-        assert!(err_msg.contains("factory should iterate"), "Error should guide to use factory");
+        assert!(err_msg.contains("contains wildcards"), "Error should explain wildcards are not allowed");
+        assert!(err_msg.contains("collect_matches()"), "Error should guide to use collect_matches");
 
         println!("✅ Provider correctly rejects glob patterns");
         Ok(())

@@ -1,345 +1,45 @@
 //! Scope Prefix Table Provider
 //!
-//! Wraps a TableProvider to add a scope prefix to all column names except the time column.
-//! This enables dynamic column renaming without schema introspection at configuration time.
+//! Factory function to create a TableProvider that adds a scope prefix to all column names 
+//! except the time column. This enables dynamic column renaming without schema introspection 
+//! at configuration time.
 //!
 //! Example: With scope "Vulink" and time_column "timestamp", transforms:
 //!   - `timestamp` → `timestamp` (unchanged)
 //!   - `WaterTemp` → `Vulink.WaterTemp`
 //!   - `DO.mg/L` → `Vulink.DO.mg/L`
+//!
+//! This is implemented using ColumnRenameTableProvider with a scope-specific rename function.
 
-use async_trait::async_trait;
-use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
-use datafusion::arrow::record_batch::RecordBatch;
+use crate::column_rename::ColumnRenameTableProvider;
 use datafusion::catalog::TableProvider;
-use datafusion::datasource::TableType;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
-use std::any::Any;
+use datafusion::error::Result as DataFusionResult;
 use std::sync::Arc;
 
-/// Wraps a TableProvider to prefix column names with a scope
-#[derive(Debug)]
-pub struct ScopePrefixTableProvider {
-    /// The underlying table provider
+/// Create a TableProvider that prefixes column names with a scope
+///
+/// # Arguments
+/// * `inner` - The underlying table provider to wrap
+/// * `scope` - The scope prefix to add (e.g., "Vulink", "AT500_Surface")
+/// * `time_column` - The time column name to exclude from prefixing
+///
+/// # Returns
+/// A ColumnRenameTableProvider configured to prefix all columns except the time column
+pub fn scope_prefix_table_provider(
     inner: Arc<dyn TableProvider>,
-    /// Scope prefix to prepend (e.g., "Vulink")
     scope: String,
-    /// Time column to exclude from prefixing
     time_column: String,
-    /// Cached prefixed schema
-    schema: SchemaRef,
-}
-
-impl ScopePrefixTableProvider {
-    /// Create a new scope prefix wrapper
-    ///
-    /// # Arguments
-    /// * `inner` - The underlying table provider to wrap
-    /// * `scope` - The scope prefix to add (e.g., "Vulink", "AT500_Surface")
-    /// * `time_column` - The time column name to exclude from prefixing
-    pub fn new(
-        inner: Arc<dyn TableProvider>,
-        scope: String,
-        time_column: String,
-    ) -> DataFusionResult<Self> {
-        let original_schema = inner.schema();
-        let prefixed_schema = Self::create_prefixed_schema(&original_schema, &scope, &time_column)?;
-
-        Ok(Self {
-            inner,
-            scope,
-            time_column,
-            schema: Arc::new(prefixed_schema),
-        })
-    }
-
-    /// Create a new schema with prefixed column names
-    fn create_prefixed_schema(
-        original: &Schema,
-        scope: &str,
-        time_column: &str,
-    ) -> DataFusionResult<Schema> {
-        let prefixed_fields: Vec<Field> = original
-            .fields()
-            .iter()
-            .map(|field| {
-                if field.name() == time_column {
-                    // Keep time column unchanged
-                    field.as_ref().clone()
-                } else {
-                    // Prefix other columns with scope
-                    let new_name = format!("{}.{}", scope, field.name());
-                    Field::new(new_name, field.data_type().clone(), field.is_nullable())
-                }
-            })
-            .collect();
-
-        Ok(Schema::new(prefixed_fields))
-    }
-
-    /// Get the underlying table provider
-    pub fn inner(&self) -> &Arc<dyn TableProvider> {
-        &self.inner
-    }
-}
-
-#[async_trait]
-impl TableProvider for ScopePrefixTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn table_type(&self) -> TableType {
-        self.inner.table_type()
-    }
-
-    async fn scan(
-        &self,
-        state: &dyn datafusion::catalog::Session,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // Rewrite filter expressions to use original column names
-        let rewritten_filters: Vec<Expr> =
-            filters.iter().map(|expr| self.rewrite_expr(expr)).collect();
-
-        // Pass projection and rewritten filters through to inner
-        let plan = self
-            .inner
-            .scan(state, projection, &rewritten_filters, limit)
-            .await?;
-
-        // Calculate output schema based on projection
-        let output_schema = if let Some(proj) = projection {
-            let projected_fields: Vec<_> =
-                proj.iter().map(|&i| self.schema.field(i).clone()).collect();
-            Arc::new(Schema::new(projected_fields))
+) -> DataFusionResult<ColumnRenameTableProvider> {
+    // Create rename function that prefixes all columns except time_column
+    let rename_fn = Arc::new(move |col_name: &str| {
+        if col_name == time_column.as_str() {
+            col_name.to_string()
         } else {
-            self.schema.clone()
-        };
-
-        // Wrap the execution plan to rename columns in output batches
-        Ok(Arc::new(ScopePrefixExec::new(
-            plan,
-            output_schema,
-            self.scope.clone(),
-            self.time_column.clone(),
-        )))
-    }
-
-    fn supports_filters_pushdown(
-        &self,
-        filters: &[&Expr],
-    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        // Rewrite filters to use original column names, then ask inner provider
-        let rewritten: Vec<Expr> = filters.iter().map(|f| self.rewrite_expr(f)).collect();
-        let rewritten_refs: Vec<&Expr> = rewritten.iter().collect();
-
-        // Delegate to inner provider - it knows best whether it can handle these filters
-        self.inner.supports_filters_pushdown(&rewritten_refs)
-    }
-}
-
-impl ScopePrefixTableProvider {
-    /// Rewrite an expression to use original column names instead of prefixed names
-    fn rewrite_expr(&self, expr: &Expr) -> Expr {
-        use datafusion::common::Column;
-        use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
-
-        let prefix = format!("{}.", self.scope);
-
-        expr.clone()
-            .transform(|e| {
-                Ok(if let Expr::Column(col) = &e {
-                    // Strip scope prefix from column names
-                    if let Some(original_name) = col.name.strip_prefix(&prefix) {
-                        Transformed::yes(Expr::Column(Column::new(
-                            col.relation.clone(),
-                            original_name.to_string(),
-                        )))
-                    } else {
-                        Transformed::no(e)
-                    }
-                } else {
-                    Transformed::no(e)
-                })
-            })
-            .data()
-            .expect("Column name rewriting is infallible")
-    }
-}
-
-/// Execution plan that renames columns in output batches
-struct ScopePrefixExec {
-    inner: Arc<dyn ExecutionPlan>,
-    output_schema: SchemaRef,
-    scope: String,
-    time_column: String,
-    properties: datafusion::physical_plan::PlanProperties,
-}
-
-impl ScopePrefixExec {
-    fn new(
-        inner: Arc<dyn ExecutionPlan>,
-        output_schema: SchemaRef,
-        scope: String,
-        time_column: String,
-    ) -> Self {
-        let properties = Self::compute_properties(&output_schema, &inner);
-
-        Self {
-            inner,
-            output_schema,
-            scope,
-            time_column,
-            properties,
+            format!("{}.{}", scope, col_name)
         }
-    }
+    });
 
-    fn compute_properties(
-        schema: &SchemaRef,
-        inner: &Arc<dyn ExecutionPlan>,
-    ) -> datafusion::physical_plan::PlanProperties {
-        use datafusion::physical_expr::EquivalenceProperties;
-        use datafusion::physical_plan::PlanProperties;
-
-        let inner_props = inner.properties();
-        PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            inner_props.output_partitioning().clone(),
-            inner_props.emission_type,
-            inner_props.boundedness,
-        )
-    }
-}
-
-impl std::fmt::Debug for ScopePrefixExec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ScopePrefixExec(scope={})", self.scope)
-    }
-}
-
-impl std::fmt::Display for ScopePrefixExec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ScopePrefixExec: scope={}", self.scope)
-    }
-}
-
-impl DisplayAs for ScopePrefixExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ScopePrefixExec(scope={})", self.scope)
-    }
-}
-
-impl ExecutionPlan for ScopePrefixExec {
-    fn name(&self) -> &str {
-        "ScopePrefixExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.output_schema.clone()
-    }
-
-    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
-        &self.properties
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![&self.inner]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        if children.len() != 1 {
-            return Err(DataFusionError::Internal(
-                "ScopePrefixExec requires exactly one child".to_string(),
-            ));
-        }
-
-        Ok(Arc::new(ScopePrefixExec::new(
-            children[0].clone(),
-            self.output_schema.clone(),
-            self.scope.clone(),
-            self.time_column.clone(),
-        )))
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
-    ) -> DataFusionResult<datafusion::physical_plan::SendableRecordBatchStream> {
-        let inner_stream = self.inner.execute(partition, context)?;
-
-        Ok(Box::pin(ScopePrefixStream::new(
-            inner_stream,
-            self.output_schema.clone(),
-        )))
-    }
-}
-
-/// Stream that renames columns in record batches
-struct ScopePrefixStream {
-    inner: datafusion::physical_plan::SendableRecordBatchStream,
-    output_schema: SchemaRef,
-}
-
-impl ScopePrefixStream {
-    fn new(
-        inner: datafusion::physical_plan::SendableRecordBatchStream,
-        output_schema: SchemaRef,
-    ) -> Self {
-        Self {
-            inner,
-            output_schema,
-        }
-    }
-}
-
-impl datafusion::physical_plan::RecordBatchStream for ScopePrefixStream {
-    fn schema(&self) -> SchemaRef {
-        self.output_schema.clone()
-    }
-}
-
-impl futures::Stream for ScopePrefixStream {
-    type Item = DataFusionResult<RecordBatch>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        use futures::StreamExt;
-
-        match self.inner.poll_next_unpin(cx) {
-            std::task::Poll::Ready(Some(Ok(batch))) => {
-                // Just rename columns - projection already handled by inner
-                match RecordBatch::try_new(self.output_schema.clone(), batch.columns().to_vec()) {
-                    Ok(new_batch) => std::task::Poll::Ready(Some(Ok(new_batch))),
-                    Err(e) => std::task::Poll::Ready(Some(Err(DataFusionError::ArrowError(
-                        Box::new(e),
-                        None,
-                    )))),
-                }
-            }
-            std::task::Poll::Ready(Some(Err(e))) => std::task::Poll::Ready(Some(Err(e))),
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
+    ColumnRenameTableProvider::new(inner, rename_fn)
 }
 
 #[cfg(test)]
@@ -361,7 +61,7 @@ mod tests {
         )?;
 
         let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
-        let scoped = ScopePrefixTableProvider::new(
+        let scoped = scope_prefix_table_provider(
             Arc::new(table),
             "Vulink".to_string(),
             "timestamp".to_string(),
@@ -384,7 +84,7 @@ mod tests {
         )?;
 
         let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
-        let scoped = Arc::new(ScopePrefixTableProvider::new(
+        let scoped = Arc::new(scope_prefix_table_provider(
             Arc::new(table),
             "Site1".to_string(),
             "timestamp".to_string(),
@@ -460,7 +160,7 @@ mod tests {
         // Get the parquet table provider
         let parquet_provider = ctx.table_provider("inner_table").await?;
 
-        let scoped = Arc::new(ScopePrefixTableProvider::new(
+        let scoped = Arc::new(scope_prefix_table_provider(
             parquet_provider,
             "Station".to_string(),
             "timestamp".to_string(),
@@ -488,7 +188,7 @@ mod tests {
         )?;
 
         let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
-        let scoped = ScopePrefixTableProvider::new(
+        let scoped = scope_prefix_table_provider(
             Arc::new(table),
             "Sensor".to_string(),
             "timestamp".to_string(),
@@ -516,7 +216,7 @@ mod tests {
 
         let schema = batch1.schema();
         let table = MemTable::try_new(schema, vec![vec![batch1, batch2]])?;
-        let scoped = Arc::new(ScopePrefixTableProvider::new(
+        let scoped = Arc::new(scope_prefix_table_provider(
             Arc::new(table),
             "Multi".to_string(),
             "timestamp".to_string(),
@@ -548,7 +248,7 @@ mod tests {
         )?;
 
         let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
-        let scoped = Arc::new(ScopePrefixTableProvider::new(
+        let scoped = Arc::new(scope_prefix_table_provider(
             Arc::new(table),
             "Mixed".to_string(),
             "timestamp".to_string(),

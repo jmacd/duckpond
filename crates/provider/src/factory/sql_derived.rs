@@ -32,7 +32,7 @@
 
 use tinyfs::FileID;
 
-use crate::ScopePrefixTableProvider;
+use crate::scope_prefix_table_provider;
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use log::debug;
@@ -85,6 +85,12 @@ pub struct SqlDerivedConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
 
+    /// Optional list of table transform factory paths to apply to each pattern's TableProvider.
+    /// Transforms are applied in order before scope prefixes and SQL execution.
+    /// Each transform is a path like "/transforms/column-rename"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transforms: Option<Vec<String>>,
+
     /// Optional scope prefixes to apply to table columns (internal use by derivative factories)
     /// Maps table name to (scope_prefix, time_column_name)
     /// NOT serialized - must be set programmatically by factories like timeseries-join
@@ -110,6 +116,7 @@ impl SqlDerivedConfig {
         Self {
             patterns,
             query,
+            transforms: None,
             scope_prefixes: None,
             provider_wrapper: None,
         }
@@ -124,6 +131,7 @@ impl SqlDerivedConfig {
         Self {
             patterns,
             query,
+            transforms: None,
             scope_prefixes: Some(scope_prefixes),
             provider_wrapper: None,
         }
@@ -239,6 +247,78 @@ impl SqlDerivedFile {
             context,
             mode,
         })
+    }
+
+    /// Apply transform chain to a TableProvider
+    /// 
+    /// Applies transforms in order from config.transforms, each transform wrapping the previous result.
+    async fn apply_transforms(
+        &self,
+        mut table_provider: Arc<dyn TableProvider>,
+        pattern_name: &str,
+    ) -> TinyFSResult<Arc<dyn TableProvider>> {
+        // Early return if no transforms configured
+        let Some(transform_paths) = &self.config.transforms else {
+            return Ok(table_provider);
+        };
+
+        debug!(
+            "🔧 SQL-DERIVED: Applying {} transforms to table '{}': {:?}",
+            transform_paths.len(),
+            pattern_name,
+            transform_paths
+        );
+
+        // Apply each transform in order
+        for (index, transform_path) in transform_paths.iter().enumerate() {
+            debug!(
+                "🔧 SQL-DERIVED: Applying transform {}/{}: '{}'",
+                index + 1,
+                transform_paths.len(),
+                transform_path
+            );
+
+            // Look up the transform factory (registry is static)
+            let transform_factory = crate::FactoryRegistry::get_factory(transform_path)
+                .ok_or_else(|| {
+                    tinyfs::Error::Other(format!(
+                        "Transform factory not found: {}",
+                        transform_path
+                    ))
+                })?;
+
+            // Verify it's a table transform factory
+            if transform_factory.apply_table_transform.is_none() {
+                return Err(tinyfs::Error::Other(format!(
+                    "Factory '{}' does not implement apply_table_transform (not a table transform factory)",
+                    transform_path
+                )));
+            }
+
+            // Get the transform function
+            let apply_fn = transform_factory.apply_table_transform.unwrap();
+
+            // Get the factory's config by reading its validate_config output
+            // For now, use empty config - the factory path itself identifies the config
+            let transform_config = serde_json::json!({});
+
+            // Apply the transform
+            table_provider = apply_fn(transform_config, table_provider)
+                .await
+                .map_err(|e| {
+                    tinyfs::Error::Other(format!(
+                        "Transform '{}' failed: {}",
+                        transform_path, e
+                    ))
+                })?;
+
+            debug!(
+                "🔧 SQL-DERIVED: Transform {} applied successfully",
+                index + 1
+            );
+        }
+
+        Ok(table_provider)
     }
 
     /// Wrap this SqlDerivedFile in a FileHandle for use with TinyFS
@@ -939,7 +1019,10 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         unique_table_name, pattern_name
                     );
 
-                    // Wrap with ScopePrefixTableProvider if scope prefix is configured
+                    // Apply user transforms first (before scope prefix)
+                    let table_provider = self.apply_transforms(listing_table_provider, &pattern_name).await?;
+
+                    // Then wrap with ScopePrefixTableProvider if scope prefix is configured
                     let final_table_provider: Arc<dyn TableProvider> = if let Some(scope_prefixes) =
                         &self.config.scope_prefixes
                     {
@@ -958,8 +1041,8 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                 scope_prefix
                             );
                             let wrapped = Arc::new(
-                                ScopePrefixTableProvider::new(
-                                    listing_table_provider,
+                                scope_prefix_table_provider(
+                                    table_provider,
                                     scope_prefix.clone(),
                                     time_column.clone(),
                                 )
@@ -978,10 +1061,10 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                             );
                             wrapped
                         } else {
-                            listing_table_provider
+                            table_provider
                         }
                     } else {
-                        listing_table_provider
+                        table_provider
                     };
 
                     _ = ctx
