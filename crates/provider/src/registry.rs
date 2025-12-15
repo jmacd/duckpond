@@ -172,10 +172,11 @@ pub struct DynamicFactory {
     >,
 
     /// Apply table provider transformation (optional, for transform factories)
-    /// Takes a config and input TableProvider, returns transformed TableProvider
+    /// Takes a FactoryContext (with FileID to read config) and input TableProvider
+    /// Returns transformed TableProvider
     pub apply_table_transform: Option<
         fn(
-            config: Value,
+            context: FactoryContext,
             input: Arc<dyn datafusion::catalog::TableProvider>,
         ) -> Pin<
             Box<
@@ -506,11 +507,11 @@ macro_rules! register_table_transform_factory {
     ) => {
         paste::paste! {
             fn [<transform_wrapper_ $name:snake>](
-                config: serde_json::Value,
+                context: $crate::FactoryContext,
                 input: std::sync::Arc<dyn datafusion::catalog::TableProvider>,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, Box<dyn std::error::Error + Send + Sync>>> + Send>> {
                 Box::pin(async move {
-                    $transform_fn(config, input).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                    $transform_fn(context, input).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
                 })
             }
 

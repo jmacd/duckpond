@@ -107,10 +107,11 @@ async fn mknod_impl(
     // Determine what type of node to create based on factory capabilities
     let entry_type = if factory.create_directory.is_some() {
         tinyfs::EntryType::DirectoryDynamic
-    } else if factory.create_file.is_some() || factory.execute.is_some() {
+    } else if factory.create_file.is_some() || factory.execute.is_some() || factory.apply_table_transform.is_some() {
         // Factory supports files - either:
         // 1. Has explicit create_file function (template factory)
         // 2. Is executable factory (config bytes ARE the file content via ConfigFile wrapper)
+        // 3. Is table transform factory (config stored for use by other factories)
         tinyfs::EntryType::FileDataDynamic
     } else {
         return Err(anyhow!(

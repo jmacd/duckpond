@@ -72,11 +72,11 @@ pub struct SqlTransformOptions {
 pub struct SqlDerivedConfig {
     /// Named URL patterns for matching files. Each pattern name becomes a table in the SQL query.
     /// Each pattern can match multiple files which are automatically harmonized with UNION ALL BY NAME.
-    /// 
+    ///
     /// **URL Format**: `scheme:///path/pattern`
     /// - `series:///pattern` - FileSeries (for sql-derived-series mode)
     /// - `table:///pattern` - FileTable (for sql-derived-table mode)
-    /// 
+    ///
     /// Example: {"vulink": "series:///data/vulink*.series", "at500": "series:///data/at500*.series"}
     #[serde(default)]
     pub patterns: HashMap<String, crate::Url>,
@@ -159,7 +159,7 @@ impl SqlDerivedConfig {
 
         // All schemes are valid - builtin types (series/table/file) or format providers (csv/excelhtml/oteljson)
         // The actual data compatibility is verified at runtime when the data is loaded
-        
+
         Ok(())
     }
 
@@ -231,7 +231,7 @@ pub struct SqlDerivedFile {
 
 impl SqlDerivedFile {
     /// Create a new SQL-derived file with validated URL patterns
-    /// 
+    ///
     /// # Errors
     /// Returns error if pattern validation fails (invalid URLs, mismatched schemes, etc.)
     pub fn new(
@@ -241,7 +241,7 @@ impl SqlDerivedFile {
     ) -> TinyFSResult<Self> {
         // Validate patterns match the mode
         config.validate(&mode)?;
-        
+
         Ok(Self {
             config,
             context,
@@ -250,7 +250,7 @@ impl SqlDerivedFile {
     }
 
     /// Apply transform chain to a TableProvider
-    /// 
+    ///
     /// Applies transforms in order from config.transforms, each transform wrapping the previous result.
     async fn apply_transforms(
         &self,
@@ -278,12 +278,65 @@ impl SqlDerivedFile {
                 transform_path
             );
 
-            // Look up the transform factory (registry is static)
-            let transform_factory = crate::FactoryRegistry::get_factory(transform_path)
+            // Create a temporary FS to resolve the transform path
+            let fs = tinyfs::FS::from_arc(self.context.context.persistence.clone());
+            let root = fs
+                .root()
+                .await
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to get root: {}", e)))?;
+
+            // Resolve the transform path to get the node
+            let (_parent_wd, lookup_result) =
+                root.resolve_path(transform_path).await.map_err(|e| {
+                    tinyfs::Error::Other(format!(
+                        "Failed to resolve transform path '{}': {}",
+                        transform_path, e
+                    ))
+                })?;
+
+            let config_node = match lookup_result {
+                tinyfs::Lookup::Found(node) => node,
+                _ => {
+                    return Err(tinyfs::Error::Other(format!(
+                        "Transform path '{}' not found",
+                        transform_path
+                    )));
+                }
+            };
+
+            let node_id = config_node.id();
+
+            // Get the factory name and config for this node using generic PersistenceLayer method
+            let (factory_name, _config_bytes) = self
+                .context
+                .context
+                .persistence
+                .get_dynamic_node_config(node_id)
+                .await
+                .map_err(|e| {
+                    tinyfs::Error::Other(format!(
+                        "Failed to get factory config for transform '{}': {}",
+                        transform_path, e
+                    ))
+                })?
                 .ok_or_else(|| {
                     tinyfs::Error::Other(format!(
-                        "Transform factory not found: {}",
+                        "Transform file '{}' has no associated factory",
                         transform_path
+                    ))
+                })?;
+
+            debug!(
+                "🔧 SQL-DERIVED: Transform '{}' uses factory '{}'",
+                transform_path, factory_name
+            );
+
+            // Look up the transform factory
+            let transform_factory =
+                crate::FactoryRegistry::get_factory(&factory_name).ok_or_else(|| {
+                    tinyfs::Error::Other(format!(
+                        "Transform factory '{}' not found in registry",
+                        factory_name
                     ))
                 })?;
 
@@ -291,25 +344,30 @@ impl SqlDerivedFile {
             if transform_factory.apply_table_transform.is_none() {
                 return Err(tinyfs::Error::Other(format!(
                     "Factory '{}' does not implement apply_table_transform (not a table transform factory)",
-                    transform_path
+                    factory_name
                 )));
             }
 
             // Get the transform function
             let apply_fn = transform_factory.apply_table_transform.unwrap();
 
-            // Get the factory's config by reading its validate_config output
-            // For now, use empty config - the factory path itself identifies the config
-            let transform_config = serde_json::json!({});
+            // Create FactoryContext with the transform file's FileID
+            let transform_context = crate::FactoryContext {
+                context: self.context.context.clone(),
+                file_id: FileID::from(node_id),
+                pond_metadata: None,
+            };
 
-            // Apply the transform
-            table_provider = apply_fn(transform_config, table_provider)
+            debug!(
+                "🔧 SQL-DERIVED: Applying transform '{}' (factory: '{}')",
+                transform_path, factory_name
+            );
+
+            // Apply the transform - factory will read its own config from FileID
+            table_provider = apply_fn(transform_context, table_provider)
                 .await
                 .map_err(|e| {
-                    tinyfs::Error::Other(format!(
-                        "Transform '{}' failed: {}",
-                        transform_path, e
-                    ))
+                    tinyfs::Error::Other(format!("Transform '{}' failed: {}", transform_path, e))
                 })?;
 
             debug!(
@@ -328,7 +386,7 @@ impl SqlDerivedFile {
     }
 
     /// Resolve URL pattern to QueryableFile instances
-    /// 
+    ///
     /// URL already validated during config deserialization.
     pub async fn resolve_pattern_to_queryable_files(
         &self,
@@ -347,7 +405,7 @@ impl SqlDerivedFile {
                 )));
             }
         };
-        
+
         // Allow: exact match, "file" scheme (uses EntryType), or format providers
         let is_format_provider = matches!(scheme, "csv" | "excelhtml" | "oteljson");
         if scheme != expected_scheme && scheme != "file" && !is_format_provider {
@@ -356,7 +414,7 @@ impl SqlDerivedFile {
                 scheme, entry_type, expected_scheme
             )));
         }
-        
+
         // For format providers, look for FileDataPhysical/Dynamic instead of the requested entry_type
         // The format provider will convert them to the appropriate type
         let lookup_entry_type = if is_format_provider {
@@ -370,10 +428,10 @@ impl SqlDerivedFile {
         } else {
             entry_type
         };
-        
+
         // Extract TinyFS path from URL
         let tinyfs_path = url.path();
-        
+
         // STEP 1: Build TinyFS from persistence via ProviderContext
         let fs = self.context.context.filesystem();
         let tinyfs_root = fs
@@ -418,9 +476,15 @@ impl SqlDerivedFile {
             }
         } else {
             // Use collect_matches() for glob patterns - returns Vec<(NodePath, Vec<String>)>
-            let pattern_matches = tinyfs_root.collect_matches(tinyfs_path).await.map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to resolve pattern '{}': {}", tinyfs_path, e))
-            })?;
+            let pattern_matches = tinyfs_root
+                .collect_matches(tinyfs_path)
+                .await
+                .map_err(|e| {
+                    tinyfs::Error::Other(format!(
+                        "Failed to resolve pattern '{}': {}",
+                        tinyfs_path, e
+                    ))
+                })?;
 
             // Convert Vec<(NodePath, Vec<String>)> to Vec<(NodePath, HashMap<String, String>)>
             pattern_matches
@@ -585,15 +649,25 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
                 "Table name cannot be empty".to_string(),
             ));
         }
-        
+
         // Validate scheme is recognized (no fallback for unknown schemes)
         let scheme = pattern_url.scheme();
-        const KNOWN_SCHEMES: &[&str] = &["series", "table", "data", "csv", "excelhtml", "oteljson"];
+        const KNOWN_SCHEMES: &[&str] = &[
+            "file",
+            "series",
+            "table",
+            "data",
+            "csv",
+            "excelhtml",
+            "oteljson",
+        ];
         if !KNOWN_SCHEMES.contains(&scheme) {
-            return Err(tinyfs::Error::Other(
-                format!("Unknown URL scheme '{}' in pattern '{}'. Known schemes: {}", 
-                    scheme, pattern_url, KNOWN_SCHEMES.join(", "))
-            ));
+            return Err(tinyfs::Error::Other(format!(
+                "Unknown URL scheme '{}' in pattern '{}'. Known schemes: {}",
+                scheme,
+                pattern_url,
+                KNOWN_SCHEMES.join(", ")
+            )));
         }
     }
 
@@ -810,30 +884,45 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     // Format providers: Use Provider API to convert format to series/table
                     debug!(
                         "🔍 SQL-DERIVED: Pattern '{}' uses format provider '{}' with {} files",
-                        pattern_name, scheme, queryable_files.len()
+                        pattern_name,
+                        scheme,
+                        queryable_files.len()
                     );
                     let fs = self.context.context.filesystem();
                     let fs_arc = Arc::new(fs);
                     let provider_api = crate::Provider::new(fs_arc);
                     let datafusion_ctx = datafusion::prelude::SessionContext::new();
-                    
+
                     if queryable_files.len() == 1 {
                         // Single file: direct format provider conversion
                         let node_path = &queryable_files[0];
                         let file_url = format!("{}://{}", scheme, node_path.path().display());
-                        
-                        match provider_api.create_table_provider(&file_url, &datafusion_ctx).await {
+
+                        match provider_api
+                            .create_table_provider(&file_url, &datafusion_ctx)
+                            .await
+                        {
                             Ok(table_provider) => {
-                                debug!("✅ SQL-DERIVED: Format provider created table for single file");
+                                debug!(
+                                    "✅ SQL-DERIVED: Format provider created table for single file"
+                                );
                                 if let Some(wrapper) = &self.config.provider_wrapper {
-                                    wrapper(table_provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                                    wrapper(table_provider)
+                                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?
                                 } else {
                                     table_provider
                                 }
                             }
                             Err(e) => {
-                                log::error!("❌ SQL-DERIVED: Format provider failed for '{}': {}", file_url, e);
-                                return Err(tinyfs::Error::Other(format!("Format provider failed: {}", e)));
+                                log::error!(
+                                    "❌ SQL-DERIVED: Format provider failed for '{}': {}",
+                                    file_url,
+                                    e
+                                );
+                                return Err(tinyfs::Error::Other(format!(
+                                    "Format provider failed: {}",
+                                    e
+                                )));
                             }
                         }
                     } else {
@@ -841,34 +930,53 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         let mut table_providers = Vec::new();
                         for node_path in &queryable_files {
                             let file_url = format!("{}://{}", scheme, node_path.path().display());
-                            match provider_api.create_table_provider(&file_url, &datafusion_ctx).await {
+                            match provider_api
+                                .create_table_provider(&file_url, &datafusion_ctx)
+                                .await
+                            {
                                 Ok(tp) => table_providers.push(tp),
                                 Err(e) => {
-                                    log::error!("❌ SQL-DERIVED: Format provider failed for '{}': {}", file_url, e);
-                                    return Err(tinyfs::Error::Other(format!("Format provider failed: {}", e)));
+                                    log::error!(
+                                        "❌ SQL-DERIVED: Format provider failed for '{}': {}",
+                                        file_url,
+                                        e
+                                    );
+                                    return Err(tinyfs::Error::Other(format!(
+                                        "Format provider failed: {}",
+                                        e
+                                    )));
                                 }
                             }
                         }
-                        
+
                         // UNION BY NAME using SQL
                         let temp_ctx = datafusion::prelude::SessionContext::new();
                         for (i, tp) in table_providers.iter().enumerate() {
-                            _ = temp_ctx.register_table(&format!("t{}", i), tp.clone())
+                            _ = temp_ctx
+                                .register_table(&format!("t{}", i), tp.clone())
                                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                         }
                         let union_sql = (0..table_providers.len())
                             .map(|i| format!("SELECT * FROM t{}", i))
                             .collect::<Vec<_>>()
                             .join(" UNION ALL BY NAME ");
-                        
-                        let df = temp_ctx.sql(&union_sql).await.map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                        let batches = df.collect().await.map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                        let schema = batches.first().map(|b| b.schema())
-                            .ok_or_else(|| tinyfs::Error::Other("No batches in union".to_string()))?;
-                        let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
+
+                        let df = temp_ctx
+                            .sql(&union_sql)
+                            .await
                             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                        let batches = df
+                            .collect()
+                            .await
+                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                        let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
+                            tinyfs::Error::Other("No batches in union".to_string())
+                        })?;
+                        let mem_table =
+                            datafusion::datasource::MemTable::try_new(schema, vec![batches])
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                         let provider: Arc<dyn TableProvider> = Arc::new(mem_table);
-                        
+
                         if let Some(wrapper) = &self.config.provider_wrapper {
                             wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
                         } else {
@@ -959,46 +1067,46 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         }
                     }
 
-                        // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
-                        if urls.is_empty() {
-                            return Err(tinyfs::Error::Other(format!(
-                                "No valid URLs found for pattern '{}'",
-                                pattern_name
-                            )));
-                        }
+                    // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
+                    if urls.is_empty() {
+                        return Err(tinyfs::Error::Other(format!(
+                            "No valid URLs found for pattern '{}'",
+                            pattern_name
+                        )));
+                    }
 
-                        // Create table provider options for multi-file query
-                        // Note: Temporal bounds (from pond set-temporal-bounds) should be enforced
-                        // at the Parquet reader level, not here at the factory level
-                        let options = crate::TableProviderOptions {
-                            additional_urls: urls.clone(),
-                            ..Default::default()
-                        };
+                    // Create table provider options for multi-file query
+                    // Note: Temporal bounds (from pond set-temporal-bounds) should be enforced
+                    // at the Parquet reader level, not here at the factory level
+                    let options = crate::TableProviderOptions {
+                        additional_urls: urls.clone(),
+                        ..Default::default()
+                    };
 
-                        log::debug!(
-                            "📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs",
-                            pattern_name,
-                            urls.len()
+                    log::debug!(
+                        "📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs",
+                        pattern_name,
+                        urls.len()
+                    );
+
+                    // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
+                    let representative_file_id =
+                        file_ids.first().copied().unwrap_or(FileID::root());
+                    let provider =
+                        crate::create_table_provider(representative_file_id, context, options)
+                            .await
+                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+                    // Apply optional provider wrapper (e.g., null_padding_table)
+                    if let Some(wrapper) = &self.config.provider_wrapper {
+                        debug!(
+                            "Applying provider wrapper to multi-file table '{}'",
+                            pattern_name
                         );
-
-                        // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
-                        let representative_file_id =
-                            file_ids.first().copied().unwrap_or(FileID::root());
-                        let provider =
-                            crate::create_table_provider(representative_file_id, context, options)
-                                .await
-                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
-                        // Apply optional provider wrapper (e.g., null_padding_table)
-                        if let Some(wrapper) = &self.config.provider_wrapper {
-                            debug!(
-                                "Applying provider wrapper to multi-file table '{}'",
-                                pattern_name
-                            );
-                            wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
-                        } else {
-                            provider
-                        }
+                        wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                    } else {
+                        provider
+                    }
                 };
                 // Register the ListingTable as the provider
                 let table_exists = matches!(
@@ -1020,7 +1128,9 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     );
 
                     // Apply user transforms first (before scope prefix)
-                    let table_provider = self.apply_transforms(listing_table_provider, &pattern_name).await?;
+                    let table_provider = self
+                        .apply_transforms(listing_table_provider, &pattern_name)
+                        .await?;
 
                     // Then wrap with ScopePrefixTableProvider if scope prefix is configured
                     let final_table_provider: Arc<dyn TableProvider> = if let Some(scope_prefixes) =
@@ -1161,13 +1271,36 @@ mod tests {
     use super::*;
     use crate::ProviderContext;
     use crate::QueryableFile;
+    use crate::factory::temporal_reduce::{
+        AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
+    };
+    use arrow::array::{
+        Array, Float64Array, Int32Array, Int64Array, StringArray, TimestampMillisecondArray,
+        TimestampSecondArray,
+    };
+    use arrow::compute::concat_batches;
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
     use arrow_array::record_batch;
+    use arrow_cast::cast;
     use datafusion::execution::context::SessionContext;
+    use datafusion::physical_plan::collect;
+    use datafusion::sql::parser::DFParser;
+    use datafusion::sql::parser::Statement as DFStatement;
+    use datafusion::sql::sqlparser::ast::TableAlias;
+    use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+    use datafusion::sql::sqlparser::ast::{Query, Select, SetExpr, TableFactor};
+    use datafusion::sql::sqlparser::dialect::GenericDialect;
+    use parquet::arrow::ArrowWriter;
     use std::collections::HashMap;
+    use std::io::Cursor;
+    use std::sync::Arc;
+    use tinyfs::Directory;
     use tinyfs::FS;
     use tinyfs::MemoryPersistence;
     use tinyfs::PartID;
     use tinyfs::arrow::SimpleParquetExt;
+    use tokio::io::AsyncWriteExt;
 
     // Test helper: Create patterns HashMap from string URL literals
     fn test_patterns(pairs: &[(&str, &str)]) -> HashMap<String, crate::Url> {
@@ -1274,7 +1407,6 @@ mod tests {
 
         // Create the file in FS (this creates the directory entry and node)
         let mut writer = root.async_writer_path_with_type(path, entry_type).await?;
-        use tokio::io::AsyncWriteExt;
         writer.write_all(&parquet_data).await?;
         writer.shutdown().await?;
 
@@ -1292,14 +1424,31 @@ mod tests {
         Ok(file_id)
     }
 
+    /// Helper to create a parquet file from a RecordBatch
+    /// Converts the batch to parquet format and stores it using create_parquet_file
+    async fn create_parquet_from_batch(
+        fs: &FS,
+        persistence: &MemoryPersistence,
+        path: &str,
+        batch: &RecordBatch,
+        entry_type: EntryType,
+    ) -> Result<FileID, Box<dyn std::error::Error>> {
+        let mut parquet_buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer);
+            let mut writer = ArrowWriter::try_new(cursor, batch.schema(), None)?;
+            writer.write(batch)?;
+            _ = writer.close()?;
+        }
+
+        create_parquet_file(fs, persistence, path, parquet_buffer, entry_type).await
+    }
+
     /// Helper function to get a string array from any column, handling different Arrow string types
     fn get_string_array(
-        batch: &arrow::record_batch::RecordBatch,
+        batch: &RecordBatch,
         column_index: usize,
-    ) -> Arc<arrow::array::StringArray> {
-        use arrow::datatypes::DataType;
-        use arrow_cast::cast;
-
+    ) -> Arc<StringArray> {
         let column = batch.column(column_index);
         let string_column = match column.data_type() {
             DataType::Utf8 => column.clone(),
@@ -1307,7 +1456,7 @@ mod tests {
         };
         string_column
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<StringArray>()
             .expect("Failed to downcast to StringArray")
             .clone()
             .into()
@@ -1318,7 +1467,7 @@ mod tests {
     async fn execute_sql_derived_direct(
         sql_derived_file: &SqlDerivedFile,
         provider_context: &ProviderContext,
-    ) -> Result<Vec<arrow::record_batch::RecordBatch>, Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error + Send + Sync>>
     {
         debug!("execute_sql_derived_direct: Starting execution");
 
@@ -1344,7 +1493,6 @@ mod tests {
             .await?;
 
         // Execute the plan directly
-        use datafusion::physical_plan::collect;
         let task_context = ctx.task_ctx();
         debug!("execute_sql_derived_direct: Executing plan");
         let result_batches = collect(execution_plan, task_context).await?;
@@ -1436,71 +1584,37 @@ query: ""
             .downcast_ref::<MemoryPersistence>()
             .expect("Expected MemoryPersistence");
 
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
-
         // Create sensor_data1.parquet
-        let batch1 = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![101, 102])),
-                Arc::new(StringArray::from(vec!["Building A", "Building B"])),
-                Arc::new(Int32Array::from(vec![80, 85])),
-            ],
+        let batch1 = record_batch!(
+            ("sensor_id", Int32, [101, 102]),
+            ("location", Utf8, ["Building A", "Building B"]),
+            ("reading", Int32, [80, 85])
         )
         .unwrap();
 
-        let mut parquet_buffer1 = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer1);
-            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-            writer.write(&batch1).unwrap();
-            _ = writer.close().unwrap();
-        }
-
-        _ = create_parquet_file(
+        _ = create_parquet_from_batch(
             &fs,
             persistence,
             "/sensor_data1.parquet",
-            parquet_buffer1,
+            &batch1,
             EntryType::FileTablePhysical,
         )
         .await
         .unwrap();
 
         // Create sensor_data2.parquet
-        let batch2 = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![201, 202])),
-                Arc::new(StringArray::from(vec!["Building C", "Building D"])),
-                Arc::new(Int32Array::from(vec![90, 95])),
-            ],
+        let batch2 = record_batch!(
+            ("sensor_id", Int32, [201, 202]),
+            ("location", Utf8, ["Building C", "Building D"]),
+            ("reading", Int32, [90, 95])
         )
         .unwrap();
 
-        let mut parquet_buffer2 = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer2);
-            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-            writer.write(&batch2).unwrap();
-            _ = writer.close().unwrap();
-        }
-
-        _ = create_parquet_file(
+        _ = create_parquet_from_batch(
             &fs,
             persistence,
             "/sensor_data2.parquet",
-            parquet_buffer2,
+            &batch2,
             EntryType::FileTablePhysical,
         )
         .await
@@ -1561,80 +1675,40 @@ query: ""
         // Set up FileSeries files in different directories
         // Create /sensors/building_a/data.parquet
 
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
-
-        let batch_a = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![301])),
-                Arc::new(StringArray::from(vec!["Building A"])),
-                Arc::new(Int32Array::from(vec![100])),
-            ],
+        let batch_a = record_batch!(
+            ("sensor_id", Int32, [301]),
+            ("location", Utf8, ["Building A"]),
+            ("reading", Int32, [100])
         )
         .unwrap();
-
-        let mut parquet_buffer_a = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer_a);
-            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-            writer.write(&batch_a).unwrap();
-            _ = writer.close().unwrap();
-        }
 
         // Create directory first, then file
         _ = root.create_dir_path("/sensors").await.unwrap();
         _ = root.create_dir_path("/sensors/building_a").await.unwrap();
-        _ = create_parquet_file(
+        _ = create_parquet_from_batch(
             &fs,
             persistence,
             "/sensors/building_a/data.parquet",
-            parquet_buffer_a,
+            &batch_a,
             EntryType::FileTablePhysical,
         )
         .await
         .unwrap();
 
         // Create /sensors/building_b/data.parquet
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
-
-        let batch_b = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![302])),
-                Arc::new(StringArray::from(vec!["Building B"])),
-                Arc::new(Int32Array::from(vec![110])),
-            ],
+        let batch_b = record_batch!(
+            ("sensor_id", Int32, [302]),
+            ("location", Utf8, ["Building B"]),
+            ("reading", Int32, [110])
         )
         .unwrap();
 
-        let mut parquet_buffer_b = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer_b);
-            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-            writer.write(&batch_b).unwrap();
-            _ = writer.close().unwrap();
-        }
-
         _ = root.create_dir_path("/sensors/building_b").await.unwrap();
-        _ = create_parquet_file(
+        _ = create_parquet_from_batch(
             &fs,
             persistence,
             "/sensors/building_b/data.parquet",
-            parquet_buffer_b,
+            &batch_b,
             EntryType::FileTablePhysical,
         )
         .await
@@ -1669,7 +1743,6 @@ query: ""
         assert_eq!(total_rows, 2);
 
         // Concatenate all batches into one for easier testing
-        use arrow::compute::concat_batches;
         let schema = result_batches[0].schema();
         let result_batch = concat_batches(&schema, &result_batches).unwrap();
 
@@ -1711,80 +1784,40 @@ query: ""
         // Set up FileSeries files in different locations matching different patterns
         // Create files in /metrics/ directory
 
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
-
         // Metrics file 1
-        let batch_metrics = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![401, 402])),
-                Arc::new(StringArray::from(vec!["Metrics Room A", "Metrics Room B"])),
-                Arc::new(Int32Array::from(vec![120, 125])),
-            ],
+        let batch_metrics = record_batch!(
+            ("sensor_id", Int32, [401, 402]),
+            ("location", Utf8, ["Metrics Room A", "Metrics Room B"]),
+            ("reading", Int32, [120, 125])
         )
         .unwrap();
 
-        let mut parquet_buffer = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer);
-            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-            writer.write(&batch_metrics).unwrap();
-            _ = writer.close().unwrap();
-        }
-
         _ = root.create_dir_path("/metrics").await.unwrap();
-        _ = create_parquet_file(
+        _ = create_parquet_from_batch(
             &fs,
             persistence,
             "/metrics/data.parquet",
-            parquet_buffer,
+            &batch_metrics,
             EntryType::FileTablePhysical,
         )
         .await
         .unwrap();
 
         // Create files in /logs/ directory
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
-
         // Logs file 1
-        let batch_logs = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![501, 502])),
-                Arc::new(StringArray::from(vec!["Log Server A", "Log Server B"])),
-                Arc::new(Int32Array::from(vec![130, 135])),
-            ],
+        let batch_logs = record_batch!(
+            ("sensor_id", Int32, [501, 502]),
+            ("location", Utf8, ["Log Server A", "Log Server B"]),
+            ("reading", Int32, [130, 135])
         )
         .unwrap();
 
-        let mut parquet_buffer = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer);
-            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-            writer.write(&batch_logs).unwrap();
-            _ = writer.close().unwrap();
-        }
-
         _ = root.create_dir_path("/logs").await.unwrap();
-        _ = create_parquet_file(
+        _ = create_parquet_from_batch(
             &fs,
             persistence,
             "/logs/info.parquet",
-            parquet_buffer,
+            &batch_logs,
             EntryType::FileTablePhysical,
         )
         .await
@@ -1815,7 +1848,6 @@ query: ""
         assert_eq!(total_rows, 4);
 
         // Concatenate all batches into one for easier testing
-        use arrow::compute::concat_batches;
         let schema = result_batches[0].schema();
         let result_batch = concat_batches(&schema, &result_batches).unwrap();
 
@@ -1861,47 +1893,28 @@ query: ""
             .expect("Expected MemoryPersistence");
 
         // Create test Parquet data
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![101, 102, 103, 104, 105])),
-                Arc::new(StringArray::from(vec![
+        let batch = record_batch!(
+            ("sensor_id", Int32, [101, 102, 103, 104, 105]),
+            (
+                "location",
+                Utf8,
+                [
                     "Building A",
                     "Building B",
                     "Building C",
                     "Building A",
-                    "Building B",
-                ])),
-                Arc::new(Int32Array::from(vec![75, 82, 68, 90, 77])),
-            ],
+                    "Building B"
+                ]
+            ),
+            ("reading", Int32, [75, 82, 68, 90, 77])
         )
         .unwrap();
 
-        let mut parquet_buffer = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer);
-            let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
-            writer.write(&batch).unwrap();
-            _ = writer.close().unwrap();
-        }
-
-        _ = create_parquet_file(
+        _ = create_parquet_from_batch(
             &fs,
             persistence,
             "/sensor_data.parquet",
-            parquet_buffer,
+            &batch,
             EntryType::FileTablePhysical,
         )
         .await
@@ -1957,47 +1970,28 @@ query: ""
             .expect("Expected MemoryPersistence");
 
         // Create test Parquet data
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![101, 102, 103, 104, 105])),
-                Arc::new(StringArray::from(vec![
+        let batch = record_batch!(
+            ("sensor_id", Int32, [101, 102, 103, 104, 105]),
+            (
+                "location",
+                Utf8,
+                [
                     "Building A",
                     "Building B",
                     "Building C",
                     "Building A",
-                    "Building B",
-                ])),
-                Arc::new(Int32Array::from(vec![75, 82, 68, 90, 77])),
-            ],
+                    "Building B"
+                ]
+            ),
+            ("reading", Int32, [75, 82, 68, 90, 77])
         )
         .unwrap();
 
-        let mut parquet_buffer = Vec::new();
-        {
-            let cursor = Cursor::new(&mut parquet_buffer);
-            let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
-            writer.write(&batch).unwrap();
-            _ = writer.close().unwrap();
-        }
-
-        _ = create_parquet_file(
+        _ = create_parquet_from_batch(
             &fs,
             persistence,
             "/sensor_data.parquet",
-            parquet_buffer,
+            &batch,
             EntryType::FileTablePhysical,
         )
         .await
@@ -2055,58 +2049,40 @@ query: ""
             .expect("Expected MemoryPersistence");
 
         // Set up FileSeries test data with 2 versions
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
 
         for version in 1..=2 {
             let base_sensor_id = 100 + (version * 10);
             let base_reading = 70 + (version * 10);
 
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(Int32Array::from(vec![
-                        base_sensor_id + 1,
-                        base_sensor_id + 2,
-                        base_sensor_id + 3,
-                    ])),
-                    Arc::new(StringArray::from(vec![
+            let batch = record_batch!(
+                (
+                    "sensor_id",
+                    Int32,
+                    [base_sensor_id + 1, base_sensor_id + 2, base_sensor_id + 3]
+                ),
+                (
+                    "location",
+                    Utf8,
+                    [
                         format!("Building {}", version),
                         format!("Building {}", version),
-                        format!("Building {}", version),
-                    ])),
-                    Arc::new(Int32Array::from(vec![
-                        base_reading,
-                        base_reading + 5,
-                        base_reading + 10,
-                    ])),
-                ],
+                        format!("Building {}", version)
+                    ]
+                ),
+                (
+                    "reading",
+                    Int32,
+                    [base_reading, base_reading + 5, base_reading + 10]
+                )
             )
             .unwrap();
 
-            let mut parquet_buffer = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer);
-                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-                writer.write(&batch).unwrap();
-                _ = writer.close().unwrap();
-            }
-
             let filename = format!("/multi_sensor_data_v{}.parquet", version);
-            _ = create_parquet_file(
+            _ = create_parquet_from_batch(
                 &fs,
                 persistence,
                 &filename,
-                parquet_buffer,
+                &batch,
                 EntryType::FileTablePhysical,
             )
             .await
@@ -2165,58 +2141,39 @@ query: ""
             .expect("Expected MemoryPersistence");
 
         // Set up FileSeries test data with 3 versions
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("sensor_id", DataType::Int32, false),
-            Field::new("location", DataType::Utf8, false),
-            Field::new("reading", DataType::Int32, false),
-        ]));
-
         for version in 1..=3 {
             let base_sensor_id = 100 + (version * 10);
             let base_reading = 70 + (version * 10);
 
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(Int32Array::from(vec![
-                        base_sensor_id + 1,
-                        base_sensor_id + 2,
-                        base_sensor_id + 3,
-                    ])),
-                    Arc::new(StringArray::from(vec![
+            let batch = record_batch!(
+                (
+                    "sensor_id",
+                    Int32,
+                    [base_sensor_id + 1, base_sensor_id + 2, base_sensor_id + 3]
+                ),
+                (
+                    "location",
+                    Utf8,
+                    [
                         format!("Building {}", version),
                         format!("Building {}", version),
-                        format!("Building {}", version),
-                    ])),
-                    Arc::new(Int32Array::from(vec![
-                        base_reading,
-                        base_reading + 5,
-                        base_reading + 10,
-                    ])),
-                ],
+                        format!("Building {}", version)
+                    ]
+                ),
+                (
+                    "reading",
+                    Int32,
+                    [base_reading, base_reading + 5, base_reading + 10]
+                )
             )
             .unwrap();
 
-            let mut parquet_buffer = Vec::new();
-            {
-                let cursor = Cursor::new(&mut parquet_buffer);
-                let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
-                writer.write(&batch).unwrap();
-                _ = writer.close().unwrap();
-            }
-
             let filename = format!("/multi_sensor_data_v{}.parquet", version);
-            _ = create_parquet_file(
+            _ = create_parquet_from_batch(
                 &fs,
                 persistence,
                 &filename,
-                parquet_buffer,
+                &batch,
                 EntryType::FileTablePhysical,
             )
             .await
@@ -2226,7 +2183,10 @@ query: ""
         // Create the SQL-derived file that should union all 3 versions
         let context = test_context(&provider_context, FileID::root());
         let config = SqlDerivedConfig {
-            patterns: test_patterns(&[("multi_sensor_data", "table:///multi_sensor_data*.parquet")]),
+            patterns: test_patterns(&[(
+                "multi_sensor_data",
+                "table:///multi_sensor_data*.parquet",
+            )]),
             // This query should return data from all 3 versions
             query: Some(
                 "SELECT location, reading, sensor_id FROM multi_sensor_data ORDER BY sensor_id"
@@ -2261,7 +2221,6 @@ query: ""
         assert_eq!(total_rows, 9);
 
         // Concatenate all batches into one for easier testing
-        use arrow::compute::concat_batches;
         let schema = result_batches[0].schema();
         let result_batch = concat_batches(&schema, &result_batches).unwrap();
 
@@ -2297,30 +2256,14 @@ query: ""
             .expect("Expected MemoryPersistence");
 
         // Create test Parquet data
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-            Field::new("value", DataType::Int32, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
-                Arc::new(StringArray::from(vec![
-                    "Alice", "Bob", "Charlie", "David", "Eve",
-                ])),
-                Arc::new(Int32Array::from(vec![100, 200, 150, 300, 250])),
-            ],
+        let batch = record_batch!(
+            ("id", Int32, [1, 2, 3, 4, 5]),
+            ("name", Utf8, ["Alice", "Bob", "Charlie", "David", "Eve"]),
+            ("value", Int32, [100, 200, 150, 300, 250])
         )
         .unwrap();
 
+        let schema = batch.schema();
         let mut parquet_buffer = Vec::new();
         {
             let cursor = Cursor::new(&mut parquet_buffer);
@@ -2380,7 +2323,6 @@ query: ""
         assert_eq!(schema.field(1).name(), "doubled_value");
 
         // Check data - ORDER BY should be preserved with direct table provider scanning
-        use arrow::array::Int64Array;
         let names = get_string_array(result_batch, 0);
         let doubled_values = result_batch
             .column(1)
@@ -2411,30 +2353,14 @@ query: ""
             .expect("Expected MemoryPersistence");
 
         // Create test Parquet data
-        use arrow::array::{Int32Array, StringArray};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-            Field::new("value", DataType::Int32, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
-                Arc::new(StringArray::from(vec![
-                    "Alice", "Bob", "Charlie", "David", "Eve",
-                ])),
-                Arc::new(Int32Array::from(vec![100, 200, 150, 300, 250])),
-            ],
+        let batch = record_batch!(
+            ("id", Int32, [1, 2, 3, 4, 5]),
+            ("name", Utf8, ["Alice", "Bob", "Charlie", "David", "Eve"]),
+            ("value", Int32, [100, 200, 150, 300, 250])
         )
         .unwrap();
 
+        let schema = batch.schema();
         let mut parquet_buffer = Vec::new();
         {
             let cursor = Cursor::new(&mut parquet_buffer);
@@ -2479,8 +2405,6 @@ query: ""
 
         // Convert result batches to Parquet format for intermediate storage
         let first_result_data = {
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -2547,7 +2471,6 @@ query: ""
             assert_eq!(schema.field(1).name(), "final_value");
 
             // Check data - should be ordered by final_value DESC
-            use arrow::array::Int64Array;
             let names = get_string_array(result_batch, 0);
             let final_values = result_batch
                 .column(1)
@@ -2606,12 +2529,6 @@ query: ""
 
         // Create File A v1: timestamps 1,2,3 with columns: timestamp, temperature
         let file_id_a = {
-            use arrow::array::{Float64Array, TimestampSecondArray};
-            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
-
             let schema = Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",
@@ -2657,12 +2574,6 @@ query: ""
 
         // Create File A v2: timestamps 4,5,6 with columns: timestamp, temperature, humidity
         {
-            use arrow::array::{Float64Array, TimestampSecondArray};
-            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
-
             let schema = Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",
@@ -2700,12 +2611,6 @@ query: ""
 
         // Create File B: timestamps 1-6 with columns: timestamp, pressure
         {
-            use arrow::array::{Float64Array, TimestampSecondArray};
-            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
-
             let schema = Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",
@@ -2789,7 +2694,6 @@ query: ""
         assert_eq!(result_batch.num_rows(), 6);
 
         // Verify data integrity: check a few key combinations
-        use arrow::array::{Array, Float64Array, TimestampSecondArray};
 
         let timestamp_col_idx = column_names
             .iter()
@@ -2884,16 +2788,6 @@ query: ""
     async fn test_temporal_reduce_over_sql_derived_over_parquet() {
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
-
-        use crate::factory::temporal_reduce::{
-            AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
-        };
-        use arrow::array::{Float64Array, StringArray, TimestampSecondArray};
-        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
-        use std::sync::Arc;
 
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
@@ -2991,7 +2885,7 @@ query: ""
 
             let config = TemporalReduceConfig {
                 in_pattern: crate::Url::parse("series:///sensors/stations/*").unwrap(), // Use pattern to match parquet data
-                out_pattern: "$0".to_string(),                 // Keep original filename as output
+                out_pattern: "$0".to_string(), // Keep original filename as output
                 time_column: "timestamp".to_string(),
                 resolutions: vec!["1d".to_string()],
                 aggregations: vec![AggregationConfig {
@@ -3026,7 +2920,6 @@ query: ""
             assert_eq!(bdock_schema.field(2).name(), "humidity");
 
             // Now test actual temporal-reduce execution - should reduce 36 hourly points to ~3 daily points
-            use tinyfs::Directory;
             // With hierarchical structure, first get the site directory "all_data.series"
             let site_dir_node = temporal_reduce_dir.get("all_data.series").await.unwrap();
             assert!(
@@ -3207,14 +3100,6 @@ query: ""
         // Initialize logger for debugging (safe to call multiple times)
         let _ = env_logger::try_init();
 
-        use crate::factory::temporal_reduce::{
-            AggregationConfig, AggregationType, TemporalReduceConfig, TemporalReduceDirectory,
-        };
-        use arrow::array::{Float64Array, TimestampSecondArray};
-        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-        use arrow::record_batch::RecordBatch;
-        use std::sync::Arc;
-
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
         let persistence = provider_context
@@ -3271,8 +3156,6 @@ query: ""
                 .unwrap();
 
             // Write parquet buffer manually and store in both FS and persistence
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
             let mut parquet_buffer = Vec::new();
             {
                 let cursor = Cursor::new(&mut parquet_buffer);
@@ -3428,7 +3311,6 @@ query: ""
                 }
             }
 
-            use tinyfs::Directory;
             // With hierarchical structure, first get the site directory "base_data.series"
             let site_dir_node = temporal_reduce_dir.get("base_data.series").await.unwrap();
             assert!(
@@ -3551,12 +3433,6 @@ query: ""
         {
             _ = root.create_dir_path("/test").await.unwrap();
 
-            use arrow::array::{Int32Array, TimestampMillisecondArray};
-            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
-
             let schema = Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",
@@ -3597,13 +3473,6 @@ query: ""
 
         {
             // Create second Physical file
-
-            use arrow::array::{Int32Array, TimestampMillisecondArray};
-            use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-            use arrow::record_batch::RecordBatch;
-            use parquet::arrow::ArrowWriter;
-            use std::io::Cursor;
-
             let schema = Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",
@@ -3682,12 +3551,6 @@ query: ""
 
         // Create a file with uppercase in the path
         _ = root.create_dir_path("/Sensors").await.unwrap();
-
-        use arrow::array::{Int32Array, TimestampMillisecondArray};
-        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::io::Cursor;
 
         let schema = Arc::new(Schema::new(vec![
             Field::new(
@@ -3996,9 +3859,6 @@ query: ""
             return original_sql.to_string();
         }
 
-        use datafusion::sql::parser::DFParser;
-        use datafusion::sql::sqlparser::dialect::GenericDialect;
-
         let dialect = GenericDialect {};
 
         let statements = match DFParser::parse_sql_with_dialect(original_sql, &dialect) {
@@ -4013,9 +3873,6 @@ query: ""
         }
 
         let mut statement = statements[0].clone();
-
-        use datafusion::sql::parser::Statement as DFStatement;
-        use datafusion::sql::sqlparser::ast::{Query, Select, SetExpr, TableFactor};
 
         fn replace_table_names_in_statement(
             statement: &mut DFStatement,
@@ -4102,10 +3959,6 @@ query: ""
 
                 if let Some(mappings) = table_mappings {
                     if let Some(replacement) = mappings.get(&table_name) {
-                        use datafusion::sql::sqlparser::ast::{
-                            Ident, ObjectName, ObjectNamePart, TableAlias,
-                        };
-
                         // If no existing alias, add one using the original table name
                         if alias.is_none() {
                             *alias = Some(TableAlias {
@@ -4120,7 +3973,6 @@ query: ""
                     }
                 } else if let Some(replacement) = source_replacement {
                     if table_name == "source" {
-                        use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
                         *name =
                             ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
                     }
@@ -4159,5 +4011,105 @@ query: ""
         assert!(opts.table_mappings.is_some());
         assert!(opts.source_replacement.is_none());
     }
-}
 
+    #[tokio::test]
+    async fn test_sql_derived_with_column_rename_transform() {
+        // Create test environment
+        let (fs, provider_context) = create_test_environment().await;
+        let persistence = provider_context
+            .persistence
+            .as_any()
+            .downcast_ref::<MemoryPersistence>()
+            .unwrap();
+
+        // Create test data with column "old_col" that we'll rename to "new_col"
+        let batch = record_batch!(
+            ("old_col", Utf8, ["a", "b", "c"]),
+            ("value", Int32, [1, 2, 3])
+        )
+        .unwrap();
+
+        let schema = batch.schema();
+        let mut parquet_buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut parquet_buffer);
+            let mut writer = ArrowWriter::try_new(cursor, schema.clone(), None).unwrap();
+            writer.write(&batch).unwrap();
+            _ = writer.close().unwrap();
+        }
+
+        _ = create_parquet_file(
+            &fs,
+            persistence,
+            "/input.parquet",
+            parquet_buffer,
+            EntryType::FileTablePhysical,
+        )
+        .await
+        .unwrap();
+
+        // Create column-rename transform config
+        let rename_config = r#"
+rules:
+  - type: direct
+    from: "old_col"
+    to: "new_col"
+"#;
+
+        let root = fs.root().await.unwrap();
+
+        // Create /etc directory first
+        _ = root.create_dir_path("/etc").await.unwrap();
+
+        // Create the transform node using the FS abstraction (like mknod does)
+        _ = root
+            .create_dynamic_path(
+                "/etc/test_rename",
+                EntryType::FileDataDynamic,
+                "column-rename",
+                rename_config.as_bytes().to_vec(),
+            )
+            .await
+            .unwrap();
+
+        // Create sql-derived config with transform
+        let sql_config = SqlDerivedConfig {
+            patterns: [(
+                "input".to_string(),
+                crate::Url::parse("table:///input.parquet").unwrap(),
+            )]
+            .into(),
+            query: Some("SELECT new_col, value FROM input".to_string()),
+            scope_prefixes: None,
+            provider_wrapper: None,
+            transforms: Some(vec!["/etc/test_rename".to_string()]),
+        };
+
+        // Create sql-derived file
+        let sql_derived_id = FileID::new_physical_dir_id();
+        let sql_file = SqlDerivedFile::new(
+            sql_config,
+            test_context(&provider_context, sql_derived_id),
+            SqlDerivedMode::Table,
+        )
+        .unwrap();
+
+        // Execute and verify column was renamed
+        let batches = execute_sql_derived_direct(&sql_file, &provider_context)
+            .await
+            .unwrap();
+
+        assert!(!batches.is_empty(), "Should have results");
+        let batch = &batches[0];
+
+        // Verify schema has renamed column
+        assert_eq!(batch.schema().fields().len(), 2);
+        assert_eq!(batch.schema().field(0).name(), "new_col");
+        assert_eq!(batch.schema().field(1).name(), "value");
+
+        // Verify data
+        let names = get_string_array(batch, 0);
+        assert_eq!(names.len(), 3);
+        assert_eq!(names.value(0), "a");
+    }
+}

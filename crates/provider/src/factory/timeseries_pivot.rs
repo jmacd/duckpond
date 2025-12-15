@@ -314,7 +314,7 @@ fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
 
     // Validate scheme is recognized (no fallback for unknown schemes)
     let scheme = cfg.pattern.scheme();
-    const KNOWN_SCHEMES: &[&str] = &["series", "table", "data", "csv", "excelhtml", "oteljson"];
+    const KNOWN_SCHEMES: &[&str] = &["file", "series", "table", "data", "csv", "excelhtml", "oteljson"];
     if !KNOWN_SCHEMES.contains(&scheme) {
         return Err(tinyfs::Error::Other(
             format!("Unknown URL scheme '{}' in pattern '{}'. Known schemes: {}", 

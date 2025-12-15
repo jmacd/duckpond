@@ -163,12 +163,18 @@ fn validate_column_rename_config(config: &[u8]) -> TinyFSResult<Value> {
 /// transform chains. It wraps the input TableProvider with a ColumnRenameTableProvider
 /// that applies the configured rename rules.
 async fn apply_column_rename_transform(
-    config: Value,
+    context: crate::FactoryContext,
     input: std::sync::Arc<dyn datafusion::catalog::TableProvider>,
 ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, tinyfs::Error> {
+    // Read config directly from the file's content (version 1)
+    let config_bytes = context.context.persistence.read_file_version(context.file_id, 1).await?;
+    
     // Parse config
-    let rename_config: ColumnRenameConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let config_str = std::str::from_utf8(&config_bytes)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
+    
+    let rename_config: ColumnRenameConfig = serde_yaml::from_str(config_str)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
 
     // Create rename function from config
     let rename_fn = std::sync::Arc::new(move |col_name: &str| -> String {
@@ -187,9 +193,7 @@ crate::register_table_transform_factory!(
     name: "column-rename",
     description: "Column rename transformation for table providers",
     validate: validate_column_rename_config,
-    transform: |config, input| async move {
-        apply_column_rename_transform(config, input).await
-    }
+    transform: apply_column_rename_transform
 );
 
 // ============================================================================
