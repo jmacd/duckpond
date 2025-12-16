@@ -80,6 +80,7 @@ impl AggregationType {
 
 /// Configuration for a single aggregation operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AggregationConfig {
     /// Type of aggregation (avg, min, max, count, sum)
     #[serde(rename = "type")]
@@ -94,6 +95,7 @@ pub struct AggregationConfig {
 
 /// Configuration for the temporal-reduce factory
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemporalReduceConfig {
     /// Input URL pattern to match source files (supports glob patterns)
     pub in_pattern: crate::Url,
@@ -373,6 +375,7 @@ impl TemporalReduceSqlFile {
                 },
                 query: Some(sql_query.clone()),
                 transforms: None,
+                pattern_transforms: None,
                 scope_prefixes: None,
                 provider_wrapper: None,
             };

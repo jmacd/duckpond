@@ -2,6 +2,7 @@ rules:
   - type: direct
     from: "Date Time"
     to: "timestamp"
+    cast: timestamp
   - type: pattern
     pattern: "^(.+) \\((.+)\\)$"
     replacement: "$1.$2"

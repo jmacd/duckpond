@@ -11,7 +11,7 @@
 //! - Batch column renaming in ExecutionPlan
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::TableType;
@@ -26,8 +26,25 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+/// Parse Arrow type name to DataType
+fn parse_arrow_type(type_name: &str) -> Option<DataType> {
+    match type_name.to_lowercase().as_str() {
+        "timestamp" => Some(DataType::Timestamp(TimeUnit::Second, Some("+00:00".into()))),
+        "utf8" | "string" => Some(DataType::Utf8),
+        "int64" => Some(DataType::Int64),
+        "int32" => Some(DataType::Int32),
+        "float64" => Some(DataType::Float64),
+        "float32" => Some(DataType::Float32),
+        "boolean" => Some(DataType::Boolean),
+        _ => None,
+    }
+}
+
 /// Column rename function: takes original column name, returns renamed column name
 pub type ColumnRenameFunc = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
+/// Column cast function: takes renamed column name, returns optional Arrow data type string
+pub type ColumnCastMap = Arc<HashMap<String, String>>;
 
 /// Wraps a TableProvider to rename columns according to a function
 pub struct ColumnRenameTableProvider {
@@ -36,6 +53,9 @@ pub struct ColumnRenameTableProvider {
     
     /// Function to rename columns (original → renamed)
     rename_fn: ColumnRenameFunc,
+    
+    /// Optional type casts to apply: renamed_column → type_name (e.g., "timestamp")
+    cast_map: ColumnCastMap,
     
     /// Cached renamed schema
     schema: SchemaRef,
@@ -50,16 +70,20 @@ impl ColumnRenameTableProvider {
     /// # Arguments
     /// * `inner` - The underlying table provider to wrap
     /// * `rename_fn` - Function that maps original column names to renamed names
+    /// * `cast_map` - Optional map of renamed columns to cast types (e.g., "timestamp" → "timestamp")
     pub fn new(
         inner: Arc<dyn TableProvider>,
         rename_fn: ColumnRenameFunc,
+        cast_map: HashMap<String, String>,
     ) -> DataFusionResult<Self> {
         let original_schema = inner.schema();
-        let (renamed_schema, reverse_map) = Self::create_renamed_schema(&original_schema, &rename_fn)?;
+        let cast_map_arc = Arc::new(cast_map.clone());
+        let (renamed_schema, reverse_map) = Self::create_renamed_schema(&original_schema, &rename_fn, &cast_map_arc)?;
 
         Ok(Self {
             inner,
             rename_fn,
+            cast_map: cast_map_arc,
             schema: Arc::new(renamed_schema),
             reverse_map,
         })
@@ -69,6 +93,7 @@ impl ColumnRenameTableProvider {
     fn create_renamed_schema(
         original: &Schema,
         rename_fn: &ColumnRenameFunc,
+        cast_map: &ColumnCastMap,
     ) -> DataFusionResult<(Schema, HashMap<String, String>)> {
         let mut reverse_map = HashMap::new();
 
@@ -84,7 +109,14 @@ impl ColumnRenameTableProvider {
                     let _ = reverse_map.insert(new_name.clone(), original_name.clone());
                 }
 
-                Field::new(new_name, field.data_type().clone(), field.is_nullable())
+                // Check if this column needs type casting
+                let data_type = if let Some(cast_type) = cast_map.get(&new_name) {
+                    parse_arrow_type(cast_type).unwrap_or_else(|| field.data_type().clone())
+                } else {
+                    field.data_type().clone()
+                };
+
+                Field::new(new_name, data_type, field.is_nullable())
             })
             .collect();
 
@@ -173,6 +205,7 @@ impl TableProvider for ColumnRenameTableProvider {
             plan,
             output_schema,
             self.rename_fn.clone(),
+            self.cast_map.clone(),
         )))
     }
 
@@ -192,6 +225,7 @@ pub struct ColumnRenameExec {
     inner: Arc<dyn ExecutionPlan>,
     output_schema: SchemaRef,
     rename_fn: ColumnRenameFunc,
+    cast_map: ColumnCastMap,
     properties: datafusion::physical_plan::PlanProperties,
 }
 
@@ -200,12 +234,14 @@ impl ColumnRenameExec {
         inner: Arc<dyn ExecutionPlan>,
         output_schema: SchemaRef,
         rename_fn: ColumnRenameFunc,
+        cast_map: ColumnCastMap,
     ) -> Self {
         let properties = Self::compute_properties(&output_schema, &inner);
         Self {
             inner,
             output_schema,
             rename_fn,
+            cast_map,
             properties,
         }
     }
@@ -275,6 +311,7 @@ impl ExecutionPlan for ColumnRenameExec {
             Arc::clone(&children[0]),
             self.output_schema.clone(),
             self.rename_fn.clone(),
+            self.cast_map.clone(),
         )))
     }
 
@@ -287,11 +324,12 @@ impl ExecutionPlan for ColumnRenameExec {
         let output_schema = self.output_schema.clone();
         let output_schema_for_adapter = output_schema.clone();
         let rename_fn = self.rename_fn.clone();
+        let cast_map = self.cast_map.clone();
 
         // Create stream that renames columns in each batch
         let stream = inner_stream.map(move |batch_result| {
             batch_result.and_then(|batch| {
-                rename_batch_columns(&batch, &output_schema, &rename_fn)
+                rename_batch_columns(&batch, &output_schema, &rename_fn, &cast_map)
             })
         });
 
@@ -302,18 +340,39 @@ impl ExecutionPlan for ColumnRenameExec {
     }
 }
 
-/// Rename columns in a RecordBatch
+/// Rename columns in a RecordBatch and apply type casts if needed
 fn rename_batch_columns(
     batch: &RecordBatch,
     target_schema: &SchemaRef,
     _rename_fn: &ColumnRenameFunc,
+    cast_map: &ColumnCastMap,
 ) -> DataFusionResult<RecordBatch> {
-    // Verify batch schema matches expected input
-    let _batch_schema = batch.schema();
+    use datafusion::arrow::compute::cast;
     
-    // Create new batch with renamed schema
-    let columns = batch.columns().to_vec();
+    // If no casts needed, just rename schema
+    if cast_map.is_empty() {
+        let columns = batch.columns().to_vec();
+        return RecordBatch::try_new(target_schema.clone(), columns)
+            .map_err(|e| DataFusionError::ArrowError(e.into(), None));
+    }
+
+    // Apply casts where needed
+    let mut new_columns = Vec::with_capacity(batch.num_columns());
     
-    RecordBatch::try_new(target_schema.clone(), columns)
+    for (i, field) in target_schema.fields().iter().enumerate() {
+        let column = batch.column(i);
+        
+        // Check if this column needs casting
+        if cast_map.contains_key(field.name()) {
+            // Cast to target type
+            let casted = cast(column, field.data_type())
+                .map_err(|e| DataFusionError::ArrowError(e.into(), None))?;
+            new_columns.push(casted);
+        } else {
+            new_columns.push(column.clone());
+        }
+    }
+    
+    RecordBatch::try_new(target_schema.clone(), new_columns)
         .map_err(|e| DataFusionError::ArrowError(e.into(), None))
 }

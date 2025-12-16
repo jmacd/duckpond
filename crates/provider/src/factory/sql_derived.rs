@@ -69,6 +69,7 @@ pub struct SqlTransformOptions {
 
 /// Configuration for SQL-derived file generation
 #[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SqlDerivedConfig {
     /// Named URL patterns for matching files. Each pattern name becomes a table in the SQL query.
     /// Each pattern can match multiple files which are automatically harmonized with UNION ALL BY NAME.
@@ -90,6 +91,13 @@ pub struct SqlDerivedConfig {
     /// Each transform is a path like "/transforms/column-rename"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transforms: Option<Vec<String>>,
+
+    /// Optional per-pattern transforms (internal use by derivative factories like timeseries-join)
+    /// Maps pattern name (e.g., "input0") to list of transform paths
+    /// Takes precedence over global `transforms` field for specified patterns
+    /// NOT serialized - must be set programmatically
+    #[serde(skip, default)]
+    pub pattern_transforms: Option<HashMap<String, Vec<String>>>,
 
     /// Optional scope prefixes to apply to table columns (internal use by derivative factories)
     /// Maps table name to (scope_prefix, time_column_name)
@@ -117,6 +125,7 @@ impl SqlDerivedConfig {
             patterns,
             query,
             transforms: None,
+            pattern_transforms: None,
             scope_prefixes: None,
             provider_wrapper: None,
         }
@@ -132,6 +141,7 @@ impl SqlDerivedConfig {
             patterns,
             query,
             transforms: None,
+            pattern_transforms: None,
             scope_prefixes: Some(scope_prefixes),
             provider_wrapper: None,
         }
@@ -251,14 +261,21 @@ impl SqlDerivedFile {
 
     /// Apply transform chain to a TableProvider
     ///
-    /// Applies transforms in order from config.transforms, each transform wrapping the previous result.
+    /// Applies transforms in order from config.transforms or config.pattern_transforms, 
+    /// each transform wrapping the previous result.
     async fn apply_transforms(
         &self,
         mut table_provider: Arc<dyn TableProvider>,
         pattern_name: &str,
     ) -> TinyFSResult<Arc<dyn TableProvider>> {
-        // Early return if no transforms configured
-        let Some(transform_paths) = &self.config.transforms else {
+        // Check for pattern-specific transforms first, then fall back to global transforms
+        let transform_paths = if let Some(ref pattern_transforms) = self.config.pattern_transforms {
+            pattern_transforms.get(pattern_name)
+        } else {
+            self.config.transforms.as_ref()
+        };
+
+        let Some(transform_paths) = transform_paths else {
             return Ok(table_provider);
         };
 
@@ -288,19 +305,23 @@ impl SqlDerivedFile {
             // Resolve the transform path to get the node
             let (_parent_wd, lookup_result) =
                 root.resolve_path(transform_path).await.map_err(|e| {
-                    tinyfs::Error::Other(format!(
-                        "Failed to resolve transform path '{}': {}",
-                        transform_path, e
-                    ))
+                    let err_msg = format!(
+                        "Failed to resolve transform path '{}' (pattern: '{}'): {}",
+                        transform_path, pattern_name, e
+                    );
+                    log::error!("❌ SQL-DERIVED: {}", err_msg);
+                    tinyfs::Error::Other(err_msg)
                 })?;
 
             let config_node = match lookup_result {
                 tinyfs::Lookup::Found(node) => node,
                 _ => {
-                    return Err(tinyfs::Error::Other(format!(
-                        "Transform path '{}' not found",
-                        transform_path
-                    )));
+                    let err_msg = format!(
+                        "Transform path '{}' not found (pattern: '{}')",
+                        transform_path, pattern_name
+                    );
+                    log::error!("❌ SQL-DERIVED: {}", err_msg);
+                    return Err(tinyfs::Error::Other(err_msg));
                 }
             };
 
@@ -4080,6 +4101,7 @@ rules:
             )]
             .into(),
             query: Some("SELECT new_col, value FROM input".to_string()),
+            pattern_transforms: None,
             scope_prefixes: None,
             provider_wrapper: None,
             transforms: Some(vec!["/etc/test_rename".to_string()]),

@@ -12,6 +12,7 @@ use tinyfs::Result as TinyFSResult;
 
 /// Test factory configuration
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestConfig {
     /// Message to print during execution
     pub message: String,
@@ -198,6 +199,7 @@ crate::register_dynamic_factory!(
 
 /// Configuration for infinite CSV stream
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InfiniteCsvConfig {
     /// Number of rows to generate (for testing, we use finite but large number)
     #[serde(default = "default_row_count")]

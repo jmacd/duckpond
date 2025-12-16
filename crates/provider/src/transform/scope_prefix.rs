@@ -39,7 +39,7 @@ pub fn scope_prefix_table_provider(
         }
     });
 
-    ColumnRenameTableProvider::new(inner, rename_fn)
+    ColumnRenameTableProvider::new(inner, rename_fn, std::collections::HashMap::new())
 }
 
 #[cfg(test)]

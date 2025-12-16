@@ -23,7 +23,7 @@ use tinyfs::Result as TinyFSResult;
 
 /// A single column rename rule
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum RenameRule {
     /// Direct column name mapping
     ///
@@ -32,9 +32,15 @@ pub enum RenameRule {
     /// - type: direct
     ///   from: "DateTime"
     ///   to: "timestamp"
+    ///   cast: "timestamp"
     /// ```
     #[serde(rename = "direct")]
-    Direct { from: String, to: String },
+    Direct {
+        from: String,
+        to: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cast: Option<String>,
+    },
 
     /// Regex pattern-based renaming
     ///
@@ -54,6 +60,7 @@ pub enum RenameRule {
 
 /// Configuration for column rename transformation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ColumnRenameConfig {
     /// List of rename rules applied in order
     pub rules: Vec<RenameRule>,
@@ -82,7 +89,7 @@ impl ColumnRenameConfig {
     pub fn apply_to_column(&self, column_name: &str) -> String {
         for rule in &self.rules {
             match rule {
-                RenameRule::Direct { from, to } => {
+                RenameRule::Direct { from, to, cast: _ } => {
                     if column_name == from {
                         return to.clone();
                     }
@@ -134,6 +141,28 @@ impl ColumnRenameConfig {
 
         map
     }
+
+    /// Build a map of columns that need type casting
+    ///
+    /// Returns HashMap: renamed_column_name → cast_type_name
+    pub fn build_cast_map(&self, column_names: Vec<&str>) -> HashMap<String, String> {
+        let mut cast_map = HashMap::new();
+
+        for col_name in column_names {
+            for rule in &self.rules {
+                if let RenameRule::Direct { from, to, cast } = rule {
+                    if from == col_name {
+                        if let Some(cast_type) = cast {
+                            _ = cast_map.insert(to.clone(), cast_type.clone());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        cast_map
+    }
 }
 
 // ============================================================================
@@ -161,7 +190,7 @@ fn validate_column_rename_config(config: &[u8]) -> TinyFSResult<Value> {
 ///
 /// This function is called by other factories (like sql_derived) when they apply
 /// transform chains. It wraps the input TableProvider with a ColumnRenameTableProvider
-/// that applies the configured rename rules.
+/// that applies the configured rename rules and optional type casts.
 async fn apply_column_rename_transform(
     context: crate::FactoryContext,
     input: std::sync::Arc<dyn datafusion::catalog::TableProvider>,
@@ -176,16 +205,21 @@ async fn apply_column_rename_transform(
     let rename_config: ColumnRenameConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
 
+    // Build cast map from rules with cast annotations
+    let schema = input.schema();
+    let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let cast_map = rename_config.build_cast_map(field_names);
+
     // Create rename function from config
     let rename_fn = std::sync::Arc::new(move |col_name: &str| -> String {
         rename_config.apply_to_column(col_name)
     });
 
     // Wrap with ColumnRenameTableProvider
-    let renamed_provider = crate::transform::column_rename::ColumnRenameTableProvider::new(input, rename_fn)
+    let provider = crate::transform::column_rename::ColumnRenameTableProvider::new(input, rename_fn, cast_map)
         .map_err(|e| tinyfs::Error::Other(format!("Failed to create rename provider: {}", e)))?;
 
-    Ok(std::sync::Arc::new(renamed_provider))
+    Ok(std::sync::Arc::new(provider))
 }
 
 // Register the factory as a table transform factory
@@ -210,6 +244,7 @@ mod tests {
             rules: vec![RenameRule::Direct {
                 from: "DateTime".to_string(),
                 to: "timestamp".to_string(),
+                cast: None,
             }],
         };
 
@@ -240,6 +275,7 @@ mod tests {
             rules: vec![
                 RenameRule::Direct {
                     from: "DateTime".to_string(),
+                cast: None,
                     to: "timestamp".to_string(),
                 },
                 RenameRule::Pattern {
@@ -288,6 +324,7 @@ mod tests {
                 RenameRule::Direct {
                     from: "DateTime".to_string(),
                     to: "timestamp".to_string(),
+                    cast: None,
                 },
                 RenameRule::Pattern {
                     pattern: r"^(.+) \((.+)\)$".to_string(),
@@ -317,7 +354,8 @@ mod tests {
         let config = ColumnRenameConfig {
             rules: vec![RenameRule::Direct {
                 from: "DateTime".to_string(),
-                to: "timestamp".to_string(),
+                to: "new_name".to_string(),
+                cast: None,
             }],
         };
 
@@ -336,6 +374,7 @@ mod tests {
                 RenameRule::Direct {
                     from: "DateTime".to_string(),
                     to: "timestamp".to_string(),
+                    cast: None,
                 },
                 RenameRule::Pattern {
                     pattern: r"^(.+) \((.+)\)$".to_string(),

@@ -17,6 +17,7 @@ use tinyfs::{EntryType, FileHandle, NodeMetadata, Result as TinyFSResult};
 
 /// Time range bounds for filtering
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimeRange {
     /// Optional start time (ISO 8601 format)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,6 +30,7 @@ pub struct TimeRange {
 
 /// Input source with URL pattern and optional time range
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimeseriesInput {
     /// URL pattern for matching time series files
     ///
@@ -50,10 +52,17 @@ pub struct TimeseriesInput {
     /// "temperature" -> "BDock.temperature")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+
+    /// Optional list of table transform factory paths to apply to this input's TableProvider.
+    /// Transforms are applied in order before scope prefixes and SQL execution.
+    /// Each transform is a path like "/etc/hydro_rename"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transforms: Option<Vec<String>>,
 }
 
 /// Configuration for the timeseries-join factory
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimeseriesJoinConfig {
     /// Name of the timestamp column (defaults to "timestamp")
     #[serde(default = "default_time_column")]
@@ -261,16 +270,22 @@ impl TimeseriesJoinFile {
             );
 
             // Generate SQL using UNION BY NAME for same-scope inputs, then FULL OUTER JOIN
-            let (sql_query, patterns, scope_prefixes) = self.generate_union_join_sql().await?;
+            let (sql_query, patterns, scope_prefixes, pattern_transforms) =
+                self.generate_union_join_sql().await?;
 
             log::debug!("🔍 Generated SQL:\n{}", sql_query);
 
-            // Create SqlDerivedConfig with scope prefixes (SqlDerivedFile will apply them)
-            let sql_config = if scope_prefixes.is_empty() {
+            // Create SqlDerivedConfig with scope prefixes and pattern transforms
+            let mut sql_config = if scope_prefixes.is_empty() {
                 SqlDerivedConfig::new(patterns, Some(sql_query))
             } else {
                 SqlDerivedConfig::new_scoped(patterns, Some(sql_query), scope_prefixes)
             };
+
+            // Add pattern transforms if any inputs have them
+            if !pattern_transforms.is_empty() {
+                sql_config.pattern_transforms = Some(pattern_transforms);
+            }
 
             // Create SqlDerivedFile in Series mode
             log::debug!("🔍 TIMESERIES-JOIN: Creating SqlDerivedFile with SqlDerivedMode::Series");
@@ -283,7 +298,7 @@ impl TimeseriesJoinFile {
     }
 
     /// Generate SQL using UNION BY NAME for same-scope inputs, then FULL OUTER JOIN different scopes
-    /// Returns: (sql_query, patterns, scope_prefixes)
+    /// Returns: (sql_query, patterns, scope_prefixes, pattern_transforms)
     ///
     /// Strategy:
     /// 1. Group inputs by scope
@@ -296,13 +311,16 @@ impl TimeseriesJoinFile {
         String,
         HashMap<String, crate::Url>,
         HashMap<String, (String, String)>,
+        HashMap<String, Vec<String>>,
     )> {
         use std::collections::BTreeMap;
 
         // Build patterns map - one URL per input (already validated in config)
         // AND build scope_prefixes map - one entry per input that has a scope
+        // AND build pattern_transforms map - one entry per input that has transforms
         let mut patterns = HashMap::new();
         let mut scope_prefixes = HashMap::new();
+        let mut pattern_transforms = HashMap::new();
 
         for (i, input) in self.config.inputs.iter().enumerate() {
             let table_name = format!("input{}", i);
@@ -316,6 +334,11 @@ impl TimeseriesJoinFile {
                     table_name.clone(),
                     (scope.clone(), self.config.time_column.clone()),
                 );
+            }
+
+            // Register transforms for this input's table
+            if let Some(ref transforms) = input.transforms {
+                let _ = pattern_transforms.insert(table_name.clone(), transforms.clone());
             }
         }
 
@@ -476,8 +499,9 @@ impl TimeseriesJoinFile {
 
         log::debug!("🔍 TIMESERIES-JOIN: Generated SQL:\n{}", sql);
         log::debug!("🔍 TIMESERIES-JOIN: Scope prefixes: {:?}", scope_prefixes);
+        log::debug!("🔍 TIMESERIES-JOIN: Pattern transforms: {:?}", pattern_transforms);
 
-        Ok((sql, patterns, scope_prefixes))
+        Ok((sql, patterns, scope_prefixes, pattern_transforms))
     }
 
     #[must_use]
@@ -687,6 +711,7 @@ mod tests {
                 pattern: crate::Url::parse("series:///solo.series").unwrap(),
                 scope: None,
                 range: None,
+                transforms: None,
             }],
         };
         assert!(generate_timeseries_join_sql(&config_single).is_err());
@@ -702,11 +727,13 @@ mod tests {
                         begin: Some("not-a-timestamp".to_string()),
                         end: None,
                     }),
+                    transforms: None,
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("series:///b.series").unwrap(),
                     scope: None,
                     range: None,
+                    transforms: None,
                 },
             ],
         };
@@ -804,11 +831,13 @@ mod tests {
                     pattern: crate::Url::parse("series:///source1.series").unwrap(),
                     scope: None,
                     range: None,
+                transforms: None,
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("series:///source2.series").unwrap(),
                     scope: None,
                     range: None,
+                transforms: None,
                 },
             ],
         };
@@ -927,11 +956,13 @@ mod tests {
                     pattern: crate::Url::parse("series:///source1.series").unwrap(),
                     scope: Some("BDock".to_string()),
                     range: None,
+                transforms: None,
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("series:///source2.series").unwrap(),
                     scope: Some("ADock".to_string()),
                     range: None,
+                transforms: None,
                 },
             ],
         };
@@ -1109,6 +1140,7 @@ mod tests {
                         begin: None,
                         end: Some("1970-01-01T00:00:03Z".to_string()),
                     }),
+                    transforms: None,
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("series:///vulink2.series").unwrap(),
@@ -1117,11 +1149,13 @@ mod tests {
                         begin: Some("1970-01-01T00:00:05Z".to_string()),
                         end: None,
                     }),
+                    transforms: None,
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("series:///at500.series").unwrap(),
                     scope: Some("AT500_Surface".to_string()),
                     range: None,
+                    transforms: None,
                 },
             ],
         };
@@ -1238,11 +1272,13 @@ mod tests {
                 TimeseriesInput {
                     pattern: crate::Url::parse("csv:///sensor1.csv").unwrap(),
                     range: None,
+                transforms: None,
                     scope: Some("sensor1".to_string()),
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("csv:///sensor2.csv").unwrap(),
                     range: None,
+                transforms: None,
                     scope: Some("sensor2".to_string()),
                 },
             ],
