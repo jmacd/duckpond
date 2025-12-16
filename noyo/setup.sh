@@ -25,7 +25,7 @@ ${EXE} copy host://${NOYO}/laketech /laketech/data
 
 # Disable backup
 #${EXE} mkdir /etc/system.d
-#${EXE} mknod remote /etc/system.d/backup --config-path ${NOYO}/backup.yaml
+${EXE} mknod remote /etc/test_backup --config-path ${NOYO}/backup.yaml
 
 # Disable hydrovu
 #${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
@@ -49,4 +49,4 @@ ${EXE} mknod dynamic-dir /reduced --config-path ${NOYO}/reduce.yaml
 
 ${EXE} mknod dynamic-dir /templates --config-path ${NOYO}/template.yaml
 
-${EXE} mknod column-rename /etc/hyrdro_rename --config-path ${NOYO}/hrename.yaml
+${EXE} mknod column-rename /etc/hydro_rename --config-path ${NOYO}/hrename.yaml
