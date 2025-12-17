@@ -40,6 +40,7 @@ impl Default for TransactionState {
 
 impl TransactionState {
     /// Create a new transaction state
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -112,6 +113,7 @@ impl TransactionState {
     }
 
     /// Check if a transaction is currently active
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.inner.lock().map(|state| state.active).unwrap_or(false)
     }

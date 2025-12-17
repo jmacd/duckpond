@@ -1105,7 +1105,7 @@ mod tests {
 
         // Store in persistence (version 1 for MemoryPersistence)
         persistence
-            .store_file_version(file_id, 1, parquet_data.into())
+            .store_file_version(file_id, 1, parquet_data)
             .await?;
 
         Ok(file_id)

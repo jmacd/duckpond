@@ -114,11 +114,11 @@ impl TableProvider for NullPaddingTableProvider {
         for filter in filters {
             let mut references_padded = false;
             let _ = filter.apply(|expr| {
-                if let Expr::Column(col) = expr {
-                    if inner_schema.column_with_name(&col.name).is_none() {
-                        references_padded = true;
-                        return Ok(datafusion::common::tree_node::TreeNodeRecursion::Stop);
-                    }
+                if let Expr::Column(col) = expr
+                    && inner_schema.column_with_name(&col.name).is_none()
+                {
+                    references_padded = true;
+                    return Ok(datafusion::common::tree_node::TreeNodeRecursion::Stop);
                 }
                 Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
             });
@@ -169,11 +169,11 @@ impl TableProvider for NullPaddingTableProvider {
             .filter(|filter| {
                 let mut references_padded = false;
                 let _ = filter.apply(|expr| {
-                    if let Expr::Column(col) = expr {
-                        if inner_schema.column_with_name(&col.name).is_none() {
-                            references_padded = true;
-                            return Ok(datafusion::common::tree_node::TreeNodeRecursion::Stop);
-                        }
+                    if let Expr::Column(col) = expr
+                        && inner_schema.column_with_name(&col.name).is_none()
+                    {
+                        references_padded = true;
+                        return Ok(datafusion::common::tree_node::TreeNodeRecursion::Stop);
                     }
                     Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
                 });

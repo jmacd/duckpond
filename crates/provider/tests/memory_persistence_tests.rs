@@ -119,8 +119,6 @@ async fn test_memory_file_queryable_interface() {
     //
     // Integration test validation requires full MemoryPersistence storage API
     // (store_file_version, list_file_versions, etc.) which is tracked separately.
-
-    println!("✅ MemoryFile::as_table_provider() implemented using ObjectStore pattern");
 }
 
 #[tokio::test]
@@ -161,9 +159,6 @@ async fn test_temporal_filtered_listing_table_with_memory() {
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].version, 1);
     assert!(versions[0].size > 0); // Parquet data was stored
-
-    println!("✅ store_file_version() and list_file_versions() work correctly");
-    println!("✅ MemoryPersistence storage API complete for sql_derived migration");
 }
 
 #[tokio::test]

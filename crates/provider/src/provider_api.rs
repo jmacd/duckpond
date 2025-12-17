@@ -30,6 +30,7 @@ pub struct Provider {
 
 impl Provider {
     /// Create a new Provider with TinyFS
+    #[must_use]
     pub fn new(fs: Arc<tinyfs::FS>) -> Self {
         Self { fs }
     }
@@ -171,24 +172,25 @@ mod tests {
         let root = fs.root().await?;
 
         // Create parent directories
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            if parent.to_str() != Some("/") && !parent.as_os_str().is_empty() {
-                let path_parts: Vec<_> = parent
-                    .components()
-                    .filter_map(|c| match c {
-                        std::path::Component::Normal(name) => name.to_str(),
-                        _ => None,
-                    })
-                    .collect();
+        if let Some(parent) = std::path::Path::new(path).parent()
+            && parent.to_str() != Some("/")
+            && !parent.as_os_str().is_empty()
+        {
+            let path_parts: Vec<_> = parent
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .collect();
 
-                let mut current_path = String::from("/");
-                for part in path_parts {
-                    if !current_path.ends_with('/') {
-                        current_path.push('/');
-                    }
-                    current_path.push_str(part);
-                    let _ = root.create_dir_path(&current_path).await;
+            let mut current_path = String::from("/");
+            for part in path_parts {
+                if !current_path.ends_with('/') {
+                    current_path.push('/');
                 }
+                current_path.push_str(part);
+                let _ = root.create_dir_path(&current_path).await;
             }
         }
 
@@ -242,7 +244,6 @@ mod tests {
         let results = df.collect().await.unwrap();
 
         assert!(!results.is_empty());
-        println!("✅ Provider created table from single CSV file");
     }
 
     #[tokio::test]
@@ -272,7 +273,6 @@ mod tests {
         let results = df.collect().await.unwrap();
 
         assert!(!results.is_empty());
-        println!("✅ Provider handled CSV with query parameters");
     }
 
     #[test]
@@ -283,8 +283,6 @@ mod tests {
         // CSV should be registered via linkme
         assert!(csv_provider.is_some());
         assert_eq!(csv_provider.unwrap().name(), "csv");
-
-        println!("✅ Provider uses linkme format registry with CSV");
     }
 
     #[tokio::test]
@@ -318,7 +316,6 @@ mod tests {
         let results = df.collect().await?;
 
         assert_eq!(results.len(), 1);
-        println!("✅ Layer 3 complete: URL → FormatProvider → TableProvider → SQL");
         Ok(())
     }
 
@@ -361,7 +358,6 @@ mod tests {
             "Error should guide to use collect_matches"
         );
 
-        println!("✅ Provider correctly rejects glob patterns");
         Ok(())
     }
 }

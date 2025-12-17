@@ -797,7 +797,7 @@ impl ForArrow for tinyfs::DirectoryEntry {
 
 /// Encode DirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
 pub fn encode_directory_entries(
-    entries: &Vec<DirectoryEntry>,
+    entries: &[DirectoryEntry],
 ) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
@@ -810,7 +810,7 @@ pub fn encode_directory_entries(
     }
 
     // Use serde_arrow consistently for both empty and non-empty cases
-    let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), entries)?;
+    let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), &entries)?;
 
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
@@ -831,9 +831,9 @@ pub fn encode_directory_entries(
 /// Legacy function name for backward compatibility
 #[deprecated(note = "Use encode_directory_entries instead")]
 pub fn encode_versioned_directory_entries(
-    entries: &Vec<DirectoryEntry>,
+    entries: &[DirectoryEntry],
 ) -> Result<Vec<u8>, crate::error::TLogFSError> {
-    encode_directory_entries(&entries.clone())
+    encode_directory_entries(entries)
 }
 
 /// Decode DirectoryEntry records from Arrow IPC bytes

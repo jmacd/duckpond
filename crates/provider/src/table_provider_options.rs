@@ -47,6 +47,7 @@ impl TableProviderKey {
     ///
     /// Format: "file_id:node_id:part_id:version_selection"
     /// Example: "12345:node123:part456:latest"
+    #[must_use]
     pub fn to_cache_string(&self) -> String {
         format!(
             "{}:{}",

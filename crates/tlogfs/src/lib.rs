@@ -60,7 +60,7 @@ pub fn extract_state(pctx: &FactoryContext) -> Result<persistence::State, TLogFS
                 "Persistence layer is not tlogfs::State - cannot access Delta table".to_string(),
             )
         })
-        .map(|s| s.clone())
+        .cloned()
 }
 
 // TinyFS ObjectStore implementation for DataFusion ListingTable integration

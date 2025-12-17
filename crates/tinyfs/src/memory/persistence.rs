@@ -382,14 +382,12 @@ impl State {
     }
 
     async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>> {
-        if let Some(versions) = self.file_versions.get(&id) {
-            if let Some(latest) = versions.last() {
-                if let Some(ref metadata) = latest.extended_metadata {
-                    if let Some(factory_type) = metadata.get("factory") {
-                        return Ok(Some((factory_type.clone(), latest.content.clone())));
-                    }
-                }
-            }
+        if let Some(versions) = self.file_versions.get(&id)
+            && let Some(latest) = versions.last()
+            && let Some(ref metadata) = latest.extended_metadata
+            && let Some(factory_type) = metadata.get("factory")
+        {
+            return Ok(Some((factory_type.clone(), latest.content.clone())));
         }
         Ok(None)
     }
@@ -407,7 +405,7 @@ impl State {
             let next_version = versions.last().map(|v| v.version + 1).unwrap_or(1);
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("system time is after UNIX_EPOCH")
                 .as_micros() as i64;
 
             MemoryFileVersion {

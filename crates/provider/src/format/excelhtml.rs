@@ -113,15 +113,8 @@ fn parse_table_data(
         .nodes()
         .iter()
         .filter_map(|node| {
-            if let Some(tag) = node.as_tag() {
-                if tag.name().as_utf8_str() == "tr" {
-                    Some(tag)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            node.as_tag()
+                .filter(|&tag| tag.name().as_utf8_str() == "tr")
         })
         .collect();
 
@@ -181,11 +174,11 @@ fn extract_column_names(header_row: &tl::HTMLTag, parser: &tl::Parser) -> Result
         .map_err(|e| Error::InvalidUrl(format!("Header parse error: {}", e)))?;
 
     for node in header_dom.nodes().iter() {
-        if let Some(tag) = node.as_tag() {
-            if tag.name().as_utf8_str() == "td" {
-                let text = tag.inner_text(header_dom.parser()).to_string();
-                columns.push(text.trim().to_string());
-            }
+        if let Some(tag) = node.as_tag()
+            && tag.name().as_utf8_str() == "td"
+        {
+            let text = tag.inner_text(header_dom.parser()).to_string();
+            columns.push(text.trim().to_string());
         }
     }
 
@@ -209,11 +202,11 @@ fn extract_row_data(
         .map_err(|e| Error::InvalidUrl(format!("Row parse error: {}", e)))?;
 
     for node in row_dom.nodes().iter() {
-        if let Some(tag) = node.as_tag() {
-            if tag.name().as_utf8_str() == "td" {
-                let text = tag.inner_text(row_dom.parser()).to_string();
-                values.push(text.trim().to_string());
-            }
+        if let Some(tag) = node.as_tag()
+            && tag.name().as_utf8_str() == "td"
+        {
+            let text = tag.inner_text(row_dom.parser()).to_string();
+            values.push(text.trim().to_string());
         }
     }
 

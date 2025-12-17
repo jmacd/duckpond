@@ -706,6 +706,7 @@ impl State {
     /// This allows State to be used with factories that expect a ProviderContext.
     /// Create a ProviderContext from this State with concrete values (no trait objects!)
     /// This is synchronous and lock-free - it accesses session_context directly
+    #[must_use]
     pub fn as_provider_context(&self) -> provider::ProviderContext {
         // Get current template variables
         let template_vars = self
@@ -2176,7 +2177,7 @@ impl InnerState {
             }
         };
 
-        node.map_err(|e| TLogFSError::TinyFS(e))
+        node.map_err(TLogFSError::TinyFS)
     }
 
     /// Get dynamic node configuration if the node is dynamic
@@ -2358,7 +2359,7 @@ impl InnerState {
             Ok(df) => match df.collect().await {
                 Ok(batches) => {
                     if batches.is_empty() || batches[0].num_rows() == 0 {
-                        return Err(TLogFSError::Missing);
+                        Err(TLogFSError::Missing)
                     } else {
                         let batch = &batches[0];
                         debug!("🔍 Query returned {} rows", batch.num_rows());
@@ -2376,9 +2377,9 @@ impl InnerState {
                         Ok(records.into_iter().next().expect("one"))
                     }
                 }
-                Err(e) => return Err(TLogFSError::DataFusion(e)),
+                Err(e) => Err(TLogFSError::DataFusion(e)),
             },
-            Err(e) => return Err(TLogFSError::DataFusion(e)),
+            Err(e) => Err(TLogFSError::DataFusion(e)),
         }
     }
 
@@ -2603,8 +2604,7 @@ impl InnerState {
                     .readlink()
                     .await
                     .map_err(|e| tinyfs::Error::Other(format!("Symlink readlink error: {}", e)))?;
-                let target_bytes = target.to_string_lossy().as_bytes().to_vec();
-                target_bytes
+                target.to_string_lossy().as_bytes().to_vec()
             }
         };
 

@@ -188,6 +188,7 @@ impl FileID {
     /// Used by dynamic factories to create stable IDs for generated nodes
     /// For dynamic directories creating children:
     ///   - Use parent directory's NodeID as the PartID
+    ///
     /// For root-level dynamic nodes:
     ///   - Use PartID::root()
     #[must_use]

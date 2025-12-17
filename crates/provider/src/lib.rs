@@ -124,17 +124,20 @@ impl Url {
     }
 
     /// Get format scheme (e.g., "csv", "oteljson")
+    #[must_use]
     pub fn scheme(&self) -> &str {
         self.inner.scheme()
     }
 
     /// Get optional compression from host (e.g., "zstd", "gzip")
+    #[must_use]
     pub fn compression(&self) -> Option<&str> {
         let host = self.inner.host_str()?;
         if host.is_empty() { None } else { Some(host) }
     }
 
     /// Get TinyFS path or pattern
+    #[must_use]
     pub fn path(&self) -> &str {
         self.inner.path()
     }

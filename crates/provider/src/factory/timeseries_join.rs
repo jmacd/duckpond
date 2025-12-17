@@ -351,10 +351,7 @@ impl TimeseriesJoinFile {
                 .scope
                 .clone()
                 .unwrap_or_else(|| format!("_none_{}", i));
-            scope_groups
-                .entry(scope_key)
-                .or_insert_with(|| Vec::new())
-                .push(i);
+            scope_groups.entry(scope_key).or_default().push(i);
         }
 
         log::debug!(
@@ -665,7 +662,7 @@ mod tests {
 
         // Store in persistence (version 1 for MemoryPersistence)
         persistence
-            .store_file_version(file_id, 1, parquet_data.into())
+            .store_file_version(file_id, 1, parquet_data)
             .await?;
 
         Ok(file_id)
@@ -691,9 +688,7 @@ mod tests {
         let file_id = node_path.id();
 
         // Store in persistence (version 1 for MemoryPersistence)
-        persistence
-            .store_file_version(file_id, 1, content.into())
-            .await?;
+        persistence.store_file_version(file_id, 1, content).await?;
 
         Ok(file_id)
     }
@@ -1194,7 +1189,6 @@ mod tests {
 
         // Verify column names
         let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        println!("Column names: {:?}", column_names);
 
         assert!(
             column_names.contains(&"timestamp"),
@@ -1212,14 +1206,6 @@ mod tests {
             column_names.contains(&"AT500_Surface.pressure"),
             "Should have AT500_Surface.pressure column"
         );
-
-        // Debug: print actual timestamps
-        use arrow::array::AsArray;
-        let timestamp_col = batch
-            .column(0)
-            .as_primitive::<arrow::datatypes::TimestampSecondType>();
-        let timestamps: Vec<i64> = timestamp_col.iter().map(|v| v.unwrap()).collect();
-        println!("Actual timestamps: {:?}", timestamps);
 
         // Verify we have all unique timestamps from all sources (1,2,3,4,5,6,7)
         assert_eq!(batch.num_rows(), 7, "Should have 7 unique timestamps");

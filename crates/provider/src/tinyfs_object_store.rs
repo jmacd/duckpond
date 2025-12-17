@@ -21,7 +21,6 @@ use object_store::{
     PutPayload, PutResult, Result as ObjectStoreResult, path::Path as ObjectPath,
 };
 use tinyfs::PersistenceLayer;
-use uuid7;
 
 /// File series information for ObjectStore registry
 #[derive(Debug, Clone)]

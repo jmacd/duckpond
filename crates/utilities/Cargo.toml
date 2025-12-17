@@ -18,6 +18,9 @@ parquet.workspace = true
 thiserror.workspace = true
 log.workspace = true
 
+[features]
+test-helpers = []
+
 [lints]
 workspace = true
 

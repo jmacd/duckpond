@@ -245,6 +245,7 @@ pub struct InfiniteCsvFile {
 }
 
 impl InfiniteCsvFile {
+    #[must_use]
     pub fn new(config: InfiniteCsvConfig) -> Self {
         Self { config }
     }
@@ -323,7 +324,7 @@ impl InfiniteCsvReader {
             let value = match col.as_str() {
                 "id" => index.to_string(),
                 "timestamp" => (1700000000 + index as i64).to_string(),
-                "value" => format!("{:.6}", (index as f64 * 3.14159).sin()),
+                "value" => format!("{:.6}", (index as f64 * std::f64::consts::PI).sin()),
                 "label" => format!("label_{}", index % 10),
                 "temperature" => format!("{:.2}", 20.0 + (index as f64 * 0.1).sin() * 5.0),
                 "humidity" => format!("{:.2}", 50.0 + (index as f64 * 0.2).cos() * 20.0),

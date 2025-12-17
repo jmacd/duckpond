@@ -49,6 +49,7 @@ pub struct UrlPatternMatcher {
 
 impl UrlPatternMatcher {
     /// Create a new matcher with a Provider for format handling
+    #[must_use]
     pub fn new(provider: Provider) -> Self {
         Self { provider }
     }

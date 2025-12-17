@@ -15,6 +15,7 @@ use std::collections::HashMap;
 ///
 /// This ensures we only replace actual table references, not column names or string literals.
 /// Falls back to original SQL if parsing fails.
+#[must_use]
 pub fn transform_sql(original_sql: &str, options: &SqlTransformOptions) -> String {
     // If no transformations are needed, return original
     if options.table_mappings.is_none() && options.source_replacement.is_none() {
@@ -58,13 +59,10 @@ fn replace_table_names_in_statement(
     table_mappings: Option<&HashMap<String, String>>,
     source_replacement: Option<&str>,
 ) {
-    match statement {
-        DFStatement::Statement(boxed) => {
-            if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut() {
-                replace_table_names_in_query(query, table_mappings, source_replacement);
-            }
-        }
-        _ => {}
+    if let DFStatement::Statement(boxed) = statement
+        && let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut()
+    {
+        replace_table_names_in_query(query, table_mappings, source_replacement);
     }
 }
 
@@ -156,12 +154,12 @@ fn replace_table_name(
                     replacement.clone(),
                 ))]);
             }
-        } else if let Some(replacement) = source_replacement {
-            if table_name == "source" {
-                debug!("Replacing 'source' with '{}' in AST", replacement);
-                use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
-                *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
-            }
+        } else if let Some(replacement) = source_replacement
+            && table_name == "source"
+        {
+            debug!("Replacing 'source' with '{}' in AST", replacement);
+            use datafusion::sql::sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+            *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
         }
     } else if let TableFactor::Derived { subquery, .. } = table_factor {
         // Recursively handle subqueries

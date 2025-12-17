@@ -167,13 +167,16 @@ async fn cat_provider_url(
     // Create unified table provider
     let unified_table_provider = if table_providers.len() == 1 {
         // Single file - use directly
-        table_providers.into_iter().next().unwrap()
+        table_providers
+            .into_iter()
+            .next()
+            .expect("table_providers has exactly one element")
     } else {
         // Multiple files - UNION ALL BY NAME
         let temp_ctx = datafusion::prelude::SessionContext::new();
         for (i, tp) in table_providers.iter().enumerate() {
             let _ = temp_ctx
-                .register_table(&format!("t{}", i), tp.clone())
+                .register_table(format!("t{}", i), tp.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to register table t{}: {}", i, e))?;
         }
 
@@ -257,7 +260,10 @@ async fn cat_provider_url(
                     batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
                 batches.push(batch);
             }
-            write_batches_to_buffer(&batches, output.unwrap())?;
+            write_batches_to_buffer(
+                &batches,
+                output.expect("output buffer is Some in test mode"),
+            )?;
         } else {
             // Production mode - stream directly to stdout
             write_stream_to_stdout(stream).await?;
@@ -365,7 +371,10 @@ async fn cat_impl(
                         batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
                     batches.push(batch);
                 }
-                write_batches_to_buffer(&batches, output.unwrap())?;
+                write_batches_to_buffer(
+                    &batches,
+                    output.expect("output buffer is Some in test mode"),
+                )?;
             } else {
                 // Production mode - stream directly to stdout
                 write_stream_to_stdout(stream).await?;
@@ -405,9 +414,6 @@ async fn cat_impl(
 }
 
 /// Write RecordBatch stream as parquet format to output (streaming, low memory)
-
-// DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
-// Stream copy function for non-display mode
 async fn stream_file_to_stdout(
     root: &tinyfs::WD,
     path: &str,

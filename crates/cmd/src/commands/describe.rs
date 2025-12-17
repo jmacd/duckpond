@@ -96,7 +96,7 @@ async fn describe_provider_url(
 
     for (i, (file_path, provider_name, schema_info)) in results.iter().enumerate() {
         if i > 0 {
-            output.push_str("\n");
+            output.push('\n');
         }
 
         output.push_str(&format!("File: {}\n", file_path));

@@ -120,6 +120,7 @@ pub struct SqlDerivedConfig {
 
 impl SqlDerivedConfig {
     /// Create a new SqlDerivedConfig with patterns and optional query
+    #[must_use]
     pub fn new(patterns: HashMap<String, crate::Url>, query: Option<String>) -> Self {
         Self {
             patterns,
@@ -132,6 +133,7 @@ impl SqlDerivedConfig {
     }
 
     /// Create a new SqlDerivedConfig with scope prefixes for column renaming
+    #[must_use]
     pub fn new_scoped(
         patterns: HashMap<String, crate::Url>,
         query: Option<String>,
@@ -370,12 +372,14 @@ impl SqlDerivedFile {
             }
 
             // Get the transform function
-            let apply_fn = transform_factory.apply_table_transform.unwrap();
+            let apply_fn = transform_factory
+                .apply_table_transform
+                .expect("transform factory has apply_table_transform");
 
             // Create FactoryContext with the transform file's FileID
             let transform_context = crate::FactoryContext {
                 context: self.context.context.clone(),
-                file_id: FileID::from(node_id),
+                file_id: node_id,
                 pond_metadata: None,
             };
 
@@ -974,7 +978,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         let temp_ctx = datafusion::prelude::SessionContext::new();
                         for (i, tp) in table_providers.iter().enumerate() {
                             _ = temp_ctx
-                                .register_table(&format!("t{}", i), tp.clone())
+                                .register_table(format!("t{}", i), tp.clone())
                                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                         }
                         let union_sql = (0..table_providers.len())
@@ -1150,7 +1154,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
 
                     // Apply user transforms first (before scope prefix)
                     let table_provider = self
-                        .apply_transforms(listing_table_provider, &pattern_name)
+                        .apply_transforms(listing_table_provider, pattern_name)
                         .await?;
 
                     // Then wrap with ScopePrefixTableProvider if scope prefix is configured
@@ -3898,14 +3902,10 @@ query: ""
             table_mappings: Option<&HashMap<String, String>>,
             source_replacement: Option<&str>,
         ) {
-            match statement {
-                DFStatement::Statement(boxed) => {
-                    if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut()
-                    {
-                        replace_table_names_in_query(query, table_mappings, source_replacement);
-                    }
-                }
-                _ => {}
+            if let DFStatement::Statement(boxed) = statement
+                && let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut()
+            {
+                replace_table_names_in_query(query, table_mappings, source_replacement);
             }
         }
 
@@ -3990,11 +3990,10 @@ query: ""
                             replacement.clone(),
                         ))]);
                     }
-                } else if let Some(replacement) = source_replacement {
-                    if table_name == "source" {
-                        *name =
-                            ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
-                    }
+                } else if let Some(replacement) = source_replacement
+                    && table_name == "source"
+                {
+                    *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
                 }
             } else if let TableFactor::Derived { subquery, .. } = table_factor {
                 replace_table_names_in_query(subquery, table_mappings, source_replacement);

@@ -277,8 +277,8 @@ impl SensorBatchBuilder {
             return Err(TestError::General("No data added to builder".to_string()));
         }
 
-        let min_time = *self.timestamps.iter().min().unwrap();
-        let max_time = *self.timestamps.iter().max().unwrap();
+        let min_time = *self.timestamps.iter().min().expect("timestamps not empty");
+        let max_time = *self.timestamps.iter().max().expect("timestamps not empty");
 
         let schema = Self::standard_sensor_schema();
         let batch = RecordBatch::try_new(

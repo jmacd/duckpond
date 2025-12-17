@@ -325,7 +325,7 @@ impl TemplateFile {
             .context
             .template_variables
             .lock()
-            .unwrap()
+            .expect("template_variables lock not poisoned")
             .clone();
         debug!(
             "🎨 RENDER: Fresh template variables during rendering: {:?}",

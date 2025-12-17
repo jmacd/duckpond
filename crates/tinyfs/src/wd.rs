@@ -252,7 +252,7 @@ impl WD {
             match entry {
                 Lookup::NotFound(_, name) => {
                     let parent_id = wd.id();
-                    let node = wd.fs.create_symlink_node(parent_id, &target).await?;
+                    let node = wd.fs.create_symlink_node(parent_id, target).await?;
 
                     // Store the node so it can be loaded later
                     wd.fs.persistence.store_node(&node).await?;
@@ -663,21 +663,20 @@ impl WD {
 
                     // Load matching nodes individually (handles mixed partitions)
                     for entry in matching_entries {
-                        if let Some(wildcard_captures) = pattern[0].match_component(&entry.name) {
-                            if let Some(child) = self.dref.get(&entry.name).await? {
-                                debug!("🔍 Wildcard pattern: loaded child '{}'", entry.name);
-                                // Add all captures from this wildcard component
-                                let captures_count = wildcard_captures.len();
-                                captured.extend(wildcard_captures);
-                                self.visit_match_with_visitor(
-                                    child, false, pattern, visited, captured, stack, results,
-                                    visitor,
-                                )
-                                .await?;
-                                // Remove all captures we added
-                                for _ in 0..captures_count {
-                                    _ = captured.pop();
-                                }
+                        if let Some(wildcard_captures) = pattern[0].match_component(&entry.name)
+                            && let Some(child) = self.dref.get(&entry.name).await?
+                        {
+                            debug!("🔍 Wildcard pattern: loaded child '{}'", entry.name);
+                            // Add all captures from this wildcard component
+                            let captures_count = wildcard_captures.len();
+                            captured.extend(wildcard_captures);
+                            self.visit_match_with_visitor(
+                                child, false, pattern, visited, captured, stack, results, visitor,
+                            )
+                            .await?;
+                            // Remove all captures we added
+                            for _ in 0..captures_count {
+                                _ = captured.pop();
                             }
                         }
                     }
@@ -704,16 +703,16 @@ impl WD {
                         let all_entries = self.get_entries().await?;
                         for entry in all_entries {
                             // Match files (not directories, those are handled below in Case 2)
-                            if !entry.entry_type.is_directory() {
-                                if let Some(child) = self.dref.get(&entry.name).await? {
-                                    captured.push(entry.name.clone());
-                                    self.visit_match_with_visitor(
-                                        child, true, pattern, visited, captured, stack, results,
-                                        visitor,
-                                    )
-                                    .await?;
-                                    _ = captured.pop();
-                                }
+                            if !entry.entry_type.is_directory()
+                                && let Some(child) = self.dref.get(&entry.name).await?
+                            {
+                                captured.push(entry.name.clone());
+                                self.visit_match_with_visitor(
+                                    child, true, pattern, visited, captured, stack, results,
+                                    visitor,
+                                )
+                                .await?;
+                                _ = captured.pop();
                             }
                         }
                     }

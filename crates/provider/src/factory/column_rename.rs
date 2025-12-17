@@ -86,6 +86,7 @@ impl ColumnRenameConfig {
     ///
     /// Rules are applied in order. The first matching rule wins.
     /// If no rule matches, the original column name is returned.
+    #[must_use]
     pub fn apply_to_column(&self, column_name: &str) -> String {
         for rule in &self.rules {
             match rule {
@@ -98,12 +99,12 @@ impl ColumnRenameConfig {
                     pattern,
                     replacement,
                 } => {
-                    if let Ok(regex) = Regex::new(pattern) {
-                        if regex.is_match(column_name) {
-                            return regex
-                                .replace(column_name, replacement.as_str())
-                                .into_owned();
-                        }
+                    if let Ok(regex) = Regex::new(pattern)
+                        && regex.is_match(column_name)
+                    {
+                        return regex
+                            .replace(column_name, replacement.as_str())
+                            .into_owned();
                     }
                 }
             }
@@ -116,6 +117,7 @@ impl ColumnRenameConfig {
     /// Create a forward mapping of column renames
     ///
     /// Returns HashMap: original_name → renamed_name (only for columns that change)
+    #[must_use]
     pub fn create_forward_map(&self, column_names: &[String]) -> HashMap<String, String> {
         let mut map = HashMap::new();
 
@@ -132,6 +134,7 @@ impl ColumnRenameConfig {
     /// Create a reverse mapping of column renames
     ///
     /// Returns HashMap: renamed_name → original_name (for filter pushdown)
+    #[must_use]
     pub fn create_reverse_map(&self, column_names: &[String]) -> HashMap<String, String> {
         let mut map = HashMap::new();
 
@@ -148,18 +151,19 @@ impl ColumnRenameConfig {
     /// Build a map of columns that need type casting
     ///
     /// Returns HashMap: renamed_column_name → cast_type_name
+    #[must_use]
     pub fn build_cast_map(&self, column_names: Vec<&str>) -> HashMap<String, String> {
         let mut cast_map = HashMap::new();
 
         for col_name in column_names {
             for rule in &self.rules {
-                if let RenameRule::Direct { from, to, cast } = rule {
-                    if from == col_name {
-                        if let Some(cast_type) = cast {
-                            _ = cast_map.insert(to.clone(), cast_type.clone());
-                        }
-                        break;
+                if let RenameRule::Direct { from, to, cast } = rule
+                    && from == col_name
+                {
+                    if let Some(cast_type) = cast {
+                        _ = cast_map.insert(to.clone(), cast_type.clone());
                     }
+                    break;
                 }
             }
         }

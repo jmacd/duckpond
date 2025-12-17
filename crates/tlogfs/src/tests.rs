@@ -1153,27 +1153,21 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         let store_path_obj = std::path::Path::new(&store_path);
         debug!("Store path: {}", store_path);
         debug!("Store path exists: {}", store_path_obj.exists());
-        if store_path_obj.exists() {
-            if let Ok(entries) = std::fs::read_dir(store_path_obj) {
-                for entry in entries {
-                    if let Ok(entry) = entry {
-                        debug!("  - {}", entry.path().display());
-                    }
-                }
+        if store_path_obj.exists() &&
+            let Ok(entries) = std::fs::read_dir(store_path_obj) {
+                for entry in entries.flatten() {
+                    debug!("  - {}", entry.path().display());
+		}
             }
-        }
 
         // Check _delta_log directory
         let delta_log_path = store_path_obj.join("_delta_log");
         debug!("Delta log exists: {}", delta_log_path.exists());
-        if delta_log_path.exists() {
-            if let Ok(entries) = std::fs::read_dir(&delta_log_path) {
-                for entry in entries {
-                    if let Ok(entry) = entry {
+        if delta_log_path.exists() &&
+            let Ok(entries) = std::fs::read_dir(&delta_log_path) {
+                for entry in entries.flatten() {
                         debug!("  - delta log: {}", entry.path().display());
-                    }
                 }
-            }
         }
 
         let series_path = "devices/sensor_123/data.series";
@@ -1616,11 +1610,11 @@ async fn test_create_dynamic_file_path() {
 async fn test_create_dynamic_directory_path() {
     // Use fixed path so we can inspect Delta files after test
     let store_path = "/tmp/tlogfs_dynamic_dir_test";
-    let _ = std::fs::remove_dir_all(&store_path); // Clean up from previous run
+    let _ = std::fs::remove_dir_all(store_path); // Clean up from previous run
 
-    println!("\n🔍 Test store path: {}", store_path);
+    log::debug!("\n🔍 Test store path: {}", store_path);
 
-    let mut persistence = OpLogPersistence::create_test(&store_path)
+    let mut persistence = OpLogPersistence::create_test(store_path)
         .await
         .expect("Failed to create persistence layer");
 
@@ -1672,31 +1666,31 @@ async fn test_create_dynamic_directory_path() {
     _ = tx.commit().await.expect("Failed to commit");
 
     // Inspect what Delta Lake actually wrote
-    println!("\n🔍 After TX1 commit - inspecting Delta Lake files:");
-    println!("📁 Store path: {}", store_path);
+    log::debug!("\n🔍 After TX1 commit - inspecting Delta Lake files:");
+    log::debug!("📁 Store path: {}", store_path);
 
     // List _delta_log directory
     let delta_log_path = format!("{}/_delta_log", store_path);
     if let Ok(entries) = std::fs::read_dir(&delta_log_path) {
-        println!("📂 _delta_log directory:");
+        log::debug!("📂 _delta_log directory:");
         for entry in entries.flatten() {
-            println!("  - {}", entry.file_name().to_string_lossy());
+            log::debug!("  - {}", entry.file_name().to_string_lossy());
         }
     }
 
     // List main directory for Parquet files
-    if let Ok(entries) = std::fs::read_dir(&store_path) {
-        println!("📂 Main directory:");
+    if let Ok(entries) = std::fs::read_dir(store_path) {
+        log::debug!("📂 Main directory:");
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
             if fname.ends_with(".parquet") {
-                println!("  - {} (Parquet data file)", fname);
+                log::debug!("  - {} (Parquet data file)", fname);
             }
         }
     }
 
-    println!("\n💡 Use: ./catparquet.sh {} <file>.parquet", store_path);
-    println!("💡 to inspect the actual data written\n");
+    log::debug!("\n💡 Use: ./catparquet.sh {} <file>.parquet", store_path);
+    log::debug!("💡 to inspect the actual data written\n");
 
     // Verify in new transaction
     let tx2 = persistence.begin_test().await.expect("Failed to begin TX2");
@@ -1728,7 +1722,7 @@ async fn test_create_dynamic_directory_path() {
 async fn test_dynamic_node_entry_type_validation() {
     let store_path = test_dir();
 
-    println!("\n🔍 Testing dynamic node EntryType validation");
+    log::debug!("\n🔍 Testing dynamic node EntryType validation");
 
     let mut persistence = OpLogPersistence::create_test(&store_path)
         .await
@@ -1743,14 +1737,14 @@ async fn test_dynamic_node_entry_type_validation() {
     let root = tx1.root().await.expect("Failed to get root");
 
     // Create parent directory
-    println!("Creating parent directory: /dynamic-test");
+    log::debug!("Creating parent directory: /dynamic-test");
     let _ = root
         .create_dir_path("/dynamic-test")
         .await
         .expect("Failed to create parent directory");
 
     // Create dynamic file using test-file factory
-    println!("Creating dynamic file: /dynamic-test/test.yaml");
+    log::debug!("Creating dynamic file: /dynamic-test/test.yaml");
     let test_file_config =
         tinyfs::testing::TestFileConfig::simple("test content from dynamic file");
     let file_config_bytes = test_file_config
@@ -1768,11 +1762,11 @@ async fn test_dynamic_node_entry_type_validation() {
         .expect("Failed to create dynamic file");
 
     let file_id = dynamic_file.id();
-    println!("✅ Created dynamic file with ID: {:?}", file_id);
+    log::debug!("✅ Created dynamic file with ID: {:?}", file_id);
 
     // Verify EntryType is valid immediately after creation
     let file_entry_type = file_id.entry_type();
-    println!("  EntryType from FileID: {:?}", file_entry_type);
+    log::debug!("  EntryType from FileID: {:?}", file_entry_type);
     assert_eq!(
         file_entry_type,
         tinyfs::EntryType::FileDataDynamic,
@@ -1780,7 +1774,7 @@ async fn test_dynamic_node_entry_type_validation() {
     );
 
     // Create dynamic directory using test-dir factory
-    println!("Creating dynamic directory: /dynamic-test/subdir");
+    log::debug!("Creating dynamic directory: /dynamic-test/subdir");
     let test_dir_config = tinyfs::testing::TestDirectoryConfig::simple("subdir");
     let dir_config_bytes = test_dir_config
         .to_yaml_bytes()
@@ -1797,11 +1791,11 @@ async fn test_dynamic_node_entry_type_validation() {
         .expect("Failed to create dynamic directory");
 
     let dir_id = dynamic_dir.id();
-    println!("✅ Created dynamic directory with ID: {:?}", dir_id);
+    log::debug!("✅ Created dynamic directory with ID: {:?}", dir_id);
 
     // Verify EntryType is valid immediately after creation
     let dir_entry_type = dir_id.entry_type();
-    println!("  EntryType from FileID: {:?}", dir_entry_type);
+    log::debug!("  EntryType from FileID: {:?}", dir_entry_type);
     assert_eq!(
         dir_entry_type,
         tinyfs::EntryType::DirectoryDynamic,
@@ -1809,13 +1803,13 @@ async fn test_dynamic_node_entry_type_validation() {
     );
 
     // Commit transaction
-    println!("Committing transaction 1");
+    log::debug!("Committing transaction 1");
     tx1.commit_test()
         .await
         .expect("Failed to commit transaction 1");
 
     // Transaction 2: Read back the dynamic nodes and verify EntryTypes
-    println!("\nStarting transaction 2 to read back dynamic nodes");
+    log::debug!("\nStarting transaction 2 to read back dynamic nodes");
     let tx2 = persistence
         .begin_test()
         .await
@@ -1824,18 +1818,18 @@ async fn test_dynamic_node_entry_type_validation() {
     let root2 = tx2.root().await.expect("Failed to get root in TX2");
 
     // Read back dynamic file
-    println!("Reading back dynamic file: /dynamic-test/test.yaml");
+    log::debug!("Reading back dynamic file: /dynamic-test/test.yaml");
     let file_node = root2
         .get_node_path(std::path::Path::new("/dynamic-test/test.yaml"))
         .await
         .expect("Failed to get dynamic file");
 
     let read_file_id = file_node.id();
-    println!("✅ Read back dynamic file with ID: {:?}", read_file_id);
+    log::debug!("✅ Read back dynamic file with ID: {:?}", read_file_id);
 
     // This is the critical test: can we parse the EntryType from the persisted FileID?
     let read_file_entry_type = read_file_id.entry_type();
-    println!(
+    log::debug!(
         "  EntryType from persisted FileID: {:?}",
         read_file_entry_type
     );
@@ -1851,25 +1845,25 @@ async fn test_dynamic_node_entry_type_validation() {
         .await
         .expect("Failed to read dynamic file content");
     let content_str = String::from_utf8_lossy(&file_content);
-    println!("  File content: {:?}", content_str);
+    log::debug!("  File content: {:?}", content_str);
     assert_eq!(
         content_str, "test content from dynamic file",
         "Dynamic file content should match"
     );
 
     // Read back dynamic directory
-    println!("Reading back dynamic directory: /dynamic-test/subdir");
+    log::debug!("Reading back dynamic directory: /dynamic-test/subdir");
     let dir_node = root2
         .get_node_path(std::path::Path::new("/dynamic-test/subdir"))
         .await
         .expect("Failed to get dynamic directory");
 
     let read_dir_id = dir_node.id();
-    println!("✅ Read back dynamic directory with ID: {:?}", read_dir_id);
+    log::debug!("✅ Read back dynamic directory with ID: {:?}", read_dir_id);
 
     // This is the critical test: can we parse the EntryType from the persisted FileID?
     let read_dir_entry_type = read_dir_id.entry_type();
-    println!(
+    log::debug!(
         "  EntryType from persisted FileID: {:?}",
         read_dir_entry_type
     );
@@ -1895,13 +1889,13 @@ async fn test_dynamic_node_entry_type_validation() {
         let _entry = entry_result.expect("Failed to read entry");
         entry_count += 1;
     }
-    println!("  Directory has {} entries", entry_count);
+    log::debug!("  Directory has {} entries", entry_count);
 
-    println!("\n✅ TEST PASSED!");
-    println!("- Created dynamic file and directory");
-    println!("- Verified EntryType immediately after creation");
-    println!("- Committed to persistence");
-    println!("- Read back from new transaction");
-    println!("- Verified EntryType from persisted NodeIDs (would have panicked with bug)");
-    println!("- Successfully used dynamic nodes (read file, list directory)");
+    log::debug!("\n✅ TEST PASSED!");
+    log::debug!("- Created dynamic file and directory");
+    log::debug!("- Verified EntryType immediately after creation");
+    log::debug!("- Committed to persistence");
+    log::debug!("- Read back from new transaction");
+    log::debug!("- Verified EntryType from persisted NodeIDs (would have panicked with bug)");
+    log::debug!("- Successfully used dynamic nodes (read file, list directory)");
 }

@@ -14,7 +14,6 @@ mod excel_html_integration_tests {
         // Copy HTML file into TinyFS
         let html_path = "/Volumes/sourcecode/src/duckpond/sample-excelhtml/HydroVu_FB-Bottom-664623_2024-12-31_22-00-00_Export.htm";
         if !std::path::Path::new(html_path).exists() {
-            eprintln!("⚠️  Sample file not found, skipping test");
             return Ok(());
         }
 
@@ -26,7 +25,6 @@ mod excel_html_integration_tests {
         let provider = Provider::new(fs);
         let ctx = SessionContext::new();
 
-        println!("📊 Opening HydroVu HTML export...");
         let table = provider
             .create_table_provider("excelhtml:///hydrovu.htm", &ctx)
             .await?;
@@ -41,12 +39,6 @@ mod excel_html_integration_tests {
         let results = count_df.collect().await?;
 
         assert!(!results.is_empty());
-        let row_count = results[0].column(0);
-        let count = row_count
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap();
-        println!("✅ Found {} rows", count.value(0));
 
         // Verify we have the expected columns
         let table_provider = ctx.table("hydrovu").await?;
@@ -56,14 +48,11 @@ mod excel_html_integration_tests {
         assert!(schema.field_with_name("Temperature (C)").is_ok());
         assert!(schema.field_with_name("Salinity (psu)").is_ok());
 
-        println!("✅ Schema validation passed");
-
         // Sample query
         let sample_df = ctx.sql("SELECT \"Date Time\", \"Temperature (C)\", \"Salinity (psu)\" FROM hydrovu LIMIT 3").await?;
         let sample_results = sample_df.collect().await?;
         assert!(!sample_results.is_empty());
 
-        println!("✅ ExcelHTML provider working correctly!");
         Ok(())
     }
 }

@@ -56,6 +56,7 @@ pub struct TimeseriesPivotFile {
 }
 
 impl TimeseriesPivotFile {
+    #[must_use]
     pub fn new(config: TimeseriesPivotConfig, context: crate::FactoryContext) -> Self {
         Self { config, context }
     }
@@ -152,11 +153,7 @@ impl TimeseriesPivotFile {
                 // Reference format: table."Scope.Column"
                 // e.g., Silver."Silver.AT500_Surface.DO.mg/L"
                 // After sql_derived replacement: sql_derived_silver_xxx."Silver.AT500_Surface.DO.mg/L"
-                column_selections.push(format!(
-                    "{}.\"{}\"",
-                    alias,
-                    format!("{}.{}", alias, column)
-                ));
+                column_selections.push(format!("{}.{}.{}", alias, alias, column));
             }
         }
 

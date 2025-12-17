@@ -1,3 +1,8 @@
+//! Memory allocation tracking and debugging utilities
+//!
+//! This module uses eprintln! for debugging output, which is intentional
+#![allow(clippy::print_stderr)]
+
 use peak_alloc::PeakAlloc;
 use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicUsize, Ordering};

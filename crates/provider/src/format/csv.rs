@@ -132,10 +132,7 @@ impl FormatProvider for CsvProvider {
         // This is acceptable - schema inference typically needs to see the full dataset anyway
         let mut bytes = Vec::new();
         let mut reader = reader;
-        let _ = reader
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|e| Error::Io(e))?;
+        let _ = reader.read_to_end(&mut bytes).await.map_err(Error::Io)?;
 
         // Use arrow_csv's infer_schema
         let cursor = std::io::Cursor::new(&bytes);
@@ -219,7 +216,7 @@ fn decode_csv_stream<R: AsyncBufRead + Unpin + Send + 'static>(
     Box::pin(futures::stream::poll_fn(move |cx| {
         loop {
             let buf = match futures::ready!(Pin::new(&mut reader).poll_fill_buf(cx)) {
-                Ok(b) if b.is_empty() => break,
+                Ok([]) => break,
                 Ok(b) => b,
                 Err(e) => return Poll::Ready(Some(Err(Error::Io(e)))),
             };
@@ -266,7 +263,7 @@ mod tests {
     fn test_csv_options_default() {
         let options = CsvOptions::default();
         assert_eq!(options.delimiter, ',');
-        assert_eq!(options.has_header, true);
+        assert!(options.has_header);
         assert_eq!(options.batch_size, 8192);
         assert_eq!(options.quote, '"');
         assert_eq!(options.escape, None);
@@ -278,7 +275,7 @@ mod tests {
             Url::parse("csv:///file.csv?delimiter=;&has_header=false&batch_size=1024").unwrap();
         let options: CsvOptions = url.query_params().unwrap();
         assert_eq!(options.delimiter, ';');
-        assert_eq!(options.has_header, false);
+        assert!(!options.has_header);
         assert_eq!(options.batch_size, 1024);
     }
 
@@ -391,7 +388,7 @@ mod tests {
         assert_eq!(total_rows, 10_000);
         // Should have created ~100 batches (10K rows / 100 batch_size)
         assert!(
-            batch_count >= 99 && batch_count <= 101,
+            (99..=101).contains(&batch_count),
             "Expected ~100 batches, got {}",
             batch_count
         );
@@ -473,14 +470,9 @@ mod tests {
 
         // Should have created ~390 batches (100K rows / 256 batch_size)
         assert!(
-            batch_count >= 380 && batch_count <= 400,
+            (380..=400).contains(&batch_count),
             "Expected ~390 batches, got {}",
             batch_count
-        );
-
-        println!(
-            "✅ Successfully streamed {} rows in {} batches from infinite CSV generator",
-            total_rows, batch_count
         );
     }
 
@@ -497,27 +489,28 @@ mod tests {
         let root = fs.root().await?;
 
         // Create parent directories if needed
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            if parent.to_str() != Some("/") && !parent.as_os_str().is_empty() {
-                // Create each directory in the path
-                let path_parts: Vec<_> = parent
-                    .components()
-                    .filter_map(|c| match c {
-                        std::path::Component::Normal(name) => name.to_str(),
-                        _ => None,
-                    })
-                    .collect();
+        if let Some(parent) = std::path::Path::new(path).parent()
+            && parent.to_str() != Some("/")
+            && !parent.as_os_str().is_empty()
+        {
+            // Create each directory in the path
+            let path_parts: Vec<_> = parent
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .collect();
 
-                let mut current_path = String::from("/");
-                for part in path_parts {
-                    if !current_path.ends_with('/') {
-                        current_path.push('/');
-                    }
-                    current_path.push_str(part);
-
-                    // Try to create directory, ignore if already exists
-                    let _ = root.create_dir_path(&current_path).await;
+            let mut current_path = String::from("/");
+            for part in path_parts {
+                if !current_path.ends_with('/') {
+                    current_path.push('/');
                 }
+                current_path.push_str(part);
+
+                // Try to create directory, ignore if already exists
+                let _ = root.create_dir_path(&current_path).await;
             }
         }
 
@@ -569,25 +562,18 @@ mod tests {
             .await
             .expect("Failed to open CSV stream");
 
-        println!("CSV Schema: {:?}", schema);
         assert_eq!(schema.fields().len(), 2);
         assert_eq!(schema.field(0).name(), "timestamp");
         assert_eq!(schema.field(1).name(), "temperature");
 
         // Stream through all batches
         let mut total_rows = 0;
-        let mut batch_count = 0;
         while let Some(result) = stream.next().await {
             let batch = result.expect("Failed to get batch");
             total_rows += batch.num_rows();
-            batch_count += 1;
         }
 
         assert_eq!(total_rows, 100);
-        println!(
-            "✅ Successfully streamed {} rows in {} batches from CSV file via URL",
-            total_rows, batch_count
-        );
     }
 
     #[tokio::test]
@@ -639,8 +625,5 @@ mod tests {
 
         let results = df.collect().await.expect("Failed to collect results");
         assert!(!results.is_empty());
-
-        println!("✅ Successfully queried CSV data through DataFusion");
-        println!("✅ Query results: {:?}", results[0]);
     }
 }

@@ -320,10 +320,10 @@ impl FactoryRegistry {
     #[must_use]
     pub fn try_as_queryable_file(file: &dyn File) -> Option<&dyn QueryableFile> {
         for factory in DYNAMIC_FACTORIES.iter() {
-            if let Some(try_fn) = factory.try_as_queryable {
-                if let Some(queryable) = try_fn(file) {
-                    return Some(queryable);
-                }
+            if let Some(try_fn) = factory.try_as_queryable
+                && let Some(queryable) = try_fn(file)
+            {
+                return Some(queryable);
             }
         }
         None
