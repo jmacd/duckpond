@@ -112,6 +112,12 @@ pub struct TemporalReduceConfig {
 
     /// Aggregation operations to perform
     pub aggregations: Vec<AggregationConfig>,
+
+    /// Optional list of table transform factory paths to apply to input TableProvider.
+    /// Transforms are applied in order before SQL execution.
+    /// Each transform is a path like "/etc/hydro_rename"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transforms: Option<Vec<String>>,
 }
 
 /// Convert Duration to SQL interval string compatible with DuckDB
@@ -374,7 +380,7 @@ impl TemporalReduceSqlFile {
                     patterns
                 },
                 query: Some(sql_query.clone()),
-                transforms: None,
+                transforms: self.config.transforms.clone(),
                 pattern_transforms: None,
                 scope_prefixes: None,
                 provider_wrapper: None,
@@ -1217,6 +1223,7 @@ mod tests {
                         columns: Some(vec!["temperature".to_string()]),
                     },
                 ],
+                transforms: None,
             };
 
             let context = test_context(&provider_context, FileID::root());

@@ -2913,6 +2913,7 @@ query: ""
                     agg_type: AggregationType::Avg,
                     columns: Some(vec!["temperature".to_string(), "humidity".to_string()]),
                 }],
+                transforms: None,
             };
 
             TemporalReduceDirectory::new(config, context).unwrap()
@@ -3212,6 +3213,7 @@ query: ""
                     agg_type: AggregationType::Avg,
                     columns: None, // This should trigger automatic schema discovery!
                 }],
+                transforms: None,
             };
 
             // Create temporal reduce directory within the same transaction that will access it

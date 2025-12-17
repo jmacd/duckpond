@@ -363,7 +363,7 @@ mod tests {
 
         let reverse_map = config.create_reverse_map(&columns);
 
-        assert_eq!(reverse_map.get("timestamp"), Some(&"DateTime".to_string()));
+        assert_eq!(reverse_map.get("new_name"), Some(&"DateTime".to_string()));
         assert_eq!(reverse_map.get("Other"), None);
     }
 

@@ -37,6 +37,12 @@ pub struct TimeseriesPivotConfig {
     /// Time column name (default: "timestamp")
     #[serde(default = "default_time_column")]
     pub time_column: String,
+
+    /// Optional list of table transform factory paths to apply to input TableProvider.
+    /// Transforms are applied in order before SQL execution.
+    /// Each transform is a path like "/etc/hydro_rename"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transforms: Option<Vec<String>>,
 }
 
 fn default_time_column() -> String {
@@ -269,11 +275,14 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
         }
 
         // Create SqlDerivedFile config with scope prefixes and null_padding wrapper
-        let sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
+        let mut sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
             .with_provider_wrapper(move |provider| {
                 crate::transform::null_padding::null_padding_table(provider, expected_columns.clone())
                     .map_err(crate::Error::from)
             });
+        
+        // Add transforms if configured
+        sql_config.transforms = self.config.transforms.clone();
 
         // Use SqlDerivedSeries factory to create the file
         let sql_file =
@@ -381,6 +390,7 @@ mod tests {
             pattern: crate::Url::parse("series:///combined/*").unwrap(),
             columns: vec!["WaterTemp".to_string(), "DO".to_string()],
             time_column: "time".to_string(),
+            transforms: None,
         };
 
         let matched_inputs = vec![
@@ -424,6 +434,7 @@ mod tests {
             pattern: crate::Url::parse("series:///combined/*").unwrap(),
             columns: vec!["Temp".to_string()],
             time_column: "timestamp".to_string(),
+            transforms: None,
         };
 
         let matched_inputs = vec![("OnlySite".to_string(), "/data/site1".to_string())];
@@ -443,6 +454,7 @@ mod tests {
             pattern: crate::Url::parse("series:///combined/*").unwrap(),
             columns: vec!["WaterTemp".to_string()],
             time_column: "time".to_string(),
+            transforms: None,
         };
 
         let matched_inputs = vec![];
