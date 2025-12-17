@@ -3,8 +3,8 @@
 //! This factory simplifies the common pattern of joining multiple time series sources
 //! by timestamp, automatically generating the COALESCE + FULL OUTER JOIN + EXCLUDE SQL.
 
-use crate::register_dynamic_factory;
 use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::register_dynamic_factory;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use datafusion::catalog::TableProvider;
@@ -246,13 +246,13 @@ pub struct TimeseriesJoinFile {
 
 impl TimeseriesJoinFile {
     /// Create a new TimeseriesJoinFile with validated URL patterns
-    /// 
+    ///
     /// # Errors
     /// Returns error if config validation fails (invalid URLs, unsupported schemes, etc.)
     pub fn new(config: TimeseriesJoinConfig, context: crate::FactoryContext) -> TinyFSResult<Self> {
         // Validate config immediately on creation
         config.validate()?;
-        
+
         Ok(Self {
             config,
             context,
@@ -324,7 +324,7 @@ impl TimeseriesJoinFile {
 
         for (i, input) in self.config.inputs.iter().enumerate() {
             let table_name = format!("input{}", i);
-            
+
             // Pattern is already a Url (validated during deserialization)
             _ = patterns.insert(table_name.clone(), input.pattern.clone());
 
@@ -499,7 +499,10 @@ impl TimeseriesJoinFile {
 
         log::debug!("🔍 TIMESERIES-JOIN: Generated SQL:\n{}", sql);
         log::debug!("🔍 TIMESERIES-JOIN: Scope prefixes: {:?}", scope_prefixes);
-        log::debug!("🔍 TIMESERIES-JOIN: Pattern transforms: {:?}", pattern_transforms);
+        log::debug!(
+            "🔍 TIMESERIES-JOIN: Pattern transforms: {:?}",
+            pattern_transforms
+        );
 
         Ok((sql, patterns, scope_prefixes, pattern_transforms))
     }
@@ -831,13 +834,13 @@ mod tests {
                     pattern: crate::Url::parse("series:///source1.series").unwrap(),
                     scope: None,
                     range: None,
-                transforms: None,
+                    transforms: None,
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("series:///source2.series").unwrap(),
                     scope: None,
                     range: None,
-                transforms: None,
+                    transforms: None,
                 },
             ],
         };
@@ -956,13 +959,13 @@ mod tests {
                     pattern: crate::Url::parse("series:///source1.series").unwrap(),
                     scope: Some("BDock".to_string()),
                     range: None,
-                transforms: None,
+                    transforms: None,
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("series:///source2.series").unwrap(),
                     scope: Some("ADock".to_string()),
                     range: None,
-                transforms: None,
+                    transforms: None,
                 },
             ],
         };
@@ -1238,7 +1241,7 @@ mod tests {
                            2024-01-01T00:00:00Z,20.5,65.0\n\
                            2024-01-01T01:00:00Z,21.0,63.0\n\
                            2024-01-01T02:00:00Z,21.5,62.0\n";
-        
+
         _ = create_text_file(
             &fs,
             persistence,
@@ -1254,7 +1257,7 @@ mod tests {
                            2024-01-01T01:00:00Z,22.0,1013.0\n\
                            2024-01-01T02:00:00Z,22.5,1012.0\n\
                            2024-01-01T03:00:00Z,23.0,1011.0\n";
-        
+
         _ = create_text_file(
             &fs,
             persistence,
@@ -1272,13 +1275,13 @@ mod tests {
                 TimeseriesInput {
                     pattern: crate::Url::parse("csv:///sensor1.csv").unwrap(),
                     range: None,
-                transforms: None,
+                    transforms: None,
                     scope: Some("sensor1".to_string()),
                 },
                 TimeseriesInput {
                     pattern: crate::Url::parse("csv:///sensor2.csv").unwrap(),
                     range: None,
-                transforms: None,
+                    transforms: None,
                     scope: Some("sensor2".to_string()),
                 },
             ],
@@ -1297,7 +1300,10 @@ mod tests {
         // Query the joined data
         let ctx = SessionContext::new();
         _ = ctx.register_table("joined", table_provider).unwrap();
-        let df = ctx.sql("SELECT * FROM joined ORDER BY timestamp").await.unwrap();
+        let df = ctx
+            .sql("SELECT * FROM joined ORDER BY timestamp")
+            .await
+            .unwrap();
         let batches = df.collect().await.unwrap();
 
         assert!(!batches.is_empty(), "Should have results");
@@ -1346,10 +1352,16 @@ mod tests {
 
         // First row (00:00): sensor1.humidity=65.0, sensor2.pressure=NULL
         assert_eq!(sensor1_humidity.value(0), 65.0);
-        assert!(sensor2_pressure.is_null(0), "sensor2.pressure should be NULL at 00:00");
+        assert!(
+            sensor2_pressure.is_null(0),
+            "sensor2.pressure should be NULL at 00:00"
+        );
 
         // Last row (03:00): sensor1.humidity=NULL, sensor2.pressure=1011.0
-        assert!(sensor1_humidity.is_null(3), "sensor1.humidity should be NULL at 03:00");
+        assert!(
+            sensor1_humidity.is_null(3),
+            "sensor1.humidity should be NULL at 03:00"
+        );
         assert_eq!(sensor2_pressure.value(3), 1011.0);
     }
 }

@@ -3,7 +3,6 @@ use super::error::TLogFSError;
 use super::schema::{DirectoryEntry, ForArrow, OplogEntry};
 use super::symlink::OpLogSymlink;
 use super::transaction_guard::TransactionGuard;
-use provider::{FactoryContext, FactoryRegistry};
 use crate::txn_metadata::{PondTxnMetadata, PondUserMetadata};
 use arrow::array::DictionaryArray;
 use arrow::array::{Int64Array, StringArray};
@@ -17,6 +16,7 @@ use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
 use log::{debug, info, warn};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use provider::{FactoryContext, FactoryRegistry};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -1135,8 +1135,9 @@ impl InnerState {
     async fn complete_session_setup(&self, state: &State) -> Result<(), TLogFSError> {
         // Register the TinyFS ObjectStore with the context
         let _object_store =
-            provider::register_tinyfs_object_store(&self.session_context, state.clone())
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to register object store: {}", e)))?;
+            provider::register_tinyfs_object_store(&self.session_context, state.clone()).map_err(
+                |e| TLogFSError::ArrowMessage(format!("Failed to register object store: {}", e)),
+            )?;
         debug!("✅ Completed SessionContext setup with TinyFS ObjectStore");
         Ok(())
     }
@@ -1694,7 +1695,7 @@ impl InnerState {
             &OplogEntry::for_arrow(),
             &records,
         )?];
-        
+
         // Drop records immediately after Arrow conversion to free ~100MB
         drop(records);
 

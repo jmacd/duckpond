@@ -17,9 +17,9 @@ use datafusion::catalog::TableProvider;
 use datafusion::datasource::TableType;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use futures::stream::StreamExt;
 use std::any::Any;
 use std::collections::HashMap;
@@ -50,16 +50,16 @@ pub type ColumnCastMap = Arc<HashMap<String, String>>;
 pub struct ColumnRenameTableProvider {
     /// The underlying table provider
     inner: Arc<dyn TableProvider>,
-    
+
     /// Function to rename columns (original → renamed)
     rename_fn: ColumnRenameFunc,
-    
+
     /// Optional type casts to apply: renamed_column → type_name (e.g., "timestamp")
     cast_map: ColumnCastMap,
-    
+
     /// Cached renamed schema
     schema: SchemaRef,
-    
+
     /// Reverse mapping: renamed → original (for filter pushdown)
     reverse_map: HashMap<String, String>,
 }
@@ -78,7 +78,8 @@ impl ColumnRenameTableProvider {
     ) -> DataFusionResult<Self> {
         let original_schema = inner.schema();
         let cast_map_arc = Arc::new(cast_map.clone());
-        let (renamed_schema, reverse_map) = Self::create_renamed_schema(&original_schema, &rename_fn, &cast_map_arc)?;
+        let (renamed_schema, reverse_map) =
+            Self::create_renamed_schema(&original_schema, &rename_fn, &cast_map_arc)?;
 
         Ok(Self {
             inner,
@@ -181,10 +182,8 @@ impl TableProvider for ColumnRenameTableProvider {
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         // Rewrite filters to use original column names
-        let rewritten_filters: Vec<Expr> = filters
-            .iter()
-            .map(|expr| self.rewrite_expr(expr))
-            .collect();
+        let rewritten_filters: Vec<Expr> =
+            filters.iter().map(|expr| self.rewrite_expr(expr)).collect();
 
         // Get plan from inner provider
         let plan = self
@@ -348,7 +347,7 @@ fn rename_batch_columns(
     cast_map: &ColumnCastMap,
 ) -> DataFusionResult<RecordBatch> {
     use datafusion::arrow::compute::cast;
-    
+
     // If no casts needed, just rename schema
     if cast_map.is_empty() {
         let columns = batch.columns().to_vec();
@@ -358,10 +357,10 @@ fn rename_batch_columns(
 
     // Apply casts where needed
     let mut new_columns = Vec::with_capacity(batch.num_columns());
-    
+
     for (i, field) in target_schema.fields().iter().enumerate() {
         let column = batch.column(i);
-        
+
         // Check if this column needs casting
         if cast_map.contains_key(field.name()) {
             // Cast to target type
@@ -372,7 +371,7 @@ fn rename_batch_columns(
             new_columns.push(column.clone());
         }
     }
-    
+
     RecordBatch::try_new(target_schema.clone(), new_columns)
         .map_err(|e| DataFusionError::ArrowError(e.into(), None))
 }

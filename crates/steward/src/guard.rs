@@ -5,12 +5,12 @@ use crate::{
     control_table::{ControlTable, TransactionType},
 };
 use log::{debug, error, info};
+use provider::FactoryRegistry;
+use provider::registry::ExecutionContext;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tinyfs::FS;
-use provider::registry::ExecutionContext;
-use provider::FactoryRegistry;
 use tlogfs::transaction_guard::TransactionGuard;
 
 /// Configuration for a post-commit factory to be executed

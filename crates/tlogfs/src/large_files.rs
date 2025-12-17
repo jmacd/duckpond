@@ -202,7 +202,7 @@ impl HybridWriter {
             create_future: None,
         }
     }
-    
+
     pub fn total_written(&self) -> usize {
         self.total_written
     }
@@ -215,7 +215,7 @@ impl HybridWriter {
             temp_file.flush().await?;
             temp_file.sync_all().await?;
         }
-        
+
         // Finalize hash computation
         let sha256 = format!("{:x}", self.hasher.finalize());
 
@@ -227,11 +227,13 @@ impl HybridWriter {
         let content = if self.total_written >= LARGE_FILE_THRESHOLD {
             debug!("Large file: moving temp file to external storage");
             // Large file: move temp file to final location
-            let temp_path = self.temp_path.ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "No temp file created for large file"
-            ))?;
-            
+            let temp_path = self.temp_path.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "No temp file created for large file",
+                )
+            })?;
+
             let large_files_dir = self.pond_path.join("_large_files");
             tokio::fs::create_dir_all(&large_files_dir).await?;
 
@@ -278,11 +280,18 @@ impl AsyncWrite for HybridWriter {
             this.create_future = Some(Box::pin(async move {
                 let temp_dir = pond_path.join("_large_files");
                 tokio::fs::create_dir_all(&temp_dir).await?;
-                
+
                 // Create unique temp file using process ID and timestamp
-                let temp_path = temp_dir.join(format!("tmp_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+                let temp_path = temp_dir.join(format!(
+                    "tmp_{}_{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
                 let temp_file = File::create(&temp_path).await?;
-                
+
                 Ok((temp_file, temp_path))
             }));
         }
@@ -307,18 +316,18 @@ impl AsyncWrite for HybridWriter {
         // Now write to the temp file
         if let Some(ref mut temp_file) = this.temp_file {
             this.hasher.update(buf);
-            
+
             let result = Pin::new(temp_file).poll_write(cx, buf);
-            
+
             if let Poll::Ready(Ok(n)) = result {
                 this.total_written += n;
             }
-            
+
             result
         } else {
             Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                "Writer in invalid state"
+                "Writer in invalid state",
             )))
         }
     }

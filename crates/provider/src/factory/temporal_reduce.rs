@@ -39,8 +39,8 @@
 //!
 //! Each file contains time-bucketed aggregations using SQL GROUP BY operations.
 
-use crate::register_dynamic_factory;
 use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::register_dynamic_factory;
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use futures::stream::{self, Stream};
@@ -362,7 +362,7 @@ impl TemporalReduceSqlFile {
                 pattern_name,
                 self.source_path
             );
-            
+
             // Convert source_path (filesystem path) to URL with series:// scheme
             // Temporal-reduce works with series files
             let source_url_str = if self.source_path.starts_with('/') {
@@ -370,9 +370,13 @@ impl TemporalReduceSqlFile {
             } else {
                 format!("series:///{}", self.source_path)
             };
-            let source_url = crate::Url::parse(&source_url_str)
-                .map_err(|e| tinyfs::Error::Other(format!("Invalid source path URL '{}': {}", source_url_str, e)))?;
-            
+            let source_url = crate::Url::parse(&source_url_str).map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Invalid source path URL '{}': {}",
+                    source_url_str, e
+                ))
+            })?;
+
             let sql_config = SqlDerivedConfig {
                 patterns: {
                     let mut patterns = HashMap::new();

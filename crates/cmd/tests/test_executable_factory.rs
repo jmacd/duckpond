@@ -7,12 +7,12 @@
 
 use cmd::common::ShipContext;
 use log::debug;
+use provider::registry::ExecutionContext;
 use std::collections::HashMap;
 use steward::PondUserMetadata;
 use tempfile::TempDir;
 use tinyfs::FS;
 use tlogfs::FactoryRegistry;
-use provider::registry::ExecutionContext;
 
 /// Helper to create a test ship and workspace
 async fn setup_test_ship() -> (ShipContext, TempDir) {

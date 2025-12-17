@@ -278,10 +278,7 @@ impl State {
             extended_metadata,
         };
 
-        self.file_versions
-            .entry(id)
-            .or_default()
-            .push(file_version);
+        self.file_versions.entry(id).or_default().push(file_version);
 
         Ok(())
     }
@@ -375,10 +372,7 @@ impl State {
             extended_metadata: Some(extended_metadata),
         };
 
-        self.file_versions
-            .entry(id)
-            .or_default()
-            .push(version);
+        self.file_versions.entry(id).or_default().push(version);
 
         // Create a dummy node - actual factory instantiation happens on read
         Ok(Node::new(

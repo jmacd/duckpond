@@ -7,11 +7,11 @@
 
 use crate::HydroVuConfig;
 use clap::Parser;
+use provider::FactoryContext;
+use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
 use tlogfs::TLogFSError;
-use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
-use provider::FactoryContext;
 
 /// HydroVu command-line interface
 #[derive(Debug, Parser)]
@@ -102,8 +102,7 @@ async fn create_directory_structure(
     log::debug!("Creating HydroVu directory structure");
 
     // Extract State from provider context
-    let state = tlogfs::extract_state(context)
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    let state = tlogfs::extract_state(context).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
     // Create FS from State - this is SAFE here because create_dynamic_file_node has returned and released its lock
     let fs = tinyfs::FS::new(state.clone()).await?;
@@ -192,15 +191,12 @@ async fn execute_collect(
         .map_err(TLogFSError::TinyFS)?;
 
     // Run collection within the existing transaction
-    let result = collector
-        .collect_data(&state, &fs)
-        .await
-        .map_err(|e| {
-            TLogFSError::TinyFS(tinyfs::Error::Other(format!(
-                "HydroVu data collection failed: {}",
-                e
-            )))
-        })?;
+    let result = collector.collect_data(&state, &fs).await.map_err(|e| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+            "HydroVu data collection failed: {}",
+            e
+        )))
+    })?;
 
     // Print summary for each device
     for summary in &result.device_summaries {

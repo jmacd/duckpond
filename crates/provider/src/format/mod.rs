@@ -47,7 +47,10 @@ pub trait FormatProvider: Send + Sync {
         &self,
         reader: Pin<Box<dyn AsyncRead + Send>>,
         url: &crate::Url,
-    ) -> Result<(SchemaRef, Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>)>;
+    ) -> Result<(
+        SchemaRef,
+        Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>,
+    )>;
 
     /// Infer schema without creating a stream
     ///

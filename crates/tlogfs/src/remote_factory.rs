@@ -2,10 +2,10 @@
 
 use crate::TLogFSError;
 use crate::data_taxonomy::{ApiKey, ApiSecret, ServiceEndpoint};
-use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
-use provider::FactoryContext;
 use base64::Engine;
 use clap::Parser;
+use provider::FactoryContext;
+use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinyfs::{NodeID, Result as TinyFSResult};
@@ -241,9 +241,15 @@ async fn execute_remote(
 
     // Dispatch to command handler
     match cmd {
-        RemoteCommand::Push => execute_push(store, state.clone(), &context.pond_metadata, config).await,
-        RemoteCommand::Pull => execute_pull(store, state.clone(), &context.pond_metadata, config).await,
-        RemoteCommand::Replicate => execute_replicate_subcommand(config, state.clone(), &context.pond_metadata).await,
+        RemoteCommand::Push => {
+            execute_push(store, state.clone(), &context.pond_metadata, config).await
+        }
+        RemoteCommand::Pull => {
+            execute_pull(store, state.clone(), &context.pond_metadata, config).await
+        }
+        RemoteCommand::Replicate => {
+            execute_replicate_subcommand(config, state.clone(), &context.pond_metadata).await
+        }
         RemoteCommand::ListBundles { verbose } => {
             execute_list_bundles_subcommand(store, config, context.pond_metadata.as_ref(), verbose)
                 .await

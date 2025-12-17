@@ -13,8 +13,8 @@
 //!     - "AT500_Bottom.DO.mg/L"
 //! ```
 
-use crate::register_dynamic_factory;
 use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::register_dynamic_factory;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -68,7 +68,7 @@ impl TimeseriesPivotFile {
 
         // Extract filesystem path from URL for pattern matching
         let pattern_path = self.config.pattern.path();
-        
+
         // Use collect_matches to find matching files with captured groups
         let pattern_matches = tinyfs_root.collect_matches(pattern_path).await?;
 
@@ -277,10 +277,13 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
         // Create SqlDerivedFile config with scope prefixes and null_padding wrapper
         let mut sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
             .with_provider_wrapper(move |provider| {
-                crate::transform::null_padding::null_padding_table(provider, expected_columns.clone())
-                    .map_err(crate::Error::from)
+                crate::transform::null_padding::null_padding_table(
+                    provider,
+                    expected_columns.clone(),
+                )
+                .map_err(crate::Error::from)
             });
-        
+
         // Add transforms if configured
         sql_config.transforms = self.config.transforms.clone();
 
@@ -324,14 +327,24 @@ fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
 
     // Validate scheme is recognized (no fallback for unknown schemes)
     let scheme = cfg.pattern.scheme();
-    const KNOWN_SCHEMES: &[&str] = &["file", "series", "table", "data", "csv", "excelhtml", "oteljson"];
+    const KNOWN_SCHEMES: &[&str] = &[
+        "file",
+        "series",
+        "table",
+        "data",
+        "csv",
+        "excelhtml",
+        "oteljson",
+    ];
     if !KNOWN_SCHEMES.contains(&scheme) {
-        return Err(tinyfs::Error::Other(
-            format!("Unknown URL scheme '{}' in pattern '{}'. Known schemes: {}", 
-                scheme, cfg.pattern, KNOWN_SCHEMES.join(", "))
-        ));
+        return Err(tinyfs::Error::Other(format!(
+            "Unknown URL scheme '{}' in pattern '{}'. Known schemes: {}",
+            scheme,
+            cfg.pattern,
+            KNOWN_SCHEMES.join(", ")
+        )));
     }
-    
+
     if cfg.columns.is_empty() {
         return Err(tinyfs::Error::Other(
             "At least one column must be specified".to_string(),

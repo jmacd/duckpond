@@ -94,7 +94,10 @@ impl ColumnRenameConfig {
                         return to.clone();
                     }
                 }
-                RenameRule::Pattern { pattern, replacement } => {
+                RenameRule::Pattern {
+                    pattern,
+                    replacement,
+                } => {
                     if let Ok(regex) = Regex::new(pattern) {
                         if regex.is_match(column_name) {
                             return regex
@@ -196,12 +199,16 @@ async fn apply_column_rename_transform(
     input: std::sync::Arc<dyn datafusion::catalog::TableProvider>,
 ) -> Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>, tinyfs::Error> {
     // Read config directly from the file's content (version 1)
-    let config_bytes = context.context.persistence.read_file_version(context.file_id, 1).await?;
-    
+    let config_bytes = context
+        .context
+        .persistence
+        .read_file_version(context.file_id, 1)
+        .await?;
+
     // Parse config
     let config_str = std::str::from_utf8(&config_bytes)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
-    
+
     let rename_config: ColumnRenameConfig = serde_yaml::from_str(config_str)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
 
@@ -216,8 +223,11 @@ async fn apply_column_rename_transform(
     });
 
     // Wrap with ColumnRenameTableProvider
-    let provider = crate::transform::column_rename::ColumnRenameTableProvider::new(input, rename_fn, cast_map)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to create rename provider: {}", e)))?;
+    let provider =
+        crate::transform::column_rename::ColumnRenameTableProvider::new(input, rename_fn, cast_map)
+            .map_err(|e| {
+                tinyfs::Error::Other(format!("Failed to create rename provider: {}", e))
+            })?;
 
     Ok(std::sync::Arc::new(provider))
 }
@@ -261,10 +271,7 @@ mod tests {
             }],
         };
 
-        assert_eq!(
-            config.apply_to_column("Temperature (C)"),
-            "Temperature.C"
-        );
+        assert_eq!(config.apply_to_column("Temperature (C)"), "Temperature.C");
         assert_eq!(config.apply_to_column("DO (mg/L)"), "DO.mg/L");
         assert_eq!(config.apply_to_column("SimpleColumn"), "SimpleColumn");
     }
@@ -275,7 +282,7 @@ mod tests {
             rules: vec![
                 RenameRule::Direct {
                     from: "DateTime".to_string(),
-                cast: None,
+                    cast: None,
                     to: "timestamp".to_string(),
                 },
                 RenameRule::Pattern {
@@ -286,10 +293,7 @@ mod tests {
         };
 
         assert_eq!(config.apply_to_column("DateTime"), "timestamp");
-        assert_eq!(
-            config.apply_to_column("Temperature (C)"),
-            "Temperature.C"
-        );
+        assert_eq!(config.apply_to_column("Temperature (C)"), "Temperature.C");
         assert_eq!(config.apply_to_column("Simple"), "Simple");
     }
 

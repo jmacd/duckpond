@@ -82,7 +82,11 @@ async fn copy_files_to_directory(
     for source in sources {
         // Strip host:// prefix if present (for copy IN with explicit host:// prefix)
         let (_is_host, clean_source) = parse_host_path(source);
-        log::debug!("parse_host_path: source='{}' -> clean_source='{}'", source, clean_source);
+        log::debug!(
+            "parse_host_path: source='{}' -> clean_source='{}'",
+            source,
+            clean_source
+        );
 
         // Extract filename from source path
         let source_filename = std::path::Path::new(&clean_source)
@@ -384,7 +388,7 @@ async fn copy_in(
                             if sources.len() == 1 {
                                 // Single file to non-existent destination - use format flag only
                                 let source = &sources[0];
-                                
+
                                 // Strip host:// prefix if present
                                 let (_is_host, clean_source) = parse_host_path(source);
 

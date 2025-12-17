@@ -271,18 +271,18 @@ impl AsyncWrite for OpLogFileWriter {
                 let result = async {
                     let hybrid_result = storage.finalize().await
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to finalize storage: {}", e)))?;
-                    
+
                     let content = hybrid_result.content;
                     let content_len = hybrid_result.size;
                     let sha256 = hybrid_result.sha256;
-                    
+
                     debug!(
-                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, sha256={}, is_large={}", 
+                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, sha256={}, is_large={}",
                         content_len,
                         sha256,
                         content.is_empty() && content_len > 0
                     );
-                    
+
                     // Determine ContentRef based on whether content is empty (large file external)
                     let content_ref = if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
                         // Large file - stored externally
@@ -291,7 +291,7 @@ impl AsyncWrite for OpLogFileWriter {
                         // Small file - content in memory
                         crate::file_writer::ContentRef::Small(content.clone())
                     };
-                    
+
                     // Extract metadata based on file type
                     let metadata = match entry_type {
                         tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {

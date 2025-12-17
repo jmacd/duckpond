@@ -75,7 +75,7 @@ impl UrlPatternMatcher {
 
         // Determine if this is a builtin type or requires format provider
         let scheme = url.scheme();
-        
+
         match scheme {
             "series" | "table" | "data" | "file" => {
                 // Builtin TinyFS types - use direct TinyFS matching
@@ -97,18 +97,9 @@ impl UrlPatternMatcher {
     ) -> Result<Vec<MatchedFile>> {
         // Map scheme to EntryType
         let entry_types = match url.scheme() {
-            "series" => vec![
-                EntryType::FileSeriesPhysical,
-                EntryType::FileSeriesDynamic,
-            ],
-            "table" => vec![
-                EntryType::FileTablePhysical,
-                EntryType::FileTableDynamic,
-            ],
-            "data" => vec![
-                EntryType::FileDataPhysical,
-                EntryType::FileDataDynamic,
-            ],
+            "series" => vec![EntryType::FileSeriesPhysical, EntryType::FileSeriesDynamic],
+            "table" => vec![EntryType::FileTablePhysical, EntryType::FileTableDynamic],
+            "data" => vec![EntryType::FileDataPhysical, EntryType::FileDataDynamic],
             "file" => vec![
                 // Accept any file type - actual type determined by EntryType
                 EntryType::FileSeriesPhysical,
@@ -119,7 +110,10 @@ impl UrlPatternMatcher {
                 EntryType::FileDataDynamic,
             ],
             scheme => {
-                return Err(Error::InvalidUrl(format!("Unknown builtin type: {}", scheme)));
+                return Err(Error::InvalidUrl(format!(
+                    "Unknown builtin type: {}",
+                    scheme
+                )));
             }
         };
 

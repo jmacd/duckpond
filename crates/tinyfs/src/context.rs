@@ -221,11 +221,11 @@ impl Default for PondMetadata {
 #[cfg(test)]
 mod tests {
     use crate::ProviderContext;
+    use crate::memory::persistence::MemoryPersistence;
     use datafusion::execution::context::SessionContext;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use crate::memory::persistence::MemoryPersistence;
 
     #[tokio::test]
     async fn test_provider_context_transaction_guard() {

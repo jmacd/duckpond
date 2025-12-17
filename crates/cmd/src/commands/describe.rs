@@ -59,32 +59,35 @@ async fn describe_provider_url(
     let results = RefCell::new(Vec::new());
 
     // Use clean for_each_match API to handle both single files and patterns
-    let _count = provider.for_each_match(url, |table_provider, file_path| {
-        let url = url.to_string();
-        let results = &results;
-        async move {
-            // Get schema from TableProvider
-            let schema = table_provider.schema();
-            let schema_info = extract_schema_info(&schema, true)
-                .map_err(|e| provider::Error::InvalidUrl(e.to_string()))?;
+    let _count = provider
+        .for_each_match(url, |table_provider, file_path| {
+            let url = url.to_string();
+            let results = &results;
+            async move {
+                // Get schema from TableProvider
+                let schema = table_provider.schema();
+                let schema_info = extract_schema_info(&schema, true)
+                    .map_err(|e| provider::Error::InvalidUrl(e.to_string()))?;
 
-            // Parse URL for provider name
-            let parsed_url = provider::Url::parse(&url)
-                .map_err(|e| provider::Error::InvalidUrl(e.to_string()))?;
-            let provider_name = parsed_url.scheme();
+                // Parse URL for provider name
+                let parsed_url = provider::Url::parse(&url)
+                    .map_err(|e| provider::Error::InvalidUrl(e.to_string()))?;
+                let provider_name = parsed_url.scheme();
 
-            results.borrow_mut().push((file_path, provider_name.to_string(), schema_info));
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to process URL '{}': {}", url, e))?;
+                results
+                    .borrow_mut()
+                    .push((file_path, provider_name.to_string(), schema_info));
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to process URL '{}': {}", url, e))?;
 
     let results = results.into_inner();
 
     // Format output from results
     let mut output = String::new();
-    
+
     if results.len() > 1 {
         output.push_str(&format!("Pattern matched {} files\n\n", results.len()));
     }
@@ -101,7 +104,10 @@ async fn describe_provider_url(
         output.push_str(&format!("Schema: {} fields\n", schema_info.field_count));
 
         for field_info in &schema_info.fields {
-            output.push_str(&format!("  • {}: {}\n", field_info.name, field_info.data_type));
+            output.push_str(&format!(
+                "  • {}: {}\n",
+                field_info.name, field_info.data_type
+            ));
         }
 
         if let Some(timestamp_col) = &schema_info.timestamp_column {
@@ -122,7 +128,7 @@ async fn describe_command_impl(
     if pattern.contains("://") {
         return describe_provider_url(tx, ship_context, pattern).await;
     }
-    
+
     let fs = &**tx;
     let root = fs
         .root()

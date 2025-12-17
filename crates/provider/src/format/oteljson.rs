@@ -164,7 +164,12 @@ fn build_record_batch(
     for metric_name in metric_names {
         let values: Vec<Option<f64>> = timestamps
             .iter()
-            .map(|ts| timestamp_map.get(ts).and_then(|m| m.get(metric_name)).copied())
+            .map(|ts| {
+                timestamp_map
+                    .get(ts)
+                    .and_then(|m| m.get(metric_name))
+                    .copied()
+            })
             .collect();
         metric_arrays.push(Arc::new(Float64Array::from(values)) as arrow::array::ArrayRef);
     }
@@ -211,7 +216,10 @@ impl FormatProvider for OtelJsonProvider {
         &self,
         reader: Pin<Box<dyn AsyncRead + Send>>,
         _url: &Url,
-    ) -> Result<(SchemaRef, Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>)> {
+    ) -> Result<(
+        SchemaRef,
+        Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>,
+    )> {
         // Read entire file and build schema + data
         let mut reader = BufReader::new(reader);
         let mut metric_names_set = BTreeSet::new();

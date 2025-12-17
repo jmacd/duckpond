@@ -16,39 +16,39 @@ mod tinyfs_path;
 mod url_pattern_matcher;
 mod version_selection;
 
-pub use factory::dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
 pub use error::{Error, Result};
+pub use factory::dynamic_dir::{DynamicDirConfig, DynamicDirDirectory, DynamicDirEntry};
+pub use factory::sql_derived::SqlDerivedConfig;
 pub use format::FormatProvider;
-pub use format_registry::{FormatRegistry, FormatProviderEntry, FORMAT_PROVIDERS};
+pub use format_registry::{FORMAT_PROVIDERS, FormatProviderEntry, FormatRegistry};
 pub use provider_api::Provider;
 pub use registry::{
     ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
     FactoryRegistry, QueryableFile,
 };
-pub use factory::sql_derived::SqlDerivedConfig;
 pub use sql_transform::transform_sql;
 pub use table_creation::{
     create_latest_table_provider, create_listing_table_provider, create_table_provider,
 };
 pub use table_provider_options::{TableProviderKey, TableProviderOptions};
 pub use tinyfs::{FactoryContext, PondMetadata, ProviderContext};
-pub use tinyfs_object_store::{register_tinyfs_object_store, TinyFsObjectStore};
-pub use url_pattern_matcher::{MatchedFile, UrlPatternMatcher};
+pub use tinyfs_object_store::{TinyFsObjectStore, register_tinyfs_object_store};
 pub use tinyfs_path::TinyFsPathBuilder;
+pub use url_pattern_matcher::{MatchedFile, UrlPatternMatcher};
 pub use version_selection::VersionSelection;
 
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
 /// URL for accessing files with format conversion and optional compression
-/// 
+///
 /// Format: `scheme://[compression]/path/pattern?query_params`
-/// 
+///
 /// - `scheme`: Format name (csv, oteljson, etc.) - indicates FormatProvider
 /// - `host`: Optional compression (zstd, gzip, bzip2)
 /// - `path`: TinyFS path or glob pattern
 /// - `query`: Format-specific options (delimiter, batch_size, etc.)
-/// 
+///
 /// Examples:
 /// - `csv:///data/file.csv?delimiter=;`
 /// - `oteljson://zstd/logs/**/*.json.zstd?batch_size=2048`
@@ -94,7 +94,7 @@ impl std::fmt::Display for Url {
 impl Url {
     /// Parse URL from string using standard url crate
     /// Returns error if fragment, port, username, or password are present
-    /// 
+    ///
     /// If the string doesn't contain "://", defaults to "file://" scheme
     /// The actual file type is determined by EntryType when the file is accessed
     pub fn parse(url_str: &str) -> Result<Self> {
@@ -131,11 +131,7 @@ impl Url {
     /// Get optional compression from host (e.g., "zstd", "gzip")
     pub fn compression(&self) -> Option<&str> {
         let host = self.inner.host_str()?;
-        if host.is_empty() {
-            None
-        } else {
-            Some(host)
-        }
+        if host.is_empty() { None } else { Some(host) }
     }
 
     /// Get TinyFS path or pattern
@@ -144,7 +140,7 @@ impl Url {
     }
 
     /// Parse query parameters into strongly-typed struct using serde_qs
-    /// 
+    ///
     /// Example:
     /// ```ignore
     /// #[derive(Deserialize)]
@@ -152,18 +148,16 @@ impl Url {
     ///     delimiter: char,
     ///     has_header: bool,
     /// }
-    /// 
+    ///
     /// let url = Url::parse("csv:///file.csv?delimiter=;&has_header=false")?;
     /// let options: CsvOptions = url.query_params()?;
     /// ```
     pub fn query_params<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
         match self.inner.query() {
-            None => serde_qs::from_str("").map_err(|e| {
-                Error::InvalidUrl(format!("query parameter parsing failed: {}", e))
-            }),
-            Some(query) => serde_qs::from_str(query).map_err(|e| {
-                Error::InvalidUrl(format!("query parameter parsing failed: {}", e))
-            }),
+            None => serde_qs::from_str("")
+                .map_err(|e| Error::InvalidUrl(format!("query parameter parsing failed: {}", e))),
+            Some(query) => serde_qs::from_str(query)
+                .map_err(|e| Error::InvalidUrl(format!("query parameter parsing failed: {}", e))),
         }
     }
 }

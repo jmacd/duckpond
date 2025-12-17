@@ -57,13 +57,16 @@ impl FormatProvider for ExcelHtmlProvider {
         &self,
         mut reader: Pin<Box<dyn AsyncRead + Send>>,
         _url: &Url,
-    ) -> Result<(SchemaRef, Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>)> {
+    ) -> Result<(
+        SchemaRef,
+        Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>,
+    )> {
         // Read entire HTML file into memory
         // (These files are typically small, < 10MB)
         use tokio::io::AsyncReadExt;
         let mut html_bytes = Vec::new();
         let _ = reader.read_to_end(&mut html_bytes).await?;
-        
+
         let html_str = String::from_utf8(html_bytes)
             .map_err(|e| Error::InvalidUrl(format!("Invalid UTF-8 in HTML: {}", e)))?;
 
@@ -77,7 +80,8 @@ impl FormatProvider for ExcelHtmlProvider {
             .get_element_by_id("isi-report")
             .ok_or_else(|| Error::InvalidUrl("No table with id='isi-report' found".to_string()))?;
 
-        let table_node = table.get(parser)
+        let table_node = table
+            .get(parser)
             .ok_or_else(|| Error::InvalidUrl("Could not resolve table node".to_string()))?;
 
         // Extract column headers and data rows
@@ -97,13 +101,13 @@ fn parse_table_data(
     parser: &tl::Parser,
 ) -> Result<(SchemaRef, Vec<Vec<String>>)> {
     let table_html = table_node.inner_html(parser);
-    
+
     // Re-parse just the table content
     let table_dom = tl::parse(&table_html, tl::ParserOptions::default())
         .map_err(|e| Error::InvalidUrl(format!("Table parse error: {}", e)))?;
-    
+
     let table_parser = table_dom.parser();
-    
+
     // Find all <tr> elements
     let rows: Vec<_> = table_dom
         .nodes()
@@ -122,9 +126,13 @@ fn parse_table_data(
         .collect();
 
     // Find the data header row (has class="dataHeader" or isi-data-table attribute)
-    let header_row = rows.iter()
+    let header_row = rows
+        .iter()
         .find(|row| {
-            row.attributes().class().map(|c| c.as_utf8_str().contains("dataHeader")).unwrap_or(false)
+            row.attributes()
+                .class()
+                .map(|c| c.as_utf8_str().contains("dataHeader"))
+                .unwrap_or(false)
                 || row.attributes().get("isi-data-table").flatten().is_some()
         })
         .ok_or_else(|| Error::InvalidUrl("No dataHeader row found".to_string()))?;
@@ -147,9 +155,13 @@ fn parse_table_data(
     // Extract data rows (have class="data" or isi-data-row attribute)
     let mut data_rows = Vec::new();
     for row in rows.iter() {
-        let is_data_row = row.attributes().class().map(|c| c.as_utf8_str().contains("data")).unwrap_or(false)
+        let is_data_row = row
+            .attributes()
+            .class()
+            .map(|c| c.as_utf8_str().contains("data"))
+            .unwrap_or(false)
             || row.attributes().get("isi-data-row").flatten().is_some();
-        
+
         if is_data_row {
             let row_data = extract_row_data(row, table_parser, column_names.len())?;
             data_rows.push(row_data);
@@ -162,12 +174,12 @@ fn parse_table_data(
 /// Extract column names from header row
 fn extract_column_names(header_row: &tl::HTMLTag, parser: &tl::Parser) -> Result<Vec<String>> {
     let mut columns = Vec::new();
-    
+
     // Find all <td> elements in this row
     let header_html = header_row.inner_html(parser);
     let header_dom = tl::parse(&header_html, tl::ParserOptions::default())
         .map_err(|e| Error::InvalidUrl(format!("Header parse error: {}", e)))?;
-    
+
     for node in header_dom.nodes().iter() {
         if let Some(tag) = node.as_tag() {
             if tag.name().as_utf8_str() == "td" {
@@ -185,13 +197,17 @@ fn extract_column_names(header_row: &tl::HTMLTag, parser: &tl::Parser) -> Result
 }
 
 /// Extract data from a single row
-fn extract_row_data(row: &tl::HTMLTag, parser: &tl::Parser, expected_cols: usize) -> Result<Vec<String>> {
+fn extract_row_data(
+    row: &tl::HTMLTag,
+    parser: &tl::Parser,
+    expected_cols: usize,
+) -> Result<Vec<String>> {
     let mut values = Vec::new();
-    
+
     let row_html = row.inner_html(parser);
     let row_dom = tl::parse(&row_html, tl::ParserOptions::default())
         .map_err(|e| Error::InvalidUrl(format!("Row parse error: {}", e)))?;
-    
+
     for node in row_dom.nodes().iter() {
         if let Some(tag) = node.as_tag() {
             if tag.name().as_utf8_str() == "td" {
@@ -230,33 +246,30 @@ fn rows_to_batch(schema: SchemaRef, rows: &[Vec<String>]) -> Result<RecordBatch>
 
     for col_idx in 0..num_cols {
         let field = schema.field(col_idx);
-        
+
         match field.data_type() {
             DataType::Utf8 => {
-                let values: Vec<Option<&str>> = rows.iter()
+                let values: Vec<Option<&str>> = rows
+                    .iter()
                     .map(|row| {
                         let val = row.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-                        if val.is_empty() {
-                            None
-                        } else {
-                            Some(val)
-                        }
+                        if val.is_empty() { None } else { Some(val) }
                     })
                     .collect();
                 columns.push(Arc::new(StringArray::from(values)));
             }
             DataType::Float64 => {
-                let values: Vec<Option<f64>> = rows.iter()
+                let values: Vec<Option<f64>> = rows
+                    .iter()
                     .map(|row| {
-                        row.get(col_idx)
-                            .and_then(|s| {
-                                let trimmed = s.trim();
-                                if trimmed.is_empty() {
-                                    None
-                                } else {
-                                    trimmed.parse::<f64>().ok()
-                                }
-                            })
+                        row.get(col_idx).and_then(|s| {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                trimmed.parse::<f64>().ok()
+                            }
+                        })
                     })
                     .collect();
                 columns.push(Arc::new(Float64Array::from(values)));

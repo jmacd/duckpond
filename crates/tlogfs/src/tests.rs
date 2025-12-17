@@ -1162,7 +1162,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
                 }
             }
         }
-        
+
         // Check _delta_log directory
         let delta_log_path = store_path_obj.join("_delta_log");
         debug!("Delta log exists: {}", delta_log_path.exists());

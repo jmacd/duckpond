@@ -90,11 +90,7 @@ impl Provider {
     /// # Returns
     ///
     /// Number of files matched
-    pub async fn for_each_match<F, Fut>(
-        &self,
-        url_str: &str,
-        mut callback: F,
-    ) -> Result<usize>
+    pub async fn for_each_match<F, Fut>(&self, url_str: &str, mut callback: F) -> Result<usize>
     where
         F: FnMut(Arc<dyn datafusion::catalog::TableProvider>, String) -> Fut,
         Fut: Future<Output = Result<()>>,
@@ -106,18 +102,22 @@ impl Provider {
         if has_wildcards {
             // Expand pattern
             let root = self.fs.root().await?;
-            let matches = root.collect_matches(path).await
-                .map_err(|e| Error::InvalidUrl(format!("Pattern expansion failed for '{}': {}", path, e)))?;
+            let matches = root.collect_matches(path).await.map_err(|e| {
+                Error::InvalidUrl(format!("Pattern expansion failed for '{}': {}", path, e))
+            })?;
 
             if matches.is_empty() {
-                return Err(Error::InvalidUrl(format!("No files match pattern: {}", url_str)));
+                return Err(Error::InvalidUrl(format!(
+                    "No files match pattern: {}",
+                    url_str
+                )));
             }
 
             let ctx = SessionContext::new();
             for (node_path, _captures) in &matches {
                 let file_path = node_path.path();
                 let file_url_str = format!("{}://{}", url.scheme(), file_path.display());
-                
+
                 let table_provider = self.create_table_provider(&file_url_str, &ctx).await?;
                 callback(table_provider, file_path.display().to_string()).await?;
             }
@@ -167,11 +167,7 @@ mod tests {
         Arc::new(tinyfs::FS::new(persistence).await.unwrap())
     }
 
-    async fn create_csv_file(
-        fs: &tinyfs::FS,
-        path: &str,
-        config: InfiniteCsvConfig,
-    ) -> Result<()> {
+    async fn create_csv_file(fs: &tinyfs::FS, path: &str, config: InfiniteCsvConfig) -> Result<()> {
         let root = fs.root().await?;
 
         // Create parent directories
@@ -272,10 +268,7 @@ mod tests {
             .unwrap();
 
         let _ = ctx.register_table("sensors", table).unwrap();
-        let df = ctx
-            .sql("SELECT COUNT(*) FROM sensors")
-            .await
-            .unwrap();
+        let df = ctx.sql("SELECT COUNT(*) FROM sensors").await.unwrap();
         let results = df.collect().await.unwrap();
 
         assert!(!results.is_empty());
@@ -286,11 +279,11 @@ mod tests {
     fn test_provider_uses_linkme_registry() {
         // Test that Provider uses linkme format registry
         let csv_provider = FormatRegistry::get_provider("csv");
-        
+
         // CSV should be registered via linkme
         assert!(csv_provider.is_some());
         assert_eq!(csv_provider.unwrap().name(), "csv");
-        
+
         println!("✅ Provider uses linkme format registry with CSV");
     }
 
@@ -298,7 +291,7 @@ mod tests {
     async fn test_layer_3_complete() -> Result<()> {
         // Full Layer 3 integration test: URL → Provider → FormatProvider → TableProvider
         let fs = create_test_fs().await;
-        
+
         // Create test CSV file in memory
         create_csv_file(
             &fs,
@@ -315,7 +308,9 @@ mod tests {
         let ctx = SessionContext::new();
 
         // Create table from CSV URL
-        let table = provider.create_table_provider("csv:///data.csv", &ctx).await?;
+        let table = provider
+            .create_table_provider("csv:///data.csv", &ctx)
+            .await?;
 
         // Register and query
         let _ = ctx.register_table("users", table)?;
@@ -332,7 +327,7 @@ mod tests {
         // Test that Provider correctly rejects glob patterns
         // Glob expansion should be handled by the factory layer
         let fs = create_test_fs().await;
-        
+
         // Create multiple CSV files
         for i in 1..=3 {
             create_csv_file(
@@ -351,12 +346,20 @@ mod tests {
         let ctx = SessionContext::new();
 
         // Provider should reject glob patterns - factory handles iteration
-        let result = provider.create_table_provider("csv:///data*.csv", &ctx).await;
+        let result = provider
+            .create_table_provider("csv:///data*.csv", &ctx)
+            .await;
         assert!(result.is_err(), "Provider should reject glob patterns");
-        
+
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("contains wildcards"), "Error should explain wildcards are not allowed");
-        assert!(err_msg.contains("collect_matches()"), "Error should guide to use collect_matches");
+        assert!(
+            err_msg.contains("contains wildcards"),
+            "Error should explain wildcards are not allowed"
+        );
+        assert!(
+            err_msg.contains("collect_matches()"),
+            "Error should guide to use collect_matches"
+        );
 
         println!("✅ Provider correctly rejects glob patterns");
         Ok(())

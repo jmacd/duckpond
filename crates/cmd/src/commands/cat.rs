@@ -160,9 +160,7 @@ async fn cat_provider_url(
             async { Ok(()) }
         })
         .await
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e)
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e))?;
 
     debug!("Matched {} file(s) for pattern: {}", match_count, url);
 
@@ -178,7 +176,7 @@ async fn cat_provider_url(
                 .register_table(&format!("t{}", i), tp.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to register table t{}: {}", i, e))?;
         }
-        
+
         let union_sql = (0..table_providers.len())
             .map(|i| format!("SELECT * FROM t{}", i))
             .collect::<Vec<_>>()
@@ -190,19 +188,20 @@ async fn cat_provider_url(
             .sql(&union_sql)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to execute union query: {}", e))?;
-        
+
         let batches = df
             .collect()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to collect union batches: {}", e))?;
-        
-        let schema = batches.first()
+
+        let schema = batches
+            .first()
             .map(|b| b.schema())
             .ok_or_else(|| anyhow::anyhow!("No batches in union result"))?;
-        
+
         let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
             .map_err(|e| anyhow::anyhow!("Failed to create MemTable from union: {}", e))?;
-        
+
         std::sync::Arc::new(mem_table) as std::sync::Arc<dyn datafusion::catalog::TableProvider>
     };
 
@@ -213,10 +212,13 @@ async fn cat_provider_url(
     let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
     debug!("Executing SQL query: {}", effective_sql_query);
 
-    let df = ctx
-        .sql(effective_sql_query)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to execute SQL query '{}': {}", effective_sql_query, e))?;
+    let df = ctx.sql(effective_sql_query).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to execute SQL query '{}': {}",
+            effective_sql_query,
+            e
+        )
+    })?;
 
     let mut stream = df.execute_stream().await?;
 
@@ -251,7 +253,8 @@ async fn cat_provider_url(
             // Testing mode - collect batches then write to buffer
             let mut batches = Vec::new();
             while let Some(batch_result) = stream.next().await {
-                let batch = batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
+                let batch =
+                    batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
                 batches.push(batch);
             }
             write_batches_to_buffer(&batches, output.unwrap())?;

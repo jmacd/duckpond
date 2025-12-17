@@ -122,7 +122,11 @@ impl Drop for PerfTrace {
 
         log::debug!(
             "PERF_TRACE|{}|{}{}|elapsed_ms={}{}",
-            self.call_num, self.function_name, params_str, elapsed_ms, metrics_str
+            self.call_num,
+            self.function_name,
+            params_str,
+            elapsed_ms,
+            metrics_str
         );
     }
 }

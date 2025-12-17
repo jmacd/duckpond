@@ -8,20 +8,20 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
+use crate::tinyfs_path::TinyFsPathBuilder;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use log::debug;
 use object_store::{
     GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions,
     PutPayload, PutResult, Result as ObjectStoreResult, path::Path as ObjectPath,
 };
 use tinyfs::PersistenceLayer;
 use uuid7;
-use log::debug;
-use crate::tinyfs_path::TinyFsPathBuilder;
 
 /// File series information for ObjectStore registry
 #[derive(Debug, Clone)]
@@ -761,14 +761,14 @@ pub fn register_tinyfs_object_store<P: PersistenceLayer + Clone + 'static>(
     persistence: P,
 ) -> Result<Arc<TinyFsObjectStore<P>>, Box<dyn std::error::Error + Send + Sync>> {
     let object_store = Arc::new(TinyFsObjectStore::new(persistence));
-    
-    let url = url::Url::parse("tinyfs:///")
-        .map_err(|e| format!("Failed to parse tinyfs URL: {}", e))?;
-    
+
+    let url =
+        url::Url::parse("tinyfs:///").map_err(|e| format!("Failed to parse tinyfs URL: {}", e))?;
+
     _ = ctx
         .runtime_env()
         .register_object_store(&url, object_store.clone());
-    
+
     debug!("Registered TinyFS ObjectStore with SessionContext - ready for any TinyFS path");
     Ok(object_store)
 }

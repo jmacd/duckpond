@@ -300,13 +300,13 @@ impl InfiniteCsvReader {
     fn new(config: InfiniteCsvConfig) -> Self {
         // Pre-generate header and some initial rows for schema inference
         let mut initial_data = format!("{}\n", config.columns.join(","));
-        
+
         // Generate first 100 rows for schema inference (if available)
         let initial_rows = config.row_count.min(100);
         for i in 0..initial_rows {
             initial_data.push_str(&Self::generate_row(i, &config.columns));
         }
-        
+
         Self {
             config,
             position: 0,

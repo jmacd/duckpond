@@ -81,9 +81,9 @@ pub use txn_metadata::{PondTxnMetadata, PondUserMetadata};
 pub use query::{execute_sql_on_file, get_file_schema};
 
 // Re-export factory types from provider for easy access
-pub use provider::{ConfigFile, DynamicFactory, FactoryRegistry, PondMetadata};
-pub use provider::FactoryContext;
 pub use provider::DYNAMIC_FACTORIES;
+pub use provider::FactoryContext;
+pub use provider::{ConfigFile, DynamicFactory, FactoryRegistry, PondMetadata};
 
 // Note: Macros are #[macro_export] so they're automatically available at crate::macro_name
 // No need to re-export them here

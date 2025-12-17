@@ -19,7 +19,7 @@ use tinyfs::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateCollection {
     pub in_pattern: crate::Url,    // URL pattern with wildcard expressions
-    pub out_pattern: String,   // Output basename with $0, $1 placeholders (no '/' chars)
+    pub out_pattern: String,       // Output basename with $0, $1 placeholders (no '/' chars)
     pub template_file: crate::Url, // URL to template file WITHIN POND (e.g., "file:///templates/data.md.tmpl") - REQUIRED
 }
 
@@ -320,7 +320,13 @@ impl TemplateFile {
 
         // Get FRESH template variables from state during rendering (not cached context)
         // This ensures we see export data added after factory creation
-        let fresh_template_variables = self.context.context.template_variables.lock().unwrap().clone();
+        let fresh_template_variables = self
+            .context
+            .context
+            .template_variables
+            .lock()
+            .unwrap()
+            .clone();
         debug!(
             "🎨 RENDER: Fresh template variables during rendering: {:?}",
             fresh_template_variables.keys().collect::<Vec<_>>()

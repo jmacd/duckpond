@@ -1,4 +1,3 @@
-
 //! TableProvider creation for DuckPond
 //!
 //! This module provides the core logic for creating DataFusion TableProviders from FileID references.
@@ -15,7 +14,8 @@ use tinyfs::{FileID, ProviderContext};
 
 use crate::Result;
 use crate::{
-    TableProviderKey, TableProviderOptions, transform::temporal_filter::TemporalFilteredListingTable, VersionSelection,
+    TableProviderKey, TableProviderOptions, VersionSelection,
+    transform::temporal_filter::TemporalFilteredListingTable,
 };
 
 /// Create a TableProvider from a FileID with configurable options

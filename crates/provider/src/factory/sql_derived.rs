@@ -261,7 +261,7 @@ impl SqlDerivedFile {
 
     /// Apply transform chain to a TableProvider
     ///
-    /// Applies transforms in order from config.transforms or config.pattern_transforms, 
+    /// Applies transforms in order from config.transforms or config.pattern_transforms,
     /// each transform wrapping the previous result.
     async fn apply_transforms(
         &self,
@@ -1466,10 +1466,7 @@ mod tests {
     }
 
     /// Helper function to get a string array from any column, handling different Arrow string types
-    fn get_string_array(
-        batch: &RecordBatch,
-        column_index: usize,
-    ) -> Arc<StringArray> {
+    fn get_string_array(batch: &RecordBatch, column_index: usize) -> Arc<StringArray> {
         let column = batch.column(column_index);
         let string_column = match column.data_type() {
             DataType::Utf8 => column.clone(),
@@ -1488,8 +1485,7 @@ mod tests {
     async fn execute_sql_derived_direct(
         sql_derived_file: &SqlDerivedFile,
         provider_context: &ProviderContext,
-    ) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error + Send + Sync>>
-    {
+    ) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error + Send + Sync>> {
         debug!("execute_sql_derived_direct: Starting execution");
 
         // Get table provider using the SqlDerivedFile's own file_id from its context

@@ -1,7 +1,7 @@
 //! Scope Prefix Table Provider
 //!
-//! Factory function to create a TableProvider that adds a scope prefix to all column names 
-//! except the time column. This enables dynamic column renaming without schema introspection 
+//! Factory function to create a TableProvider that adds a scope prefix to all column names
+//! except the time column. This enables dynamic column renaming without schema introspection
 //! at configuration time.
 //!
 //! Example: With scope "Vulink" and time_column "timestamp", transforms:
