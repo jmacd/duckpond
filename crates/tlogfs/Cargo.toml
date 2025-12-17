@@ -63,7 +63,7 @@ uuid7 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-utilities = { workspace = true }
+utilities = { workspace = true, features = ["test-helpers"] }
 
 [lints]
 workspace = true

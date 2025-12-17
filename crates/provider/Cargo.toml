@@ -47,7 +47,7 @@ tempfile.workspace = true
 tokio.workspace = true
 datafusion-common.workspace = true
 arrow-array.workspace = true
-utilities.workspace = true
+utilities = { workspace = true, features = ["test-helpers"] }
 env_logger.workspace = true
 parquet.workspace = true
 tokio-util.workspace = true
