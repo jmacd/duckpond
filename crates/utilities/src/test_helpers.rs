@@ -399,11 +399,13 @@ pub struct TestSchemas;
 
 impl TestSchemas {
     /// Sensor data schema: timestamp, sensor_id, temperature, humidity
+    #[must_use]
     pub fn sensor_data() -> Arc<Schema> {
         SensorBatchBuilder::standard_sensor_schema()
     }
 
     /// Simple table schema: id, name, value
+    #[must_use]
     pub fn simple_table() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
@@ -413,6 +415,7 @@ impl TestSchemas {
     }
 
     /// Timeseries schema: timestamp, value
+    #[must_use]
     pub fn timeseries() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new(
@@ -425,6 +428,7 @@ impl TestSchemas {
     }
 
     /// Multi-sensor schema: timestamp, site_id, sensor_id, value
+    #[must_use]
     pub fn multi_sensor() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new(

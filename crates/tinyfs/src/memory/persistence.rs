@@ -280,7 +280,7 @@ impl State {
 
         self.file_versions
             .entry(id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(file_version);
 
         Ok(())
@@ -364,7 +364,7 @@ impl State {
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("positive")
             .as_micros() as i64;
 
         let version = MemoryFileVersion {
@@ -377,7 +377,7 @@ impl State {
 
         self.file_versions
             .entry(id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(version);
 
         // Create a dummy node - actual factory instantiation happens on read

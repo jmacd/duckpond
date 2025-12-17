@@ -11,7 +11,7 @@ pub(crate) enum WildcardComponent {
         index: usize,
     },
     /// A wildcard component supporting multiple wildcards
-    /// 
+    ///
     /// Pattern is split by '*' into literal segments that must appear in order.
     /// Examples:
     /// - "*VuLink*" -> ["", "VuLink", ""]
@@ -45,7 +45,7 @@ impl WildcardComponent {
             WildcardComponent::Wildcard { segments, .. } => {
                 // Match name against pattern segments
                 // Capture ALL parts matched by wildcards
-                
+
                 if segments.is_empty() {
                     // Just "*" - matches everything
                     return Some(vec![name.to_string()]);
@@ -55,7 +55,7 @@ impl WildcardComponent {
                 let mut captures = Vec::new();
 
                 // For each wildcard (between segments), capture what it matched
-                
+
                 // Handle first segment
                 if !segments[0].is_empty() {
                     // Pattern starts with literal (e.g., "file*.txt")
@@ -71,7 +71,7 @@ impl WildcardComponent {
                 // Process remaining segments and capture wildcards between them
                 for (i, segment) in segments.iter().enumerate().skip(1) {
                     let capture_start = pos;
-                    
+
                     if !segment.is_empty() {
                         // Find this literal in the remaining name
                         if let Some(found_at) = name[pos..].find(segment) {
@@ -92,10 +92,11 @@ impl WildcardComponent {
                 }
 
                 // Check if we matched the entire name for patterns ending with a literal
-                if !segments.is_empty() && !segments.last().unwrap().is_empty() {
-                    if pos != name.len() {
-                        return None; // Didn't consume entire name
-                    }
+                if let Some(last) = segments.last()
+                    && !last.is_empty()
+                    && pos != name.len()
+                {
+                    return None; // Didn't consume entire name
                 }
 
                 // For segments.len() == 1, there's one wildcard at the end
@@ -107,7 +108,7 @@ impl WildcardComponent {
             }
             WildcardComponent::Normal(pattern) => {
                 if name == pattern {
-                    Some(vec![])  // No wildcards, no captures
+                    Some(vec![]) // No wildcards, no captures
                 } else {
                     None
                 }
@@ -160,10 +161,7 @@ pub(crate) fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIter
 
         if component_str.contains('*') {
             // Split by '*' to get literal segments
-            let segments: Vec<String> = component_str
-                .split('*')
-                .map(|s| s.to_string())
-                .collect();
+            let segments: Vec<String> = component_str.split('*').map(|s| s.to_string()).collect();
 
             components.push(WildcardComponent::Wildcard {
                 segments,
@@ -199,7 +197,7 @@ mod tests {
             segments: vec!["file".to_string(), ".txt".to_string()],
             index: 0,
         };
-        
+
         // Should capture what's between "file" and ".txt"
         assert_eq!(
             comp.match_component("file1.txt"),
@@ -220,7 +218,7 @@ mod tests {
             segments: vec!["".to_string(), "VuLink".to_string(), "".to_string()],
             index: 0,
         };
-        
+
         assert_eq!(
             comp.match_component("HydroVu_FB-VuLink1.htm"),
             Some(vec!["HydroVu_FB-".to_string(), "1.htm".to_string()])
@@ -300,7 +298,10 @@ mod tests {
         assert_eq!(components.len(), 2);
 
         if let WildcardComponent::Wildcard { segments, .. } = &components[1] {
-            assert_eq!(segments, &vec!["file".to_string(), ".".to_string(), "".to_string()]);
+            assert_eq!(
+                segments,
+                &vec!["file".to_string(), ".".to_string(), "".to_string()]
+            );
         } else {
             panic!("Expected wildcard component");
         }
@@ -323,19 +324,19 @@ mod tests {
             segments: vec!["".to_string(), ".template".to_string()],
             index: 0,
         };
-        
+
         // Should capture "hello", not "hello.template"
         assert_eq!(
             comp.match_component("hello.template"),
             Some(vec!["hello".to_string()])
         );
-        
+
         // Should capture "world", not "world.template"
         assert_eq!(
             comp.match_component("world.template"),
             Some(vec!["world".to_string()])
         );
-        
+
         // Should not match files without .template suffix
         assert_eq!(comp.match_component("hello.txt"), None);
     }
@@ -348,24 +349,21 @@ mod tests {
             segments: vec!["file".to_string(), "".to_string()],
             index: 0,
         };
-        
+
         // Should capture "name.txt", not "filename.txt"
         assert_eq!(
             comp.match_component("filename.txt"),
             Some(vec!["name.txt".to_string()])
         );
-        
+
         // Should capture "123", not "file123"
         assert_eq!(
             comp.match_component("file123"),
             Some(vec!["123".to_string()])
         );
-        
+
         // Should capture empty string for exact match
-        assert_eq!(
-            comp.match_component("file"),
-            Some(vec!["".to_string()])
-        );
+        assert_eq!(comp.match_component("file"), Some(vec!["".to_string()]));
     }
 
     #[test]
@@ -376,19 +374,19 @@ mod tests {
             segments: vec!["file".to_string(), ".txt".to_string()],
             index: 0,
         };
-        
+
         // Should capture "name", not "filename.txt"
         assert_eq!(
             comp.match_component("filename.txt"),
             Some(vec!["name".to_string()])
         );
-        
+
         // Should capture "123", not "file123.txt"
         assert_eq!(
             comp.match_component("file123.txt"),
             Some(vec!["123".to_string()])
         );
-        
+
         // Should not match wrong extension
         assert_eq!(comp.match_component("filename.csv"), None);
     }
@@ -401,13 +399,13 @@ mod tests {
             segments: vec![],
             index: 0,
         };
-        
+
         // Should capture full filename
         assert_eq!(
             comp.match_component("anything.txt"),
             Some(vec!["anything.txt".to_string()])
         );
-        
+
         assert_eq!(
             comp.match_component("hello.template"),
             Some(vec!["hello.template".to_string()])
@@ -422,19 +420,19 @@ mod tests {
             segments: vec!["data".to_string(), ".csv".to_string()],
             index: 0,
         };
-        
+
         // Should capture "1", not "data1.csv"
         assert_eq!(
             comp.match_component("data1.csv"),
             Some(vec!["1".to_string()])
         );
-        
+
         // Should capture "123", not "data123.csv"
         assert_eq!(
             comp.match_component("data123.csv"),
             Some(vec!["123".to_string()])
         );
-        
+
         // Should not match wrong prefix
         assert_eq!(comp.match_component("file1.csv"), None);
     }

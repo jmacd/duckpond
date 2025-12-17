@@ -69,6 +69,7 @@ impl ProviderContext {
     }
 
     /// Get cached TableProvider by cache key
+    #[must_use]
     pub fn get_table_provider_cache(
         &self,
         key: &str,
@@ -91,6 +92,7 @@ impl ProviderContext {
     }
 
     /// Create a filesystem from the persistence layer
+    #[must_use]
     pub fn filesystem(&self) -> crate::FS {
         crate::FS::from_arc(self.persistence.clone())
     }
