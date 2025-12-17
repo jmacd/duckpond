@@ -227,9 +227,12 @@ impl HybridWriter {
         let content = if self.total_written >= LARGE_FILE_THRESHOLD {
             debug!("Large file: moving temp file to external storage");
             // Large file: move temp file to final location
-            let temp_path = self
-                .temp_path
-                .ok_or_else(|| std::io::Error::other("No temp file created for large file"))?;
+            let temp_path = self.temp_path.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "No temp file created for large file",
+                )
+            })?;
 
             let large_files_dir = self.pond_path.join("_large_files");
             tokio::fs::create_dir_all(&large_files_dir).await?;
@@ -322,7 +325,10 @@ impl AsyncWrite for HybridWriter {
 
             result
         } else {
-            Poll::Ready(Err(std::io::Error::other("Writer in invalid state")))
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Writer in invalid state",
+            )))
         }
     }
 

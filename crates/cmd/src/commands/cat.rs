@@ -176,7 +176,7 @@ async fn cat_provider_url(
         let temp_ctx = datafusion::prelude::SessionContext::new();
         for (i, tp) in table_providers.iter().enumerate() {
             let _ = temp_ctx
-                .register_table(format!("t{}", i), tp.clone())
+                .register_table(&format!("t{}", i), tp.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to register table t{}: {}", i, e))?;
         }
 
@@ -414,6 +414,9 @@ async fn cat_impl(
 }
 
 /// Write RecordBatch stream as parquet format to output (streaming, low memory)
+
+// DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
+// Stream copy function for non-display mode
 async fn stream_file_to_stdout(
     root: &tinyfs::WD,
     path: &str,

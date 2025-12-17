@@ -132,7 +132,10 @@ impl FormatProvider for CsvProvider {
         // This is acceptable - schema inference typically needs to see the full dataset anyway
         let mut bytes = Vec::new();
         let mut reader = reader;
-        let _ = reader.read_to_end(&mut bytes).await.map_err(Error::Io)?;
+        let _ = reader
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(Error::Io)?;
 
         // Use arrow_csv's infer_schema
         let cursor = std::io::Cursor::new(&bytes);
@@ -490,28 +493,27 @@ mod tests {
 
         // Create parent directories if needed
         if let Some(parent) = std::path::Path::new(path).parent()
-            && parent.to_str() != Some("/")
-            && !parent.as_os_str().is_empty()
+            && parent.to_str() != Some("/") && !parent.as_os_str().is_empty()
         {
             // Create each directory in the path
             let path_parts: Vec<_> = parent
-                .components()
-                .filter_map(|c| match c {
-                    std::path::Component::Normal(name) => name.to_str(),
-                    _ => None,
-                })
-                .collect();
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(name) => name.to_str(),
+                        _ => None,
+                    })
+                    .collect();
 
-            let mut current_path = String::from("/");
-            for part in path_parts {
-                if !current_path.ends_with('/') {
-                    current_path.push('/');
+                let mut current_path = String::from("/");
+                for part in path_parts {
+                    if !current_path.ends_with('/') {
+                        current_path.push('/');
+                    }
+                    current_path.push_str(part);
+
+                    // Try to create directory, ignore if already exists
+                    let _ = root.create_dir_path(&current_path).await;
                 }
-                current_path.push_str(part);
-
-                // Try to create directory, ignore if already exists
-                let _ = root.create_dir_path(&current_path).await;
-            }
         }
 
         // Generate CSV data using InfiniteCsvFile

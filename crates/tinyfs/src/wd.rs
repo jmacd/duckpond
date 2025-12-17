@@ -667,20 +667,21 @@ impl WD {
                             && let Some(child) = self.dref.get(&entry.name).await?
                         {
                             debug!("🔍 Wildcard pattern: loaded child '{}'", entry.name);
-                            // Add all captures from this wildcard component
-                            let captures_count = wildcard_captures.len();
-                            captured.extend(wildcard_captures);
-                            self.visit_match_with_visitor(
-                                child, false, pattern, visited, captured, stack, results, visitor,
-                            )
-                            .await?;
-                            // Remove all captures we added
-                            for _ in 0..captures_count {
-                                _ = captured.pop();
+                                // Add all captures from this wildcard component
+                                let captures_count = wildcard_captures.len();
+                                captured.extend(wildcard_captures);
+                                self.visit_match_with_visitor(
+                                    child, false, pattern, visited, captured, stack, results,
+                                    visitor,
+                                )
+                                .await?;
+                                // Remove all captures we added
+                                for _ in 0..captures_count {
+                                    _ = captured.pop();
+                                }
                             }
                         }
                     }
-                }
                 WildcardComponent::DoubleWildcard { .. } => {
                     // For DoubleWildcard, we need to handle two cases:
                     // 1. Match zero directories (current directory) - continue with next pattern component

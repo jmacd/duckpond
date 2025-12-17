@@ -351,7 +351,10 @@ impl TimeseriesJoinFile {
                 .scope
                 .clone()
                 .unwrap_or_else(|| format!("_none_{}", i));
-            scope_groups.entry(scope_key).or_default().push(i);
+            scope_groups
+                .entry(scope_key)
+                .or_default()
+                .push(i);
         }
 
         log::debug!(
@@ -688,7 +691,9 @@ mod tests {
         let file_id = node_path.id();
 
         // Store in persistence (version 1 for MemoryPersistence)
-        persistence.store_file_version(file_id, 1, content).await?;
+        persistence
+            .store_file_version(file_id, 1, content)
+            .await?;
 
         Ok(file_id)
     }

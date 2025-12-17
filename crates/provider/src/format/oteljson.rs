@@ -98,7 +98,10 @@ async fn discover_schema(reader: Pin<Box<dyn AsyncRead + Send>>) -> Result<Schem
 
     loop {
         line.clear();
-        let bytes_read = reader.read_line(&mut line).await.map_err(Error::Io)?;
+        let bytes_read = reader
+            .read_line(&mut line)
+            .await
+            .map_err(Error::Io)?;
 
         if bytes_read == 0 {
             break; // EOF
@@ -225,7 +228,10 @@ impl FormatProvider for OtelJsonProvider {
 
         loop {
             line.clear();
-            let bytes_read = reader.read_line(&mut line).await.map_err(Error::Io)?;
+            let bytes_read = reader
+                .read_line(&mut line)
+                .await
+                .map_err(Error::Io)?;
 
             if bytes_read == 0 {
                 break; // EOF
