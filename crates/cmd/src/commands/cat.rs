@@ -151,16 +151,63 @@ async fn cat_provider_url(
     // Create DataFusion session context
     let ctx = datafusion::prelude::SessionContext::new();
 
-    // Create TableProvider from URL
-    let table_provider = provider
-        .create_table_provider(url, &ctx)
+    // Collect table providers for all matches (handles both wildcards and single files)
+    let mut table_providers = Vec::new();
+    let match_count = provider
+        .for_each_match(url, |table_provider, file_path| {
+            debug!("Matched file: {}", file_path);
+            table_providers.push(table_provider);
+            async { Ok(()) }
+        })
         .await
         .map_err(|e| {
             anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e)
         })?;
 
-    // Register table with DataFusion
-    let _ = ctx.register_table("series", table_provider)?;
+    debug!("Matched {} file(s) for pattern: {}", match_count, url);
+
+    // Create unified table provider
+    let unified_table_provider = if table_providers.len() == 1 {
+        // Single file - use directly
+        table_providers.into_iter().next().unwrap()
+    } else {
+        // Multiple files - UNION ALL BY NAME
+        let temp_ctx = datafusion::prelude::SessionContext::new();
+        for (i, tp) in table_providers.iter().enumerate() {
+            let _ = temp_ctx
+                .register_table(&format!("t{}", i), tp.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to register table t{}: {}", i, e))?;
+        }
+        
+        let union_sql = (0..table_providers.len())
+            .map(|i| format!("SELECT * FROM t{}", i))
+            .collect::<Vec<_>>()
+            .join(" UNION ALL BY NAME ");
+
+        debug!("Executing union query: {}", union_sql);
+
+        let df = temp_ctx
+            .sql(&union_sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to execute union query: {}", e))?;
+        
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to collect union batches: {}", e))?;
+        
+        let schema = batches.first()
+            .map(|b| b.schema())
+            .ok_or_else(|| anyhow::anyhow!("No batches in union result"))?;
+        
+        let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
+            .map_err(|e| anyhow::anyhow!("Failed to create MemTable from union: {}", e))?;
+        
+        std::sync::Arc::new(mem_table) as std::sync::Arc<dyn datafusion::catalog::TableProvider>
+    };
+
+    // Register unified table with DataFusion
+    let _ = ctx.register_table("series", unified_table_provider)?;
 
     // Execute SQL query
     let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
