@@ -75,6 +75,21 @@ jobs:
         run: |
           podman build -f Dockerfile -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} .
       
+      - name: Extract binary for direct use
+        run: |
+          mkdir -p ./artifacts
+          CONTAINER_ID=$(podman create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }})
+          podman cp $CONTAINER_ID:/usr/local/bin/pond ./artifacts/pond
+          podman rm $CONTAINER_ID
+          chmod +x ./artifacts/pond
+      
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pond-linux-x86_64
+          path: ./artifacts/pond
+          retention-days: 90
+      
       - name: Push container image
         if: github.event_name != 'pull_request'
         run: |

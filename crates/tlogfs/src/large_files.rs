@@ -228,8 +228,7 @@ impl HybridWriter {
             debug!("Large file: moving temp file to external storage");
             // Large file: move temp file to final location
             let temp_path = self.temp_path.ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                std::io::Error::other(
                     "No temp file created for large file",
                 )
             })?;
@@ -325,8 +324,7 @@ impl AsyncWrite for HybridWriter {
 
             result
         } else {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Poll::Ready(Err(std::io::Error::other(
                 "Writer in invalid state",
             )))
         }

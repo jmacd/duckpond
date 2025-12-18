@@ -3902,10 +3902,10 @@ query: ""
             table_mappings: Option<&HashMap<String, String>>,
             source_replacement: Option<&str>,
         ) {
-            if let DFStatement::Statement(boxed) = statement {
-                if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut() {
-                    replace_table_names_in_query(query, table_mappings, source_replacement);
-                }
+            if let DFStatement::Statement(boxed) = statement
+                && let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut()
+            {
+                replace_table_names_in_query(query, table_mappings, source_replacement);
             }
         }
 
