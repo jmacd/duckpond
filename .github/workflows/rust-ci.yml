@@ -34,10 +34,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       
       - name: Build
-        run: cargo build --verbose --workspace
+        run: cargo build --workspace
       
       - name: Run tests
-        run: cargo test --verbose --workspace
+        run: cargo test --all --workspace
 
   build-pond-cli:
     name: Build & Publish Container
