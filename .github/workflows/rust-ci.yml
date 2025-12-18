@@ -3,16 +3,20 @@ name: Rust CI
 on:
   push:
     branches: [ "main", "jmacd/*" ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 env:
-  CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/duckpond
 
 jobs:
-  build:
-    name: Build
+  check:
+    name: Check, Build & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,122 +25,57 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88
+          components: rustfmt, clippy
       
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
+      - name: Check formatting
+        run: cargo fmt --all -- --check
       
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-git-
-      
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-target-
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       
       - name: Build
         run: cargo build --verbose --workspace
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
-      
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-      
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-git-
-      
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-target-
       
       - name: Run tests
         run: cargo test --verbose --workspace
 
-  clippy:
-    name: Clippy
+  build-pond-cli:
+    name: Build & Publish Container
+    needs: check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
       
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
-          components: clippy
+      - name: Set up Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install podman
       
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-git-
+      - name: Extract metadata
+        id: meta
+        run: |
+          IMAGE_ID=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
+          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+          [ "$VERSION" == "main" ] && VERSION=latest
+          echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
       
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-target-
+      - name: Build container image
+        run: |
+          podman build -f Dockerfile -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} .
       
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
-          components: rustfmt
-      
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Push container image
+        if: github.event_name != 'pull_request'
+        run: |
+          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
