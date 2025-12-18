@@ -2,7 +2,7 @@ name: Rust CI
 
 on:
   push:
-    branches: [ "main", "jmacd/*" ]
+    branches: [ "main" ]
     tags:
       - 'v*'
   pull_request:
