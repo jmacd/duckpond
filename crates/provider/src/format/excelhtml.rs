@@ -113,7 +113,8 @@ fn parse_table_data(
         .nodes()
         .iter()
         .filter_map(|node| {
-            node.as_tag().filter(|&tag| tag.name().as_utf8_str() == "tr")
+            node.as_tag()
+                .filter(|&tag| tag.name().as_utf8_str() == "tr")
         })
         .collect();
 

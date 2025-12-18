@@ -3903,8 +3903,7 @@ query: ""
             source_replacement: Option<&str>,
         ) {
             if let DFStatement::Statement(boxed) = statement {
-                if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut()
-                {
+                if let datafusion::sql::sqlparser::ast::Statement::Query(query) = boxed.as_mut() {
                     replace_table_names_in_query(query, table_mappings, source_replacement);
                 }
             }
@@ -3994,8 +3993,7 @@ query: ""
                 } else if let Some(replacement) = source_replacement
                     && table_name == "source"
                 {
-                    *name =
-                        ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
+                    *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(replacement))]);
                 }
             } else if let TableFactor::Derived { subquery, .. } = table_factor {
                 replace_table_names_in_query(subquery, table_mappings, source_replacement);

@@ -173,7 +173,8 @@ mod tests {
 
         // Create parent directories
         if let Some(parent) = std::path::Path::new(path).parent()
-            && parent.to_str() != Some("/") && !parent.as_os_str().is_empty()
+            && parent.to_str() != Some("/")
+            && !parent.as_os_str().is_empty()
         {
             let path_parts: Vec<_> = parent
                 .components()
