@@ -1,0 +1,28 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: duckpond
+Upstream-Contact: Caspar Water Company
+Source: https://github.com/jmacd/duckpond
+
+Files: crates/**/*.rs original/**/*.rs
+Copyright: Caspar Water Company
+License: Apache-2.0
+
+Files: *.toml *.lock *.md *.yml *.yaml *.sh *.txt *.tmpl Dockerfile Makefile
+Copyright: Caspar Water Company
+License: Apache-2.0
+
+Files: **/*.toml **/*.lock **/*.md **/*.yml **/*.yaml **/*.sh **/*.txt **/*.tmpl
+Copyright: Caspar Water Company
+License: Apache-2.0
+
+Files: noyo/* original/src/config/**/* pond/* export/* inbox/* history/* sample-*/*
+Copyright: Caspar Water Company
+License: Apache-2.0
+
+Files: *.jpg *.png *.parquet OUT* CLIPPY DIFF ORIG WHATIS .dockerignore .gitignore
+Copyright: Caspar Water Company
+License: CC0-1.0
+
+Files: target/* .git/* arrow-rs/* datafusion-rs/* delta-rs/* linkme-rs/* object_store-rs/* opentelemetry-rs/* oxidizer-rs/* peak_alloc-rs/* serde_arrow-rs/* tera-rs/* tokio-tar-rs/*
+Copyright: None
+License: CC0-1.0
