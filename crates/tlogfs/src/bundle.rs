@@ -1,45 +1,8 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bundle creation for remote backups
-//!
-//! This module provides streaming tar+zstd compression for creating backup bundles.
-//! Bundles are written directly to object storage (local filesystem or S3) without
-//! creating temporary files.
-//!
-//! # Architecture
-//!
-//! ```text
-//! AsyncRead (file) → tar → zstd → object_store
-//!                    ↓      ↓         ↓
-//!                  stream  compress  upload
-//! ```
-//!
-//! # Usage
-//!
-//! ```rust,no_run
-//! use tlogfs::bundle::{BundleBuilder, BundleFile};
-//! use object_store::local::LocalFileSystem;
-//! use std::sync::Arc;
-//!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut builder = BundleBuilder::new();
-//!
-//! // Add files with async readers
-//! builder.add_file(
-//!     "/data/file1.csv",
-//!     1024,
-//!     tokio::io::empty(), // Replace with actual AsyncRead
-//! )?;
-//!
-//! // Write bundle to local filesystem (or S3)
-//! let store = Arc::new(LocalFileSystem::new());
-//! let metadata = builder.write_to_store(
-//!     store,
-//!     &object_store::path::Path::from("bundle.tar.zst")
-//! ).await?;
-//!
-//! println!("Bundle created: {} bytes", metadata.compressed_size);
-//! # Ok(())
-//! # }
-//! ```
 
 use crate::error::TLogFSError;
 use async_compression::tokio::write::ZstdEncoder;
@@ -51,17 +14,17 @@ use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio_tar as tar;
 
 /// A file to be included in a bundle
-pub struct BundleFile {
+pub(crate) struct BundleFile {
     /// Logical path within the bundle (e.g., "/data/file.csv")
-    pub path: String,
+    path: String,
     /// Size in bytes (must be known upfront for tar header)
-    pub size: u64,
+    size: u64,
     /// Async reader for file content
-    pub reader: Box<dyn AsyncRead + Send + Unpin>,
+    reader: Box<dyn AsyncRead + Send + Unpin>,
 }
 
 /// Builder for creating tar+zstd compressed bundles
-pub struct BundleBuilder {
+pub(crate) struct BundleBuilder {
     files: Vec<BundleFile>,
     metadata: BundleMetadata,
 }
@@ -98,7 +61,7 @@ pub struct BundleFileInfo {
 impl BundleBuilder {
     /// Create a new bundle builder
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             files: Vec::new(),
             metadata: BundleMetadata {
@@ -119,7 +82,7 @@ impl BundleBuilder {
     /// * `path` - Logical path within the bundle (e.g., "/data/file.csv")
     /// * `size` - File size in bytes (must be known upfront for tar)
     /// * `reader` - Async reader providing file content
-    pub fn add_file(
+    pub(crate) fn add_file(
         &mut self,
         path: impl Into<String>,
         size: u64,
@@ -152,14 +115,14 @@ impl BundleBuilder {
 
     /// Set the zstd compression level (0-21, default 3)
     #[must_use]
-    pub fn compression_level(mut self, level: i32) -> Self {
+    pub(crate) fn compression_level(mut self, level: i32) -> Self {
         self.metadata.compression_level = level;
         self
     }
 
     /// Set the CLI args that created this bundle's transaction
     #[must_use]
-    pub fn cli_args(mut self, args: Vec<String>) -> Self {
+    pub(crate) fn cli_args(mut self, args: Vec<String>) -> Self {
         self.metadata.cli_args = args;
         self
     }
@@ -178,7 +141,7 @@ impl BundleBuilder {
     ///
     /// # Returns
     /// BundleMetadata with final compressed size
-    pub async fn write_to_store(
+    pub(crate) async fn write_to_store(
         mut self,
         store: Arc<dyn ObjectStore>,
         path: &Path,

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! HydroVu executable factory
 //!
 //! This factory creates run configuration nodes for HydroVu data collection.
@@ -7,10 +11,11 @@
 
 use crate::HydroVuConfig;
 use clap::Parser;
+use provider::FactoryContext;
+use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
 use tlogfs::TLogFSError;
-use tlogfs::factory::{ExecutionMode, FactoryCommand, FactoryContext};
 
 /// HydroVu command-line interface
 #[derive(Debug, Parser)]
@@ -66,12 +71,6 @@ fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
                 device.id
             )));
         }
-        if device.scope.is_empty() {
-            return Err(tinyfs::Error::InvalidConfig(format!(
-                "Device scope cannot be empty for device ID {}",
-                device.id
-            )));
-        }
     }
 
     if config.max_points_per_run == 0 {
@@ -106,8 +105,11 @@ async fn create_directory_structure(
 ) -> TinyFSResult<()> {
     log::debug!("Creating HydroVu directory structure");
 
+    // Extract State from provider context
+    let state = tlogfs::extract_state(context).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
     // Create FS from State - this is SAFE here because create_dynamic_file_node has returned and released its lock
-    let fs = tinyfs::FS::new(context.state.clone()).await?;
+    let fs = tinyfs::FS::new(state.clone()).await?;
 
     let root = fs.root().await?;
 
@@ -142,12 +144,12 @@ async fn create_directory_structure(
 async fn execute_hydrovu(
     config: Value,
     context: FactoryContext,
-    ctx: tlogfs::factory::ExecutionContext,
+    ctx: ExecutionContext,
 ) -> Result<(), TLogFSError> {
     log::info!("🌊 HYDROVU FACTORY");
     log::info!("   Context: {:?}", ctx);
 
-    let cmd: HydroVuCommand = ctx.to_command()?;
+    let cmd: HydroVuCommand = ctx.to_command::<HydroVuCommand, TLogFSError>()?;
 
     log::info!("   Command: {:?}", cmd);
 
@@ -184,21 +186,21 @@ async fn execute_collect(
             )))
         })?;
 
+    // Extract State from provider context
+    let state = tlogfs::extract_state(&context)?;
+
     // Create filesystem from state
-    let fs = tinyfs::FS::new(context.state.clone())
+    let fs = tinyfs::FS::new(state.clone())
         .await
         .map_err(TLogFSError::TinyFS)?;
 
     // Run collection within the existing transaction
-    let result = collector
-        .collect_data(&context.state, &fs)
-        .await
-        .map_err(|e| {
-            TLogFSError::TinyFS(tinyfs::Error::Other(format!(
-                "HydroVu data collection failed: {}",
-                e
-            )))
-        })?;
+    let result = collector.collect_data(&state, &fs).await.map_err(|e| {
+        TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+            "HydroVu data collection failed: {}",
+            e
+        )))
+    })?;
 
     // Print summary for each device
     for summary in &result.device_summaries {
@@ -229,7 +231,7 @@ async fn execute_collect(
 // Register the factory
 // Note: No file parameter - executable factories don't need create_file
 // Config bytes ARE the file content (YAML), handled by ConfigFile wrapper
-tlogfs::register_executable_factory!(
+provider::register_executable_factory!(
     name: "hydrovu",
     description: "HydroVu data collector configuration",
     validate: validate_hydrovu_config,

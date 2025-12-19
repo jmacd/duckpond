@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{Result, anyhow};
 
 use crate::common::{ShipContext, format_node_id};
@@ -226,7 +230,7 @@ async fn show_brief_mode(
 
     // Build path map from all matched entries
     for (node_path, _captured) in matches {
-        let node_id = node_path.id().await;
+        let node_id = node_path.id();
         let path = node_path.path();
         let node_id_str = node_id.to_string();
 
@@ -236,7 +240,7 @@ async fn show_brief_mode(
     }
 
     // Also add the root directory
-    let root_node_id = root.node_path().id().await;
+    let root_node_id = root.node_path().id();
     if let Some(stats) = partition_map.get_mut(&root_node_id.to_string()) {
         stats.path_name = Some("/".to_string());
     }
@@ -418,14 +422,14 @@ async fn show_detailed_mode(
 
     // Build path map from all matched entries
     for (node_path, _captured) in matches {
-        let node_id = node_path.id().await;
+        let node_id = node_path.id();
         let path = node_path.path();
         let node_id_str = node_id.to_string();
         _ = path_map.insert(node_id_str, path.to_string_lossy().to_string());
     }
 
     // Also add the root directory
-    let root_node_id = root.node_path().id().await;
+    let root_node_id = root.node_path().id();
     _ = path_map.insert(root_node_id.to_string(), "/".to_string());
 
     // Query ALL operations in a single query, ordered by transaction (newest first)
@@ -700,8 +704,14 @@ fn format_operations_from_batches(
 
         // Format each row
         for i in 0..batch.num_rows() {
-            let part_id = part_ids.value(i).to_string();
-            let node_id = node_ids.value(i);
+            let part_id_str = part_ids.value(i);
+            let part_id = tinyfs::PartID::from_hex_string(part_id_str).map_err(|e| {
+                steward::StewardError::Dyn(format!("Invalid part_id: {}", e).into())
+            })?;
+            let node_id_str = node_ids.value(i);
+            let node_id = tinyfs::NodeID::from_hex_string(node_id_str).map_err(|e| {
+                steward::StewardError::Dyn(format!("Invalid node_id: {}", e).into())
+            })?;
             let file_type = file_types.value(i);
             let version = versions.value(i);
             let size = if sizes.is_null(i) { -1 } else { sizes.value(i) };
@@ -744,7 +754,7 @@ fn format_operations_from_batches(
 
             let operation = format!(
                 "Node {} {} v{}{}",
-                format_node_id(node_id),
+                format_node_id(&node_id),
                 file_type,
                 version,
                 detail_display
@@ -756,7 +766,9 @@ fn format_operations_from_batches(
                 .map(|entry| format!("{} → {}", entry.name, format_node_id(&entry.child_node_id)))
                 .collect();
 
-            let part_entry = partition_groups.entry(part_id).or_default();
+            // Group by partition (directory) - use PartID for grouping
+            let part_key = part_id.to_string();
+            let part_entry = partition_groups.entry(part_key).or_default();
             part_entry.push((operation, entry_strings));
         }
     }
@@ -766,16 +778,24 @@ fn format_operations_from_batches(
     let mut sorted_partitions: Vec<_> = partition_groups.into_iter().collect();
     sorted_partitions.sort_by_key(|(part_id, _)| part_id.clone());
 
-    for (part_id, ops) in sorted_partitions {
+    for (part_id_str, ops) in sorted_partitions {
+        // Parse part_id string back to PartID to construct directory FileID
+        let part_id = tinyfs::PartID::from_hex_string(&part_id_str).map_err(|e| {
+            steward::StewardError::Dyn(format!("Invalid part_id in map: {}", e).into())
+        })?;
+
+        // For directory partitions, the FileID is self-partitioned (part_id == node_id)
+        let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(part_id.to_node_id());
+
         let path_display = path_map
-            .get(&part_id)
+            .get(&dir_file_id.to_string())
             .map(|s| s.as_str())
             .unwrap_or("<unknown>");
 
         // Add partition label (not indented)
         result.push(format!(
             "  Partition {} {}:",
-            format_node_id(&part_id),
+            format_node_id(&part_id_str),
             path_display
         ));
 
@@ -809,11 +829,9 @@ fn format_operations_from_batches(
 }
 
 /// Decode directory content and return entries with their names and node IDs
-fn decode_directory_entries(
-    content_bytes: &[u8],
-) -> Result<Vec<tlogfs::schema::VersionedDirectoryEntry>, String> {
+fn decode_directory_entries(content_bytes: &[u8]) -> Result<Vec<tlogfs::DirectoryEntry>, String> {
     // Use the public helper from tlogfs
-    let entries = tlogfs::schema::decode_versioned_directory_entries(content_bytes)
+    let entries = tlogfs::schema::decode_directory_entries(content_bytes)
         .map_err(|e| format!("Failed to decode: {}", e))?;
 
     Ok(entries)

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tests for large Parquet file storage integration
 //!
 //! These tests verify that large Parquet files are handled correctly

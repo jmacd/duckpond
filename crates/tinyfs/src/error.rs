@@ -1,39 +1,51 @@
-use std::cell::BorrowMutError;
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+use crate::node::FileID;
 use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Represents errors that can occur in filesystem operations
-/// TODO: thiserror
-#[derive(Debug, Clone, PartialEq)]
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub enum Error {
-    NotFound(PathBuf),
-    NotADirectory(PathBuf),
-    NotAFile(PathBuf),
-    NotASymlink(PathBuf),
-    PrefixNotSupported(PathBuf),
-    RootPathFromNonRoot(PathBuf),
-    ParentPathInvalid(PathBuf),
-    EmptyPath,
-    Immutable(PathBuf),
+    #[error("AlreadyExists: {0}")]
     AlreadyExists(PathBuf),
-    SymlinkLoop(PathBuf),
-    VisitLoop(PathBuf),
-    Borrow(String), // TODO: should be BorrowMutError
-
-    /// General error with custom message
-    /// @@@ How to Box?
-    Other(String),
-
-    InvalidConfig(String),
-
-    /// Component contains multiple wildcards (only one '*' is allowed)
-    MultipleWildcards(String),
-
-    /// Path component could not be converted to string
-    InvalidComponent(PathBuf),
-
+    #[error("EmptyPath")]
+    EmptyPath,
+    #[error("IDNotFound: {0}")]
+    IDNotFound(FileID),
+    #[error("Immutable: {0}")]
+    Immutable(PathBuf),
+    #[error("Internal: {0}")]
     Internal(String),
+    #[error("InvalidComponent: {0}")]
+    InvalidComponent(PathBuf),
+    #[error("InvalidConfig: {0}")]
+    InvalidConfig(String),
+    #[error("MultipleWildcards: {0}")]
+    MultipleWildcards(String),
+    #[error("NotADirectory: {0}")]
+    NotADirectory(PathBuf),
+    #[error("NotAFile: {0}")]
+    NotAFile(PathBuf),
+    #[error("NotASymlink: {0}")]
+    NotASymlink(PathBuf),
+    #[error("NotFound: {0}")]
+    NotFound(PathBuf),
+    #[error("Other: {0}")]
+    Other(String),
+    #[error("ParentPathInvalid: {0}")]
+    ParentPathInvalid(PathBuf),
+    #[error("PrefixNotSupported: {0}")]
+    PrefixNotSupported(PathBuf),
+    #[error("RootPathFromNonRoot: {0}")]
+    RootPathFromNonRoot(PathBuf),
+    #[error("SymlinkLoop: {0}")]
+    SymlinkLoop(PathBuf),
+    #[error("VisitLoop: {0}")]
+    VisitLoop(PathBuf),
 }
 
 impl Error {
@@ -102,44 +114,35 @@ impl Error {
     }
 }
 
-impl From<BorrowMutError> for Error {
-    fn from(err: BorrowMutError) -> Error {
-        Error::Borrow(err.to_string())
-    }
-}
-
-// @@@ ARGH use thiserror
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::NotFound(path) => write!(f, "Path not found: {}", path.display()),
-            Error::NotADirectory(path) => write!(f, "Not a directory: {}", path.display()),
-            Error::NotASymlink(path) => write!(f, "Not a symlink: {}", path.display()),
-            Error::NotAFile(path) => write!(f, "Not a file: {}", path.display()),
-            Error::PrefixNotSupported(path) => {
-                write!(f, "Path prefix not supported: {}", path.display())
-            }
-            Error::RootPathFromNonRoot(path) => {
-                write!(f, "Can't resolve root path: {}", path.display())
-            }
-            Error::ParentPathInvalid(path) => {
-                write!(f, "Parent path invalid: {}", path.display())
-            }
-            Error::Immutable(path) => {
-                write!(f, "Immutable path: {}", path.display())
-            }
-            Error::EmptyPath => write!(f, "Path is empty"),
-            Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
-            Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
-            Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),
-            Error::Borrow(err) => write!(f, "Object being modified: {}", err),
-            Error::Other(msg) => write!(f, "Error: {}", msg),
-            Error::InvalidConfig(msg) => write!(f, "Invalid config: {}", msg),
-            Error::MultipleWildcards(part) => write!(f, "Multiple wildcards: {}", part),
-            Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
-            Error::Internal(msg) => write!(f, "Internal error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
+// impl std::fmt::Display for Error {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         match self {
+// 	    Error::IDNotFound(id) => write!(f, "ID not found: {id:?}"),
+//             Error::NotFound(path) => write!(f, "Path not found: {}", path.display()),
+//             Error::NotADirectory(path) => write!(f, "Not a directory: {}", path.display()),
+//             Error::NotASymlink(path) => write!(f, "Not a symlink: {}", path.display()),
+//             Error::NotAFile(path) => write!(f, "Not a file: {}", path.display()),
+//             Error::PrefixNotSupported(path) => {
+//                 write!(f, "Path prefix not supported: {}", path.display())
+//             }
+//             Error::RootPathFromNonRoot(path) => {
+//                 write!(f, "Can't resolve root path: {}", path.display())
+//             }
+//             Error::ParentPathInvalid(path) => {
+//                 write!(f, "Parent path invalid: {}", path.display())
+//             }
+//             Error::Immutable(path) => {
+//                 write!(f, "Immutable path: {}", path.display())
+//             }
+//             Error::EmptyPath => write!(f, "Path is empty"),
+//             Error::AlreadyExists(path) => write!(f, "Entry already exists: {}", path.display()),
+//             Error::SymlinkLoop(path) => write!(f, "Too many symbolic links: {}", path.display()),
+//             Error::VisitLoop(path) => write!(f, "Recursive visit to self: {}", path.display()),
+//             Error::Other(msg) => write!(f, "Error: {}", msg),
+//             Error::InvalidConfig(msg) => write!(f, "Invalid config: {}", msg),
+//             Error::MultipleWildcards(part) => write!(f, "Multiple wildcards: {}", part),
+//             Error::InvalidComponent(path) => write!(f, "Invalid component: {}", path.display()),
+//             Error::Internal(msg) => write!(f, "Internal error: {}", msg),
+//         }
+//     }
+// }

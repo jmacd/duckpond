@@ -1,11 +1,13 @@
-#![allow(missing_docs)]
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
 use log::debug;
 use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
-use tinyfs::{FS, PersistenceLayer};
-use tlogfs::{FactoryContext, FactoryRegistry};
+use tinyfs::FS;
+use tlogfs::FactoryRegistry;
 
 /// Test that post-commit factories are discovered and executed after a write transaction
 #[tokio::test]
@@ -34,30 +36,35 @@ async fn test_post_commit_factory_execution() -> Result<()> {
     // Create /etc first, then /etc/system.d/ directory
     _ = root1.create_dir_path("/etc").await?;
     _ = root1.create_dir_path("/etc/system.d").await?;
-    let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
-    let parent_node_id = match lookup {
-        tinyfs::Lookup::Found(node_path) => node_path.id().await,
-        _ => anyhow::bail!("Failed to resolve /etc/system.d"),
-    };
 
     // Create a test-executor factory config
     let config_yaml = r#"message: "Post-commit execution test"
 repeat_count: 3
 "#;
 
-    _ = state1
-        .create_dynamic_file_node(
-            parent_node_id,
-            "test-post-commit.yaml".to_string(),
+    // Create executable dynamic file using high-level path-based API
+    // Note: Executable factories use FileDataDynamic, config is the file content
+    let factory_node = root1
+        .create_dynamic_path(
+            "/etc/system.d/test-post-commit.yaml",
             tinyfs::EntryType::FileDataDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
         )
         .await?;
 
+    // Save factory node ID for later use
+    let factory_node_id = factory_node.id();
+
     // Initialize the factory
-    let context1 = FactoryContext::new(state1.clone(), parent_node_id);
-    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context1).await?;
+    let provider_context1 = state1.as_provider_context();
+    let context1 = provider::FactoryContext::new(provider_context1, factory_node_id);
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context1,
+    )
+    .await?;
 
     debug!("DEBUG: About to commit tx1...");
 
@@ -152,8 +159,8 @@ repeat_count: 3
     debug!("✅ Transaction committed, post-commit should have executed");
 
     // Verify the test factory was executed by checking the result file it creates
-    // The test-executor factory writes to /tmp/test-executor-result-{parent_node_id}.txt
-    let result_path = format!("/tmp/test-executor-result-{}.txt", parent_node_id);
+    // The test-executor factory writes to /tmp/test-executor-result-{factory_node_id}.txt
+    let result_path = format!("/tmp/test-executor-result-{}.txt", factory_node_id);
 
     // Give a small delay for file write to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -217,28 +224,29 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
 
     _ = root1.create_dir_path("/etc").await?;
     _ = root1.create_dir_path("/etc/system.d").await?;
-    let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
-    let parent_node_id = match lookup {
-        tinyfs::Lookup::Found(node_path) => node_path.id().await,
-        _ => anyhow::bail!("Failed to resolve /etc/system.d"),
-    };
 
     let config_yaml = r#"message: "Should not execute on read"
 repeat_count: 1
 "#;
 
-    _ = state1
-        .create_dynamic_file_node(
-            parent_node_id,
-            "test-no-execute.yaml".to_string(),
+    // Create dynamic file using high-level path-based API
+    let factory_node = root1
+        .create_dynamic_path(
+            "/etc/system.d/test-no-execute.yaml",
             tinyfs::EntryType::FileDataDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
         )
         .await?;
 
-    let context1 = FactoryContext::new(state1.clone(), parent_node_id);
-    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context1).await?;
+    let provider_context1 = state1.as_provider_context();
+    let context1 = provider::FactoryContext::new(provider_context1, factory_node.id());
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context1,
+    )
+    .await?;
     _ = tx1.commit().await?;
 
     // Now do a read-only transaction using the transact helper
@@ -291,11 +299,6 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
 
     _ = root1.create_dir_path("/etc").await?;
     _ = root1.create_dir_path("/etc/system.d").await?;
-    let (_wd, lookup) = root1.resolve_path("/etc/system.d").await?;
-    let parent_node_id = match lookup {
-        tinyfs::Lookup::Found(node_path) => node_path.id().await,
-        _ => anyhow::bail!("Failed to resolve /etc/system.d"),
-    };
 
     // Create configs with names that will sort alphabetically
     let configs = vec![
@@ -312,18 +315,24 @@ repeat_count: 1
             message
         );
 
-        _ = state1
-            .create_dynamic_file_node(
-                parent_node_id,
-                filename.to_string(),
+        // Create dynamic file using high-level path-based API
+        let factory_node = root1
+            .create_dynamic_path(
+                format!("/etc/system.d/{}", filename),
                 tinyfs::EntryType::FileDataDynamic,
                 "test-executor",
                 config_yaml.as_bytes().to_vec(),
             )
             .await?;
 
-        let context = FactoryContext::new(state1.clone(), parent_node_id);
-        FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context).await?;
+        let provider_context = state1.as_provider_context();
+        let context = provider::FactoryContext::new(provider_context, factory_node.id());
+        FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+            "test-executor",
+            config_yaml.as_bytes(),
+            context,
+        )
+        .await?;
     }
 
     _ = tx1.commit().await?;

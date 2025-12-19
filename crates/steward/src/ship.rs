@@ -1,4 +1,8 @@
-//! Ship - The main steward struct that orchestrates primary and secondary filesystems
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//! Ship - Transaction coordinator managing data filesystem and control table
 
 use crate::{
     RecoveryResult, StewardError, StewardTransactionGuard,
@@ -12,19 +16,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tlogfs::{OpLogPersistence, PondMetadata, PondTxnMetadata, PondUserMetadata};
 
-/// Ship manages both a primary "data" filesystem and a secondary "control" filesystem
-/// It provides the main interface for pond operations while handling post-commit actions
+/// Ship manages the data filesystem (OpLogPersistence) and control table (ControlTable)
+/// providing transaction coordination, audit logging, and post-commit action sequencing
 pub struct Ship {
-    /// Direct access to data persistence layer for transaction operations
     data_persistence: OpLogPersistence,
-    /// Control table for tracking transaction lifecycle and sequencing
     control_table: ControlTable,
-    /// Last committed write transaction sequence number (cached from control table)
-    /// This avoids querying the control table on every transaction.
-    /// Initialized from control table on open, incremented by begin_transaction().
     last_write_seq: i64,
-    /// Path to the pond root (needed to reload data_persistence after commits)
-    /// Is this true? I think data_persistence can reload from its DeltaTable.
     pond_path: PathBuf,
 }
 

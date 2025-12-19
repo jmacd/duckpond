@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Phase 2 TLogFS Schema Implementation - Abstraction Consolidation
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use datafusion::common::Result;
@@ -9,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tinyfs::NodeID;
+use tinyfs::{EntryType, FileID, NodeID, PartID};
 
 /// Extended attributes - immutable metadata set at file creation
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -230,6 +234,19 @@ pub fn compute_sha256(content: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Storage format for OplogEntry content
+/// This field enables forward compatibility for different storage strategies
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum StorageFormat {
+    /// Small files, symlinks, and dynamic nodes - content stored inline in OplogEntry
+    #[serde(rename = "inline")]
+    Inline,
+
+    /// Physical directories - full directory snapshot stored in content field
+    #[serde(rename = "fulldir")]
+    FullDir,
+}
+
 /// Trait for converting data structures to Arrow and Delta Lake schemas
 pub trait ForArrow {
     fn for_arrow() -> Vec<FieldRef>;
@@ -265,13 +282,12 @@ pub trait ForArrow {
 /// This represents a single filesystem operation (create, update, delete)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OplogEntry {
-    /// Hex-encoded partition ID (parent directory for files/symlinks, self for directories)
-    /// TODO Investigate if we can store these as NodeID and serialize as hex string.
-    pub part_id: String,
-    /// Hex-encoded NodeID from TinyFS
-    pub node_id: String,
+    /// Partition ID (parent directory for files/symlinks, self for directories)
+    pub part_id: PartID,
+    /// NodeID from TinyFS
+    pub node_id: NodeID,
     /// Type of filesystem entry (file, directory, or symlink)
-    pub file_type: tinyfs::EntryType,
+    pub file_type: EntryType, // @@@ rename one or other
     /// Timestamp when this node was modified (microseconds since Unix epoch)
     pub timestamp: i64,
     /// Per-node modification version counter (starts at 1, increments on each change)
@@ -306,8 +322,12 @@ pub struct OplogEntry {
     /// For FileSeries: includes timestamp column name and other series metadata
     pub extended_attributes: Option<String>,
 
-    /// Factory type for dynamic files/directories ("tlogfs" for static, "hostmount" for hostmount dynamic dir, etc)
+    /// Factory type for dynamic files/directories
     pub factory: Option<String>,
+
+    /// Storage format for this entry's content
+    /// Determines how to interpret the content field and optimize access patterns
+    pub format: StorageFormat,
 
     /// Transaction sequence number from Steward
     /// This links OpLog records to transaction sequences for chronological ordering
@@ -336,6 +356,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("max_override", DataType::Int64, true)), // Manual override for temporal bounds
             Arc::new(Field::new("extended_attributes", DataType::Utf8, true)), // JSON-encoded application metadata
             Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
+            Arc::new(Field::new("format", DataType::Utf8, false)), // Storage format - required field
             Arc::new(Field::new("txn_seq", DataType::Int64, false)), // Transaction sequence number from Steward (required)
         ]
     }
@@ -351,19 +372,24 @@ impl OplogEntry {
     /// Create entry for small file (<= threshold)
     #[must_use]
     pub fn new_small_file(
-        part_id: NodeID,
-        node_id: NodeID,
-        file_type: tinyfs::EntryType,
+        id: FileID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field - cannot use new_small_file
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+
         let size = content.len() as u64;
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
-            file_type,
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: Some(content.clone()),
@@ -376,6 +402,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            format: StorageFormat::Inline, // Small files use inline storage
             txn_seq,
         }
     }
@@ -384,19 +411,24 @@ impl OplogEntry {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_large_file(
-        part_id: NodeID,
-        node_id: NodeID,
-        file_type: tinyfs::EntryType,
+        id: FileID,
         timestamp: i64,
         version: i64,
         sha256: String,
         size: i64,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
-            file_type,
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: None,
@@ -409,6 +441,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            format: StorageFormat::Inline, // Large files use inline format (content is external)
             txn_seq,
         }
     }
@@ -416,18 +449,23 @@ impl OplogEntry {
     /// Create entry for non-file types (directories, symlinks) - always inline
     #[must_use]
     pub fn new_inline(
-        part_id: NodeID,
-        node_id: NodeID,
-        file_type: tinyfs::EntryType,
+        id: FileID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
-            file_type,
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: Some(content),
@@ -440,6 +478,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: None,
+            format: StorageFormat::Inline, // Symlinks and small metadata use inline storage
             txn_seq,
         }
     }
@@ -461,8 +500,7 @@ impl OplogEntry {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_file_series(
-        part_id: NodeID,
-        node_id: NodeID,
+        id: FileID,
         timestamp: i64,
         version: i64,
         content: Vec<u8>,
@@ -471,11 +509,18 @@ impl OplogEntry {
         extended_attributes: ExtendedAttributes,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+
         let size = content.len() as u64;
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
-            file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: Some(content.clone()),
@@ -487,7 +532,8 @@ impl OplogEntry {
             min_override: None, // No overrides by default
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
-            factory: None, // Physical file, no factory
+            factory: None,                 // Physical file, no factory
+            format: StorageFormat::Inline, // Small FileSeries use inline storage
             txn_seq,
         }
     }
@@ -496,8 +542,7 @@ impl OplogEntry {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_large_file_series(
-        part_id: NodeID,
-        node_id: NodeID,
+        id: FileID,
         timestamp: i64,
         version: i64,
         sha256: String,
@@ -507,10 +552,18 @@ impl OplogEntry {
         extended_attributes: ExtendedAttributes,
         txn_seq: i64,
     ) -> Self {
+        // INVARIANT: Dynamic EntryTypes require factory field
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
+            id.entry_type()
+        );
+        assert_eq!(EntryType::FileSeriesPhysical, id.entry_type());
+
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
-            file_type: tinyfs::EntryType::FileSeriesPhysical, // Physical series file
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: EntryType::FileSeriesPhysical,
             timestamp,
             version,
             content: None,
@@ -522,7 +575,8 @@ impl OplogEntry {
             min_override: None, // No overrides by default
             max_override: None, // No overrides by default
             extended_attributes: Some(extended_attributes.to_json().unwrap_or_default()),
-            factory: None, // Physical file, no factory
+            factory: None,                 // Physical file, no factory
+            format: StorageFormat::Inline, // Large FileSeries use inline format (content is external)
             txn_seq,
         }
     }
@@ -595,25 +649,27 @@ impl OplogEntry {
         }
     }
 
-    /// Create entry for dynamic directory with factory type and configuration
-    /// This is the primary constructor for dynamic nodes as described in the plan
+    /// Create entry for dynamic node with factory type and configuration
     #[must_use]
-    pub fn new_dynamic_directory(
-        part_id: NodeID,
-        node_id: NodeID,
+    pub fn new_dynamic_node(
+        id: FileID,
         timestamp: i64,
         version: i64,
         factory_type: &str,
         config_content: Vec<u8>,
         txn_seq: i64,
     ) -> Self {
+        // For ALL dynamic nodes (both files and directories):
+        // - Config goes in content field (YAML bytes)
+        // - Factory type goes in factory field
+        // - No special encoding needed - just store the raw YAML
         Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
-            file_type: tinyfs::EntryType::DirectoryDynamic, // Use comprehensive type
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
             timestamp,
             version,
-            content: Some(config_content), // Configuration stored in content field
+            content: Some(config_content),
             sha256: None,
             size: None,
             min_event_time: None,
@@ -622,52 +678,7 @@ impl OplogEntry {
             max_override: None,
             extended_attributes: None,
             factory: Some(factory_type.to_string()), // Factory type identifier
-            txn_seq,
-        }
-    }
-
-    /// Create entry for dynamic file with factory type and configuration
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_dynamic_file(
-        part_id: NodeID,
-        node_id: NodeID,
-        file_type: tinyfs::EntryType,
-        timestamp: i64,
-        version: i64,
-        factory_type: &str,
-        config_content: Vec<u8>,
-        txn_seq: i64,
-    ) -> Self {
-        // Convert physical file type to dynamic variant
-        let dynamic_file_type = match file_type {
-            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
-                tinyfs::EntryType::FileDataDynamic
-            }
-            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
-                tinyfs::EntryType::FileTableDynamic
-            }
-            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
-                tinyfs::EntryType::FileSeriesDynamic
-            }
-            _ => file_type, // Leave other types unchanged (though should only be file types)
-        };
-
-        Self {
-            part_id: part_id.to_string(),
-            node_id: node_id.to_string(),
-            file_type: dynamic_file_type,
-            timestamp,
-            version,
-            content: Some(config_content), // Configuration stored in content field
-            sha256: None,
-            size: None, // Dynamic files don't have predetermined size
-            min_event_time: None,
-            max_event_time: None,
-            min_override: None,
-            max_override: None,
-            extended_attributes: None,
-            factory: Some(factory_type.to_string()), // Factory type identifier
+            format: StorageFormat::Inline,           // Config is always inline
             txn_seq,
         }
     }
@@ -675,7 +686,7 @@ impl OplogEntry {
     /// Check if this entry is a dynamic node (has factory type)
     #[must_use]
     pub fn is_dynamic(&self) -> bool {
-        self.factory.is_some() && self.factory.as_ref() != Some(&"tlogfs".to_string())
+        self.factory.is_some()
     }
 
     /// Get factory type if this is a dynamic node
@@ -694,120 +705,108 @@ impl OplogEntry {
         }
     }
 
-    /// Get comprehensive EntryType that includes physical/dynamic distinction
-    /// This is the authoritative method for determining the complete entry type
-    /// including whether the node is factory-based or not.
+    /// Create entry for directory full snapshot (new storage format)
+    /// This constructor creates a complete directory state snapshot instead of incremental changes
     #[must_use]
-    pub fn comprehensive_entry_type(&self) -> tinyfs::EntryType {
-        let is_dynamic = self.is_dynamic();
-
-        match self.file_type {
-            tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
-                // Directory: check factory field to determine physical vs dynamic
-                if is_dynamic {
-                    tinyfs::EntryType::DirectoryDynamic
-                } else {
-                    tinyfs::EntryType::DirectoryPhysical
-                }
-            }
-            tinyfs::EntryType::Symlink => tinyfs::EntryType::Symlink,
-
-            // Files: check factory field and preserve base format
-            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
-                if is_dynamic {
-                    tinyfs::EntryType::FileDataDynamic
-                } else {
-                    tinyfs::EntryType::FileDataPhysical
-                }
-            }
-            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
-                if is_dynamic {
-                    tinyfs::EntryType::FileTableDynamic
-                } else {
-                    tinyfs::EntryType::FileTablePhysical
-                }
-            }
-            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
-                if is_dynamic {
-                    tinyfs::EntryType::FileSeriesDynamic
-                } else {
-                    tinyfs::EntryType::FileSeriesPhysical
-                }
-            }
-        }
-    }
-}
-
-/// Extended directory entry with versioning support
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VersionedDirectoryEntry {
-    /// Entry name within the directory
-    pub name: String,
-    /// Hex-encoded NodeID of the child
-    pub child_node_id: String,
-    /// Type of operation
-    pub operation_type: OperationType,
-    /// Comprehensive entry type (includes physical/dynamic distinction)
-    /// This field contains ALL information needed to determine partition assignment
-    pub entry_type: tinyfs::EntryType,
-}
-
-impl VersionedDirectoryEntry {
-    /// Create a new directory entry with EntryType (convenience constructor)
-    #[must_use]
-    pub fn new(
-        name: String,
-        child_node_id: Option<NodeID>,
-        operation_type: OperationType,
-        entry_type: tinyfs::EntryType,
+    pub fn new_directory_full_snapshot(
+        id: FileID,
+        timestamp: i64,
+        version: i64,
+        content: Vec<u8>, // Serialized DirectoryEntry[]
+        txn_seq: i64,
     ) -> Self {
         Self {
-            name,
-            child_node_id: child_node_id
-		.map(|x| x.to_string())
-		.unwrap_or_else(|| {
-		    // FAIL-FAST: Empty node IDs indicate architectural confusion
-		    panic!("VersionedDirectoryEntry created with None node_id - this indicates a fundamental API misuse. Operation: {:?}", operation_type)
-		}),
-            operation_type,
-            entry_type,
+            part_id: id.part_id(),
+            node_id: id.node_id(),
+            file_type: id.entry_type(),
+            timestamp,
+            version,
+            content: Some(content),
+            sha256: None,
+            size: None,
+            min_event_time: None,
+            max_event_time: None,
+            min_override: None,
+            max_override: None,
+            extended_attributes: None,
+            factory: None,
+            format: StorageFormat::FullDir, // Full directory snapshot
+            txn_seq,
         }
     }
 
-    /// Get the entry type (Copy trait makes this simple)
-    #[must_use]
-    pub fn entry_type(&self) -> tinyfs::EntryType {
-        self.entry_type
-    }
+    // /// Get comprehensive EntryType that includes physical/dynamic distinction
+    // /// This is the authoritative method for determining the complete entry type
+    // /// including whether the node is factory-based or not.
+    // #[must_use]
+    // pub fn comprehensive_entry_type(&self) -> EntryType {
+    //     let is_dynamic = self.is_dynamic();
+
+    //     match self.file_type {
+    //         EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => {
+    //             // Directory: check factory field to determine physical vs dynamic
+    //             if is_dynamic {
+    //                 EntryType::DirectoryDynamic
+    //             } else {
+    //                 EntryType::DirectoryPhysical
+    //             }
+    //         }
+    //         EntryType::Symlink => EntryType::Symlink,
+
+    //         // Files: check factory field and preserve base format
+    //         EntryType::FileDataPhysical | EntryType::FileDataDynamic => {
+    //             if is_dynamic {
+    //                 EntryType::FileDataDynamic
+    //             } else {
+    //                 EntryType::FileDataPhysical
+    //             }
+    //         }
+    //         EntryType::FileTablePhysical | EntryType::FileTableDynamic => {
+    //             if is_dynamic {
+    //                 EntryType::FileTableDynamic
+    //             } else {
+    //                 EntryType::FileTablePhysical
+    //             }
+    //         }
+    //         EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+    //             if is_dynamic {
+    //                 EntryType::FileSeriesDynamic
+    //             } else {
+    //                 EntryType::FileSeriesPhysical
+    //             }
+    //         }
+    //     }
+    // }
 }
 
-/// Operation type for directory mutations
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub enum OperationType {
-    Insert,
-    Delete,
-    Update,
-}
+/// Type alias - use tinyfs::DirectoryEntry as the canonical type
+/// This avoids duplicate struct definitions and maintains a single source of truth.
+pub type DirectoryEntry = tinyfs::DirectoryEntry;
 
-impl ForArrow for VersionedDirectoryEntry {
+/// Type alias for backward compatibility during transition
+#[deprecated(note = "Use DirectoryEntry instead")]
+pub type VersionedDirectoryEntry = tinyfs::DirectoryEntry;
+
+/// ForArrow implementation for tinyfs::DirectoryEntry to enable Arrow/Parquet serialization
+impl ForArrow for tinyfs::DirectoryEntry {
     fn for_arrow() -> Vec<FieldRef> {
         vec![
             Arc::new(Field::new("name", DataType::Utf8, false)),
             Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
-            Arc::new(Field::new("operation_type", DataType::Utf8, false)),
             Arc::new(Field::new("entry_type", DataType::Utf8, false)),
+            Arc::new(Field::new("version_last_modified", DataType::Int64, false)),
         ]
     }
 }
 
-/// Encode VersionedDirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
-pub fn encode_versioned_directory_entries(
-    entries: &Vec<VersionedDirectoryEntry>,
+/// Encode DirectoryEntry records as Arrow IPC bytes for storage in OplogEntry.content
+pub fn encode_directory_entries(
+    entries: &[DirectoryEntry],
 ) -> Result<Vec<u8>, crate::error::TLogFSError> {
     use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
     let entry_count = entries.len();
-    debug!("encode_versioned_directory_entries() - encoding {entry_count} entries");
+    debug!("encode_directory_entries() - encoding {entry_count} entries");
     for (i, entry) in entries.iter().enumerate() {
         let name = &entry.name;
         let child_node_id = &entry.child_node_id;
@@ -815,13 +814,11 @@ pub fn encode_versioned_directory_entries(
     }
 
     // Use serde_arrow consistently for both empty and non-empty cases
-    let batch = serde_arrow::to_record_batch(&VersionedDirectoryEntry::for_arrow(), entries)?;
+    let batch = serde_arrow::to_record_batch(&DirectoryEntry::for_arrow(), &entries)?;
 
     let row_count = batch.num_rows();
     let col_count = batch.num_columns();
-    debug!(
-        "encode_versioned_directory_entries() - created batch with {row_count} rows, {col_count} columns"
-    );
+    debug!("encode_directory_entries() - created batch with {row_count} rows, {col_count} columns");
 
     let mut buffer = Vec::new();
     let options = IpcWriteOptions::default();
@@ -831,14 +828,22 @@ pub fn encode_versioned_directory_entries(
     writer.finish()?;
 
     let buffer_len = buffer.len();
-    debug!("encode_versioned_directory_entries() - encoded to {buffer_len} bytes");
+    debug!("encode_directory_entries() - encoded to {buffer_len} bytes");
     Ok(buffer)
 }
 
-/// Decode VersionedDirectoryEntry records from Arrow IPC bytes
-pub fn decode_versioned_directory_entries(
+/// Legacy function name for backward compatibility
+#[deprecated(note = "Use encode_directory_entries instead")]
+pub fn encode_versioned_directory_entries(
+    entries: &[DirectoryEntry],
+) -> Result<Vec<u8>, crate::error::TLogFSError> {
+    encode_directory_entries(entries)
+}
+
+/// Decode DirectoryEntry records from Arrow IPC bytes
+pub fn decode_directory_entries(
     content: &[u8],
-) -> Result<Vec<VersionedDirectoryEntry>, crate::error::TLogFSError> {
+) -> Result<Vec<DirectoryEntry>, crate::error::TLogFSError> {
     use arrow::ipc::reader::StreamReader;
 
     // Handle empty directories (0 bytes of content)
@@ -847,7 +852,7 @@ pub fn decode_versioned_directory_entries(
     }
 
     debug!(
-        "decode_versioned_directory_entries() - processing {} bytes",
+        "decode_directory_entries() - processing {} bytes",
         content.len()
     );
 
@@ -860,9 +865,9 @@ pub fn decode_versioned_directory_entries(
             crate::error::TLogFSError::ArrowMessage(format!("Failed to read IPC batch: {}", e))
         })?;
 
-        let entries: Vec<VersionedDirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
+        let entries: Vec<DirectoryEntry> = serde_arrow::from_record_batch(&batch)?;
         debug!(
-            "decode_versioned_directory_entries() - decoded {} entries",
+            "decode_directory_entries() - decoded {} entries",
             entries.len()
         );
         Ok(entries)

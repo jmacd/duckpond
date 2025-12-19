@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tree formatting utilities for displaying hierarchical structures with proper box-drawing characters.
 //!
 //! This module provides a general-purpose tree formatter that can display any hierarchical

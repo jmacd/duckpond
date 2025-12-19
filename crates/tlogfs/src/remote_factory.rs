@@ -1,10 +1,15 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Remote storage factory for S3-compatible object stores
 
 use crate::TLogFSError;
 use crate::data_taxonomy::{ApiKey, ApiSecret, ServiceEndpoint};
-use crate::factory::{ExecutionMode, FactoryCommand, FactoryContext};
 use base64::Engine;
 use clap::Parser;
+use provider::FactoryContext;
+use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinyfs::{NodeID, Result as TinyFSResult};
@@ -219,16 +224,19 @@ fn validate_remote_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
 async fn execute_remote(
     config: Value,
     context: FactoryContext,
-    ctx: crate::factory::ExecutionContext,
+    ctx: ExecutionContext,
 ) -> Result<(), TLogFSError> {
     let config: RemoteConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
+
+    // Extract State for remote operations
+    let state = crate::extract_state(&context)?;
 
     log::info!("🌐 REMOTE FACTORY");
     log::info!("   Storage URL: {}", config.url.as_declassified());
     log::info!("   Context: {:?}", ctx);
 
-    let cmd: RemoteCommand = ctx.to_command()?;
+    let cmd: RemoteCommand = ctx.to_command::<RemoteCommand, TLogFSError>()?;
 
     log::info!("   Command: {:?}", cmd);
 
@@ -237,9 +245,15 @@ async fn execute_remote(
 
     // Dispatch to command handler
     match cmd {
-        RemoteCommand::Push => execute_push(store, context, config).await,
-        RemoteCommand::Pull => execute_pull(store, context, config).await,
-        RemoteCommand::Replicate => execute_replicate_subcommand(config, context).await,
+        RemoteCommand::Push => {
+            execute_push(store, state.clone(), &context.pond_metadata, config).await
+        }
+        RemoteCommand::Pull => {
+            execute_pull(store, state.clone(), &context.pond_metadata, config).await
+        }
+        RemoteCommand::Replicate => {
+            execute_replicate_subcommand(config, state.clone(), &context.pond_metadata).await
+        }
         RemoteCommand::ListBundles { verbose } => {
             execute_list_bundles_subcommand(store, config, context.pond_metadata.as_ref(), verbose)
                 .await
@@ -254,10 +268,11 @@ async fn execute_remote(
 #[allow(clippy::print_stdout)]
 async fn execute_replicate_subcommand(
     config: RemoteConfig,
-    context: FactoryContext,
+    _state: crate::persistence::State,
+    pond_metadata: &Option<provider::PondMetadata>,
 ) -> Result<(), TLogFSError> {
-    // Get pond metadata from context
-    let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
+    // Get pond metadata
+    let pond_metadata = pond_metadata.as_ref().ok_or_else(|| {
         TLogFSError::TinyFS(tinyfs::Error::Other(
             "Pond metadata not available in factory context".to_string(),
         ))
@@ -287,7 +302,7 @@ async fn execute_replicate_subcommand(
 async fn execute_list_bundles_subcommand(
     store: std::sync::Arc<dyn object_store::ObjectStore>,
     _config: RemoteConfig,
-    pond_metadata: Option<&crate::factory::PondMetadata>,
+    pond_metadata: Option<&provider::PondMetadata>,
     verbose: bool,
 ) -> Result<(), TLogFSError> {
     use object_store::path::Path as ObjectPath;
@@ -338,7 +353,7 @@ async fn execute_list_bundles_subcommand(
 async fn execute_verify_subcommand(
     store: std::sync::Arc<dyn object_store::ObjectStore>,
     _config: RemoteConfig,
-    pond_metadata: Option<&crate::factory::PondMetadata>,
+    pond_metadata: Option<&provider::PondMetadata>,
     version: Option<i64>,
 ) -> Result<(), TLogFSError> {
     log::info!("✓ VERIFY SUBCOMMAND");
@@ -550,13 +565,14 @@ pub fn build_object_store(
 /// Push mode: Backup local data to remote storage
 async fn execute_push(
     store: std::sync::Arc<dyn object_store::ObjectStore>,
-    context: FactoryContext,
+    state: crate::persistence::State,
+    pond_metadata: &Option<provider::PondMetadata>,
     config: RemoteConfig,
 ) -> Result<(), TLogFSError> {
     log::info!("📤 PUSH MODE: Backing up to remote");
 
     // Get the Delta table from State (contains transaction-scoped table reference)
-    let table = context.state.table().await;
+    let table = state.table().await;
     let current_version = table.version().ok_or_else(|| {
         TLogFSError::TinyFS(tinyfs::Error::Other(
             "No Delta Lake version available".to_string(),
@@ -565,9 +581,8 @@ async fn execute_push(
 
     log::info!("   Current Delta version: {}", current_version);
 
-    // Get pond_id from context (required for push operations)
-    let pond_id = context
-        .pond_metadata
+    // Get pond_id from pond_metadata (required for push operations)
+    let pond_id = pond_metadata
         .as_ref()
         .ok_or_else(|| {
             TLogFSError::TinyFS(tinyfs::Error::Other(
@@ -648,19 +663,20 @@ async fn execute_push(
 /// Pull mode: Continuously sync new versions from remote backup
 async fn execute_pull(
     store: std::sync::Arc<dyn object_store::ObjectStore>,
-    context: FactoryContext,
+    state: crate::persistence::State,
+    pond_metadata: &Option<provider::PondMetadata>,
     _config: RemoteConfig,
 ) -> Result<(), TLogFSError> {
     log::info!("🔽 PULL MODE: Checking for new versions");
 
-    let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
+    let pond_metadata = pond_metadata.as_ref().ok_or_else(|| {
         TLogFSError::TinyFS(tinyfs::Error::Other(
             "Pull command requires pond metadata".to_string(),
         ))
     })?;
 
     // Step 1: Get current local Delta table version
-    let table = context.state.table().await;
+    let table = state.table().await;
     let local_version = table.version().unwrap_or(0);
     log::info!("   Local Delta version: {}", local_version);
 
@@ -1004,12 +1020,14 @@ async fn create_backup_bundle(
     Ok(())
 }
 
-crate::register_executable_factory!(
+provider::register_executable_factory!(
     name: "remote",
     description: "S3-compatible remote storage configuration and validation",
     validate: validate_remote_config,
-    initialize: |_config, _context| Box::pin(async { Ok(()) }),
-    execute: execute_remote
+    initialize: |_config, _context| async { Ok::<(), tinyfs::Error>(()) },
+    execute: |config, context, ctx| async move {
+        execute_remote(config, context, ctx).await.map_err(|e: TLogFSError| tinyfs::Error::Other(e.to_string()))
+    }
 );
 
 /// Represents a file change in a Delta Lake commit
@@ -1333,7 +1351,7 @@ pub async fn scan_remote_versions(
 /// Raw bytes of the compressed bundle
 pub async fn download_bundle(
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
-    pond_metadata: &crate::factory::PondMetadata,
+    pond_metadata: &provider::PondMetadata,
     version: i64,
 ) -> Result<Vec<u8>, TLogFSError> {
     use object_store::path::Path;
@@ -1644,8 +1662,8 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn test_pond_metadata() -> crate::factory::PondMetadata {
-        crate::factory::PondMetadata {
+    fn test_pond_metadata() -> provider::PondMetadata {
+        provider::PondMetadata {
             pond_id: "019a37b4-d539-736f-80aa-16952163cc2f"
                 .to_string()
                 .try_into()

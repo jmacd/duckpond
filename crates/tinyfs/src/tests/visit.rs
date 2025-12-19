@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use futures::stream::{self, Stream};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -7,10 +11,11 @@ use std::sync::Arc;
 use super::super::memory::new_fs;
 use crate::async_helpers::convenience;
 use crate::dir::Directory;
+use crate::dir::DirectoryEntry;
 use crate::dir::Handle as DirectoryHandle;
 use crate::error;
 use crate::fs::FS;
-use crate::node::NodeRef;
+use crate::node::Node;
 use crate::node::NodeType;
 
 /// A directory implementation that derives its contents from wildcard matches
@@ -36,7 +41,7 @@ impl VisitDirectory {
 
 /// A visitor that creates filename and node ref pairs for directory iteration
 struct FilenameCollector {
-    items: Vec<(String, NodeRef)>,
+    items: Vec<(String, Node)>,
 }
 
 impl FilenameCollector {
@@ -46,12 +51,12 @@ impl FilenameCollector {
 }
 
 #[async_trait::async_trait]
-impl crate::wd::Visitor<(String, NodeRef)> for FilenameCollector {
+impl crate::wd::Visitor<(String, Node)> for FilenameCollector {
     async fn visit(
         &mut self,
         node: crate::node::NodePath,
         captured: &[String],
-    ) -> error::Result<(String, NodeRef)> {
+    ) -> error::Result<(String, Node)> {
         let filename = if captured.is_empty() {
             node.basename()
         } else {
@@ -83,7 +88,7 @@ impl crate::wd::Visitor<(String, Vec<u8>)> for FileContentVisitor {
         node: crate::node::NodePath,
         _captured: &[String],
     ) -> error::Result<(String, Vec<u8>)> {
-        let file_node = node.borrow().await.as_file().unwrap();
+        let file_node = node.as_file().await.unwrap();
         let reader = file_node.async_reader().await.unwrap();
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await
@@ -122,7 +127,7 @@ impl crate::wd::Visitor<String> for BasenameVisitor {
 
 #[async_trait::async_trait]
 impl Directory for VisitDirectory {
-    async fn get(&self, name: &str) -> error::Result<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> error::Result<Option<Node>> {
         let mut visitor = FilenameCollector::new();
         let root_node = self.fs.root().await?;
         let result = root_node
@@ -137,13 +142,13 @@ impl Directory for VisitDirectory {
             .map(|(_, r)| r))
     }
 
-    async fn insert(&mut self, name: String, _id: NodeRef) -> error::Result<()> {
+    async fn insert(&mut self, name: String, _id: Node) -> error::Result<()> {
         Err(error::Error::immutable(name))
     }
 
     async fn entries(
         &self,
-    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<(String, NodeRef)>> + Send>>> {
+    ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<DirectoryEntry>> + Send>>> {
         // For now, fall back to the original visitor pattern implementation
         // TODO: Use derived manager for better performance and caching
         let mut visitor = FilenameCollector::new();
@@ -151,7 +156,26 @@ impl Directory for VisitDirectory {
         let result = root.visit_with_visitor(&self.pattern, &mut visitor).await;
         // @@@
         _ = result?;
-        let items: Vec<_> = visitor.items.into_iter().map(Ok).collect();
+        let items: Vec<_> = visitor
+            .items
+            .into_iter()
+            .map(|(name, _node_ref)| {
+                // Convert Node to DirectoryEntry (without awaiting - use placeholder)
+                // Use a deterministic FileID for testing (part_id=root for test simplicity)
+                let file_id = crate::FileID::from_content(
+                    crate::PartID::root(),
+                    crate::EntryType::FileDataDynamic,
+                    format!("visit:{}", name).as_bytes(),
+                );
+                let dir_entry = DirectoryEntry::new(
+                    name.clone(),
+                    file_id.node_id(),
+                    crate::EntryType::FileDataDynamic,
+                    0,
+                );
+                Ok(dir_entry)
+            })
+            .collect();
         Ok(Box::pin(stream::iter(items)))
     }
 }
@@ -253,10 +277,12 @@ async fn test_visit_directory() {
 
     // Test iterator functionality of VisitDirectory
     let mut entries = BTreeSet::new();
-    let mut dir_stream = visit_dir.read_dir().await.unwrap();
+    let mut entry_stream = visit_dir.entries().await.unwrap();
     use futures::StreamExt;
-    while let Some(np) = dir_stream.next().await {
-        let file_node = np.borrow().await.as_file().unwrap();
+    while let Some(result) = entry_stream.next().await {
+        let dir_entry = result.unwrap();
+        let np = visit_dir.get(&dir_entry.name).await.unwrap().unwrap();
+        let file_node = np.as_file().await.unwrap();
         let reader = file_node.async_reader().await.unwrap();
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await

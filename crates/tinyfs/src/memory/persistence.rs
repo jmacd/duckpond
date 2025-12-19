@@ -1,6 +1,12 @@
-use crate::error::Result;
-use crate::node::{NodeID, NodeType};
-use crate::persistence::{DirectoryOperation, FileVersionInfo, PersistenceLayer};
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+use crate::error::{Error, Result};
+use crate::memory::MemoryDirectory;
+use crate::node::{FileID, Node, NodeType};
+use crate::persistence::{FileVersionInfo, PersistenceLayer};
+use crate::transaction_guard::TransactionState;
 use crate::{EntryType, NodeMetadata};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -19,225 +25,270 @@ struct MemoryFileVersion {
 
 /// In-memory persistence layer for testing and derived file computation
 /// This implements the PersistenceLayer trait using in-memory storage
+#[derive(Clone)]
 pub struct MemoryPersistence {
+    state: Arc<Mutex<State>>,
+    /// Transaction state for enforcing single-writer pattern
+    pub txn_state: Arc<TransactionState>,
+}
+
+pub struct State {
     // Store multiple versions of each file: (node_id, part_id) -> Vec<MemoryFileVersion>
-    file_versions: Arc<Mutex<HashMap<(NodeID, NodeID), Vec<MemoryFileVersion>>>>,
-    // Non-file nodes (directories, symlinks): (node_id, part_id) -> NodeType
-    nodes: Arc<Mutex<HashMap<(NodeID, NodeID), NodeType>>>,
-    directories: Arc<Mutex<HashMap<NodeID, HashMap<String, (NodeID, EntryType)>>>>, // parent_id -> {name -> child_id}
-    root_dir: Arc<Mutex<Option<crate::dir::Handle>>>, // Shared root directory state
+    // Also used for dynamic nodes (FileDataDynamic, DirectoryDynamic, FileExecutable) - config is the content
+    file_versions: HashMap<FileID, Vec<MemoryFileVersion>>,
+
+    // Non-file nodes (directories, symlinks): (node_id, part_id) -> Node
+    nodes: HashMap<FileID, Node>,
+
+    // Temporal bounds for FileSeries nodes: FileID -> (min_time, max_time)
+    // Parallel to tlogfs OplogEntry.min_time/max_time columns
+    temporal_bounds: HashMap<FileID, (i64, i64)>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        let root_dir = Node::new(
+            FileID::root(),
+            NodeType::Directory(MemoryDirectory::new_handle()),
+        );
+        Self {
+            file_versions: HashMap::new(),
+            nodes: HashMap::from([(root_dir.id, root_dir)]),
+            temporal_bounds: HashMap::new(),
+        }
+    }
 }
 
 impl Default for MemoryPersistence {
     fn default() -> Self {
         Self {
-            file_versions: Arc::new(Mutex::new(HashMap::new())),
-            nodes: Arc::new(Mutex::new(HashMap::new())),
-            directories: Arc::new(Mutex::new(HashMap::new())),
-            root_dir: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(State::default())),
+            txn_state: Arc::new(TransactionState::new()),
         }
     }
 }
 
 #[async_trait]
 impl PersistenceLayer for MemoryPersistence {
+    /// Downcast support for accessing concrete implementation methods
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
-    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType> {
-        let nodes = self.nodes.lock().await;
-        match nodes.get(&(node_id, part_id)) {
-            Some(node_type) => Ok(node_type.clone()),
-            None => {
-                if node_id == NodeID::root() {
-                    let mut root_guard = self.root_dir.lock().await;
-                    if let Some(ref existing_root) = *root_guard {
-                        Ok(NodeType::Directory(existing_root.clone()))
-                    } else {
-                        let new_root = crate::memory::MemoryDirectory::new_handle();
-                        *root_guard = Some(new_root.clone());
-                        Ok(NodeType::Directory(new_root))
-                    }
-                } else {
-                    Err(crate::error::Error::NotFound(std::path::PathBuf::from(
-                        format!("Node {} not found", node_id),
-                    )))
-                }
-            }
-        }
+    /// Get the transaction state for this persistence layer
+    fn transaction_state(&self) -> Arc<TransactionState> {
+        self.txn_state.clone()
     }
 
-    async fn store_node(
+    // Node operations
+    async fn load_node(&self, id: FileID) -> Result<Node> {
+        self.state.lock().await.load_node(id).await
+    }
+
+    async fn store_node(&self, node: &Node) -> Result<()> {
+        self.state.lock().await.store_node(node).await
+    }
+
+    // Factory methods for creating nodes directly with persistence
+    async fn create_file_node(&self, id: FileID) -> Result<Node> {
+        self.state.lock().await.create_file_node(id).await
+    }
+
+    async fn create_directory_node(&self, id: FileID) -> Result<Node> {
+        self.state.lock().await.create_directory_node(id).await
+    }
+
+    async fn create_symlink_node(&self, id: FileID, target: &std::path::Path) -> Result<Node> {
+        self.state
+            .lock()
+            .await
+            .create_symlink_node(id, target)
+            .await
+    }
+
+    async fn create_dynamic_node(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        node_type: &NodeType,
+        id: FileID,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<Node> {
+        self.state
+            .lock()
+            .await
+            .create_dynamic_node(id, factory_type, config_content)
+            .await
+    }
+
+    async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>> {
+        self.state.lock().await.get_dynamic_node_config(id).await
+    }
+
+    async fn update_dynamic_node_config(
+        &self,
+        id: FileID,
+        factory_type: &str,
+        config_content: Vec<u8>,
     ) -> Result<()> {
-        let mut nodes = self.nodes.lock().await;
-        _ = nodes.insert((node_id, part_id), node_type.clone());
-        Ok(())
+        self.state
+            .lock()
+            .await
+            .update_dynamic_node_config(id, factory_type, config_content)
+            .await
     }
 
-    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool> {
-        let nodes = self.nodes.lock().await;
-        Ok(nodes.contains_key(&(node_id, part_id)))
+    async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
+        self.state.lock().await.metadata(id).await
     }
 
-    async fn load_directory_entries(
+    async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>> {
+        self.state.lock().await.list_file_versions(id).await
+    }
+
+    async fn read_file_version(&self, id: FileID, version: u64) -> Result<Vec<u8>> {
+        self.state.lock().await.read_file_version(id, version).await
+    }
+
+    async fn set_extended_attributes(
         &self,
-        parent_node_id: NodeID,
-    ) -> Result<HashMap<String, (NodeID, EntryType)>> {
-        let directories = self.directories.lock().await;
-        Ok(directories
-            .get(&parent_node_id)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    async fn load_symlink_target(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> Result<std::path::PathBuf> {
-        let node_type = self.load_node(node_id, part_id).await?;
-        match node_type {
-            NodeType::Symlink(symlink_handle) => symlink_handle.readlink().await,
-            _ => Err(crate::error::Error::Other(
-                "Expected symlink node type".to_string(),
-            )),
-        }
-    }
-
-    async fn store_symlink_target(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        target: &std::path::Path,
+        id: FileID,
+        attributes: HashMap<String, String>,
     ) -> Result<()> {
-        let symlink_handle = crate::memory::MemorySymlink::new_handle(target.to_path_buf());
-        let node_type = NodeType::Symlink(symlink_handle);
-        self.store_node(node_id, part_id, &node_type).await
+        self.state
+            .lock()
+            .await
+            .set_extended_attributes(id, attributes)
+            .await
     }
 
-    async fn create_file_node(
+    async fn get_temporal_bounds(&self, id: FileID) -> Result<Option<(i64, i64)>> {
+        Ok(self.state.lock().await.temporal_bounds.get(&id).copied())
+    }
+}
+
+impl MemoryPersistence {
+    /// Set temporal bounds for a FileSeries node (for testing)
+    ///
+    /// Parallel to tlogfs OplogEntry.min_time/max_time columns.
+    /// Used to test low-level temporal filtering at the table provider level.
+    pub async fn set_temporal_bounds(&self, id: FileID, min_time: i64, max_time: i64) {
+        _ = self
+            .state
+            .lock()
+            .await
+            .temporal_bounds
+            .insert(id, (min_time, max_time));
+    }
+
+    /// Store a file version for testing
+    ///
+    /// Adds a new version of a file to the in-memory storage. Versions are stored
+    /// in order and can be retrieved via list_file_versions() or read_file_version().
+    pub async fn store_file_version(
         &self,
-        _node_id: NodeID,
-        _part_id: NodeID,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .await
+            .store_file_version(id, version, content)
+            .await
+    }
+
+    /// Store a file version with extended metadata (for testing)
+    pub async fn store_file_version_with_metadata(
+        &self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
         entry_type: EntryType,
-    ) -> Result<NodeType> {
-        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type([], entry_type);
-        Ok(NodeType::File(file_handle))
-    }
-
-    async fn create_directory_node(&self, _node_id: NodeID) -> Result<NodeType> {
-        let dir_handle = crate::memory::MemoryDirectory::new_handle();
-        Ok(NodeType::Directory(dir_handle))
-    }
-
-    async fn create_symlink_node(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        target: &std::path::Path,
-    ) -> Result<NodeType> {
-        let symlink_handle = crate::memory::MemorySymlink::new_handle(target.to_path_buf());
-        let node_type = NodeType::Symlink(symlink_handle.clone());
-        self.store_node(node_id, part_id, &node_type).await?;
-        Ok(node_type)
-    }
-
-    async fn query_directory_entry(
-        &self,
-        parent_node_id: NodeID,
-        entry_name: &str,
-    ) -> Result<Option<(NodeID, EntryType)>> {
-        let directories = self.directories.lock().await;
-        Ok(directories
-            .get(&parent_node_id)
-            .and_then(|entries| entries.get(entry_name))
-            .cloned())
-    }
-
-    async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeMetadata> {
-        let nodes = self.nodes.lock().await;
-        if let Some(node_type) = nodes.get(&(node_id, part_id)) {
-            match node_type {
-                NodeType::File(handle) => {
-                    // Query the handle's metadata to get the entry type
-                    handle.metadata().await
-                }
-                NodeType::Directory(_) => Ok(NodeMetadata {
-                    version: 1,
-                    size: None,
-                    sha256: None,
-                    entry_type: EntryType::DirectoryPhysical,
-                    timestamp: 0,
-                }),
-                NodeType::Symlink(_) => Ok(NodeMetadata {
-                    version: 1,
-                    size: None,
-                    sha256: None,
-                    entry_type: EntryType::Symlink,
-                    timestamp: 0,
-                }),
-            }
-        } else if node_id == NodeID::root() {
-            Ok(NodeMetadata {
-                version: 1,
-                size: None,
-                sha256: None,
-                entry_type: EntryType::DirectoryPhysical,
-                timestamp: 0,
-            })
-        } else {
-            Err(crate::error::Error::NotFound(std::path::PathBuf::from(
-                format!("Node {} not found", node_id),
-            )))
-        }
-    }
-
-    async fn metadata_u64(
-        &self,
-        _node_id: NodeID,
-        _part_id: NodeID,
-        _name: &str,
-    ) -> Result<Option<u64>> {
-        Ok(None)
-    }
-
-    async fn update_directory_entry(
-        &self,
-        parent_node_id: NodeID,
-        entry_name: &str,
-        operation: DirectoryOperation,
+        extended_metadata: Option<HashMap<String, String>>,
     ) -> Result<()> {
-        let mut directories = self.directories.lock().await;
-        let dir_entries = directories
-            .entry(parent_node_id)
-            .or_insert_with(HashMap::new);
-        match operation {
-            DirectoryOperation::InsertWithType(node_id, entry_type) => {
-                _ = dir_entries.insert(entry_name.to_string(), (node_id, entry_type));
-            }
-            DirectoryOperation::DeleteWithType(_) => {
-                _ = dir_entries.remove(entry_name);
-            }
-            DirectoryOperation::RenameWithType(new_name, node_id, entry_type) => {
-                _ = dir_entries.remove(entry_name);
-                _ = dir_entries.insert(new_name, (node_id, entry_type));
-            }
+        self.state
+            .lock()
+            .await
+            .store_file_version_with_metadata(id, version, content, entry_type, extended_metadata)
+            .await
+    }
+}
+
+impl State {
+    async fn load_node(&self, id: FileID) -> Result<Node> {
+        match self.nodes.get(&id) {
+            Some(node) => Ok(node.clone()),
+            None => Err(Error::IDNotFound(id)),
         }
+    }
+
+    async fn store_node(&mut self, node: &Node) -> Result<()> {
+        _ = self.nodes.insert(node.id, node.clone());
         Ok(())
     }
 
-    async fn list_file_versions(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> Result<Vec<FileVersionInfo>> {
-        let file_versions = self.file_versions.lock().await;
-        if let Some(versions) = file_versions.get(&(node_id, part_id)) {
+    async fn create_file_node(&self, id: FileID) -> Result<Node> {
+        // @@@ shouldn't pass content
+        let file_handle =
+            crate::memory::MemoryFile::new_handle_with_entry_type([], id.entry_type());
+        Ok(Node::new(id, NodeType::File(file_handle)))
+    }
+
+    async fn create_directory_node(&self, id: FileID) -> Result<Node> {
+        let dir_handle = MemoryDirectory::new_handle();
+        Ok(Node::new(id, NodeType::Directory(dir_handle)))
+    }
+
+    async fn create_symlink_node(&mut self, id: FileID, target: &std::path::Path) -> Result<Node> {
+        let symlink_handle = crate::memory::MemorySymlink::new_handle(target.to_path_buf());
+        let node = Node::new(id, NodeType::Symlink(symlink_handle.clone()));
+        self.store_node(&node).await?;
+        Ok(node)
+    }
+
+    async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
+        let node = self.nodes.get(&id).ok_or_else(|| {
+            Error::NotFound(std::path::PathBuf::from(format!("Node {id} not found",)))
+        })?;
+
+        match &node.node_type {
+            NodeType::File(handle) => handle.metadata().await,
+            _ => Err(Error::Other("Non-file metadata unimplemented".to_string())),
+        }
+    }
+
+    async fn store_file_version(
+        &mut self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+    ) -> Result<()> {
+        self.store_file_version_with_metadata(id, version, content, id.entry_type(), None)
+            .await
+    }
+
+    async fn store_file_version_with_metadata(
+        &mut self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+        entry_type: EntryType,
+        extended_metadata: Option<HashMap<String, String>>,
+    ) -> Result<()> {
+        let file_version = MemoryFileVersion {
+            version,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            content,
+            entry_type,
+            extended_metadata,
+        };
+
+        self.file_versions.entry(id).or_default().push(file_version);
+
+        Ok(())
+    }
+
+    async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>> {
+        if let Some(versions) = self.file_versions.get(&id) {
             let version_infos = versions
                 .iter()
                 .map(|v| FileVersionInfo {
@@ -255,106 +306,128 @@ impl PersistenceLayer for MemoryPersistence {
         }
     }
 
-    async fn read_file_version(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        version: Option<u64>,
-    ) -> Result<Vec<u8>> {
-        let file_versions = self.file_versions.lock().await;
-        if let Some(versions) = file_versions.get(&(node_id, part_id)) {
-            match version {
-                Some(v) => {
-                    if let Some(file_version) = versions.iter().find(|fv| fv.version == v) {
-                        Ok(file_version.content.clone())
-                    } else {
-                        Err(crate::error::Error::NotFound(std::path::PathBuf::from(
-                            format!("Version {} of file {} not found", v, node_id),
-                        )))
-                    }
-                }
-                None => {
-                    if let Some(latest) = versions.last() {
-                        Ok(latest.content.clone())
-                    } else {
-                        Err(crate::error::Error::NotFound(std::path::PathBuf::from(
-                            format!("No versions of file {} found", node_id),
-                        )))
-                    }
-                }
+    async fn read_file_version(&self, id: FileID, version: u64) -> Result<Vec<u8>> {
+        if let Some(versions) = self.file_versions.get(&id) {
+            if let Some(file_version) = versions.iter().find(|fv| fv.version == version) {
+                Ok(file_version.content.clone())
+            } else {
+                Err(Error::NotFound(std::path::PathBuf::from(format!(
+                    "Version {version} of file {id} not found"
+                ))))
             }
+            // None => {
+            //     if let Some(latest) = versions.last() {
+            //         Ok(latest.content.clone())
+            //     } else {
+            //         Err(Error::NotFound(std::path::PathBuf::from(format!(
+            //             "No versions of file {id} found",
+            //         ))))
+            //     }
+            // }
         } else {
-            Err(crate::error::Error::NotFound(std::path::PathBuf::from(
-                format!("File {} not found", node_id),
-            )))
+            Err(Error::NotFound(std::path::PathBuf::from(format!(
+                "File {id} not found",
+            ))))
         }
     }
 
     async fn set_extended_attributes(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        &mut self,
+        id: FileID,
         attributes: HashMap<String, String>,
     ) -> Result<()> {
-        let mut file_versions = self.file_versions.lock().await;
-        if let Some(versions) = file_versions.get_mut(&(node_id, part_id)) {
+        if let Some(versions) = self.file_versions.get_mut(&id) {
             if let Some(latest_version) = versions.last_mut() {
                 latest_version.extended_metadata = Some(attributes);
                 Ok(())
             } else {
-                Err(crate::error::Error::NotFound(std::path::PathBuf::from(
-                    format!("No versions of file {} found", node_id),
-                )))
+                Err(Error::NotFound(std::path::PathBuf::from(format!(
+                    "No versions of file {id} found",
+                ))))
             }
         } else {
-            Err(crate::error::Error::NotFound(std::path::PathBuf::from(
-                format!("File {} not found", node_id),
-            )))
+            Err(Error::NotFound(std::path::PathBuf::from(format!(
+                "File {id} not found",
+            ))))
         }
     }
 
-    async fn create_dynamic_directory_node(
-        &self,
-        _parent_node_id: NodeID,
-        _name: String,
-        _factory_type: &str,
-        _config_content: Vec<u8>,
-    ) -> Result<NodeID> {
-        Err(crate::Error::Other(
-            "Dynamic nodes not supported in memory persistence".to_string(),
+    async fn create_dynamic_node(
+        &mut self,
+        id: FileID,
+        factory_type: &str,
+        config_content: Vec<u8>,
+    ) -> Result<Node> {
+        // Dynamic nodes are stored like files with config as content
+        // Factory type goes in extended_metadata["factory"]
+        let mut extended_metadata = HashMap::new();
+        _ = extended_metadata.insert("factory".to_string(), factory_type.to_string());
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("positive")
+            .as_micros() as i64;
+
+        let version = MemoryFileVersion {
+            version: 1,
+            timestamp,
+            content: config_content,
+            entry_type: id.entry_type(),
+            extended_metadata: Some(extended_metadata),
+        };
+
+        self.file_versions.entry(id).or_default().push(version);
+
+        // Create a dummy node - actual factory instantiation happens on read
+        Ok(Node::new(
+            id,
+            NodeType::File(super::MemoryFile::new_handle(vec![])),
         ))
     }
 
-    async fn create_dynamic_file_node(
-        &self,
-        _parent_node_id: NodeID,
-        _name: String,
-        _file_type: EntryType,
-        _factory_type: &str,
-        _config_content: Vec<u8>,
-    ) -> Result<NodeID> {
-        Err(crate::Error::Other(
-            "Dynamic nodes not supported in memory persistence".to_string(),
-        ))
-    }
-
-    async fn get_dynamic_node_config(
-        &self,
-        _node_id: NodeID,
-        _part_id: NodeID,
-    ) -> Result<Option<(String, Vec<u8>)>> {
+    async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>> {
+        if let Some(versions) = self.file_versions.get(&id)
+            && let Some(latest) = versions.last()
+            && let Some(ref metadata) = latest.extended_metadata
+            && let Some(factory_type) = metadata.get("factory")
+        {
+            return Ok(Some((factory_type.clone(), latest.content.clone())));
+        }
         Ok(None)
     }
 
     async fn update_dynamic_node_config(
-        &self,
-        _node_id: NodeID,
-        _part_id: NodeID,
-        _factory_type: &str,
-        _config_content: Vec<u8>,
+        &mut self,
+        id: FileID,
+        factory_type: &str,
+        config_content: Vec<u8>,
     ) -> Result<()> {
-        Err(crate::Error::Other(
-            "Dynamic node updates not supported in memory persistence".to_string(),
-        ))
+        let mut extended_metadata = HashMap::new();
+        _ = extended_metadata.insert("factory".to_string(), factory_type.to_string());
+
+        let new_version = if let Some(versions) = self.file_versions.get(&id) {
+            let next_version = versions.last().map(|v| v.version + 1).unwrap_or(1);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time is after UNIX_EPOCH")
+                .as_micros() as i64;
+
+            MemoryFileVersion {
+                version: next_version,
+                timestamp,
+                content: config_content,
+                entry_type: id.entry_type(),
+                extended_metadata: Some(extended_metadata),
+            }
+        } else {
+            return Err(Error::Other(format!("Dynamic node not found: {}", id)));
+        };
+
+        self.file_versions
+            .get_mut(&id)
+            .ok_or_else(|| Error::Other(format!("Dynamic node not found: {}", id)))?
+            .push(new_version);
+
+        Ok(())
     }
 }

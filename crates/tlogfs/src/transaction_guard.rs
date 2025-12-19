@@ -1,9 +1,12 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use super::error::TLogFSError;
 use super::persistence::{OpLogPersistence, State};
 use super::txn_metadata::PondTxnMetadata;
 use log::info;
 use std::ops::Deref;
-use std::path::PathBuf;
 use tinyfs::FS;
 use tinyfs::Result as TinyFSResult;
 
@@ -12,14 +15,16 @@ use super::txn_metadata::PondUserMetadata;
 
 /// Transaction Guard - Enforces proper transaction usage patterns
 ///
-/// The guard provides RAII-style cleanup and access to the underlying persistence layer.
-/// Operations are performed through the persistence layer accessed via the guard.
-/// Optionally provides a DataFusion SessionContext with TinyFS ObjectStore for queries.
+/// This guard embeds a tinyfs::TransactionGuard and adds tlogfs-specific concerns:
+/// - Transaction metadata (txn_id, args, vars)
+/// - Commit logic for Delta Lake
+/// - Write vs read transaction tracking
 ///
-/// All transaction metadata (txn_id, args, vars) is provided at `begin()` and stored
-/// here, so `commit()` requires no additional parameters.
+/// The embedded tinyfs guard handles the single-transaction enforcement via TransactionState.
 pub struct TransactionGuard<'a> {
-    /// Reference to the persistence layer
+    /// The embedded tinyfs transaction guard (owns FS, manages active state)
+    inner: tinyfs::TransactionGuard,
+    /// Reference to the persistence layer for commit operations
     persistence: &'a mut OpLogPersistence,
     /// Transaction metadata (txn_id, args, vars) provided at begin()
     metadata: PondTxnMetadata,
@@ -32,11 +37,13 @@ impl<'a> TransactionGuard<'a> {
     ///
     /// This should only be called by OpLogPersistence::begin_write() or begin_read()
     pub(crate) fn new(
+        inner: tinyfs::TransactionGuard,
         persistence: &'a mut OpLogPersistence,
         metadata: &PondTxnMetadata,
         is_write: bool,
     ) -> Self {
         Self {
+            inner,
             persistence,
             metadata: metadata.clone(),
             is_write,
@@ -81,18 +88,13 @@ impl<'a> TransactionGuard<'a> {
     /// using the State's object_store method for proper architecture.
     pub async fn object_store(
         &mut self,
-    ) -> Result<std::sync::Arc<crate::tinyfs_object_store::TinyFsObjectStore>, TLogFSError> {
+    ) -> Result<std::sync::Arc<crate::TinyFsObjectStore<State>>, TLogFSError> {
         let state = self.state()?;
         // Ensure SessionContext and ObjectStore are initialized
         _ = state.session_context().await?;
         state
             .object_store()
             .ok_or_else(|| TLogFSError::ArrowMessage("ObjectStore not initialized".to_string()))
-    }
-
-    /// Deltalake store path
-    pub(crate) fn store_path(&self) -> &PathBuf {
-        &self.persistence.path
     }
 
     /// Commit the transaction
@@ -104,13 +106,17 @@ impl<'a> TransactionGuard<'a> {
     /// requires no additional parameters. The guard has everything it needs.
     ///
     /// This is the clean production API that Steward uses.
+    ///
+    /// The embedded tinyfs::TransactionGuard will be dropped after commit, clearing the transaction state.
     pub async fn commit(self) -> TinyFSResult<Option<()>> {
         if !self.is_write {
             // Read transactions don't commit - just return success
+            // tinyfs guard drop will clear the transaction state
             return Ok(None);
         }
 
         let result = self.persistence.commit(self.metadata.clone()).await;
+        // tinyfs guard drop happens here, clearing the transaction state
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
     }
@@ -160,7 +166,7 @@ impl<'a> Deref for TransactionGuard<'a> {
     type Target = FS;
 
     fn deref(&self) -> &Self::Target {
-        self.persistence.fs.as_ref().expect("guarded")
+        &self.inner
     }
 }
 
@@ -170,6 +176,8 @@ impl<'a> Drop for TransactionGuard<'a> {
     /// If the transaction hasn't been explicitly committed or rolled back,
     /// we clean up the state and fs to allow new transactions to begin.
     /// This happens when read-only transactions go out of scope without commit.
+    ///
+    /// The embedded tinyfs::TransactionGuard will handle clearing the TransactionState.
     fn drop(&mut self) {
         if self.persistence.state.is_some() {
             info!(
@@ -178,6 +186,7 @@ impl<'a> Drop for TransactionGuard<'a> {
             );
             self.persistence.state = None;
             self.persistence.fs = None;
+            // tinyfs::TransactionGuard drop will clear the txn_state
         }
     }
 }

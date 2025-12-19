@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Error types for TLogFS operations
 use std::path::PathBuf;
 
@@ -61,4 +65,22 @@ pub enum TLogFSError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+impl From<String> for TLogFSError {
+    fn from(s: String) -> Self {
+        TLogFSError::Internal(s)
+    }
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for TLogFSError {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        TLogFSError::Internal(e.to_string())
+    }
+}
+
+impl From<TLogFSError> for provider::Error {
+    fn from(e: TLogFSError) -> Self {
+        provider::Error::TLogFS(e.to_string())
+    }
 }

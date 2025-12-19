@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Comprehensive tests for the full ParquetExt trait
 //!
 //! Tests both high-level ForArrow integration and low-level RecordBatch operations.

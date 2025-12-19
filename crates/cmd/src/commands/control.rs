@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Control table query command - Show transaction status and post-commit execution
 //!
 //! Displays information from the control table including:
@@ -8,8 +12,9 @@
 
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
+use provider::FactoryRegistry;
+use provider::registry::ExecutionContext;
 use serde::Deserialize;
-use tlogfs::factory::ExecutionContext;
 use tokio::io::AsyncReadExt;
 
 /// Recent transaction record from control table query
@@ -466,7 +471,7 @@ async fn execute_sync_impl(
     let root = fs.root().await?;
 
     // Resolve the factory config path
-    let (parent_wd, lookup_result) = root
+    let (_parent_wd, lookup_result) = root
         .resolve_path(&remote_path)
         .await
         .with_context(|| format!("Failed to resolve path: {}", remote_path))?;
@@ -481,14 +486,13 @@ async fn execute_sync_impl(
         }
     };
 
-    // Get node and parent IDs
-    let node_id = config_node.borrow().await.id();
-    let part_id = parent_wd.node_path().id().await;
+    // Get node ID
+    let node_id = config_node.id();
 
     // Get the factory name from the oplog
     let factory_name = tx
         .state()?
-        .get_factory_for_node(node_id, part_id)
+        .get_factory_for_node(node_id)
         .await
         .with_context(|| format!("Failed to get factory for: {}", remote_path))?
         .ok_or_else(|| {
@@ -520,15 +524,17 @@ async fn execute_sync_impl(
 
     let pond_metadata = control_table.get_pond_metadata().clone();
 
-    // Create factory context for ControlReader mode
+    // Create factory context for ControlWriter mode
+    let state = tx.state()?;
+    let provider_context = state.as_provider_context();
     let factory_context =
-        tlogfs::factory::FactoryContext::with_metadata(tx.state()?, node_id, pond_metadata);
+        provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
 
     // Pass factory mode as arg
     let args = vec![factory_mode];
 
     // Execute the factory in ControlWriter mode
-    tlogfs::factory::FactoryRegistry::execute(
+    FactoryRegistry::execute::<tlogfs::TLogFSError>(
         &factory_name,
         &config_bytes,
         factory_context,

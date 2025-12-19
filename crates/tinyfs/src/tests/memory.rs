@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use super::super::memory::new_fs;
 use crate::error::Error;
 use crate::path::normalize;
@@ -399,6 +403,85 @@ impl FileContentVisitor {
     }
 }
 
+#[tokio::test]
+async fn test_create_dynamic_file_path() {
+    let fs = new_fs().await;
+    let root = fs.root().await.unwrap();
+
+    // Create parent directory
+    _ = root.create_dir_path("/config").await.unwrap();
+
+    // Create a dynamic file using the path-based API
+    let config_content = b"factory_type: test\nvalue: 42";
+
+    let dynamic_node = root
+        .create_dynamic_path(
+            "/config/test.yaml",
+            crate::EntryType::FileDataDynamic,
+            "test-factory",
+            config_content.to_vec(),
+        )
+        .await
+        .unwrap();
+
+    // Verify the node was created
+    assert_eq!(
+        dynamic_node.id().entry_type(),
+        crate::EntryType::FileDataDynamic
+    );
+
+    // Verify we can resolve it
+    let (_, lookup) = root.resolve_path("/config/test.yaml").await.unwrap();
+    match lookup {
+        crate::Lookup::Found(node_path) => {
+            assert_eq!(
+                node_path.id().entry_type(),
+                crate::EntryType::FileDataDynamic
+            );
+            assert_eq!(node_path.path(), std::path::Path::new("/config/test.yaml"));
+        }
+        _ => panic!("Expected to find the dynamic file"),
+    }
+}
+
+#[tokio::test]
+async fn test_create_dynamic_directory_path() {
+    let fs = new_fs().await;
+    let root = fs.root().await.unwrap();
+
+    // Create a dynamic directory using the path-based API
+    let config_content = b"query: SELECT * FROM data";
+
+    let dynamic_node = root
+        .create_dynamic_path(
+            "/virtual_data",
+            crate::EntryType::DirectoryDynamic,
+            "sql-derived",
+            config_content.to_vec(),
+        )
+        .await
+        .unwrap();
+
+    // Verify the node was created
+    assert_eq!(
+        dynamic_node.id().entry_type(),
+        crate::EntryType::DirectoryDynamic
+    );
+
+    // Verify we can resolve it
+    let (_, lookup) = root.resolve_path("/virtual_data").await.unwrap();
+    match lookup {
+        crate::Lookup::Found(node_path) => {
+            assert_eq!(
+                node_path.id().entry_type(),
+                crate::EntryType::DirectoryDynamic
+            );
+            assert_eq!(node_path.path(), std::path::Path::new("/virtual_data"));
+        }
+        _ => panic!("Expected to find the dynamic directory"),
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::wd::Visitor<Vec<u8>> for FileContentVisitor {
     async fn visit(
@@ -406,7 +489,7 @@ impl crate::wd::Visitor<Vec<u8>> for FileContentVisitor {
         node: crate::node::NodePath,
         _captured: &[String],
     ) -> crate::error::Result<Vec<u8>> {
-        let file_node = node.borrow().await.as_file()?;
+        let file_node = node.as_file().await?;
         let reader = file_node.async_reader().await?;
         let content = crate::async_helpers::buffer_helpers::read_all_to_vec(reader)
             .await

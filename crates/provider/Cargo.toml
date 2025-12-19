@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: 2025 Caspar Water Company
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "provider"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[dependencies]
+url.workspace = true
+serde_qs.workspace = true
+arrow.workspace = true
+arrow-csv.workspace = true
+arrow-schema.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+async-compression.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tinyfs.workspace = true
+datafusion.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+uuid7.workspace = true
+chrono.workspace = true
+linkme.workspace = true
+paste.workspace = true
+clap.workspace = true
+log.workspace = true
+bytes.workspace = true
+object_store.workspace = true
+async-stream.workspace = true
+humantime.workspace = true
+tera.workspace = true
+regex.workspace = true
+tl = "0.7.8"
+opentelemetry-proto = { version = "0.31.0", features = ["gen-tonic-messages", "metrics", "with-serde"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+datafusion-common.workspace = true
+arrow-array.workspace = true
+utilities = { workspace = true, features = ["test-helpers"] }
+env_logger.workspace = true
+parquet.workspace = true
+tokio-util.workspace = true
+arrow-cast.workspace = true
+
+[lints]
+workspace = true

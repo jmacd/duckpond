@@ -1,7 +1,11 @@
-#![allow(missing_docs)]
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
 
 pub mod arrow;
-pub mod async_helpers; // New helper module for reducing duplication
+pub mod async_helpers;
+pub mod caching_persistence;
+pub mod context;
 mod dir;
 mod entry_type;
 mod error;
@@ -14,25 +18,30 @@ mod node;
 mod path;
 pub mod persistence;
 mod symlink;
-pub mod tree_format; // Tree formatting utilities for hierarchical displays
-mod wd; // Arrow integration module
+pub mod testing;
+pub mod transaction_guard;
+pub mod tree_format;
+mod wd;
 
 // Public exports - Core filesystem API
-pub use dir::{Directory, Handle as DirHandle, Pathed};
-pub use file::{AsyncReadSeek, File, Handle as FileHandle};
+pub use context::{FactoryContext, PondMetadata, ProviderContext};
+pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
+pub use file::{AsyncReadSeek, File, Handle as FileHandle, QueryableFile};
 pub use fs::FS;
-pub use node::{Node, NodeID, NodePath, NodeRef, NodeType};
+pub use node::{FileID, Node, NodeID, NodePath, NodeType, PartID};
 pub use wd::{CopyDestination, Lookup, Visitor, WD};
 
 // Buffer utilities for tests and special cases
 // WARNING: These load entire files into memory - use sparingly
 pub use async_helpers::buffer_helpers;
+pub use caching_persistence::CachingPersistence;
 pub use entry_type::EntryType;
 pub use error::{Error, Result};
 pub use memory::persistence::MemoryPersistence;
 pub use metadata::{Metadata, NodeMetadata};
-pub use persistence::{DirectoryOperation, FileVersionInfo, PersistenceLayer};
+pub use persistence::{FileVersionInfo, PersistenceLayer};
 pub use symlink::{Handle as SymlinkHandle, Symlink};
+pub use transaction_guard::TransactionGuard;
 
 #[cfg(test)]
 mod tests;

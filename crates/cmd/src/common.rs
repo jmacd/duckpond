@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
@@ -108,7 +112,8 @@ const UUID_SHORT_LENGTH: usize = 12;
 /// For hex strings, shows appropriate number of digits based on magnitude
 /// Always wraps the result in square brackets for consistency
 #[must_use]
-pub fn format_node_id(node_id: &str) -> String {
+pub fn format_node_id(node_id: &impl std::fmt::Display) -> String {
+    let node_id = node_id.to_string();
     // @@@ YUCK Use Uuid, fail, do not fallback
     // Check if this looks like a UUID7 (contains hyphens)
     let id_str = if node_id.contains('-') {
@@ -145,7 +150,7 @@ pub fn format_file_size(size: u64) -> String {
 #[derive(Debug)]
 pub struct FileInfo {
     pub path: String,
-    pub node_id: String,
+    pub node_id: tinyfs::FileID,
     pub metadata: tinyfs::NodeMetadata,
     pub symlink_target: Option<String>,
 }
@@ -213,7 +218,6 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         node: tinyfs::NodePath,
         _captured: &[String],
     ) -> tinyfs::Result<FileInfo> {
-        let node_ref = node.borrow().await;
         let path = node.path().to_string_lossy().to_string();
 
         // Skip hidden files unless --all is specified
@@ -223,50 +227,48 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         }
 
         // Extract metadata that we can access from the node
-        let node_id = node.id().await.to_string();
+        let node_id = node.id();
 
-        match node_ref.node_type() {
-            tinyfs::NodeType::File(file_handle) => {
-                // Get consolidated metadata from the file handle
-                let metadata = file_handle.metadata().await?;
-                let entry_type_str = metadata.entry_type.as_str();
-                let size_val = metadata.size.unwrap_or(0);
+        if let Some(file_handle) = node.into_file().await {
+            // Get consolidated metadata from the file handle
+            let metadata = file_handle.metadata().await?;
+            let entry_type_str = metadata.entry_type.as_str();
+            let size_val = metadata.size.unwrap_or(0);
 
-                let final_type_str = metadata.entry_type.as_str();
-                let version = metadata.version;
-                debug!(
-                    "FileInfoVisitor: Successfully got metadata - entry_type={entry_type_str}, version={version}, size={size_val}"
-                );
+            let final_type_str = metadata.entry_type.as_str();
+            let version = metadata.version;
+            debug!(
+                "FileInfoVisitor: Successfully got metadata - entry_type={entry_type_str}, version={version}, size={size_val}"
+            );
 
-                debug!("FileInfoVisitor: Final FileInfo will have node_type={final_type_str}");
+            debug!("FileInfoVisitor: Final FileInfo will have node_type={final_type_str}");
 
-                Ok(FileInfo {
-                    path,
-                    metadata,
-                    symlink_target: None,
-                    node_id,
-                })
-            }
-            tinyfs::NodeType::Directory(dir_handle) => {
-                let metadata = dir_handle.metadata().await?;
-                Ok(FileInfo {
-                    path,
-                    metadata,
-                    symlink_target: None,
-                    node_id,
-                })
-            }
-            tinyfs::NodeType::Symlink(symlink_handle) => {
-                let target = symlink_handle.readlink().await.unwrap_or_default();
-                let metadata = symlink_handle.metadata().await?;
+            Ok(FileInfo {
+                path,
+                metadata,
+                symlink_target: None,
+                node_id,
+            })
+        } else if let Some(dir_handle) = node.into_dir().await {
+            let metadata = dir_handle.handle.metadata().await?;
+            Ok(FileInfo {
+                path,
+                metadata,
+                symlink_target: None,
+                node_id,
+            })
+        } else if let Some(symlink_handle) = node.into_symlink().await {
+            let target = symlink_handle.handle.readlink().await.unwrap_or_default();
+            let metadata = symlink_handle.handle.metadata().await?;
 
-                Ok(FileInfo {
-                    path,
-                    metadata,
-                    symlink_target: Some(target.to_string_lossy().to_string()),
-                    node_id,
-                })
-            }
+            Ok(FileInfo {
+                path,
+                metadata,
+                symlink_target: Some(target.to_string_lossy().to_string()),
+                node_id,
+            })
+        } else {
+            Err(tinyfs::Error::Other("Unknown node type".to_string()))
         }
     }
 }

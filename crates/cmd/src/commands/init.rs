@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{Context, Result, anyhow};
 
 use crate::common::ShipContext;
@@ -170,7 +174,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         let version_clone = *version;
 
         // Convert pond metadata to tlogfs format for download
-        let tlogfs_metadata = tlogfs::factory::PondMetadata {
+        let tlogfs_metadata = provider::PondMetadata {
             pond_id: pond_metadata_for_restore.pond_id,
             birth_timestamp: pond_metadata_for_restore.birth_timestamp,
             birth_hostname: pond_metadata_for_restore.birth_hostname.clone(),

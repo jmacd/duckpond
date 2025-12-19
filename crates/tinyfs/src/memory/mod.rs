@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Memory-based implementations for TinyFS
 //!
 //! This module contains in-memory implementations of the File, Directory, and Symlink traits.

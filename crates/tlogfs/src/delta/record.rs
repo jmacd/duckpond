@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use std::collections::HashMap;
 

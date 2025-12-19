@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::persistence::OpLogPersistence;
 use arrow_array::record_batch;
 use log::{debug, info};
@@ -58,6 +62,278 @@ async fn test_transaction_guard_basic_usage() {
         .expect("Failed to commit transaction");
 
     info!("✅ Transaction committed successfully");
+}
+
+/// Test the absolute basics: create, commit, reopen, read empty root
+#[tokio::test]
+async fn test_create_commit_reopen_read_root() {
+    let store_path = test_dir();
+
+    // Step 1: Create new OpLogPersistence with root directory
+    debug!("Step 1: Creating new OpLogPersistence");
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    debug!("OpLogPersistence created successfully");
+
+    // Step 2: Begin a transaction and verify we can access root
+    debug!("Step 2: Beginning first transaction");
+    let tx1 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root1 = tx1.root().await.expect("Failed to get root directory");
+    debug!("✅ Got root directory in first transaction");
+
+    // List the root directory (should be empty)
+    use futures::stream::StreamExt;
+    let mut entries_stream1 = root1.entries().await.expect("Failed to get entries stream");
+    let mut entries1 = Vec::new();
+    while let Some(entry_result) = entries_stream1.next().await {
+        let entry = entry_result.expect("Failed to read entry");
+        entries1.push(entry);
+    }
+    debug!("Root directory has {} entries", entries1.len());
+    assert_eq!(entries1.len(), 0, "Root should be empty initially");
+
+    // Step 3: Commit the transaction
+    debug!("Step 3: Committing first transaction");
+    tx1.commit_test()
+        .await
+        .expect("Failed to commit first transaction");
+    debug!("✅ First transaction committed");
+
+    // Step 4: Begin a second transaction and read root again
+    debug!("Step 4: Beginning second transaction (should see committed data)");
+    let tx2 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin second transaction");
+
+    let root2 = tx2
+        .root()
+        .await
+        .expect("Failed to get root in second transaction");
+    debug!("✅ Got root directory in second transaction");
+
+    // List the root directory again (should still be empty)
+    let mut entries_stream2 = root2.entries().await.expect("Failed to get entries stream");
+    let mut entries2 = Vec::new();
+    while let Some(entry_result) = entries_stream2.next().await {
+        let entry = entry_result.expect("Failed to read entry");
+        entries2.push(entry);
+    }
+    debug!(
+        "Root directory has {} entries in second transaction",
+        entries2.len()
+    );
+    assert_eq!(entries2.len(), 0, "Root should still be empty");
+
+    // No need to commit read transaction
+    debug!("✅ Test passed - can create, commit, and read empty root");
+}
+
+/// Test create file, commit, reopen, read file
+#[tokio::test]
+async fn test_create_file_commit_reopen_read() {
+    let store_path = test_dir();
+
+    // Step 1: Create new OpLogPersistence with root directory
+    debug!("Step 1: Creating new OpLogPersistence");
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    // Step 2: Create a simple file
+    debug!("Step 2: Creating a file");
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let root = tx.root().await.expect("Failed to get root");
+
+        // Write a simple text file
+        root.write_file_path_from_slice("test.txt", b"Hello, World!")
+            .await
+            .expect("Failed to write file");
+
+        debug!("✅ File created");
+
+        tx.commit_test().await.expect("Failed to commit");
+        debug!("✅ Transaction committed");
+    }
+
+    // Step 3: Read the file back in a new transaction
+    debug!("Step 3: Reading file in new transaction");
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin second transaction");
+        let root = tx.root().await.expect("Failed to get root");
+
+        // Read the file
+        let content = root
+            .read_file_path_to_vec("test.txt")
+            .await
+            .expect("Failed to read file");
+
+        let content_str = String::from_utf8(content).expect("Invalid UTF-8");
+        debug!("✅ Read file content: '{}'", content_str);
+
+        assert_eq!(content_str, "Hello, World!", "File content should match");
+
+        debug!("✅ Test passed - can create file, commit, and read back");
+    }
+}
+
+/// Test create file:series, commit, reopen, read - SIMPLIFIED VERSION
+#[tokio::test]
+async fn test_create_series_commit_reopen_read_simple() {
+    let store_path = test_dir();
+
+    // Step 1: Create new OpLogPersistence with root directory
+    debug!("Step 1: Creating new OpLogPersistence");
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    // Step 2: Create a simple series file
+    debug!("Step 2: Creating a file:series");
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let root = tx.root().await.expect("Failed to get root");
+
+        // Create test data as a RecordBatch
+        let batch = record_batch!(
+            ("timestamp", Int64, [1704067200000_i64]),
+            ("value", Float64, [42.0_f64])
+        )
+        .expect("Failed to create batch");
+
+        debug!("Created RecordBatch with {} rows", batch.num_rows());
+
+        // Write the series
+        let (min_time, max_time) = root
+            .create_series_from_batch("test.series", &batch, Some("timestamp"))
+            .await
+            .expect("Failed to create series");
+
+        debug!(
+            "✅ Series created with time range: {} to {}",
+            min_time, max_time
+        );
+
+        tx.commit_test().await.expect("Failed to commit");
+        debug!("✅ Transaction committed");
+    }
+
+    // Step 3: Read the series back in a new transaction
+    debug!("Step 3: Reading series in new transaction");
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin second transaction");
+        let root = tx.root().await.expect("Failed to get root");
+
+        // Check if file exists
+        let exists = root.exists(std::path::Path::new("test.series")).await;
+        debug!("File exists: {}", exists);
+        assert!(exists, "Series file should exist after commit");
+
+        // Read the series back
+        let read_batch = root
+            .read_table_as_batch("test.series")
+            .await
+            .expect("Failed to read series");
+
+        debug!(
+            "✅ Read RecordBatch with {} rows, {} columns",
+            read_batch.num_rows(),
+            read_batch.num_columns()
+        );
+
+        assert_eq!(read_batch.num_rows(), 1, "Should have 1 row");
+        assert_eq!(read_batch.num_columns(), 2, "Should have 2 columns");
+
+        debug!("✅ Test passed - can create series, commit, and read back");
+    }
+}
+
+/// Test create series in subdirectory, commit, reopen, read
+#[tokio::test]
+async fn test_create_series_in_subdir() {
+    let store_path = test_dir();
+
+    debug!("Creating new OpLogPersistence");
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    // Create a series in a subdirectory
+    debug!("Creating series in subdirectory");
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let root = tx.root().await.expect("Failed to get root");
+
+        // Create subdirectory
+        debug!("Creating test/ subdirectory");
+        let _test_dir = root
+            .create_dir_path("test")
+            .await
+            .expect("Failed to create directory");
+
+        // Create series in subdirectory
+        let batch = record_batch!(
+            ("timestamp", Int64, [1704067200000_i64]),
+            ("value", Float64, [42.0_f64])
+        )
+        .expect("Failed to create batch");
+
+        debug!("Writing series to test/data.series");
+        let _time_range = root
+            .create_series_from_batch("test/data.series", &batch, Some("timestamp"))
+            .await
+            .expect("Failed to create series");
+
+        debug!("✅ Series created, committing...");
+        tx.commit_test().await.expect("Failed to commit");
+        debug!("✅ Committed");
+    }
+
+    // Read back in new transaction
+    debug!("Reading back in new transaction");
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin read transaction");
+        let root = tx.root().await.expect("Failed to get root");
+
+        let exists = root.exists(std::path::Path::new("test/data.series")).await;
+        debug!("File exists: {}", exists);
+        assert!(exists, "File should exist");
+
+        let read_batch = root
+            .read_table_as_batch("test/data.series")
+            .await
+            .expect("Failed to read series");
+
+        debug!("✅ Read {} rows", read_batch.num_rows());
+        assert_eq!(read_batch.num_rows(), 1);
+    }
+
+    debug!("✅ Test passed");
 }
 
 /// Test reading from a directory after creation (simulating steward's read pattern)
@@ -514,7 +790,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     let wd2 = tx2.root().await?;
 
     let file_node = wd2.get_node_path("/large_test.dat").await?;
-    let file_handle = file_node.borrow().await.as_file()?;
+    let file_handle = file_node.as_file().await?;
 
     debug!("Getting async reader for large file...");
     let mut reader = file_handle.async_reader().await?;
@@ -597,7 +873,7 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     let wd2 = tx2.root().await?;
 
     let file_node = wd2.get_node_path("/small_test.txt").await?;
-    let file_handle = file_node.borrow().await.as_file()?;
+    let file_handle = file_node.as_file().await?;
 
     debug!("Getting async reader for small file...");
     let mut reader = file_handle.async_reader().await?;
@@ -876,6 +1152,28 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         debug!("Creating persistence layer...");
         let mut persistence = OpLogPersistence::create_test(&store_path).await?;
 
+        // Check filesystem after bootstrap
+        debug!("\n=== Checking filesystem after bootstrap ===");
+        let store_path_obj = std::path::Path::new(&store_path);
+        debug!("Store path: {}", store_path);
+        debug!("Store path exists: {}", store_path_obj.exists());
+        if store_path_obj.exists() &&
+            let Ok(entries) = std::fs::read_dir(store_path_obj) {
+                for entry in entries.flatten() {
+                    debug!("  - {}", entry.path().display());
+		}
+            }
+
+        // Check _delta_log directory
+        let delta_log_path = store_path_obj.join("_delta_log");
+        debug!("Delta log exists: {}", delta_log_path.exists());
+        if delta_log_path.exists() &&
+            let Ok(entries) = std::fs::read_dir(&delta_log_path) {
+                for entry in entries.flatten() {
+                        debug!("  - delta log: {}", entry.path().display());
+                }
+        }
+
         let series_path = "devices/sensor_123/data.series";
 
         // === TRANSACTION 2: Create directory structure and initial file ===
@@ -1008,9 +1306,10 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
 
         debug!("Total directory entries in oplog: {}", total_dir_entries);
 
-        // THE KEY CHECK: We created 3 directories, so should have exactly 3 directory entries
-        // If we have 4+, it means one or more directories were updated unnecessarily
-        let expected_dir_entries = 4; // root (v1 empty, v2 with devices), devices (v1), sensor_123 (v1)
+        // THE KEY CHECK: store_node() skips creating empty directory versions when has_pending_operations() is true
+        // Expected: root v1 (bootstrap), root v2 (with devices), devices v1 (with sensor_123), sensor_123 v1 (with file)
+        // NOT created: devices v1 empty, sensor_123 v1 empty (skipped because insert() happened in same transaction)
+        let expected_dir_entries = 4;
 
         debug!("\n=== Verification Result ===");
         debug!("Expected directory entries: {}", expected_dir_entries);
@@ -1108,4 +1407,499 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
             panic!("Test timed out after 30 seconds");
         }
     }
+}
+
+#[tokio::test]
+async fn test_symlink_create_and_read() {
+    let store_path = test_dir();
+
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    debug!("=== TX1: Create symlink and read in same transaction ===");
+
+    let tx1 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root = tx1.root().await.expect("Failed to get root");
+
+    // Create a target file with content
+    debug!("Creating target file: /target.txt");
+    use tinyfs::async_helpers::convenience;
+    _ = convenience::create_file_path(&root, "/target.txt", b"Hello, symlink!")
+        .await
+        .expect("Failed to create target file");
+
+    // Create a symlink pointing to the target
+    debug!("Creating symlink: /link -> /target.txt");
+    _ = root
+        .create_symlink_path("/link", "/target.txt")
+        .await
+        .expect("Failed to create symlink");
+
+    // Follow the symlink and read the file content in the same transaction
+    debug!("Following symlink to read file content in TX1");
+    let content = root
+        .read_file_path_to_vec("/link")
+        .await
+        .expect("Failed to read file through symlink in TX1");
+
+    assert_eq!(
+        content, b"Hello, symlink!",
+        "Should be able to read file through symlink in same transaction"
+    );
+    debug!(
+        "✅ Read file content through symlink in TX1: {:?}",
+        String::from_utf8_lossy(&content)
+    );
+
+    // Commit TX1
+    debug!("Committing TX1");
+    _ = tx1.commit().await.expect("Failed to commit TX1");
+
+    debug!("\n=== TX2: Read symlink in new transaction ===");
+
+    let tx2 = persistence.begin_test().await.expect("Failed to begin TX2");
+
+    let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    // Follow the symlink in TX2 and read content
+    debug!("Following symlink in TX2 to read file content");
+    let content2 = root2
+        .read_file_path_to_vec("/link")
+        .await
+        .expect("Failed to read file through symlink in TX2");
+
+    assert_eq!(
+        content2, b"Hello, symlink!",
+        "Should be able to read file through symlink in new transaction"
+    );
+    debug!(
+        "✅ Read file content through symlink in TX2: {:?}",
+        String::from_utf8_lossy(&content2)
+    );
+
+    debug!("\n✅ TEST PASSED!");
+    debug!("- Created symlink in TX1");
+    debug!("- Read symlink target in same transaction");
+    debug!("- Followed symlink to read file content in same transaction");
+    debug!("- Committed TX1");
+    debug!("- Read symlink in new transaction (TX2)");
+    debug!("- Followed symlink in TX2 to read file content");
+}
+
+/// Test creating dynamic files using high-level path API
+#[tokio::test]
+async fn test_create_dynamic_file_path() {
+    let store_path = test_dir();
+
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    debug!("=== Testing dynamic file creation with path API ===");
+
+    let tx = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root = tx.root().await.expect("Failed to get root");
+
+    // Create parent directory first
+    debug!("Creating parent directory: /config");
+    _ = root
+        .create_dir_path("/config")
+        .await
+        .expect("Failed to create parent directory");
+
+    // Create a dynamic file with factory name and YAML config
+    debug!("Creating dynamic file: /config/test.yaml");
+    let test_file_config = tinyfs::testing::TestFileConfig::simple("SELECT 1");
+    let config_content = test_file_config
+        .to_yaml_bytes()
+        .expect("Failed to serialize test file config");
+
+    let dynamic_node = root
+        .create_dynamic_path(
+            "/config/test.yaml",
+            tinyfs::EntryType::FileDataDynamic,
+            "test-file",
+            config_content.clone(),
+        )
+        .await
+        .expect("Failed to create dynamic file");
+
+    debug!("✅ Created dynamic file with factory: test-file");
+    debug!("   Node ID: {:?}", dynamic_node.id());
+
+    // Verify EntryType is correctly embedded in the FileID
+    let file_id = dynamic_node.id();
+    let entry_type = file_id.entry_type();
+    assert_eq!(
+        entry_type,
+        tinyfs::EntryType::FileDataDynamic,
+        "Dynamic file should have FileDataDynamic EntryType"
+    );
+    debug!("✅ FileID has correct EntryType: {:?}", entry_type);
+
+    // Verify we can read the file back
+    let read_content = root
+        .read_file_path_to_vec("/config/test.yaml")
+        .await
+        .expect("Failed to read dynamic file");
+
+    // Content from test-file factory is the "content" field, not the YAML config
+    assert_eq!(
+        String::from_utf8_lossy(&read_content),
+        "SELECT 1",
+        "Dynamic file content should be from TestFileConfig.content field"
+    );
+    debug!("✅ Read back dynamic file content successfully");
+
+    // Commit and verify persistence
+    debug!("Committing transaction");
+    _ = tx.commit().await.expect("Failed to commit");
+
+    // Read in new transaction
+    debug!("Reading dynamic file in new transaction");
+    let tx2 = persistence.begin_test().await.expect("Failed to begin TX2");
+
+    let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    // Read back the node to verify EntryType persisted correctly
+    let node_path2 = root2
+        .get_node_path(std::path::Path::new("/config/test.yaml"))
+        .await
+        .expect("Failed to get node");
+
+    let file_id2 = node_path2.id();
+    let entry_type2 = file_id2.entry_type();
+    assert_eq!(
+        entry_type2,
+        tinyfs::EntryType::FileDataDynamic,
+        "Persisted dynamic file should have valid FileDataDynamic EntryType"
+    );
+    debug!(
+        "✅ Persisted FileID has correct EntryType: {:?}",
+        entry_type2
+    );
+
+    let content2 = root2
+        .read_file_path_to_vec("/config/test.yaml")
+        .await
+        .expect("Failed to read file in TX2");
+
+    // Content from test-file factory is the "content" field, not the YAML config
+    assert_eq!(
+        String::from_utf8_lossy(&content2),
+        "SELECT 1",
+        "Dynamic file should persist and return content from factory"
+    );
+    debug!("✅ Dynamic file persisted correctly");
+
+    debug!("\n✅ TEST PASSED!");
+    debug!("- Created dynamic file using high-level path API");
+    debug!("- Read back content in same transaction");
+    debug!("- Committed and verified persistence");
+}
+
+/// Test creating dynamic directories using high-level path API
+/// NOTE: This test verifies dynamic directory creation with the test-dir factory.
+/// This demonstrates that dynamic nodes require proper factory registration.
+#[tokio::test]
+async fn test_create_dynamic_directory_path() {
+    // Use fixed path so we can inspect Delta files after test
+    let store_path = "/tmp/tlogfs_dynamic_dir_test";
+    let _ = std::fs::remove_dir_all(store_path); // Clean up from previous run
+
+    log::debug!("\n🔍 Test store path: {}", store_path);
+
+    let mut persistence = OpLogPersistence::create_test(store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    debug!("=== Testing dynamic directory creation with path API ===");
+
+    let tx = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root = tx.root().await.expect("Failed to get root");
+
+    // Create parent directory first
+    debug!("Creating parent directory: /factories");
+    _ = root
+        .create_dir_path("/factories")
+        .await
+        .expect("Failed to create parent directory");
+
+    // Create a dynamic directory with factory name and YAML config
+    debug!("Creating dynamic directory: /factories/processors");
+    let test_dir_config = tinyfs::testing::TestDirectoryConfig::simple("processors");
+    let config_content = test_dir_config
+        .to_yaml_bytes()
+        .expect("Failed to serialize test dir config");
+
+    let dynamic_dir = root
+        .create_dynamic_path(
+            "/factories/processors",
+            tinyfs::EntryType::DirectoryDynamic,
+            "test-dir",
+            config_content,
+        )
+        .await
+        .expect("Failed to create dynamic directory");
+
+    debug!("✅ Created dynamic directory with factory: test-dir");
+    debug!("   Node ID: {:?}", dynamic_dir.id());
+
+    // Verify the directory exists
+    let exists = root
+        .exists(std::path::Path::new("/factories/processors"))
+        .await;
+    assert!(exists, "Dynamic directory should exist");
+    debug!("✅ Dynamic directory exists");
+
+    // Commit
+    debug!("Committing transaction");
+    _ = tx.commit().await.expect("Failed to commit");
+
+    // Inspect what Delta Lake actually wrote
+    log::debug!("\n🔍 After TX1 commit - inspecting Delta Lake files:");
+    log::debug!("📁 Store path: {}", store_path);
+
+    // List _delta_log directory
+    let delta_log_path = format!("{}/_delta_log", store_path);
+    if let Ok(entries) = std::fs::read_dir(&delta_log_path) {
+        log::debug!("📂 _delta_log directory:");
+        for entry in entries.flatten() {
+            log::debug!("  - {}", entry.file_name().to_string_lossy());
+        }
+    }
+
+    // List main directory for Parquet files
+    if let Ok(entries) = std::fs::read_dir(store_path) {
+        log::debug!("📂 Main directory:");
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.ends_with(".parquet") {
+                log::debug!("  - {} (Parquet data file)", fname);
+            }
+        }
+    }
+
+    log::debug!("\n💡 Use: ./catparquet.sh {} <file>.parquet", store_path);
+    log::debug!("💡 to inspect the actual data written\n");
+
+    // Verify in new transaction
+    let tx2 = persistence.begin_test().await.expect("Failed to begin TX2");
+
+    let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    debug!("TX2: Looking up /factories/processors");
+    let result = root2
+        .get_node_path(std::path::Path::new("/factories/processors"))
+        .await;
+
+    let _node_path = result.expect("Dynamic directory should persist");
+    debug!("✅ Dynamic directory persisted correctly");
+
+    debug!("\n✅ TEST PASSED!");
+    debug!("- Created dynamic directory using high-level path API");
+    debug!("- Verified existence in same transaction");
+    debug!("- Committed and verified persistence");
+}
+
+/// Test that would have caught the EntryType bug in FileID::from_content
+///
+/// This test creates dynamic nodes (both files and directories), commits them,
+/// then reads them back and verifies:
+/// 1. FileIDs are valid and parseable
+/// 2. EntryType is correctly embedded in NodeID
+/// 3. Dynamic nodes can be read and used after persistence
+#[tokio::test]
+async fn test_dynamic_node_entry_type_validation() {
+    let store_path = test_dir();
+
+    log::debug!("\n🔍 Testing dynamic node EntryType validation");
+
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    // Transaction 1: Create dynamic file and directory
+    let tx1 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+
+    let root = tx1.root().await.expect("Failed to get root");
+
+    // Create parent directory
+    log::debug!("Creating parent directory: /dynamic-test");
+    let _ = root
+        .create_dir_path("/dynamic-test")
+        .await
+        .expect("Failed to create parent directory");
+
+    // Create dynamic file using test-file factory
+    log::debug!("Creating dynamic file: /dynamic-test/test.yaml");
+    let test_file_config =
+        tinyfs::testing::TestFileConfig::simple("test content from dynamic file");
+    let file_config_bytes = test_file_config
+        .to_yaml_bytes()
+        .expect("Failed to serialize test file config");
+
+    let dynamic_file = root
+        .create_dynamic_path(
+            "/dynamic-test/test.yaml",
+            tinyfs::EntryType::FileDataDynamic,
+            "test-file",
+            file_config_bytes,
+        )
+        .await
+        .expect("Failed to create dynamic file");
+
+    let file_id = dynamic_file.id();
+    log::debug!("✅ Created dynamic file with ID: {:?}", file_id);
+
+    // Verify EntryType is valid immediately after creation
+    let file_entry_type = file_id.entry_type();
+    log::debug!("  EntryType from FileID: {:?}", file_entry_type);
+    assert_eq!(
+        file_entry_type,
+        tinyfs::EntryType::FileDataDynamic,
+        "Dynamic file should have FileDataDynamic EntryType"
+    );
+
+    // Create dynamic directory using test-dir factory
+    log::debug!("Creating dynamic directory: /dynamic-test/subdir");
+    let test_dir_config = tinyfs::testing::TestDirectoryConfig::simple("subdir");
+    let dir_config_bytes = test_dir_config
+        .to_yaml_bytes()
+        .expect("Failed to serialize test dir config");
+
+    let dynamic_dir = root
+        .create_dynamic_path(
+            "/dynamic-test/subdir",
+            tinyfs::EntryType::DirectoryDynamic,
+            "test-dir",
+            dir_config_bytes,
+        )
+        .await
+        .expect("Failed to create dynamic directory");
+
+    let dir_id = dynamic_dir.id();
+    log::debug!("✅ Created dynamic directory with ID: {:?}", dir_id);
+
+    // Verify EntryType is valid immediately after creation
+    let dir_entry_type = dir_id.entry_type();
+    log::debug!("  EntryType from FileID: {:?}", dir_entry_type);
+    assert_eq!(
+        dir_entry_type,
+        tinyfs::EntryType::DirectoryDynamic,
+        "Dynamic directory should have DirectoryDynamic EntryType"
+    );
+
+    // Commit transaction
+    log::debug!("Committing transaction 1");
+    tx1.commit_test()
+        .await
+        .expect("Failed to commit transaction 1");
+
+    // Transaction 2: Read back the dynamic nodes and verify EntryTypes
+    log::debug!("\nStarting transaction 2 to read back dynamic nodes");
+    let tx2 = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction 2");
+
+    let root2 = tx2.root().await.expect("Failed to get root in TX2");
+
+    // Read back dynamic file
+    log::debug!("Reading back dynamic file: /dynamic-test/test.yaml");
+    let file_node = root2
+        .get_node_path(std::path::Path::new("/dynamic-test/test.yaml"))
+        .await
+        .expect("Failed to get dynamic file");
+
+    let read_file_id = file_node.id();
+    log::debug!("✅ Read back dynamic file with ID: {:?}", read_file_id);
+
+    // This is the critical test: can we parse the EntryType from the persisted FileID?
+    let read_file_entry_type = read_file_id.entry_type();
+    log::debug!(
+        "  EntryType from persisted FileID: {:?}",
+        read_file_entry_type
+    );
+    assert_eq!(
+        read_file_entry_type,
+        tinyfs::EntryType::FileDataDynamic,
+        "Persisted dynamic file should have valid FileDataDynamic EntryType"
+    );
+
+    // Verify we can actually read the file content
+    let file_content = root2
+        .read_file_path_to_vec("/dynamic-test/test.yaml")
+        .await
+        .expect("Failed to read dynamic file content");
+    let content_str = String::from_utf8_lossy(&file_content);
+    log::debug!("  File content: {:?}", content_str);
+    assert_eq!(
+        content_str, "test content from dynamic file",
+        "Dynamic file content should match"
+    );
+
+    // Read back dynamic directory
+    log::debug!("Reading back dynamic directory: /dynamic-test/subdir");
+    let dir_node = root2
+        .get_node_path(std::path::Path::new("/dynamic-test/subdir"))
+        .await
+        .expect("Failed to get dynamic directory");
+
+    let read_dir_id = dir_node.id();
+    log::debug!("✅ Read back dynamic directory with ID: {:?}", read_dir_id);
+
+    // This is the critical test: can we parse the EntryType from the persisted FileID?
+    let read_dir_entry_type = read_dir_id.entry_type();
+    log::debug!(
+        "  EntryType from persisted FileID: {:?}",
+        read_dir_entry_type
+    );
+    assert_eq!(
+        read_dir_entry_type,
+        tinyfs::EntryType::DirectoryDynamic,
+        "Persisted dynamic directory should have valid DirectoryDynamic EntryType"
+    );
+
+    // Verify we can list the directory (even though it's empty)
+    use futures::stream::StreamExt;
+    let dir_node_handle = dir_node
+        .into_dir()
+        .await
+        .expect("Node should be a directory");
+    let mut entries_stream = dir_node_handle
+        .handle
+        .entries()
+        .await
+        .expect("Failed to get entries");
+    let mut entry_count = 0;
+    while let Some(entry_result) = entries_stream.next().await {
+        let _entry = entry_result.expect("Failed to read entry");
+        entry_count += 1;
+    }
+    log::debug!("  Directory has {} entries", entry_count);
+
+    log::debug!("\n✅ TEST PASSED!");
+    log::debug!("- Created dynamic file and directory");
+    log::debug!("- Verified EntryType immediately after creation");
+    log::debug!("- Committed to persistence");
+    log::debug!("- Read back from new transaction");
+    log::debug!("- Verified EntryType from persisted NodeIDs (would have panicked with bug)");
+    log::debug!("- Successfully used dynamic nodes (read file, list directory)");
 }

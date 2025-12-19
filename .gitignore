@@ -26,3 +26,10 @@ Cargo.lock
 *.csv
 
 hydrovu-config.yaml
+
+sample-*/
+
+noyo/copy/
+noyo/export/
+noyo/laketech/
+

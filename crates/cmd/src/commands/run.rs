@@ -1,9 +1,14 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Run command - executes run configurations stored as pond nodes
 
 use crate::common::ShipContext;
 use anyhow::{Context, Result, anyhow};
 use log::{debug, error};
-use tlogfs::factory::ExecutionContext;
+use provider::FactoryRegistry;
+use provider::registry::ExecutionContext;
 use tokio::io::AsyncReadExt;
 
 /// Execute a run configuration
@@ -69,7 +74,7 @@ async fn run_command_impl(
     let root = fs.root().await?;
 
     // Get the node ID for the config file
-    let (parent_wd, lookup_result) = root
+    let (_parent_wd, lookup_result) = root
         .resolve_path(config_path)
         .await
         .with_context(|| format!("Failed to resolve path: {}", config_path))?;
@@ -84,14 +89,13 @@ async fn run_command_impl(
         }
     };
 
-    // Get node and parent IDs for querying the factory
-    let node_id = config_node.borrow().await.id();
-    let part_id = parent_wd.node_path().id().await;
+    // Get node ID for querying the factory
+    let node_id = config_node.id();
 
     // Get the factory name from the oplog
     let factory_name = tx
         .state()?
-        .get_factory_for_node(node_id, part_id)
+        .get_factory_for_node(node_id)
         .await
         .with_context(|| format!("Failed to get factory for: {}", config_path))?
         .ok_or_else(|| {
@@ -147,11 +151,13 @@ async fn run_command_impl(
     };
 
     // Create factory context with pond metadata (pre-loaded above)
+    let state = tx.state()?;
+    let provider_context = state.as_provider_context();
     let factory_context =
-        tlogfs::factory::FactoryContext::with_metadata(tx.state()?, node_id, pond_metadata);
+        provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
 
     // Execute the configuration using the factory registry in write mode
-    tlogfs::factory::FactoryRegistry::execute(
+    FactoryRegistry::execute::<tlogfs::TLogFSError>(
         &factory_name,
         &config_bytes,
         factory_context,

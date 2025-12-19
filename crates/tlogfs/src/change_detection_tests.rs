@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tests for Delta Lake change detection functionality
 //!
 //! This test suite verifies that we can correctly detect file changes

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Caspar Water Company
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [package]
 name = "tinyfs"
 version.workspace = true
@@ -15,24 +19,29 @@ description.workspace = true
 doctest = false
 
 [dependencies]
-tokio = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
-log = { workspace = true }
-uuid7 = { workspace = true }
-serde = { workspace = true }
-sha2 = { workspace = true }
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+log.workspace = true
+uuid7.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
+sha2.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 arrow.workspace = true
 parquet.workspace = true
+datafusion.workspace = true
 deltalake.workspace = true
 tokio-util.workspace = true
 serde_arrow.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
-serde_json = { workspace = true }
-bytes = { workspace = true }
+serde_json.workspace = true
 
 [lints]
 workspace = true

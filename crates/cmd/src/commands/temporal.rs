@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -66,31 +70,31 @@ pub async fn detect_overlaps_command(
             .map_err(|e| anyhow!("Failed to resolve pattern '{}': {}", pattern, e))?;
 
         for (node_path, _captured) in matches {
-            let node_ref = node_path.borrow().await;
-
-            if let Ok(file_node) = node_ref.as_file()
-                && let Ok(metadata) = file_node.metadata().await
-                && metadata.entry_type.is_series_file()
-            {
-                let path_str = node_path.path().to_string_lossy().to_string();
-
-                // Use resolve_path to get both the parent directory and lookup result
-                let (parent_wd, lookup) = tinyfs_root
-                    .resolve_path(&path_str)
+            if let Some(file_node) = node_path.into_file().await {
+                let metadata = file_node
+                    .metadata()
                     .await
-                    .map_err(|e| anyhow!("Failed to resolve path {}: {}", path_str, e))?;
+                    .map_err(|e| anyhow!("Failed to get metadata: {}", e))?;
 
-                match lookup {
-                    tinyfs::Lookup::Found(found_node) => {
-                        let node_guard = found_node.borrow().await;
-                        let node_id = node_guard.id();
-                        let part_id = parent_wd.node_path().id().await;
-                        drop(node_guard);
+                if metadata.entry_type.is_series_file() {
+                    let path_str = node_path.path().to_string_lossy().to_string();
 
-                        file_info.push((path_str, node_id, part_id));
-                    }
-                    _ => {
-                        return Err(anyhow!("File not found: {}", path_str));
+                    // Use resolve_path to get both the parent directory and lookup result
+                    let (_parent_wd, lookup) = tinyfs_root
+                        .resolve_path(&path_str)
+                        .await
+                        .map_err(|e| anyhow!("Failed to resolve path {}: {}", path_str, e))?;
+
+                    match lookup {
+                        tinyfs::Lookup::Found(found_node) => {
+                            let node_id = found_node.id();
+                            let part_id = node_id.part_id();
+
+                            file_info.push((path_str, node_id, part_id));
+                        }
+                        _ => {
+                            return Err(anyhow!("File not found: {}", path_str));
+                        }
                     }
                 }
             }
@@ -108,16 +112,22 @@ pub async fn detect_overlaps_command(
     // Create a UNION query to get all data from all versions sorted by timestamp
     let mut union_parts = Vec::new();
 
-    for (origin_id, (path_str, node_id, part_id)) in file_info.iter().enumerate() {
-        // Get all versions of this file using node_id and part_id
-        let all_versions = fs
-            .list_file_versions(*node_id, *part_id)
+    for (origin_id, (path_str, node_id, _part_id)) in file_info.iter().enumerate() {
+        // Get all versions of this file from OpLog records
+        let state = tx.state()?;
+        let records = state
+            .query_records(*node_id)
             .await
-            .map_err(|e| anyhow!("Failed to get versions for {}: {}", path_str, e))?;
+            .map_err(|e| anyhow!("Failed to get records for {}: {}", path_str, e))?;
 
         // Filter out empty versions (size == 0) to avoid Parquet parsing errors
-        // Empty versions are used only for temporal metadata and should not be included in data analysis
-        let versions: Vec<_> = all_versions.into_iter().filter(|v| v.size > 0).collect();
+        let versions: Vec<_> = records
+            .into_iter()
+            .filter(|r| {
+                !matches!(r.format, tlogfs::schema::StorageFormat::Inline)
+                    && r.size.unwrap_or(0) > 0
+            })
+            .collect();
 
         let version_count = versions.len();
         debug!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions");
@@ -126,34 +136,37 @@ pub async fn detect_overlaps_command(
         let _object_store = tx.object_store().await?; // Keep for future use if needed
 
         // Create a TemporalFilteredListingTable for each version using the new approach
-        let version_count = versions.len();
         debug!("Creating table providers for {path_str} with {version_count} versions");
 
         debug!("\nAnalyzing {}: {} versions", path_str, version_count);
 
-        for version_info in versions {
-            let version = version_info.version;
-            let size = version_info.size;
+        for record in versions {
+            let version = record.version;
+            let size = record.size.unwrap_or(0);
             debug!("Creating table provider for {path_str} version {version} (size: {size})");
 
-            let table_provider = tlogfs::file_table::create_listing_table_provider_with_options(
-                *node_id, // Already a NodeID, just dereference
-                *part_id, // Already a NodeID, just dereference
-                tx.transaction_guard()?,
-                tlogfs::file_table::VersionSelection::SpecificVersion(version_info.version),
+            let state = tx.state()?;
+            let context = state.as_provider_context();
+            let table_provider = provider::create_table_provider(
+                *node_id,
+                &context,
+                provider::TableProviderOptions {
+                    version_selection: provider::VersionSelection::SpecificVersion(version as u64),
+                    additional_urls: Vec::new(),
+                },
             )
             .await
             .map_err(|e| {
                 anyhow!(
                     "Failed to create TemporalFilteredListingTable for {} v{}: {}",
                     path_str,
-                    version_info.version,
+                    version,
                     e
                 )
             })?;
 
             // Register table with unique name including version
-            let table_name = format!("file_{}_{}", origin_id, version_info.version);
+            let table_name = format!("file_{}_{}", origin_id, version);
             _ = ctx
                 .register_table(&table_name, table_provider)
                 .map_err(|e| anyhow!("Failed to register table '{}': {}", table_name, e))?;
@@ -258,7 +271,7 @@ pub async fn detect_overlaps_command(
             // Add to UNION query with origin tracking (timestamp and metadata)
             union_parts.push(format!(
                 "(SELECT timestamp, {} as _node_id, {} as _version, '{}' as _file_path FROM {})",
-                origin_id, version_info.version, path_str, table_name
+                origin_id, version, path_str, table_name
             ));
         }
     }

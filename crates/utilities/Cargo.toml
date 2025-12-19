@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Caspar Water Company
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [package]
 name = "utilities"
 version.workspace = true
@@ -13,6 +17,13 @@ description.workspace = true
 
 [dependencies]
 chrono.workspace = true
+arrow.workspace = true
+parquet.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[features]
+test-helpers = []
 
 [lints]
 workspace = true

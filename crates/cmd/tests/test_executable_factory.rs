@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Integration tests for executable factory system
 //!
 //! These tests verify the complete workflow:
@@ -7,12 +11,12 @@
 
 use cmd::common::ShipContext;
 use log::debug;
+use provider::registry::ExecutionContext;
 use std::collections::HashMap;
 use steward::PondUserMetadata;
 use tempfile::TempDir;
-use tinyfs::{FS, PersistenceLayer};
-use tlogfs::factory::ExecutionContext;
-use tlogfs::{FactoryContext, FactoryRegistry};
+use tinyfs::FS;
+use tlogfs::FactoryRegistry;
 
 /// Helper to create a test ship and workspace
 async fn setup_test_ship() -> (ShipContext, TempDir) {
@@ -67,12 +71,12 @@ async fn create_test_config(
 
     // Resolve parent after creation
     let (parent_wd, _) = root.resolve_path(parent_path).await?;
-    let parent_node_id = parent_wd.node_path().id().await;
+    let parent_node_id = parent_wd.node_path().id();
 
-    _ = state
-        .create_dynamic_file_node(
-            parent_node_id,
-            path.rsplit('/').next().expect("ok").to_string(),
+    // Create dynamic node using path-based API
+    let _node_path = root
+        .create_dynamic_path(
+            path,
             tinyfs::EntryType::FileDataDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
@@ -80,8 +84,14 @@ async fn create_test_config(
         .await?;
 
     // Initialize the factory
-    let context = FactoryContext::new(state.clone(), parent_node_id);
-    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context).await?;
+    let provider_context = state.as_provider_context();
+    let context = provider::FactoryContext::new(provider_context, parent_node_id);
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context,
+    )
+    .await?;
 
     _ = tx.commit().await?;
     Ok(())
@@ -141,12 +151,12 @@ repeat_count: 5
         .resolve_path("/configs")
         .await
         .expect("Failed to resolve configs");
-    let parent_node_id = parent_wd.node_path().id().await;
+    let parent_node_id = parent_wd.node_path().id();
 
-    _ = state
-        .create_dynamic_file_node(
-            parent_node_id,
-            "test3".to_string(),
+    // Create dynamic node using path-based API
+    let _node_path = root
+        .create_dynamic_path(
+            "/configs/test3",
             tinyfs::EntryType::FileDataDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
@@ -155,12 +165,17 @@ repeat_count: 5
         .expect("Failed to create config node");
 
     // Initialize and execute in the SAME transaction
-    let context = FactoryContext::new(state.clone(), parent_node_id);
-    FactoryRegistry::initialize("test-executor", config_yaml.as_bytes(), context.clone())
-        .await
-        .expect("Failed to initialize factory");
+    let provider_context = state.as_provider_context();
+    let context = provider::FactoryContext::new(provider_context, parent_node_id);
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        "test-executor",
+        config_yaml.as_bytes(),
+        context.clone(),
+    )
+    .await
+    .expect("Failed to initialize factory");
 
-    FactoryRegistry::execute(
+    FactoryRegistry::execute::<tlogfs::TLogFSError>(
         "test-executor",
         config_yaml.as_bytes(),
         context,

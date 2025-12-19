@@ -1,8 +1,12 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::EntryType;
-use crate::dir::{Directory, Handle};
+use crate::dir::{Directory, DirectoryEntry, Handle};
 use crate::error::{Error, Result};
 use crate::metadata::{Metadata, NodeMetadata};
-use crate::node::NodeRef;
+use crate::node::Node;
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
 use std::collections::BTreeMap;
@@ -13,7 +17,7 @@ use std::sync::Arc;
 /// This implementation stores directory entries in memory and is suitable for
 /// testing, development, and lightweight filesystem operations.
 pub struct MemoryDirectory {
-    entries: BTreeMap<String, NodeRef>,
+    entries: BTreeMap<String, Node>,
 }
 
 #[async_trait]
@@ -31,11 +35,11 @@ impl Metadata for MemoryDirectory {
 
 #[async_trait]
 impl Directory for MemoryDirectory {
-    async fn get(&self, name: &str) -> Result<Option<NodeRef>> {
+    async fn get(&self, name: &str) -> Result<Option<Node>> {
         Ok(self.entries.get(name).cloned())
     }
 
-    async fn insert(&mut self, name: String, id: NodeRef) -> Result<()> {
+    async fn insert(&mut self, name: String, id: Node) -> Result<()> {
         if self.entries.insert(name.clone(), id).is_some() {
             // Note this is not a full path.
             return Err(Error::already_exists(&name));
@@ -43,14 +47,17 @@ impl Directory for MemoryDirectory {
         Ok(())
     }
 
-    async fn entries(
-        &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<(String, NodeRef)>> + Send>>> {
-        let items: Vec<_> = self
-            .entries
-            .iter()
-            .map(|(name, node_ref)| Ok((name.clone(), node_ref.clone())))
-            .collect();
+    async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
+        let mut items = Vec::new();
+        for (name, node) in &self.entries {
+            let dir_entry = DirectoryEntry::new(
+                name.clone(),
+                node.id().node_id(),
+                node.entry_type(),
+                0, // Version not tracked in memory @@@
+            );
+            items.push(Ok(dir_entry));
+        }
         Ok(Box::pin(stream::iter(items)))
     }
 }

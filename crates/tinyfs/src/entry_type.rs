@@ -1,58 +1,49 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 /// Node type identifiers for directory entries and persistence
-///
-/// This enum provides type-safe alternatives to string literals
-/// for identifying node types in directory entries and persistence layers.
-/// Files are distinguished by their format for different access patterns.
-///
-/// CRITICAL: This enum is now COMPREHENSIVE - it includes both the access method
-/// (directory, file, symlink) AND whether the node is physical (real TLogFS) or
-/// dynamic (factory-based). This eliminates the need to query OplogEntry.factory
-/// to determine partition assignment.
-///
-/// Partition Rules:
-/// - DirectoryPhysical: uses child_node_id as part_id (own partition)
-/// - DirectoryDynamic: uses parent_node_id as part_id (parent's partition)
-/// - All Files (physical/dynamic): use parent_node_id as part_id (parent's partition)
-/// - Symlinks: use parent_node_id as part_id (parent's partition, always physical)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[repr(u8)]
 pub enum EntryType {
     /// Physical directory - real TLogFS directory that creates its own partition
     #[serde(rename = "dir:physical")]
-    DirectoryPhysical,
+    DirectoryPhysical = 1,
 
     /// Dynamic directory - factory-based directory that uses parent's partition
     #[serde(rename = "dir:dynamic")]
-    DirectoryDynamic,
+    DirectoryDynamic = 2,
 
     /// Symbolic link entry (always physical, no dynamic symlinks)
-    Symlink,
+    Symlink = 3,
 
     /// Physical data file - arbitrary byte content, accessed via Read/Write traits
     #[serde(rename = "file:data:physical")]
-    FileDataPhysical,
+    FileDataPhysical = 4,
 
     /// Dynamic data file - factory-generated data file
     #[serde(rename = "file:data:dynamic")]
-    FileDataDynamic,
+    FileDataDynamic = 5,
 
     /// Physical table file - single-version table stored as Parquet
     #[serde(rename = "file:table:physical")]
-    FileTablePhysical,
+    FileTablePhysical = 6,
 
     /// Dynamic table file - factory-generated table
     #[serde(rename = "file:table:dynamic")]
-    FileTableDynamic,
+    FileTableDynamic = 7,
 
     /// Physical series file - multi-version table series, supports time-travel queries
     #[serde(rename = "file:series:physical")]
-    FileSeriesPhysical,
+    FileSeriesPhysical = 8,
 
     /// Dynamic series file - factory-generated time series
     #[serde(rename = "file:series:dynamic")]
-    FileSeriesDynamic,
+    FileSeriesDynamic = 9,
 }
 
 impl EntryType {
@@ -163,23 +154,23 @@ impl EntryType {
             EntryType::FileSeriesDynamic => "file:series:dynamic",
         }
     }
+}
 
-    /// Convert from NodeType to EntryType for directory entries
-    ///
-    /// Query the handle's metadata to determine the actual EntryType
-    pub async fn from_node_type(node_type: &crate::NodeType) -> crate::error::Result<Self> {
-        match node_type {
-            crate::NodeType::File(handle) => {
-                let metadata = handle.metadata().await?;
-                Ok(metadata.entry_type)
-            }
-            crate::NodeType::Directory(_) => {
-                // For directories, we need additional context to determine if they're dynamic
-                // This method is insufficient - use from_node_type_with_factory instead
-                // Default to physical for compatibility
-                Ok(EntryType::DirectoryPhysical)
-            }
-            crate::NodeType::Symlink(_) => Ok(EntryType::Symlink),
+impl TryFrom<u8> for EntryType {
+    type Error = String;
+
+    fn try_from(v: u8) -> Result<Self, String> {
+        match v {
+            1 => Ok(EntryType::DirectoryPhysical),
+            2 => Ok(EntryType::DirectoryDynamic),
+            3 => Ok(EntryType::Symlink),
+            4 => Ok(EntryType::FileDataPhysical),
+            5 => Ok(EntryType::FileDataDynamic),
+            6 => Ok(EntryType::FileTablePhysical),
+            7 => Ok(EntryType::FileTableDynamic),
+            8 => Ok(EntryType::FileSeriesPhysical),
+            9 => Ok(EntryType::FileSeriesDynamic),
+            _ => Err(format!("Unknown EntryType: {}", v)),
         }
     }
 }
@@ -410,31 +401,6 @@ mod tests {
 
         let symlink_parsed: EntryType = serde_json::from_str("\"symlink\"").unwrap();
         assert_eq!(symlink_parsed, EntryType::Symlink);
-    }
-
-    #[tokio::test]
-    async fn test_from_node_type() {
-        // Create memory files with different entry types in their metadata
-        let file_handle = crate::memory::MemoryFile::new_handle_with_entry_type(
-            vec![],
-            EntryType::FileSeriesPhysical,
-        );
-        let file_node = crate::NodeType::File(file_handle);
-        assert_eq!(
-            EntryType::from_node_type(&file_node).await.unwrap(),
-            EntryType::FileSeriesPhysical
-        );
-
-        // Test with FileData
-        let file_handle2 = crate::memory::MemoryFile::new_handle_with_entry_type(
-            vec![],
-            EntryType::FileDataDynamic,
-        );
-        let file_node2 = crate::NodeType::File(file_handle2);
-        assert_eq!(
-            EntryType::from_node_type(&file_node2).await.unwrap(),
-            EntryType::FileDataDynamic
-        );
     }
 
     #[test]

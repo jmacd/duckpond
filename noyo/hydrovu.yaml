@@ -4,32 +4,30 @@ client_id: "{{ env(name='HYDRO_KEY_ID') }}"
 client_secret: "{{ env(name='HYDRO_KEY_VALUE') }}"
 devices:
   - name:  BDockVulink
-    scope: Vulink
     id:    4990594334457856
+    comment: Becomes Field Station surface 10/17/2025    
 
   - name:  BDockAT500
-    scope: AT500_Surface
     id:    6154708427603968
+    comment: Becomes Field Station surface 10/17/2025    
 
   - name:  SilverVulink1
-    scope: Vulink
     id:    6582334615060480
     comment: This original unit stopped working around May 30, 2024
 
   - name:  SilverVulink2
-    scope: Vulink
     id:    6417476404772864
     comment: This replaces SilverVulink1 around July 23, 2024
 
   - name:  SilverAT500
-    scope: AT500_Surface
     id:    5859376846209024
+    comment: Still current @ Silver
 
   - name:  PrincessVulink
-    scope: Vulink
     id:    5877040213786624
+    comment: Becomes Field Station bottom 10/17/2025    
 
   - name:  PrincessAT500
-    scope: AT500_Surface
     id:    6187749627789312
+    comment: Becomes Field Station bottom 10/17/2025    
     

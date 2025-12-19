@@ -9,11 +9,13 @@ entries:
       resolutions: [1h, 2h, 4h, 12h, 24h]
       aggregations:
         - type: "avg"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.DO.mg/L", "AT500_Surface.Salinity.psu"]
+          # Glob patterns supported: * matches any characters
+          # "Vulink*.Temperature.C" will match Vulink1, Vulink2, etc.
+          columns: ["Vulink*.Temperature.C", "AT500_*.Temperature.C", "AT500_*.DO.mg/L", "AT500_*.Salinity.psu"]
         - type: "min"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.DO.mg/L", "AT500_Surface.Salinity.psu"]
+          columns: ["Vulink*.Temperature.C", "AT500_*.Temperature.C", "AT500_*.DO.mg/L", "AT500_*.Salinity.psu"]
         - type: "max"
-          columns: ["Vulink.Temperature.C", "AT500_Surface.Temperature.C", "AT500_Surface.DO.mg/L", "AT500_Surface.Salinity.psu"]
+          columns: ["Vulink*.Temperature.C", "AT500_*.Temperature.C", "AT500_*.DO.mg/L", "AT500_*.Salinity.psu"]
 
   - name: "single_param"
     factory: "temporal-reduce"

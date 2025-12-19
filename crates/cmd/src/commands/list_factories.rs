@@ -1,7 +1,11 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CLI command for listing available dynamic factories
 use anyhow::Result;
 use log::debug;
-use tlogfs::factory::FactoryRegistry;
+use provider::FactoryRegistry;
 
 /// List all available dynamic node factories
 #[allow(clippy::print_stdout)]

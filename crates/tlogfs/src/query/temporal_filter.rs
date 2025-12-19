@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 /// Unified Temporal Filtering for TLogFS
 ///
 /// This module provides consistent temporal override filtering that can be applied

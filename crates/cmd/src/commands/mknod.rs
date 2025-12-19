@@ -1,10 +1,14 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CLI command for creating dynamic nodes
 use crate::common::ShipContext;
 use crate::template_utils;
 use anyhow::{Result, anyhow};
 use log::debug;
+use provider::FactoryRegistry;
 use std::fs;
-use tlogfs::factory::FactoryRegistry;
 
 /// Create a dynamic node in the pond using transaction guard pattern
 pub async fn mknod_command(
@@ -105,52 +109,35 @@ async fn mknod_impl(
         .ok_or_else(|| anyhow!("Unknown factory type: {}", factory_type))?;
 
     // Determine what type of node to create based on factory capabilities
-    let _node_path = if factory.create_directory.is_some() {
-        // Factory supports directories
-        if overwrite {
-            // Use overwrite method directly to bypass parsing existing config
-            root.create_dynamic_directory_path_with_overwrite(
-                path,
-                factory_type,
-                config_bytes.clone(),
-                overwrite,
-            )
-            .await?
-        } else {
-            // Normal creation path
-            root.create_dynamic_directory_path(
-            path,
-            factory_type,
-            config_bytes.clone(),
-        ).await.map_err(|e| match e {
-            tinyfs::Error::AlreadyExists(_) => {
-                anyhow!("Dynamic node already exists at path '{}'. Use --overwrite to replace it.", path)
-            },
-            e => anyhow!("Failed to create dynamic directory: {}", e),
-        })?
-        }
-    } else if factory.create_file.is_some() || factory.execute.is_some() {
+    let entry_type = if factory.create_directory.is_some() {
+        tinyfs::EntryType::DirectoryDynamic
+    } else if factory.create_file.is_some()
+        || factory.execute.is_some()
+        || factory.apply_table_transform.is_some()
+    {
         // Factory supports files - either:
         // 1. Has explicit create_file function (template factory)
         // 2. Is executable factory (config bytes ARE the file content via ConfigFile wrapper)
-        if overwrite {
-            // Use overwrite method directly to bypass parsing existing config
-            root.create_dynamic_file_path_with_overwrite(
-                path,
-                tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
-                factory_type,
-                config_bytes.clone(),
-                overwrite,
-            )
-            .await?
-        } else {
-            // Normal creation path
-            root.create_dynamic_file_path(
-                path,
-                tinyfs::EntryType::FileDataDynamic, // Executable configs are data files
-                factory_type,
-                config_bytes.clone(),
-            )
+        // 3. Is table transform factory (config stored for use by other factories)
+        tinyfs::EntryType::FileDataDynamic
+    } else {
+        return Err(anyhow!(
+            "Factory '{}' does not support creating directories or files",
+            factory_type
+        ));
+    };
+
+    let _node_path = if overwrite {
+        root.create_dynamic_path_with_overwrite(
+            path,
+            entry_type,
+            factory_type,
+            config_bytes.clone(),
+            overwrite,
+        )
+        .await?
+    } else {
+        root.create_dynamic_path(path, entry_type, factory_type, config_bytes.clone())
             .await
             .map_err(|e| match e {
                 tinyfs::Error::AlreadyExists(_) => {
@@ -159,14 +146,8 @@ async fn mknod_impl(
                         path
                     )
                 }
-                e => anyhow!("Failed to create dynamic file: {}", e),
+                e => anyhow!("Failed to create dynamic node: {}", e),
             })?
-        }
-    } else {
-        return Err(anyhow!(
-            "Factory '{}' does not support creating directories or files",
-            factory_type
-        ));
     };
 
     // Node is created, lock is released - now run factory initialization
@@ -176,7 +157,7 @@ async fn mknod_impl(
         .unwrap_or(std::path::Path::new("/"));
     let parent_node_path = root.resolve_path(parent_path).await?;
     let parent_node_id = match parent_node_path.1 {
-        tinyfs::Lookup::Found(node) => node.id().await,
+        tinyfs::Lookup::Found(node) => node.id(),
         _ => {
             return Err(anyhow!(
                 "Parent directory not found: {}",
@@ -189,10 +170,11 @@ async fn mknod_impl(
     let state = tx
         .state()
         .map_err(|e| anyhow!("Failed to get state: {}", e))?;
-    let context = tlogfs::factory::FactoryContext::new(state, parent_node_id);
+    let provider_context = state.as_provider_context();
+    let context = provider::FactoryContext::new(provider_context, parent_node_id);
 
     // Run factory initialization if it exists (e.g., create directories)
-    FactoryRegistry::initialize(factory_type, &config_bytes, context)
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(factory_type, &config_bytes, context)
         .await
         .map_err(|e| anyhow!("Factory initialization failed: {}", e))?;
 
@@ -243,9 +225,9 @@ Generated file: {{ filename }}
             // Create config that references the template file
             let config_path = self.temp_dir.path().join("template_config.yaml");
             let config_content = format!(
-                r#"in_pattern: "/base/*.tmpl"
+                r#"in_pattern: "file:///base/*.tmpl"
 out_pattern: "$0.txt"
-template_file: "{}"
+template_file: "file://{}"
 "#,
                 template_file_path.to_string_lossy()
             );
@@ -501,9 +483,9 @@ New file: {{ filename }}
 
         let config_path2 = setup.temp_dir.path().join("template_config2.yaml");
         let config_content2 = format!(
-            r#"in_pattern: "/base/*.tmpl"
+            r#"in_pattern: "file:///base/*.tmpl"
 out_pattern: "$0.html"
-template_file: "{}"
+template_file: "file://{}"
 "#,
             template_file_path2.to_string_lossy()
         );

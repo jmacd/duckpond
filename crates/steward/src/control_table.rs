@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Control Table - DeltaLake-based transaction tracking for Steward
 //!
 //! This is a clean rewrite following these principles:

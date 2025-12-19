@@ -1,5 +1,7 @@
 #![allow(tail_expr_drop_order)]
-#![allow(missing_docs)]
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
 
 //! TLogFS - A filesystem implementation using Delta Lake for storage
 //!
@@ -41,56 +43,53 @@ pub mod error;
 // Transaction metadata - required for all commits
 pub mod txn_metadata;
 
-// Dynamic factory system
-pub mod factory;
-
 // Data taxonomy for sensitive configuration fields
 pub mod data_taxonomy;
-
-// Hostmount dynamic directory
-// pub mod hostmount;
-
-// SQL-derived dynamic node factory
-pub mod sql_derived;
-
-// Temporal reduce dynamic factory
-pub mod temporal_reduce;
 
 // Schema validation utilities
 pub mod schema_validation;
 
-// Template dynamic factory
-pub mod template_factory;
-
-// CSV directory dynamic factory
-// pub mod csv_directory;
+/// Extract State from provider::FactoryContext
+///
+/// Helper to downcast the persistence layer back to concrete State.
+/// Used by remote_factory to access Delta table operations.
+pub fn extract_state(pctx: &FactoryContext) -> Result<persistence::State, TLogFSError> {
+    pctx.context
+        .persistence
+        .as_any()
+        .downcast_ref::<persistence::State>()
+        .ok_or_else(|| {
+            TLogFSError::Internal(
+                "Persistence layer is not tlogfs::State - cannot access Delta table".to_string(),
+            )
+        })
+        .cloned()
+}
 
 // TinyFS ObjectStore implementation for DataFusion ListingTable integration
-pub mod tinyfs_object_store;
-
-// Dynamic directory factory for composing other factories
-pub mod dynamic_dir;
-
-// File-table duality integration for TinyFS and DataFusion
-pub mod file_table;
+// Re-export from provider crate where it's now generically implemented
+pub use provider::TinyFsObjectStore;
 
 // Re-export key types
 pub use error::TLogFSError;
 pub use persistence::OpLogPersistence;
-pub use schema::{OplogEntry, VersionedDirectoryEntry};
+pub use schema::{DirectoryEntry, OplogEntry};
+// Backward compatibility alias
+#[allow(deprecated)]
+pub use schema::VersionedDirectoryEntry;
 pub use transaction_guard::TransactionGuard;
 pub use txn_metadata::{PondTxnMetadata, PondUserMetadata};
 
 // Re-export query interfaces for DataFusion integration
 pub use query::{execute_sql_on_file, get_file_schema};
 
-// Re-export factory types and macros for easy access
-pub use factory::{
-    ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, FactoryContext, FactoryRegistry, PondMetadata,
-};
+// Re-export factory types from provider for easy access
+pub use provider::DYNAMIC_FACTORIES;
+pub use provider::FactoryContext;
+pub use provider::{ConfigFile, DynamicFactory, FactoryRegistry, PondMetadata};
 
-// Test factory for unit/integration testing executable factory system
-pub mod test_factory;
+// Note: Macros are #[macro_export] so they're automatically available at crate::macro_name
+// No need to re-export them here
 
 // Remote storage factory for S3-compatible object stores
 pub mod remote_factory;

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::commands::temporal::parse_timestamp_seconds;
 use crate::common::ShipContext;
 use anyhow::Result;
@@ -778,9 +782,12 @@ fn extract_timestamps_from_path(
         return Ok((None, None));
     }
 
-    // Add defaults only for parts that logically should have defaults when missing
-    // Year and month are always required if any temporal parsing occurred
-    // Day defaults to 1, time components default to 0
+    // Add defaults for missing temporal parts that weren't partitioned
+    // When --temporal year is used, month/day/etc. default to their starting values
+    // When --temporal year,month is used, day/hour/etc. default to their starting values
+    if !temporal_parts.contains_key("month") {
+        _ = temporal_parts.insert("month", 1);
+    }
     if !temporal_parts.contains_key("day") {
         _ = temporal_parts.insert("day", 1);
     }
@@ -1143,9 +1150,8 @@ fn compute_output_name(pond_path: &str, captures: &[String]) -> String {
 #[async_trait]
 impl Visitor<ExportTarget> for ExportTargetVisitor {
     async fn visit(&mut self, node: NodePath, captured: &[String]) -> tinyfs::Result<ExportTarget> {
-        let node_ref = node.borrow().await;
         let pond_path = node.path().to_string_lossy().to_string();
-        let node_id = node.id().await;
+        let node_id = node.id();
 
         debug!(
             "🔍 TinyFS visitor called: path={}, node_id={:?}, captures={:?}",
@@ -1153,32 +1159,28 @@ impl Visitor<ExportTarget> for ExportTargetVisitor {
         );
 
         // Only process files, not directories
-        match node_ref.node_type() {
-            tinyfs::NodeType::File(file_handle) => {
-                let metadata = file_handle.metadata().await?;
-                let file_type = metadata.entry_type;
+        if let Some(file_handle) = node.into_file().await {
+            let metadata = file_handle.metadata().await?;
+            let file_type = metadata.entry_type;
 
-                let output_name = compute_output_name(&pond_path, captured);
-                let captures = captured.to_vec();
+            let output_name = compute_output_name(&pond_path, captured);
+            let captures = captured.to_vec();
 
-                debug!(
-                    "Created export target: {} -> {} ({:?})",
-                    pond_path, output_name, file_type
-                );
+            debug!(
+                "Created export target: {} -> {} ({:?})",
+                pond_path, output_name, file_type
+            );
 
-                Ok(ExportTarget {
-                    pond_path,
-                    output_name,
-                    file_type,
-                    captures,
-                })
-            }
-            tinyfs::NodeType::Directory(_) => {
-                Err(TinyFsError::Other("Directories not exportable".to_string()))
-            }
-            tinyfs::NodeType::Symlink(_) => {
-                Err(TinyFsError::Other("Symlinks not exportable".to_string()))
-            }
+            Ok(ExportTarget {
+                pond_path,
+                output_name,
+                file_type,
+                captures,
+            })
+        } else if node.into_dir().await.is_some() {
+            Err(TinyFsError::Other("Directories not exportable".to_string()))
+        } else {
+            Err(TinyFsError::Other("Symlinks not exportable".to_string()))
         }
     }
 }
@@ -1416,8 +1418,7 @@ async fn execute_direct_copy_query(
 
     match lookup_result {
         Lookup::Found(node_path) => {
-            let node_guard = node_path.borrow().await;
-            let file_handle = node_guard.as_file().map_err(|e| {
+            let file_handle = node_path.as_file().await.map_err(|e| {
                 anyhow::anyhow!("Path {} does not point to a file: {}", pond_path, e)
             })?;
 
@@ -1435,27 +1436,17 @@ async fn execute_direct_copy_query(
                     let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 
-                    // Get NodeIDs
-                    let node_id = node_path.id().await;
-                    let part_id = {
-                        let parent_path = node_path.dirname();
-                        let parent_node_path = tinyfs_wd
-                            .resolve_path(&parent_path)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to resolve parent path: {}", e))?;
-                        match parent_node_path.1 {
-                            Lookup::Found(parent_node) => parent_node.id().await,
-                            _ => tinyfs::NodeID::root(),
-                        }
-                    };
+                    // Get FileID
+                    let node_id = node_path.id();
 
                     // Register table with our unique name
-                    let queryable_file = tlogfs::sql_derived::try_as_queryable_file(&**file_guard);
+                    let queryable_file = file_guard.as_queryable();
 
                     if let Some(queryable_file) = queryable_file {
                         let state = tx.state()?;
+                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
-                            .as_table_provider(node_id, part_id, &state)
+                            .as_table_provider(node_id, &provider_context)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to get table provider: {}", e))?;
 
@@ -1656,8 +1647,7 @@ async fn export_raw_file(
 
     match lookup_result {
         tinyfs::Lookup::Found(found) => {
-            let node_ref = found.borrow().await;
-            if let Ok(file_handle) = node_ref.as_file() {
+            if let Some(file_handle) = found.into_file().await {
                 let mut reader = file_handle.async_reader().await?;
                 let mut content = Vec::new();
                 _ = reader.read_to_end(&mut content).await?;

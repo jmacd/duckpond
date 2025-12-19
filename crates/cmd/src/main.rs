@@ -1,4 +1,6 @@
-#![allow(missing_docs)]
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -124,9 +126,9 @@ enum Commands {
     Cat {
         /// File path to read
         path: String,
-        /// Display mode [default: raw] [possible values: raw, table]
+        /// Output format [default: raw] [possible values: raw, table]
         #[arg(long, default_value = "raw")]
-        display: String,
+        format: String,
         /// Time range start (Unix timestamp in milliseconds, optional)
         #[arg(long)]
         time_start: Option<i64>,
@@ -137,14 +139,17 @@ enum Commands {
         #[arg(long)]
         query: Option<String>,
     },
-    /// Copy files into the pond (supports multiple files like UNIX cp)
+    /// Copy files into or out of the pond
+    ///
+    /// Copy IN (host → pond): pond copy file1.csv file2.csv /dest/path --format=table
+    /// Copy OUT (pond → host): pond copy '/pattern/**/*.series' host:///output/dir
     Copy {
-        /// Source file paths (one or more files to copy)
+        /// Source paths: host files (copy IN) or pond paths/patterns (copy OUT)
         #[arg(required = true)]
         sources: Vec<String>,
-        /// Destination path in pond (file name or directory)
+        /// Destination: pond path (copy IN) or host://path (copy OUT)
         dest: String,
-        /// Format handling [possible values: data, table, series]
+        /// Format for copying IN [possible values: data, table, series] (ignored for copy OUT)
         #[arg(long, default_value = "data")]
         format: String,
     },
@@ -289,7 +294,7 @@ async fn main() -> Result<()> {
         }
         Commands::Cat {
             path,
-            display,
+            format,
             time_start,
             time_end,
             query,
@@ -297,7 +302,7 @@ async fn main() -> Result<()> {
             commands::cat_command(
                 &ship_context,
                 &path,
-                &display,
+                &format,
                 None,
                 time_start,
                 time_end,
@@ -360,6 +365,9 @@ async fn main() -> Result<()> {
     // Log peak memory usage
     let peak_mem = PEAK_ALLOC.peak_usage_as_mb();
     log::info!("Peak memory usage: {:.2} MB", peak_mem);
+
+    // Print large allocations report
+    PEAK_ALLOC.print_large_allocs();
 
     result
 }

@@ -1,8 +1,15 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::EntryType;
 use crate::error::Result;
-use crate::node::{NodeID, NodeType};
+use crate::node::{FileID, Node};
+use crate::transaction_guard::TransactionState;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 /// Information about a specific version of a file
 #[derive(Debug, Clone)]
@@ -26,141 +33,71 @@ pub struct FileVersionInfo {
 pub trait PersistenceLayer: Send + Sync {
     /// Downcast support for accessing concrete implementation methods
     fn as_any(&self) -> &dyn std::any::Any;
-    // Node operations (with part_id for containing directory)
-    async fn load_node(&self, node_id: NodeID, part_id: NodeID) -> Result<NodeType>;
-    async fn store_node(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        node_type: &NodeType,
-    ) -> Result<()>;
-    async fn exists_node(&self, node_id: NodeID, part_id: NodeID) -> Result<bool>;
 
-    // Symlink operations (for symlinks to avoid local state)
-    async fn load_symlink_target(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> Result<std::path::PathBuf>;
-    async fn store_symlink_target(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        target: &std::path::Path,
-    ) -> Result<()>;
+    /// Get the transaction state for this persistence layer
+    ///
+    /// This allows transaction guards to be created from the persistence layer
+    fn transaction_state(&self) -> Arc<TransactionState>;
 
-    // Factory methods for creating nodes directly with persistence
-    async fn create_file_node(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        entry_type: EntryType,
-    ) -> Result<NodeType>;
-    async fn create_directory_node(&self, node_id: NodeID) -> Result<NodeType>;
-    async fn create_symlink_node(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        target: &std::path::Path,
-    ) -> Result<NodeType>;
+    async fn load_node(&self, file_id: FileID) -> Result<Node>;
 
-    // Dynamic node factory methods
-    async fn create_dynamic_directory_node(
+    async fn store_node(&self, node: &Node) -> Result<()>;
+
+    async fn create_file_node(&self, file_id: FileID) -> Result<Node>;
+
+    async fn create_directory_node(&self, id: FileID) -> Result<Node>;
+
+    async fn create_symlink_node(&self, id: FileID, target: &Path) -> Result<Node>;
+
+    async fn create_dynamic_node(
         &self,
-        parent_node_id: NodeID,
-        name: String,
+        id: FileID,
         factory_type: &str,
         config_content: Vec<u8>,
-    ) -> Result<NodeID>;
-    async fn create_dynamic_file_node(
-        &self,
-        parent_node_id: NodeID,
-        name: String,
-        file_type: EntryType,
-        factory_type: &str,
-        config_content: Vec<u8>,
-    ) -> Result<NodeID>;
-    async fn get_dynamic_node_config(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
+    ) -> Result<Node>;
+
+    async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>>; // (factory_type, config)
+
     async fn update_dynamic_node_config(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<()>;
 
-    // Directory operations with versioning
-    async fn load_directory_entries(
-        &self,
-        parent_node_id: NodeID,
-    ) -> Result<HashMap<String, (NodeID, EntryType)>>;
-    /// Optimized query for a single directory entry by name
-    async fn query_directory_entry(
-        &self,
-        parent_node_id: NodeID,
-        entry_name: &str,
-    ) -> Result<Option<(NodeID, EntryType)>>;
-    /// Directory entry update that stores node type (only supported operation)
-    async fn update_directory_entry(
-        &self,
-        parent_node_id: NodeID,
-        entry_name: &str,
-        operation: DirectoryOperation,
-    ) -> Result<()>;
-
-    // Metadata operations
     /// Get consolidated metadata for a node
     /// Requires both node_id and part_id for efficient querying
-    async fn metadata(&self, node_id: NodeID, part_id: NodeID) -> Result<crate::NodeMetadata>;
+    async fn metadata(&self, id: FileID) -> Result<crate::NodeMetadata>;
 
-    /// Get a u64 metadata value for a node by name
-    /// Common metadata names: "timestamp", "version"
-    /// Requires both node_id and part_id for efficient querying
-    async fn metadata_u64(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        name: &str,
-    ) -> Result<Option<u64>>;
-
-    // Versioning operations (for file:series support)
     /// List all versions of a file, returning metadata for each version
     /// Returns versions in chronological order (oldest to newest)
-    async fn list_file_versions(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-    ) -> Result<Vec<FileVersionInfo>>;
+    async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>>;
 
     /// Read content of a specific version of a file
     /// If version is None, reads the latest version
-    async fn read_file_version(
-        &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        version: Option<u64>,
-    ) -> Result<Vec<u8>>;
+    async fn read_file_version(&self, id: FileID, version: u64) -> Result<Vec<u8>>;
 
     /// Set extended attributes on an existing node
     /// This should modify the pending version of the node in the current transaction
     async fn set_extended_attributes(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
+        id: FileID,
         attributes: HashMap<String, String>,
     ) -> Result<()>;
-}
 
-#[derive(Clone)]
-pub enum DirectoryOperation {
-    /// Insert operation that includes node type (only supported operation)
-    InsertWithType(NodeID, EntryType),
-    /// Delete operation with node type for consistency
-    DeleteWithType(EntryType),
-    /// Rename operation with node type
-    RenameWithType(String, NodeID, EntryType), // old_name, new_node_id, node_type
+    /// Get temporal bounds for a FileSeries node
+    ///
+    /// Returns the time range (min_time, max_time) that this FileSeries covers,
+    /// used for data quality filtering at the Parquet reader level.
+    ///
+    /// This is similar to node metadata but optimized for performance:
+    /// - tlogfs stores temporal bounds in dedicated OplogEntry columns (not in attributes map)
+    /// - This allows efficient queries without deserializing JSON metadata
+    /// - Common use case: filter out garbage data outside valid time range
+    ///
+    /// Returns:
+    /// - Ok(Some((min, max))) if the node is a FileSeries with temporal bounds
+    /// - Ok(None) if the node has no temporal bounds or is not a FileSeries
+    /// - Err(_) if the query fails
+    async fn get_temporal_bounds(&self, id: FileID) -> Result<Option<(i64, i64)>>;
 }

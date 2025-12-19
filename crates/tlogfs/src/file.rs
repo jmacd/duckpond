@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::persistence::State;
 use async_trait::async_trait;
 use log::debug;
@@ -6,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tinyfs::{
-    AsyncReadSeek, Error as TinyFSError, File, Metadata, NodeID, NodeMetadata,
+    AsyncReadSeek, Error as TinyFSError, File, FileID, Metadata, NodeID, NodeMetadata, PartID,
     persistence::PersistenceLayer,
 };
 use tokio::io::AsyncWrite;
@@ -18,10 +22,7 @@ use tokio::sync::RwLock;
 /// - Proper separation of concerns
 pub struct OpLogFile {
     /// Unique node identifier for this file
-    node_id: NodeID,
-
-    /// Parent directory node ID (for persistence operations)
-    part_id: NodeID,
+    id: FileID,
 
     /// Reference to persistence layer (single source of truth)
     state: State,
@@ -39,11 +40,10 @@ enum TransactionWriteState {
 impl OpLogFile {
     /// Create new file instance with persistence layer dependency injection
     #[must_use]
-    pub fn new(node_id: NodeID, part_id: NodeID, state: State) -> Self {
-        debug!("OpLogFile::new() - creating file with node_id: {node_id}, parent: {part_id}");
+    pub fn new(id: FileID, state: State) -> Self {
+        debug!("OpLogFile::new() - creating file with node_id: {id}");
         Self {
-            node_id,
-            part_id,
+            id,
             state,
             transaction_state: Arc::new(RwLock::new(TransactionWriteState::Ready)),
         }
@@ -51,14 +51,14 @@ impl OpLogFile {
 
     /// Get the node ID for this file
     #[must_use]
-    pub fn get_node_id(&self) -> NodeID {
-        self.node_id
+    pub fn node_id(&self) -> NodeID {
+        self.id.node_id()
     }
 
     /// Get the part ID (parent directory node ID) for this file
     #[must_use]
-    pub fn get_part_id(&self) -> NodeID {
-        self.part_id
+    pub fn part_id(&self) -> PartID {
+        self.id.part_id()
     }
 
     /// Create a file handle for TinyFS integration
@@ -72,7 +72,7 @@ impl OpLogFile {
 impl Metadata for OpLogFile {
     async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
         // For files, the partition is the parent directory (parent_node_id)
-        self.state.metadata(self.node_id, self.part_id).await
+        self.state.metadata(self.id).await
     }
 }
 
@@ -93,7 +93,7 @@ impl File for OpLogFile {
         // Use streaming async reader instead of loading entire file into memory
         let reader = self
             .state
-            .async_file_reader(self.node_id, self.part_id)
+            .async_file_reader(self.id)
             .await
             .map_err(|e| TinyFSError::Other(e.to_string()))?;
 
@@ -123,58 +123,62 @@ impl File for OpLogFile {
         debug!("OpLogFile::async_writer()");
 
         // Get the current entry type from metadata to preserve it
-        let metadata = self.state.metadata(self.node_id, self.part_id).await?;
+        let metadata = self.state.metadata(self.id).await?;
         let entry_type = metadata.entry_type;
 
-        // Create a simple buffering writer that will store content via persistence layer
+        // Get store path for HybridWriter
+        let store_path = self.state.store_path().await;
+
+        // Create streaming writer that will store content via persistence layer
         let persistence = self.state.clone();
-        let node_id = self.node_id;
-        let part_id = self.part_id;
+        let file_id = self.id;
         let transaction_state = self.transaction_state.clone();
 
         Ok(Box::pin(OpLogFileWriter::new(
             persistence,
-            node_id,
-            part_id,
+            file_id,
             transaction_state,
             entry_type,
+            store_path,
         )))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
+        Some(self)
+    }
 }
 
 /// Writer integrated with Delta Lake transactions
+/// Streams writes directly to HybridWriter for memory efficiency
 struct OpLogFileWriter {
-    buffer: Vec<u8>,
+    storage: crate::large_files::HybridWriter,
     state: State,
-    node_id: NodeID,
-    part_id: NodeID,
+    file_id: FileID,
     transaction_state: Arc<RwLock<TransactionWriteState>>,
     completed: bool,
     completion_future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    entry_type: tinyfs::EntryType, // Store the original entry type
+    entry_type: tinyfs::EntryType,
 }
 
 // OpLogFileWriter is Unpin because all its fields are Unpin
-// (Pin<Box<T>> is Unpin even though the T inside may not be)
 impl Unpin for OpLogFileWriter {}
 
 impl OpLogFileWriter {
     fn new(
         state: State,
-        node_id: NodeID,
-        part_id: NodeID,
+        file_id: FileID,
         transaction_state: Arc<RwLock<TransactionWriteState>>,
         entry_type: tinyfs::EntryType,
+        store_path: std::path::PathBuf,
     ) -> Self {
         Self {
-            buffer: Vec::new(),
+            storage: crate::large_files::HybridWriter::new(store_path),
             state,
-            node_id,
-            part_id,
+            file_id,
             transaction_state,
             completed: false,
             completion_future: None,
@@ -186,20 +190,15 @@ impl OpLogFileWriter {
 impl Drop for OpLogFileWriter {
     fn drop(&mut self) {
         if !self.completed {
-            // 🚨 CRITICAL: Writer was dropped without calling shutdown()!
-            // This means the file data was buffered but NEVER PERSISTED to Delta Lake.
-            // The file metadata exists, but attempting to read will fail with
-            // "No non-empty versions found for file"
-
-            let bytes_lost = self.buffer.len();
-            if bytes_lost > 0 {
+            let total_written = self.storage.total_written();
+            if total_written > 0 {
                 // PANIC on data loss - this is a programming error that MUST be fixed
                 panic!(
                     "🚨 DATA LOSS: OpLogFileWriter dropped without shutdown()! \
-                    {} bytes of data were buffered but will NOT be persisted to Delta Lake. \
+                    {} bytes of data were written but will NOT be persisted to Delta Lake. \
                     You MUST call writer.shutdown().await? before dropping the writer. \
                     Pattern: writer.write_all(...).await?; writer.flush().await?; writer.shutdown().await?;",
-                    bytes_lost
+                    total_written
                 );
             }
 
@@ -222,7 +221,7 @@ impl Drop for OpLogFileWriter {
 impl AsyncWrite for OpLogFileWriter {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         let this = self.get_mut();
@@ -232,11 +231,11 @@ impl AsyncWrite for OpLogFileWriter {
                 "Writer already completed",
             )));
         }
-        this.buffer.extend_from_slice(buf);
-        Poll::Ready(Ok(buf.len()))
+        // Stream directly to HybridWriter (which writes to temp file)
+        Pin::new(&mut this.storage).poll_write(cx, buf)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
         if this.completed {
             Poll::Ready(Err(std::io::Error::new(
@@ -244,7 +243,8 @@ impl AsyncWrite for OpLogFileWriter {
                 "Writer already completed",
             )))
         } else {
-            Poll::Ready(Ok(()))
+            // Flush HybridWriter
+            Pin::new(&mut this.storage).poll_flush(cx)
         }
     }
 
@@ -260,91 +260,104 @@ impl AsyncWrite for OpLogFileWriter {
 
         // Create completion future if not already created
         if this.completion_future.is_none() {
-            let content = std::mem::take(&mut this.buffer);
+            // Take ownership of storage to finalize it
+            let storage = std::mem::replace(
+                &mut this.storage,
+                crate::large_files::HybridWriter::new(std::path::PathBuf::new()),
+            );
             let mut state = this.state.clone();
-            let node_id = this.node_id;
-            let part_id = this.part_id;
+            let file_id = this.file_id;
             let transaction_state = this.transaction_state.clone();
             let entry_type = this.entry_type;
 
-            let content_len = content.len();
-            let entry_type_debug = format!("{:?}", entry_type);
-            debug!(
-                "OpLogFileWriter::poll_shutdown() - storing {content_len} bytes via persistence layer, entry_type: {entry_type_debug}"
-            );
-
-            debug!(
-                "OpLogFileWriter::poll_shutdown() - about to use new FileWriter architecture via store_file_content_ref_transactional"
-            );
-
             let future = Box::pin(async move {
-                // Phase 4: Use new FileWriter architecture instead of old update methods
-                // Get the OpLogPersistence to access transaction guard API
+                // Finalize HybridWriter to get content
                 let result = async {
-                    // Use the new FileWriter pattern through transaction guard API
-                    state.store_file_content_ref(
-                        node_id,
-                        part_id,
-                        crate::file_writer::ContentRef::Small(content.clone()),
-                        entry_type,
-                        match entry_type {
-                            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
-                                // Special case: Handle empty FileSeries (0 bytes) for metadata-only versions
-                                if content.is_empty() {
-                                    debug!("OpLogFileWriter::poll_shutdown() - creating empty FileSeries for metadata-only version");
-                                    crate::file_writer::FileMetadata::Series {
-                                        min_timestamp: 0, // Will be ignored, temporal overrides in extended attributes take precedence
-                                        max_timestamp: 0, // Will be ignored, temporal overrides in extended attributes take precedence
-                                        timestamp_column: "timestamp".to_string(), // Default timestamp column
-                                    }
-                                } else {
-                                    // For FileSeries with content, extract temporal metadata
-                                    use std::io::Cursor;
-                                    let reader = Cursor::new(content.clone());
-                                    match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
-                                        Ok(metadata) => metadata,
-                                        Err(e) => {
-                                            // FAIL-FAST: Temporal metadata extraction failure is a data integrity issue
-                                            return Err(tinyfs::Error::Other(format!(
-                                                "Failed to extract temporal metadata from FileSeries content: {}. \
-                                                This indicates corrupted or incompatible data format.", e
-                                            )));
-                                        }
+                    let hybrid_result = storage.finalize().await
+                        .map_err(|e| tinyfs::Error::Other(format!("Failed to finalize storage: {}", e)))?;
+
+                    let content = hybrid_result.content;
+                    let content_len = hybrid_result.size;
+                    let sha256 = hybrid_result.sha256;
+
+                    debug!(
+                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, sha256={}, is_large={}",
+                        content_len,
+                        sha256,
+                        content.is_empty() && content_len > 0
+                    );
+
+                    // Determine ContentRef based on whether content is empty (large file external)
+                    let content_ref = if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
+                        // Large file - stored externally
+                        crate::file_writer::ContentRef::Large(sha256, content_len as u64)
+                    } else {
+                        // Small file - content in memory
+                        crate::file_writer::ContentRef::Small(content.clone())
+                    };
+
+                    // Extract metadata based on file type
+                    let metadata = match entry_type {
+                        tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
+                            if content.is_empty() {
+                                // Large file or empty - use placeholder
+                                debug!("OpLogFileWriter: large/empty FileSeries, using placeholder metadata");
+                                crate::file_writer::FileMetadata::Series {
+                                    min_timestamp: 0,
+                                    max_timestamp: 0,
+                                    timestamp_column: "timestamp".to_string(),
+                                }
+                            } else {
+                                // Small file - extract temporal metadata
+                                use std::io::Cursor;
+                                let reader = Cursor::new(&content);
+                                match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
+                                    Ok(metadata) => metadata,
+                                    Err(e) => {
+                                        return Err(tinyfs::Error::Other(format!(
+                                            "Failed to extract temporal metadata from FileSeries content: {}",
+                                            e
+                                        )));
                                     }
                                 }
                             }
-                            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
-                                // For FileTable, extract schema
+                        }
+                        tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
+                            if content.is_empty() {
+                                // Large file or empty - use placeholder
+                                crate::file_writer::FileMetadata::Table {
+                                    schema: r#"{"type": "struct", "fields": []}"#.to_string(),
+                                }
+                            } else {
+                                // Small file - extract schema
                                 use std::io::Cursor;
-                                let reader = Cursor::new(content);
+                                let reader = Cursor::new(&content);
                                 match crate::file_writer::TableProcessor::validate_schema(reader).await {
                                     Ok(metadata) => metadata,
                                     Err(_) => {
-                                        // Fallback to default metadata if validation fails
                                         crate::file_writer::FileMetadata::Table {
                                             schema: r#"{"type": "struct", "fields": []}"#.to_string(),
                                         }
                                     }
                                 }
                             }
-                            _ => {
-                                // For FileData and others, no special processing
-                                crate::file_writer::FileMetadata::Data
-                            }
-                        },
-                    ).await
-                        .map_err(|e| tinyfs::Error::Other(format!("FileWriter storage failed: {}", e)))
+                        }
+                        _ => crate::file_writer::FileMetadata::Data,
+                    };
+
+                    state.store_file_content_ref(file_id, content_ref, metadata).await
+                        .map_err(|e| tinyfs::Error::Other(format!("Failed to store file: {}", e)))
                 }.await;
 
                 match result {
                     Ok(_) => {
                         if entry_type.is_series_file() {
                             debug!(
-                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new FileWriter architecture"
+                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new NewFileWriter architecture"
                             );
                         } else {
                             debug!(
-                                "OpLogFileWriter::poll_shutdown() - successfully stored content via new FileWriter architecture"
+                                "OpLogFileWriter::poll_shutdown() - successfully stored content via new NewFileWriter architecture"
                             );
                         }
                     }
@@ -382,49 +395,19 @@ impl AsyncWrite for OpLogFileWriter {
 
 // QueryableFile trait implementation - follows anti-duplication principles
 #[async_trait]
-impl crate::query::QueryableFile for OpLogFile {
-    /// Create TableProvider for OpLogFile by delegating to existing logic
+impl tinyfs::QueryableFile for OpLogFile {
+    /// Create TableProvider for OpLogFile by delegating to provider crate
     ///
-    /// Follows anti-duplication: reuses existing create_listing_table_provider
-    /// instead of duplicating DataFusion setup logic.
+    /// Follows anti-duplication: uses provider::create_table_provider directly
     async fn as_table_provider(
         &self,
-        node_id: NodeID,
-        part_id: NodeID,
-        state: &State,
-    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-        log::info!(
-            "📋 DELEGATING OpLogFile to create_listing_table_provider: node_id={}, part_id={}",
-            node_id,
-            part_id
-        );
-        // Delegate to existing create_listing_table_provider - no duplication
-        crate::file_table::create_listing_table_provider(node_id, part_id, state).await
+        id: FileID,
+        context: &tinyfs::ProviderContext,
+    ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        log::debug!("DELEGATING OpLogFile to provider::create_table_provider: id={id}");
+        // Delegate to provider crate - no duplication
+        provider::create_table_provider(id, context, provider::TableProviderOptions::default())
+            .await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))
     }
-}
-
-/// Create a table provider from multiple file URLs
-/// This is a convenience function following anti-duplication principles
-pub async fn create_table_provider_for_multiple_urls(
-    urls: Vec<String>,
-    tx: &mut crate::transaction_guard::TransactionGuard<'_>,
-) -> Result<Arc<dyn datafusion::catalog::TableProvider>, crate::error::TLogFSError> {
-    log::info!(
-        "📋 CREATING TableProvider for multiple URLs: {} files",
-        urls.len()
-    );
-    use crate::file_table::{TableProviderOptions, create_table_provider};
-    use tinyfs::NodeID;
-
-    // Use dummy node IDs since we're providing explicit URLs
-    let dummy_node_id = NodeID::root();
-    let dummy_part_id = NodeID::root();
-
-    let options = TableProviderOptions {
-        additional_urls: urls,
-        ..Default::default()
-    };
-
-    let state = tx.state()?;
-    create_table_provider(dummy_node_id, dummy_part_id, &state, options).await
 }

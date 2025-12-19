@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(test)]
 mod tests {
     use crate::commands::cat::cat_command;
@@ -95,7 +99,7 @@ mod tests {
             // Create config that references the pond path
             let config_path = self.temp_dir.path().join("template_config.yaml");
             let config_content = format!(
-                "in_pattern: \"/base/*.template\"\nout_pattern: \"$0.template\"\ntemplate_file: \"{}\"",
+                "in_pattern: \"file:///base/*.template\"\nout_pattern: \"$0.template\"\ntemplate_file: \"file://{}\"",
                 pond_template_path
             );
             fs::write(&config_path, config_content)?;

@@ -1,30 +1,10 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::error::TLogFSError;
-use crate::large_files;
-use crate::transaction_guard::TransactionGuard;
-use log::{debug, info};
-use std::io::{Cursor, SeekFrom};
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tinyfs::{EntryType, NodeID};
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWriteExt};
-
-/// Main file writer that supports both small and large files with automatic promotion
-pub struct FileWriter<'tx> {
-    pub(crate) node_id: NodeID,
-    pub(crate) part_id: NodeID,
-    pub(crate) file_type: EntryType,
-    pub(crate) storage: WriterStorage,
-    pub(crate) total_written: u64,
-    pub(crate) transaction: &'tx TransactionGuard<'tx>,
-}
-
-/// Storage strategy that automatically promotes from memory to external file
-pub enum WriterStorage {
-    /// Small files buffered in memory
-    Small(Vec<u8>),
-    /// Large files streamed to external storage
-    Large(Box<large_files::HybridWriter>),
-}
+use log::debug;
+use tokio::io::{AsyncRead, AsyncSeek};
 
 /// Content reference for transaction storage - either inline or external
 pub enum ContentRef {
@@ -32,12 +12,6 @@ pub enum ContentRef {
     Small(Vec<u8>),
     /// Large content stored externally with SHA256 hash and size
     Large(String, u64), // SHA256, size
-}
-
-/// Result of file write operation
-pub struct WriteResult {
-    pub size: u64,
-    pub metadata: FileMetadata,
 }
 
 /// File-type specific metadata extracted during finish()
@@ -55,193 +29,6 @@ pub enum FileMetadata {
         max_timestamp: i64,
         timestamp_column: String,
     },
-}
-
-/// AsyncRead + AsyncSeek interface for content analysis regardless of storage type
-pub enum ContentReader {
-    /// In-memory content reader
-    Memory(Cursor<Vec<u8>>),
-    /// File-based content reader
-    File(tokio::fs::File),
-}
-
-impl<'tx> FileWriter<'tx> {
-    // /// Create a new file writer tied to a transaction
-    // pub(crate) fn new(
-    //     node_id: NodeID,
-    //     part_id: NodeID,
-    //     file_type: EntryType,
-    //     transaction: &'tx TransactionGuard<'tx>,
-    // ) -> Self {
-    //     let node_hex = node_id.to_hex_string();
-    //     debug!("Creating FileWriter for node {node_hex}");
-
-    //     Self {
-    //         node_id,
-    //         part_id,
-    //         file_type,
-    //         transaction,
-    //         storage: WriterStorage::Small(Vec::new()),
-    //         total_written: 0,
-    //     }
-    // }
-
-    /// Write data to the file, automatically promoting to large storage if needed
-    pub async fn write(&mut self, data: &[u8]) -> Result<(), TLogFSError> {
-        match &mut self.storage {
-            WriterStorage::Small(buffer) => {
-                // Check if we need to promote to large file storage
-                let new_size = buffer.len() + data.len();
-                if new_size >= large_files::LARGE_FILE_THRESHOLD {
-                    debug!("Promoting to large file storage at {new_size} bytes");
-                    self.promote_to_large_storage().await?;
-
-                    // Now write to the large storage
-                    if let WriterStorage::Large(writer) = &mut self.storage {
-                        writer.write_all(data).await.map_err(TLogFSError::Io)?;
-                    }
-                } else {
-                    buffer.extend_from_slice(data);
-                }
-            }
-            WriterStorage::Large(writer) => {
-                writer.write_all(data).await.map_err(TLogFSError::Io)?;
-            }
-        }
-
-        self.total_written += data.len() as u64;
-        Ok(())
-    }
-
-    /// Finalize the write operation with content analysis and transaction storage
-    pub async fn finish(mut self) -> Result<WriteResult, TLogFSError> {
-        let node_hex = self.node_id.to_string();
-        let total_written = self.total_written;
-        let node_id = self.node_id;
-        let part_id = self.part_id;
-        let file_type = self.file_type;
-
-        debug!("Finalizing FileWriter for node {node_hex}, total written: {total_written} bytes");
-
-        // Create AsyncRead + AsyncSeek interface for content analysis
-        let content_reader = self.create_content_reader().await?;
-
-        // Extract metadata based on file type
-        let metadata = match file_type {
-            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
-                SeriesProcessor::extract_temporal_metadata(content_reader).await?
-            }
-            EntryType::FileTablePhysical | EntryType::FileTableDynamic => {
-                TableProcessor::validate_schema(content_reader).await?
-            }
-            EntryType::FileDataPhysical | EntryType::FileDataDynamic => {
-                FileMetadata::Data // No special processing needed
-            }
-            _ => {
-                return Err(TLogFSError::Transaction {
-                    message: format!("Unsupported file type for writer: {:?}", file_type),
-                });
-            }
-        };
-        let mut state = self.transaction.state()?;
-
-        // Finalize storage and get content reference
-        let content_ref = self.finalize_storage().await?;
-
-        // Store in transaction (replaces any existing pending version)
-        state
-            .store_file_content_ref(node_id, part_id, content_ref, file_type, metadata.clone())
-            .await?;
-
-        let node_hex = node_id.to_string();
-        let size = total_written;
-        info!("Successfully wrote file node {node_hex}, size: {size}");
-
-        Ok(WriteResult {
-            size: total_written,
-            metadata,
-        })
-    }
-
-    /// Promote from small (memory) to large (external) storage
-    async fn promote_to_large_storage(&mut self) -> Result<(), TLogFSError> {
-        if let WriterStorage::Small(buffer) = &self.storage {
-            let mut hybrid_writer = large_files::HybridWriter::new(self.transaction.store_path());
-
-            // Write existing buffer content to large storage
-            if !buffer.is_empty() {
-                hybrid_writer
-                    .write_all(buffer)
-                    .await
-                    .map_err(TLogFSError::Io)?;
-            }
-
-            self.storage = WriterStorage::Large(Box::new(hybrid_writer));
-            debug!("Successfully promoted to large file storage");
-        }
-        Ok(())
-    }
-
-    /// Create AsyncRead + AsyncSeek interface for content analysis
-    async fn create_content_reader(&mut self) -> Result<ContentReader, TLogFSError> {
-        match &self.storage {
-            WriterStorage::Small(buffer) => {
-                // For small files, create AsyncRead from Vec<u8>
-                Ok(ContentReader::Memory(Cursor::new(buffer.clone())))
-            }
-            WriterStorage::Large(_writer) => {
-                // For large files, we can't provide a reader without finalizing,
-                // and we can't finalize twice. For now, skip content analysis
-                // and return a placeholder reader.
-                // TODO: Implement proper streaming analysis
-                Ok(ContentReader::Memory(Cursor::new(Vec::new())))
-            }
-        }
-    }
-
-    /// Finalize storage and return content reference for transaction
-    async fn finalize_storage(mut self) -> Result<ContentRef, TLogFSError> {
-        match &mut self.storage {
-            WriterStorage::Small(buffer) => Ok(ContentRef::Small(buffer.clone())),
-            WriterStorage::Large(writer) => {
-                // For large files, shutdown and then finalize
-                let mut writer = std::mem::take(writer);
-                writer.shutdown().await.map_err(TLogFSError::Io)?;
-                let result = writer.finalize().await.map_err(TLogFSError::Io)?;
-                Ok(ContentRef::Large(result.sha256, result.size as u64))
-            }
-        }
-    }
-}
-
-// Implement AsyncRead + AsyncSeek for ContentReader
-impl AsyncRead for ContentReader {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        match &mut *self {
-            ContentReader::Memory(cursor) => Pin::new(cursor).poll_read(cx, buf),
-            ContentReader::File(file) => Pin::new(file).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncSeek for ContentReader {
-    fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
-        match &mut *self {
-            ContentReader::Memory(cursor) => Pin::new(cursor).start_seek(position),
-            ContentReader::File(file) => Pin::new(file).start_seek(position),
-        }
-    }
-
-    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
-        match &mut *self {
-            ContentReader::Memory(cursor) => Pin::new(cursor).poll_complete(cx),
-            ContentReader::File(file) => Pin::new(file).poll_complete(cx),
-        }
-    }
 }
 
 /// Processor for FileSeries content - extracts temporal metadata from Parquet

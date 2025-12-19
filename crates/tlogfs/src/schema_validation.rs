@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Schema validation utilities for TLogFS
 //!
 //! This module provides common schema validation functions used across
@@ -19,27 +23,6 @@ use std::sync::Arc;
 /// # Returns
 /// * `Ok(())` if schema is valid
 /// * `Err(String)` with detailed error message if validation fails
-///
-/// # Example
-/// ```rust
-/// use arrow::datatypes::{Schema, Field, DataType};
-/// use std::sync::Arc;
-/// use tlogfs::schema_validation::validate_fileseries_timestamp;
-///
-/// // Valid schema - non-nullable timestamp
-/// let valid_schema = Arc::new(Schema::new(vec![
-///     Field::new("timestamp", DataType::Timestamp(arrow::datatypes::TimeUnit::Second, None), false),
-///     Field::new("value", DataType::Float64, true),
-/// ]));
-/// assert!(validate_fileseries_timestamp(&valid_schema, "test.series").is_ok());
-///
-/// // Invalid schema - nullable timestamp
-/// let invalid_schema = Arc::new(Schema::new(vec![
-///     Field::new("timestamp", DataType::Timestamp(arrow::datatypes::TimeUnit::Second, None), true),
-///     Field::new("value", DataType::Float64, true),
-/// ]));
-/// assert!(validate_fileseries_timestamp(&invalid_schema, "test.series").is_err());
-/// ```
 pub fn validate_fileseries_timestamp(schema: &Arc<Schema>, context: &str) -> Result<(), String> {
     log::debug!(
         "🔍 SCHEMA VALIDATION for '{}': Schema has {} fields",

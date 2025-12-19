@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tests for streaming support in Phase 1
 //!
 //! These tests verify that the async_reader/async_writer functionality works correctly
@@ -59,7 +63,7 @@ async fn test_async_reader_basic() -> Result<()> {
 
     // Get the file and test async reading
     let node_path = root.get_node_path("/test.txt").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
     let mut reader = file_node.async_reader().await?;
 
     let mut buffer = Vec::new();
@@ -77,7 +81,7 @@ async fn test_async_writer_basic() -> Result<()> {
     // Create an empty file
     _ = convenience::create_file_path(&root, "/output.txt", b"").await?;
     let node_path = root.get_node_path("/output.txt").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
 
     // Write data using async writer
     let test_data = b"Hello from async writer!";
@@ -106,7 +110,7 @@ async fn test_async_writer_memory_buffering() -> Result<()> {
     // Create a file and write small data (buffered in memory)
     _ = convenience::create_file_path(&root, "/small.txt", b"").await?;
     let node_path = root.get_node_path("/small.txt").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
 
     let small_data = vec![42u8; 1024]; // 1KB - buffered in memory during Phase 1
     {
@@ -131,7 +135,7 @@ async fn test_async_writer_large_data() -> Result<()> {
     // Create a file and write large data (all buffered in memory during Phase 1)
     _ = convenience::create_file_path(&root, "/large.txt", b"").await?;
     let node_path = root.get_node_path("/large.txt").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
 
     let large_data = vec![42u8; 1024 * 1024 + 1]; // Just over 1MB - all buffered in memory
     {
@@ -156,7 +160,7 @@ async fn test_parquet_roundtrip_single_batch() -> Result<()> {
     // Create a parquet file with Arrow data
     _ = convenience::create_file_path(&root, "/test.parquet", b"").await?;
     let node_path = root.get_node_path("/test.parquet").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
 
     let batch = create_simple_batch();
     let schema = batch.schema();
@@ -192,7 +196,7 @@ async fn test_parquet_roundtrip_multiple_batches() -> Result<()> {
 
     _ = convenience::create_file_path(&root, "/multi.parquet", b"").await?;
     let node_path = root.get_node_path("/multi.parquet").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
 
     // Create multiple batches with the same schema
     let batch1 = create_simple_batch();
@@ -250,7 +254,7 @@ async fn test_memory_bounded_large_parquet() -> Result<()> {
 
     _ = convenience::create_file_path(&root, "/huge.parquet", b"").await?;
     let node_path = root.get_node_path("/huge.parquet").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
 
     // Create a large batch (all buffered in memory during Phase 1)
     let large_batch = create_large_batch(10000); // Demonstrates memory buffering in Phase 1
@@ -296,7 +300,7 @@ async fn test_concurrent_writers() -> Result<()> {
                 .await
                 .unwrap();
             let node_path = root.get_node_path(&filename).await.unwrap();
-            let file_node = node_path.borrow().await.as_file().unwrap();
+            let file_node = node_path.as_file().await.unwrap();
 
             let batch = create_large_batch(1000);
             let schema = batch.schema();
@@ -328,7 +332,7 @@ async fn test_concurrent_read_write_protection() -> Result<()> {
     // Create a file
     _ = convenience::create_file_path(&root, "/protected.txt", b"initial content").await?;
     let node_path = root.get_node_path("/protected.txt").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
 
     // Start writing
     let _writer = file_node.async_writer().await?;
@@ -372,7 +376,7 @@ async fn test_write_protection_with_completed_write() -> Result<()> {
     // Create a file and completely write to it
     _ = convenience::create_file_path(&root, "/complete.txt", b"").await?;
     let node_path = root.get_node_path("/complete.txt").await?;
-    let file_node = node_path.borrow().await.as_file()?;
+    let file_node = node_path.as_file().await?;
 
     let test_data = b"new content";
     {

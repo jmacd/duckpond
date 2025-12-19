@@ -1,5 +1,10 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::common::{FileInfoVisitor, ShipContext};
 use anyhow::Result;
+use std::sync::Arc;
 
 /// Describe command - shows file types and schemas for files matching the pattern
 ///
@@ -39,12 +44,95 @@ where
     }
 }
 
+/// Describe a provider URL (e.g., "oteljson:///otel/file.json" or "excelhtml:///data/*.htm")
+async fn describe_provider_url(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    _ship_context: &ShipContext,
+    url: &str,
+) -> Result<String> {
+    log::debug!("Describing provider URL: {}", url);
+
+    // Get TinyFS from transaction
+    let fs = &**tx;
+    let fs_arc = Arc::new(fs.clone());
+
+    // Create Provider instance
+    let provider = provider::Provider::new(fs_arc);
+
+    use std::cell::RefCell;
+    let results = RefCell::new(Vec::new());
+
+    // Use clean for_each_match API to handle both single files and patterns
+    let _count = provider
+        .for_each_match(url, |table_provider, file_path| {
+            let url = url.to_string();
+            let results = &results;
+            async move {
+                // Get schema from TableProvider
+                let schema = table_provider.schema();
+                let schema_info = extract_schema_info(&schema, true)
+                    .map_err(|e| provider::Error::InvalidUrl(e.to_string()))?;
+
+                // Parse URL for provider name
+                let parsed_url = provider::Url::parse(&url)
+                    .map_err(|e| provider::Error::InvalidUrl(e.to_string()))?;
+                let provider_name = parsed_url.scheme();
+
+                results
+                    .borrow_mut()
+                    .push((file_path, provider_name.to_string(), schema_info));
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to process URL '{}': {}", url, e))?;
+
+    let results = results.into_inner();
+
+    // Format output from results
+    let mut output = String::new();
+
+    if results.len() > 1 {
+        output.push_str(&format!("Pattern matched {} files\n\n", results.len()));
+    }
+
+    output.push_str("=== Provider Schema Description ===\n\n");
+
+    for (i, (file_path, provider_name, schema_info)) in results.iter().enumerate() {
+        if i > 0 {
+            output.push('\n');
+        }
+
+        output.push_str(&format!("File: {}\n", file_path));
+        output.push_str(&format!("Provider: {}\n", provider_name));
+        output.push_str(&format!("Schema: {} fields\n", schema_info.field_count));
+
+        for field_info in &schema_info.fields {
+            output.push_str(&format!(
+                "  • {}: {}\n",
+                field_info.name, field_info.data_type
+            ));
+        }
+
+        if let Some(timestamp_col) = &schema_info.timestamp_column {
+            output.push_str(&format!("Timestamp Column: {}\n", timestamp_col));
+        }
+    }
+
+    Ok(output)
+}
+
 /// Implementation of describe command
 async fn describe_command_impl(
     tx: &mut steward::StewardTransactionGuard<'_>,
     ship_context: &ShipContext,
     pattern: &str,
 ) -> Result<String> {
+    // Check for provider URL syntax (e.g., "oteljson:///path")
+    if pattern.contains("://") {
+        return describe_provider_url(tx, ship_context, pattern).await;
+    }
+
     let fs = &**tx;
     let root = fs
         .root()

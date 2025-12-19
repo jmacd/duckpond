@@ -1,16 +1,102 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use futures::StreamExt;
+use parquet::arrow::ArrowWriter;
 use std::io::{self, Write};
 
 use crate::common::ShipContext;
 use log::debug;
 
+/// Write stream directly to stdout as parquet
+async fn write_stream_to_stdout(
+    mut stream: datafusion::physical_plan::SendableRecordBatchStream,
+) -> Result<()> {
+    // Get the first batch to determine schema
+    let first_batch = match stream.next().await {
+        Some(Ok(batch)) => batch,
+        Some(Err(e)) => return Err(anyhow::anyhow!("Failed to read first batch: {}", e)),
+        None => {
+            debug!("Empty stream, no parquet output");
+            return Ok(());
+        }
+    };
+
+    let schema = first_batch.schema();
+    let stdout = io::stdout();
+    let mut writer = ArrowWriter::try_new(stdout, schema, None)
+        .map_err(|e| anyhow::anyhow!("Failed to create parquet writer: {}", e))?;
+
+    let mut total_rows = first_batch.num_rows();
+    let mut batch_count = 1;
+
+    writer
+        .write(&first_batch)
+        .map_err(|e| anyhow::anyhow!("Failed to write batch to parquet: {}", e))?;
+
+    // Stream remaining batches
+    while let Some(batch_result) = stream.next().await {
+        let batch =
+            batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch from stream: {}", e))?;
+        total_rows += batch.num_rows();
+        batch_count += 1;
+        writer
+            .write(&batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write batch to parquet: {}", e))?;
+    }
+
+    let _metadata = writer
+        .close()
+        .map_err(|e| anyhow::anyhow!("Failed to close parquet writer: {}", e))?;
+
+    debug!(
+        "Streamed parquet data to stdout ({} rows in {} batches)",
+        total_rows, batch_count
+    );
+    Ok(())
+}
+
+/// Write batches to in-memory buffer as parquet
+fn write_batches_to_buffer(batches: &[RecordBatch], output: &mut String) -> Result<()> {
+    if batches.is_empty() {
+        return Ok(());
+    }
+
+    let mut buffer = Vec::new();
+    let schema = batches[0].schema();
+    let mut writer = ArrowWriter::try_new(&mut buffer, schema, None)
+        .map_err(|e| anyhow::anyhow!("Failed to create parquet writer: {}", e))?;
+
+    let mut total_rows = 0;
+    for batch in batches {
+        total_rows += batch.num_rows();
+        writer
+            .write(batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write batch to parquet: {}", e))?;
+    }
+
+    let _metadata = writer
+        .close()
+        .map_err(|e| anyhow::anyhow!("Failed to close parquet writer: {}", e))?;
+
+    output.push_str(&String::from_utf8_lossy(&buffer));
+    debug!(
+        "Buffered {} bytes of parquet data for testing ({} rows in {} batches)",
+        buffer.len(),
+        total_rows,
+        batches.len()
+    );
+    Ok(())
+}
+
 /// Cat file with optional SQL query
 pub async fn cat_command(
     ship_context: &ShipContext,
     path: &str,
-    display: &str,
+    display: &str, // Output format: "raw" (parquet bytes) or "table" (ASCII formatted)
     output: Option<&mut String>,
     _time_start: Option<i64>,
     _time_end: Option<i64>,
@@ -48,6 +134,149 @@ pub async fn cat_command(
     }
 }
 
+/// Cat a provider URL (e.g., "oteljson:///otel/file.json")
+#[allow(clippy::print_stdout)]
+async fn cat_provider_url(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    url: &str,
+    display: &str,
+    output: Option<&mut String>,
+    sql_query: Option<&str>,
+) -> Result<()> {
+    debug!("cat_provider_url called with url: {}", url);
+
+    // Get TinyFS from transaction
+    let fs = &**tx;
+    let fs_arc = std::sync::Arc::new(fs.clone());
+
+    // Create Provider instance
+    let provider = provider::Provider::new(fs_arc);
+
+    // Create DataFusion session context
+    let ctx = datafusion::prelude::SessionContext::new();
+
+    // Collect table providers for all matches (handles both wildcards and single files)
+    let mut table_providers = Vec::new();
+    let match_count = provider
+        .for_each_match(url, |table_provider, file_path| {
+            debug!("Matched file: {}", file_path);
+            table_providers.push(table_provider);
+            async { Ok(()) }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e))?;
+
+    debug!("Matched {} file(s) for pattern: {}", match_count, url);
+
+    // Create unified table provider
+    let unified_table_provider = if table_providers.len() == 1 {
+        // Single file - use directly
+        table_providers
+            .into_iter()
+            .next()
+            .expect("table_providers has exactly one element")
+    } else {
+        // Multiple files - UNION ALL BY NAME
+        let temp_ctx = datafusion::prelude::SessionContext::new();
+        for (i, tp) in table_providers.iter().enumerate() {
+            let _ = temp_ctx
+                .register_table(format!("t{}", i), tp.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to register table t{}: {}", i, e))?;
+        }
+
+        let union_sql = (0..table_providers.len())
+            .map(|i| format!("SELECT * FROM t{}", i))
+            .collect::<Vec<_>>()
+            .join(" UNION ALL BY NAME ");
+
+        debug!("Executing union query: {}", union_sql);
+
+        let df = temp_ctx
+            .sql(&union_sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to execute union query: {}", e))?;
+
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to collect union batches: {}", e))?;
+
+        let schema = batches
+            .first()
+            .map(|b| b.schema())
+            .ok_or_else(|| anyhow::anyhow!("No batches in union result"))?;
+
+        let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
+            .map_err(|e| anyhow::anyhow!("Failed to create MemTable from union: {}", e))?;
+
+        std::sync::Arc::new(mem_table) as std::sync::Arc<dyn datafusion::catalog::TableProvider>
+    };
+
+    // Register unified table with DataFusion
+    let _ = ctx.register_table("series", unified_table_provider)?;
+
+    // Execute SQL query
+    let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
+    debug!("Executing SQL query: {}", effective_sql_query);
+
+    let df = ctx.sql(effective_sql_query).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to execute SQL query '{}': {}",
+            effective_sql_query,
+            e
+        )
+    })?;
+
+    let mut stream = df.execute_stream().await?;
+
+    // Determine output format
+    let use_table_format = display == "table" || sql_query.is_some();
+
+    if use_table_format {
+        // Collect batches for table formatting
+        let mut batches = Vec::new();
+        let mut total_rows = 0;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
+            total_rows += batch.num_rows();
+            batches.push(batch);
+        }
+
+        // Format and display the results as ASCII table
+        let formatted = format_query_results(&batches)
+            .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", url, e))?;
+
+        if let Some(output_buffer) = output {
+            output_buffer.push_str(&formatted);
+        } else {
+            print!("{}", formatted);
+        }
+
+        debug!("Successfully formatted {} rows from: {}", total_rows, url);
+    } else {
+        // Raw parquet output
+        if output.is_some() {
+            // Testing mode - collect batches then write to buffer
+            let mut batches = Vec::new();
+            while let Some(batch_result) = stream.next().await {
+                let batch =
+                    batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
+                batches.push(batch);
+            }
+            write_batches_to_buffer(
+                &batches,
+                output.expect("output buffer is Some in test mode"),
+            )?;
+        } else {
+            // Production mode - stream directly to stdout
+            write_stream_to_stdout(stream).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Internal implementation of cat command
 #[allow(clippy::print_stdout)]
 async fn cat_impl(
@@ -57,6 +286,11 @@ async fn cat_impl(
     output: Option<&mut String>,
     sql_query: Option<&str>,
 ) -> Result<()> {
+    // Check for provider URL syntax (e.g., "oteljson:///path")
+    if path.contains("://") {
+        return cat_provider_url(tx, path, display, output, sql_query).await;
+    }
+
     let fs = &**tx;
     let root = fs.root().await?;
 
@@ -69,11 +303,18 @@ async fn cat_impl(
     let entry_type_str = format!("{:?}", metadata.entry_type);
     debug!("File entry type: {entry_type_str}");
 
-    // Use DataFusion for file:table and file:series always, not for file:data
-    let should_use_datafusion =
-        metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
+    // Check if this is a queryable file type (file:table or file:series)
+    let is_queryable = metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
 
-    if should_use_datafusion {
+    if is_queryable {
+        // NOTE: We cannot use async_reader() for file:series because it only returns ONE version.
+        // file:series can have multiple versions that need to be combined, which requires DataFusion.
+        // file:table typically has one version, but for consistency we use DataFusion for both.
+        //
+        // For raw output, we use DataFusion with SELECT * and then write the results as parquet.
+        // This gives us a combined parquet file with all versions of the series.
+
+        // For table display or raw output, use DataFusion
         // Use the new SQL execution interface for file:series and file:table
         // Default to sorting by timestamp for chronological display
         let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
@@ -92,28 +333,57 @@ async fn cat_impl(
                     )
                 })?;
 
-        // Collect batches from the stream
-        let mut batches = Vec::new();
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
-            batches.push(batch);
-        }
+        // When SQL query is provided, always format as table (even if display="raw")
+        // because the user is running a query and expects to see formatted results.
+        // Only use raw parquet output when displaying entire file without SQL.
+        let use_table_format = display == "table" || sql_query.is_some();
 
-        // Format and display the results
-        let formatted = format_query_results(&batches)
-            .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", path, e))?;
+        if use_table_format {
+            // Collect batches for table formatting
+            let mut batches = Vec::new();
+            let mut total_rows = 0;
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result
+                    .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
+                total_rows += batch.num_rows();
+                batches.push(batch);
+            }
 
-        // @@@ Buffering whole content?
-        if let Some(output_buffer) = output {
-            output_buffer.push_str(&formatted);
+            // Format and display the results as ASCII table
+            let formatted = format_query_results(&batches).map_err(|e| {
+                anyhow::anyhow!("Failed to format query results for '{}': {}", path, e)
+            })?;
+
+            // @@@ Buffering whole content?
+            if let Some(output_buffer) = output {
+                output_buffer.push_str(&formatted);
+            } else {
+                print!("{}", formatted);
+            }
+
+            let batch_count = batches.len();
+            debug!(
+                "Successfully formatted {total_rows} rows in {batch_count} batches from: {path}"
+            );
         } else {
-            print!("{}", formatted);
+            // Raw parquet output - stream directly without formatting
+            if output.is_some() {
+                // Testing mode - collect batches then write to buffer
+                let mut batches = Vec::new();
+                while let Some(batch_result) = stream.next().await {
+                    let batch =
+                        batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
+                    batches.push(batch);
+                }
+                write_batches_to_buffer(
+                    &batches,
+                    output.expect("output buffer is Some in test mode"),
+                )?;
+            } else {
+                // Production mode - stream directly to stdout
+                write_stream_to_stdout(stream).await?;
+            }
         }
-
-        let batch_count = batches.len();
-        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        debug!("Successfully displayed {total_rows} rows in {batch_count} batches from: {path}");
 
         // Return success (caller will commit)
         return Ok(());
@@ -147,8 +417,7 @@ async fn cat_impl(
     Ok(())
 }
 
-// DataFusion SQL interface for file:series and file:table queries with node_id (more efficient)
-// Stream copy function for non-display mode
+/// Write RecordBatch stream as parquet format to output (streaming, low memory)
 async fn stream_file_to_stdout(
     root: &tinyfs::WD,
     path: &str,

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Caspar Water Company
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [package]
 name = "cmd"
 version.workspace = true
@@ -41,6 +45,7 @@ linkme = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
+provider = { workspace = true }
 paste = { workspace = true }
 peak_alloc = { workspace = true }
 serde = { workspace = true }
@@ -63,3 +68,14 @@ sha2 = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.deb]
+name = "pond"
+maintainer = "DuckPond Contributors"
+copyright = "2025, DuckPond Contributors"
+depends = "libssl3, ca-certificates"
+section = "utils"
+priority = "optional"
+assets = [
+    ["../../target/release/pond", "usr/bin/", "755"],
+]

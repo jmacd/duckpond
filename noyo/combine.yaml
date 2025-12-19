@@ -1,45 +1,82 @@
 entries:
-  - name: "BDock"
-    factory: "sql-derived-series"
-    config:
-      patterns:
-        vulink: "/hydrovu/devices/**/BDockVulink.series"
-        at500: "/hydrovu/devices/**/BDockAT500.series"
-      query: |
-        SELECT 
-          COALESCE(vulink.timestamp, at500.timestamp) AS timestamp,
-          vulink.* EXCLUDE (timestamp),
-          at500.* EXCLUDE (timestamp)
-        FROM vulink 
-        FULL OUTER JOIN at500 ON vulink.timestamp = at500.timestamp
-        ORDER BY timestamp
-
   - name: "Silver"  
-    factory: "sql-derived-series"
+    factory: "timeseries-join"
     config:
-      patterns:
-        vulink: "/hydrovu/devices/**/SilverVulink*.series"
-        at500: "/hydrovu/devices/**/SilverAT500.series"
-      query: |
-        SELECT 
-          COALESCE(vulink.timestamp, at500.timestamp) AS timestamp,
-          vulink.* EXCLUDE (timestamp),
-          at500.* EXCLUDE (timestamp)
-        FROM vulink
-        FULL OUTER JOIN at500 ON vulink.timestamp = at500.timestamp
-        ORDER BY timestamp
+      inputs:
+        - pattern: "/hydrovu/devices/**/SilverVulink1.series"
+          scope: Vulink
+          range:
+            end: 2024-05-30T00:00:00Z
+        - pattern: "/hydrovu/devices/**/SilverVulink2.series"
+          scope: Vulink
+          range:
+            begin: 2024-05-30T00:00:00Z
+        - pattern: "/hydrovu/devices/**/SilverAT500.series"
+          scope: AT500_Surface
+
+  - name: "FieldStation"
+    factory: "timeseries-join" 
+    config:
+      inputs:
+        - pattern: "/hydrovu/devices/**/BDockVulink.series"
+          scope: Vulink1
+          range:
+            begin: 2025-10-16T21:00:00Z
+        - pattern: "/hydrovu/devices/**/BDockAT500.series"
+          scope: AT500_Surface
+          range:
+            begin: 2025-10-16T21:00:00Z
+        - pattern: "/hydrovu/devices/**/PrincessVulink.series"
+          scope: Vulink2
+          range:
+            begin: 2025-10-16T21:00:00Z
+        - pattern: "/hydrovu/devices/**/PrincessAT500.series"
+          scope: AT500_Bottom
+          range:
+            begin: 2025-10-16T21:00:00Z
+        - pattern: "excelhtml:///laketech/data/HydroVu_FB-Bottom*.htm"
+          scope: AT500_Bottom
+          transforms:
+            - /etc/hydro_rename
+          range:
+            end: 2025-10-16T21:00:00Z
+        - pattern: "excelhtml:///laketech/data/HydroVu_FB-Surface*.htm"
+          scope: AT500_Surface
+          transforms:
+            - /etc/hydro_rename
+          range:
+            end: 2025-10-16T21:00:00Z
+        - pattern: "excelhtml:///laketech/data/HydroVu_FB-VuLink*.htm"
+          scope: AT500_Vulink
+          transforms:
+            - /etc/hydro_rename
+          range:
+            end: 2025-10-16T21:00:00Z
+
+  - name: "BDock"
+    factory: "timeseries-join"
+    config:
+      inputs:
+        - pattern: "/hydrovu/devices/**/BDockVulink.series"
+          scope: Vulink
+          range:
+            end: 2025-10-16T21:00:00Z
+        - pattern: "/hydrovu/devices/**/BDockAT500.series"
+          scope: AT500_Surface
+          range:
+            end: 2025-10-16T21:00:00Z
 
   - name: "Princess"
-    factory: "sql-derived-series" 
+    factory: "timeseries-join" 
     config:
-      patterns:
-        vulink: "/hydrovu/devices/**/PrincessVulink.series"
-        at500: "/hydrovu/devices/**/PrincessAT500.series"
-      query: |
-        SELECT 
-          COALESCE(vulink.timestamp, at500.timestamp) AS timestamp,
-          vulink.* EXCLUDE (timestamp),
-          at500.* EXCLUDE (timestamp)
-        FROM vulink 
-        FULL OUTER JOIN at500 ON vulink.timestamp = at500.timestamp
-        ORDER BY timestamp
+      inputs:
+        - pattern: "/hydrovu/devices/**/PrincessVulink.series"
+          scope: Vulink
+          range:
+            end: 2025-10-16T21:00:00Z
+        - pattern: "/hydrovu/devices/**/PrincessAT500.series"
+          scope: AT500_Surface
+          range:
+            end: 2025-10-16T21:00:00Z
+
+            

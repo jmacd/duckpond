@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Caspar Water Company
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [package]
 name = "tlogfs"
 version.workspace = true
@@ -43,6 +47,7 @@ log = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
 paste = { workspace = true }
+provider = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }
@@ -62,6 +67,7 @@ uuid7 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+utilities = { workspace = true, features = ["test-helpers"] }
 
 [lints]
 workspace = true
