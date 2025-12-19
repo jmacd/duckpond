@@ -93,7 +93,7 @@ jobs:
           cd crates/cmd
           cargo deb
           mkdir -p ../../artifacts
-          cp target/debian/*.deb ../../artifacts/
+          cp ../../target/debian/*.deb ../../artifacts/
       
       - name: Sign .deb with Sigstore
         run: |
