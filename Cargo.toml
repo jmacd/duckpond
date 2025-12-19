@@ -54,7 +54,7 @@ datafusion-common = "49"
 datafusion-common-runtime = "49"
 datafusion-expr = "49"
 datafusion-functions-json = "0.49"
-deltalake = { version = "0.28", features = ["datafusion"] }
+deltalake = { version = "0.29", features = ["datafusion"] }
 duckdb = { version = "1.3", features = ["bundled"] }
 env_logger = "0.11.3"
 futures = "0.3"
