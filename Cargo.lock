@@ -734,7 +734,7 @@ dependencies = [
  "clap",
  "datafusion",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 51.0.0",
  "datafusion-expr",
  "deltalake",
  "env_logger",
@@ -1071,7 +1071,7 @@ dependencies = [
  "datafusion-catalog",
  "datafusion-catalog-listing",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 49.0.2",
  "datafusion-datasource",
  "datafusion-datasource-csv",
  "datafusion-datasource-json",
@@ -1120,7 +1120,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 49.0.2",
  "datafusion-datasource",
  "datafusion-execution",
  "datafusion-expr",
@@ -1197,6 +1197,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-common-runtime"
+version = "51.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b92065bbc6532c6651e2f7dd30b55cba0c7a14f860c7e1d15f165c41a1868d95"
+dependencies = [
+ "futures",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "datafusion-datasource"
 version = "49.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1209,7 +1220,7 @@ dependencies = [
  "bzip2 0.6.1",
  "chrono",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 49.0.2",
  "datafusion-execution",
  "datafusion-expr",
  "datafusion-physical-expr",
@@ -1243,7 +1254,7 @@ dependencies = [
  "bytes",
  "datafusion-catalog",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 49.0.2",
  "datafusion-datasource",
  "datafusion-execution",
  "datafusion-expr",
@@ -1268,7 +1279,7 @@ dependencies = [
  "bytes",
  "datafusion-catalog",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 49.0.2",
  "datafusion-datasource",
  "datafusion-execution",
  "datafusion-expr",
@@ -1293,7 +1304,7 @@ dependencies = [
  "bytes",
  "datafusion-catalog",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 49.0.2",
  "datafusion-datasource",
  "datafusion-execution",
  "datafusion-expr",
@@ -1616,7 +1627,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 49.0.2",
  "datafusion-execution",
  "datafusion-expr",
  "datafusion-functions-window-common",
@@ -1688,7 +1699,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "datafusion-common",
- "datafusion-common-runtime",
+ "datafusion-common-runtime 49.0.2",
  "datafusion-execution",
  "datafusion-expr",
  "datafusion-physical-expr",
