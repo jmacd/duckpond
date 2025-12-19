@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Test factories for unit testing the factory system
 //!
 //! Simple factories that don't require external dependencies,

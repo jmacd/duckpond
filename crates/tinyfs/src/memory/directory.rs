@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::EntryType;
 use crate::dir::{Directory, DirectoryEntry, Handle};
 use crate::error::{Error, Result};

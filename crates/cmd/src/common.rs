@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;

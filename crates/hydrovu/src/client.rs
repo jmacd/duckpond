@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::models::{Location, LocationReadings, Names};
 use anyhow::{Context, Result, anyhow};
 use log::debug;

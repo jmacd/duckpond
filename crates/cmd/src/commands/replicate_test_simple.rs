@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Simplified replication tests
 //!
 //! Tests verify the basic replication and sync workflow without

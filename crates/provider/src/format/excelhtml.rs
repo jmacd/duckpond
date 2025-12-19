@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! ExcelHTML Format Provider
 //!
 //! Parses HydroVu HTML export files that wrap tabular data in HTML <table> elements.

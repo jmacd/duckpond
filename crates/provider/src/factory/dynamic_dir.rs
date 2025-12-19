@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Dynamic directory factory for TinyFS
 
 use crate::{FactoryContext, FactoryRegistry, register_dynamic_factory};

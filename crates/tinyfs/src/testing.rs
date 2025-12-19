@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Test utilities and fixtures for TinyFS
 //!
 //! This module provides reusable test factories and utilities for testing

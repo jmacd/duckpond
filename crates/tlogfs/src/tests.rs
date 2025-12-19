@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::persistence::OpLogPersistence;
 use arrow_array::record_batch;
 use log::{debug, info};

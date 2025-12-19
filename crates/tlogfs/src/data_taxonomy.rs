@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! DuckPond data taxonomy for classifying and protecting sensitive configuration data.
 //!
 //! This module defines data classes for sensitive information in DuckPond configurations,

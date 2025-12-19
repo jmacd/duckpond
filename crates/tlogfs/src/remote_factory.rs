@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Remote storage factory for S3-compatible object stores
 
 use crate::TLogFSError;

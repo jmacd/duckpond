@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Temporal reduce dynamic factory for TLogFS
 //!
 //! This factory creates temporal downsampling views from existing data sources,

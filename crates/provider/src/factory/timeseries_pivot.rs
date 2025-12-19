@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Timeseries Pivot Factory
 //!
 //! Creates a series file that pivots specific columns from multiple inputs matched by a pattern.

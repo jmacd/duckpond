@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Comprehensive tests for MemoryPersistence with QueryableFile and temporal filtering
 //!
 //! These tests verify that MemoryPersistence properly supports:

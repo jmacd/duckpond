@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Layer 2: Format Provider Traits
 //!
 //! Converts AsyncRead streams to Arrow RecordBatches for tabular formats.

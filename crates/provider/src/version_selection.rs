@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Version selection for ListingTable queries
 //!
 //! Determines which file versions to include when querying data.

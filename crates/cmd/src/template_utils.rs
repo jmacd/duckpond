@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Template expansion utilities for YAML configuration files
 //!
 //! This module provides template expansion functionality using the Tera template engine.

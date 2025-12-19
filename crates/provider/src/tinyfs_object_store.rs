@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! TinyFS-backed ObjectStore implementation for DataFusion ListingTable integration.
 //!
 //! This module implements the object_store::ObjectStore trait to bridge TinyFS

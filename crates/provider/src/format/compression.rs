@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Layer 1: Compression Utilities
 //!
 //! Standalone decompression utilities usable by any code (including TinyFS)

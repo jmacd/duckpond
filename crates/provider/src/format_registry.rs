@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Format Provider Registry
 //!
 //! Central registry for all format providers (CSV, OtelJson, etc.)

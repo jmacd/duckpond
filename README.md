@@ -1,5 +1,8 @@
 # Duckpond
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jmacd/duckpond/badge)](https://scorecard.dev/viewer/?uri=github.com/jmacd/duckpond)
+[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
+
 Duckpond is a very small data lake.
 
 Duckpond is built by the [Caspar Water System](https://github.com/jmacd/caspar.water).

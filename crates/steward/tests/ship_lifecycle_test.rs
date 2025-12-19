@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::Result;
 use log::debug;
 use steward::{PondUserMetadata, Ship};

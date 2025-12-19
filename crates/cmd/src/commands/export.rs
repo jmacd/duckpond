@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::commands::temporal::parse_timestamp_seconds;
 use crate::common::ShipContext;
 use anyhow::Result;

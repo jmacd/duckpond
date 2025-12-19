@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Column Rename Transform Factory
 //!
 //! This factory creates table-provider transformations that rename columns

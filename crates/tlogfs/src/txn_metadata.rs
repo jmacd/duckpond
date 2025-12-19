@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Transaction metadata that MUST be provided for all commits
 //!
 //! This module defines type-safe transaction metadata that ensures every

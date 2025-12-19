@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use futures::stream::{self, Stream};
 use std::path::Path;
 use std::path::PathBuf;

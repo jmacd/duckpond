@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Transaction guard for enforcing single-transaction pattern in TinyFS
 //!
 //! This module provides RAII-style transaction management with runtime detection

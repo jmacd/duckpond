@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Consolidated test helpers for all DuckPond crates
 //!
 //! This module provides reusable test utilities to eliminate duplication across

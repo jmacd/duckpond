@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! OpenTelemetry JSON Format Provider
 //!
 //! Reads OpenTelemetry JSON Lines files containing metrics data.

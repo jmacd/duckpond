@@ -51,6 +51,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # For Sigstore signing
     
     steps:
       - name: Checkout repository
@@ -60,6 +61,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get -y install podman
+      
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.6.0
       
       - name: Log in to Container Registry
         if: github.event_name != 'pull_request'
@@ -76,26 +80,46 @@ jobs:
           echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       
+      - name: Setup Rust for packaging
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+      
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+      
+      - name: Build .deb package
+        run: |
+          cd crates/cmd
+          cargo deb
+          mkdir -p ../../artifacts
+          cp target/debian/*.deb ../../artifacts/
+      
+      - name: Sign .deb with Sigstore
+        run: |
+          cosign sign-blob artifacts/*.deb \
+            --bundle artifacts/pond.deb.bundle \
+            --yes
+      
+      - name: Upload .deb package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pond-debian-package
+          path: |
+            artifacts/*.deb
+            artifacts/*.bundle
+          retention-days: 90
+      
       - name: Build container image
         run: |
           podman build -f Dockerfile -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} .
-      
-      - name: Extract binary for direct use
-        run: |
-          mkdir -p ./artifacts
-          CONTAINER_ID=$(podman create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }})
-          podman cp $CONTAINER_ID:/usr/local/bin/pond ./artifacts/pond
-          podman rm $CONTAINER_ID
-          chmod +x ./artifacts/pond
-      
-      - name: Upload binary as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pond-linux-x86_64
-          path: ./artifacts/pond
-          retention-days: 90
       
       - name: Push container image
         if: github.event_name != 'pull_request'
         run: |
           podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
+      
+      - name: Sign container image with Sigstore
+        if: github.event_name != 'pull_request'
+        run: |
+          cosign sign --yes ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}

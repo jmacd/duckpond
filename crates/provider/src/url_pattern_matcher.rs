@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! URL-Based Pattern Matching for TinyFS Queryable Files
 //!
 //! This module provides a unified API for factories to match files using URL patterns

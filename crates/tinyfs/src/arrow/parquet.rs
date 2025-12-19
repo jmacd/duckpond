@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Full Parquet integration for TinyFS following the original pond pattern
 //!
 //! This module provides high-level ForArrow integration for reading/writing

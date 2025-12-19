@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use super::super::memory::new_fs;
 use crate::error::Error;
 use crate::path::normalize;

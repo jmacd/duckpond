@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Memory allocation tracking and debugging utilities
 //!
 //! This module uses eprintln! for debugging output, which is intentional

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Provider context and factory context for dynamic node creation
 //!
 //! This module defines the abstraction layer between factories and persistence implementations.

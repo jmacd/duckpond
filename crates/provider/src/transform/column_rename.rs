@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Generic Column Rename TableProvider Implementation
 //!
 //! This module provides the core infrastructure for renaming columns in a TableProvider.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(test)]
 mod excel_html_integration_tests {
     use datafusion::prelude::*;

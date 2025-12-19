@@ -1,0 +1,77 @@
+name: SLSA Provenance
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  build:
+    name: Build artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    permissions:
+      contents: write
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+      
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+      
+      - name: Build release binary
+        run: cargo build --release --bin pond
+      
+      - name: Build .deb package
+        run: |
+          cd crates/cmd
+          cargo deb --no-build
+          cd ../..
+      
+      - name: Copy artifacts
+        run: |
+          mkdir -p artifacts
+          cp target/release/pond artifacts/pond
+          cp crates/cmd/target/debian/*.deb artifacts/
+      
+      - name: Generate hashes
+        id: hash
+        run: |
+          cd artifacts
+          sha256sum * > checksums.txt
+          echo "hashes=$(cat checksums.txt | base64 -w0)" >> $GITHUB_OUTPUT
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pond-release-artifacts
+          path: artifacts/*
+          retention-days: 90
+
+  provenance:
+    name: Generate SLSA provenance
+    needs: [build]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.hashes }}"
+      upload-assets: true

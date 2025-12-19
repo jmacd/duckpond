@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Arrow integration for TinyFS
 //!
 //! This module provides Arrow ecosystem integration, including:

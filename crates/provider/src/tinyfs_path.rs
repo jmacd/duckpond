@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! TinyFS path handling utilities for ObjectStore integration
 //!
 //! Provides centralized path building for TinyFS files in ObjectStore contexts,

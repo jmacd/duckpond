@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Reusable banner formatting for pond commands
 //!
 //! Provides utilities to format boxed headers with left- and right-justified fields

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Control table query command - Show transaction status and post-commit execution
 //!
 //! Displays information from the control table including:

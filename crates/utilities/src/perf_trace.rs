@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Performance tracing utilities for analyzing call patterns and performance
 //!
 //! This module provides tools to track function call patterns and performance metrics.

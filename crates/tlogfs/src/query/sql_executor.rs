@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! SQL execution interface for TLogFS files
 //!
 //! This module provides a simple interface to execute SQL queries against TLogFS files

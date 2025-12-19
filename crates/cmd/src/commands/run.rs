@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Run command - executes run configurations stored as pond nodes
 
 use crate::common::ShipContext;

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Timeseries Join Factory for TLogFS
 //!
 //! This factory simplifies the common pattern of joining multiple time series sources

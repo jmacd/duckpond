@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Layer 3: Provider API - URL-based TableProvider creation
 //!
 //! Bridges FormatProviders (Layer 2) with DataFusion TableProviders.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Phase 2 TLogFS Schema Implementation - Abstraction Consolidation
 use arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use datafusion::common::Result;

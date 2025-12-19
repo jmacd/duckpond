@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! TableProvider creation for DuckPond
 //!
 //! This module provides the core logic for creating DataFusion TableProviders from FileID references.

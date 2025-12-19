@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Factory registration system for dynamic node creation
 //!
 //! This module provides the infrastructure for registering and managing factories

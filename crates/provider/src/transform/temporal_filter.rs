@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Temporal filtering for DataFusion ListingTables
 //!
 //! Provides low-level per-file temporal bounds filtering to filter out garbage

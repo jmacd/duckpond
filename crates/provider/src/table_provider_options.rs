@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Table Provider Configuration Options
 //!
 //! This module provides configuration types for creating DataFusion TableProviders

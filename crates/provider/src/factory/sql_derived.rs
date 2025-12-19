@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! SQL-derived dynamic node factories for TLogFS
 //!
 //! This module provides two specialized factories for SQL operations over TLogFS data:

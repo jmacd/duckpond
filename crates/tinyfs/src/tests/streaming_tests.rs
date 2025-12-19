@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tests for streaming support in Phase 1
 //!
 //! These tests verify that the async_reader/async_writer functionality works correctly

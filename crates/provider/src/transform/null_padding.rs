@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Null-Padding Table Provider
 //!
 //! A wrapper TableProvider that extends a table's schema with nullable columns.

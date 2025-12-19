@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CLI command for creating dynamic nodes
 use crate::common::ShipContext;
 use crate::template_utils;
