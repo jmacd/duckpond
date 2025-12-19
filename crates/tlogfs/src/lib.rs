@@ -1,5 +1,4 @@
 #![allow(tail_expr_drop_order)]
-
 // SPDX-FileCopyrightText: 2025 Caspar Water Company
 //
 // SPDX-License-Identifier: Apache-2.0
