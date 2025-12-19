@@ -36,7 +36,7 @@ arrow-arith = "55"
 arrow-array = "55"
 arrow-buffer = "55"
 arrow-cast = { version = "55", features = ["prettyprint"] }
-arrow-csv = "55"
+arrow-csv = "57"
 arrow-schema = "55"
 arrow-select = "55"
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
