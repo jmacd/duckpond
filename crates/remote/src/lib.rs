@@ -67,7 +67,7 @@ pub use factory::{
     scan_remote_versions,
 };
 pub use reader::ChunkedReader;
-pub use schema::{CHUNK_SIZE_DEFAULT, ChunkedFileRecord, FileType};
+pub use schema::{ChunkedFileRecord, FileInfo, FileType, TransactionMetadata, CHUNK_SIZE_DEFAULT};
 pub use table::RemoteTable;
 pub use writer::ChunkedWriter;
 

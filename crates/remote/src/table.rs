@@ -275,9 +275,9 @@ impl RemoteTable {
 
     /// Write transaction metadata
     ///
-    /// Stores a summary of a pond transaction backup, including the list
-    /// of files and their hashes. This is stored in a special partition
-    /// with bundle_id="metadata_{pond_txn_id}".
+    /// Stores a summary of a pond transaction backup. All metadata for a pond
+    /// uses the same bundle_id="POND:META:{pond_id}" partition, with individual
+    /// transactions distinguished by the pond_txn_id column.
     ///
     /// # Arguments
     /// * `pond_txn_id` - Transaction sequence number
@@ -293,27 +293,40 @@ impl RemoteTable {
         let metadata_json = serde_json::to_vec(metadata)?;
         let metadata_reader = std::io::Cursor::new(metadata_json);
 
-        let _bundle_id = ChunkedFileRecord::metadata_bundle_id(pond_txn_id);
+        // Use pond-specific metadata partition
+        let bundle_id = ChunkedFileRecord::metadata_bundle_id(&metadata.pond_id);
 
-        self.write_file(
+        let writer = ChunkedWriter::new(
             metadata.pond_id.clone(),
             pond_txn_id,
-            "METADATA",
+            "METADATA".to_string(),
             0, // metadata has no version
             crate::FileType::Metadata,
             metadata_reader,
             metadata.cli_args.clone(),
         )
-        .await?;
+        .with_bundle_id(bundle_id);
+
+        writer.write_to_table(&mut self.table).await?;
+
+        // Re-register the updated table
+        self.session_context.deregister_table("remote_files")?;
+        self.session_context
+            .register_table("remote_files", Arc::new(self.table.clone()))
+            .map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to re-register table: {}", e))
+            })?;
 
         Ok(())
     }
 
     /// Read transaction metadata
     ///
-    /// Retrieves the summary of a pond transaction backup.
+    /// Retrieves the summary of a pond transaction backup by querying
+    /// the metadata partition for the specific pond_txn_id.
     ///
     /// # Arguments
+    /// * `pond_id` - Pond UUID
     /// * `pond_txn_id` - Transaction sequence number
     ///
     /// # Returns
@@ -323,11 +336,48 @@ impl RemoteTable {
     /// Returns error if metadata not found or cannot be deserialized
     pub async fn read_metadata(
         &self,
+        pond_id: &str,
         pond_txn_id: i64,
     ) -> Result<crate::schema::TransactionMetadata> {
-        let bundle_id = ChunkedFileRecord::metadata_bundle_id(pond_txn_id);
+        let bundle_id = ChunkedFileRecord::metadata_bundle_id(pond_id);
+        
+        // Query for the specific transaction's metadata
+        let df = self
+            .session_context
+            .sql(&format!(
+                "SELECT chunk_data FROM remote_files \
+                 WHERE bundle_id = '{}' AND pond_txn_id = {} \
+                 ORDER BY chunk_id",
+                bundle_id, pond_txn_id
+            ))
+            .await?;
+
+        let batches = df.collect().await?;
+        
+        if batches.is_empty() {
+            return Err(RemoteError::FileNotFound(format!(
+                "Metadata not found for pond {} txn {}",
+                pond_id, pond_txn_id
+            )));
+        }
+
+        // Reconstruct metadata from chunks
         let mut buffer = Vec::new();
-        self.read_file(&bundle_id, &mut buffer).await?;
+        for batch in batches {
+            let chunk_data_col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow_array::BinaryArray>()
+                .ok_or_else(|| {
+                    RemoteError::TableOperation("Invalid chunk_data column type".to_string())
+                })?;
+
+            for i in 0..chunk_data_col.len() {
+                if !chunk_data_col.is_null(i) {
+                    buffer.extend_from_slice(chunk_data_col.value(i));
+                }
+            }
+        }
 
         let metadata = serde_json::from_slice(&buffer)?;
         Ok(metadata)

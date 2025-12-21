@@ -7,7 +7,6 @@
 //! This test suite verifies that we can correctly detect file changes
 //! from Delta Lake transaction logs.
 
-use log::debug;
 use remote::detect_changes_from_delta_log;
 use tlogfs::{OpLogPersistence, PondTxnMetadata, PondUserMetadata, TLogFSError};
 

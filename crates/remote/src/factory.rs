@@ -146,16 +146,9 @@ async fn execute_remote(
     log::info!("   Command: {:?}", cmd);
 
     // Open or create remote table
-    let remote_table = if config.url.starts_with("s3://") {
-        // TODO: Build object store for S3 and create RemoteTable with it
-        return Err(RemoteError::TableOperation(
-            "S3 remote tables not yet implemented".to_string(),
-        ));
-    } else {
-        // Local file path
-        let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
-        RemoteTable::open_or_create(path, true).await?
-    };
+    // DeltaOps supports both file:// and s3:// URLs through object_store
+    let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
+    let remote_table = RemoteTable::open_or_create(path, true).await?;
 
     match cmd {
         RemoteCommand::Push => execute_push(remote_table, &context).await,
@@ -458,44 +451,24 @@ pub fn build_object_store(
 }
 
 /// Scan remote storage for available pond versions
+///
+/// Opens the RemoteTable at the given URL and queries for all backed up transaction IDs.
+/// Supports both file:// and s3:// URLs through Delta Lake's object_store integration.
+///
+/// # Arguments
+/// * `remote_url` - URL to the remote backup table (e.g., "file:///path" or "s3://bucket/path")
+/// * `pond_id` - Optional pond ID to filter by (currently unused, returns all transactions)
+///
+/// # Returns
+/// Vec of transaction IDs (pond_txn_id values) available in the backup
 pub async fn scan_remote_versions(
-    store: &std::sync::Arc<dyn object_store::ObjectStore>,
+    remote_url: &str,
     pond_id: Option<&uuid7::Uuid>,
 ) -> Result<Vec<i64>, RemoteError> {
-    // For chunked format, we query the RemoteTable for distinct pond_txn_id values
-    // This replaces the old bundle version scanning
-
     let _pond_id_str = pond_id.map(|id| id.to_string()).unwrap_or_default();
 
-    // Get remote URL from object store debug output
-    // This is a workaround - ideally we'd have a better way to get the URL
-    let store_debug = format!("{:?}", store);
-    let remote_url = if store_debug.contains("LocalFileSystem") {
-        // Extract path from LocalFileSystem debug output
-        // Format: LocalFileSystem { root: "path" }
-        if let Some(start) = store_debug.find("root: \"") {
-            let after_root = &store_debug[start + 7..];
-            if let Some(end) = after_root.find('"') {
-                format!("file://{}", &after_root[..end])
-            } else {
-                return Err(RemoteError::TableOperation(
-                    "Failed to parse local filesystem path".to_string(),
-                ));
-            }
-        } else {
-            return Err(RemoteError::TableOperation(
-                "Failed to parse local filesystem path".to_string(),
-            ));
-        }
-    } else {
-        // For S3 or other stores, we'd need different logic
-        return Err(RemoteError::TableOperation(
-            "Only local filesystem is currently supported for restore".to_string(),
-        ));
-    };
-
-    // Open the RemoteTable
-    let remote_table = crate::RemoteTable::open(&remote_url).await?;
+    // Open the RemoteTable - Delta Lake handles object_store internally
+    let remote_table = crate::RemoteTable::open(remote_url).await?;
 
     // Query for all distinct pond_txn_id values
     let transactions = remote_table.list_transactions().await?;
@@ -544,6 +517,7 @@ pub fn extract_txn_seq_from_bundle(_files: &[(String, Vec<u8>)]) -> Result<i64, 
 /// # Arguments
 /// * `remote_table` - The remote backup table to read from
 /// * `local_table` - The local Delta table to write to
+/// * `pond_id` - Pond UUID (for locating metadata partition)
 /// * `pond_txn_id` - Transaction ID to restore
 ///
 /// # Errors
@@ -554,12 +528,13 @@ pub fn extract_txn_seq_from_bundle(_files: &[(String, Vec<u8>)]) -> Result<i64, 
 pub async fn apply_parquet_files_from_remote(
     remote_table: &crate::RemoteTable,
     local_table: &mut deltalake::DeltaTable,
+    pond_id: &str,
     pond_txn_id: i64,
 ) -> Result<(), RemoteError> {
     log::info!("Restoring transaction {} from remote backup", pond_txn_id);
 
     // Read metadata for this transaction
-    let metadata = remote_table.read_metadata(pond_txn_id).await?;
+    let metadata = remote_table.read_metadata(pond_id, pond_txn_id).await?;
 
     log::info!("Found {} files to restore", metadata.files.len());
 

@@ -57,8 +57,8 @@ pub enum RemoteError {
     #[error("Invalid bundle_id format: {0}")]
     Configuration(String),
 
-    #[error("Invalid file_id format: {0}")]
-    InvalidFileId(String),
+    #[error("Invalid bundle_id format: {0}")]
+    InvalidBundleId(String),
 
     #[error("Table operation error: {0}")]
     TableOperation(String),

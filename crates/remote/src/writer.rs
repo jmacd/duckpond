@@ -58,6 +58,8 @@ pub struct ChunkedWriter<R> {
     reader: R,
     cli_args: Vec<String>,
     chunk_size: usize,
+    /// Optional override for bundle_id (used for metadata to avoid SHA256 computation)
+    bundle_id_override: Option<String>,
 }
 
 impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
@@ -90,6 +92,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             reader,
             cli_args,
             chunk_size: CHUNK_SIZE_DEFAULT,
+            bundle_id_override: None,
         }
     }
 
@@ -100,6 +103,17 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size =
             chunk_size.clamp(crate::schema::CHUNK_SIZE_MIN, crate::schema::CHUNK_SIZE_MAX);
+        self
+    }
+
+    /// Set bundle_id override (for metadata)
+    ///
+    /// When set, this bundle_id will be used instead of computing SHA256.
+    /// This is used for metadata records which need predictable bundle_ids
+    /// in the format "metadata_{pond_txn_id}".
+    #[must_use]
+    pub fn with_bundle_id(mut self, bundle_id: String) -> Self {
+        self.bundle_id_override = Some(bundle_id);
         self
     }
 
@@ -155,7 +169,22 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             chunk_id += 1;
         }
 
-        let bundle_id = format!("{:x}", file_hasher.finalize());
+        // Compute raw SHA256 hash
+        let sha256_hash = format!("{:x}", file_hasher.finalize());
+        
+        let bundle_id = if let Some(ref override_id) = self.bundle_id_override {
+            // Use provided bundle_id (for metadata and pond data files)
+            override_id.clone()
+        } else {
+            // Only large files use SHA256-based bundle_id for deduplication
+            match self.file_type {
+                FileType::LargeFile => ChunkedFileRecord::large_file_bundle_id(&sha256_hash),
+                FileType::PondParquet | FileType::Metadata => {
+                    // Should use override, but fallback to prevent panic
+                    ChunkedFileRecord::metadata_bundle_id(&self.pond_id)
+                }
+            }
+        };
         let chunk_count = chunk_id;
 
         debug!(
@@ -163,7 +192,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             self.path,
             chunk_count,
             total_size,
-            &bundle_id[..16]
+            &sha256_hash[..16.min(sha256_hash.len())]
         );
 
         // Special case: empty file needs at least one row with empty chunk_data
@@ -174,7 +203,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         // Second pass: create RecordBatches with final metadata
         let mut all_batches = Vec::new();
         for chunk_batch in all_chunk_data.chunks(CHUNKS_PER_BATCH) {
-            let batch = self.create_batch(chunk_batch, &bundle_id, total_size, chunk_count)?;
+            let batch = self.create_batch(chunk_batch, &bundle_id, &sha256_hash, total_size, chunk_count)?;
             all_batches.push(batch);
         }
 
@@ -205,6 +234,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         &self,
         chunks: &[(i64, i64, Vec<u8>)],
         bundle_id: &str,
+        sha256_hash: &str,
         total_size: u64,
         chunk_count: i64,
     ) -> Result<RecordBatch> {
@@ -245,7 +275,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             chunk_crc32s.push(*crc);
             chunk_datas.push(data.clone());
             total_sizes.push(total_size as i64);
-            total_sha256s.push(bundle_id.to_string());
+            total_sha256s.push(sha256_hash.to_string());
             chunk_counts.push(chunk_count);
             cli_args_vec.push(cli_args_json.clone());
             created_ats.push(created_at);
@@ -320,9 +350,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify bundle_id is a valid SHA256
-        assert_eq!(bundle_id.len(), 64);
-        assert!(bundle_id.chars().all(|c| c.is_ascii_hexdigit()));
+        // Verify bundle_id has POND:FILE: prefix and valid SHA256
+        assert!(bundle_id.starts_with("POND:FILE:"));
+        let hash_part = &bundle_id["POND:FILE:".len()..];
+        assert_eq!(hash_part.len(), 64);
+        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Verify we can query the file
         let files = table.list_files("pond-test-123").await.unwrap();
@@ -345,18 +377,6 @@ mod tests {
         let chunk_size = 1024 * 1024; // 1MB chunks for fast test
         let data_size = 3 * chunk_size + 512 * 1024; // 3.5MB = 4 chunks
         let data = vec![123u8; data_size];
-        let reader = Cursor::new(data.clone());
-
-        let mut writer = ChunkedWriter::new(
-            "pond-test-456".to_string(),
-            456,
-            "test/large.dat".to_string(),
-            1,
-            FileType::PondParquet,
-            reader,
-            vec!["backup".to_string()],
-        )
-        .with_chunk_size(chunk_size);
 
         let _bundle_id = table
             .write_file(
@@ -402,8 +422,9 @@ mod tests {
             .await
             .unwrap();
 
-        // SHA256 of empty input
+        // SHA256 of empty input with POND:FILE: prefix
         let expected_hash = format!("{:x}", Sha256::digest(b""));
-        assert_eq!(bundle_id, expected_hash);
+        let expected_bundle_id = format!("POND:FILE:{}", expected_hash);
+        assert_eq!(bundle_id, expected_bundle_id);
     }
 }

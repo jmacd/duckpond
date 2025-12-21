@@ -144,12 +144,8 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
 
     info!("Starting restore from backup...");
 
-    // Build the object store
-    let store = remote::build_object_store(&config)
-        .map_err(|e| anyhow!("Failed to create object store: {}", e))?;
-
-    // Scan for all available versions (filter by source pond_id)
-    let versions = remote::scan_remote_versions(&store, Some(&pond_metadata_for_restore.pond_id))
+    // Scan for all available versions in the remote backup
+    let versions = remote::scan_remote_versions(&config.url, Some(&pond_metadata_for_restore.pond_id))
         .await
         .map_err(|e| anyhow!("Failed to scan remote versions: {}", e))?;
 
@@ -165,26 +161,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     );
 
     // Open the RemoteTable for reading backed up files
-    // Extract URL from object store (same parsing logic as scan_remote_versions)
-    let store_debug = format!("{:?}", store);
-    let remote_url = if store_debug.contains("LocalFileSystem") {
-        if let Some(start) = store_debug.find("root: \"") {
-            let after_root = &store_debug[start + 7..];
-            if let Some(end) = after_root.find('"') {
-                format!("file://{}", &after_root[..end])
-            } else {
-                return Err(anyhow!("Failed to parse local filesystem path"));
-            }
-        } else {
-            return Err(anyhow!("Failed to parse local filesystem path"));
-        }
-    } else {
-        return Err(anyhow!(
-            "Only local filesystem is currently supported for restore"
-        ));
-    };
-
-    let remote_table = remote::RemoteTable::open(&remote_url)
+    let remote_table = remote::RemoteTable::open(&config.url)
         .await
         .map_err(|e| anyhow!("Failed to open remote table: {}", e))?;
 
@@ -196,7 +173,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
 
         // Read metadata for this transaction
         let metadata = remote_table
-            .read_metadata(version_clone)
+            .read_metadata(&pond_metadata_for_restore.pond_id.to_string(), version_clone)
             .await
             .map_err(|e| anyhow!("Failed to read metadata for version {}: {}", version, e))?;
 
@@ -223,6 +200,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
 
         // Clone remote_table for use in async block
         let remote_table_clone = remote_table.clone();
+        let pond_id_str = pond_metadata_for_restore.pond_id.to_string();
 
         // CRITICAL: Use replay_transaction() instead of transact()
         // This preserves the original txn_seq from the source pond
@@ -244,6 +222,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
                     remote::apply_parquet_files_from_remote(
                         &remote_table_clone,
                         &mut table,
+                        &pond_id_str,
                         version_clone,
                     )
                     .await

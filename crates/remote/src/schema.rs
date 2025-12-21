@@ -66,9 +66,9 @@ impl FileType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkedFileRecord {
     // === PARTITION COLUMN ===
-    /// File identifier (SHA256 hash) or "metadata_{pond_txn_id}" for metadata records
+    /// Bundle identifier (SHA256 hash) or "metadata_{pond_txn_id}" for metadata records
     /// This is the PARTITION column in Delta Lake
-    pub file_id: String,
+    pub bundle_id: String,
 
     // === File identity and transaction context ===
     /// Transaction sequence number from pond
@@ -156,17 +156,33 @@ impl ChunkedFileRecord {
             .collect()
     }
 
-    /// Generate a metadata bundle_id for a transaction
-    /// Format: "metadata_{pond_txn_id}"
+    /// Generate a metadata bundle_id for a pond
+    /// Format: "POND:META:{pond_id}"
+    /// 
+    /// All metadata for a pond shares the same bundle_id (partition),
+    /// with individual transactions distinguished by pond_txn_id column.
     #[must_use]
-    pub fn metadata_bundle_id(pond_txn_id: i64) -> String {
-        format!("metadata_{}", pond_txn_id)
+    pub fn metadata_bundle_id(pond_id: &str) -> String {
+        format!("POND:META:{}", pond_id)
+    }
+
+    /// Generate a large file bundle_id
+    /// Format: "POND:FILE:{sha256}"
+    #[must_use]
+    pub fn large_file_bundle_id(sha256: &str) -> String {
+        format!("POND:FILE:{}", sha256)
     }
 
     /// Check if a bundle_id is a metadata record
     #[must_use]
     pub fn is_metadata_bundle_id(bundle_id: &str) -> bool {
-        bundle_id.starts_with("metadata_")
+        bundle_id.starts_with("POND:META:")
+    }
+
+    /// Check if a bundle_id is a large file record
+    #[must_use]
+    pub fn is_large_file_bundle_id(bundle_id: &str) -> bool {
+        bundle_id.starts_with("POND:FILE:")
     }
 }
 
@@ -193,7 +209,7 @@ pub struct TransactionMetadata {
 pub struct FileInfo {
     /// Original path in pond
     pub path: String,
-    /// SHA256 hash (= file_id for this file)
+    /// SHA256 hash (= bundle_id for this file)
     pub sha256: String,
     /// Total file size in bytes
     pub size: u64,
@@ -207,10 +223,20 @@ mod tests {
 
     #[test]
     fn test_metadata_bundle_id() {
-        let bundle_id = ChunkedFileRecord::metadata_bundle_id(123);
-        assert_eq!(bundle_id, "metadata_123");
+        let pond_id = "018e5e5e-5e5e-7e5e-8e5e-5e5e5e5e5e5e";
+        let bundle_id = ChunkedFileRecord::metadata_bundle_id(pond_id);
+        assert_eq!(bundle_id, "POND:META:018e5e5e-5e5e-7e5e-8e5e-5e5e5e5e5e5e");
         assert!(ChunkedFileRecord::is_metadata_bundle_id(&bundle_id));
-        assert!(!ChunkedFileRecord::is_metadata_bundle_id("abc123def"));
+        assert!(!ChunkedFileRecord::is_metadata_bundle_id("POND:FILE:abc123def"));
+    }
+
+    #[test]
+    fn test_large_file_bundle_id() {
+        let sha256 = "abc123def456";
+        let bundle_id = ChunkedFileRecord::large_file_bundle_id(sha256);
+        assert_eq!(bundle_id, "POND:FILE:abc123def456");
+        assert!(ChunkedFileRecord::is_large_file_bundle_id(&bundle_id));
+        assert!(!ChunkedFileRecord::is_large_file_bundle_id("POND:META:something"));
     }
 
     #[test]
