@@ -40,6 +40,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct RemoteTable {
     /// Path to the Delta Lake table
     path: String,
@@ -218,15 +219,19 @@ impl RemoteTable {
     /// - Cannot write to Delta Lake
     pub async fn write_file<R: AsyncRead + Unpin>(
         &mut self,
+        pond_id: impl Into<String>,
         pond_txn_id: i64,
-        original_path: impl Into<String>,
+        path: impl Into<String>,
+        version: i64,
         file_type: crate::FileType,
         reader: R,
         cli_args: Vec<String>,
     ) -> Result<String> {
         let writer = ChunkedWriter::new(
+            pond_id.into(),
             pond_txn_id,
-            original_path.into(),
+            path.into(),
+            version,
             file_type,
             reader,
             cli_args,
@@ -291,8 +296,10 @@ impl RemoteTable {
         let _bundle_id = ChunkedFileRecord::metadata_bundle_id(pond_txn_id);
 
         self.write_file(
+            metadata.pond_id.clone(),
             pond_txn_id,
             "METADATA",
+            0, // metadata has no version
             crate::FileType::Metadata,
             metadata_reader,
             metadata.cli_args.clone(),
@@ -364,28 +371,33 @@ impl RemoteTable {
         Ok(txn_ids)
     }
 
-    /// List all files in a transaction
+    /// List all files in a pond
     ///
-    /// Returns information about all files backed up in a specific transaction.
+    /// Returns information about all files backed up for the given pond.
     ///
     /// # Arguments
-    /// * `pond_txn_id` - Transaction sequence number
+    /// * `pond_id` - UUID of the pond (empty string = all ponds)
     ///
     /// # Returns
-    /// Vec of (bundle_id, original_path, file_type, total_size)
+    /// Vec of (bundle_id, path, file_type, total_size)
     ///
     /// # Errors
     /// Returns error if query fails
-    pub async fn list_files(&self, pond_txn_id: i64) -> Result<Vec<(String, String, String, i64)>> {
+    pub async fn list_files(&self, pond_id: &str) -> Result<Vec<(String, String, String, i64)>> {
+        let where_clause = if pond_id.is_empty() {
+            "WHERE file_type != 'metadata'".to_string()
+        } else {
+            format!("WHERE pond_id = '{}' AND file_type != 'metadata'", pond_id)
+        };
+
         let df = self
             .session_context
             .sql(&format!(
-                "SELECT DISTINCT bundle_id, original_path, file_type, total_size 
+                "SELECT DISTINCT bundle_id, path, file_type, total_size 
                  FROM remote_files 
-                 WHERE pond_txn_id = {} 
-                   AND file_type != 'metadata'
-                 ORDER BY original_path",
-                pond_txn_id
+                 {}
+                 ORDER BY path",
+                where_clause
             ))
             .await?;
 

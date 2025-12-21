@@ -385,6 +385,7 @@ impl SqlDerivedFile {
                 context: self.context.context.clone(),
                 file_id: node_id,
                 pond_metadata: None,
+                txn_seq: 0, // Transform context doesn't need txn_seq
             };
 
             debug!(
@@ -1396,6 +1397,7 @@ mod tests {
             context: context.clone(),
             file_id,
             pond_metadata: None,
+            txn_seq: 0,
         }
     }
 

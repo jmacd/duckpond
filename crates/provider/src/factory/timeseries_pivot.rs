@@ -377,6 +377,7 @@ mod tests {
             context: context.clone(),
             file_id,
             pond_metadata: None,
+            txn_seq: 0,
         }
     }
 

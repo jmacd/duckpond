@@ -52,7 +52,6 @@ pub mod schema_validation;
 /// Extract State from provider::FactoryContext
 ///
 /// Helper to downcast the persistence layer back to concrete State.
-/// Used by remote_factory to access Delta table operations.
 pub fn extract_state(pctx: &FactoryContext) -> Result<persistence::State, TLogFSError> {
     pctx.context
         .persistence
@@ -91,18 +90,9 @@ pub use provider::{ConfigFile, DynamicFactory, FactoryRegistry, PondMetadata};
 // Note: Macros are #[macro_export] so they're automatically available at crate::macro_name
 // No need to re-export them here
 
-// Remote storage factory for S3-compatible object stores
-pub mod remote_factory;
-
-// Bundle creation for remote backups (tar+zstd streaming compression)
-pub mod bundle;
-
 // Test utilities for DRY test patterns
 #[cfg(test)]
 pub mod test_utils;
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod change_detection_tests;

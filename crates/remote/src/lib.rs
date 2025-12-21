@@ -51,13 +51,21 @@
 //! # }
 //! ```
 
+mod changes;
 mod error;
+pub mod factory;
 mod reader;
 mod schema;
 mod table;
 mod writer;
 
+pub use changes::{Changeset, FileChange, detect_changes_from_delta_log};
 pub use error::RemoteError;
+pub use factory::{
+    RemoteConfig, ReplicationConfig, apply_parquet_files, apply_parquet_files_from_remote,
+    build_object_store, download_bundle, extract_bundle, extract_txn_seq_from_bundle,
+    scan_remote_versions,
+};
 pub use reader::ChunkedReader;
 pub use schema::{CHUNK_SIZE_DEFAULT, ChunkedFileRecord, FileType};
 pub use table::RemoteTable;

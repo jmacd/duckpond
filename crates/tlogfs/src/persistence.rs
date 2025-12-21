@@ -3198,6 +3198,7 @@ mod node_factory {
             context: state.as_provider_context(),
             file_id: id,
             pond_metadata: None,
+            txn_seq: 0, // Node creation context doesn't need txn_seq
         };
 
         debug!(

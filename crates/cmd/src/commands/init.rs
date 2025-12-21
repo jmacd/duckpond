@@ -85,7 +85,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
                 format!("Failed to read config file: {}", config_path.display())
             })?;
 
-            let config: tlogfs::remote_factory::RemoteConfig =
+            let config: remote::RemoteConfig =
                 serde_yaml::from_str(&config_content).with_context(|| {
                     format!("Failed to parse config YAML from {}", config_path.display())
                 })?;
@@ -96,7 +96,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         InitConfig::FromBase64(encoded) => {
             info!("📦 Decoding replication configuration...");
 
-            let repl_config = tlogfs::remote_factory::ReplicationConfig::from_base64(&encoded)
+            let repl_config = remote::ReplicationConfig::from_base64(&encoded)
                 .with_context(|| "Failed to decode base64 replication config")?;
 
             info!("✓ Configuration decoded successfully");
@@ -145,16 +145,13 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     info!("Starting restore from backup...");
 
     // Build the object store
-    let store = tlogfs::remote_factory::build_object_store(&config)
+    let store = remote::build_object_store(&config)
         .map_err(|e| anyhow!("Failed to create object store: {}", e))?;
 
     // Scan for all available versions (filter by source pond_id)
-    let versions = tlogfs::remote_factory::scan_remote_versions(
-        &store,
-        Some(&pond_metadata_for_restore.pond_id),
-    )
-    .await
-    .map_err(|e| anyhow!("Failed to scan remote versions: {}", e))?;
+    let versions = remote::scan_remote_versions(&store, Some(&pond_metadata_for_restore.pond_id))
+        .await
+        .map_err(|e| anyhow!("Failed to scan remote versions: {}", e))?;
 
     if versions.is_empty() {
         info!("   No backup versions found");
@@ -167,77 +164,65 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         versions
     );
 
+    // Open the RemoteTable for reading backed up files
+    // Extract URL from object store (same parsing logic as scan_remote_versions)
+    let store_debug = format!("{:?}", store);
+    let remote_url = if store_debug.contains("LocalFileSystem") {
+        if let Some(start) = store_debug.find("root: \"") {
+            let after_root = &store_debug[start + 7..];
+            if let Some(end) = after_root.find('"') {
+                format!("file://{}", &after_root[..end])
+            } else {
+                return Err(anyhow!("Failed to parse local filesystem path"));
+            }
+        } else {
+            return Err(anyhow!("Failed to parse local filesystem path"));
+        }
+    } else {
+        return Err(anyhow!(
+            "Only local filesystem is currently supported for restore"
+        ));
+    };
+
+    let remote_table = remote::RemoteTable::open(&remote_url)
+        .await
+        .map_err(|e| anyhow!("Failed to open remote table: {}", e))?;
+
     // Apply each version - replaying transactions with their ORIGINAL sequence numbers
     for version in &versions {
         info!("   Restoring version {}...", version);
 
         let version_clone = *version;
 
-        // Convert pond metadata to tlogfs format for download
-        let tlogfs_metadata = provider::PondMetadata {
-            pond_id: pond_metadata_for_restore.pond_id,
-            birth_timestamp: pond_metadata_for_restore.birth_timestamp,
-            birth_hostname: pond_metadata_for_restore.birth_hostname.clone(),
-            birth_username: pond_metadata_for_restore.birth_username.clone(),
-        };
-
-        // Download bundle
-        let bundle_data =
-            tlogfs::remote_factory::download_bundle(&store, &tlogfs_metadata, version_clone)
-                .await
-                .map_err(|e| anyhow!("Failed to download bundle for version {}: {}", version, e))?;
-
-        // Extract files from bundle (Parquet + Delta commit log)
-        let files = tlogfs::remote_factory::extract_bundle(&bundle_data)
+        // Read metadata for this transaction
+        let metadata = remote_table
+            .read_metadata(version_clone)
             .await
-            .map_err(|e| anyhow!("Failed to extract bundle for version {}: {}", version, e))?;
+            .map_err(|e| anyhow!("Failed to read metadata for version {}: {}", version, e))?;
 
-        if files.is_empty() {
+        if metadata.files.is_empty() {
             info!("      Version {} has no files, skipping", version_clone);
             continue;
         }
 
-        // Extract original txn_seq from Delta commit log in the bundle
-        let txn_seq = tlogfs::remote_factory::extract_txn_seq_from_bundle(&files).map_err(|e| {
-            anyhow!(
-                "Failed to extract txn_seq from bundle version {}: {}",
-                version,
-                e
-            )
-        })?;
+        // txn_seq is the same as pond_txn_id in chunked format
+        let txn_seq = version_clone;
 
         info!("      Original txn_seq: {}", txn_seq);
-
-        // Extract metadata for cli_args (for backward compatibility and logging)
-        let bundle_path = format!(
-            "pond-{}-bundle-{:06}.tar.zst",
-            pond_metadata_for_restore.pond_id, version
-        );
-        let bundle_metadata = tlogfs::bundle::extract_bundle_metadata(
-            store.clone(),
-            &object_store::path::Path::from(bundle_path.as_str()),
-        )
-        .await
-        .map_err(|e| anyhow!("Failed to extract bundle metadata: {}", e))?;
-
-        let cli_args = if bundle_metadata.cli_args.is_empty() {
-            // Fallback for old bundles - use generic command
-            vec!["<restored>".to_string()]
-        } else {
-            bundle_metadata.cli_args.clone()
-        };
-
-        info!("      Original command: {:?}", cli_args);
+        info!("      Original command: {:?}", metadata.cli_args);
 
         // Build PondTxnMetadata for replay
         let txn_meta = tlogfs::PondTxnMetadata {
             txn_seq,
             user: tlogfs::PondUserMetadata {
                 txn_id: uuid7::uuid7(), // Generate new UUID for restoration
-                args: cli_args,
+                args: metadata.cli_args.clone(),
                 vars: std::collections::HashMap::new(),
             },
         };
+
+        // Clone remote_table for use in async block
+        let remote_table_clone = remote_table.clone();
 
         // CRITICAL: Use replay_transaction() instead of transact()
         // This preserves the original txn_seq from the source pond
@@ -255,11 +240,18 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
                     // Get Delta table from state
                     let mut table = state.table().await;
 
-                    // Apply files to Delta table (includes Parquet + Delta commit log)
-                    // This directly copies the commit log, preserving the original txn_seq
-                    tlogfs::remote_factory::apply_parquet_files(&mut table, &files)
-                        .await
-                        .map_err(steward::StewardError::DataInit)?;
+                    // Restore files from RemoteTable to local Delta table
+                    remote::apply_parquet_files_from_remote(
+                        &remote_table_clone,
+                        &mut table,
+                        version_clone,
+                    )
+                    .await
+                    .map_err(|e| {
+                        steward::StewardError::DataInit(tlogfs::TLogFSError::Restore {
+                            message: e.to_string(),
+                        })
+                    })?;
 
                     let delta_version = table.version().unwrap_or(0);
                     log::info!(

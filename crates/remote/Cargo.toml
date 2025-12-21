@@ -34,14 +34,23 @@ futures = { workspace = true }
 pin-project = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
+uuid7 = { workspace = true }
 sha2 = { workspace = true }
 crc32fast = "1.4"
 chrono = { workspace = true }
 tlogfs = { workspace = true }
 steward = { workspace = true }
+provider = { workspace = true }
+tinyfs = { workspace = true }
+clap = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+paste = { workspace = true }
+linkme = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

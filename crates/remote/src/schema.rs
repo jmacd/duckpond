@@ -109,8 +109,10 @@ impl ChunkedFileRecord {
             // PARTITION COLUMN - must be first for Delta Lake
             Field::new("bundle_id", DataType::Utf8, false),
             // File identity and context
+            Field::new("pond_id", DataType::Utf8, false),
             Field::new("pond_txn_id", DataType::Int64, false),
-            Field::new("original_path", DataType::Utf8, false),
+            Field::new("path", DataType::Utf8, false),
+            Field::new("version", DataType::Int64, false),
             Field::new("file_type", DataType::Utf8, false),
             // Chunk information
             Field::new("chunk_id", DataType::Int64, false),
@@ -172,6 +174,8 @@ impl ChunkedFileRecord {
 /// This summarizes an entire pond commit backup
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionMetadata {
+    /// Pond UUID
+    pub pond_id: String,
     /// Number of files in this transaction
     pub file_count: usize,
     /// List of files backed up

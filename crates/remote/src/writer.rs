@@ -50,8 +50,10 @@ use tokio::io::AsyncReadExt;
 /// # }
 /// ```
 pub struct ChunkedWriter<R> {
+    pond_id: String,
     pond_txn_id: i64,
-    original_path: String,
+    path: String,
+    version: i64,
     file_type: FileType,
     reader: R,
     cli_args: Vec<String>,
@@ -62,22 +64,28 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     /// Create a new chunked writer
     ///
     /// # Arguments
+    /// * `pond_id` - UUID of the pond
     /// * `pond_txn_id` - Transaction sequence number from pond
-    /// * `original_path` - Original path in pond
+    /// * `path` - File path in Delta table
+    /// * `version` - Delta table version number
     /// * `file_type` - Type of file
     /// * `reader` - Async reader providing file content
     /// * `cli_args` - CLI arguments that triggered this backup
     #[must_use]
     pub fn new(
+        pond_id: String,
         pond_txn_id: i64,
-        original_path: String,
+        path: String,
+        version: i64,
         file_type: FileType,
         reader: R,
         cli_args: Vec<String>,
     ) -> Self {
         Self {
+            pond_id,
             pond_txn_id,
-            original_path,
+            path,
+            version,
             file_type,
             reader,
             cli_args,
@@ -112,7 +120,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     pub async fn write_to_table(mut self, table: &mut DeltaTable) -> Result<String> {
         debug!(
             "Writing file {} (txn {}) to remote in {}MB chunks",
-            self.original_path,
+            self.path,
             self.pond_txn_id,
             self.chunk_size / (1024 * 1024)
         );
@@ -126,7 +134,8 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         // Maximum chunks buffered before creating RecordBatch
         // 10 chunks × 50MB = ~500MB per batch
         const CHUNKS_PER_BATCH: usize = 10;
-        let mut batch_chunks: Vec<(i64, i64, Vec<u8>)> = Vec::with_capacity(CHUNKS_PER_BATCH);
+        // TODO: Implement batched writing if needed for performance
+        // Currently writing all chunks at once due to WriteBuilder API
 
         // First pass: read file, compute checksums, store chunks temporarily
         let mut all_chunk_data = Vec::new();
@@ -151,7 +160,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
 
         debug!(
             "File {} has {} chunks, {} bytes, SHA256={}",
-            self.original_path,
+            self.path,
             chunk_count,
             total_size,
             &bundle_id[..16]
@@ -185,7 +194,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
 
         debug!(
             "Successfully wrote file {} ({} chunks) to remote",
-            self.original_path, chunk_count
+            self.path, chunk_count
         );
 
         Ok(bundle_id)
@@ -211,8 +220,10 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         let num_chunks = chunks.len();
 
         let mut bundle_ids = Vec::with_capacity(num_chunks);
+        let mut pond_ids = Vec::with_capacity(num_chunks);
         let mut pond_txn_ids = Vec::with_capacity(num_chunks);
-        let mut original_paths = Vec::with_capacity(num_chunks);
+        let mut paths = Vec::with_capacity(num_chunks);
+        let mut versions = Vec::with_capacity(num_chunks);
         let mut file_types = Vec::with_capacity(num_chunks);
         let mut chunk_ids = Vec::with_capacity(num_chunks);
         let mut chunk_crc32s = Vec::with_capacity(num_chunks);
@@ -225,8 +236,10 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
 
         for (chunk_id, crc, data) in chunks {
             bundle_ids.push(bundle_id.to_string());
+            pond_ids.push(self.pond_id.clone());
             pond_txn_ids.push(self.pond_txn_id);
-            original_paths.push(self.original_path.clone());
+            paths.push(self.path.clone());
+            versions.push(self.version);
             file_types.push(self.file_type.as_str());
             chunk_ids.push(*chunk_id);
             chunk_crc32s.push(*crc);
@@ -243,8 +256,10 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             schema,
             vec![
                 Arc::new(StringArray::from(bundle_ids)),
+                Arc::new(StringArray::from(pond_ids)),
                 Arc::new(Int64Array::from(pond_txn_ids)),
-                Arc::new(StringArray::from(original_paths)),
+                Arc::new(StringArray::from(paths)),
+                Arc::new(Int64Array::from(versions)),
                 Arc::new(StringArray::from(
                     file_types.into_iter().map(String::from).collect::<Vec<_>>(),
                 )),
@@ -294,8 +309,10 @@ mod tests {
 
         let bundle_id = table
             .write_file(
+                "pond-test-123",
                 123,
                 "test/file.dat",
+                0,
                 FileType::LargeFile,
                 reader,
                 vec!["test".to_string()],
@@ -308,7 +325,7 @@ mod tests {
         assert!(bundle_id.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Verify we can query the file
-        let files = table.list_files(123).await.unwrap();
+        let files = table.list_files("pond-test-123").await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].0, bundle_id);
         assert_eq!(files[0].1, "test/file.dat");
@@ -331,8 +348,10 @@ mod tests {
         let reader = Cursor::new(data.clone());
 
         let mut writer = ChunkedWriter::new(
+            "pond-test-456".to_string(),
             456,
             "test/large.dat".to_string(),
+            1,
             FileType::PondParquet,
             reader,
             vec!["backup".to_string()],
@@ -341,8 +360,10 @@ mod tests {
 
         let _bundle_id = table
             .write_file(
+                "pond-test-456",
                 456,
                 "test/large.dat",
+                1,
                 FileType::PondParquet,
                 Cursor::new(data.clone()),
                 vec!["backup".to_string()],
@@ -351,7 +372,7 @@ mod tests {
             .unwrap();
 
         // Verify file was written
-        let files = table.list_files(456).await.unwrap();
+        let files = table.list_files("pond-test-456").await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].3, data.len() as i64);
     }
@@ -370,8 +391,10 @@ mod tests {
 
         let bundle_id = table
             .write_file(
+                "pond-test-1",
                 1,
                 "test/empty.dat",
+                0,
                 FileType::LargeFile,
                 reader,
                 vec!["test".to_string()],

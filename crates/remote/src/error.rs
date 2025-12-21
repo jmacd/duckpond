@@ -62,4 +62,25 @@ pub enum RemoteError {
 
     #[error("Table operation error: {0}")]
     TableOperation(String),
+
+    #[error("Command parsing error: {0}")]
+    CommandParsing(String),
+
+    #[error("Delta table version {0} not found: {1}")]
+    VersionNotFound(i64, String),
+
+    #[error("Delta table error: {0}")]
+    DeltaTableError(String),
+}
+
+impl From<clap::Error> for RemoteError {
+    fn from(e: clap::Error) -> Self {
+        RemoteError::CommandParsing(e.to_string())
+    }
+}
+
+impl From<String> for RemoteError {
+    fn from(s: String) -> Self {
+        RemoteError::Configuration(s)
+    }
 }

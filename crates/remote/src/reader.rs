@@ -271,8 +271,10 @@ mod tests {
 
         let bundle_id = table
             .write_file(
+                "pond-test-123",
                 123,
                 "test/roundtrip.dat",
+                0,
                 FileType::LargeFile,
                 reader,
                 vec!["test".to_string()],
@@ -319,8 +321,10 @@ mod tests {
         let reader = Cursor::new(vec![]);
         let bundle_id = table
             .write_file(
-                1,
-                "test/empty.dat",
+                "pond-test-789",
+                789,
+                "test/exists.dat",
+                0,
                 FileType::LargeFile,
                 reader,
                 vec!["test".to_string()],
@@ -351,8 +355,10 @@ mod tests {
         let reader = Cursor::new(original_data.clone());
         let bundle_id = table
             .write_file(
+                "pond-test-456",
                 456,
-                "test/large.dat",
+                "test/chunks.dat",
+                0,
                 FileType::PondParquet,
                 reader,
                 vec!["backup".to_string()],
