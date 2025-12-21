@@ -4113,6 +4113,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
+name = "remote"
+version = "0.15.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "crc32fast",
+ "datafusion",
+ "deltalake",
+ "env_logger",
+ "futures",
+ "log",
+ "object_store",
+ "parquet",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "sha2",
+ "steward",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tlogfs",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.11.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
