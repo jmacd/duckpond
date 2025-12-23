@@ -312,11 +312,8 @@ mod tests {
 
         let bundle_id = table
             .write_file(
-                "pond-test-123",
                 123,
                 "test/file.dat",
-                0,
-                FileType::LargeFile,
                 reader,
                 vec!["test".to_string()],
             )
@@ -334,7 +331,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].0, bundle_id);
         assert_eq!(files[0].1, "test/file.dat");
-        assert_eq!(files[0].2, "large_file");
+        assert_eq!(files[0].2, 123);
         assert_eq!(files[0].3, data.len() as i64);
     }
 
@@ -353,11 +350,8 @@ mod tests {
 
         let _bundle_id = table
             .write_file(
-                "pond-test-456",
                 456,
                 "test/large.dat",
-                1,
-                FileType::PondParquet,
                 Cursor::new(data.clone()),
                 vec!["backup".to_string()],
             )
@@ -384,11 +378,8 @@ mod tests {
 
         let bundle_id = table
             .write_file(
-                "pond-test-1",
                 1,
                 "test/empty.dat",
-                0,
-                FileType::LargeFile,
                 reader,
                 vec!["test".to_string()],
             )

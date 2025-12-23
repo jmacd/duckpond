@@ -38,7 +38,11 @@ enum ControlCommand {
     /// Show incomplete operations (for recovery)
     Incomplete,
     /// Sync with remote: retry failed pushes OR pull new bundles
-    Sync,
+    Sync {
+        /// Optional: Base64-encoded remote config for recovery (use same as pond init --config)
+        #[arg(long)]
+        config: Option<String>,
+    },
     /// Show pond configuration (ID, factory modes, metadata, settings)
     ShowConfig,
     /// Set a configuration value
@@ -278,7 +282,7 @@ async fn main() -> Result<()> {
                     commands::control::ControlMode::Detail { txn_seq }
                 }
                 ControlCommand::Incomplete => commands::control::ControlMode::Incomplete,
-                ControlCommand::Sync => commands::control::ControlMode::Sync,
+                ControlCommand::Sync { config } => commands::control::ControlMode::Sync { config: config.clone() },
                 ControlCommand::ShowConfig => commands::control::ControlMode::ShowConfig,
                 ControlCommand::SetConfig { key, value } => {
                     commands::control::ControlMode::SetConfig { key, value }

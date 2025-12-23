@@ -65,7 +65,15 @@ pub async fn init_command(
 async fn init_normal(ship_context: &ShipContext) -> Result<()> {
     // Pond doesn't exist, so create a new one
     // This creates both the filesystem infrastructure AND the initial /txn/1 transaction
-    let _ship = ship_context.create_pond().await?;
+    let mut ship = ship_context.create_pond().await?;
+
+    // Set default factory mode to "push" for new ponds
+    // This will be inherited by remote factories unless explicitly changed
+    info!("Setting default factory mode to 'push' for new pond");
+    ship.control_table_mut()
+        .set_factory_mode("remote", "push")
+        .await
+        .map_err(|e| anyhow!("Failed to set default factory mode: {}", e))?;
 
     log::debug!("Pond initialized successfully with transaction #1");
     Ok(())
