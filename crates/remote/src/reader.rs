@@ -40,6 +40,8 @@ use tokio::io::AsyncWriteExt;
 pub struct ChunkedReader<'a> {
     table: &'a DeltaTable,
     bundle_id: String,
+    path: String,
+    pond_txn_id: i64,
 }
 
 impl<'a> ChunkedReader<'a> {
@@ -47,12 +49,16 @@ impl<'a> ChunkedReader<'a> {
     ///
     /// # Arguments
     /// * `table` - Delta Lake table containing the chunks
-    /// * `bundle_id` - SHA256 hash identifying the file
+    /// * `bundle_id` - Partition identifier (e.g., FILE-META-{date}-{txn} or POND-FILE-{sha256})
+    /// * `path` - Original file path to uniquely identify file within partition
+    /// * `pond_txn_id` - Transaction sequence number
     #[must_use]
-    pub fn new(table: &'a DeltaTable, bundle_id: impl Into<String>) -> Self {
+    pub fn new(table: &'a DeltaTable, bundle_id: impl Into<String>, path: impl Into<String>, pond_txn_id: i64) -> Self {
         Self {
             table,
             bundle_id: bundle_id.into(),
+            path: path.into(),
+            pond_txn_id,
         }
     }
 
@@ -87,11 +93,13 @@ impl<'a> ChunkedReader<'a> {
             .sql(&format!(
                 "SELECT chunk_id, chunk_crc32, chunk_data, total_size, total_sha256, chunk_count 
                  FROM remote_files 
-                 WHERE bundle_id = '{}' 
+                 WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {} 
                  ORDER BY chunk_id",
-                self.bundle_id
+                self.bundle_id, self.path, self.pond_txn_id
             ))
             .await?;
+
+        log::info!("Reading chunks for bundle_id: {}, path: {}, txn: {}", self.bundle_id, self.path, self.pond_txn_id);
 
         let mut stream = df.execute_stream().await?;
 
@@ -211,6 +219,9 @@ impl<'a> ChunkedReader<'a> {
             let expected_crc = chunk_crc32s.value(i) as u32; // Cast back to u32
             let chunk_data = chunk_datas.value(i);
 
+            log::info!("Processing chunk_id={}, expected={}, batch row {}/{}", 
+                       chunk_id, *expected_chunk_id, i+1, batch.num_rows());
+
             // Verify chunk sequence
             if chunk_id != *expected_chunk_id {
                 return Err(RemoteError::InvalidChunkSequence {
@@ -253,7 +264,7 @@ impl<'a> ChunkedReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FileType, RemoteTable};
+    use crate::RemoteTable;
     use std::io::Cursor;
     use tempfile::TempDir;
 
@@ -271,11 +282,8 @@ mod tests {
 
         let bundle_id = table
             .write_file(
-                "pond-test-123",
                 123,
                 "test/roundtrip.dat",
-                0,
-                FileType::LargeFile,
                 reader,
                 vec!["test".to_string()],
             )
@@ -284,7 +292,7 @@ mod tests {
 
         // Read it back
         let mut output = Vec::new();
-        table.read_file(&bundle_id, &mut output).await.unwrap();
+        table.read_file(&bundle_id, "test/roundtrip.dat", 123, &mut output).await.unwrap();
 
         // Verify data matches
         assert_eq!(output, original_data);
@@ -300,7 +308,7 @@ mod tests {
 
         // Try to read a file that doesn't exist
         let mut output = Vec::new();
-        let result = table.read_file("nonexistent_bundle_id", &mut output).await;
+        let result = table.read_file("nonexistent_bundle_id", "nonexistent.dat", 0, &mut output).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -321,11 +329,8 @@ mod tests {
         let reader = Cursor::new(vec![]);
         let bundle_id = table
             .write_file(
-                "pond-test-789",
                 789,
-                "test/exists.dat",
-                0,
-                FileType::LargeFile,
+                "test/empty.dat",
                 reader,
                 vec!["test".to_string()],
             )
@@ -334,7 +339,7 @@ mod tests {
 
         // Read it back
         let mut output = Vec::new();
-        table.read_file(&bundle_id, &mut output).await.unwrap();
+        table.read_file(&bundle_id, "test/empty.dat", 789, &mut output).await.unwrap();
 
         assert_eq!(output.len(), 0);
     }
@@ -355,11 +360,8 @@ mod tests {
         let reader = Cursor::new(original_data.clone());
         let bundle_id = table
             .write_file(
-                "pond-test-456",
                 456,
                 "test/chunks.dat",
-                0,
-                FileType::PondParquet,
                 reader,
                 vec!["backup".to_string()],
             )
@@ -368,7 +370,7 @@ mod tests {
 
         // Read it back
         let mut output = Vec::new();
-        table.read_file(&bundle_id, &mut output).await.unwrap();
+        table.read_file(&bundle_id, "test/chunks.dat", 456, &mut output).await.unwrap();
 
         // Verify data matches exactly
         assert_eq!(output, original_data);

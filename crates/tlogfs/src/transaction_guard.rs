@@ -5,7 +5,7 @@
 use super::error::TLogFSError;
 use super::persistence::{OpLogPersistence, State};
 use super::txn_metadata::PondTxnMetadata;
-use log::info;
+use log::debug;
 use std::ops::Deref;
 use tinyfs::FS;
 use tinyfs::Result as TinyFSResult;
@@ -108,10 +108,11 @@ impl<'a> TransactionGuard<'a> {
     /// This is the clean production API that Steward uses.
     ///
     /// The embedded tinyfs::TransactionGuard will be dropped after commit, clearing the transaction state.
-    pub async fn commit(mut self) -> TinyFSResult<Option<()>> {
+    pub async fn commit(self) -> TinyFSResult<Option<()>> {
         if !self.is_write {
-            // Read transactions don't commit - just return success
-            // tinyfs guard drop will clear the transaction state
+            // Read transactions don't commit data - just clean up state
+            self.persistence.state = None;
+            self.persistence.fs = None;
             return Ok(None);
         }
 
@@ -185,7 +186,7 @@ impl<'a> Drop for TransactionGuard<'a> {
     /// The embedded tinyfs::TransactionGuard will handle clearing the TransactionState.
     fn drop(&mut self) {
         if self.persistence.state.is_some() {
-            info!(
+            debug!(
                 "Transaction {} dropped without explicit commit - cleaning up state",
                 self.metadata.txn_seq
             );

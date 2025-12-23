@@ -108,12 +108,9 @@ impl ChunkedFileRecord {
         Arc::new(Schema::new(vec![
             // PARTITION COLUMN - must be first for Delta Lake
             Field::new("bundle_id", DataType::Utf8, false),
-            // File identity and context
-            Field::new("pond_id", DataType::Utf8, false),
+            // File identity
             Field::new("pond_txn_id", DataType::Int64, false),
             Field::new("path", DataType::Utf8, false),
-            Field::new("version", DataType::Int64, false),
-            Field::new("file_type", DataType::Utf8, false),
             // Chunk information
             Field::new("chunk_id", DataType::Int64, false),
             Field::new("chunk_crc32", DataType::Int32, false),
@@ -166,11 +163,12 @@ impl ChunkedFileRecord {
         format!("POND-META-{}", pond_id)
     }
 
-    /// Generate a transaction bundle_id
+    /// Generate bundle_id for a transaction file (parquet or Delta log)
     /// Format: "FILE-META-{YYYY-MM-DD}-{txn_seq}"
     /// 
-    /// All files (parquet + Delta logs) for a transaction share this bundle_id.
-    /// Date prefix enables chronological sorting while txn_seq ensures uniqueness.
+    /// All files in a transaction share this bundle_id for partitioning.
+    /// Individual files are distinguished by the path column.
+    /// Date and txn_seq enable chronological grouping and transaction identification.
     #[must_use]
     pub fn transaction_bundle_id(txn_seq: i64) -> String {
         let now = chrono::Utc::now();

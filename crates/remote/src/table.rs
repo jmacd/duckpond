@@ -217,20 +217,14 @@ impl RemoteTable {
     pub async fn write_file_with_bundle_id<R: AsyncRead + Unpin>(
         &mut self,
         bundle_id: &str,
-        pond_id: impl Into<String>,
         pond_txn_id: i64,
         path: impl Into<String>,
-        version: i64,
-        file_type: crate::FileType,
         reader: R,
         cli_args: Vec<String>,
     ) -> Result<()> {
         let writer = ChunkedWriter::new(
-            pond_id.into(),
             pond_txn_id,
             path.into(),
-            version,
-            file_type,
             reader,
             cli_args,
         )
@@ -257,8 +251,7 @@ impl RemoteTable {
     ///
     /// # Arguments
     /// * `pond_txn_id` - Transaction sequence number from pond
-    /// * `original_path` - Original path in pond
-    /// * `file_type` - Type of file being backed up
+    /// * `path` - Original path in pond
     /// * `reader` - Async reader providing file content
     /// * `cli_args` - CLI arguments that triggered this backup
     ///
@@ -272,20 +265,14 @@ impl RemoteTable {
     /// - Cannot write to Delta Lake
     pub async fn write_file<R: AsyncRead + Unpin>(
         &mut self,
-        pond_id: impl Into<String>,
         pond_txn_id: i64,
         path: impl Into<String>,
-        version: i64,
-        file_type: crate::FileType,
         reader: R,
         cli_args: Vec<String>,
     ) -> Result<String> {
         let writer = ChunkedWriter::new(
-            pond_id.into(),
             pond_txn_id,
             path.into(),
-            version,
-            file_type,
             reader,
             cli_args,
         );
@@ -311,7 +298,9 @@ impl RemoteTable {
     /// to the output writer.
     ///
     /// # Arguments
-    /// * `bundle_id` - SHA256 hash identifying the file
+    /// * `bundle_id` - Partition identifier (FILE-META-{date}-{txn} or POND-FILE-{sha256})
+    /// * `path` - Original file path to uniquely identify file within partition
+    /// * `pond_txn_id` - Transaction sequence number
     /// * `writer` - Async writer to receive the file content
     ///
     /// # Errors
@@ -321,8 +310,8 @@ impl RemoteTable {
     /// - SHA256 hash mismatch
     /// - Cannot read from Delta Lake
     /// - Cannot write to output
-    pub async fn read_file<W: AsyncWrite + Unpin>(&self, bundle_id: &str, writer: W) -> Result<()> {
-        let reader = ChunkedReader::new(&self.table, bundle_id);
+    pub async fn read_file<W: AsyncWrite + Unpin>(&self, bundle_id: &str, path: &str, pond_txn_id: i64, writer: W) -> Result<()> {
+        let reader = ChunkedReader::new(&self.table, bundle_id, path, pond_txn_id);
         reader.read_to_writer(writer).await
     }
 
@@ -350,11 +339,8 @@ impl RemoteTable {
         let bundle_id = ChunkedFileRecord::metadata_bundle_id(&metadata.pond_id);
 
         let writer = ChunkedWriter::new(
-            metadata.pond_id.clone(),
             pond_txn_id,
             "METADATA".to_string(),
-            0, // metadata has no version
-            crate::FileType::Metadata,
             metadata_reader,
             metadata.cli_args.clone(),
         )
@@ -486,22 +472,14 @@ impl RemoteTable {
     ///
     /// # Errors
     /// Returns error if query fails
-    pub async fn list_files(&self, pond_id: &str) -> Result<Vec<(String, String, String, i64)>> {
-        let where_clause = if pond_id.is_empty() {
-            "WHERE file_type != 'metadata'".to_string()
-        } else {
-            format!("WHERE pond_id = '{}' AND file_type != 'metadata'", pond_id)
-        };
-
+    pub async fn list_files(&self, _pond_id: &str) -> Result<Vec<(String, String, i64, i64)>> {
         let df = self
             .session_context
-            .sql(&format!(
-                "SELECT DISTINCT bundle_id, path, file_type, total_size 
+            .sql(
+                "SELECT DISTINCT bundle_id, path, pond_txn_id, total_size 
                  FROM remote_files 
-                 {}
-                 ORDER BY path",
-                where_clause
-            ))
+                 ORDER BY path"
+            )
             .await?;
 
         let batches = df.collect().await?;
@@ -524,16 +502,15 @@ impl RemoteTable {
                 .as_any()
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| {
-                    RemoteError::TableOperation("Invalid column type for original_path".to_string())
+                    RemoteError::TableOperation("Invalid column type for path".to_string())
                 })?;
 
-            let type_col = batch.column(2);
-            let types = arrow_cast::cast(type_col, &arrow_schema::DataType::Utf8)?;
-            let types = types
+            let txn_ids = batch
+                .column(2)
                 .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
+                .downcast_ref::<arrow_array::Int64Array>()
                 .ok_or_else(|| {
-                    RemoteError::TableOperation("Invalid column type for file_type".to_string())
+                    RemoteError::TableOperation("Invalid column type for pond_txn_id".to_string())
                 })?;
 
             let sizes = batch
@@ -548,7 +525,7 @@ impl RemoteTable {
                 files.push((
                     bundle_ids.value(i).to_string(),
                     paths.value(i).to_string(),
-                    types.value(i).to_string(),
+                    txn_ids.value(i),
                     sizes.value(i),
                 ));
             }
@@ -655,37 +632,28 @@ impl RemoteTable {
     /// # Errors
     /// Returns error if cannot list object store
     pub async fn list_transaction_numbers(&self, _pond_id: Option<&str>) -> Result<Vec<i64>> {
-        use object_store::path::Path;
+        // Query Delta table's file list directly from metadata
+        // This is more reliable than object_store.list() which may not reflect latest commits
+        let snapshot = self.table.snapshot()
+            .map_err(|e| RemoteError::TableOperation(format!("Failed to get Delta snapshot: {}", e)))?;
         
-        let store = self.table.object_store();
+        log::info!("Querying Delta files (table version: {:?})", self.table.version());
         
-        // List all partition directories with FILE-META prefix
-        // Using list() to get all paths with the prefix
-        let prefix = Path::from("bundle_id=FILE-META-");
-        log::debug!("Listing with prefix: {:?}", prefix);
-        let mut list_stream = store.list(Some(&prefix));
-        
-        use futures::StreamExt;
         let mut paths = Vec::new();
-        while let Some(result) = list_stream.next().await {
-            match result {
-                Ok(meta) => {
-                    log::debug!("Found path: {}", meta.location);
-                    paths.push(meta.location);
-                }
-                Err(e) => {
-                    log::warn!("Error listing path: {}", e);
-                    return Err(RemoteError::TableOperation(format!("Failed to list partitions: {}", e)));
-                }
+        for file in snapshot.file_paths_iter() {
+            let path_str = file.as_ref();
+            // Only include paths with FILE-META partition
+            if path_str.starts_with("bundle_id=FILE-META-") {
+                log::info!("Found Delta file: {}", path_str);
+                paths.push(path_str.to_string());
             }
         }
         
-        log::debug!("Listed {} paths total", paths.len());
+        log::info!("Found {} FILE-META files in Delta", paths.len());
         
         // Extract unique partition directories from file paths
         let mut partition_dirs = std::collections::HashSet::new();
-        for path in paths {
-            let path_str = path.as_ref();
+        for path_str in &paths {
             // Paths look like "bundle_id=FILE-META-2025-12-22-3/file.parquet"
             // Extract the partition directory part
             if let Some(dir_end) = path_str.find('/') {
@@ -781,13 +749,13 @@ impl RemoteTable {
     pub async fn list_transaction_files(
         &self,
         txn_seq: i64,
-    ) -> Result<Vec<(String, String, i64, crate::FileType)>> {
+    ) -> Result<Vec<(String, String, String, i64, i64)>> {
         let bundle_id = crate::schema::ChunkedFileRecord::transaction_bundle_id(txn_seq);
 
         let df = self
             .session_context
             .sql(&format!(
-                "SELECT DISTINCT path, total_sha256, total_size, file_type \
+                "SELECT DISTINCT bundle_id, path, total_sha256, total_size, pond_txn_id \
                  FROM remote_files \
                  WHERE bundle_id = '{}' \
                  ORDER BY path",
@@ -799,7 +767,16 @@ impl RemoteTable {
 
         let mut files = Vec::new();
         for batch in batches {
-            let path_col = batch.column(0);
+            let bundle_id_col = batch.column(0);
+            let bundle_ids = arrow_cast::cast(bundle_id_col, &arrow_schema::DataType::Utf8)?;
+            let bundle_ids = bundle_ids
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| {
+                    RemoteError::TableOperation("Invalid column type for bundle_id".to_string())
+                })?;
+
+            let path_col = batch.column(1);
             let paths = arrow_cast::cast(path_col, &arrow_schema::DataType::Utf8)?;
             let paths = paths
                 .as_any()
@@ -808,7 +785,7 @@ impl RemoteTable {
                     RemoteError::TableOperation("Invalid column type for path".to_string())
                 })?;
 
-            let sha_col = batch.column(1);
+            let sha_col = batch.column(2);
             let shas = arrow_cast::cast(sha_col, &arrow_schema::DataType::Utf8)?;
             let shas = shas
                 .as_any()
@@ -818,29 +795,28 @@ impl RemoteTable {
                 })?;
 
             let sizes = batch
-                .column(2)
+                .column(3)
                 .as_any()
                 .downcast_ref::<arrow_array::Int64Array>()
                 .ok_or_else(|| {
                     RemoteError::TableOperation("Invalid column type for total_size".to_string())
                 })?;
 
-            let type_col = batch.column(3);
-            let types = arrow_cast::cast(type_col, &arrow_schema::DataType::Utf8)?;
-            let types = types
+            let txn_ids = batch
+                .column(4)
                 .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
+                .downcast_ref::<arrow_array::Int64Array>()
                 .ok_or_else(|| {
-                    RemoteError::TableOperation("Invalid column type for file_type".to_string())
+                    RemoteError::TableOperation("Invalid column type for pond_txn_id".to_string())
                 })?;
 
             for i in 0..batch.num_rows() {
-                let file_type = crate::FileType::from_str(types.value(i))?;
                 files.push((
+                    bundle_ids.value(i).to_string(),
                     paths.value(i).to_string(),
                     shas.value(i).to_string(),
                     sizes.value(i),
-                    file_type,
+                    txn_ids.value(i),
                 ));
             }
         }

@@ -8,7 +8,7 @@
 //! and writes to Delta Lake in a single transaction.
 
 use crate::Result;
-use crate::schema::{CHUNK_SIZE_DEFAULT, ChunkedFileRecord, FileType};
+use crate::schema::{CHUNK_SIZE_DEFAULT, ChunkedFileRecord};
 use arrow_array::{
     BinaryArray, Int32Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
 };
@@ -50,11 +50,8 @@ use tokio::io::AsyncReadExt;
 /// # }
 /// ```
 pub struct ChunkedWriter<R> {
-    pond_id: String,
     pond_txn_id: i64,
     path: String,
-    version: i64,
-    file_type: FileType,
     reader: R,
     cli_args: Vec<String>,
     chunk_size: usize,
@@ -70,25 +67,18 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     /// * `pond_txn_id` - Transaction sequence number from pond
     /// * `path` - File path in Delta table
     /// * `version` - Delta table version number
-    /// * `file_type` - Type of file
     /// * `reader` - Async reader providing file content
     /// * `cli_args` - CLI arguments that triggered this backup
     #[must_use]
     pub fn new(
-        pond_id: String,
         pond_txn_id: i64,
         path: String,
-        version: i64,
-        file_type: FileType,
         reader: R,
         cli_args: Vec<String>,
     ) -> Self {
         Self {
-            pond_id,
             pond_txn_id,
             path,
-            version,
-            file_type,
             reader,
             cli_args,
             chunk_size: CHUNK_SIZE_DEFAULT,
@@ -173,17 +163,11 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         let sha256_hash = format!("{:x}", file_hasher.finalize());
         
         let bundle_id = if let Some(ref override_id) = self.bundle_id_override {
-            // Use provided bundle_id (for metadata and pond data files)
+            // Use provided bundle_id (for transaction files)
             override_id.clone()
         } else {
-            // Only large files use SHA256-based bundle_id for deduplication
-            match self.file_type {
-                FileType::LargeFile => ChunkedFileRecord::large_file_bundle_id(&sha256_hash),
-                FileType::PondParquet | FileType::Metadata => {
-                    // Should use override, but fallback to prevent panic
-                    ChunkedFileRecord::metadata_bundle_id(&self.pond_id)
-                }
-            }
+            // Use SHA256-based bundle_id for content-addressed large files
+            ChunkedFileRecord::large_file_bundle_id(&sha256_hash)
         };
         let chunk_count = chunk_id;
 
@@ -250,11 +234,8 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         let num_chunks = chunks.len();
 
         let mut bundle_ids = Vec::with_capacity(num_chunks);
-        let mut pond_ids = Vec::with_capacity(num_chunks);
         let mut pond_txn_ids = Vec::with_capacity(num_chunks);
         let mut paths = Vec::with_capacity(num_chunks);
-        let mut versions = Vec::with_capacity(num_chunks);
-        let mut file_types = Vec::with_capacity(num_chunks);
         let mut chunk_ids = Vec::with_capacity(num_chunks);
         let mut chunk_crc32s = Vec::with_capacity(num_chunks);
         let mut chunk_datas = Vec::with_capacity(num_chunks);
@@ -266,11 +247,8 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
 
         for (chunk_id, crc, data) in chunks {
             bundle_ids.push(bundle_id.to_string());
-            pond_ids.push(self.pond_id.clone());
             pond_txn_ids.push(self.pond_txn_id);
             paths.push(self.path.clone());
-            versions.push(self.version);
-            file_types.push(self.file_type.as_str());
             chunk_ids.push(*chunk_id);
             chunk_crc32s.push(*crc);
             chunk_datas.push(data.clone());
@@ -286,13 +264,8 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             schema,
             vec![
                 Arc::new(StringArray::from(bundle_ids)),
-                Arc::new(StringArray::from(pond_ids)),
                 Arc::new(Int64Array::from(pond_txn_ids)),
                 Arc::new(StringArray::from(paths)),
-                Arc::new(Int64Array::from(versions)),
-                Arc::new(StringArray::from(
-                    file_types.into_iter().map(String::from).collect::<Vec<_>>(),
-                )),
                 Arc::new(Int64Array::from(chunk_ids)),
                 Arc::new(Int32Array::from(
                     chunk_crc32s

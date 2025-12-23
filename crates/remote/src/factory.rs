@@ -8,7 +8,7 @@
 //! approach. Each file is split into chunks and stored in a Delta Lake table with
 //! content-based deduplication (bundle_id = SHA256 hash).
 
-use crate::{FileType, RemoteError, RemoteTable};
+use crate::{RemoteError, RemoteTable};
 use base64::Engine;
 use bytes::Bytes;
 use clap::Parser;
@@ -249,11 +249,8 @@ async fn execute_push(
             remote_table
                 .write_file_with_bundle_id(
                     &transaction_bundle_id,
-                    &pond_id,
                     version,
                     path,
-                    version,
-                    FileType::PondParquet,
                     reader,
                     vec!["push".to_string()],
                 )
@@ -274,11 +271,8 @@ async fn execute_push(
                 remote_table
                     .write_file_with_bundle_id(
                         &transaction_bundle_id,
-                        &pond_id,
                         version,
                         &commit_log_path,
-                        version,
-                        FileType::Metadata,
                         reader,
                         vec!["push".to_string()],
                     )
@@ -322,11 +316,8 @@ async fn execute_push(
             let reader = std::io::Cursor::new(file_data);
             remote_table
                 .write_file(
-                    &pond_id,
                     current_version,
                     file_name,
-                    current_version,
-                    FileType::LargeFile,
                     reader,
                     vec!["push".to_string()],
                 )
@@ -372,7 +363,7 @@ async fn execute_pull(
     let local_store = local_table.object_store();
 
     // Download each remote file that doesn't exist locally
-    for (bundle_id, original_path, _file_type, _size) in remote_files {
+    for (bundle_id, original_path, pond_txn_id, _size) in remote_files {
         let file_path = object_store::path::Path::from(original_path.as_str());
 
         // Check if file exists locally
@@ -385,7 +376,7 @@ async fn execute_pull(
 
         // Download using ChunkedReader
         let mut output = Vec::new();
-        remote_table.read_file(&bundle_id, &mut output).await?;
+        remote_table.read_file(&bundle_id, &original_path, pond_txn_id, &mut output).await?;
 
         // Write to local Delta table's object store
         let byte_len = output.len();
@@ -447,11 +438,11 @@ async fn execute_list_files(
     }
 
     log::info!("   Found {} files:", files.len());
-    for (bundle_id, original_path, file_type, size) in files {
+    for (bundle_id, original_path, pond_txn_id, size) in files {
         log::info!(
-            "   - {} | {} | {} | {} bytes",
-            &bundle_id[..16],
-            file_type.as_str(),
+            "   - {} | txn {} | {} | {} bytes",
+            &bundle_id[..16.min(bundle_id.len())],
+            pond_txn_id,
             original_path,
             size
         );
@@ -468,13 +459,24 @@ async fn execute_verify(
     log::info!("✓ VERIFY: Checking backup integrity");
 
     if let Some(id) = bundle_id {
-        // Verify specific bundle
-        log::info!("   Verifying bundle: {}", &id[..16]);
+        // Verify specific bundle - need to find files with this bundle_id
+        log::info!("   Verifying bundle: {}", &id[..16.min(id.len())]);
 
-        let mut output = Vec::new();
-        remote_table.read_file(&id, &mut output).await?;
+        // Query to find all files with this bundle_id
+        let files = remote_table.list_files("").await?;
+        let matching_files: Vec<_> = files.into_iter()
+            .filter(|(bid, _, _, _)| bid == &id)
+            .collect();
 
-        log::info!("   ✓ Bundle OK ({} bytes)", output.len());
+        if matching_files.is_empty() {
+            return Err(RemoteError::FileNotFound(id));
+        }
+
+        for (bundle_id, file_path, pond_txn_id, _) in matching_files {
+            let mut output = Vec::new();
+            remote_table.read_file(&bundle_id, &file_path, pond_txn_id, &mut output).await?;
+            log::info!("   ✓ {} OK ({} bytes)", file_path, output.len());
+        }
     } else {
         // Verify all bundles
         log::info!("   Verifying all bundles...");
@@ -484,9 +486,9 @@ async fn execute_verify(
         log::info!("   Found {} files to verify", total_files);
 
         let mut verified = 0;
-        for (bundle_id, _path, _type, _size) in files {
+        for (bundle_id, file_path, pond_txn_id, _size) in files {
             let mut output = Vec::new();
-            match remote_table.read_file(&bundle_id, &mut output).await {
+            match remote_table.read_file(&bundle_id, &file_path, pond_txn_id, &mut output).await {
                 Ok(_) => {
                     verified += 1;
                 }
@@ -658,26 +660,14 @@ pub async fn apply_parquet_files_from_remote(
     // Phase 2: Download and write parquet files + Delta logs
     let mut large_file_refs = std::collections::HashSet::new();
     
-    for (path, sha256, size, file_type) in &files {
-        log::debug!("Restoring file: {} ({} bytes, type: {:?})", path, size, file_type);
-
-        // Build bundle_id based on file type
-        let bundle_id = match file_type {
-            crate::FileType::LargeFile => {
-                // Large file - use POND-FILE-{sha256}
-                crate::schema::ChunkedFileRecord::large_file_bundle_id(sha256)
-            }
-            _ => {
-                // Transaction file - use FILE-META-{txn_seq}
-                crate::schema::ChunkedFileRecord::transaction_bundle_id(txn_seq)
-            }
-        };
+    for (bundle_id, path, sha256, size, pond_txn_id) in &files {
+        log::debug!("Restoring file: {} ({} bytes)", path, size);
 
         // Create a buffer to hold the reconstructed file
         let mut buffer = Vec::new();
 
         // Read file from remote using ChunkedReader
-        remote_table.read_file(&bundle_id, &mut buffer).await?;
+        remote_table.read_file(bundle_id, path, *pond_txn_id, &mut buffer).await?;
 
         // Write to local Delta table's object store
         let object_store_path = object_store::path::Path::from(path.as_str());
@@ -690,14 +680,8 @@ pub async fn apply_parquet_files_from_remote(
 
         log::debug!("  ✓ Restored {}", path);
 
-        // Phase 3: Parse parquet files to find large file references
-        if matches!(file_type, crate::FileType::PondParquet) {
-            // TODO: Parse parquet file to extract large file SHA256s
-            // For now, we rely on LargeFile type entries in the transaction
-        }
-
-        // Track large file references
-        if matches!(file_type, crate::FileType::LargeFile) {
+        // Track large file references (if path indicates it's a large file)
+        if path.starts_with("_large_files/sha256=") {
             large_file_refs.insert(sha256.clone());
         }
     }
@@ -712,8 +696,30 @@ pub async fn apply_parquet_files_from_remote(
             
             log::debug!("Downloading large file: {}", large_file_path);
             
+            // Query to get pond_txn_id for this large file
+            // Large files use bundle_id=POND-FILE-{sha256}, so we need to query the table
+            let df = remote_table.session_context()
+                .sql(&format!(
+                    "SELECT DISTINCT pond_txn_id FROM remote_files \
+                     WHERE bundle_id = '{}' AND path = '{}' LIMIT 1",
+                    bundle_id, large_file_path
+                ))
+                .await?;
+            
+            let batches = df.collect().await?;
+            let pond_txn_id = if !batches.is_empty() && batches[0].num_rows() > 0 {
+                let txn_ids = batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .ok_or_else(|| RemoteError::TableOperation("Invalid column type".to_string()))?;
+                txn_ids.value(0)
+            } else {
+                0 // Default if not found (shouldn't happen)
+            };
+            
             let mut buffer = Vec::new();
-            remote_table.read_file(&bundle_id, &mut buffer).await?;
+            remote_table.read_file(&bundle_id, &large_file_path, pond_txn_id, &mut buffer).await?;
             
             // Write to _large_files directory
             let object_store_path = object_store::path::Path::from(large_file_path.as_str());
