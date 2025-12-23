@@ -108,7 +108,7 @@ impl<'a> TransactionGuard<'a> {
     /// This is the clean production API that Steward uses.
     ///
     /// The embedded tinyfs::TransactionGuard will be dropped after commit, clearing the transaction state.
-    pub async fn commit(self) -> TinyFSResult<Option<()>> {
+    pub async fn commit(mut self) -> TinyFSResult<Option<()>> {
         if !self.is_write {
             // Read transactions don't commit - just return success
             // tinyfs guard drop will clear the transaction state
@@ -116,6 +116,11 @@ impl<'a> TransactionGuard<'a> {
         }
 
         let result = self.persistence.commit(self.metadata.clone()).await;
+        
+        // Clear state so Drop handler knows we committed
+        self.persistence.state = None;
+        self.persistence.fs = None;
+        
         // tinyfs guard drop happens here, clearing the transaction state
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))

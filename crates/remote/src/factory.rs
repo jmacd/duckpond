@@ -224,14 +224,15 @@ async fn execute_push(
 
         let local_store = versioned_table.object_store();
         
-        // Get files that existed at this version
-        let version_files = get_current_delta_files(&versioned_table).await?;
-        log::info!("      Found {} files in version {}", version_files.len(), version);
+        // Get NEW files added in this specific transaction (incremental delta only)
+        // Each Delta transaction has a commit log with 'add' actions for new parquet files
+        let new_files = get_delta_commit_files(&versioned_table, version).await?;
+        log::info!("      Transaction {} added {} new files", version, new_files.len());
 
         // Back up parquet files with transaction bundle_id
         let transaction_bundle_id = crate::schema::ChunkedFileRecord::transaction_bundle_id(version);
         
-        for (path, size) in &version_files {
+        for (path, size) in &new_files {
             log::debug!("      Backing up: {} ({} bytes)", path, size);
 
             let file_path = object_store::path::Path::from(path.as_str());
@@ -288,7 +289,7 @@ async fn execute_push(
             }
         }
 
-        log::info!("      ✓ Transaction {} backed up ({} files)", version, version_files.len());
+        log::info!("      ✓ Transaction {} backed up ({} files)", version, new_files.len());
     }
 
     // Back up large files (these are cumulative, not per-transaction)
@@ -835,30 +836,56 @@ async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteE
 }
 
 /// Get current parquet files from Delta table
-async fn get_current_delta_files(
+/// Get NEW files added in a specific Delta transaction
+///
+/// Reads _delta_log/{version:020}.json and extracts 'add' actions.
+/// Returns only the NEW parquet files added in this transaction, not the cumulative state.
+/// This is the incremental delta - exactly what needs to be backed up for this transaction.
+async fn get_delta_commit_files(
     table: &deltalake::DeltaTable,
+    version: i64,
 ) -> Result<Vec<(String, i64)>, RemoteError> {
-    use futures::stream::StreamExt;
-
-    let snapshot = table
-        .snapshot()
-        .map_err(|e| RemoteError::TableOperation(format!("Failed to get snapshot: {}", e)))?;
-
+    use object_store::path::Path;
+    
     let log_store = table.log_store();
-    let mut file_stream = snapshot.file_actions_iter(log_store.as_ref());
-
+    let commit_log_path = Path::from(format!("_delta_log/{:020}.json", version));
+    
+    // Read the commit log file
+    let log_data = log_store
+        .object_store(None)
+        .get(&commit_log_path)
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to read commit log for version {}: {}", version, e)))?;
+    
+    let log_bytes = log_data.bytes().await.map_err(|e| {
+        RemoteError::TableOperation(format!("Failed to read commit log bytes: {}", e))
+    })?;
+    
+    let log_content = String::from_utf8(log_bytes.to_vec()).map_err(|e| {
+        RemoteError::TableOperation(format!("Invalid UTF-8 in commit log: {}", e))
+    })?;
+    
+    // Parse each line as a JSON action
     let mut files = Vec::new();
-    while let Some(result) = file_stream.next().await {
-        match result {
-            Ok(add_action) => {
-                files.push((add_action.path.clone(), add_action.size));
-            }
-            Err(e) => {
-                log::warn!("Failed to read file action: {}", e);
+    for line in log_content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        
+        let action: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to parse commit log line: {}", e))
+        })?;
+        
+        // Look for 'add' actions
+        if let Some(add) = action.get("add") {
+            if let (Some(path), Some(size)) = (add.get("path"), add.get("size")) {
+                if let (Some(path_str), Some(size_i64)) = (path.as_str(), size.as_i64()) {
+                    files.push((path_str.to_string(), size_i64));
+                }
             }
         }
     }
-
+    
     Ok(files)
 }
 
