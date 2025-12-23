@@ -16,6 +16,7 @@ use provider::FactoryContext;
 use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 
 /// Remote factory subcommands
 #[derive(Debug, Parser)]
@@ -182,66 +183,156 @@ async fn execute_push(
         .ok_or_else(|| RemoteError::TableOperation("Push requires pond metadata".to_string()))?;
 
     let pond_id = pond_metadata.pond_id.to_string();
-    let txn_seq = context.txn_seq;
-    log::info!("   Pond ID: {}, txn_seq: {}", pond_id, txn_seq);
+    log::info!("   Pond ID: {}", pond_id);
 
-    // Query remote table to find what's already backed up for this pond
+    // Find which transactions are already backed up
+    let backed_up_txns = remote_table.list_transaction_numbers(None).await?;
+    log::info!("   Remote has transactions: {:?}", backed_up_txns);
+
+    // Determine which transactions need to be backed up
+    // Assumption: txn_seq matches Delta version (1:1 mapping)
+    let backed_up_set: std::collections::HashSet<_> = backed_up_txns.into_iter().collect();
+    let mut missing_versions = Vec::new();
+    
+    for version in 1..=current_version {
+        if !backed_up_set.contains(&version) {
+            missing_versions.push(version);
+        }
+    }
+
+    if missing_versions.is_empty() {
+        log::info!("   ✓ All transactions already backed up");
+        return Ok(());
+    }
+
+    log::info!("   Need to back up {} transactions: {:?}", missing_versions.len(), missing_versions);
+
+    // Get pond path for large files
+    let pond_path = state.store_path().await;
+
+    // Back up each missing transaction
+    for version in missing_versions {
+        log::info!("   📦 Backing up transaction {} (version {})...", version, version);
+        
+        // Load Delta table at this specific version
+        let store_path = pond_path.to_string_lossy().to_string();
+        let mut versioned_table = deltalake::open_table(&store_path).await
+            .map_err(|e| RemoteError::TableOperation(format!("Failed to open table: {}", e)))?;
+        
+        versioned_table.load_version(version).await
+            .map_err(|e| RemoteError::TableOperation(format!("Failed to load version {}: {}", version, e)))?;
+
+        let local_store = versioned_table.object_store();
+        
+        // Get files that existed at this version
+        let version_files = get_current_delta_files(&versioned_table).await?;
+        log::info!("      Found {} files in version {}", version_files.len(), version);
+
+        // Back up parquet files with transaction bundle_id
+        let transaction_bundle_id = crate::schema::ChunkedFileRecord::transaction_bundle_id(version);
+        
+        for (path, size) in &version_files {
+            log::debug!("      Backing up: {} ({} bytes)", path, size);
+
+            let file_path = object_store::path::Path::from(path.as_str());
+            let get_result = local_store
+                .get(&file_path)
+                .await
+                .map_err(|e| RemoteError::TableOperation(format!("Failed to read {}: {}", path, e)))?;
+
+            let bytes = get_result.bytes().await.map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to read bytes from {}: {}", path, e))
+            })?;
+
+            let reader = std::io::Cursor::new(bytes.to_vec());
+            remote_table
+                .write_file_with_bundle_id(
+                    &transaction_bundle_id,
+                    &pond_id,
+                    version,
+                    path,
+                    version,
+                    FileType::PondParquet,
+                    reader,
+                    vec!["push".to_string()],
+                )
+                .await?;
+        }
+
+        // Back up Delta commit log for this version
+        let commit_log_path = format!("_delta_log/{:020}.json", version);
+        let log_file_path = object_store::path::Path::from(commit_log_path.as_str());
+        
+        match local_store.get(&log_file_path).await {
+            Ok(get_result) => {
+                let bytes = get_result.bytes().await.map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to read commit log: {}", e))
+                })?;
+                
+                let reader = std::io::Cursor::new(bytes.to_vec());
+                remote_table
+                    .write_file_with_bundle_id(
+                        &transaction_bundle_id,
+                        &pond_id,
+                        version,
+                        &commit_log_path,
+                        version,
+                        FileType::Metadata,
+                        reader,
+                        vec!["push".to_string()],
+                    )
+                    .await?;
+            }
+            Err(e) => {
+                log::warn!("      Could not read commit log (may not exist): {}", e);
+            }
+        }
+
+        log::info!("      ✓ Transaction {} backed up ({} files)", version, version_files.len());
+    }
+
+    // Back up large files (these are cumulative, not per-transaction)
+    // Only back up large files that don't exist remotely yet
     let remote_files = remote_table.list_files(&pond_id).await?;
-    log::info!("   Remote has {} files already", remote_files.len());
-
-    // Get list of local files to back up from current Delta table state
-    // This queries the Delta table for all current parquet files
-    let local_store = local_table.object_store();
-    let local_files = get_current_delta_files(&local_table).await?;
-
-    log::info!("   Local has {} files total", local_files.len());
-
-    // Find files not yet backed up (by comparing paths)
     let remote_paths: std::collections::HashSet<_> =
         remote_files.iter().map(|f| f.1.as_str()).collect();
 
-    let files_to_backup: Vec<_> = local_files
+    let large_files = get_large_files(pond_path.as_path()).await?;
+    let large_files_to_backup: Vec<_> = large_files
         .into_iter()
         .filter(|(path, _)| !remote_paths.contains(path.as_str()))
         .collect();
 
-    if files_to_backup.is_empty() {
-        log::info!("   ✓ All files already backed up");
-        return Ok(());
-    }
+    if !large_files_to_backup.is_empty() {
+        log::info!("   📦 Backing up {} large files...", large_files_to_backup.len());
+        
+        for (path, size) in &large_files_to_backup {
+            log::debug!("      Backing up large file: {} ({} bytes)", path, size);
 
-    log::info!("   Backing up {} new files", files_to_backup.len());
+            let file_data = tokio::fs::read(&path).await.map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to read large file {}: {}", path, e))
+            })?;
 
-    // Back up each file using ChunkedWriter
-    for (path, size) in files_to_backup {
-        log::info!("   Backing up: {} ({} bytes)", path, size);
+            let file_name = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| RemoteError::TableOperation(format!("Invalid large file path: {}", path)))?;
 
-        // Read file from local Delta table's object store
-        let file_path = object_store::path::Path::from(path.as_str());
-        let get_result = local_store
-            .get(&file_path)
-            .await
-            .map_err(|e| RemoteError::TableOperation(format!("Failed to read {}: {}", path, e)))?;
-
-        let bytes = get_result.bytes().await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to read bytes from {}: {}", path, e))
-        })?;
-
-        // Write to remote using ChunkedWriter
-        let reader = std::io::Cursor::new(bytes.to_vec());
-        let bundle_id = remote_table
-            .write_file(
-                &pond_id,
-                txn_seq,
-                &path,
-                current_version,
-                FileType::PondParquet,
-                reader,
-                vec!["push".to_string()],
-            )
-            .await?;
-
-        log::info!("      ✓ Backed up as bundle_id: {}", &bundle_id[..16]);
+            let reader = std::io::Cursor::new(file_data);
+            remote_table
+                .write_file(
+                    &pond_id,
+                    current_version,
+                    file_name,
+                    current_version,
+                    FileType::LargeFile,
+                    reader,
+                    vec!["push".to_string()],
+                )
+                .await?;
+        }
+        
+        log::info!("      ✓ Large files backed up");
     }
 
     log::info!("   ✓ Push complete");
@@ -450,31 +541,47 @@ pub fn build_object_store(
     }
 }
 
-/// Scan remote storage for available pond versions
+/// Scan remote storage for available transaction sequences
 ///
-/// Opens the RemoteTable at the given URL and queries for all backed up transaction IDs.
-/// Supports both file:// and s3:// URLs through Delta Lake's object_store integration.
+/// Uses efficient object_store listing to find all FILE-META-* partitions
+/// without querying parquet files. Returns range of available transactions.
 ///
 /// # Arguments
 /// * `remote_url` - URL to the remote backup table (e.g., "file:///path" or "s3://bucket/path")
 /// * `pond_id` - Optional pond ID to filter by (currently unused, returns all transactions)
 ///
 /// # Returns
-/// Vec of transaction IDs (pond_txn_id values) available in the backup
+/// Vec of transaction IDs (txn_seq values) available in the backup, in order
 pub async fn scan_remote_versions(
     remote_url: &str,
     pond_id: Option<&uuid7::Uuid>,
 ) -> Result<Vec<i64>, RemoteError> {
-    let _pond_id_str = pond_id.map(|id| id.to_string()).unwrap_or_default();
-
     // Open the RemoteTable - Delta Lake handles object_store internally
     let remote_table = crate::RemoteTable::open(remote_url).await?;
 
-    // Query for all distinct pond_txn_id values
-    let transactions = remote_table.list_transactions().await?;
+    // Try new FILE-META approach first
+    let max_txn = remote_table.find_max_transaction(pond_id.map(|id| id.to_string()).as_deref()).await?;
 
-    log::info!("Found {} transactions in remote backup", transactions.len());
-    Ok(transactions)
+    match max_txn {
+        Some(max) => {
+            let transactions: Vec<i64> = (1..=max).collect();
+            log::info!("Found {} transactions in remote backup (1..={})", transactions.len(), max);
+            Ok(transactions)
+        }
+        None => {
+            // Fallback: Try old metadata-based approach for backward compatibility
+            log::debug!("No FILE-META partitions found, trying old metadata approach");
+            
+            if let Some(pond_id) = pond_id {
+                let transactions = remote_table.list_transactions_from_metadata(&pond_id.to_string()).await?;
+                log::info!("Found {} transactions using metadata approach", transactions.len());
+                Ok(transactions)
+            } else {
+                log::info!("No transactions found in remote backup");
+                Ok(Vec::new())
+            }
+        }
+    }
 }
 
 /// Download files for a specific version
@@ -510,71 +617,123 @@ pub fn extract_txn_seq_from_bundle(_files: &[(String, Vec<u8>)]) -> Result<i64, 
 /// Apply parquet files to Delta table (restore operation)
 ///
 /// For chunked format, this function:
-/// 1. Reads metadata to get the list of files backed up for this transaction
+/// 1. Queries for all files in the transaction partition (FILE-META-{txn_seq})
 /// 2. Uses ChunkedReader to reconstruct each file from chunks
 /// 3. Writes files directly to the local Delta table's object store
+/// 4. Parses files locally to find large file SHA256 references
+/// 5. Downloads referenced large files from POND-FILE-{sha256} partitions
+/// 6. Calls table.load() to refresh Delta table state
 ///
 /// # Arguments
 /// * `remote_table` - The remote backup table to read from
 /// * `local_table` - The local Delta table to write to
-/// * `pond_id` - Pond UUID (for locating metadata partition)
-/// * `pond_txn_id` - Transaction ID to restore
+/// * `txn_seq` - Transaction sequence number to restore
 ///
 /// # Errors
 /// Returns error if:
-/// - Cannot read metadata
+/// - Cannot query transaction files
 /// - Cannot reconstruct files
 /// - Cannot write to local table
 pub async fn apply_parquet_files_from_remote(
     remote_table: &crate::RemoteTable,
     local_table: &mut deltalake::DeltaTable,
-    pond_id: &str,
-    pond_txn_id: i64,
+    txn_seq: i64,
 ) -> Result<(), RemoteError> {
-    log::info!("Restoring transaction {} from remote backup", pond_txn_id);
+    log::info!("Restoring transaction {} from remote backup", txn_seq);
 
-    // Read metadata for this transaction
-    let metadata = remote_table.read_metadata(pond_id, pond_txn_id).await?;
+    // Phase 1: Query for all files in this transaction (efficient partition query)
+    let files = remote_table.list_transaction_files(txn_seq).await?;
 
-    log::info!("Found {} files to restore", metadata.files.len());
+    if files.is_empty() {
+        log::warn!("No files found for transaction {}", txn_seq);
+        return Ok(());
+    }
+
+    log::info!("Found {} files to restore in transaction", files.len());
 
     // Get the object store from the local table
     let object_store = local_table.object_store();
 
-    // Restore each file
-    for file_info in &metadata.files {
-        let original_path = &file_info.path;
-        let bundle_id = &file_info.sha256;
+    // Phase 2: Download and write parquet files + Delta logs
+    let mut large_file_refs = std::collections::HashSet::new();
+    
+    for (path, sha256, size, file_type) in &files {
+        log::debug!("Restoring file: {} ({} bytes, type: {:?})", path, size, file_type);
 
-        log::debug!("Restoring file: {} ({})", original_path, bundle_id);
+        // Build bundle_id based on file type
+        let bundle_id = match file_type {
+            crate::FileType::LargeFile => {
+                // Large file - use POND-FILE-{sha256}
+                crate::schema::ChunkedFileRecord::large_file_bundle_id(sha256)
+            }
+            _ => {
+                // Transaction file - use FILE-META-{txn_seq}
+                crate::schema::ChunkedFileRecord::transaction_bundle_id(txn_seq)
+            }
+        };
 
         // Create a buffer to hold the reconstructed file
         let mut buffer = Vec::new();
 
         // Read file from remote using ChunkedReader
-        remote_table.read_file(bundle_id, &mut buffer).await?;
+        remote_table.read_file(&bundle_id, &mut buffer).await?;
 
         // Write to local Delta table's object store
-        let object_store_path = object_store::path::Path::from(original_path.as_str());
-
-        // Upload the file to the local table's object store
+        let object_store_path = object_store::path::Path::from(path.as_str());
         object_store
-            .put(&object_store_path, buffer.into())
+            .put(&object_store_path, buffer.clone().into())
             .await
             .map_err(|e| {
                 RemoteError::TableOperation(format!("Failed to write file to local table: {}", e))
             })?;
 
-        log::debug!("  ✓ Restored {}", original_path);
+        log::debug!("  ✓ Restored {}", path);
+
+        // Phase 3: Parse parquet files to find large file references
+        if matches!(file_type, crate::FileType::PondParquet) {
+            // TODO: Parse parquet file to extract large file SHA256s
+            // For now, we rely on LargeFile type entries in the transaction
+        }
+
+        // Track large file references
+        if matches!(file_type, crate::FileType::LargeFile) {
+            large_file_refs.insert(sha256.clone());
+        }
     }
 
-    // Reload the table to pick up the new files
+    // Phase 4: Download referenced large files (if any)
+    if !large_file_refs.is_empty() {
+        log::info!("Downloading {} referenced large files", large_file_refs.len());
+        
+        for sha256 in large_file_refs {
+            let bundle_id = crate::schema::ChunkedFileRecord::large_file_bundle_id(&sha256);
+            let large_file_path = format!("_large_files/sha256={}", sha256);
+            
+            log::debug!("Downloading large file: {}", large_file_path);
+            
+            let mut buffer = Vec::new();
+            remote_table.read_file(&bundle_id, &mut buffer).await?;
+            
+            // Write to _large_files directory
+            let object_store_path = object_store::path::Path::from(large_file_path.as_str());
+            object_store
+                .put(&object_store_path, buffer.into())
+                .await
+                .map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to write large file: {}", e))
+                })?;
+            
+            log::debug!("  ✓ Downloaded large file {}", sha256);
+        }
+    }
+
+    // Phase 5: Reload the table to pick up the new files
     local_table
         .load()
         .await
         .map_err(|e| RemoteError::TableOperation(format!("Failed to reload local table: {}", e)))?;
 
-    log::info!("  ✓ Transaction {} restored", pond_txn_id);
+    log::info!("  ✓ Transaction {} restored", txn_seq);
     Ok(())
 }
 
@@ -602,6 +761,77 @@ fn extract_tlogfs_state(
         .downcast_ref::<tlogfs::persistence::State>()
         .cloned()
         .ok_or_else(|| RemoteError::TableOperation("State is not TLogFS State".to_string()))
+}
+
+/// Get large files from _large_files directory
+/// Scans both flat (sha256=X) and hierarchical (sha256_16=XX/sha256=X) structures
+/// Returns Vec of (absolute_path, file_size)
+async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteError> {
+    let large_files_dir = pond_path.join("_large_files");
+
+    if !large_files_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::new();
+    let mut entries = tokio::fs::read_dir(&large_files_dir)
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to read _large_files directory: {}", e)))?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        RemoteError::TableOperation(format!("Failed to read directory entry: {}", e))
+    })? {
+        let path = entry.path();
+        let file_type = entry.file_type().await.map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to get file type: {}", e))
+        })?;
+
+        if file_type.is_file() {
+            let filename = entry.file_name();
+            let name = filename.to_string_lossy();
+            if name.starts_with("sha256=") {
+                // Flat structure: _large_files/sha256=X
+                let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to get file metadata: {}", e))
+                })?;
+                files.push((path.to_string_lossy().to_string(), metadata.len() as i64));
+            }
+        } else if file_type.is_dir() {
+            let dirname = entry.file_name();
+            let dir_name = dirname.to_string_lossy();
+            if dir_name.starts_with("sha256_16=") {
+                // Hierarchical structure: _large_files/sha256_16=XX/sha256=Y
+                let mut subentries = tokio::fs::read_dir(&path).await.map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to read subdirectory: {}", e))
+                })?;
+
+                while let Some(subentry) = subentries.next_entry().await.map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to read subdirectory entry: {}", e))
+                })? {
+                    let subpath = subentry.path();
+                    let subfile_type = subentry.file_type().await.map_err(|e| {
+                        RemoteError::TableOperation(format!("Failed to get file type: {}", e))
+                    })?;
+
+                    if subfile_type.is_file() {
+                        let subfilename = subentry.file_name();
+                        let subname = subfilename.to_string_lossy();
+                        if subname.starts_with("sha256=") {
+                            let metadata = tokio::fs::metadata(&subpath).await.map_err(|e| {
+                                RemoteError::TableOperation(format!("Failed to get file metadata: {}", e))
+                            })?;
+                            files.push((
+                                subpath.to_string_lossy().to_string(),
+                                metadata.len() as i64,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(files)
 }
 
 /// Get current parquet files from Delta table

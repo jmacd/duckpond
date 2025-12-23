@@ -350,9 +350,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify bundle_id has POND:FILE: prefix and valid SHA256
-        assert!(bundle_id.starts_with("POND:FILE:"));
-        let hash_part = &bundle_id["POND:FILE:".len()..];
+        // Verify bundle_id has POND-FILE- prefix and valid SHA256
+        assert!(bundle_id.starts_with("POND-FILE-"));
+        let hash_part = &bundle_id["POND-FILE-".len()..];
         assert_eq!(hash_part.len(), 64);
         assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()));
 
@@ -422,9 +422,9 @@ mod tests {
             .await
             .unwrap();
 
-        // SHA256 of empty input with POND:FILE: prefix
+        // SHA256 of empty input with POND-FILE- prefix
         let expected_hash = format!("{:x}", Sha256::digest(b""));
-        let expected_bundle_id = format!("POND:FILE:{}", expected_hash);
+        let expected_bundle_id = format!("POND-FILE-{}", expected_hash);
         assert_eq!(bundle_id, expected_bundle_id);
     }
 }

@@ -316,11 +316,13 @@ impl AsyncWrite for HybridWriter {
 
         // Now write to the temp file
         if let Some(ref mut temp_file) = this.temp_file {
-            this.hasher.update(buf);
-
+            // Write to file first
             let result = Pin::new(temp_file).poll_write(cx, buf);
 
+            // Only update hasher and counter if write succeeded
             if let Poll::Ready(Ok(n)) = result {
+                // Hash exactly what was written (might be less than buf.len())
+                this.hasher.update(&buf[..n]);
                 this.total_written += n;
             }
 

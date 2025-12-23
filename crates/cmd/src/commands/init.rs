@@ -144,119 +144,51 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
 
     info!("Starting restore from backup...");
 
-    // Scan for all available versions in the remote backup
-    let versions = remote::scan_remote_versions(&config.url, Some(&pond_metadata_for_restore.pond_id))
+    // Open the remote table
+    let remote_url = &config.url;
+    let remote_table = remote::RemoteTable::open(remote_url)
         .await
-        .map_err(|e| anyhow!("Failed to scan remote versions: {}", e))?;
+        .map_err(|e| anyhow!("Failed to open remote table: {}", e))?;
 
-    if versions.is_empty() {
-        info!("   No backup versions found");
+    // List available transactions using efficient object_store listing
+    let transactions = remote_table
+        .list_transaction_numbers(Some(&pond_metadata_for_restore.pond_id.to_string()))
+        .await
+        .map_err(|e| anyhow!("Failed to list remote transactions: {}", e))?;
+
+    if transactions.is_empty() {
+        info!("   No backup transactions found");
         return Ok(());
     }
 
     info!(
-        "   Found {} version(s) to restore: {:?}",
-        versions.len(),
-        versions
+        "   Found {} transactions to restore: {:?}",
+        transactions.len(),
+        transactions
     );
 
-    // Open the RemoteTable for reading backed up files
-    let remote_table = remote::RemoteTable::open(&config.url)
+    // Get the pond path and open the Delta table directly
+    let pond_path = ship_context.resolve_pond_path()?;
+    let data_path = pond_path.join("data");
+    let data_path_str = data_path.to_string_lossy().to_string();
+    let mut local_table = deltalake::open_table(&data_path_str)
         .await
-        .map_err(|e| anyhow!("Failed to open remote table: {}", e))?;
+        .map_err(|e| anyhow!("Failed to open local Delta table: {}", e))?;
 
-    // Apply each version - replaying transactions with their ORIGINAL sequence numbers
-    for version in &versions {
-        info!("   Restoring version {}...", version);
+    // Restore each transaction sequentially
+    for txn_seq in &transactions {
+        info!("   Restoring transaction {}...", txn_seq);
 
-        let version_clone = *version;
-
-        // Read metadata for this transaction
-        let metadata = remote_table
-            .read_metadata(&pond_metadata_for_restore.pond_id.to_string(), version_clone)
+        // Use apply_parquet_files_from_remote to download and restore files
+        remote::factory::apply_parquet_files_from_remote(&remote_table, &mut local_table, *txn_seq)
             .await
-            .map_err(|e| anyhow!("Failed to read metadata for version {}: {}", version, e))?;
+            .map_err(|e| anyhow!("Failed to restore transaction {}: {}", txn_seq, e))?;
 
-        if metadata.files.is_empty() {
-            info!("      Version {} has no files, skipping", version_clone);
-            continue;
-        }
-
-        // txn_seq is the same as pond_txn_id in chunked format
-        let txn_seq = version_clone;
-
-        info!("      Original txn_seq: {}", txn_seq);
-        info!("      Original command: {:?}", metadata.cli_args);
-
-        // Build PondTxnMetadata for replay
-        let txn_meta = tlogfs::PondTxnMetadata {
-            txn_seq,
-            user: tlogfs::PondUserMetadata {
-                txn_id: uuid7::uuid7(), // Generate new UUID for restoration
-                args: metadata.cli_args.clone(),
-                vars: std::collections::HashMap::new(),
-            },
-        };
-
-        // Clone remote_table for use in async block
-        let remote_table_clone = remote_table.clone();
-        let pond_id_str = pond_metadata_for_restore.pond_id.to_string();
-
-        // CRITICAL: Use replay_transaction() instead of transact()
-        // This preserves the original txn_seq from the source pond
-        ship.replay_transaction(
-            &txn_meta,
-            move |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
-                Box::pin(async move {
-                    // Get state from transaction
-                    let state = tx.state().map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                            tinyfs::Error::Other(format!("Failed to get state: {}", e)),
-                        ))
-                    })?;
-
-                    // Get Delta table from state
-                    let mut table = state.table().await;
-
-                    // Restore files from RemoteTable to local Delta table
-                    remote::apply_parquet_files_from_remote(
-                        &remote_table_clone,
-                        &mut table,
-                        &pond_id_str,
-                        version_clone,
-                    )
-                    .await
-                    .map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::Restore {
-                            message: e.to_string(),
-                        })
-                    })?;
-
-                    let delta_version = table.version().unwrap_or(0);
-                    log::info!(
-                        "      ✓ Version {} restored (Delta version: {}, txn_seq: {})",
-                        version_clone,
-                        delta_version,
-                        txn_seq
-                    );
-
-                    Ok(())
-                })
-            },
-        )
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "Failed to restore version {} (txn_seq={}): {}",
-                version,
-                txn_seq,
-                e
-            )
-        })?;
+        info!("      ✓ Transaction {} restored", txn_seq);
     }
 
     info!("✓ Pond initialized from backup successfully");
-    info!("   All transactions from backup have been restored");
+    info!("   Restored {} transactions", transactions.len());
 
     // Set remote factory mode to "pull" for replica
     // This tells Steward to only run the remote factory on manual sync (pond control --mode sync)

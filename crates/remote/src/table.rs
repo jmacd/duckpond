@@ -170,11 +170,14 @@ impl RemoteTable {
     /// * `path` - Directory path for the Delta Lake table
     /// * `create_new` - If true, require table creation (error if exists)
     ///                  If false, open existing table (error if doesn't exist)
-    pub async fn open_or_create<P: AsRef<Path>>(path: P, create_new: bool) -> Result<Self> {
-        if create_new {
-            Self::create(path).await
-        } else {
-            Self::open(path).await
+    /// Open an existing table or create it if it doesn't exist
+    /// 
+    /// Despite the parameter name, this always tries to open first,
+    /// then creates only if the table doesn't exist.
+    pub async fn open_or_create<P: AsRef<Path>>(path: P, _create_new: bool) -> Result<Self> {
+        match Self::open(&path).await {
+            Ok(table) => Ok(table),
+            Err(_) => Self::create(path).await,
         }
     }
 
@@ -194,6 +197,56 @@ impl RemoteTable {
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Write a file to remote storage with custom bundle_id
+    ///
+    /// Same as write_file but uses a provided bundle_id instead of computing SHA256.
+    /// Used for transaction-based partitioning where all files in a transaction
+    /// share the same bundle_id (e.g., "FILE-META-{txn_seq}").
+    ///
+    /// # Arguments
+    /// * `bundle_id` - Custom bundle_id to use
+    /// * Other arguments same as write_file
+    ///
+    /// # Returns
+    /// The bundle_id that was used
+    ///
+    /// # Errors
+    /// Same as write_file
+    pub async fn write_file_with_bundle_id<R: AsyncRead + Unpin>(
+        &mut self,
+        bundle_id: &str,
+        pond_id: impl Into<String>,
+        pond_txn_id: i64,
+        path: impl Into<String>,
+        version: i64,
+        file_type: crate::FileType,
+        reader: R,
+        cli_args: Vec<String>,
+    ) -> Result<()> {
+        let writer = ChunkedWriter::new(
+            pond_id.into(),
+            pond_txn_id,
+            path.into(),
+            version,
+            file_type,
+            reader,
+            cli_args,
+        )
+        .with_bundle_id(bundle_id.to_string());
+
+        writer.write_to_table(&mut self.table).await?;
+
+        // Re-register the updated table with the session context
+        self.session_context.deregister_table("remote_files")?;
+        self.session_context
+            .register_table("remote_files", Arc::new(self.table.clone()))
+            .map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to re-register table: {}", e))
+            })?;
+
+        Ok(())
     }
 
     /// Write a file to remote storage in chunks
@@ -497,6 +550,297 @@ impl RemoteTable {
                     paths.value(i).to_string(),
                     types.value(i).to_string(),
                     sizes.value(i),
+                ));
+            }
+        }
+
+        Ok(files)
+    }
+
+    /// Find maximum transaction sequence number using efficient object_store listing
+    ///
+    /// Lists FILE-META-* partition directories without opening any parquet files.
+    /// This is much cheaper than querying the Delta table, especially on S3.
+    ///
+    /// # Arguments
+    /// * `pond_id` - Optional pond_id to filter by (currently not used, all txns returned)
+    ///
+    /// # Returns
+    /// Maximum txn_seq found, or None if no transactions exist
+    ///
+    /// # Errors
+    /// Returns error if cannot list object store
+    pub async fn find_max_transaction(&self, _pond_id: Option<&str>) -> Result<Option<i64>> {
+        use object_store::path::Path;
+        
+        let store = self.table.object_store();
+        
+        // List with delimiter to get only directories (partitions)
+        let prefix = Some(Path::from("bundle_id=FILE-META-"));
+        let list_result = store
+            .list_with_delimiter(prefix.as_ref())
+            .await
+            .map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to list partitions: {}", e))
+            })?;
+
+        // Parse directory names to extract transaction numbers
+        let max_txn = list_result
+            .common_prefixes
+            .iter()
+            .filter_map(|path| {
+                // Extract txn_seq from "bundle_id=FILE-META-42/"
+                let path_str = path.as_ref();
+                path_str
+                    .strip_prefix("bundle_id=FILE-META-")
+                    .and_then(|s| s.trim_end_matches('/').parse::<i64>().ok())
+            })
+            .max();
+
+        Ok(max_txn)
+    }
+
+    /// List all transaction numbers available in FILE-META partitions
+    ///
+    /// Uses object_store listing to enumerate all FILE-META-{txn_seq} directories.
+    /// This is the efficient way to discover what transactions exist for restoration.
+    ///
+    /// # Returns
+    /// Sorted vector of transaction sequence numbers
+    ///
+    /// # Errors
+    /// Returns error if listing fails
+    pub async fn list_available_transactions(&self) -> Result<Vec<i64>> {
+        use object_store::path::Path;
+        
+        let store = self.table.object_store();
+        
+        // List with delimiter to get only directories (partitions)
+        let prefix = Some(Path::from("bundle_id=FILE-META-"));
+        let list_result = store
+            .list_with_delimiter(prefix.as_ref())
+            .await
+            .map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to list partitions: {}", e))
+            })?;
+
+        // Parse directory names to extract transaction numbers
+        let mut txns: Vec<i64> = list_result
+            .common_prefixes
+            .iter()
+            .filter_map(|path| {
+                // Extract txn_seq from "bundle_id=FILE-META-42/"
+                let path_str = path.as_ref();
+                path_str
+                    .strip_prefix("bundle_id=FILE-META-")
+                    .and_then(|s| s.trim_end_matches('/').parse::<i64>().ok())
+            })
+            .collect();
+
+        txns.sort_unstable();
+        Ok(txns)
+    }
+
+    /// List all transaction numbers that have FILE-META partitions
+    ///
+    /// Uses efficient object_store listing to get actual transaction numbers.
+    /// Returns sorted list of transaction sequence numbers.
+    ///
+    /// # Arguments
+    /// * `pond_id` - Optional pond_id (currently unused)
+    ///
+    /// # Returns
+    /// Sorted vec of transaction numbers (e.g., [3, 4, 5, 6, 7])
+    ///
+    /// # Errors
+    /// Returns error if cannot list object store
+    pub async fn list_transaction_numbers(&self, _pond_id: Option<&str>) -> Result<Vec<i64>> {
+        use object_store::path::Path;
+        
+        let store = self.table.object_store();
+        
+        // List all partition directories with FILE-META prefix
+        // Using list() to get all paths with the prefix
+        let prefix = Path::from("bundle_id=FILE-META-");
+        log::debug!("Listing with prefix: {:?}", prefix);
+        let mut list_stream = store.list(Some(&prefix));
+        
+        use futures::StreamExt;
+        let mut paths = Vec::new();
+        while let Some(result) = list_stream.next().await {
+            match result {
+                Ok(meta) => {
+                    log::debug!("Found path: {}", meta.location);
+                    paths.push(meta.location);
+                }
+                Err(e) => {
+                    log::warn!("Error listing path: {}", e);
+                    return Err(RemoteError::TableOperation(format!("Failed to list partitions: {}", e)));
+                }
+            }
+        }
+        
+        log::debug!("Listed {} paths total", paths.len());
+        
+        // Extract unique partition directories from file paths
+        let mut partition_dirs = std::collections::HashSet::new();
+        for path in paths {
+            let path_str = path.as_ref();
+            // Paths look like "bundle_id=FILE-META-2025-12-22-3/file.parquet"
+            // Extract the partition directory part
+            if let Some(dir_end) = path_str.find('/') {
+                let dir = &path_str[..dir_end];
+                if dir.starts_with("bundle_id=FILE-META-") {
+                    log::debug!("Found partition dir: {}", dir);
+                    partition_dirs.insert(dir.to_string());
+                }
+            }
+        }
+        
+        log::debug!("Found {} FILE-META partitions", partition_dirs.len());
+
+        // Parse directory names to extract transaction numbers
+        // Format: "bundle_id=FILE-META-2025-12-22-42" -> 42
+        let mut txn_numbers: Vec<i64> = partition_dirs
+            .iter()
+            .filter_map(|dir| {
+                // Strip "bundle_id=FILE-META-" and extract last part after final dash
+                let rest = dir.strip_prefix("bundle_id=FILE-META-")?;
+                // rest is like "2025-12-22-42", extract the last number
+                let txn = rest.rsplit('-').next()?.parse::<i64>().ok()?;
+                log::debug!("Parsed txn {} from {}", txn, dir);
+                Some(txn)
+            })
+            .collect();
+
+        txn_numbers.sort_unstable();
+        log::info!("Found {} transaction numbers: {:?}", txn_numbers.len(), txn_numbers);
+        Ok(txn_numbers)
+    }
+
+    /// List transactions from metadata partition (old approach for backward compatibility)
+    ///
+    /// Queries the POND-META-{pond_id} partition for all pond_txn_id values.
+    /// Used as fallback when FILE-META-* partitions don't exist.
+    ///
+    /// # Arguments
+    /// * `pond_id` - Pond UUID to query
+    ///
+    /// # Returns
+    /// Vec of transaction sequence numbers found in metadata
+    ///
+    /// # Errors
+    /// Returns error if query fails
+    pub async fn list_transactions_from_metadata(&self, pond_id: &str) -> Result<Vec<i64>> {
+        let bundle_id = crate::schema::ChunkedFileRecord::metadata_bundle_id(pond_id);
+
+        let df = self
+            .session_context
+            .sql(&format!(
+                "SELECT DISTINCT pond_txn_id \
+                 FROM remote_files \
+                 WHERE bundle_id = '{}' \
+                 ORDER BY pond_txn_id",
+                bundle_id
+            ))
+            .await?;
+
+        let batches = df.collect().await?;
+
+        let mut transactions = Vec::new();
+        for batch in batches {
+            let txn_ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .ok_or_else(|| {
+                    RemoteError::TableOperation("Invalid pond_txn_id column".to_string())
+                })?;
+
+            for i in 0..batch.num_rows() {
+                transactions.push(txn_ids.value(i));
+            }
+        }
+
+        Ok(transactions)
+    }
+
+    /// Query for files in a specific transaction
+    ///
+    /// Returns all files (parquet + delta logs) for the given transaction.
+    /// Uses exact partition match on bundle_id for efficiency.
+    ///
+    /// # Arguments
+    /// * `txn_seq` - Transaction sequence number
+    ///
+    /// # Returns
+    /// Vec of (path, total_sha256, total_size, file_type)
+    ///
+    /// # Errors
+    /// Returns error if query fails
+    pub async fn list_transaction_files(
+        &self,
+        txn_seq: i64,
+    ) -> Result<Vec<(String, String, i64, crate::FileType)>> {
+        let bundle_id = crate::schema::ChunkedFileRecord::transaction_bundle_id(txn_seq);
+
+        let df = self
+            .session_context
+            .sql(&format!(
+                "SELECT DISTINCT path, total_sha256, total_size, file_type \
+                 FROM remote_files \
+                 WHERE bundle_id = '{}' \
+                 ORDER BY path",
+                bundle_id
+            ))
+            .await?;
+
+        let batches = df.collect().await?;
+
+        let mut files = Vec::new();
+        for batch in batches {
+            let path_col = batch.column(0);
+            let paths = arrow_cast::cast(path_col, &arrow_schema::DataType::Utf8)?;
+            let paths = paths
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| {
+                    RemoteError::TableOperation("Invalid column type for path".to_string())
+                })?;
+
+            let sha_col = batch.column(1);
+            let shas = arrow_cast::cast(sha_col, &arrow_schema::DataType::Utf8)?;
+            let shas = shas
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| {
+                    RemoteError::TableOperation("Invalid column type for total_sha256".to_string())
+                })?;
+
+            let sizes = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .ok_or_else(|| {
+                    RemoteError::TableOperation("Invalid column type for total_size".to_string())
+                })?;
+
+            let type_col = batch.column(3);
+            let types = arrow_cast::cast(type_col, &arrow_schema::DataType::Utf8)?;
+            let types = types
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .ok_or_else(|| {
+                    RemoteError::TableOperation("Invalid column type for file_type".to_string())
+                })?;
+
+            for i in 0..batch.num_rows() {
+                let file_type = crate::FileType::from_str(types.value(i))?;
+                files.push((
+                    paths.value(i).to_string(),
+                    shas.value(i).to_string(),
+                    sizes.value(i),
+                    file_type,
                 ));
             }
         }

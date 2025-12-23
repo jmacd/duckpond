@@ -723,7 +723,8 @@ impl<'a> StewardTransactionGuard<'a> {
             provider_context,
             parent_node_id,
             pond_metadata.clone(),
-        );
+        )
+        .with_txn_seq(self.txn_meta.txn_seq);
 
         // Pass factory mode as args[0]
         let args = vec![factory_mode.to_string()];

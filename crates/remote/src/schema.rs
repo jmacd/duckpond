@@ -157,32 +157,43 @@ impl ChunkedFileRecord {
     }
 
     /// Generate a metadata bundle_id for a pond
-    /// Format: "POND:META:{pond_id}"
+    /// Format: "POND-META-{pond_id}"
     /// 
     /// All metadata for a pond shares the same bundle_id (partition),
     /// with individual transactions distinguished by pond_txn_id column.
     #[must_use]
     pub fn metadata_bundle_id(pond_id: &str) -> String {
-        format!("POND:META:{}", pond_id)
+        format!("POND-META-{}", pond_id)
+    }
+
+    /// Generate a transaction bundle_id
+    /// Format: "FILE-META-{YYYY-MM-DD}-{txn_seq}"
+    /// 
+    /// All files (parquet + Delta logs) for a transaction share this bundle_id.
+    /// Date prefix enables chronological sorting while txn_seq ensures uniqueness.
+    #[must_use]
+    pub fn transaction_bundle_id(txn_seq: i64) -> String {
+        let now = chrono::Utc::now();
+        format!("FILE-META-{}-{}", now.format("%Y-%m-%d"), txn_seq)
     }
 
     /// Generate a large file bundle_id
-    /// Format: "POND:FILE:{sha256}"
+    /// Format: "POND-FILE-{sha256}"
     #[must_use]
     pub fn large_file_bundle_id(sha256: &str) -> String {
-        format!("POND:FILE:{}", sha256)
+        format!("POND-FILE-{}", sha256)
     }
 
-    /// Check if a bundle_id is a metadata record
+    /// Check if a bundle_id is a transaction record
     #[must_use]
-    pub fn is_metadata_bundle_id(bundle_id: &str) -> bool {
-        bundle_id.starts_with("POND:META:")
+    pub fn is_transaction_bundle_id(bundle_id: &str) -> bool {
+        bundle_id.starts_with("FILE-META-")
     }
 
     /// Check if a bundle_id is a large file record
     #[must_use]
     pub fn is_large_file_bundle_id(bundle_id: &str) -> bool {
-        bundle_id.starts_with("POND:FILE:")
+        bundle_id.starts_with("POND-FILE-")
     }
 }
 
@@ -222,21 +233,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_metadata_bundle_id() {
-        let pond_id = "018e5e5e-5e5e-7e5e-8e5e-5e5e5e5e5e5e";
-        let bundle_id = ChunkedFileRecord::metadata_bundle_id(pond_id);
-        assert_eq!(bundle_id, "POND:META:018e5e5e-5e5e-7e5e-8e5e-5e5e5e5e5e5e");
-        assert!(ChunkedFileRecord::is_metadata_bundle_id(&bundle_id));
-        assert!(!ChunkedFileRecord::is_metadata_bundle_id("POND:FILE:abc123def"));
+    fn test_transaction_bundle_id() {
+        let txn_seq = 42;
+        let bundle_id = ChunkedFileRecord::transaction_bundle_id(txn_seq);
+        // Should be in format FILE-META-YYYY-MM-DD-42
+        assert!(bundle_id.starts_with("FILE-META-"));
+        assert!(bundle_id.ends_with("-42"));
+        assert!(ChunkedFileRecord::is_transaction_bundle_id(&bundle_id));
+        assert!(!ChunkedFileRecord::is_transaction_bundle_id("POND-FILE-abc123def"));
     }
 
     #[test]
     fn test_large_file_bundle_id() {
         let sha256 = "abc123def456";
         let bundle_id = ChunkedFileRecord::large_file_bundle_id(sha256);
-        assert_eq!(bundle_id, "POND:FILE:abc123def456");
+        assert_eq!(bundle_id, "POND-FILE-abc123def456");
         assert!(ChunkedFileRecord::is_large_file_bundle_id(&bundle_id));
-        assert!(!ChunkedFileRecord::is_large_file_bundle_id("POND:META:something"));
+        assert!(!ChunkedFileRecord::is_large_file_bundle_id("POND-META-something"));
     }
 
     #[test]
