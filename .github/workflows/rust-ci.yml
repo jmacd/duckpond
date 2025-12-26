@@ -102,7 +102,7 @@ jobs:
             --yes
       
       - name: Upload .deb package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: pond-debian-package
           path: |
