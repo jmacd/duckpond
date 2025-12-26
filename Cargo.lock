@@ -1040,7 +1040,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f2f4eb22a76872bbee25bc7e8896b7b976ee8b70dd13a175aa3ec9d8653115c"
 dependencies = [
- "data_privacy_macros",
+ "data_privacy_macros 0.3.0",
  "serde",
 ]
 
@@ -1049,6 +1049,26 @@ name = "data_privacy_macros"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d84f54163610271cd72829c72525cc561f54ce147a9fc0f7d95afb0e0f7e3481"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "data_privacy_macros"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f4e67ef6f86fcf4369c483a1ce432632d24f39dc55e7368137b76dffae22ab9"
+dependencies = [
+ "data_privacy_macros_impl",
+]
+
+[[package]]
+name = "data_privacy_macros_impl"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d093f817306b1fdc4309224044004e3f2ccd93d2b1dd88797cbfeb58508a97f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2401,7 +2421,7 @@ dependencies = [
  "chrono",
  "clap",
  "data_privacy",
- "data_privacy_macros",
+ "data_privacy_macros 0.9.0",
  "datafusion",
  "futures",
  "linkme",
@@ -4762,9 +4782,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.109"
+version = "2.0.111"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f17c7e013e88258aa9543dcbe81aca68a667a9ac37cd69c9fbc07858bfe0e2f"
+checksum = "390cc9a294ab71bdb1aa2e99d13be9c753cd2d7bd6560c77118597410c4d2e87"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5051,7 +5071,7 @@ dependencies = [
  "chrono",
  "clap",
  "data_privacy",
- "data_privacy_macros",
+ "data_privacy_macros 0.9.0",
  "datafusion",
  "deltalake",
  "env_logger",
