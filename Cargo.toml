@@ -37,7 +37,7 @@ arrow-array = "55"
 arrow-buffer = "55"
 arrow-cast = { version = "55", features = ["prettyprint"] }
 arrow-csv = "55"
-arrow-schema = "55"
+arrow-schema = "57"
 arrow-select = "55"
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 async-stream = "0.3"
