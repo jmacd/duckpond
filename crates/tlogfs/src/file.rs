@@ -363,12 +363,22 @@ impl AsyncWrite for OpLogFileWriter {
                     // Extract metadata based on file type
                     let metadata = match entry_type {
                         tinyfs::EntryType::FileSeriesPhysical => {
-                            // Series files MUST have precomputed metadata from the parquet writer
-                            precomputed_metadata.ok_or_else(|| {
-                                tinyfs::Error::Other(
-                                    "FileSeriesPhysical written without temporal metadata - caller must use FileMetadataWriter::set_temporal_metadata()".to_string()
-                                )
-                            })?
+                            // Series files should have precomputed metadata from the parquet writer
+                            // Exception: empty writes (for extended attributes only) are allowed without metadata
+                            if let Some(precomputed) = precomputed_metadata {
+                                precomputed
+                            } else if content.is_empty() && content_len == 0 {
+                                // Empty version for setting extended attributes - no metadata needed
+                                crate::file_writer::FileMetadata::Series {
+                                    min_timestamp: 0,
+                                    max_timestamp: 0,
+                                    timestamp_column: String::new(),
+                                }
+                            } else {
+                                return Err(tinyfs::Error::Other(
+                                    "FileSeriesPhysical written without temporal metadata - caller must use FileMetadataWriter::set_temporal_metadata() or infer_temporal_bounds()".to_string()
+                                ));
+                            }
                         }
                         tinyfs::EntryType::FileTablePhysical => {
                             if let Some(precomputed) = precomputed_metadata {
