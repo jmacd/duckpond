@@ -47,7 +47,6 @@ use std::sync::Arc;
 use tinyfs::{
     AsyncReadSeek, EntryType, File, FileHandle, Metadata, NodeMetadata, Result as TinyFSResult,
 };
-use tokio::io::AsyncWrite;
 
 // ============================================================================
 // Configuration Types
@@ -600,7 +599,7 @@ impl File for SqlDerivedFile {
         ))
     }
 
-    async fn async_writer(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncWrite + Send>>> {
+    async fn async_writer(&self) -> TinyFSResult<std::pin::Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
         Err(tinyfs::Error::Other(
             "SQL-derived file is read-only".to_string(),
         ))
@@ -1329,7 +1328,7 @@ mod tests {
     use tinyfs::FS;
     use tinyfs::MemoryPersistence;
     use tinyfs::PartID;
-    use tinyfs::arrow::SimpleParquetExt;
+    use tinyfs::arrow::ParquetExt;
     use tokio::io::AsyncWriteExt;
 
     // Test helper: Create patterns HashMap from string URL literals
@@ -3070,7 +3069,7 @@ query: ""
         // Create an OpLogFile with parquet data - use setup_test_data pattern
         {
             // Write as FileTable (this creates an OpLogFile internally)
-            root.write_parquet("/test_data.parquet", &batch, EntryType::FileTablePhysical)
+            root.create_table_from_batch("/test_data.parquet", &batch, EntryType::FileTablePhysical)
                 .await
                 .unwrap();
         }

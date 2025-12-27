@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tinyfs::{
-    AsyncReadSeek, Error as TinyFSError, File, FileID, Metadata, NodeID, NodeMetadata, PartID,
+    AsyncReadSeek, Error as TinyFSError, File, FileID, FileMetadataWriter, Metadata, NodeID, NodeMetadata, PartID,
     persistence::PersistenceLayer,
 };
 use tokio::io::AsyncWrite;
@@ -102,7 +102,7 @@ impl File for OpLogFile {
         Ok(reader)
     }
 
-    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send + 'static>>> {
+    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn FileMetadataWriter>>> {
         // Acquire write lock and check for recursive writes
         // The main threat model here is preventing recursive scenarios where
         // a dynamically synthesized file evaluation tries to write a file
@@ -154,7 +154,7 @@ impl File for OpLogFile {
 
 /// Writer integrated with Delta Lake transactions
 /// Streams writes directly to HybridWriter for memory efficiency
-struct OpLogFileWriter {
+pub struct OpLogFileWriter {
     storage: crate::large_files::HybridWriter,
     state: State,
     file_id: FileID,
@@ -162,6 +162,7 @@ struct OpLogFileWriter {
     completed: bool,
     completion_future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     entry_type: tinyfs::EntryType,
+    precomputed_metadata: Option<crate::file_writer::FileMetadata>,
 }
 
 // OpLogFileWriter is Unpin because all its fields are Unpin
@@ -183,7 +184,69 @@ impl OpLogFileWriter {
             completed: false,
             completion_future: None,
             entry_type,
+            precomputed_metadata: None,
         }
+    }
+
+}
+
+#[async_trait]
+impl FileMetadataWriter for OpLogFileWriter {
+    fn set_temporal_metadata(&mut self, min: i64, max: i64, timestamp_column: String) {
+        self.precomputed_metadata = Some(crate::file_writer::FileMetadata::Series {
+            min_timestamp: min,
+            max_timestamp: max,
+            timestamp_column,
+        });
+    }
+    
+    async fn infer_temporal_bounds(&mut self) -> tinyfs::Result<(i64, i64, String)> {
+        // First, flush the writer to ensure all bytes are written (but don't shutdown yet)
+        use tokio::io::AsyncWriteExt;
+        self.flush().await.map_err(|e| {
+            tinyfs::Error::Other(format!("Failed to flush before inferring bounds: {}", e))
+        })?;
+        
+        // Read back the bytes from the temp file in HybridWriter
+        // This is efficient because parquet footer parsing only needs the end of the file
+        let temp_path = self.storage.temp_file_path()
+            .ok_or_else(|| tinyfs::Error::Other("No temp file for inferring bounds".to_string()))?
+            .clone();
+        
+        let bytes = tokio::fs::read(&temp_path).await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to read temp file: {}", e)))?;
+        
+        // Parse parquet footer to extract temporal bounds
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use tokio_util::bytes::Bytes;
+        
+        let bytes = Bytes::from(bytes);
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to parse parquet: {}", e)))?;
+        
+        let parquet_metadata = reader_builder.metadata();
+        let schema = reader_builder.schema();
+        
+        // Detect timestamp column
+        let timestamp_column = crate::schema::detect_timestamp_column(&schema)
+            .map_err(|e| tinyfs::Error::Other(format!("No timestamp column found: {}", e)))?;
+        
+        // Extract temporal bounds
+        let (min_time, max_time) = tinyfs::arrow::parquet::extract_temporal_bounds_from_parquet_metadata(
+            parquet_metadata.as_ref(),
+            &schema,
+            &timestamp_column,
+        )?;
+        
+        // Set the metadata on ourselves
+        self.set_temporal_metadata(min_time, max_time, timestamp_column.clone());
+        
+        // Now shutdown with the metadata set
+        self.shutdown().await.map_err(|e| {
+            tinyfs::Error::Other(format!("Failed to finalize write after setting metadata: {}", e))
+        })?;
+        
+        Ok((min_time, max_time, timestamp_column))
     }
 }
 
@@ -269,6 +332,7 @@ impl AsyncWrite for OpLogFileWriter {
             let file_id = this.file_id;
             let transaction_state = this.transaction_state.clone();
             let entry_type = this.entry_type;
+            let precomputed_metadata = this.precomputed_metadata.clone();
 
             let future = Box::pin(async move {
                 // Finalize HybridWriter to get content
@@ -298,33 +362,19 @@ impl AsyncWrite for OpLogFileWriter {
 
                     // Extract metadata based on file type
                     let metadata = match entry_type {
-                        tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
-                            if content.is_empty() {
-                                // Large file or empty - use placeholder
-                                debug!("OpLogFileWriter: large/empty FileSeries, using placeholder metadata");
-                                crate::file_writer::FileMetadata::Series {
-                                    min_timestamp: 0,
-                                    max_timestamp: 0,
-                                    timestamp_column: "timestamp".to_string(),
-                                }
-                            } else {
-                                // Small file - extract temporal metadata
-                                use std::io::Cursor;
-                                let reader = Cursor::new(&content);
-                                match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
-                                    Ok(metadata) => metadata,
-                                    Err(e) => {
-                                        return Err(tinyfs::Error::Other(format!(
-                                            "Failed to extract temporal metadata from FileSeries content: {}",
-                                            e
-                                        )));
-                                    }
-                                }
-                            }
+                        tinyfs::EntryType::FileSeriesPhysical => {
+                            // Series files MUST have precomputed metadata from the parquet writer
+                            precomputed_metadata.ok_or_else(|| {
+                                tinyfs::Error::Other(
+                                    "FileSeriesPhysical written without temporal metadata - caller must use FileMetadataWriter::set_temporal_metadata()".to_string()
+                                )
+                            })?
                         }
-                        tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
-                            if content.is_empty() {
-                                // Large file or empty - use placeholder
+                        tinyfs::EntryType::FileTablePhysical => {
+                            if let Some(precomputed) = precomputed_metadata {
+                                precomputed
+                            } else if content.is_empty() {
+                                // Large file - use placeholder
                                 crate::file_writer::FileMetadata::Table {
                                     schema: r#"{"type": "struct", "fields": []}"#.to_string(),
                                 }

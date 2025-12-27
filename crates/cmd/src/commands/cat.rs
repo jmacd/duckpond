@@ -504,7 +504,7 @@ mod tests {
     use crate::commands::init::init_command;
     use arrow_array::record_batch;
     use tempfile::TempDir;
-    use tinyfs::arrow::SimpleParquetExt;
+    use tinyfs::arrow::ParquetExt;
 
     /// Test setup helper - creates pond and returns context for testing
     struct TestSetup {
@@ -608,8 +608,8 @@ mod tests {
                             ))
                         })?;
 
-                        // Write as parquet table using SimpleParquetExt
-                        root.write_parquet(&filename, &batch, tinyfs::EntryType::FileTablePhysical)
+                        // Write as parquet table using ParquetExt
+                        root.create_table_from_batch(&filename, &batch, tinyfs::EntryType::FileTablePhysical)
                             .await
                             .map_err(|e| {
                                 steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
@@ -655,11 +655,11 @@ mod tests {
                             ))
                         })?;
 
-                        // Write as file:series using the same approach as file:table but with FileSeries entry type
-                        root.write_parquet(
+                        // Write as file:series using ParquetExt with temporal metadata extraction
+                        let _ = root.create_series_from_batch(
                             &filename,
                             &batch,
-                            tinyfs::EntryType::FileSeriesPhysical,
+                            Some("timestamp"),
                         )
                         .await
                         .map_err(|e| {

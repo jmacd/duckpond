@@ -424,7 +424,7 @@ impl tinyfs::File for TemporalReduceSqlFile {
         inner.async_reader().await
     }
 
-    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
         self.ensure_inner().await?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().expect("safelock");

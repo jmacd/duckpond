@@ -15,6 +15,20 @@ pub trait AsyncReadSeek: AsyncRead + AsyncSeek + Send + Unpin {}
 /// Blanket implementation for types that implement both AsyncRead and AsyncSeek
 impl<T: AsyncRead + AsyncSeek + Send + Unpin> AsyncReadSeek for T {}
 
+/// Trait for writers that can accept file metadata (e.g., temporal bounds from parquet)
+/// This allows metadata extracted during serialization to be passed to the storage layer
+/// without re-reading the file
+#[async_trait]
+pub trait FileMetadataWriter: AsyncWrite + Send + Unpin {
+    /// Set temporal metadata for series files (used when metadata is known at write time)
+    fn set_temporal_metadata(&mut self, min: i64, max: i64, timestamp_column: String);
+    
+    /// Infer temporal bounds from the written parquet file by reading only the footer.
+    /// After calling this, further writes will fail. Calls shutdown() internally.
+    /// Returns (min_timestamp, max_timestamp, timestamp_column_name)
+    async fn infer_temporal_bounds(&mut self) -> error::Result<(i64, i64, String)>;
+}
+
 /// Simple handle wrapper - no external state management
 #[derive(Clone)]
 pub struct Handle(Arc<tokio::sync::Mutex<Box<dyn File>>>);
@@ -27,8 +41,9 @@ pub trait File: Metadata + Send + Sync {
     /// Create a reader stream - implementation specific
     async fn async_reader(&self) -> error::Result<Pin<Box<dyn AsyncReadSeek>>>;
 
-    /// Create a writer stream - implementation specific  
-    async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>>;
+    /// Create a writer stream - implementation specific
+    /// Returns a writer that can optionally accept metadata via FileMetadataWriter trait
+    async fn async_writer(&self) -> error::Result<Pin<Box<dyn FileMetadataWriter>>>;
 
     /// Allow downcasting to concrete file types
     fn as_any(&self) -> &dyn std::any::Any;
@@ -68,7 +83,7 @@ impl Handle {
     }
 
     /// Get an async writer - delegated to implementation  
-    pub async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
+    pub async fn async_writer(&self) -> error::Result<Pin<Box<dyn FileMetadataWriter>>> {
         let file = self.0.lock().await;
         file.async_writer().await
     }

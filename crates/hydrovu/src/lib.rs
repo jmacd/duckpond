@@ -18,15 +18,12 @@ use arrow_array::{Array, RecordBatch};
 use arrow_schema::{DataType, Field, TimeUnit};
 use chrono::{DateTime, SecondsFormat};
 use log::debug;
-use parquet::arrow::ArrowWriter;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::env;
-use std::io::Cursor;
 use std::sync::Arc;
 use tinyfs::FS;
-use tokio::io::AsyncWriteExt;
 
 /// Summary of collection for a single device
 #[derive(Clone, Debug)]
@@ -403,31 +400,13 @@ impl HydroVuCollector {
                     )))
                 })?;
 
-        // Serialize to Parquet bytes
-        let parquet_bytes = HydroVuCollector::serialize_to_parquet(record_batch).map_err(|e| {
-            steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::other(
-                e.to_string(),
-            )))
-        })?;
-
-        // Create FileSeries writer
+        // Use TinyFS's clean API: pass RecordBatch, let TinyFS handle parquet conversion and metadata
         let device_path = format!("{hydrovu_path}/devices/{device_id}/{}.series", device.name);
-        let mut writer = root_wd
-            .async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeriesPhysical)
+        use tinyfs::arrow::ParquetExt;
+        let (_min_ts, _max_ts) = root_wd
+            .create_series_from_batch(&device_path, &record_batch, Some("timestamp"))
             .await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-        // Write parquet data
-        writer
-            .write_all(&parquet_bytes)
-            .await
-            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
-
-        // Shutdown writer
-        writer
-            .shutdown()
-            .await
-            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
 
         debug!("Processed {count} records for device {device_id}");
 
@@ -575,23 +554,4 @@ impl HydroVuCollector {
         Ok(record_batch)
     }
 
-    /// Serialize Arrow RecordBatch to Parquet bytes
-    fn serialize_to_parquet(record_batch: RecordBatch) -> Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        {
-            let cursor = Cursor::new(&mut buffer);
-            let mut writer = ArrowWriter::try_new(cursor, record_batch.schema(), None)
-                .context("Failed to create Parquet writer")?;
-
-            writer
-                .write(&record_batch)
-                .context("Failed to write RecordBatch to Parquet")?;
-
-            _ = writer.close().context("Failed to close Parquet writer")?;
-        }
-
-        let buffer_size = buffer.len();
-        debug!("Serialized to Parquet: {buffer_size} bytes");
-        Ok(buffer)
-    }
 }
