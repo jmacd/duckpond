@@ -115,83 +115,15 @@ impl ExtendedAttributes {
 }
 
 /// Extract temporal range from Arrow RecordBatch
-/// This function extracts min/max timestamps from a specified column in the batch
+/// Returns timestamps normalized to **microseconds** for consistent storage.
+/// 
+/// This is a thin wrapper around the canonical implementation in tinyfs::arrow::parquet.
 pub fn extract_temporal_range_from_batch(
     batch: &arrow::record_batch::RecordBatch,
     time_column: &str,
 ) -> Result<(i64, i64), crate::error::TLogFSError> {
-    use arrow::array::{Array, TimestampSecondArray};
-    use arrow::datatypes::{DataType, TimeUnit};
-
-    let time_array = batch.column_by_name(time_column).ok_or_else(|| {
-        crate::error::TLogFSError::ArrowMessage(format!(
-            "Time column '{}' not found in batch",
-            time_column
-        ))
-    })?;
-
-    // Handle different timestamp types
-    match time_array.data_type() {
-        DataType::Timestamp(TimeUnit::Second, _) => {
-            let array = time_array
-                .as_any()
-                .downcast_ref::<TimestampSecondArray>()
-                .ok_or_else(|| {
-                    crate::error::TLogFSError::ArrowMessage(
-                        "Failed to downcast timestamp array".to_string(),
-                    )
-                })?;
-            let min = array.iter().flatten().min().unwrap_or(0);
-            let max = array.iter().flatten().max().unwrap_or(0);
-            // Keep original units
-            Ok((min, max))
-        }
-        DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            let array = time_array
-                .as_any()
-                .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                .ok_or_else(|| {
-                    crate::error::TLogFSError::ArrowMessage(
-                        "Failed to downcast timestamp array".to_string(),
-                    )
-                })?;
-            let min = array.iter().flatten().min().unwrap_or(0);
-            let max = array.iter().flatten().max().unwrap_or(0);
-            Ok((min, max))
-        }
-        DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            let array = time_array
-                .as_any()
-                .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-                .ok_or_else(|| {
-                    crate::error::TLogFSError::ArrowMessage(
-                        "Failed to downcast timestamp array".to_string(),
-                    )
-                })?;
-            let min = array.iter().flatten().min().unwrap_or(0);
-            let max = array.iter().flatten().max().unwrap_or(0);
-            // Keep microseconds - maintain native precision
-            Ok((min, max))
-        }
-        DataType::Int64 => {
-            // Handle raw int64 timestamps
-            let array = time_array
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .ok_or_else(|| {
-                    crate::error::TLogFSError::ArrowMessage(
-                        "Failed to downcast int64 array".to_string(),
-                    )
-                })?;
-            let min = array.iter().flatten().min().unwrap_or(0);
-            let max = array.iter().flatten().max().unwrap_or(0);
-            Ok((min, max))
-        }
-        _ => Err(crate::error::TLogFSError::ArrowMessage(format!(
-            "Unsupported timestamp type: {:?}",
-            time_array.data_type()
-        ))),
-    }
+    tinyfs::arrow::parquet::extract_temporal_bounds_from_batch(batch, time_column)
+        .map_err(|e| crate::error::TLogFSError::ArrowMessage(e.to_string()))
 }
 
 /// Auto-detect timestamp column with priority order

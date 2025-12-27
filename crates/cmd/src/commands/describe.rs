@@ -219,7 +219,7 @@ async fn describe_command_impl(
                                     }
                                     output.push('\n');
 
-                                    // Show null counts for columns with nulls
+                                    // Show null counts for columns with nulls (indented under this version)
                                     let mut null_cols: Vec<_> = stats
                                         .column_null_counts
                                         .iter()
@@ -228,7 +228,7 @@ async fn describe_command_impl(
                                     
                                     if !null_cols.is_empty() {
                                         null_cols.sort_by_key(|(name, _)| *name);
-                                        output.push_str("     Null counts: ");
+                                        output.push_str("       Null counts: ");
                                         let null_strs: Vec<String> = null_cols
                                             .iter()
                                             .map(|(col, count)| format!("{}: {}", col, count))
@@ -237,6 +237,11 @@ async fn describe_command_impl(
                                         output.push('\n');
                                     }
                                 }
+                                // Show total size after all versions
+                                output.push_str(&format!(
+                                    "   Total size (all versions): {} bytes\n",
+                                    file_info.metadata.size.unwrap_or(0)
+                                ));
                             }
                         }
                         Err(e) => {
@@ -277,11 +282,18 @@ async fn describe_command_impl(
             }
         }
 
-        output.push_str(&format!(
-            "   Size: {} bytes\n",
-            file_info.metadata.size.unwrap_or(0)
-        ));
-        output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
+        // Show size for non-series files (series files show it in Version History section)
+        if !matches!(file_info.metadata.entry_type, tinyfs::EntryType::FileSeriesPhysical) {
+            output.push_str(&format!(
+                "   Size: {} bytes\n",
+                file_info.metadata.size.unwrap_or(0)
+            ));
+        }
+        // Note: Version number is already shown in "Version History" section above for series files
+        // For non-series files, this is the only place version is shown
+        if !matches!(file_info.metadata.entry_type, tinyfs::EntryType::FileSeriesPhysical) {
+            output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
+        }
         output.push('\n');
     }
 
@@ -608,6 +620,18 @@ async fn describe_file_series_versions(
         };
 
         version_stats.push(stats);
+    }
+
+    // Check for duplicate versions - this indicates a data integrity error
+    let mut seen_versions: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for stats in &version_stats {
+        if !seen_versions.insert(stats.version) {
+            return Err(anyhow::anyhow!(
+                "Data integrity error: Duplicate version {} found for file '{}'",
+                stats.version,
+                path
+            ));
+        }
     }
 
     Ok(version_stats)

@@ -77,6 +77,12 @@ pub struct InnerState {
     table: DeltaTable,        // The Delta table for this transaction
     records: Vec<OplogEntry>, // @@@ LINEAR SEARCH
     directories: HashMap<FileID, DirectoryState>,
+    /// Track files that exist in directories but haven't been written yet (pending write)
+    pending_files: HashMap<FileID, EntryType>,
+    /// Track pre-allocated version numbers for async writes in progress
+    allocated_versions: HashMap<FileID, Vec<i64>>,
+    /// Transaction poisoned flag - if true, commit must fail
+    poisoned: bool,
     session_context: Arc<SessionContext>,
     txn_seq: i64,
 }
@@ -671,19 +677,6 @@ impl State {
         self.inner.lock().await.commit_impl(metadata, table).await
     }
 
-    pub(crate) async fn store_file_content_ref(
-        &mut self,
-        id: FileID,
-        content_ref: crate::file_writer::ContentRef,
-        metadata: crate::file_writer::FileMetadata,
-    ) -> Result<(), TLogFSError> {
-        self.inner
-            .lock()
-            .await
-            .store_file_content_ref(id, content_ref, metadata)
-            .await
-    }
-
     /// Create an async reader for a file without loading entire content into memory
     pub(crate) async fn async_file_reader(
         &self,
@@ -890,6 +883,35 @@ impl State {
         dir_id: FileID,
     ) -> Result<Vec<tinyfs::DirectoryEntry>, TLogFSError> {
         Ok(self.inner.lock().await.get_all_directory_entries(dir_id))
+    }
+
+    /// Pre-allocate a version number for an async write
+    /// This reserves the version so that concurrent writes get sequential versions
+    /// The actual content write happens later in shutdown()
+    pub async fn allocate_version_for_write(&self, id: FileID) -> Result<i64, TLogFSError> {
+        self.inner.lock().await.allocate_version_for_write(id).await
+    }
+
+    /// Mark transaction as poisoned (failed write)
+    /// A poisoned transaction cannot be committed
+    pub async fn poison_transaction(&self, reason: String) {
+        self.inner.lock().await.poison_transaction(reason).await
+    }
+
+    /// Store file content reference (called from OpLogFileWriter::shutdown)
+    /// If pre_allocated_version is provided, uses that instead of calculating a new version
+    pub async fn store_file_content_ref(
+        &self,
+        id: FileID,
+        content_ref: crate::file_writer::ContentRef,
+        metadata: crate::file_writer::FileMetadata,
+        pre_allocated_version: Option<i64>,
+    ) -> Result<(), TLogFSError> {
+        self.inner
+            .lock()
+            .await
+            .store_file_content_ref(id, content_ref, metadata, pre_allocated_version)
+            .await
     }
 
     /// Insert a directory entry into in-memory state
@@ -1130,6 +1152,9 @@ impl InnerState {
             table,
             records: Vec::new(),
             directories: HashMap::new(),
+            pending_files: HashMap::new(),
+            allocated_versions: HashMap::new(),
+            poisoned: false,
             session_context: ctx,
             txn_seq,
         })
@@ -1265,13 +1290,15 @@ impl InnerState {
         id: FileID,
         result: crate::large_files::HybridWriterResult,
     ) -> Result<(), TLogFSError> {
+        // Get proper version number immediately - no placeholders
+        let version = self.get_next_version_for_node(id).await?;
         let entry = if result.size < crate::large_files::LARGE_FILE_THRESHOLD {
             // Small file: store content directly in Delta Lake
             let now = Utc::now().timestamp_micros();
             OplogEntry::new_small_file(
                 id,
                 now,
-                0, // Placeholder - actual version assigned by Delta Lake transaction log
+                version,
                 result.content,
                 self.txn_seq,
             )
@@ -1356,8 +1383,7 @@ impl InnerState {
                     OplogEntry::new_large_file_series(
                         id,
                         now,
-                        // @@@ GARBAGE BELOW
-                        0, // Placeholder - actual version assigned by Delta Lake transaction log
+                        version,
                         result.sha256,
                         result.size as i64, // Cast to i64 to match Delta Lake protocol
                         global_min,
@@ -1371,7 +1397,7 @@ impl InnerState {
                     OplogEntry::new_large_file(
                         id,
                         now,
-                        0, // Placeholder - actual version assigned by Delta Lake transaction log
+                        version,
                         result.sha256,
                         result.size as i64, // Cast to i64 to match Delta Lake protocol
                         self.txn_seq,
@@ -1412,11 +1438,13 @@ impl InnerState {
         id: FileID,
         content: &[u8],
     ) -> Result<(), TLogFSError> {
+        // Get proper version number immediately - no placeholders
+        let version = self.get_next_version_for_node(id).await?;
         let now = Utc::now().timestamp_micros();
         let entry = OplogEntry::new_small_file(
             id,
             now,
-            0, // @@@ !!! Placeholder - actual version assigned by Delta Lake transaction log
+            version,
             content.to_vec(),
             self.txn_seq,
         );
@@ -1435,20 +1463,41 @@ impl InnerState {
                 let record_count = records.len();
                 debug!("get_next_version_for_node found {record_count} existing records");
 
+                // Log all versions found for debugging duplicates
+                if !records.is_empty() {
+                    let versions: Vec<i64> = records.iter().map(|r| r.version).collect();
+                    debug!("get_next_version_for_node existing versions for {id}: {:?}", versions);
+                }
+
                 let next_version = if records.is_empty() {
-                    // This is a new node - start with version 1
-                    debug!("get_next_version_for_node: new node, starting with version 1");
-                    1
+                    // This is a new node - check allocated_versions first
+                    let allocated = self.allocated_versions.get(&id).and_then(|v| v.last());
+                    if let Some(&max_allocated) = allocated {
+                        // Someone already allocated versions for this file
+                        debug!("get_next_version_for_node: new node with allocated versions, max_allocated={max_allocated}, returning next_version={}", max_allocated + 1);
+                        max_allocated + 1
+                    } else {
+                        debug!("get_next_version_for_node: new node, starting with version 1");
+                        1
+                    }
                 } else {
-                    // This is an existing node - find max version and increment
-                    let max_version = records
+                    // This is an existing node - find max version from both records and allocated
+                    let max_record_version = records
                         .iter()
                         .map(|r| r.version)
                         .max()
                         .expect("records is non-empty, so max() should succeed");
+                    
+                    let max_allocated = self.allocated_versions
+                        .get(&id)
+                        .and_then(|v| v.last())
+                        .copied()
+                        .unwrap_or(0);
+                    
+                    let max_version = std::cmp::max(max_record_version, max_allocated);
                     let next_version = max_version + 1;
                     debug!(
-                        "get_next_version_for_node: existing node with max_version={max_version}, returning next_version={next_version}"
+                        "get_next_version_for_node: existing node with max_record_version={max_record_version}, max_allocated={max_allocated}, returning next_version={next_version}"
                     );
                     next_version
                 };
@@ -1463,6 +1512,29 @@ impl InnerState {
                     "Cannot determine next version for node {id}: query failed: {e}"
                 )))
             }
+        }
+    }
+
+    /// Pre-allocate version number for async write
+    /// This is called when async_writer() is created, BEFORE any data is written
+    async fn allocate_version_for_write(&mut self, id: FileID) -> Result<i64, TLogFSError> {
+        let next_version = self.get_next_version_for_node(id).await?;
+        
+        // Track this allocated version
+        self.allocated_versions
+            .entry(id)
+            .or_insert_with(Vec::new)
+            .push(next_version);
+        
+        debug!("Allocated version {next_version} for file {id} (pending write)");
+        Ok(next_version)
+    }
+
+    /// Poison the transaction due to write failure
+    async fn poison_transaction(&mut self, reason: String) {
+        if !self.poisoned {
+            warn!("🧪 TRANSACTION POISONED: {reason}");
+            self.poisoned = true;
         }
     }
 
@@ -1665,6 +1737,13 @@ impl InnerState {
         metadata: PondTxnMetadata,
         table: DeltaTable,
     ) -> Result<Option<()>, TLogFSError> {
+        // Check if transaction is poisoned (failed write)
+        if self.poisoned {
+            return Err(TLogFSError::Transaction {
+                message: "Cannot commit poisoned transaction - a write operation failed".to_string(),
+            });
+        }
+
         self.flush_directory_operations().await?;
 
         let records = std::mem::take(&mut self.records);
@@ -1788,35 +1867,35 @@ impl InnerState {
     }
 
     /// Store file content reference with transaction context (used by transaction guard NewFileWriter)
+    /// If pre_allocated_version is Some, uses that version instead of calculating a new one
     pub async fn store_file_content_ref(
         &mut self,
         id: FileID,
         content_ref: crate::file_writer::ContentRef,
         metadata: crate::file_writer::FileMetadata,
+        pre_allocated_version: Option<i64>,
     ) -> Result<(), TLogFSError> {
         debug!("store_file_content_ref_transactional called for node_id={id}");
 
         // Create OplogEntry from content reference
         let now = Utc::now().timestamp_micros();
 
-        // Get proper version number for this node
-        // Check if there's already an entry for this node in this transaction
-        let version = {
+        // Use pre-allocated version if provided, otherwise calculate next version
+        let version = if let Some(allocated) = pre_allocated_version {
+            debug!("Using pre-allocated version {allocated} for file {id}");
+            allocated
+        } else {
+            // Legacy path: calculate version now (for backward compatibility)
+            // Check if there's already an entry for this node in this transaction
             let existing_entry = self
                 .records
                 .iter()
                 .find(|e| e.node_id == id.node_id() && e.part_id == id.part_id());
 
-            if let Some(existing) = existing_entry {
-                // Check if this is a placeholder entry (version 0) vs real content
-                if existing.version == 0 {
-                    // This is the first time content is being added - use version 1
-                    // The version 0 placeholder will be replaced, not duplicated
-                    1
-                } else {
-                    // Replacing existing content - preserve the same version
-                    existing.version
-                }
+            if existing_entry.is_some() {
+                // There's already a version in this transaction.
+                // ALWAYS get next version - never reuse (this is an immutable log).
+                self.get_next_version_for_node(id).await?
             } else {
                 // New entry - calculate next version
                 self.get_next_version_for_node(id).await?
@@ -1918,22 +1997,17 @@ impl InnerState {
             }
         };
 
-        // Find existing entry for this node/part combination
-        let existing_index = self.records.iter().position(|existing_entry| {
-            existing_entry.part_id == id.part_id() && existing_entry.node_id == id.node_id()
-        });
-
-        if let Some(index) = existing_index {
-            // Replace existing entry (content changes, version stays the same within transaction)
-            self.records[index] = entry;
-        } else {
-            // No existing entry - add new entry with version 1 (??)
-            debug!(
-                "Adding new pending entry for node {id} with version {}",
-                entry.version
-            );
-            self.records.push(entry);
-        }
+        // IMMUTABLE LOG: ALWAYS append, never replace
+        // Every write creates a new version, even multiple writes in the same transaction
+        debug!(
+            "Appending new version {} for node {id} (immutable log - no replacements)",
+            entry.version
+        );
+        
+        // Remove from pending_files since it now has actual content
+        _ = self.pending_files.remove(&id);
+        
+        self.records.push(entry);
 
         debug!("Stored file content reference for node {id}");
         Ok(())
@@ -2577,9 +2651,15 @@ impl InnerState {
         // Create OplogEntry based on node type
         let content = match &node.node_type {
             NodeType::File(_file_handle) => {
-                // Files are created without content - actual content is written later via write_file()
-                // This creates the initial file node record; subsequent writes update it
-                vec![]
+                // Files should NOT create empty placeholder records
+                // Track the file as pending - it exists in the directory but has no content yet
+                // When shutdown() writes actual content, it will create the first version
+                debug!(
+                    "TRANSACTION: store_node() - file {} registered as pending, no oplog record yet",
+                    id
+                );
+                _ = self.pending_files.insert(id, id.entry_type());
+                return Ok(());
             }
             NodeType::Directory(_) => {
                 // Check if directory already loaded in memory
@@ -2671,10 +2751,8 @@ impl InnerState {
 
     async fn create_file_node(&mut self, id: FileID, state: State) -> TinyFSResult<Node> {
         // Create file node in memory only - no immediate persistence
-        self.store_file_content_with_type(id, &[])
-            .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
+        // The caller (create_file_path_streaming_with_type) will call store_node() to persist
+        // NO double-write: don't call store_file_content_with_type here!
         node_factory::create_file_node(id, state)
     }
 
@@ -2694,6 +2772,18 @@ impl InnerState {
 
     async fn metadata(&self, id: FileID) -> TinyFSResult<NodeMetadata> {
         debug!("metadata: querying id={id}");
+
+        // Check if this is a pending file (created but not yet written)
+        if let Some(&entry_type) = self.pending_files.get(&id) {
+            debug!("metadata: found pending file {id}, returning default metadata");
+            return Ok(NodeMetadata {
+                entry_type,
+                size: Some(0),
+                sha256: None,
+                version: 0, // No version yet - will be 1 when first written
+                timestamp: Utc::now().timestamp_micros(),
+            });
+        }
 
         // Query Delta Lake for the most recent record for this node using the correct partition
         let records = self

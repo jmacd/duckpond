@@ -4,7 +4,7 @@
 
 use crate::persistence::State;
 use async_trait::async_trait;
-use log::debug;
+use log::{debug, error};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -129,6 +129,16 @@ impl File for OpLogFile {
         // Get store path for HybridWriter
         let store_path = self.state.store_path().await;
 
+        // PRE-ALLOCATE version number NOW (not in shutdown)
+        // This ensures correct ordering even if multiple writes happen concurrently
+        let allocated_version = self
+            .state
+            .allocate_version_for_write(self.id)
+            .await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+        debug!("Pre-allocated version {allocated_version} for file {}", self.id);
+
         // Create streaming writer that will store content via persistence layer
         let persistence = self.state.clone();
         let file_id = self.id;
@@ -140,6 +150,7 @@ impl File for OpLogFile {
             transaction_state,
             entry_type,
             store_path,
+            allocated_version,
         )))
     }
 
@@ -163,6 +174,8 @@ pub struct OpLogFileWriter {
     completion_future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     entry_type: tinyfs::EntryType,
     precomputed_metadata: Option<crate::file_writer::FileMetadata>,
+    /// Pre-allocated version number for this write (allocated at writer creation)
+    allocated_version: i64,
 }
 
 // OpLogFileWriter is Unpin because all its fields are Unpin
@@ -175,6 +188,7 @@ impl OpLogFileWriter {
         transaction_state: Arc<RwLock<TransactionWriteState>>,
         entry_type: tinyfs::EntryType,
         store_path: std::path::PathBuf,
+        allocated_version: i64,
     ) -> Self {
         Self {
             storage: crate::large_files::HybridWriter::new(store_path),
@@ -185,6 +199,7 @@ impl OpLogFileWriter {
             completion_future: None,
             entry_type,
             precomputed_metadata: None,
+            allocated_version,
         }
     }
 
@@ -328,11 +343,12 @@ impl AsyncWrite for OpLogFileWriter {
                 &mut this.storage,
                 crate::large_files::HybridWriter::new(std::path::PathBuf::new()),
             );
-            let mut state = this.state.clone();
+            let state = this.state.clone();
             let file_id = this.file_id;
             let transaction_state = this.transaction_state.clone();
             let entry_type = this.entry_type;
             let precomputed_metadata = this.precomputed_metadata.clone();
+            let allocated_version = this.allocated_version;
 
             let future = Box::pin(async move {
                 // Finalize HybridWriter to get content
@@ -405,7 +421,7 @@ impl AsyncWrite for OpLogFileWriter {
                         _ => crate::file_writer::FileMetadata::Data,
                     };
 
-                    state.store_file_content_ref(file_id, content_ref, metadata).await
+                    state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version)).await
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to store file: {}", e)))
                 }.await;
 
@@ -413,19 +429,23 @@ impl AsyncWrite for OpLogFileWriter {
                     Ok(_) => {
                         if entry_type.is_series_file() {
                             debug!(
-                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new NewFileWriter architecture"
+                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries version {allocated_version}"
                             );
                         } else {
                             debug!(
-                                "OpLogFileWriter::poll_shutdown() - successfully stored content via new NewFileWriter architecture"
+                                "OpLogFileWriter::poll_shutdown() - successfully stored content version {allocated_version}"
                             );
                         }
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        debug!(
-                            "OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error_str}"
+                        error!(
+                            "OpLogFileWriter::poll_shutdown() - WRITE FAILED, poisoning transaction: {error_str}"
                         );
+                        // POISON THE TRANSACTION - this write failed, cannot commit
+                        state.poison_transaction(format!(
+                            "File write failed for {file_id} version {allocated_version}: {error_str}"
+                        )).await;
                     }
                 }
 
