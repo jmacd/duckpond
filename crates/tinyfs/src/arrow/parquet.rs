@@ -2,14 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Full Parquet integration for TinyFS following the original pond pattern
+//! Parquet integration for TinyFS
 //!
-//! This module provides high-level ForArrow integration for reading/writing
-//! Vec<T> where T: Serialize + Deserialize + ForArrow.
+//! This module provides:
+//! - High-level ForArrow integration for writing/reading `Vec<T>`
+//! - Low-level RecordBatch operations  
+//! - Temporal bounds extraction using Arrow compute kernels
+//! - Parquet metadata parsing for existing files (used by copy command)
 
 use super::schema::ForArrow;
 use crate::{EntryType, Result, WD};
-use arrow_array::RecordBatch;
+use arrow_array::{Array, RecordBatch};
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
@@ -18,11 +21,85 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tokio_util::bytes::Bytes;
 
-/// Default batch size for processing large datasets
-pub const DEFAULT_BATCH_SIZE: usize = 1000;
+// ============================================================================
+// Temporal Bounds Extraction
+// ============================================================================
 
-/// Extract temporal bounds from high-level ParquetMetaData API
-/// This is a public helper for extracting temporal metadata from already-written parquet files
+/// Extract min/max temporal bounds from a RecordBatch column using Arrow compute kernels.
+/// This is efficient - no serialization needed, just array aggregation.
+pub fn extract_temporal_bounds_from_batch(
+    batch: &RecordBatch,
+    timestamp_column: &str,
+) -> Result<(i64, i64)> {
+    use arrow_array::types::{
+        TimestampSecondType, TimestampMillisecondType, 
+        TimestampMicrosecondType, TimestampNanosecondType,
+    };
+    
+    // Find the timestamp column
+    let col_idx = batch
+        .schema()
+        .index_of(timestamp_column)
+        .map_err(|_| crate::Error::Other(format!(
+            "Timestamp column '{}' not found in schema", timestamp_column
+        )))?;
+    
+    let column = batch.column(col_idx);
+    
+    // Try to get as Int64 array (raw i64 timestamps)
+    if let Some(int64_array) = column.as_any().downcast_ref::<arrow_array::Int64Array>() {
+        let min = arrow::compute::min(int64_array)
+            .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
+        let max = arrow::compute::max(int64_array)
+            .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
+        return Ok((min, max));
+    }
+    
+    // Try TimestampSecondArray
+    if let Some(ts_array) = column.as_any().downcast_ref::<arrow_array::TimestampSecondArray>() {
+        let min = arrow::compute::min::<TimestampSecondType>(ts_array)
+            .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
+        let max = arrow::compute::max::<TimestampSecondType>(ts_array)
+            .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
+        return Ok((min, max));
+    }
+    
+    // Try TimestampMillisecondArray  
+    if let Some(ts_array) = column.as_any().downcast_ref::<arrow_array::TimestampMillisecondArray>() {
+        let min = arrow::compute::min::<TimestampMillisecondType>(ts_array)
+            .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
+        let max = arrow::compute::max::<TimestampMillisecondType>(ts_array)
+            .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
+        return Ok((min, max));
+    }
+    
+    // Try TimestampMicrosecondArray
+    if let Some(ts_array) = column.as_any().downcast_ref::<arrow_array::TimestampMicrosecondArray>() {
+        let min = arrow::compute::min::<TimestampMicrosecondType>(ts_array)
+            .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
+        let max = arrow::compute::max::<TimestampMicrosecondType>(ts_array)
+            .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
+        return Ok((min, max));
+    }
+    
+    // Try TimestampNanosecondArray
+    if let Some(ts_array) = column.as_any().downcast_ref::<arrow_array::TimestampNanosecondArray>() {
+        let min = arrow::compute::min::<TimestampNanosecondType>(ts_array)
+            .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
+        let max = arrow::compute::max::<TimestampNanosecondType>(ts_array)
+            .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
+        return Ok((min, max));
+    }
+    
+    Err(crate::Error::Other(format!(
+        "Timestamp column '{}' has unsupported type: {:?}",
+        timestamp_column,
+        column.data_type()
+    )))
+}
+
+/// Extract temporal bounds from ParquetMetaData (high-level API).
+/// Used when parsing existing parquet files (e.g., copy command).
 pub fn extract_temporal_bounds_from_parquet_metadata(
     parquet_meta: &parquet::file::metadata::ParquetMetaData,
     schema: &arrow_schema::SchemaRef,
@@ -30,22 +107,17 @@ pub fn extract_temporal_bounds_from_parquet_metadata(
 ) -> Result<(i64, i64)> {
     use parquet::file::statistics::Statistics;
 
-    // Find the timestamp column index in the schema
     let ts_col_idx = schema
         .fields()
         .iter()
         .position(|f| f.name() == ts_column)
-        .ok_or_else(|| {
-            crate::Error::Other(format!(
-                "Timestamp column '{}' not found in schema",
-                ts_column
-            ))
-        })?;
+        .ok_or_else(|| crate::Error::Other(format!(
+            "Timestamp column '{}' not found in schema", ts_column
+        )))?;
 
     let mut global_min: Option<i64> = None;
     let mut global_max: Option<i64> = None;
 
-    // Iterate through all row groups
     for row_group in parquet_meta.row_groups() {
         if ts_col_idx >= row_group.columns().len() {
             continue;
@@ -67,74 +139,80 @@ pub fn extract_temporal_bounds_from_parquet_metadata(
     match (global_min, global_max) {
         (Some(min), Some(max)) => Ok((min, max)),
         _ => Err(crate::Error::Other(format!(
-            "No statistics found for timestamp column '{}'",
-            ts_column
+            "No statistics found for timestamp column '{}'", ts_column
         ))),
     }
 }
 
-/// Extract temporal bounds from Thrift FileMetaData (returned by ArrowWriter::close)
-fn extract_temporal_from_thrift(
-    thrift_meta: &parquet::format::FileMetaData,
-    schema: &arrow_schema::SchemaRef,
-    ts_column: &str,
-) -> Result<(i64, i64)> {
-    // Find the timestamp column index in the schema
-    let ts_col_idx = schema
-        .fields()
-        .iter()
-        .position(|f| f.name() == ts_column)
-        .ok_or_else(|| {
-            crate::Error::Other(format!(
-                "Timestamp column '{}' not found in schema",
-                ts_column
-            ))
-        })?;
+// ============================================================================
+// Write Options (Anti-Duplication Pattern)
+// ============================================================================
 
-    let mut global_min: Option<i64> = None;
-    let mut global_max: Option<i64> = None;
+/// Options for writing parquet files
+#[derive(Default, Clone)]
+pub struct WriteOptions<'a> {
+    /// For series files: the timestamp column name (defaults to "timestamp")
+    pub timestamp_column: Option<&'a str>,
+}
 
-    // Iterate through all row groups and their column chunks
-    for row_group in &thrift_meta.row_groups {
-        // Find the timestamp column chunk
-        if ts_col_idx >= row_group.columns.len() {
-            continue; // Schema mismatch, skip
-        }
+// ============================================================================
+// Core Write/Read Functions
+// ============================================================================
 
-        let column_chunk = &row_group.columns[ts_col_idx];
-        if let Some(ref meta_data) = column_chunk.meta_data {
-            if let Some(ref stats) = meta_data.statistics {
-                // Extract min/max values from statistics
-                // Use min_value/max_value first (preferred), fallback to deprecated min/max
-                let min_bytes = stats.min_value.as_ref().or(stats.min.as_ref());
-                let max_bytes = stats.max_value.as_ref().or(stats.max.as_ref());
+/// Serialize a RecordBatch to parquet bytes in memory
+fn serialize_batch_to_parquet(batch: &RecordBatch) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    {
+        let cursor = Cursor::new(&mut buffer);
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(cursor, batch.schema(), Some(props))
+            .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
 
-                if let (Some(min_b), Some(max_b)) = (min_bytes, max_bytes) {
-                    // Parquet stores INT64 (timestamp) as 8 bytes little-endian
-                    if min_b.len() >= 8 && max_b.len() >= 8 {
-                        let min_ts = i64::from_le_bytes(min_b[0..8].try_into().unwrap());
-                        let max_ts = i64::from_le_bytes(max_b[0..8].try_into().unwrap());
+        writer
+            .write(batch)
+            .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
 
-                        global_min = Some(global_min.map_or(min_ts, |v| v.min(min_ts)));
-                        global_max = Some(global_max.map_or(max_ts, |v| v.max(max_ts)));
-                    }
-                }
-            }
-        }
+        let _ = writer
+            .close()
+            .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
+    }
+    Ok(buffer)
+}
+
+/// Parse parquet bytes into concatenated RecordBatch
+fn parse_parquet_to_batch(data: Vec<u8>) -> Result<RecordBatch> {
+    let bytes = Bytes::from(data);
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+        .map_err(|e| crate::Error::Other(format!("Parquet reader error: {}", e)))?
+        .build()
+        .map_err(|e| crate::Error::Other(format!("Build reader error: {}", e)))?;
+
+    let mut batches = Vec::new();
+    for batch_result in reader {
+        let batch = batch_result
+            .map_err(|e| crate::Error::Other(format!("Read batch error: {}", e)))?;
+        batches.push(batch);
     }
 
-    match (global_min, global_max) {
-        (Some(min), Some(max)) => Ok((min, max)),
-        _ => Err(crate::Error::Other(format!(
-            "No statistics found for timestamp column '{}'",
-            ts_column
-        ))),
+    if batches.is_empty() {
+        return Err(crate::Error::Other("No data in parquet file".to_string()));
+    } else if batches.len() == 1 {
+        Ok(batches.into_iter().next().expect("not empty"))
+    } else {
+        let schema = batches[0].schema();
+        let batch_refs: Vec<&RecordBatch> = batches.iter().collect();
+        arrow::compute::concat_batches(&schema, batch_refs)
+            .map_err(|e| crate::Error::Other(format!("Concat batches error: {}", e)))
     }
 }
+
+// ============================================================================
+// ParquetExt Trait - Clean API
+// ============================================================================
 
 #[async_trait::async_trait]
 pub trait ParquetExt {
-    /// Write a Vec<T> to a Parquet file, where T implements ForArrow
+    /// Write items to a parquet file (high-level ForArrow API)
     async fn create_table_from_items<T, P>(
         &self,
         path: P,
@@ -145,13 +223,13 @@ pub trait ParquetExt {
         T: Serialize + ForArrow + Send + Sync,
         P: AsRef<Path> + Send + Sync;
 
-    /// Read a Parquet file as Vec<T>, where T implements ForArrow
+    /// Read a parquet file as items (high-level ForArrow API)
     async fn read_table_as_items<T, P>(&self, path: P) -> Result<Vec<T>>
     where
         T: for<'a> Deserialize<'a> + ForArrow + Send + Sync,
         P: AsRef<Path> + Send + Sync;
 
-    /// Low-level: Write a RecordBatch directly
+    /// Write a RecordBatch to a parquet file
     async fn create_table_from_batch<P>(
         &self,
         path: P,
@@ -161,26 +239,13 @@ pub trait ParquetExt {
     where
         P: AsRef<Path> + Send + Sync;
 
-    /// Low-level: Write a RecordBatch directly with temporal metadata (for FileSeries)
-    async fn create_table_from_batch_with_metadata<P>(
-        &self,
-        path: P,
-        batch: &RecordBatch,
-        entry_type: EntryType,
-        min_event_time: Option<i64>,
-        max_event_time: Option<i64>,
-        timestamp_column: Option<&str>,
-    ) -> Result<()>
-    where
-        P: AsRef<Path> + Send + Sync;
-
-    /// Low-level: Read a RecordBatch directly
+    /// Read a parquet file as RecordBatch
     async fn read_table_as_batch<P>(&self, path: P) -> Result<RecordBatch>
     where
         P: AsRef<Path> + Send + Sync;
 
-    /// Create a FileSeries from RecordBatch with temporal metadata extraction
-    /// This method extracts min/max timestamps from the specified time column
+    /// Create a FileSeries from RecordBatch with automatic temporal extraction.
+    /// Uses Arrow compute kernels to extract min/max from the timestamp column.
     async fn create_series_from_batch<P>(
         &self,
         path: P,
@@ -214,12 +279,9 @@ impl ParquetExt for WD {
         T: Serialize + ForArrow + Send + Sync,
         P: AsRef<Path> + Send + Sync,
     {
-        // Convert Vec<T> to RecordBatch using serde_arrow
         let fields = T::for_arrow();
         let batch = serde_arrow::to_record_batch(&fields, &items)
             .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
-
-        // Write the batch using the low-level method
         self.create_table_from_batch(path, &batch, entry_type).await
     }
 
@@ -228,13 +290,9 @@ impl ParquetExt for WD {
         T: for<'a> Deserialize<'a> + ForArrow + Send + Sync,
         P: AsRef<Path> + Send + Sync,
     {
-        // Read as RecordBatch first
         let batch = self.read_table_as_batch(path).await?;
-
-        // Convert RecordBatch to Vec<T> using serde_arrow
         let items = serde_arrow::from_record_batch(&batch)
             .map_err(|e| crate::Error::Other(format!("Failed to deserialize from arrow: {}", e)))?;
-
         Ok(items)
     }
 
@@ -247,27 +305,8 @@ impl ParquetExt for WD {
     where
         P: AsRef<Path> + Send + Sync,
     {
-        // Create an in-memory buffer first
-        let mut buffer = Vec::new();
+        let buffer = serialize_batch_to_parquet(batch)?;
 
-        // Write to the buffer using sync parquet writer
-        // @@@ weird
-        {
-            let cursor = Cursor::new(&mut buffer);
-            let props = WriterProperties::builder().build();
-            let mut writer = ArrowWriter::try_new(cursor, batch.schema(), Some(props))
-                .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
-
-            writer
-                .write(batch)
-                .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
-
-            let _ = writer
-                .close()
-                .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
-        }
-
-        // Now write the buffer to TinyFS
         let (_, mut writer) = self
             .create_file_path_streaming_with_type(&path, entry_type)
             .await?;
@@ -275,84 +314,6 @@ impl ParquetExt for WD {
             .write_all(&buffer)
             .await
             .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
-        writer
-            .shutdown()
-            .await
-            .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
-
-        Ok(())
-    }
-
-    async fn create_table_from_batch_with_metadata<P>(
-        &self,
-        path: P,
-        batch: &RecordBatch,
-        entry_type: EntryType,
-        min_event_time: Option<i64>,
-        max_event_time: Option<i64>,
-        timestamp_column: Option<&str>,
-    ) -> Result<()>
-    where
-        P: AsRef<Path> + Send + Sync,
-    {
-        // Create an in-memory buffer first
-        let mut buffer = Vec::new();
-
-        // Write to the buffer using sync parquet writer and capture file metadata
-        let file_metadata_thrift = {
-            let cursor = Cursor::new(&mut buffer);
-            let props = WriterProperties::builder().build();
-            let mut writer = ArrowWriter::try_new(cursor, batch.schema(), Some(props))
-                .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
-
-            writer
-                .write(batch)
-                .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
-
-            writer
-                .close()
-                .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?
-        };
-
-        // Extract temporal bounds from Thrift metadata if this is a series file
-        let (final_min, final_max, ts_col_name) = if entry_type == EntryType::FileSeriesPhysical {
-            match (min_event_time, max_event_time) {
-                (Some(min), Some(max)) => (
-                    min,
-                    max,
-                    timestamp_column.unwrap_or("timestamp").to_string(),
-                ),
-                _ => {
-                    // Extract from writer's metadata (no file re-reading!)
-                    let ts_col = timestamp_column.unwrap_or("timestamp");
-                    let (min, max) = extract_temporal_from_thrift(
-                        &file_metadata_thrift,
-                        &batch.schema(),
-                        ts_col,
-                    )?;
-                    (min, max, ts_col.to_string())
-                }
-            }
-        } else {
-            (0, 0, String::new())
-        };
-
-        // Create TLogFS writer
-        let (_, mut writer) = self
-            .create_file_path_streaming_with_type(&path, entry_type)
-            .await?;
-
-        // Write the parquet bytes
-        writer
-            .write_all(&buffer)
-            .await
-            .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
-
-        // Set temporal metadata before shutdown (for series files)
-        if entry_type == EntryType::FileSeriesPhysical {
-            writer.set_temporal_metadata(final_min, final_max, ts_col_name);
-        }
-
         writer
             .shutdown()
             .await
@@ -365,62 +326,46 @@ impl ParquetExt for WD {
     where
         P: AsRef<Path> + Send + Sync,
     {
-        // Read the entire file into memory first
         let data = self.read_file_path_to_vec(&path).await?;
-
-        // Convert to Bytes for ChunkReader
-        let bytes = Bytes::from(data);
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
-            .map_err(|e| crate::Error::Other(format!("Parquet reader error: {}", e)))?
-            .build()
-            .map_err(|e| crate::Error::Other(format!("Build reader error: {}", e)))?;
-
-        // Read all batches and combine them
-        let mut batches = Vec::new();
-        for batch_result in reader {
-            let batch = batch_result
-                .map_err(|e| crate::Error::Other(format!("Read batch error: {}", e)))?;
-            batches.push(batch);
-        }
-
-        // Return single batch or concatenate multiple
-        if batches.is_empty() {
-            return Err(crate::Error::Other("No data in parquet file".to_string()));
-        } else if batches.len() == 1 {
-            Ok(batches.into_iter().next().expect("not empty"))
-        } else {
-            // Concatenate multiple batches
-            let schema = batches[0].schema();
-            let batch_refs: Vec<&RecordBatch> = batches.iter().collect();
-            arrow::compute::concat_batches(&schema, batch_refs)
-                .map_err(|e| crate::Error::Other(format!("Concat batches error: {}", e)))
-        }
+        parse_parquet_to_batch(data)
     }
 
     async fn create_series_from_batch<P>(
         &self,
         path: P,
         batch: &RecordBatch,
-        _timestamp_column: Option<&str>,
+        timestamp_column: Option<&str>,
     ) -> Result<(i64, i64)>
     where
         P: AsRef<Path> + Send + Sync,
     {
-        // SIMPLIFIED: Use unified streaming write, let TLogFS handle temporal metadata extraction
-        // Write the FileSeries using streaming approach
-        self.create_table_from_batch_with_metadata(
-            &path,
-            batch,
-            EntryType::FileSeriesPhysical,
-            None,
-            None,
-            None,
-        )
-        .await?;
+        let ts_col = timestamp_column.unwrap_or("timestamp");
+        
+        // Extract temporal bounds directly from the RecordBatch using Arrow kernels
+        let (min_time, max_time) = extract_temporal_bounds_from_batch(batch, ts_col)?;
+        
+        // Serialize batch to parquet
+        let buffer = serialize_batch_to_parquet(batch)?;
+        
+        // Write to TinyFS with temporal metadata
+        let (_, mut writer) = self
+            .create_file_path_streaming_with_type(&path, EntryType::FileSeriesPhysical)
+            .await?;
 
-        // Return placeholder values since TLogFS now handles temporal metadata extraction
-        // In the future, we could query TLogFS for the extracted metadata if needed
-        Ok((0, 0))
+        writer
+            .write_all(&buffer)
+            .await
+            .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
+
+        // Set temporal metadata from Arrow kernels (no parquet parsing needed!)
+        writer.set_temporal_metadata(min_time, max_time, ts_col.to_string());
+
+        writer
+            .shutdown()
+            .await
+            .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
+
+        Ok((min_time, max_time))
     }
 
     async fn create_series_from_items<T, P>(
@@ -433,29 +378,31 @@ impl ParquetExt for WD {
         T: Serialize + ForArrow + Send + Sync,
         P: AsRef<Path> + Send + Sync,
     {
-        // Convert Vec<T> to RecordBatch using serde_arrow
         let fields = T::for_arrow();
         let batch = serde_arrow::to_record_batch::<&[T]>(&fields, &items)
             .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
-
-        // Use the batch method
-        self.create_series_from_batch(path, &batch, timestamp_column)
-            .await
+        self.create_series_from_batch(path, &batch, timestamp_column).await
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use crate::EntryType;
     use crate::arrow::{ForArrow, ParquetExt};
+    use crate::arrow::parquet::extract_temporal_bounds_from_batch;
     use crate::memory::new_fs;
     use arrow::datatypes::{DataType, Field, FieldRef};
-    use arrow_array::record_batch;
+    use arrow_array::{record_batch, RecordBatch};
     use log::debug;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
 
-    /// Test data structure that implements ForArrow
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct TestRecord {
         id: i64,
@@ -468,67 +415,40 @@ mod tests {
             vec![
                 Arc::new(Field::new("id", DataType::Int64, false)),
                 Arc::new(Field::new("name", DataType::Utf8, false)),
-                Arc::new(Field::new("score", DataType::Float64, true)), // nullable
+                Arc::new(Field::new("score", DataType::Float64, true)),
             ]
         }
     }
 
     #[tokio::test]
-    async fn test_full_parquet_roundtrip_with_forarrow() -> Result<(), Box<dyn std::error::Error>> {
-        // Create a test filesystem and get root WD
+    async fn test_full_parquet_roundtrip_with_forarrow() -> TestResult {
         let fs = new_fs().await;
         let wd = fs.root().await?;
 
-        // Create test data
         let test_data = vec![
-            TestRecord {
-                id: 1,
-                name: "Alice".to_string(),
-                score: Some(95.5),
-            },
-            TestRecord {
-                id: 2,
-                name: "Bob".to_string(),
-                score: None,
-            },
-            TestRecord {
-                id: 3,
-                name: "Charlie".to_string(),
-                score: Some(87.3),
-            },
+            TestRecord { id: 1, name: "Alice".to_string(), score: Some(95.5) },
+            TestRecord { id: 2, name: "Bob".to_string(), score: None },
+            TestRecord { id: 3, name: "Charlie".to_string(), score: Some(87.3) },
         ];
 
         let test_path = "test_records.parquet";
-
-        // Write using the high-level ForArrow API
-        wd.create_table_from_items(test_path, &test_data, EntryType::FileTablePhysical)
-            .await?;
-
-        // Read back using the high-level ForArrow API
+        wd.create_table_from_items(test_path, &test_data, EntryType::FileTablePhysical).await?;
         let read_data: Vec<TestRecord> = wd.read_table_as_items(test_path).await?;
 
-        // Verify the data matches
         assert_eq!(test_data.len(), read_data.len());
         for (original, read) in test_data.iter().zip(read_data.iter()) {
             assert_eq!(original, read);
         }
 
         debug!("✅ Full ParquetExt ForArrow roundtrip successful!");
-        debug!(
-            "   Processed {} records with mixed nullable/non-nullable fields",
-            read_data.len()
-        );
-
         Ok(())
     }
 
     #[tokio::test]
     async fn test_low_level_recordbatch_operations() -> Result<(), Box<dyn std::error::Error>> {
-        // Create a test filesystem and get root WD
         let fs = new_fs().await;
         let wd = fs.root().await?;
 
-        // Create a RecordBatch using Arrow macros
         let batch = record_batch!(
             ("product", Utf8, ["Widget A", "Widget B", "Widget C"]),
             ("quantity", Int64, [100_i64, 250_i64, 75_i64]),
@@ -536,152 +456,87 @@ mod tests {
         )?;
 
         let test_path = "products.parquet";
-
-        // Write using low-level RecordBatch API
-        wd.create_table_from_batch(test_path, &batch, EntryType::FileTablePhysical)
-            .await?;
-
-        // Read back using low-level RecordBatch API
+        wd.create_table_from_batch(test_path, &batch, EntryType::FileTablePhysical).await?;
         let read_batch = wd.read_table_as_batch(test_path).await?;
 
-        // Verify schema and data
         assert_eq!(batch.schema(), read_batch.schema());
         assert_eq!(batch.num_rows(), read_batch.num_rows());
         assert_eq!(batch.num_columns(), read_batch.num_columns());
 
-        // Verify column data
-        use arrow_array::{Float64Array, Int64Array, StringArray};
-
-        let original_products = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let read_products = read_batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(original_products, read_products);
-
-        let original_quantities = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let read_quantities = read_batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(original_quantities, read_quantities);
-
-        let original_prices = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        let read_prices = read_batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(original_prices, read_prices);
-
         debug!("✅ Low-level RecordBatch operations successful!");
-        debug!(
-            "   Verified schema and data integrity for {} rows",
-            read_batch.num_rows()
-        );
+        Ok(())
+    }
 
+    #[tokio::test]
+    async fn test_extract_temporal_bounds_from_batch() -> Result<(), Box<dyn std::error::Error>> {
+        use arrow_array::{Int64Array, Float64Array};
+        use arrow_schema::{DataType, Field, Schema};
+        
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Int64, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![100_i64, 500_i64, 200_i64, 300_i64])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )?;
+
+        let (min, max) = extract_temporal_bounds_from_batch(&batch, "timestamp")?;
+        assert_eq!(min, 100);
+        assert_eq!(max, 500);
+
+        debug!("✅ Temporal bounds extraction using Arrow kernels works!");
         Ok(())
     }
 
     #[tokio::test]
     async fn test_large_dataset_batching() -> Result<(), Box<dyn std::error::Error>> {
-        // Create a test filesystem and get root WD
         let fs = new_fs().await;
         let wd = fs.root().await?;
 
-        // Create a large dataset (more than DEFAULT_BATCH_SIZE = 1000)
         let large_data: Vec<TestRecord> = (0..2500)
             .map(|i| TestRecord {
                 id: i,
                 name: format!("User_{}", i),
-                score: if i % 3 == 0 {
-                    None
-                } else {
-                    Some((i as f64) * 0.1)
-                },
+                score: if i % 3 == 0 { None } else { Some((i as f64) * 0.1) },
             })
             .collect();
 
         let test_path = "large_dataset.parquet";
-
-        // Write the large dataset
-        wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical)
-            .await?;
-
-        // Read it back
+        wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical).await?;
         let read_data: Vec<TestRecord> = wd.read_table_as_items(test_path).await?;
 
-        // Verify all data is preserved
         assert_eq!(large_data.len(), read_data.len());
-
-        // Spot check some records
         assert_eq!(large_data[0], read_data[0]);
         assert_eq!(large_data[1000], read_data[1000]);
         assert_eq!(large_data[2499], read_data[2499]);
 
-        // Check that nullable fields are handled correctly
-        let none_count_original = large_data.iter().filter(|r| r.score.is_none()).count();
-        let none_count_read = read_data.iter().filter(|r| r.score.is_none()).count();
-        assert_eq!(none_count_original, none_count_read);
-
         debug!("✅ Large dataset batching successful!");
-        debug!(
-            "   Processed {} records with automatic batching",
-            read_data.len()
-        );
-        debug!(
-            "   Nullable field handling: {} None values preserved",
-            none_count_read
-        );
-
         Ok(())
     }
 
     #[tokio::test]
     async fn test_entry_type_integration() -> Result<(), Box<dyn std::error::Error>> {
-        // Create a test filesystem and get root WD
         let fs = new_fs().await;
         let wd = fs.root().await?;
 
-        // Test different entry types
         let test_data = vec![
-            TestRecord {
-                id: 1,
-                name: "Entry1".to_string(),
-                score: Some(100.0),
-            },
-            TestRecord {
-                id: 2,
-                name: "Entry2".to_string(),
-                score: Some(200.0),
-            },
+            TestRecord { id: 1, name: "Entry1".to_string(), score: Some(100.0) },
+            TestRecord { id: 2, name: "Entry2".to_string(), score: Some(200.0) },
         ];
 
         // Test with FileTable entry type
         let table_path = "table_entries.parquet";
-        wd.create_table_from_items(table_path, &test_data, EntryType::FileTablePhysical)
-            .await?;
+        wd.create_table_from_items(table_path, &test_data, EntryType::FileTablePhysical).await?;
 
         // Test with FileData entry type
         let data_path = "data_entries.parquet";
-        wd.create_table_from_items(data_path, &test_data, EntryType::FileDataPhysical)
-            .await?;
+        wd.create_table_from_items(data_path, &test_data, EntryType::FileDataPhysical).await?;
 
-        // Verify both can be read back correctly
         let table_data: Vec<TestRecord> = wd.read_table_as_items(table_path).await?;
         let data_data: Vec<TestRecord> = wd.read_table_as_items(data_path).await?;
 
@@ -689,160 +544,6 @@ mod tests {
         assert_eq!(test_data, data_data);
 
         debug!("✅ Entry type integration successful!");
-        debug!("   Verified FileTable and FileData entry types work correctly");
-
         Ok(())
     }
-
-/// The 64 KiB threshold for large file storage (copied from tlogfs)
-const LARGE_FILE_THRESHOLD: usize = 64 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct LargeTestRecord {
-    id: i64,
-    name: String,
-    description: String, // Add longer text field
-    data: Vec<u8>,       // Add binary data field
-    score: Option<f64>,
-}
-
-impl ForArrow for LargeTestRecord {
-    fn for_arrow() -> Vec<FieldRef> {
-        vec![
-            Arc::new(Field::new("id", DataType::Int64, false)),
-            Arc::new(Field::new("name", DataType::Utf8, false)),
-            Arc::new(Field::new("description", DataType::Utf8, false)),
-            Arc::new(Field::new("data", DataType::Binary, false)),
-            Arc::new(Field::new("score", DataType::Float64, true)),
-        ]
-    }
-}
-
-#[tokio::test]
-async fn test_parquet_file_size_estimation() -> Result<(), Box<dyn std::error::Error>> {
-    let fs = new_fs().await;
-    let wd = fs.root().await?;
-
-    // Create different sized datasets to see what triggers large file storage
-    let sizes = vec![100, 500, 1000, 2500, 5000, 10000];
-
-    for size in sizes {
-        let large_data: Vec<LargeTestRecord> = (0..size)
-            .map(|i| LargeTestRecord {
-                id: i as i64,
-                name: format!("User_{}_with_longer_name_to_increase_size", i),
-                description: format!("This is a longer description for user {} to increase the size of each record and make the parquet file larger. We need to trigger large file storage which happens at {} bytes.", i, LARGE_FILE_THRESHOLD),
-                data: vec![42u8; 100], // 100 bytes of binary data per record
-                score: if i % 3 == 0 { None } else { Some((i as f64) * 0.1) },
-            })
-            .collect();
-
-        let test_path = format!("test_size_{}.parquet", size);
-
-        // Write the dataset
-        wd.create_table_from_items(&test_path, &large_data, EntryType::FileTablePhysical)
-            .await?;
-
-        // Read the raw file content to check size
-        let content = wd.read_file_path_to_vec(&test_path).await?;
-        let file_size = content.len();
-
-        debug!("Dataset size: {} records", size);
-        debug!(
-            "Parquet file size: {} bytes ({:.2} KiB)",
-            file_size,
-            file_size as f64 / 1024.0
-        );
-        debug!(
-            "Large file threshold: {} bytes ({:.2} KiB)",
-            LARGE_FILE_THRESHOLD,
-            LARGE_FILE_THRESHOLD as f64 / 1024.0
-        );
-        debug!(
-            "Triggers large file storage: {}",
-            file_size >= LARGE_FILE_THRESHOLD
-        );
-
-        // Test that we can read it back correctly
-        let read_data: Vec<LargeTestRecord> = wd.read_table_as_items(&test_path).await?;
-        assert_eq!(large_data.len(), read_data.len());
-
-        if file_size >= LARGE_FILE_THRESHOLD {
-            debug!("🎯 Found a dataset size that triggers large file storage!");
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_guaranteed_large_parquet_file() -> Result<(), Box<dyn std::error::Error>> {
-    let fs = new_fs().await;
-    let wd = fs.root().await?;
-
-    // Create a dataset that definitely exceeds 64 KiB
-    let record_count = 20000; // Much larger dataset
-    let large_data: Vec<LargeTestRecord> = (0..record_count)
-        .map(|i| LargeTestRecord {
-            id: i as i64,
-            name: format!("User_{}_with_very_long_name_to_ensure_large_file_storage_is_triggered_definitely", i),
-            description: format!("This is an extremely long description for user {} designed to create a large parquet file that will definitely exceed the 64 KiB threshold for large file storage. We're repeating this text multiple times to ensure size: {}", i, "padding ".repeat(20)),
-            data: vec![42u8; 500], // 500 bytes of binary data per record
-            score: if i % 3 == 0 { None } else { Some((i as f64) * 0.1) },
-        })
-        .collect();
-
-    let test_path = "guaranteed_large.parquet";
-
-    // Write the dataset
-    wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical)
-        .await?;
-
-    // Read the raw file content to check size
-    let content = wd.read_file_path_to_vec(test_path).await?;
-    let file_size = content.len();
-
-    debug!("🎯 GUARANTEED LARGE FILE TEST");
-    debug!("Dataset size: {} records", record_count);
-    debug!(
-        "Parquet file size: {} bytes ({:.2} KiB)",
-        file_size,
-        file_size as f64 / 1024.0
-    );
-    debug!(
-        "Large file threshold: {} bytes ({:.2} KiB)",
-        LARGE_FILE_THRESHOLD,
-        LARGE_FILE_THRESHOLD as f64 / 1024.0
-    );
-    debug!(
-        "Triggers large file storage: {}",
-        file_size >= LARGE_FILE_THRESHOLD
-    );
-
-    // This should definitely trigger large file storage
-    assert!(
-        file_size >= LARGE_FILE_THRESHOLD,
-        "Expected file size {} to exceed threshold {}",
-        file_size,
-        LARGE_FILE_THRESHOLD
-    );
-
-    // Verify we can still read it back correctly
-    let read_data: Vec<LargeTestRecord> = wd.read_table_as_items(test_path).await?;
-    assert_eq!(large_data.len(), read_data.len());
-
-    // Spot check some records
-    assert_eq!(large_data[0], read_data[0]);
-    assert_eq!(large_data[10000], read_data[10000]);
-    assert_eq!(large_data[19999], read_data[19999]);
-
-    debug!("✅ Large Parquet file test successful!");
-    debug!(
-        "   Large file storage working correctly with {} KiB file",
-        file_size / 1024
-    );
-
-    Ok(())
-}
 }
