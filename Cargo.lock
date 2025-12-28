@@ -2474,7 +2474,7 @@ dependencies = [
  "parquet",
  "paste",
  "provider",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
