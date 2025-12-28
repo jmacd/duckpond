@@ -8,6 +8,7 @@ use crate::common::ShipContext;
 use log::{info, warn};
 use std::path::Path;
 use std::str::FromStr;
+use url::Url;
 use uuid7::Uuid;
 
 /// Configuration source for pond initialization
@@ -65,7 +66,15 @@ pub async fn init_command(
 async fn init_normal(ship_context: &ShipContext) -> Result<()> {
     // Pond doesn't exist, so create a new one
     // This creates both the filesystem infrastructure AND the initial /txn/1 transaction
-    let _ship = ship_context.create_pond().await?;
+    let mut ship = ship_context.create_pond().await?;
+
+    // Set default factory mode to "push" for new ponds
+    // This will be inherited by remote factories unless explicitly changed
+    info!("Setting default factory mode to 'push' for new pond");
+    ship.control_table_mut()
+        .set_factory_mode("remote", "push")
+        .await
+        .map_err(|e| anyhow!("Failed to set default factory mode: {}", e))?;
 
     log::debug!("Pond initialized successfully with transaction #1");
     Ok(())
@@ -85,7 +94,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
                 format!("Failed to read config file: {}", config_path.display())
             })?;
 
-            let config: tlogfs::remote_factory::RemoteConfig =
+            let config: remote::RemoteConfig =
                 serde_yaml::from_str(&config_content).with_context(|| {
                     format!("Failed to parse config YAML from {}", config_path.display())
                 })?;
@@ -96,7 +105,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         InitConfig::FromBase64(encoded) => {
             info!("📦 Decoding replication configuration...");
 
-            let repl_config = tlogfs::remote_factory::ReplicationConfig::from_base64(&encoded)
+            let repl_config = remote::ReplicationConfig::from_base64(&encoded)
                 .with_context(|| "Failed to decode base64 replication config")?;
 
             info!("✓ Configuration decoded successfully");
@@ -144,148 +153,54 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
 
     info!("Starting restore from backup...");
 
-    // Build the object store
-    let store = tlogfs::remote_factory::build_object_store(&config)
-        .map_err(|e| anyhow!("Failed to create object store: {}", e))?;
+    // Open the remote table
+    let remote_url = &config.url;
+    let remote_table = remote::RemoteTable::open(remote_url)
+        .await
+        .map_err(|e| anyhow!("Failed to open remote table: {}", e))?;
 
-    // Scan for all available versions (filter by source pond_id)
-    let versions = tlogfs::remote_factory::scan_remote_versions(
-        &store,
-        Some(&pond_metadata_for_restore.pond_id),
-    )
-    .await
-    .map_err(|e| anyhow!("Failed to scan remote versions: {}", e))?;
+    // List available transactions using efficient object_store listing
+    let transactions = remote_table
+        .list_transaction_numbers(Some(&pond_metadata_for_restore.pond_id.to_string()))
+        .await
+        .map_err(|e| anyhow!("Failed to list remote transactions: {}", e))?;
 
-    if versions.is_empty() {
-        info!("   No backup versions found");
+    if transactions.is_empty() {
+        info!("   No backup transactions found");
         return Ok(());
     }
 
     info!(
-        "   Found {} version(s) to restore: {:?}",
-        versions.len(),
-        versions
+        "   Found {} transactions to restore: {:?}",
+        transactions.len(),
+        transactions
     );
 
-    // Apply each version - replaying transactions with their ORIGINAL sequence numbers
-    for version in &versions {
-        info!("   Restoring version {}...", version);
+    // Get the pond path and open the Delta table directly
+    let pond_path = ship_context.resolve_pond_path()?;
+    let data_path = pond_path.join("data");
+    let data_path_str = data_path.to_string_lossy().to_string();
+    let url = Url::from_directory_path(&data_path)
+        .or_else(|_| Url::from_file_path(&data_path))
+        .map_err(|_| anyhow!("Failed to create URL from path: {}", data_path_str))?;
+    let mut local_table = deltalake::open_table(url)
+        .await
+        .map_err(|e| anyhow!("Failed to open local Delta table: {}", e))?;
 
-        let version_clone = *version;
+    // Restore each transaction sequentially
+    for txn_seq in &transactions {
+        info!("   Restoring transaction {}...", txn_seq);
 
-        // Convert pond metadata to tlogfs format for download
-        let tlogfs_metadata = provider::PondMetadata {
-            pond_id: pond_metadata_for_restore.pond_id,
-            birth_timestamp: pond_metadata_for_restore.birth_timestamp,
-            birth_hostname: pond_metadata_for_restore.birth_hostname.clone(),
-            birth_username: pond_metadata_for_restore.birth_username.clone(),
-        };
-
-        // Download bundle
-        let bundle_data =
-            tlogfs::remote_factory::download_bundle(&store, &tlogfs_metadata, version_clone)
-                .await
-                .map_err(|e| anyhow!("Failed to download bundle for version {}: {}", version, e))?;
-
-        // Extract files from bundle (Parquet + Delta commit log)
-        let files = tlogfs::remote_factory::extract_bundle(&bundle_data)
+        // Use apply_parquet_files_from_remote to download and restore files
+        remote::factory::apply_parquet_files_from_remote(&remote_table, &mut local_table, *txn_seq)
             .await
-            .map_err(|e| anyhow!("Failed to extract bundle for version {}: {}", version, e))?;
+            .map_err(|e| anyhow!("Failed to restore transaction {}: {}", txn_seq, e))?;
 
-        if files.is_empty() {
-            info!("      Version {} has no files, skipping", version_clone);
-            continue;
-        }
-
-        // Extract original txn_seq from Delta commit log in the bundle
-        let txn_seq = tlogfs::remote_factory::extract_txn_seq_from_bundle(&files).map_err(|e| {
-            anyhow!(
-                "Failed to extract txn_seq from bundle version {}: {}",
-                version,
-                e
-            )
-        })?;
-
-        info!("      Original txn_seq: {}", txn_seq);
-
-        // Extract metadata for cli_args (for backward compatibility and logging)
-        let bundle_path = format!(
-            "pond-{}-bundle-{:06}.tar.zst",
-            pond_metadata_for_restore.pond_id, version
-        );
-        let bundle_metadata = tlogfs::bundle::extract_bundle_metadata(
-            store.clone(),
-            &object_store::path::Path::from(bundle_path.as_str()),
-        )
-        .await
-        .map_err(|e| anyhow!("Failed to extract bundle metadata: {}", e))?;
-
-        let cli_args = if bundle_metadata.cli_args.is_empty() {
-            // Fallback for old bundles - use generic command
-            vec!["<restored>".to_string()]
-        } else {
-            bundle_metadata.cli_args.clone()
-        };
-
-        info!("      Original command: {:?}", cli_args);
-
-        // Build PondTxnMetadata for replay
-        let txn_meta = tlogfs::PondTxnMetadata {
-            txn_seq,
-            user: tlogfs::PondUserMetadata {
-                txn_id: uuid7::uuid7(), // Generate new UUID for restoration
-                args: cli_args,
-                vars: std::collections::HashMap::new(),
-            },
-        };
-
-        // CRITICAL: Use replay_transaction() instead of transact()
-        // This preserves the original txn_seq from the source pond
-        ship.replay_transaction(
-            &txn_meta,
-            move |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
-                Box::pin(async move {
-                    // Get state from transaction
-                    let state = tx.state().map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                            tinyfs::Error::Other(format!("Failed to get state: {}", e)),
-                        ))
-                    })?;
-
-                    // Get Delta table from state
-                    let mut table = state.table().await;
-
-                    // Apply files to Delta table (includes Parquet + Delta commit log)
-                    // This directly copies the commit log, preserving the original txn_seq
-                    tlogfs::remote_factory::apply_parquet_files(&mut table, &files)
-                        .await
-                        .map_err(steward::StewardError::DataInit)?;
-
-                    let delta_version = table.version().unwrap_or(0);
-                    log::info!(
-                        "      ✓ Version {} restored (Delta version: {}, txn_seq: {})",
-                        version_clone,
-                        delta_version,
-                        txn_seq
-                    );
-
-                    Ok(())
-                })
-            },
-        )
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "Failed to restore version {} (txn_seq={}): {}",
-                version,
-                txn_seq,
-                e
-            )
-        })?;
+        info!("      ✓ Transaction {} restored", txn_seq);
     }
 
     info!("✓ Pond initialized from backup successfully");
-    info!("   All transactions from backup have been restored");
+    info!("   Restored {} transactions", transactions.len());
 
     // Set remote factory mode to "pull" for replica
     // This tells Steward to only run the remote factory on manual sync (pond control --mode sync)

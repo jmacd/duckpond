@@ -31,9 +31,6 @@ jobs:
       
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
-          components: rustfmt, clippy
       
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -82,8 +79,6 @@ jobs:
       
       - name: Setup Rust for packaging
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
       
       - name: Install cargo-deb
         run: cargo install cargo-deb

@@ -277,6 +277,12 @@ repeat_count: 1
         .await
         .expect("Failed to create config");
 
+    // Set factory mode BEFORE creating factory node to prevent error logs
+    setup
+        .set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
+
     // Register the factory
     mknod_command(
         &setup.ship_context,
@@ -287,12 +293,6 @@ repeat_count: 1
     )
     .await
     .expect("Failed to create factory node");
-
-    // Set factory mode to "push" so it executes in post-commit
-    setup
-        .set_factory_mode("test-executor", "push")
-        .await
-        .expect("Failed to set factory mode");
 
     // Execute a write transaction (triggers post-commit)
     setup
@@ -377,6 +377,12 @@ async fn test_post_commit_multiple_factories_all_succeed() {
         .await
         .expect("Failed to create system.d");
 
+    // Set factory mode early to prevent error logs
+    setup
+        .set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
+
     // Create three factory configs
     for i in 1..=3 {
         let config_filename = format!("test-factory-{}.yaml", i);
@@ -404,12 +410,6 @@ repeat_count: 1
         .await
         .expect("Failed to create factory node");
     }
-
-    // Set factory mode to "push" once for test-executor (shared by all configs)
-    setup
-        .set_factory_mode("test-executor", "push")
-        .await
-        .expect("Failed to set factory mode");
 
     // Execute a write transaction
     setup
@@ -500,6 +500,12 @@ async fn test_post_commit_independent_execution_with_failure() {
         .await
         .expect("Failed to create system.d");
 
+    // Set factory mode early to prevent error logs
+    setup
+        .set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
+
     // Factory 1: Success
     setup
         .create_factory_config(
@@ -566,12 +572,6 @@ repeat_count: 1
     )
     .await
     .expect("Failed to create factory node");
-
-    // Set factory mode to "push" for test-executor (shared by all configs)
-    setup
-        .set_factory_mode("test-executor", "push")
-        .await
-        .expect("Failed to set factory mode");
 
     // Execute write transaction to trigger post-commit
     setup
@@ -1084,6 +1084,12 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
     .expect("Failed to write test data");
 
     // Step 2: Create a post-commit factory that will read the file
+    // Set factory mode BEFORE mknod to prevent error logs
+    setup
+        .set_factory_mode("test-executor", "push")
+        .await
+        .expect("Failed to set factory mode");
+
     setup
         .create_factory_config(
             "visibility-reader.yaml",
@@ -1109,12 +1115,6 @@ expected_content: "{}"
     )
     .await
     .expect("Failed to create factory node");
-
-    // Set factory mode to "push"
-    setup
-        .set_factory_mode("test-executor", "push")
-        .await
-        .expect("Failed to set factory mode");
 
     // Step 3: Execute a transaction to trigger post-commit (doesn't need to write more data)
     setup

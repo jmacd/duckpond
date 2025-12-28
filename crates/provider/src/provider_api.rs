@@ -27,16 +27,36 @@ use std::sync::Arc;
 /// - Glob patterns: `csv:///data/**/*.csv`
 /// - Compression: `csv://gzip/data/*.csv.gz`
 /// - Format options: `csv:///data/file.csv?delimiter=;`
+/// - Builtin types: `file:///path`, `series:///path`, `table:///path`
 pub struct Provider {
     /// TinyFS for file access
     fs: Arc<tinyfs::FS>,
+    /// Optional ProviderContext for builtin type support (requires active transaction)
+    provider_context: Option<Arc<tinyfs::ProviderContext>>,
 }
 
 impl Provider {
-    /// Create a new Provider with TinyFS
+    /// Create a new Provider with TinyFS (without ProviderContext)
+    /// This will only support external format providers (csv, oteljson, etc.)
     #[must_use]
     pub fn new(fs: Arc<tinyfs::FS>) -> Self {
-        Self { fs }
+        Self {
+            fs,
+            provider_context: None,
+        }
+    }
+
+    /// Create a new Provider with ProviderContext (supports all types)
+    /// Use this when you have an active transaction and want to query builtin types
+    #[must_use]
+    pub fn with_context(
+        fs: Arc<tinyfs::FS>,
+        provider_context: Arc<tinyfs::ProviderContext>,
+    ) -> Self {
+        Self {
+            fs,
+            provider_context: Some(provider_context),
+        }
     }
 
     /// Create a TableProvider from a URL pattern
@@ -72,13 +92,73 @@ impl Provider {
             )));
         }
 
-        // Get format provider from registry
-        let format_provider = FormatRegistry::get_provider(url.scheme())
-            .ok_or_else(|| Error::InvalidUrl(format!("Unknown format: {}", url.scheme())))?;
+        let scheme = url.scheme();
 
-        // Single file - stream into MemTable
+        // Check if this is a builtin TinyFS type (file, series, table, data)
+        if matches!(scheme, "file" | "series" | "table" | "data") {
+            let provider_context = self.provider_context.as_ref().ok_or_else(|| {
+                Error::InvalidUrl(format!(
+                    "Builtin type '{}' requires ProviderContext. Use Provider::with_context()",
+                    scheme
+                ))
+            })?;
+            return self
+                .create_builtin_table_provider(&url, provider_context)
+                .await;
+        }
+
+        // External format providers (csv, oteljson, excelhtml, etc.)
+        let format_provider = FormatRegistry::get_provider(scheme)
+            .ok_or_else(|| Error::InvalidUrl(format!("Unknown format: {}", scheme)))?;
+
         self.create_memtable_from_url(&url, format_provider.as_ref())
             .await
+    }
+
+    /// Create TableProvider from builtin TinyFS file using QueryableFile trait
+    async fn create_builtin_table_provider(
+        &self,
+        url: &Url,
+        provider_context: &tinyfs::ProviderContext,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        use tinyfs::Lookup;
+
+        let root = self.fs.root().await?;
+        let path = url.path();
+
+        let (_, lookup_result) = root
+            .resolve_path(path)
+            .await
+            .map_err(|e| Error::InvalidUrl(format!("Failed to resolve path '{}': {}", path, e)))?;
+
+        let node_path = match lookup_result {
+            Lookup::Found(np) => np,
+            _ => return Err(Error::InvalidUrl(format!("File not found: {}", path))),
+        };
+
+        let file_handle = node_path
+            .as_file()
+            .await
+            .map_err(|e| Error::InvalidUrl(format!("Failed to get file handle: {}", e)))?;
+
+        let file_arc = file_handle.handle.get_file().await;
+        let file_guard = file_arc.lock().await;
+
+        let queryable_file = file_guard.as_queryable().ok_or_else(|| {
+            Error::InvalidUrl(format!(
+                "File '{}' is not queryable (type: {:?})",
+                path,
+                node_path.id().entry_type()
+            ))
+        })?;
+
+        let table_provider = queryable_file
+            .as_table_provider(node_path.id(), provider_context)
+            .await
+            .map_err(|e| Error::InvalidUrl(format!("Failed to create table provider: {}", e)))?;
+
+        drop(file_guard);
+        Ok(table_provider)
     }
 
     /// Expand pattern and invoke callback for each matched file

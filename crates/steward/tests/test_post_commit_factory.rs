@@ -20,6 +20,11 @@ async fn test_post_commit_factory_execution() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
+    // Set factory mode early to prevent error logs (factories will be created in tx1)
+    ship.control_table_mut()
+        .set_factory_mode("test-executor", "push")
+        .await?;
+
     // Transaction 1: Set up a post-commit factory
     debug!("=== Setting up post-commit factory ===");
     let tx1 = ship
@@ -210,6 +215,11 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
+    // Set factory mode early to prevent error logs
+    ship.control_table_mut()
+        .set_factory_mode("test-executor", "push")
+        .await?;
+
     // Create a post-commit config first
     let tx1 = ship
         .begin_write(&PondUserMetadata::new(vec![
@@ -247,6 +257,7 @@ repeat_count: 1
         context1,
     )
     .await?;
+
     _ = tx1.commit().await?;
 
     // Now do a read-only transaction using the transact helper
@@ -283,6 +294,11 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
     let pond_path = temp_dir.path().join("post_commit_ordered_test_pond");
 
     let mut ship = Ship::create_pond(&pond_path).await?;
+
+    // Set factory mode early to prevent error logs
+    ship.control_table_mut()
+        .set_factory_mode("test-executor", "push")
+        .await?;
 
     // Create multiple post-commit configs
     debug!("=== Creating multiple post-commit configs ===");

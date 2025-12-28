@@ -18,15 +18,12 @@ use arrow_array::{Array, RecordBatch};
 use arrow_schema::{DataType, Field, TimeUnit};
 use chrono::{DateTime, SecondsFormat};
 use log::debug;
-use parquet::arrow::ArrowWriter;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::env;
-use std::io::Cursor;
 use std::sync::Arc;
 use tinyfs::FS;
-use tokio::io::AsyncWriteExt;
 
 /// Summary of collection for a single device
 #[derive(Clone, Debug)]
@@ -283,7 +280,9 @@ impl HydroVuCollector {
 
         match max_timestamp {
             Some(timestamp) => {
-                let next_timestamp = timestamp + 1;
+                // Add 1 second (1M microseconds) to avoid duplicate when API uses second resolution
+                // HydroVu API uses Unix seconds, so adding 1 microsecond would round down to same second
+                let next_timestamp = timestamp + 1_000_000;
                 debug!(
                     "Found youngest timestamp {timestamp} for device {device_id}, will continue from {next_timestamp}"
                 );
@@ -403,31 +402,14 @@ impl HydroVuCollector {
                     )))
                 })?;
 
-        // Serialize to Parquet bytes
-        let parquet_bytes = HydroVuCollector::serialize_to_parquet(record_batch).map_err(|e| {
-            steward::StewardError::DataInit(tlogfs::TLogFSError::Io(std::io::Error::other(
-                e.to_string(),
-            )))
-        })?;
-
-        // Create FileSeries writer
+        // Use TinyFS's clean API: pass RecordBatch, let TinyFS handle parquet conversion and metadata
+        // write_series_from_batch handles both create (first run) and append (subsequent runs)
         let device_path = format!("{hydrovu_path}/devices/{device_id}/{}.series", device.name);
-        let mut writer = root_wd
-            .async_writer_path_with_type(&device_path, tinyfs::EntryType::FileSeriesPhysical)
+        use tinyfs::arrow::ParquetExt;
+        let (_min_ts, _max_ts) = root_wd
+            .write_series_from_batch(&device_path, &record_batch, Some("timestamp"))
             .await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-        // Write parquet data
-        writer
-            .write_all(&parquet_bytes)
-            .await
-            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
-
-        // Shutdown writer
-        writer
-            .shutdown()
-            .await
-            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::Io(e)))?;
 
         debug!("Processed {count} records for device {device_id}");
 
@@ -574,24 +556,168 @@ impl HydroVuCollector {
         debug!("Created Arrow RecordBatch with {batch_rows} rows");
         Ok(record_batch)
     }
+}
 
-    /// Serialize Arrow RecordBatch to Parquet bytes
-    fn serialize_to_parquet(record_batch: RecordBatch) -> Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        {
-            let cursor = Cursor::new(&mut buffer);
-            let mut writer = ArrowWriter::try_new(cursor, record_batch.schema(), None)
-                .context("Failed to create Parquet writer")?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::RecordBatch;
+    use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tinyfs::arrow::ParquetExt;
 
-            writer
-                .write(&record_batch)
-                .context("Failed to write RecordBatch to Parquet")?;
+    /// Test that simulates HydroVu collector pattern: write twice, check for duplicate versions
+    #[tokio::test]
+    async fn test_no_duplicate_versions_on_multiple_writes() -> Result<()> {
+        // Setup
+        let temp_dir = TempDir::new()?;
+        let store_path = temp_dir.path().join("test_pond");
 
-            _ = writer.close().context("Failed to close Parquet writer")?;
+        // Initialize pond (creates root directory)
+        let mut persistence = tlogfs::OpLogPersistence::create(
+            store_path.to_str().unwrap(),
+            tlogfs::PondUserMetadata::new(vec!["test_init".to_string()]),
+        )
+        .await?;
+
+        let txn_meta = tlogfs::PondTxnMetadata::new(
+            2, // txn_seq=2 because root init used txn_seq=1
+            tlogfs::PondUserMetadata::new(vec!["test_duplicate_versions".to_string()]),
+        );
+        let tx = persistence.begin_write(&txn_meta).await?;
+
+        // TransactionGuard derefs to FS, so we can use it directly
+        let root = tx.root().await?;
+
+        // Create the /hydrovu directory
+        let _ = root.create_dir_path("/hydrovu").await?;
+
+        // Create test data path
+        let test_path = "/hydrovu/test_device.series";
+
+        // Create first batch (simulating first HydroVu run)
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
+            Field::new("temperature", DataType::Float64, true),
+        ]));
+
+        let mut ts_builder1 = TimestampSecondBuilder::new();
+        let mut temp_builder1 = Float64Builder::new();
+
+        // Add 3 records
+        for i in 0..3 {
+            ts_builder1.append_value(1000000 + i);
+            temp_builder1.append_value(20.0 + i as f64);
         }
 
-        let buffer_size = buffer.len();
-        debug!("Serialized to Parquet: {buffer_size} bytes");
-        Ok(buffer)
+        let batch1 = RecordBatch::try_new(
+            schema1.clone(),
+            vec![
+                Arc::new(ts_builder1.finish()),
+                Arc::new(temp_builder1.finish()),
+            ],
+        )?;
+
+        // Write first batch (creates version 1)
+        debug!("Writing first batch...");
+        let _ = root
+            .write_series_from_batch(test_path, &batch1, Some("timestamp"))
+            .await?;
+
+        // Create second batch (simulating second HydroVu run)
+        let mut ts_builder2 = TimestampSecondBuilder::new();
+        let mut temp_builder2 = Float64Builder::new();
+
+        // Add 3 more records
+        for i in 3..6 {
+            ts_builder2.append_value(1000000 + i);
+            temp_builder2.append_value(20.0 + i as f64);
+        }
+
+        let batch2 = RecordBatch::try_new(
+            schema1.clone(),
+            vec![
+                Arc::new(ts_builder2.finish()),
+                Arc::new(temp_builder2.finish()),
+            ],
+        )?;
+
+        // Write second batch (should create version 2)
+        debug!("Writing second batch...");
+        let _ = root
+            .write_series_from_batch(test_path, &batch2, Some("timestamp"))
+            .await?;
+
+        // Commit transaction (txn_seq=2)
+        let _ = tx.commit().await?;
+
+        // Now check versions using list_file_versions
+        // Read transactions use last_write_sequence (which is 2 after the commit above)
+        let mut persistence2 = tlogfs::OpLogPersistence::open(store_path.to_str().unwrap()).await?;
+        let txn_meta2 = tlogfs::PondTxnMetadata::new(
+            2, // Use last_write_sequence from the previous commit
+            tlogfs::PondUserMetadata::new(vec!["test_check_versions".to_string()]),
+        );
+        let tx2 = persistence2.begin_read(&txn_meta2).await?;
+        let root2 = tx2.root().await?;
+
+        let versions = root2.list_file_versions(test_path).await?;
+
+        // Check for duplicate versions
+        let mut seen_versions = std::collections::HashSet::new();
+        let mut duplicate_found = false;
+        for version_info in &versions {
+            if !seen_versions.insert(version_info.version) {
+                log::error!(
+                    "❌ DUPLICATE VERSION FOUND: version {} appears multiple times",
+                    version_info.version
+                );
+                duplicate_found = true;
+            }
+        }
+
+        // Log all versions for debugging
+        debug!("All versions found:");
+        for version_info in &versions {
+            debug!(
+                "  Version {}: timestamp={}",
+                version_info.version, version_info.timestamp
+            );
+        }
+
+        let _ = tx2.commit().await?;
+
+        // Assert no duplicates
+        assert!(
+            !duplicate_found,
+            "Duplicate versions found! Versions: {:?}",
+            versions.iter().map(|v| v.version).collect::<Vec<_>>()
+        );
+
+        // Assert we have at least 2 versions (one per write_series_from_batch call)
+        // NOTE: Implementation may create multiple versions per write (e.g., node creation + content write)
+        assert!(
+            versions.len() >= 2,
+            "Expected at least 2 versions, got {}. This test verifies no DUPLICATE versions, not exact count.",
+            versions.len()
+        );
+
+        // Verify all versions are unique (no reuse)
+        let mut sorted_versions: Vec<_> = versions.iter().map(|v| v.version).collect();
+        sorted_versions.sort();
+        sorted_versions.dedup();
+        assert_eq!(
+            sorted_versions.len(),
+            versions.len(),
+            "Version deduplication changed count - indicates duplicate versions exist!"
+        );
+
+        Ok(())
     }
 }

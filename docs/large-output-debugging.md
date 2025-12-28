@@ -10,14 +10,15 @@
 
 ### Step 1: Run with full output to file
 ```bash
-# Pattern for any command that produces large output:
+# Use tee to view output in real-time AND save to file:
 RUST_LOG=debug RUST_LOG=datafusion=debug POND=/tmp/pond \
-  cargo run --bin pond show 1> OUT 2> OUT
+  cargo run --bin pond show 2>&1 | tee OUT
 
 # Or for tests:
-cargo test test_name 1> OUT 2> OUT
+cargo test test_name 2>&1 | tee OUT
 
 # Exit status is preserved - you'll know if it succeeded/failed
+# You can watch progress while still capturing everything
 ```
 
 ### Step 2: Search the file with grep_search tool
@@ -31,7 +32,8 @@ cargo test test_name 1> OUT 2> OUT
 ✅ **Full context preserved**: No truncation, all logs available  
 ✅ **Repeatable analysis**: Search again without re-running  
 ✅ **No loss of output**: Non-deterministic tests become debuggable  
-✅ **Pattern matching**: Use grep_search tool on complete output
+✅ **Pattern matching**: Use grep_search tool on complete output  
+✅ **Real-time viewing**: With tee, monitor progress on long-running commands
 
 ## Red Flags (What NOT to Do)
 
@@ -39,7 +41,7 @@ cargo test test_name 1> OUT 2> OUT
 ❌ `cargo run | tail -n 100` - Truncates important info  
 ❌ `cargo run | head -n 50` - Misses later output  
 
-✅ `cargo test 1> OUT 2> OUT` then `grep_search` on OUT file
+✅ `cargo test 2>&1 | tee OUT` then `grep_search` on OUT file
 
 ## When to Use This
 

@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: 2025 Caspar Water Company
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "remote"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-cast = { workspace = true }
+arrow-schema = { workspace = true }
+parquet = { workspace = true, features = ["async", "arrow"] }
+deltalake = { workspace = true, features = ["datafusion"] }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "rt", "fs", "macros"] }
+tokio-util = { workspace = true, features = ["io", "compat"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+pin-project = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+uuid7 = { workspace = true }
+sha2 = { workspace = true }
+crc32fast = "1.4"
+chrono = { workspace = true }
+tlogfs = { workspace = true }
+steward = { workspace = true }
+provider = { workspace = true }
+tinyfs = { workspace = true }
+clap = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+paste = { workspace = true }
+linkme = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+env_logger = { workspace = true }

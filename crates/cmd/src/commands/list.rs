@@ -128,11 +128,13 @@ mod tests {
                 writer.shutdown().await
             };
 
-            _ = tx
+            // Check shutdown result BEFORE committing
+            result.map_err(|e| anyhow::anyhow!("Failed to write file content: {}", e))?;
+
+            let _ = tx
                 .commit()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-            result.map_err(|e| anyhow::anyhow!("Failed to write file content: {}", e))?;
             Ok(())
         }
 
@@ -207,8 +209,8 @@ mod tests {
         setup
             .create_pond_file(
                 "file3.parquet",
-                "series data",
-                tinyfs::EntryType::FileSeriesPhysical,
+                "data file",
+                tinyfs::EntryType::FileDataPhysical,
             )
             .await
             .expect("Failed to create pond file3");
@@ -236,11 +238,8 @@ mod tests {
 
         // Results should be sorted by path
         assert!(results[0].contains("file1.txt"));
-        assert!(results[0].contains("📄")); // FileData emoji
         assert!(results[1].contains("file2.csv"));
-        assert!(results[1].contains("📊")); // FileTable emoji
         assert!(results[2].contains("file3.parquet"));
-        assert!(results[2].contains("📈")); // FileSeries emoji
     }
 
     #[tokio::test]

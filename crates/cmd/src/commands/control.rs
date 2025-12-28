@@ -59,7 +59,7 @@ pub enum ControlMode {
     /// Show incomplete operations (for recovery)
     Incomplete,
     /// Sync with remote: retry failed pushes OR pull new bundles (based on factory mode)
-    Sync,
+    Sync { config: Option<String> },
     /// Show pond configuration (ID, factory modes, metadata, settings)
     ShowConfig,
     /// Set a configuration value (key=value)
@@ -82,9 +82,9 @@ pub async fn control_command(ship_context: &ShipContext, mode: ControlMode) -> R
         ControlMode::Incomplete => {
             show_incomplete_operations(control_table).await?;
         }
-        ControlMode::Sync => {
+        ControlMode::Sync { config } => {
             // Execute remote factory sync (push retry or pull new bundles)
-            execute_sync(ship_context, control_table).await?;
+            execute_sync(ship_context, control_table, config).await?;
         }
         ControlMode::ShowConfig => {
             show_pond_config(control_table).await?;
@@ -427,6 +427,7 @@ async fn show_transaction_detail(
 async fn execute_sync(
     ship_context: &ShipContext,
     control_table: &mut steward::ControlTable,
+    config: Option<String>,
 ) -> Result<()> {
     // Reload control table to see latest commits
     // Control table automatically sees latest Delta commits via DataFusion
@@ -442,7 +443,7 @@ async fn execute_sync(
         .begin_read(&steward::PondUserMetadata::new(vec!["sync".to_string()]))
         .await?;
 
-    match execute_sync_impl(&mut tx, control_table).await {
+    match execute_sync_impl(&mut tx, control_table, config).await {
         Ok(()) => {
             _ = tx.commit().await?;
             log::info!("✓ Sync operation completed");
@@ -456,14 +457,47 @@ async fn execute_sync(
 async fn execute_sync_impl(
     tx: &mut steward::StewardTransactionGuard<'_>,
     control_table: &mut steward::ControlTable,
+    config_base64: Option<String>,
 ) -> Result<()> {
-    // Get remote factory path from control table settings
-    let remote_path = control_table
-        .get_setting("remote_factory_path")
-        .ok_or_else(|| anyhow!(
-            "remote_factory_path not configured. Set it with: pond control set-config remote_factory_path <path>"
-        ))?;
+    // If --config provided, use it directly (recovery case)
+    if let Some(encoded) = config_base64 {
+        log::info!("Using remote config from --config argument");
+        let repl_config = remote::ReplicationConfig::from_base64(&encoded)
+            .map_err(|e| anyhow!("Failed to decode base64 config: {}", e))?;
 
+        let config = repl_config.remote;
+        let pond_metadata = control_table.get_pond_metadata().clone();
+
+        // Create factory context
+        let state = tx.state()?;
+        let provider_context = state.as_provider_context();
+        let factory_context = provider::FactoryContext::with_metadata(
+            provider_context,
+            tinyfs::FileID::root(),
+            pond_metadata,
+        );
+
+        // Serialize config to bytes
+        let config_str = serde_yaml::to_string(&config)
+            .map_err(|e| anyhow!("Failed to serialize remote config: {}", e))?;
+        let config_bytes = config_str.as_bytes().to_vec();
+
+        // Execute the remote factory in ControlWriter mode with "pull" arg
+        let args = vec!["pull".to_string()];
+        FactoryRegistry::execute::<tlogfs::TLogFSError>(
+            "remote",
+            &config_bytes,
+            factory_context,
+            ExecutionContext::control_writer(args),
+        )
+        .await
+        .map_err(|e| anyhow!("Remote factory execution failed: {}", e))?;
+
+        return Ok(());
+    }
+
+    // Normal case: Look for remote factory node at known path
+    let remote_path = "/etc/system.d/1-backup"; // Standard location
     log::info!("Looking for remote factory at: {}", remote_path);
 
     // Get filesystem root

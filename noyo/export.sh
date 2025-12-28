@@ -5,8 +5,8 @@ set -x -i
 ROOT=/Volumes/sourcecode/src/duckpond
 NOYO=${ROOT}/noyo
 POND=${NOYO}/pond
-#EXE=${ROOT}/target/release/pond
-EXE=${ROOT}/target/debug/pond
+EXE=${ROOT}/target/release/pond
+#EXE=${ROOT}/target/debug/pond
 OUTDIR=./export
 
 export RUST_BACKTRACE=1
@@ -21,6 +21,7 @@ cargo build
 rm -rf ${OUTDIR}
 
 # Parameters
+#samply record
 ${EXE} export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/param=*' --dir ${OUTDIR} --temporal "year,month"
 
 # Site detail

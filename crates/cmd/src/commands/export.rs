@@ -179,8 +179,7 @@ fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
                 _ = base_map
                     .entry(key)
                     .and_modify(|existing| {
-                        *existing =
-                            Box::new(merge_export_sets(*existing.clone(), *other_set.clone()));
+                        **existing = merge_export_sets(*existing.clone(), *other_set.clone());
                     })
                     .or_insert(other_set);
             }

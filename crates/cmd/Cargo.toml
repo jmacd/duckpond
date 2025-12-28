@@ -48,6 +48,7 @@ parquet = { workspace = true }
 provider = { workspace = true }
 paste = { workspace = true }
 peak_alloc = { workspace = true }
+remote = { path = "../remote" }
 serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
@@ -60,6 +61,7 @@ tlogfs = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 utilities = { workspace = true }
+url = { workspace = true }
 uuid7 = { workspace = true }
 
 [dev-dependencies]

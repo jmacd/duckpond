@@ -4,14 +4,14 @@
 
 use crate::persistence::State;
 use async_trait::async_trait;
-use log::debug;
+use log::{debug, error};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tinyfs::{
-    AsyncReadSeek, Error as TinyFSError, File, FileID, Metadata, NodeID, NodeMetadata, PartID,
-    persistence::PersistenceLayer,
+    AsyncReadSeek, Error as TinyFSError, File, FileID, FileMetadataWriter, Metadata, NodeID,
+    NodeMetadata, PartID, persistence::PersistenceLayer,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
@@ -102,7 +102,7 @@ impl File for OpLogFile {
         Ok(reader)
     }
 
-    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn AsyncWrite + Send + 'static>>> {
+    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn FileMetadataWriter>>> {
         // Acquire write lock and check for recursive writes
         // The main threat model here is preventing recursive scenarios where
         // a dynamically synthesized file evaluation tries to write a file
@@ -129,6 +129,19 @@ impl File for OpLogFile {
         // Get store path for HybridWriter
         let store_path = self.state.store_path().await;
 
+        // PRE-ALLOCATE version number NOW (not in shutdown)
+        // This ensures correct ordering even if multiple writes happen concurrently
+        let allocated_version = self
+            .state
+            .allocate_version_for_write(self.id)
+            .await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+        debug!(
+            "Pre-allocated version {allocated_version} for file {}",
+            self.id
+        );
+
         // Create streaming writer that will store content via persistence layer
         let persistence = self.state.clone();
         let file_id = self.id;
@@ -140,6 +153,7 @@ impl File for OpLogFile {
             transaction_state,
             entry_type,
             store_path,
+            allocated_version,
         )))
     }
 
@@ -154,7 +168,7 @@ impl File for OpLogFile {
 
 /// Writer integrated with Delta Lake transactions
 /// Streams writes directly to HybridWriter for memory efficiency
-struct OpLogFileWriter {
+pub struct OpLogFileWriter {
     storage: crate::large_files::HybridWriter,
     state: State,
     file_id: FileID,
@@ -162,6 +176,9 @@ struct OpLogFileWriter {
     completed: bool,
     completion_future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     entry_type: tinyfs::EntryType,
+    precomputed_metadata: Option<crate::file_writer::FileMetadata>,
+    /// Pre-allocated version number for this write (allocated at writer creation)
+    allocated_version: i64,
 }
 
 // OpLogFileWriter is Unpin because all its fields are Unpin
@@ -174,6 +191,7 @@ impl OpLogFileWriter {
         transaction_state: Arc<RwLock<TransactionWriteState>>,
         entry_type: tinyfs::EntryType,
         store_path: std::path::PathBuf,
+        allocated_version: i64,
     ) -> Self {
         Self {
             storage: crate::large_files::HybridWriter::new(store_path),
@@ -183,7 +201,76 @@ impl OpLogFileWriter {
             completed: false,
             completion_future: None,
             entry_type,
+            precomputed_metadata: None,
+            allocated_version,
         }
+    }
+}
+
+#[async_trait]
+impl FileMetadataWriter for OpLogFileWriter {
+    fn set_temporal_metadata(&mut self, min: i64, max: i64, timestamp_column: String) {
+        self.precomputed_metadata = Some(crate::file_writer::FileMetadata::Series {
+            min_timestamp: min,
+            max_timestamp: max,
+            timestamp_column,
+        });
+    }
+
+    async fn infer_temporal_bounds(&mut self) -> tinyfs::Result<(i64, i64, String)> {
+        // First, flush the writer to ensure all bytes are written (but don't shutdown yet)
+        use tokio::io::AsyncWriteExt;
+        self.flush().await.map_err(|e| {
+            tinyfs::Error::Other(format!("Failed to flush before inferring bounds: {}", e))
+        })?;
+
+        // Read back the bytes from the temp file in HybridWriter
+        // This is efficient because parquet footer parsing only needs the end of the file
+        let temp_path = self
+            .storage
+            .temp_file_path()
+            .ok_or_else(|| tinyfs::Error::Other("No temp file for inferring bounds".to_string()))?
+            .clone();
+
+        let bytes = tokio::fs::read(&temp_path)
+            .await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to read temp file: {}", e)))?;
+
+        // Parse parquet footer to extract temporal bounds
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use tokio_util::bytes::Bytes;
+
+        let bytes = Bytes::from(bytes);
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to parse parquet: {}", e)))?;
+
+        let parquet_metadata = reader_builder.metadata();
+        let schema = reader_builder.schema();
+
+        // Detect timestamp column
+        let timestamp_column = crate::schema::detect_timestamp_column(schema)
+            .map_err(|e| tinyfs::Error::Other(format!("No timestamp column found: {}", e)))?;
+
+        // Extract temporal bounds
+        let (min_time, max_time) =
+            tinyfs::arrow::parquet::extract_temporal_bounds_from_parquet_metadata(
+                parquet_metadata.as_ref(),
+                schema,
+                &timestamp_column,
+            )?;
+
+        // Set the metadata on ourselves
+        self.set_temporal_metadata(min_time, max_time, timestamp_column.clone());
+
+        // Now shutdown with the metadata set
+        self.shutdown().await.map_err(|e| {
+            tinyfs::Error::Other(format!(
+                "Failed to finalize write after setting metadata: {}",
+                e
+            ))
+        })?;
+
+        Ok((min_time, max_time, timestamp_column))
     }
 }
 
@@ -265,10 +352,12 @@ impl AsyncWrite for OpLogFileWriter {
                 &mut this.storage,
                 crate::large_files::HybridWriter::new(std::path::PathBuf::new()),
             );
-            let mut state = this.state.clone();
+            let state = this.state.clone();
             let file_id = this.file_id;
             let transaction_state = this.transaction_state.clone();
             let entry_type = this.entry_type;
+            let precomputed_metadata = this.precomputed_metadata.clone();
+            let allocated_version = this.allocated_version;
 
             let future = Box::pin(async move {
                 // Finalize HybridWriter to get content
@@ -298,33 +387,29 @@ impl AsyncWrite for OpLogFileWriter {
 
                     // Extract metadata based on file type
                     let metadata = match entry_type {
-                        tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
-                            if content.is_empty() {
-                                // Large file or empty - use placeholder
-                                debug!("OpLogFileWriter: large/empty FileSeries, using placeholder metadata");
+                        tinyfs::EntryType::FileSeriesPhysical => {
+                            // Series files should have precomputed metadata from the parquet writer
+                            // Exception: empty writes (for extended attributes only) are allowed without metadata
+                            if let Some(precomputed) = precomputed_metadata {
+                                precomputed
+                            } else if content.is_empty() && content_len == 0 {
+                                // Empty version for setting extended attributes - no metadata needed
                                 crate::file_writer::FileMetadata::Series {
                                     min_timestamp: 0,
                                     max_timestamp: 0,
-                                    timestamp_column: "timestamp".to_string(),
+                                    timestamp_column: String::new(),
                                 }
                             } else {
-                                // Small file - extract temporal metadata
-                                use std::io::Cursor;
-                                let reader = Cursor::new(&content);
-                                match crate::file_writer::SeriesProcessor::extract_temporal_metadata(reader).await {
-                                    Ok(metadata) => metadata,
-                                    Err(e) => {
-                                        return Err(tinyfs::Error::Other(format!(
-                                            "Failed to extract temporal metadata from FileSeries content: {}",
-                                            e
-                                        )));
-                                    }
-                                }
+                                return Err(tinyfs::Error::Other(
+                                    "FileSeriesPhysical written without temporal metadata - caller must use FileMetadataWriter::set_temporal_metadata() or infer_temporal_bounds()".to_string()
+                                ));
                             }
                         }
-                        tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
-                            if content.is_empty() {
-                                // Large file or empty - use placeholder
+                        tinyfs::EntryType::FileTablePhysical => {
+                            if let Some(precomputed) = precomputed_metadata {
+                                precomputed
+                            } else if content.is_empty() {
+                                // Large file - use placeholder
                                 crate::file_writer::FileMetadata::Table {
                                     schema: r#"{"type": "struct", "fields": []}"#.to_string(),
                                 }
@@ -345,7 +430,7 @@ impl AsyncWrite for OpLogFileWriter {
                         _ => crate::file_writer::FileMetadata::Data,
                     };
 
-                    state.store_file_content_ref(file_id, content_ref, metadata).await
+                    state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version)).await
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to store file: {}", e)))
                 }.await;
 
@@ -353,19 +438,23 @@ impl AsyncWrite for OpLogFileWriter {
                     Ok(_) => {
                         if entry_type.is_series_file() {
                             debug!(
-                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries via new NewFileWriter architecture"
+                                "OpLogFileWriter::poll_shutdown() - successfully stored FileSeries version {allocated_version}"
                             );
                         } else {
                             debug!(
-                                "OpLogFileWriter::poll_shutdown() - successfully stored content via new NewFileWriter architecture"
+                                "OpLogFileWriter::poll_shutdown() - successfully stored content version {allocated_version}"
                             );
                         }
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        debug!(
-                            "OpLogFileWriter::poll_shutdown() - failed to store content via FileWriter: {error_str}"
+                        error!(
+                            "OpLogFileWriter::poll_shutdown() - WRITE FAILED, poisoning transaction: {error_str}"
                         );
+                        // POISON THE TRANSACTION - this write failed, cannot commit
+                        state.poison_transaction(format!(
+                            "File write failed for {file_id} version {allocated_version}: {error_str}"
+                        )).await;
                     }
                 }
 

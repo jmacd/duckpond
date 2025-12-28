@@ -91,7 +91,9 @@ pub async fn mknod_command(
         },
     )
     .await
-    .map_err(|e| anyhow!("mknod operation failed: {}", e))
+    .map_err(|e| anyhow!("mknod operation failed: {}", e))?;
+
+    Ok(())
 }
 
 async fn mknod_impl(

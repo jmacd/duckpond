@@ -6,7 +6,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::AsyncWrite;
 
 use crate::EntryType;
 use crate::error::*;
@@ -139,7 +138,7 @@ impl Pathed<crate::file::Handle> {
     }
 
     /// Get async writer for streaming file content
-    pub async fn async_writer(&self) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+    pub async fn async_writer(&self) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         self.handle.async_writer().await
     }
 
