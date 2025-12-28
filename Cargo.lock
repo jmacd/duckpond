@@ -743,7 +743,7 @@ dependencies = [
  "hydrovu",
  "linkme",
  "log",
- "object_store",
+ "object_store 0.13.0",
  "parquet",
  "paste",
  "peak_alloc",
@@ -1128,7 +1128,7 @@ dependencies = [
  "futures",
  "itertools",
  "log",
- "object_store",
+ "object_store 0.12.4",
  "parking_lot",
  "parquet",
  "rand 0.9.2",
@@ -1163,7 +1163,7 @@ dependencies = [
  "futures",
  "itertools",
  "log",
- "object_store",
+ "object_store 0.12.4",
  "parking_lot",
  "tokio",
 ]
@@ -1187,7 +1187,7 @@ dependencies = [
  "datafusion-session",
  "futures",
  "log",
- "object_store",
+ "object_store 0.12.4",
  "tokio",
 ]
 
@@ -1207,7 +1207,7 @@ dependencies = [
  "indexmap",
  "libc",
  "log",
- "object_store",
+ "object_store 0.12.4",
  "parquet",
  "paste",
  "recursive",
@@ -1253,7 +1253,7 @@ dependencies = [
  "glob",
  "itertools",
  "log",
- "object_store",
+ "object_store 0.12.4",
  "parquet",
  "rand 0.9.2",
  "tempfile",
@@ -1284,7 +1284,7 @@ dependencies = [
  "datafusion-physical-plan",
  "datafusion-session",
  "futures",
- "object_store",
+ "object_store 0.12.4",
  "regex",
  "tokio",
 ]
@@ -1309,7 +1309,7 @@ dependencies = [
  "datafusion-physical-plan",
  "datafusion-session",
  "futures",
- "object_store",
+ "object_store 0.12.4",
  "serde_json",
  "tokio",
 ]
@@ -1340,7 +1340,7 @@ dependencies = [
  "futures",
  "itertools",
  "log",
- "object_store",
+ "object_store 0.12.4",
  "parking_lot",
  "parquet",
  "rand 0.9.2",
@@ -1366,7 +1366,7 @@ dependencies = [
  "datafusion-expr",
  "futures",
  "log",
- "object_store",
+ "object_store 0.12.4",
  "parking_lot",
  "rand 0.9.2",
  "tempfile",
@@ -1695,7 +1695,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-proto-common",
- "object_store",
+ "object_store 0.12.4",
  "prost 0.13.5",
 ]
 
@@ -1747,7 +1747,7 @@ dependencies = [
  "futures",
  "itertools",
  "log",
- "object_store",
+ "object_store 0.12.4",
  "parking_lot",
  "tokio",
 ]
@@ -1783,7 +1783,7 @@ dependencies = [
  "futures",
  "indexmap",
  "itertools",
- "object_store",
+ "object_store 0.12.4",
  "parquet",
  "reqwest 0.12.28",
  "roaring",
@@ -1853,7 +1853,7 @@ dependencies = [
  "indexmap",
  "itertools",
  "num_cpus",
- "object_store",
+ "object_store 0.12.4",
  "parking_lot",
  "parquet",
  "percent-encoding",
@@ -3317,6 +3317,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "object_store"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d180d5469872facb82dec7e233ff850d615330ea3044a7813550b22ffa4f05ce"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "http 1.4.0",
+ "humantime",
+ "itertools",
+ "parking_lot",
+ "percent-encoding",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "url",
+ "walkdir",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3481,7 +3505,7 @@ dependencies = [
  "lz4_flex",
  "num",
  "num-bigint",
- "object_store",
+ "object_store 0.12.4",
  "paste",
  "ring",
  "seq-macro",
@@ -3828,7 +3852,7 @@ dependencies = [
  "humantime",
  "linkme",
  "log",
- "object_store",
+ "object_store 0.13.0",
  "opentelemetry-proto",
  "parquet",
  "paste",
@@ -4200,7 +4224,7 @@ dependencies = [
  "futures",
  "linkme",
  "log",
- "object_store",
+ "object_store 0.13.0",
  "parquet",
  "paste",
  "pin-project",
@@ -4821,7 +4845,7 @@ dependencies = [
  "datafusion-functions-json",
  "deltalake",
  "log",
- "object_store",
+ "object_store 0.13.0",
  "provider",
  "serde",
  "serde_arrow",
@@ -5187,7 +5211,7 @@ dependencies = [
  "humantime",
  "linkme",
  "log",
- "object_store",
+ "object_store 0.13.0",
  "parquet",
  "paste",
  "provider",
