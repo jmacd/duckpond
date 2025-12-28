@@ -563,7 +563,7 @@ impl File for ConfigFile {
         Ok(Box::pin(cursor))
     }
 
-    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
         Err(tinyfs::Error::Other(
             "Config files are read-only".to_string(),
         ))

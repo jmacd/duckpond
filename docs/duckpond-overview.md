@@ -1,141 +1,318 @@
 ## Repository Overview
 
-DuckPond is an application-level file system for storage and archival
-of multi-variate timeseries, intended for small telemetry systems.
+DuckPond is a **query-native filesystem** that treats all filesystem operations as queryable data. Built on Apache Arrow, DataFusion, and Delta Lake, it creates a unified platform where files, directories, and metadata are first-class SQL citizens, enabling sophisticated data transformations and time-series analytics through familiar filesystem operations.
+
+**Core Innovation**: Every filesystem object can be queried with SQL, and SQL queries can create new filesystem objects that appear as native files and directories.
+
+**Primary Use Case**: Storage, archival, and analysis of multi-variate time-series data for small-scale telemetry and industrial systems.
 
 ## File System Architecture
 
-As an application-level file system, DuckPond is designed around
-hierarchical directories and files, containing heterogeneous types of
-file. Several features distinguish the DuckPond file system:
+DuckPond implements a transactional filesystem with these distinguishing features:
 
-- File system transactions.
-- Built-in timeseries file type.
-- Dynamic file/directories support derived content.
+- **ACID Transactions**: Atomic filesystem operations backed by Delta Lake
+- **SQL-Queryable Everything**: Files, directories, and metadata accessible via DataFusion SQL
+- **Dynamic Factories**: SQL queries and transformations appear as native filesystem objects
+- **Time-Series Native**: Built-in support for versioned, time-bucketed data
+- **Backup & Replication**: Streaming backup to S3-compatible storage with replica pond creation
 
-Like a traditional file system, DuckPond provides a namespace used to
-facilitate pattern matching. Built-in pattern-matching libraries
-support traversal and capturing of wildcard variables
+The filesystem provides a hierarchical namespace with pattern matching, glob support, and wildcard variable capture for flexible data access and manipulation
 
-## Application-specific layout
+## Command-Line Interface
 
-An application file system is designed with a specific purpose:
+DuckPond is primarily accessed through the `pond` CLI, which provides Unix-like commands for filesystem operations:
 
-- Create empty directories using `pond mkdir`
-- Copy static files using `pond copy`
-- Create dynamic and executable files using `pond mknod`
-- Execute runnable files to incorporate new data.
-- Use path expressions to read and export structured data.
+### Basic Operations
 
-As an example, create an empty `/etc` directory, then define
-an executable configuration.
+```bash
+# Initialize a new pond
+pond init /data/mypond
 
-```
-pond mkdir /etc
-pond mknod hydrovu /etc/hydrovu --config-path hydrovu.yaml
-```
+# Create directories
+pond mkdir /sensors
 
-This creates a folder for configuration and configures a "hydrovu"
-factory named `/etc/hydrovu`. To run this configuration:
+# Copy files into the pond
+pond copy data.csv /sensors/temperature.csv
 
-```
-pond run /etc/hydrovu [COMMAND [ARGS]]
-```
+# List files with glob patterns
+pond list /sensors/**/*.series
 
-where a command (e.g., "collect") invokes factory-specific logic, in
-this case to collect new timeseries data. The factory in this example
-appends to a series per device, and a `pond cat` command displays
-the data set:
+# Query files with SQL
+pond cat /sensors/temperature.csv --sql "SELECT * FROM source WHERE temp > 25"
 
-```
-pond cat --format=table /hydrovu/devices/4990594334457856/Name.series
+# Describe file schemas
+pond describe /sensors/*.csv
 ```
 
-the `pond list` command expands wildcards, for example to list all
-devices:
+### Dynamic Node Creation
 
+Create computed objects using YAML factory configurations:
+
+```bash
+# Create SQL-derived view
+cat > filter.yaml << EOF
+factory: "sql-derived-table"
+config:
+  patterns:
+    source: "table:///raw/measurements.parquet"
+  query: "SELECT timestamp, temperature FROM source WHERE temperature > 20"
+EOF
+
+pond mknod --config filter.yaml /processed/filtered.series
+
+# Create temporal aggregation
+cat > hourly.yaml << EOF
+factory: "temporal-reduce"
+config:
+  in_pattern: "series:///sensors/*"
+  time_column: "timestamp"
+  resolutions: [1h, 6h, 1d]
+  aggregations:
+    - type: "avg"
+      columns: ["temperature", "pressure"]
+EOF
+
+pond mknod --config hourly.yaml /aggregated/hourly
 ```
-pond list /hydrovu/**/*.series
+
+### Executable Factories
+
+Some factories create executable nodes that can be run with `pond run`:
+
+```bash
+# Configure data collection
+cat > hydrovu.yaml << EOF
+factory: "hydrovu"
+config:
+  client_id: "xxx"
+  client_secret: "yyy"
+  devices:
+    - name: "Station A"
+      id: 12345
+      scope: "StationA"
+EOF
+
+pond mknod --config hydrovu.yaml /etc/system.d/20-hydrovu
+
+# Execute data collection
+pond run /etc/system.d/20-hydrovu collect
+
+# Configure remote backup
+pond mknod --config remote.yaml /etc/system.d/10-remote
+pond run /etc/system.d/10-remote push
 ```
 
-## Built-in Factories
+### Control Table Operations
 
-Each factory type is configured with a specific YAML schema. There are
-a number of built-in factories:
+Query transaction history and pond configuration:
 
-- `dynamic-dir`: Meta-factory for configuring a directory of 
-  factories with nested configuration.
-- `timeseries-join`: Combine multiple timeseries having potentially
-  different schemas into a single, multivariate series.
-- `timeseries-pivot`: Split a set of columns into a new multivariate
-  timeseries.
-- `temporal-reduce`: Downsample timeseries into coarser temporal 
-  resolutions.
-- `template`: Render django-style templates using shell-wildcard
-  captured strings.
-- `remote`: Commands for replicating pond data to remote storage.
+```bash
+# Show recent transactions
+pond control recent --limit 20
 
-A complete example using all the factories can be found in
-`${REPO_ROOT}/noyo`.
+# Show detailed transaction lifecycle
+pond control detail --txn-seq 42
+
+# Query with SQL
+pond control --sql "
+  SELECT txn_seq, cli_args, duration_ms
+  FROM control_table
+  WHERE record_category = 'transaction'
+    AND record_type = 'completed'
+  ORDER BY txn_seq DESC"
+
+# Show pond configuration
+pond control show-config
+```
+
+## Built-in Factory Types
+
+DuckPond provides several factory types for data transformation and management:
+
+### Data Transformation Factories
+
+- **`sql-derived-table`**: Apply SQL transformations to single files
+  - Query individual Parquet/CSV files with SELECT, WHERE, JOIN
+  - Uses DataFusion's native ListingTable for predicate pushdown
+  - Errors if pattern matches multiple files (use sql-derived-series for that)
+
+- **`sql-derived-series`**: Apply SQL to versioned time-series files
+  - Operates on FileSeries (multiple files, multiple versions)
+  - Automatically unions data across files and versions
+  - Ideal for time-series aggregation and multi-file analytics
+
+- **`timeseries-join`**: Join multiple time series by timestamp
+  - FULL OUTER JOIN on timestamp with COALESCE
+  - Per-input time range filtering
+  - Scope prefixing for column disambiguation
+  - Optional per-input transform pipelines
+
+- **`temporal-reduce`**: Time-bucketed aggregations
+  - Creates multiple resolution levels (1h, 6h, 1d, etc.)
+  - Aggregation types: avg, min, max, count, sum
+  - Outputs directory with `res={duration}.series` files
+  - SQL GROUP BY with efficient DataFusion execution
+
+- **`timeseries-pivot`**: Long-to-wide format conversion
+  - Pivots row-based data into columnar time series
+  - Configurable pivot columns and value columns
+
+- **`column-rename`**: Rename or drop columns
+  - Glob pattern support for bulk renaming
+  - Used as transform in factory pipelines
+
+- **`template`**: Render Tera templates with file pattern variables
+  - Django-style template syntax
+  - Wildcard capture for dynamic content generation
+
+- **`dynamic-dir`**: Compose multiple factories into one directory
+  - Each entry uses a different factory
+  - Enables complex hierarchical transformations
+
+### Executable Factories
+
+- **`hydrovu`**: HydroVu API data collection
+  - OAuth2 authentication with automatic token refresh
+  - Device-based data collection with parameter mapping
+  - Wide-format time series storage (timestamp as primary key)
+  - Commands: `collect`
+
+- **`remote`**: Backup and replication management
+  - Streaming backup to S3-compatible storage
+  - Bundle-based transaction replication
+  - Primary/replica pond modes
+  - Commands: `push`, `pull`, `replicate`, `list-files`, `verify`
+
+A complete example using multiple factories can be found in `${REPO_ROOT}/noyo`.
 
 ## Project Crates
 
-### Tinyfs: an abstract file system with dynamic files
+DuckPond is organized into eight Rust crates with clear separation of concerns:
 
-Tinyfs implements a strongly-typed Rust file system interface with
-pattern-matching and navigational primitives. File system nodes are
-identified by a two-part identifier `FileID` which consists of a
-partition ID and a node ID: the partition corresponds with a physical
-directory and physical directories have their partition ID equal to
-their node ID.
+### Core Filesystem Crates
 
-To implement a `tinyfs` file system, an implementor provides the
-`Persistence` trait. A built-in memory file system is provided mainly
-for testing.
+#### `tinyfs` - Type-Safe Filesystem Abstraction
 
-### Provider: for deriving file contents
+Provides a pure, pluggable filesystem API with strong typing and async operations:
 
-A number of data providers are implemented here, where they depend on
-TinyFS and DataFusion, properties of files but not the file system
-itself. Examples include schema modification (e.g., modifying column
-names) and file compression, generally utilities for manipulating data
-that are not directly tied to the real file system `TLogFS`.
+- **Core Types**: `FS`, `WD` (working directory), `Node`, `File`, `Directory`, `Symlink`
+- **Persistence Trait**: `PersistenceLayer` for pluggable storage backends
+- **Node Identity**: `NodeID` and `FileID` for unique object identification
+- **Navigation**: Path-based operations with `Pathed<Handle>` preserving access context
+- **Memory Backend**: Built-in `MemoryPersistence` for testing
+- **Arrow Integration**: Native support for Arrow schemas and data types
 
-Provider context mainly carries a reference to the TinyFS and the
-DataFusion session context.
+TinyFS is storage-agnostic - it defines the filesystem API without committing to any particular storage implementation.
 
-As a central interface, the QueryableFile trait extends tinyfs with
-support for datafusion table providers backed by real and dynamic
-files.
+#### `tlogfs` - Delta Lake Backed Implementation
 
-### TLogFS: a DeltaLake implementation of TinyFS 
+Implements TinyFS using Delta Lake for ACID storage with queryability:
 
-TLogFS is a TinyFS implementation based on the DeltaLake library,
-which is itself based on DataFusion. DataFusion is used to access
-nodes and directory content for physical files and dynamic files with
-physical parents.
+- **OpLogPersistence**: Implements `PersistenceLayer` using Delta Lake operations log
+- **Transaction Guards**: ACID guarantees with automatic rollback on panic/error
+- **Query Integration**: Files expose DataFusion `TableProvider` interfaces
+- **Dynamic Factory System**: Plugin architecture for computed objects (SQL views, aggregations)
+- **Schema Management**: Arrow schema validation and evolution
+- **Large Files**: Content-addressed storage for files >10MB with SHA256 deduplication
+- **Data Taxonomy**: Type-safe wrappers for sensitive configuration (API keys, secrets)
 
-TLogFS is meant to be used as a single-threaded, single-application
-file system.  It does not support concurrent transactions, however
-transactions are atomic.
+**Key Files**:
+- `persistence.rs`: State management and OpLogPersistence implementation
+- `transaction_guard.rs`: ACID transaction lifecycle
+- `query/`: DataFusion integration for SQL operations
+- `file.rs`, `directory.rs`, `symlink.rs`: Filesystem object implementations
+- `delta/`: Delta Lake table operations and schema definitions
 
-Transactions are guarded: only one transaction may borrow the TLogFS
-instance at a time.
+#### `steward` - Transaction Coordination & Audit
 
-Large files are stored outside Deltalake and referred to by sha256.
+Manages transaction lifecycle with separate control table for audit and recovery:
 
-### Steward: a transaction coordinator for TLogFS
+- **Ship**: Main orchestrator managing data filesystem and control table
+- **StewardTransactionGuard**: Wraps TLogFS transactions with lifecycle tracking
+- **ControlTable**: Delta Lake audit log with transaction metadata
+- **Post-Commit Actions**: Sequences factory execution after data commits
+- **Recovery**: Restores incomplete transactions after crashes
 
-Steward simply protects access to the underlying TLogFS.
+**Architecture**:
+- Data Filesystem: `{pond_path}/data` - user data and dynamic objects (TLogFS)
+- Control Table: `{pond_path}/control` - transaction metadata (separate Delta Lake table)
+- Pond Identity: UUID-based identity preserved across replicas
+- Factory Modes: Configurable execution modes (push vs pull for remote factory)
 
-The steward library coordinates transactions in TLogFS. It's main
-purpose is to ensure that metadata is recorded about each transaction
-and that post-commit reader transactions are run in sequence following
-commit.
+### Data Access & Transformation
 
-The "remote" factory is used for replicating content to remote storage
+#### `provider` - URL-Based Access & Factory Infrastructure
 
-### Pond: the command-line utility
+Provides unified data access and the factory plugin system:
 
-The "pond" command lets the user access the TLogFS instance, run
-factory commands, as well as a number of other diagnostic utilities.
+- **URL-Based Access**: `scheme:///path/pattern` for format conversion and filtering
+- **Format Registry**: Pluggable format providers (CSV, Parquet, JSON, Excel HTML)
+- **Factory Registry**: Compile-time registration with `linkme` distributed slices
+- **TinyFS ObjectStore**: DataFusion ObjectStore implementation for seamless integration
+- **TableProvider Creation**: Unified interface for creating queryable tables
+- **Transform Pipeline**: Composable table transformations (column rename, scope prefix)
+
+**Supported URL Schemes**:
+- `series:///pattern` - FileSeries (Parquet time series)
+- `table:///pattern` - FileTable (single files)
+- `csv:///pattern` - CSV files with format conversion
+- `csv://gzip/pattern` - Compressed CSV with automatic decompression
+- `excelhtml:///pattern` - HydroVu Excel HTML exports
+
+**Factory Subdirectories**:
+- `factory/sql_derived.rs`: SQL transformation factories (table and series modes)
+- `factory/temporal_reduce.rs`: Time-bucketed aggregation factory
+- `factory/timeseries_join.rs`: Multi-series join factory
+- `factory/timeseries_pivot.rs`: Long-to-wide pivot factory
+- `factory/dynamic_dir.rs`: Composite directory factory
+- `factory/column_rename.rs`: Column transformation factory
+- `factory/template.rs`: Tera template rendering factory
+
+### Domain-Specific Crates
+
+#### `cmd` - Command-Line Interface
+
+Comprehensive `pond` CLI built with clap:
+
+- **Initialization**: `init`, `recover` - pond lifecycle management
+- **Filesystem Operations**: `mkdir`, `list`, `cat`, `describe`, `copy`
+- **Dynamic Nodes**: `mknod` - create factory-based computed objects
+- **Execution**: `run` - execute factory commands
+- **Control Table**: `control` - query transaction history and configuration
+- **Temporal Operations**: `temporal` - set/detect time bounds for files
+
+**Output Formats**: CSV, JSON, Parquet, Arrow IPC, Table (pretty-print)
+
+#### `hydrovu` - Water Quality Data Collection
+
+HydroVu API integration with factory-based execution:
+
+- **OAuth2 Authentication**: Automatic token management with data taxonomy protection
+- **Device Configuration**: Per-device parameter mapping and scopes
+- **Wide-Format Storage**: Timestamp as primary key with parameterized columns
+- **Automatic Schema**: Arrow schema generation from API metadata
+- **Incremental Collection**: Tracks last timestamps to avoid duplicates
+
+**Factory Configuration**: YAML-based device and parameter setup
+**Execution**: Via `pond run /etc/system.d/20-hydrovu collect`
+
+#### `remote` - Backup & Replication System
+
+Streaming backup and restore using tar+zstd bundles:
+
+- **Bundle Format**: Compressed tar archives with transaction metadata
+- **Object Store**: S3-compatible storage (AWS S3, MinIO, Cloudflare R2, local files)
+- **Transaction-Based**: One bundle per transaction for incremental backups
+- **Replica Support**: Create replica ponds with preserved identity
+- **Factory Modes**: `push` (primary) vs `pull` (replica) execution
+
+**Bundle Structure**:
+- `metadata.json`: Transaction metadata and file manifest
+- Parquet files: All data for that transaction
+- Named by sequence: `txn_00005.bundle.tar.zst`
+
+#### `utilities` - Shared Helpers
+
+Common utilities used across crates:
+- Banner formatting for CLI output
+- Shared error types and result helpers.

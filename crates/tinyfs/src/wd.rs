@@ -19,7 +19,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -175,7 +175,7 @@ impl WD {
     pub async fn create_file_path_streaming<P: AsRef<Path>>(
         &self,
         path: P,
-    ) -> Result<(NodePath, Pin<Box<dyn AsyncWrite + Send>>)> {
+    ) -> Result<(NodePath, Pin<Box<dyn crate::file::FileMetadataWriter>>)> {
         self.create_file_path_streaming_with_type(path, EntryType::FileDataPhysical)
             .await
     }
@@ -185,7 +185,7 @@ impl WD {
         &self,
         path: P,
         entry_type: EntryType,
-    ) -> Result<(NodePath, Pin<Box<dyn AsyncWrite + Send>>)> {
+    ) -> Result<(NodePath, Pin<Box<dyn crate::file::FileMetadataWriter>>)> {
         let path_clone = path.as_ref().to_path_buf();
 
         let node_path = self
@@ -227,7 +227,7 @@ impl WD {
     pub async fn create_file_writer<P: AsRef<Path>>(
         &self,
         path: P,
-    ) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+    ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         let (_, writer) = self.create_file_path_streaming(path).await?;
         Ok(writer)
     }
@@ -237,7 +237,7 @@ impl WD {
         &self,
         path: P,
         entry_type: EntryType,
-    ) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+    ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         let (_, writer) = self
             .create_file_path_streaming_with_type(path, entry_type)
             .await?;
@@ -359,7 +359,7 @@ impl WD {
     pub async fn async_writer_path<P: AsRef<Path>>(
         &self,
         path: P,
-    ) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+    ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         self.async_writer_path_with_type(path, EntryType::FileDataPhysical)
             .await
     }
@@ -369,7 +369,7 @@ impl WD {
         &self,
         path: P,
         entry_type: EntryType,
-    ) -> Result<Pin<Box<dyn AsyncWrite + Send>>> {
+    ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         let path_ref = path.as_ref();
         let (_, lookup) = self.resolve_path(path_ref).await?;
         match lookup {

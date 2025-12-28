@@ -523,7 +523,7 @@ impl tinyfs::File for TimeseriesJoinFile {
         inner.async_reader().await
     }
 
-    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
         self.ensure_inner().await?;
         let inner_guard = self.inner.lock().await;
         let inner = inner_guard.as_ref().expect("inner initialized");
@@ -628,6 +628,7 @@ mod tests {
             context: context.clone(),
             file_id,
             pond_metadata: None,
+            txn_seq: 0,
         }
     }
 

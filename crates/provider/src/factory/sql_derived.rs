@@ -47,7 +47,6 @@ use std::sync::Arc;
 use tinyfs::{
     AsyncReadSeek, EntryType, File, FileHandle, Metadata, NodeMetadata, Result as TinyFSResult,
 };
-use tokio::io::AsyncWrite;
 
 // ============================================================================
 // Configuration Types
@@ -385,6 +384,7 @@ impl SqlDerivedFile {
                 context: self.context.context.clone(),
                 file_id: node_id,
                 pond_metadata: None,
+                txn_seq: 0, // Transform context doesn't need txn_seq
             };
 
             debug!(
@@ -599,7 +599,9 @@ impl File for SqlDerivedFile {
         ))
     }
 
-    async fn async_writer(&self) -> TinyFSResult<std::pin::Pin<Box<dyn AsyncWrite + Send>>> {
+    async fn async_writer(
+        &self,
+    ) -> TinyFSResult<std::pin::Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
         Err(tinyfs::Error::Other(
             "SQL-derived file is read-only".to_string(),
         ))
@@ -1328,7 +1330,7 @@ mod tests {
     use tinyfs::FS;
     use tinyfs::MemoryPersistence;
     use tinyfs::PartID;
-    use tinyfs::arrow::SimpleParquetExt;
+    use tinyfs::arrow::ParquetExt;
     use tokio::io::AsyncWriteExt;
 
     // Test helper: Create patterns HashMap from string URL literals
@@ -1396,6 +1398,7 @@ mod tests {
             context: context.clone(),
             file_id,
             pond_metadata: None,
+            txn_seq: 0,
         }
     }
 
@@ -3068,9 +3071,13 @@ query: ""
         // Create an OpLogFile with parquet data - use setup_test_data pattern
         {
             // Write as FileTable (this creates an OpLogFile internally)
-            root.write_parquet("/test_data.parquet", &batch, EntryType::FileTablePhysical)
-                .await
-                .unwrap();
+            root.create_table_from_batch(
+                "/test_data.parquet",
+                &batch,
+                EntryType::FileTablePhysical,
+            )
+            .await
+            .unwrap();
         }
 
         // Test OpLogFile QueryableFile detection

@@ -183,6 +183,76 @@ async fn describe_command_impl(
                         output.push_str(&format!("   Schema: Error loading schema - {}\n", e));
                     }
                 }
+
+                // For FileSeriesPhysical, show detailed version statistics
+                if matches!(
+                    file_info.metadata.entry_type,
+                    tinyfs::EntryType::FileSeriesPhysical
+                ) {
+                    output.push_str("\n   === Version History ===\n");
+                    match describe_file_series_versions(tx, &file_info.path).await {
+                        Ok(version_stats) => {
+                            if version_stats.is_empty() {
+                                output.push_str("   No versions found\n");
+                            } else {
+                                for stats in version_stats {
+                                    output.push_str(&format!(
+                                        "   Version {}: {} rows",
+                                        stats.version, stats.row_count
+                                    ));
+
+                                    // Show timestamp range if available
+                                    if let (Some(min_time), Some(max_time)) =
+                                        (stats.min_event_time, stats.max_event_time)
+                                    {
+                                        // Convert microseconds to human-readable format
+                                        use chrono::{DateTime, Utc};
+                                        let min_dt =
+                                            DateTime::<Utc>::from_timestamp_micros(min_time);
+                                        let max_dt =
+                                            DateTime::<Utc>::from_timestamp_micros(max_time);
+
+                                        if let (Some(min), Some(max)) = (min_dt, max_dt) {
+                                            output.push_str(&format!(
+                                                ", time range: {} to {}",
+                                                min.format("%Y-%m-%d %H:%M:%S UTC"),
+                                                max.format("%Y-%m-%d %H:%M:%S UTC")
+                                            ));
+                                        }
+                                    }
+                                    output.push('\n');
+
+                                    // Show null counts for columns with nulls (indented under this version)
+                                    let mut null_cols: Vec<_> = stats
+                                        .column_null_counts
+                                        .iter()
+                                        .filter(|&(_, count)| *count > 0)
+                                        .collect();
+
+                                    if !null_cols.is_empty() {
+                                        null_cols.sort_by_key(|(name, _)| *name);
+                                        output.push_str("       Null counts: ");
+                                        let null_strs: Vec<String> = null_cols
+                                            .iter()
+                                            .map(|(col, count)| format!("{}: {}", col, count))
+                                            .collect();
+                                        output.push_str(&null_strs.join(", "));
+                                        output.push('\n');
+                                    }
+                                }
+                                // Show total size after all versions
+                                output.push_str(&format!(
+                                    "   Total size (all versions): {} bytes\n",
+                                    file_info.metadata.size.unwrap_or(0)
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            output
+                                .push_str(&format!("   Error loading version statistics: {}\n", e));
+                        }
+                    }
+                }
             }
             tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
                 output.push_str("   Format: Parquet table\n");
@@ -213,11 +283,24 @@ async fn describe_command_impl(
             }
         }
 
-        output.push_str(&format!(
-            "   Size: {} bytes\n",
-            file_info.metadata.size.unwrap_or(0)
-        ));
-        output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
+        // Show size for non-series files (series files show it in Version History section)
+        if !matches!(
+            file_info.metadata.entry_type,
+            tinyfs::EntryType::FileSeriesPhysical
+        ) {
+            output.push_str(&format!(
+                "   Size: {} bytes\n",
+                file_info.metadata.size.unwrap_or(0)
+            ));
+        }
+        // Note: Version number is already shown in "Version History" section above for series files
+        // For non-series files, this is the only place version is shown
+        if !matches!(
+            file_info.metadata.entry_type,
+            tinyfs::EntryType::FileSeriesPhysical
+        ) {
+            output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
+        }
         output.push('\n');
     }
 
@@ -343,6 +426,227 @@ fn extract_schema_info(
     })
 }
 
+#[derive(Debug)]
+pub struct VersionStats {
+    pub version: u64,
+    pub row_count: usize,
+    pub min_event_time: Option<i64>,
+    pub max_event_time: Option<i64>,
+    pub column_null_counts: std::collections::HashMap<String, usize>,
+}
+
+/// Get detailed statistics for all versions of a file series
+async fn describe_file_series_versions(
+    tx: &mut steward::StewardTransactionGuard<'_>,
+    path: &str,
+) -> Result<Vec<VersionStats>> {
+    let fs = &**tx;
+    let root = fs.root().await?;
+
+    // Resolve the file node
+    let (_wd, lookup) = root
+        .resolve_path(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to resolve path '{}': {}", path, e))?;
+
+    let file_id = match lookup {
+        tinyfs::Lookup::Found(node) => node.id(),
+        _ => return Err(anyhow::anyhow!("Path '{}' not found", path)),
+    };
+
+    // Get all versions
+    let versions = root
+        .list_file_versions(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list versions for '{}': {}", path, e))?;
+
+    let mut version_stats = Vec::new();
+
+    // Get state and session context for querying
+    let state = tx.transaction_guard()?.state()?;
+    let session_ctx = tx.session_context().await?;
+
+    // Get ProviderContext from state
+    let provider_context = state.as_provider_context();
+
+    for version_info in versions {
+        // Create table provider for this specific version
+        let options = provider::TableProviderOptions {
+            version_selection: provider::VersionSelection::SpecificVersion(version_info.version),
+            additional_urls: vec![],
+        };
+
+        let listing_result =
+            provider::create_table_provider(file_id, &provider_context, options).await;
+
+        let stats = match listing_result {
+            Ok(table_provider) => {
+                // Query to count rows and null values per column
+                let schema = table_provider.schema();
+                let field_names: Vec<String> =
+                    schema.fields().iter().map(|f| f.name().clone()).collect();
+
+                // Build SQL to count nulls for each column
+                let null_count_exprs: Vec<String> = field_names
+                    .iter()
+                    .map(|col| {
+                        format!(
+                            "COUNT(CASE WHEN \"{}\" IS NULL THEN 1 END) as \"{}_nulls\"",
+                            col, col
+                        )
+                    })
+                    .collect();
+
+                // Use a unique table name to avoid collisions (include file_id and version)
+                let table_name = format!(
+                    "describe_{}_{}",
+                    file_id.node_id().to_short_string(),
+                    version_info.version
+                );
+                _ = session_ctx.register_table(&table_name, table_provider.clone())?;
+
+                let sql = format!(
+                    "SELECT COUNT(*) as row_count, {} FROM \"{}\"",
+                    null_count_exprs.join(", "),
+                    table_name
+                );
+
+                // Execute the query
+                let query_result = session_ctx.sql(&sql).await;
+
+                // Deregister table immediately after use to keep session clean
+                _ = session_ctx.deregister_table(&table_name);
+
+                match query_result {
+                    Ok(df) => {
+                        match df.collect().await {
+                            Ok(batches) => {
+                                if batches.is_empty() || batches[0].num_rows() == 0 {
+                                    VersionStats {
+                                        version: version_info.version,
+                                        row_count: 0,
+                                        min_event_time: version_info
+                                            .extended_metadata
+                                            .as_ref()
+                                            .and_then(|m| m.get("min_event_time"))
+                                            .and_then(|s| s.parse::<i64>().ok()),
+                                        max_event_time: version_info
+                                            .extended_metadata
+                                            .as_ref()
+                                            .and_then(|m| m.get("max_event_time"))
+                                            .and_then(|s| s.parse::<i64>().ok()),
+                                        column_null_counts: std::collections::HashMap::new(),
+                                    }
+                                } else {
+                                    let batch = &batches[0];
+                                    let row_count_col = batch.column(0);
+                                    let row_count = if let Some(array) = row_count_col
+                                        .as_any()
+                                        .downcast_ref::<arrow::array::Int64Array>(
+                                    ) {
+                                        array.value(0) as usize
+                                    } else {
+                                        0
+                                    };
+
+                                    // Extract null counts
+                                    let mut column_null_counts = std::collections::HashMap::new();
+                                    for (i, field_name) in field_names.iter().enumerate() {
+                                        if let Some(null_col) = batch
+                                            .column(i + 1)
+                                            .as_any()
+                                            .downcast_ref::<arrow::array::Int64Array>(
+                                        ) {
+                                            _ = column_null_counts.insert(
+                                                field_name.clone(),
+                                                null_col.value(0) as usize,
+                                            );
+                                        }
+                                    }
+
+                                    VersionStats {
+                                        version: version_info.version,
+                                        row_count,
+                                        min_event_time: version_info
+                                            .extended_metadata
+                                            .as_ref()
+                                            .and_then(|m| m.get("min_event_time"))
+                                            .and_then(|s| s.parse::<i64>().ok()),
+                                        max_event_time: version_info
+                                            .extended_metadata
+                                            .as_ref()
+                                            .and_then(|m| m.get("max_event_time"))
+                                            .and_then(|s| s.parse::<i64>().ok()),
+                                        column_null_counts,
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to collect query results for version {}: {}",
+                                    version_info.version,
+                                    e
+                                );
+                                VersionStats {
+                                    version: version_info.version,
+                                    row_count: 0,
+                                    min_event_time: None,
+                                    max_event_time: None,
+                                    column_null_counts: std::collections::HashMap::new(),
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to execute query for version {}: {}",
+                            version_info.version,
+                            e
+                        );
+                        VersionStats {
+                            version: version_info.version,
+                            row_count: 0,
+                            min_event_time: None,
+                            max_event_time: None,
+                            column_null_counts: std::collections::HashMap::new(),
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to create table provider for version {}: {}",
+                    version_info.version,
+                    e
+                );
+                VersionStats {
+                    version: version_info.version,
+                    row_count: 0,
+                    min_event_time: None,
+                    max_event_time: None,
+                    column_null_counts: std::collections::HashMap::new(),
+                }
+            }
+        };
+
+        version_stats.push(stats);
+    }
+
+    // Check for duplicate versions - this indicates a data integrity error
+    let mut seen_versions: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for stats in &version_stats {
+        if !seen_versions.insert(stats.version) {
+            return Err(anyhow::anyhow!(
+                "Data integrity error: Duplicate version {} found for file '{}'",
+                stats.version,
+                path
+            ));
+        }
+    }
+
+    Ok(version_stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,16 +704,70 @@ mod tests {
             Ok(())
         }
 
-        /// Create a sample Parquet series by copying CSV and letting it convert
+        /// Create a sample Parquet series by writing directly to pond
         async fn create_parquet_series(&self, pond_path: &str, csv_data: &str) -> Result<()> {
-            let host_file = self.create_csv_file("temp.csv", csv_data).await?;
-            copy_command(
-                &self.ship_context,
-                &[host_file.to_string_lossy().to_string()],
-                pond_path,
-                "series",
+            use arrow_array::{Float64Array, Int64Array, RecordBatch};
+            use arrow_schema::{DataType, Field, Schema};
+            use std::sync::Arc;
+            use tinyfs::arrow::ParquetExt;
+
+            // Parse CSV data
+            let lines: Vec<&str> = csv_data.lines().collect();
+
+            // Build simple test batch with timestamp and value columns
+            let mut timestamp_values: Vec<i64> = Vec::new();
+            let mut value_values: Vec<f64> = Vec::new();
+
+            for line in lines.iter().skip(1) {
+                let values: Vec<&str> = line.split(',').collect();
+                if let Some(ts) = values.first() {
+                    timestamp_values.push(ts.parse::<i64>().unwrap_or(0));
+                }
+                if let Some(v) = values.get(1) {
+                    value_values.push(v.parse::<f64>().unwrap_or(0.0));
+                }
+            }
+
+            // Create schema and arrays
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("timestamp", DataType::Int64, false),
+                Field::new("value", DataType::Float64, false),
+            ]));
+
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Int64Array::from(timestamp_values)),
+                    Arc::new(Float64Array::from(value_values)),
+                ],
+            )?;
+
+            // Write directly to pond using transact
+            let pond_path = pond_path.to_string();
+            let mut ship = self.ship_context.open_pond().await?;
+            ship.transact(
+                &steward::PondUserMetadata::new(vec!["test".to_string()]),
+                |_tx, fs| {
+                    let batch = batch.clone();
+                    let pond_path = pond_path.clone();
+                    Box::pin(async move {
+                        let root = fs.root().await.map_err(|e| {
+                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                        })?;
+
+                        let _ = root
+                            .create_series_from_batch(&pond_path, &batch, Some("timestamp"))
+                            .await
+                            .map_err(|e| {
+                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                            })?;
+
+                        Ok(())
+                    })
+                },
             )
             .await?;
+
             Ok(())
         }
 

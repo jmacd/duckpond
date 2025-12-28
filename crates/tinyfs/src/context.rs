@@ -147,6 +147,7 @@ impl ProviderContext {
 /// - Access to persistence layer via ProviderContext
 /// - FileID providing node and partition identity
 /// - Optional pond metadata (pond_id, birth_timestamp, etc.)
+/// - Current transaction sequence number
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to persistence layer operations
@@ -156,6 +157,9 @@ pub struct FactoryContext {
     /// Pond identity metadata (pond_id, birth_timestamp, etc.)
     /// Provided by Steward when creating factory contexts
     pub pond_metadata: Option<PondMetadata>,
+    /// Current transaction sequence number from persistence layer
+    /// Provided by Steward for backup/replication operations
+    pub txn_seq: i64,
 }
 
 impl FactoryContext {
@@ -166,6 +170,7 @@ impl FactoryContext {
             context,
             file_id,
             pond_metadata: None,
+            txn_seq: 0,
         }
     }
 
@@ -180,7 +185,15 @@ impl FactoryContext {
             context,
             file_id,
             pond_metadata: Some(pond_metadata),
+            txn_seq: 0,
         }
+    }
+
+    /// Set the transaction sequence number
+    #[must_use]
+    pub fn with_txn_seq(mut self, txn_seq: i64) -> Self {
+        self.txn_seq = txn_seq;
+        self
     }
 }
 

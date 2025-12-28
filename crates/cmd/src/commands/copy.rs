@@ -123,26 +123,83 @@ async fn copy_single_file_to_directory_with_name(
         "copy_single_file_to_directory source_path: {file_path}, dest_filename: {filename}, format: {format}, entry_type: {entry_type_str}"
     );
 
-    // Unified streaming copy for all entry types
-    let mut source_file = File::open(file_path)
-        .await
-        .map_err(|e| format!("Failed to open source file '{}': {}", file_path, e))?;
+    // For series files, we need to validate it's actually a parquet file
+    // then stream it to the pond and infer temporal bounds after writing
+    if entry_type == tinyfs::EntryType::FileSeriesPhysical {
+        // Check if this is actually a parquet file by reading just the magic bytes
+        let mut file = File::open(file_path)
+            .await
+            .map_err(|e| format!("Failed to open source file '{}': {}", file_path, e))?;
 
-    let mut dest_writer = dest_wd
-        .async_writer_path_with_type(filename, entry_type)
-        .await
-        .map_err(|e| format!("Failed to create destination writer: {}", e))?;
+        let mut magic = [0u8; 4];
+        use tokio::io::AsyncReadExt;
+        let _ = file
+            .read_exact(&mut magic)
+            .await
+            .map_err(|e| format!("Failed to read magic bytes from '{}': {}", file_path, e))?;
 
-    // Stream copy with 64KB buffer for memory efficiency
-    _ = tokio::io::copy(&mut source_file, &mut dest_writer)
-        .await
-        .map_err(|e| format!("Failed to stream file content: {}", e))?;
+        if &magic != b"PAR1" {
+            return Err(format!(
+                "File '{}' is not a valid parquet file (missing PAR1 magic bytes). \
+                Series files must be parquet format.",
+                file_path
+            )
+            .into());
+        }
 
-    // TLogFS handles temporal metadata extraction during shutdown for FileSeries
-    dest_writer
-        .shutdown()
-        .await
-        .map_err(|e| format!("Failed to complete file write: {}", e))?;
+        // Rewind to beginning for streaming copy
+        use tokio::io::AsyncSeekExt;
+        let _ = file
+            .seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|e| format!("Failed to rewind file: {}", e))?;
+
+        // Create writer and stream the file content efficiently
+        let mut dest_writer = dest_wd
+            .async_writer_path_with_type(filename, entry_type)
+            .await
+            .map_err(|e| format!("Failed to create destination writer: {}", e))?;
+
+        // Stream the file bytes without loading into memory
+        let _ = tokio::io::copy(&mut file, &mut dest_writer)
+            .await
+            .map_err(|e| format!("Failed to stream file content: {}", e))?;
+
+        // Now infer temporal bounds from the written file (reads only footer)
+        // This also calls shutdown() internally
+        let (min_time, max_time, ts_col) = dest_writer
+            .infer_temporal_bounds()
+            .await
+            .map_err(|e| format!("Failed to infer temporal bounds: {}", e))?;
+
+        log::debug!(
+            "Inferred temporal bounds for {}: min={}, max={}, ts_column={}",
+            filename,
+            min_time,
+            max_time,
+            ts_col
+        );
+    } else {
+        // Non-series files: unified streaming copy
+        let mut source_file = File::open(file_path)
+            .await
+            .map_err(|e| format!("Failed to open source file '{}': {}", file_path, e))?;
+
+        let mut dest_writer = dest_wd
+            .async_writer_path_with_type(filename, entry_type)
+            .await
+            .map_err(|e| format!("Failed to create destination writer: {}", e))?;
+
+        // Stream copy with 64KB buffer for memory efficiency
+        _ = tokio::io::copy(&mut source_file, &mut dest_writer)
+            .await
+            .map_err(|e| format!("Failed to stream file content: {}", e))?;
+
+        dest_writer
+            .shutdown()
+            .await
+            .map_err(|e| format!("Failed to complete file write: {}", e))?;
+    }
 
     log::debug!("Copied {file_path} to directory as {filename}");
     Ok(())
@@ -702,7 +759,7 @@ mod tests {
     use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tinyfs::arrow::SimpleParquetExt;
+    use tinyfs::arrow::ParquetExt;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::bytes::Bytes;
@@ -1151,8 +1208,9 @@ mod tests {
                             ))
                         })?;
 
-                        // Write as file:series using tlogfs write_parquet
-                        root.write_parquet(&path, &batch, tinyfs::EntryType::FileSeriesPhysical)
+                        // Write as file:series using ParquetExt with temporal metadata extraction
+                        let _ = root
+                            .create_series_from_batch(&path, &batch, Some("timestamp"))
                             .await
                             .map_err(|e| {
                                 steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))

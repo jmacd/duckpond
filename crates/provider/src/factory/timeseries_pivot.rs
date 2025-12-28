@@ -198,7 +198,7 @@ impl tinyfs::File for TimeseriesPivotFile {
         ))
     }
 
-    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
         Err(tinyfs::Error::Other(
             "TimeseriesPivotFile is read-only".to_string(),
         ))
@@ -377,6 +377,7 @@ mod tests {
             context: context.clone(),
             file_id,
             pond_metadata: None,
+            txn_seq: 0,
         }
     }
 

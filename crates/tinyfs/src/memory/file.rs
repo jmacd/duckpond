@@ -74,7 +74,7 @@ impl File for MemoryFile {
         Ok(Box::pin(std::io::Cursor::new(content.clone())))
     }
 
-    async fn async_writer(&self) -> error::Result<Pin<Box<dyn AsyncWrite + Send>>> {
+    async fn async_writer(&self) -> error::Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         // Acquire write lock
         let mut state = self.write_state.write().await;
         if *state == WriteState::Writing {
@@ -206,6 +206,22 @@ impl MemoryFileWriter {
             completed: false,
             completion_future: None,
         }
+    }
+}
+
+#[async_trait]
+impl crate::file::FileMetadataWriter for MemoryFileWriter {
+    fn set_temporal_metadata(&mut self, _min: i64, _max: i64, _timestamp_column: String) {
+        // Memory files don't persist metadata - this is a no-op
+        // In a real implementation, we'd store this in MemoryFile
+    }
+
+    async fn infer_temporal_bounds(&mut self) -> error::Result<(i64, i64, String)> {
+        // For memory files, we don't support infer_temporal_bounds
+        // This would require reading the bytes and parsing parquet
+        Err(crate::Error::Other(
+            "infer_temporal_bounds not supported for memory files".to_string(),
+        ))
     }
 }
 

@@ -1239,7 +1239,10 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
 
         use tokio::io::AsyncWriteExt;
         writer.write_all(&buffer).await?;
-        writer.shutdown().await?;
+
+        // Infer temporal bounds from the written parquet file
+        // This also handles shutdown internally
+        _ = writer.infer_temporal_bounds().await?;
 
         debug!("Committing transaction 3...");
         tx2.commit_test().await?;

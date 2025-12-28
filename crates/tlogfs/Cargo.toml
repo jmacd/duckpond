@@ -18,10 +18,6 @@ description.workspace = true
 [lib]
 doctest = false
 
-[features]
-# Test helpers - enables commit_test() method for integration tests
-test-helpers = []
-
 [dependencies]
 arrow = { workspace = true }
 arrow-array = { workspace = true }
@@ -67,7 +63,7 @@ uuid7 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-utilities = { workspace = true, features = ["test-helpers"] }
+utilities = { workspace = true }
 
 [lints]
 workspace = true

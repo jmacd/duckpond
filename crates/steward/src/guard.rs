@@ -358,18 +358,28 @@ impl<'a> StewardTransactionGuard<'a> {
         let mut factories_to_run = Vec::new();
 
         for mut config in factory_configs {
-            // Check factory mode setting - MUST be set for factories in /etc/system.d/
+            // Check factory mode setting - set default "push" for unconfigured factories
             let factory_mode = match self.control_table.get_factory_mode(&config.factory_name) {
                 Some(mode) => mode,
                 None => {
-                    error!(
-                        "Factory '{}' exists in /etc/system.d/ but has no mode configured",
+                    // Default to "push" mode for post-commit factories in /etc/system.d/
+                    info!(
+                        "Factory '{}' has no mode configured, defaulting to 'push' (automatic execution)",
                         config.factory_name
                     );
-                    error!(
-                        "Factories in /etc/system.d/ are post-commit factories and MUST have mode set to 'push' or 'pull'"
-                    );
-                    return; // Fail fast - don't silently skip misconfigured factories
+                    // Set the default mode in control table for future use
+                    if let Err(e) = self
+                        .control_table
+                        .set_factory_mode(&config.factory_name, "push")
+                        .await
+                    {
+                        error!(
+                            "Failed to set default factory mode for '{}': {}",
+                            config.factory_name, e
+                        );
+                        continue; // Skip this factory if we can't set mode
+                    }
+                    "push".to_string()
                 }
             };
 
@@ -723,7 +733,8 @@ impl<'a> StewardTransactionGuard<'a> {
             provider_context,
             parent_node_id,
             pond_metadata.clone(),
-        );
+        )
+        .with_txn_seq(self.txn_meta.txn_seq);
 
         // Pass factory mode as args[0]
         let args = vec![factory_mode.to_string()];

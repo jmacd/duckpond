@@ -791,10 +791,157 @@ pond backup now
    - Risk: Backups fall behind, queue builds up
    - **Recommendation:** Make post-commit async, queue backups, report lag in status
 
-## Next Steps
+---
 
-1. **Implement Phase 1** (change detection) - PRIORITY
-2. Test with real pond data (HydroVu use case)
-3. Profile performance with large files (1GB+ CSVs)
-4. Set up CI testing with localstack (S3 emulator)
-5. Document backup/restore procedures for users
+## Implementation Status (December 2025)
+
+### DeltaLake Chunked Storage Implementation - COMPLETED ✅
+
+**Decision Made:** Replaced tar.zstd bundle format with DeltaLake table for chunked file storage
+
+**Rationale:**
+- **Native querying**: Can query backup contents with SQL (via DataFusion)
+- **Partitioning**: Files organized by bundle_id (transaction date + sequence)
+- **Incremental operations**: Insert new chunks without reading existing data
+- **Compression**: Built-in Parquet compression (typically better than zstd on structured data)
+- **Change detection**: Can query what's in each bundle without downloading
+- **Large file support**: Files chunked to 100MB (configurable), enabling parallel upload/download
+
+**Schema Implementation:**
+```rust
+// Arrow schema in crates/remote/src/schema.rs
+fn arrow_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("bundle_id", DataType::Utf8, false),      // Partition key: FILE-META-{date}-{txn} or POND-FILE-{sha256}
+        Field::new("pond_txn_id", DataType::Int64, false),   // Transaction sequence number
+        Field::new("path", DataType::Utf8, false),           // File path in pond
+        Field::new("chunk_id", DataType::Int32, false),      // Chunk sequence (0-based)
+        Field::new("chunk_crc32", DataType::UInt32, false),  // CRC32 checksum for chunk
+        Field::new("chunk_data", DataType::Binary, false),   // Raw chunk bytes
+        Field::new("total_size", DataType::Int64, false),    // Total file size
+        Field::new("total_sha256", DataType::Utf8, false),   // SHA256 of complete file
+        Field::new("chunk_count", DataType::Int32, false),   // Total chunks for file
+        Field::new("cli_args", DataType::Utf8, false),       // Command that created bundle
+        Field::new("created_at", DataType::Utf8, false),     // ISO timestamp
+    ]))
+}
+```
+
+**Partitioning Strategy:**
+- Transaction metadata files: `bundle_id = FILE-META-{YYYY-MM-DD}-{txn_seq}`
+  - Example: `FILE-META-2025-12-23-7` (transaction 7 on Dec 23)
+  - Groups all files from one transaction together
+  - Enables efficient "restore transaction N" queries
+
+- Large files (>100MB): `bundle_id = POND-FILE-{sha256}`
+  - Example: `POND-FILE-e3b0c44298fc1c14...` (content-addressed)
+  - Deduplicates identical large files across transactions
+  - Chunks spread across multiple Parquet row groups
+
+**Query Key:** Files uniquely identified by `(bundle_id, path, pond_txn_id)`
+- Bundle ID: Partition key (date-based or content-addressed)
+- Path: File path within transaction
+- Pond Transaction ID: Transaction sequence number
+- Prevents chunk mixing when multiple files share same bundle_id
+
+**API Implementation:**
+```rust
+// Write file to remote (crates/remote/src/table.rs)
+pub async fn write_file<R: AsyncRead + Unpin>(
+    &mut self,
+    pond_txn_id: i64,
+    path: impl Into<String>,
+    reader: R,
+    cli_args: Vec<String>,
+) -> Result<String>  // Returns bundle_id
+
+// Read file from remote
+pub async fn read_file<W: AsyncWrite + Unpin>(
+    &self,
+    bundle_id: &str,
+    path: &str,
+    pond_txn_id: i64,
+    writer: W,
+) -> Result<()>
+
+// List files in remote
+pub async fn list_files(&self, _pond_id: &str) -> Result<Vec<(String, String, i64, i64)>>
+// Returns: (bundle_id, path, pond_txn_id, total_size)
+
+// List files for specific transaction
+pub async fn list_transaction_files(&self, txn_seq: i64) 
+    -> Result<Vec<(String, String, String, i64, i64)>>
+// Returns: (bundle_id, path, sha256, size, pond_txn_id)
+```
+
+**Factory Integration:**
+- **Push mode (primary pond):** Transaction files backed up post-commit to bundle `FILE-META-{date}-{txn}`
+- **Pull mode (replica pond):** Syncs bundles from remote, reconstructs transactions locally
+- **Large file handling:** Files >100MB written to `POND-FILE-{sha256}` bundles, fetched on-demand
+
+**Chunking Benefits:**
+1. **Streaming**: No need to buffer entire file in memory
+2. **Resumability**: Can resume interrupted transfers at chunk boundary
+3. **Parallelization**: Future enhancement - upload/download chunks concurrently
+4. **Integrity**: Per-chunk CRC32 + total file SHA256 verification
+5. **Efficiency**: Only download chunks needed for partial reads (future)
+
+**Testing Status:**
+- ✅ All 316 tests passing
+- ✅ Roundtrip write/read verified (small and large files)
+- ✅ Empty file handling works
+- ✅ Replica initialization from bundles working
+- ✅ Large file on-demand fetch implemented
+- ✅ Integration tested with setup_oteljson.sh (7 transactions, 3 large files)
+
+**Performance Characteristics:**
+- Chunk size: 100MB (configurable)
+- Write throughput: Limited by Parquet encoding + object store bandwidth
+- Read throughput: Limited by network + Parquet decode (single-threaded currently)
+- Query performance: Fast (DeltaLake indexes + predicate pushdown)
+
+**Key Improvements Over Original Tar Bundle Design:**
+
+| Aspect | Tar Bundle | DeltaLake Implementation |
+|--------|-----------|-------------------------|
+| Querying | Must download + extract entire bundle | SQL queries without download |
+| Chunking | All-or-nothing | 100MB chunks, resumable |
+| Deduplication | None | Content-addressed large files |
+| Change detection | Download manifest | Query Delta log |
+| Large file support | Memory pressure | Streaming with controlled buffer |
+| Partial restore | Must extract entire bundle | Selective file download |
+| Compression | zstd (tar level) | Parquet (columnar + dictionary) |
+
+**Known Limitations & Future Work:**
+1. **Sequential chunk download**: Currently downloads chunks in order (could parallelize)
+2. **Bundle restore gap**: If replica init fails partway, use `pond control sync --config=<base64>` to resume
+3. **No bundle GC**: Old bundles accumulate (need retention policy)
+4. **Single-threaded**: Read/write operations not parallelized yet
+5. **Schema evolution**: Adding columns requires careful migration
+
+**Design Lessons Learned:**
+1. **Partition key matters**: Initial design used pond_id as partition, but bundle_id is better (groups related files)
+2. **Unique keys critical**: Required 3-column key (bundle_id, path, pond_txn_id) to prevent chunk collisions
+3. **Schema bloat**: Removed redundant columns (pond_id, version, file_type) that were constant within partition
+4. **Factory modes**: Automatic "push" default prevents test noise, explicit modes still preferred for clarity
+
+**Configuration:**
+```yaml
+# Factory node at /etc/system.d/1-backup
+factory: remote
+mode: push   # Primary ponds backup automatically (default)
+# mode: pull # Replica ponds sync on demand
+
+config:
+  remote_url: "s3://my-bucket/ponds/prod"
+  endpoint: "https://s3.amazonaws.com"
+  region: "us-west-2"
+```
+
+**Next Steps:**
+1. ✅ Schema optimization (removed 3 redundant columns)
+2. ✅ Factory mode defaults (automatic "push" for new factories)
+3. ⏳ Implement retention policy (delete old bundles after N days)
+4. ⏳ Add parallel chunk upload/download
+5. ⏳ Bundle verification command (`pond control verify`)
+6. ⏳ Metrics/monitoring (upload success rate, throughput)

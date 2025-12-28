@@ -263,7 +263,7 @@ impl tinyfs::File for InfiniteCsvFile {
         Ok(Box::pin(reader))
     }
 
-    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
         Err(tinyfs::Error::Other(
             "Infinite CSV files are read-only".to_string(),
         ))

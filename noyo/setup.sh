@@ -28,16 +28,16 @@ ${EXE} copy host://${NOYO}/laketech /laketech/data
 ${EXE} mknod remote /etc/test_backup --config-path ${NOYO}/backup.yaml
 
 # Disable hydrovu
-#${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
+${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
 
 # Copy-out hydrovu data
-COPY=${NOYO}/copy
+#COPY=${NOYO}/copy
 #rm -rf ${COPY}
 #mkdir ${COPY}
 #POND=${REPLICA} ${EXE} copy '/hydrovu/**/*.series' host://${COPY}
 
 # Copy-in hydrovu data
-${EXE} copy host://${COPY} /
+#${EXE} copy host://${COPY} /
 
 # Configure export pipeline
 

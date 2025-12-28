@@ -386,7 +386,7 @@ impl File for TemplateFile {
         Ok(Box::pin(cursor))
     }
 
-    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tokio::io::AsyncWrite + Send>>> {
+    async fn async_writer(&self) -> TinyFSResult<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
         Err(tinyfs::Error::Other(
             "Template files are read-only".to_string(),
         ))

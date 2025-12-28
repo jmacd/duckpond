@@ -8,6 +8,7 @@ members = [
 "crates/hydrovu",
 "crates/utilities",
 "crates/provider",
+"crates/remote",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ tlogfs = { path = "crates/tlogfs" }
 hydrovu = { path = "crates/hydrovu" }
 provider = { path = "crates/provider" }
 utilities = { path = "crates/utilities" }
+remote = { path = "crates/remote" }
 
 anyhow = "1.0.82"
 arrow = { version = "55", default-features = false, features = ["prettyprint", "ipc"] }
@@ -64,6 +66,7 @@ linkme = "0.3"
 log = "0.4.17"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
 object_store = { version = "0.12" }
+opentelemetry-proto = { version = "0.31.0", features = ["gen-tonic-messages", "metrics", "with-serde"] }
 parquet = { version = "55", features = ["async", "arrow"] }
 parse_duration = "2.1.1"
 paste = "1.0"
@@ -83,6 +86,7 @@ sha2 = "0.10.8"
 tempfile = "3.8"
 tera = "1"
 thiserror = "2.0.12"
+tl = "0.7.8"
 tokio = { version = "1.32", features = ["io-util", "rt"] }
 tokio-tar = "0.3"
 tokio-util = { version = "0.7", features = ["io", "compat"] }
