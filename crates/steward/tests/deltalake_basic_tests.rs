@@ -33,7 +33,9 @@ async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {
     )?;
 
     // Step 2: Create table and write first batch
-    let url = url::Url::from_directory_path(table_path).or_else(|_| url::Url::from_file_path(table_path)).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+    let url = url::Url::from_directory_path(table_path)
+        .or_else(|_| url::Url::from_file_path(table_path))
+        .map_err(|_| anyhow::anyhow!("Invalid path"))?;
     let table = DeltaOps::try_from_uri(url)
         .await?
         .write(vec![batch1])
@@ -72,7 +74,9 @@ async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {
     );
 
     // Step 4: Test with fresh table handle - should also see all commits
-    let url = url::Url::from_directory_path(table_path).or_else(|_| url::Url::from_file_path(table_path)).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+    let url = url::Url::from_directory_path(table_path)
+        .or_else(|_| url::Url::from_file_path(table_path))
+        .map_err(|_| anyhow::anyhow!("Invalid path"))?;
     let fresh_table = deltalake::open_table(url).await?;
     debug!("Fresh table version: {:?}", fresh_table.version());
 
@@ -90,7 +94,10 @@ async fn test_multiple_separate_table_handles() -> Result<()> {
     let temp_dir = tempdir()?;
     let table_path = temp_dir.path();
 
-    debug!("Testing separate table handles at: {}", table_path.display());
+    debug!(
+        "Testing separate table handles at: {}",
+        table_path.display()
+    );
 
     // Create schema and first batch
     let schema = Arc::new(Schema::new(vec![
@@ -107,7 +114,9 @@ async fn test_multiple_separate_table_handles() -> Result<()> {
     )?;
 
     // Write with first handle (creates table)
-    let url = url::Url::from_directory_path(table_path).or_else(|_| url::Url::from_file_path(table_path)).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+    let url = url::Url::from_directory_path(table_path)
+        .or_else(|_| url::Url::from_file_path(table_path))
+        .map_err(|_| anyhow::anyhow!("Invalid path"))?;
     let table1 = DeltaOps::try_from_uri(url.clone())
         .await?
         .write(vec![batch1])
@@ -147,7 +156,9 @@ async fn test_multiple_separate_table_handles() -> Result<()> {
     debug!("Table1 version after table2 commit: {:?}", table1.version());
 
     // But if we refresh table1, it should see the new version
-    let url = url::Url::from_directory_path(table_path).or_else(|_| url::Url::from_file_path(table_path)).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+    let url = url::Url::from_directory_path(table_path)
+        .or_else(|_| url::Url::from_file_path(table_path))
+        .map_err(|_| anyhow::anyhow!("Invalid path"))?;
     let table1_refreshed = deltalake::open_table(url).await?;
     debug!("Table1 refreshed: version {:?}", table1_refreshed.version());
 
@@ -165,7 +176,10 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
     let temp_dir = tempdir()?;
     let table_path = temp_dir.path();
 
-    debug!("Testing transaction sequence numbering at: {:?}", table_path.display());
+    debug!(
+        "Testing transaction sequence numbering at: {:?}",
+        table_path.display()
+    );
 
     let schema = Arc::new(Schema::new(vec![Field::new(
         "tx_id",
@@ -191,7 +205,9 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
                 .await?
         } else {
             // Create new table with first batch
-            let url = url::Url::from_directory_path(table_path).or_else(|_| url::Url::from_file_path(table_path)).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+            let url = url::Url::from_directory_path(table_path)
+                .or_else(|_| url::Url::from_file_path(table_path))
+                .map_err(|_| anyhow::anyhow!("Invalid path"))?;
             DeltaOps::try_from_uri(url)
                 .await?
                 .write(vec![batch])
@@ -218,7 +234,9 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
         debug!("  Immediate read shows version: {:?}", current_version);
 
         // Create a fresh handle - should also see the latest version
-        let url = url::Url::from_directory_path(table_path).or_else(|_| url::Url::from_file_path(table_path)).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+        let url = url::Url::from_directory_path(table_path)
+            .or_else(|_| url::Url::from_file_path(table_path))
+            .map_err(|_| anyhow::anyhow!("Invalid path"))?;
         let fresh_table = deltalake::open_table(url).await?;
         debug!("  Fresh handle shows version: {:?}", fresh_table.version());
         assert_eq!(
@@ -246,7 +264,9 @@ async fn test_deltalake_handle_sees_own_commits() -> Result<()> {
         vec![Arc::new(StringArray::from(vec!["step1"]))],
     )?;
 
-    let url = url::Url::from_directory_path(table_path).or_else(|_| url::Url::from_file_path(table_path)).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+    let url = url::Url::from_directory_path(table_path)
+        .or_else(|_| url::Url::from_file_path(table_path))
+        .map_err(|_| anyhow::anyhow!("Invalid path"))?;
     let table = DeltaOps::try_from_uri(url)
         .await?
         .write(vec![batch1])
@@ -275,7 +295,9 @@ async fn test_deltalake_handle_sees_own_commits() -> Result<()> {
     debug!("Current version after step 2: {:?}", current_version);
 
     // A fresh handle should also see the same version
-    let url = url::Url::from_directory_path(table_path).or_else(|_| url::Url::from_file_path(table_path)).map_err(|_| anyhow::anyhow!("Invalid path"))?;
+    let url = url::Url::from_directory_path(table_path)
+        .or_else(|_| url::Url::from_file_path(table_path))
+        .map_err(|_| anyhow::anyhow!("Invalid path"))?;
     let fresh_table = deltalake::open_table(url).await?;
     debug!("Fresh handle version: {:?}", fresh_table.version());
     assert_eq!(

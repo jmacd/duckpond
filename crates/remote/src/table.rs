@@ -90,10 +90,12 @@ impl RemoteTable {
         // Create Delta Lake table
         let url = Url::from_directory_path(path.as_ref())
             .or_else(|_| Url::from_file_path(path.as_ref()))
-            .map_err(|_| RemoteError::TableOperation(format!("Failed to create URL from path: {}", path_str)))?;
-        
+            .map_err(|_| {
+                RemoteError::TableOperation(format!("Failed to create URL from path: {}", path_str))
+            })?;
+
         debug!("Using URL: {}", url);
-        
+
         let table = DeltaOps::try_from_uri(url)
             .await
             .map_err(|e| {

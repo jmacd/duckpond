@@ -49,7 +49,10 @@ impl Provider {
     /// Create a new Provider with ProviderContext (supports all types)
     /// Use this when you have an active transaction and want to query builtin types
     #[must_use]
-    pub fn with_context(fs: Arc<tinyfs::FS>, provider_context: Arc<tinyfs::ProviderContext>) -> Self {
+    pub fn with_context(
+        fs: Arc<tinyfs::FS>,
+        provider_context: Arc<tinyfs::ProviderContext>,
+    ) -> Self {
         Self {
             fs,
             provider_context: Some(provider_context),
@@ -99,7 +102,9 @@ impl Provider {
                     scheme
                 ))
             })?;
-            return self.create_builtin_table_provider(&url, provider_context).await;
+            return self
+                .create_builtin_table_provider(&url, provider_context)
+                .await;
         }
 
         // External format providers (csv, oteljson, excelhtml, etc.)
@@ -121,18 +126,20 @@ impl Provider {
         let root = self.fs.root().await?;
         let path = url.path();
 
-        let (_, lookup_result) = root.resolve_path(path).await.map_err(|e| {
-            Error::InvalidUrl(format!("Failed to resolve path '{}': {}", path, e))
-        })?;
+        let (_, lookup_result) = root
+            .resolve_path(path)
+            .await
+            .map_err(|e| Error::InvalidUrl(format!("Failed to resolve path '{}': {}", path, e)))?;
 
         let node_path = match lookup_result {
             Lookup::Found(np) => np,
             _ => return Err(Error::InvalidUrl(format!("File not found: {}", path))),
         };
 
-        let file_handle = node_path.as_file().await.map_err(|e| {
-            Error::InvalidUrl(format!("Failed to get file handle: {}", e))
-        })?;
+        let file_handle = node_path
+            .as_file()
+            .await
+            .map_err(|e| Error::InvalidUrl(format!("Failed to get file handle: {}", e)))?;
 
         let file_arc = file_handle.handle.get_file().await;
         let file_guard = file_arc.lock().await;

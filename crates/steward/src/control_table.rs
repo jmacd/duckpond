@@ -521,7 +521,9 @@ impl ControlTable {
         // Create table with ErrorIfExists mode (fail if already exists)
         let url = Url::from_directory_path(path.as_ref())
             .or_else(|_| Url::from_file_path(path.as_ref()))
-            .map_err(|_| StewardError::ControlTable(format!("Failed to create URL from path: {}", path_str)))?;
+            .map_err(|_| {
+                StewardError::ControlTable(format!("Failed to create URL from path: {}", path_str))
+            })?;
         let table = DeltaOps::try_from_uri(url)
             .await
             .map_err(|e| StewardError::ControlTable(format!("Failed to initialize table: {}", e)))?
@@ -604,7 +606,9 @@ impl ControlTable {
 
         let url = Url::from_directory_path(path.as_ref())
             .or_else(|_| Url::from_file_path(path.as_ref()))
-            .map_err(|_| StewardError::ControlTable(format!("Failed to create URL from path: {}", path_str)))?;
+            .map_err(|_| {
+                StewardError::ControlTable(format!("Failed to create URL from path: {}", path_str))
+            })?;
         let table = deltalake::open_table(url).await.map_err(|e| {
             StewardError::ControlTable(format!(
                 "Failed to open control table at {}: {}",

@@ -25,12 +25,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use url::Url;
 use tinyfs::{
     EntryType, FS, FileID, FileVersionInfo, Node, NodeMetadata, NodeType, Result as TinyFSResult,
     persistence::PersistenceLayer, transaction_guard::TransactionState as TinyFsTransactionState,
 };
 use tokio::sync::Mutex;
+use url::Url;
 
 pub struct OpLogPersistence {
     pub(crate) path: PathBuf,
@@ -183,7 +183,9 @@ impl OpLogPersistence {
 
         let url = Url::from_directory_path(path.as_ref())
             .or_else(|_| Url::from_file_path(path.as_ref()))
-            .map_err(|_| TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str)))?;
+            .map_err(|_| {
+                TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str))
+            })?;
         let table = DeltaOps::try_from_uri(url)
             .await?
             .create()
@@ -222,15 +224,17 @@ impl OpLogPersistence {
 
         // First try to open existing table
         let path_str = path.as_ref().to_string_lossy().to_string();
-        
+
         // Ensure directory exists before trying to create URL
         std::fs::create_dir_all(path.as_ref())
             .map_err(|e| TLogFSError::Internal(format!("Failed to create directory: {}", e)))?;
-        
+
         let url = Url::from_directory_path(path.as_ref())
             .or_else(|_| Url::from_file_path(path.as_ref()))
-            .map_err(|_| TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str)))?;
-        
+            .map_err(|_| {
+                TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str))
+            })?;
+
         let table = match deltalake::open_table(url.clone()).await {
             Ok(existing_table) => {
                 debug!("Found existing table at {}", &path_str);
@@ -341,7 +345,9 @@ impl OpLogPersistence {
         &self,
         limit: Option<usize>,
     ) -> Result<Vec<CommitInfo>, TLogFSError> {
-        self.table.history(limit).await
+        self.table
+            .history(limit)
+            .await
             .map(|iter| iter.collect())
             .map_err(TLogFSError::Delta)
     }
@@ -496,7 +502,12 @@ impl OpLogPersistence {
         // This ensures subsequent transactions see the new data
         let reload_url = Url::from_directory_path(&self.path)
             .or_else(|_| Url::from_file_path(&self.path))
-            .map_err(|_| TLogFSError::Internal(format!("Failed to create URL from path: {}", self.path.to_string_lossy())))?;
+            .map_err(|_| {
+                TLogFSError::Internal(format!(
+                    "Failed to create URL from path: {}",
+                    self.path.to_string_lossy()
+                ))
+            })?;
         self.table = deltalake::open_table(reload_url).await?;
         debug!(
             "🔄 Reloaded table after commit, new version: {:?}",

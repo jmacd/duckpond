@@ -195,9 +195,13 @@ async fn show_brief_mode(
     }
 
     // Get aggregate file statistics from Delta Lake metadata
-    let url = Url::from_directory_path(&store_path)
-        .or_else(|_| Url::from_file_path(&store_path))
-        .map_err(|_| steward::StewardError::Dyn(format!("Failed to create URL from path: {}", store_path).into()))?;
+    let url = Url::from_directory_path(store_path)
+        .or_else(|_| Url::from_file_path(store_path))
+        .map_err(|_| {
+            steward::StewardError::Dyn(
+                format!("Failed to create URL from path: {}", store_path).into(),
+            )
+        })?;
     let table = deltalake::open_table(url).await.map_err(|e| {
         steward::StewardError::Dyn(format!("Failed to open Delta table: {}", e).into())
     })?;

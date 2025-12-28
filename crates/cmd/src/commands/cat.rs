@@ -35,8 +35,13 @@ async fn handle_stream_output(
         }
 
         // Format and display the results as ASCII table
-        let formatted = format_query_results(&batches)
-            .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", source_desc, e))?;
+        let formatted = format_query_results(&batches).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to format query results for '{}': {}",
+                source_desc,
+                e
+            )
+        })?;
 
         if let Some(output_buffer) = output {
             output_buffer.push_str(&formatted);
@@ -52,8 +57,7 @@ async fn handle_stream_output(
         // Testing mode - collect batches then write to buffer
         let mut batches = Vec::new();
         while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
+            let batch = batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
             batches.push(batch);
         }
         write_batches_to_buffer(&batches, output)?;
@@ -216,13 +220,14 @@ async fn cat_impl(
     if let Some(file_path) = url.strip_prefix("file://") {
         let fs = &**tx;
         let root = fs.root().await?;
-        
+
         let metadata = root
             .metadata_for_path(file_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get metadata for '{}': {}", path, e))?;
 
-        let is_queryable = metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
+        let is_queryable =
+            metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
 
         if !is_queryable {
             // Non-queryable file types (file:data) - use simple streaming
@@ -248,7 +253,7 @@ async fn cat_impl(
 
     // Create Provider with context (supports all types including file://)
     let provider = provider::Provider::with_context(fs_arc, provider_context.clone());
-    
+
     // Use DataFusion context from ProviderContext (has TinyFS object store registered)
     let ctx = provider_context.datafusion_session.as_ref().clone();
 
