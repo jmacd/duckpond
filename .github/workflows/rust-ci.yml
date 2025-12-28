@@ -30,7 +30,7 @@ jobs:
           df -h
       
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
       
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -78,7 +78,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       
       - name: Setup Rust for packaging
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
       
       - name: Install cargo-deb
         run: cargo install cargo-deb
