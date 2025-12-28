@@ -30,10 +30,7 @@ jobs:
           df -h
       
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
-          components: rustfmt, clippy
+        uses: dtolnay/rust-toolchain@master
       
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -81,9 +78,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       
       - name: Setup Rust for packaging
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
+        uses: dtolnay/rust-toolchain@master
       
       - name: Install cargo-deb
         run: cargo install cargo-deb

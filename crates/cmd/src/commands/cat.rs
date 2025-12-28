@@ -11,6 +11,60 @@ use std::io::{self, Write};
 use crate::common::ShipContext;
 use log::debug;
 
+/// Handle output from a DataFusion stream based on display mode
+/// Consolidates common output logic used by all cat operations
+#[allow(clippy::print_stdout)]
+async fn handle_stream_output(
+    mut stream: datafusion::physical_plan::SendableRecordBatchStream,
+    display: &str,
+    sql_query: Option<&str>,
+    output: Option<&mut String>,
+    source_desc: &str, // For debug messages: "url" or "path"
+) -> Result<()> {
+    let use_table_format = display == "table" || sql_query.is_some();
+
+    if use_table_format {
+        // Collect batches for table formatting
+        let mut batches = Vec::new();
+        let mut total_rows = 0;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
+            total_rows += batch.num_rows();
+            batches.push(batch);
+        }
+
+        // Format and display the results as ASCII table
+        let formatted = format_query_results(&batches)
+            .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", source_desc, e))?;
+
+        if let Some(output_buffer) = output {
+            output_buffer.push_str(&formatted);
+        } else {
+            print!("{}", formatted);
+        }
+
+        let batch_count = batches.len();
+        debug!(
+            "Successfully formatted {total_rows} rows in {batch_count} batches from: {source_desc}"
+        );
+    } else if let Some(output) = output {
+        // Testing mode - collect batches then write to buffer
+        let mut batches = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch =
+                batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
+            batches.push(batch);
+        }
+        write_batches_to_buffer(&batches, output)?;
+    } else {
+        // Production mode - stream directly to stdout
+        write_stream_to_stdout(stream).await?;
+    }
+
+    Ok(())
+}
+
 /// Write stream directly to stdout as parquet
 async fn write_stream_to_stdout(
     mut stream: datafusion::physical_plan::SendableRecordBatchStream,
@@ -134,31 +188,74 @@ pub async fn cat_command(
     }
 }
 
-/// Cat a provider URL (e.g., "oteljson:///otel/file.json")
+/// Internal implementation of cat command
 #[allow(clippy::print_stdout)]
-async fn cat_provider_url(
+async fn cat_impl(
     tx: &mut steward::StewardTransactionGuard<'_>,
-    url: &str,
+    path: &str,
     display: &str,
     output: Option<&mut String>,
     sql_query: Option<&str>,
 ) -> Result<()> {
-    debug!("cat_provider_url called with url: {}", url);
+    // Check if path contains :// - if not, normalize to file:// scheme
+    let url = if path.contains("://") {
+        path.to_string()
+    } else {
+        // Ensure path starts with / for absolute paths
+        let normalized_path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{}", path)
+        };
+        format!("file://{}", normalized_path)
+    };
 
-    // Get TinyFS from transaction
+    debug!("cat_impl processing URL: {}", url);
+
+    // For file:// URLs, check if file is queryable before proceeding
+    if let Some(file_path) = url.strip_prefix("file://") {
+        let fs = &**tx;
+        let root = fs.root().await?;
+        
+        let metadata = root
+            .metadata_for_path(file_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get metadata for '{}': {}", path, e))?;
+
+        let is_queryable = metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
+
+        if !is_queryable {
+            // Non-queryable file types (file:data) - use simple streaming
+            if display == "table" {
+                return Err(anyhow::anyhow!(
+                    "Table display mode only supports file:table and file:series types, but this file is {:?}",
+                    metadata.entry_type
+                ));
+            }
+            return stream_file_to_stdout(&root, file_path, output).await;
+        }
+    }
+
+    // All queryable types go through Provider (unified path)
     let fs = &**tx;
     let fs_arc = std::sync::Arc::new(fs.clone());
 
-    // Create Provider instance
-    let provider = provider::Provider::new(fs_arc);
+    // Get ProviderContext from transaction (includes registered object stores)
+    let tlogfs_tx = tx.transaction_guard()?;
+    let state = tlogfs_tx.state()?;
+    let provider_context_ref = state.as_provider_context();
+    let provider_context = std::sync::Arc::new(provider_context_ref.clone());
 
-    // Create DataFusion session context
-    let ctx = datafusion::prelude::SessionContext::new();
+    // Create Provider with context (supports all types including file://)
+    let provider = provider::Provider::with_context(fs_arc, provider_context.clone());
+    
+    // Use DataFusion context from ProviderContext (has TinyFS object store registered)
+    let ctx = provider_context.datafusion_session.as_ref().clone();
 
-    // Collect table providers for all matches (handles both wildcards and single files)
+    // Collect table providers for all matches
     let mut table_providers = Vec::new();
     let match_count = provider
-        .for_each_match(url, |table_provider, file_path| {
+        .for_each_match(&url, |table_provider, file_path| {
             debug!("Matched file: {}", file_path);
             table_providers.push(table_provider);
             async { Ok(()) }
@@ -170,7 +267,6 @@ async fn cat_provider_url(
 
     // Create unified table provider
     let unified_table_provider = if table_providers.len() == 1 {
-        // Single file - use directly
         table_providers
             .into_iter()
             .next()
@@ -212,10 +308,8 @@ async fn cat_provider_url(
         std::sync::Arc::new(mem_table) as std::sync::Arc<dyn datafusion::catalog::TableProvider>
     };
 
-    // Register unified table with DataFusion
     let _ = ctx.register_table("series", unified_table_provider)?;
 
-    // Execute SQL query
     let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
     debug!("Executing SQL query: {}", effective_sql_query);
 
@@ -227,192 +321,10 @@ async fn cat_provider_url(
         )
     })?;
 
-    let mut stream = df.execute_stream().await?;
+    let stream = df.execute_stream().await?;
 
-    // Determine output format
-    let use_table_format = display == "table" || sql_query.is_some();
-
-    if use_table_format {
-        // Collect batches for table formatting
-        let mut batches = Vec::new();
-        let mut total_rows = 0;
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
-            total_rows += batch.num_rows();
-            batches.push(batch);
-        }
-
-        // Format and display the results as ASCII table
-        let formatted = format_query_results(&batches)
-            .map_err(|e| anyhow::anyhow!("Failed to format query results for '{}': {}", url, e))?;
-
-        if let Some(output_buffer) = output {
-            output_buffer.push_str(&formatted);
-        } else {
-            print!("{}", formatted);
-        }
-
-        debug!("Successfully formatted {} rows from: {}", total_rows, url);
-    } else {
-        // Raw parquet output
-        if output.is_some() {
-            // Testing mode - collect batches then write to buffer
-            let mut batches = Vec::new();
-            while let Some(batch_result) = stream.next().await {
-                let batch =
-                    batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
-                batches.push(batch);
-            }
-            write_batches_to_buffer(
-                &batches,
-                output.expect("output buffer is Some in test mode"),
-            )?;
-        } else {
-            // Production mode - stream directly to stdout
-            write_stream_to_stdout(stream).await?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Internal implementation of cat command
-#[allow(clippy::print_stdout)]
-async fn cat_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
-    path: &str,
-    display: &str,
-    output: Option<&mut String>,
-    sql_query: Option<&str>,
-) -> Result<()> {
-    // Check for provider URL syntax (e.g., "oteljson:///path")
-    if path.contains("://") {
-        return cat_provider_url(tx, path, display, output, sql_query).await;
-    }
-
-    let fs = &**tx;
-    let root = fs.root().await?;
-
-    // Get file metadata to determine entry type
-    let metadata = root
-        .metadata_for_path(path)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get metadata for '{}': {}", path, e))?;
-
-    let entry_type_str = format!("{:?}", metadata.entry_type);
-    debug!("File entry type: {entry_type_str}");
-
-    // Check if this is a queryable file type (file:table or file:series)
-    let is_queryable = metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
-
-    if is_queryable {
-        // NOTE: We cannot use async_reader() for file:series because it only returns ONE version.
-        // file:series can have multiple versions that need to be combined, which requires DataFusion.
-        // file:table typically has one version, but for consistency we use DataFusion for both.
-        //
-        // For raw output, we use DataFusion with SELECT * and then write the results as parquet.
-        // This gives us a combined parquet file with all versions of the series.
-
-        // For table display or raw output, use DataFusion
-        // Use the new SQL execution interface for file:series and file:table
-        // Default to sorting by timestamp for chronological display
-        let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
-        debug!("Using tlogfs SQL interface for: {path} with query: {effective_sql_query}");
-
-        // Execute the SQL query using the streaming interface
-        let mut stream =
-            tlogfs::execute_sql_on_file(&root, path, effective_sql_query, tx.transaction_guard()?)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to execute SQL query '{}' on '{}': {}",
-                        effective_sql_query,
-                        path,
-                        e
-                    )
-                })?;
-
-        // When SQL query is provided, always format as table (even if display="raw")
-        // because the user is running a query and expects to see formatted results.
-        // Only use raw parquet output when displaying entire file without SQL.
-        let use_table_format = display == "table" || sql_query.is_some();
-
-        if use_table_format {
-            // Collect batches for table formatting
-            let mut batches = Vec::new();
-            let mut total_rows = 0;
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result
-                    .map_err(|e| anyhow::anyhow!("Failed to process batch from stream: {}", e))?;
-                total_rows += batch.num_rows();
-                batches.push(batch);
-            }
-
-            // Format and display the results as ASCII table
-            let formatted = format_query_results(&batches).map_err(|e| {
-                anyhow::anyhow!("Failed to format query results for '{}': {}", path, e)
-            })?;
-
-            // @@@ Buffering whole content?
-            if let Some(output_buffer) = output {
-                output_buffer.push_str(&formatted);
-            } else {
-                print!("{}", formatted);
-            }
-
-            let batch_count = batches.len();
-            debug!(
-                "Successfully formatted {total_rows} rows in {batch_count} batches from: {path}"
-            );
-        } else {
-            // Raw parquet output - stream directly without formatting
-            if output.is_some() {
-                // Testing mode - collect batches then write to buffer
-                let mut batches = Vec::new();
-                while let Some(batch_result) = stream.next().await {
-                    let batch =
-                        batch_result.map_err(|e| anyhow::anyhow!("Failed to read batch: {}", e))?;
-                    batches.push(batch);
-                }
-                write_batches_to_buffer(
-                    &batches,
-                    output.expect("output buffer is Some in test mode"),
-                )?;
-            } else {
-                // Production mode - stream directly to stdout
-                write_stream_to_stdout(stream).await?;
-            }
-        }
-
-        // Return success (caller will commit)
-        return Ok(());
-    }
-
-    // Check if we should use table display for regular files
-    if display == "table" {
-        if output.is_some() {
-            return Err(anyhow::anyhow!(
-                "Output capture not supported for table display mode"
-            ));
-        }
-
-        // Validate that table display is only used with file:table or file:series
-        if !(metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file()) {
-            return Err(anyhow::anyhow!(
-                "Table display mode only supports file:table and file:series types, but this file is {:?}",
-                metadata.entry_type
-            ));
-        }
-
-        // This should never be reached since DataFusion handles all file:table and file:series
-        return Err(anyhow::anyhow!(
-            "Internal error: table display should be handled by DataFusion"
-        ));
-    }
-
-    // Default/raw display behavior - use streaming for better memory efficiency
-    stream_file_to_stdout(&root, path, output).await?;
+    // Use consolidated output handler
+    handle_stream_output(stream, display, sql_query, output, path).await?;
 
     Ok(())
 }
