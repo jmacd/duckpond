@@ -91,10 +91,9 @@ async fn test_delta_table_version_inspection() -> Result<()> {
 
     debug!("Delta table path: {}", data_path_str);
 
-    match deltalake::DeltaTableBuilder::from_uri(&data_path_str)
-        .load()
-        .await
-    {
+    let url = url::Url::parse(&data_path_str)?;
+    let builder = deltalake::DeltaTableBuilder::from_uri(url)?;
+    match builder.load().await {
         Ok(table) => {
             debug!(
                 "✅ Delta table loaded after init, version: {:?}",
@@ -125,10 +124,9 @@ async fn test_delta_table_version_inspection() -> Result<()> {
             debug!("✅ Transaction committed");
 
             // Check version after commit
-            match deltalake::DeltaTableBuilder::from_uri(&data_path_str)
-                .load()
-                .await
-            {
+            let url = url::Url::parse(&data_path_str)?;
+            let builder = deltalake::DeltaTableBuilder::from_uri(url)?;
+            match builder.load().await {
                 Ok(table) => {
                     debug!(
                         "✅ Delta table version after first additional commit: {:?}",

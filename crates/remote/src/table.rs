@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use url::Url;
 
 /// Remote backup table using Delta Lake
 ///
@@ -69,11 +70,9 @@ impl RemoteTable {
         debug!("Creating new remote backup table at {}", path_str);
 
         // Ensure parent directory exists
-        if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to create directory: {}", e))
-            })?;
-        }
+        std::fs::create_dir_all(path.as_ref()).map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to create directory: {}", e))
+        })?;
 
         // Configure Delta Lake table to skip stats on binary column
         // This avoids warnings about large binary data in statistics
@@ -89,7 +88,13 @@ impl RemoteTable {
         .collect();
 
         // Create Delta Lake table
-        let table = DeltaOps::try_from_uri(&path_str)
+        let url = Url::from_directory_path(path.as_ref())
+            .or_else(|_| Url::from_file_path(path.as_ref()))
+            .map_err(|_| RemoteError::TableOperation(format!("Failed to create URL from path: {}", path_str)))?;
+        
+        debug!("Using URL: {}", url);
+        
+        let table = DeltaOps::try_from_uri(url)
             .await
             .map_err(|e| {
                 RemoteError::TableOperation(format!("Failed to initialize table URI: {}", e))
@@ -139,7 +144,9 @@ impl RemoteTable {
         let path_str = path.as_ref().to_string_lossy().to_string();
         debug!("Opening existing remote backup table at {}", path_str);
 
-        let table = deltalake::open_table(&path_str).await.map_err(|e| {
+        let url = Url::from_directory_path(path.as_ref())
+            .map_err(|_| RemoteError::TableOperation(format!("Invalid path: {}", path_str)))?;
+        let table = deltalake::open_table(url).await.map_err(|e| {
             RemoteError::TableOperation(format!(
                 "Failed to open remote table at {}: {}",
                 path_str, e
@@ -628,8 +635,8 @@ impl RemoteTable {
         );
 
         let mut paths = Vec::new();
-        for file in snapshot.file_paths_iter() {
-            let path_str = file.as_ref();
+        for add in snapshot.log_data() {
+            let path_str = add.path();
             // Only include paths with FILE-META partition
             if path_str.starts_with("bundle_id=FILE-META-") {
                 log::info!("Found Delta file: {}", path_str);

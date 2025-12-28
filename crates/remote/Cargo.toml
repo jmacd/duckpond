@@ -51,6 +51,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 paste = { workspace = true }
 linkme = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

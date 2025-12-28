@@ -17,6 +17,7 @@ use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
+use url::Url;
 
 /// Remote factory subcommands
 #[derive(Debug, Parser)]
@@ -224,7 +225,9 @@ async fn execute_push(
 
         // Load Delta table at this specific version
         let store_path = pond_path.to_string_lossy().to_string();
-        let mut versioned_table = deltalake::open_table(&store_path)
+        let url = Url::from_directory_path(&pond_path)
+            .map_err(|_| RemoteError::TableOperation(format!("Invalid path: {}", store_path)))?;
+        let mut versioned_table = deltalake::open_table(url)
             .await
             .map_err(|e| RemoteError::TableOperation(format!("Failed to open table: {}", e)))?;
 

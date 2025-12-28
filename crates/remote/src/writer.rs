@@ -199,9 +199,12 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         );
 
         // Write all batches to Delta Lake in a single transaction
-        let updated_table = WriteBuilder::new(table.log_store(), table.state.clone())
-            .with_input_batches(all_batches)
-            .await?;
+        let updated_table = WriteBuilder::new(
+            table.log_store(),
+            table.state.as_ref().map(|s| s.snapshot().clone()),
+        )
+        .with_input_batches(all_batches)
+        .await?;
 
         // Update our table's state to reflect the write
         *table = updated_table;

@@ -67,6 +67,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
+use url::Url;
 use uuid7::Uuid;
 
 // Re-export pond metadata types from tlogfs
@@ -513,14 +514,15 @@ impl ControlTable {
         debug!("Creating new control table at {}", path_str);
 
         // Ensure directory exists
-        if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                StewardError::ControlTable(format!("Failed to create directory: {}", e))
-            })?;
-        }
+        std::fs::create_dir_all(path.as_ref()).map_err(|e| {
+            StewardError::ControlTable(format!("Failed to create directory: {}", e))
+        })?;
 
         // Create table with ErrorIfExists mode (fail if already exists)
-        let table = DeltaOps::try_from_uri(&path_str)
+        let url = Url::from_directory_path(path.as_ref())
+            .or_else(|_| Url::from_file_path(path.as_ref()))
+            .map_err(|_| StewardError::ControlTable(format!("Failed to create URL from path: {}", path_str)))?;
+        let table = DeltaOps::try_from_uri(url)
             .await
             .map_err(|e| StewardError::ControlTable(format!("Failed to initialize table: {}", e)))?
             .create()
@@ -600,7 +602,10 @@ impl ControlTable {
         let path_str = path.as_ref().to_string_lossy().to_string();
         debug!("Opening existing control table at {}", path_str);
 
-        let table = deltalake::open_table(&path_str).await.map_err(|e| {
+        let url = Url::from_directory_path(path.as_ref())
+            .or_else(|_| Url::from_file_path(path.as_ref()))
+            .map_err(|_| StewardError::ControlTable(format!("Failed to create URL from path: {}", path_str)))?;
+        let table = deltalake::open_table(url).await.map_err(|e| {
             StewardError::ControlTable(format!(
                 "Failed to open control table at {}: {}",
                 path_str, e

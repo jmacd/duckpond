@@ -61,6 +61,7 @@ tlogfs = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 utilities = { workspace = true }
+url = { workspace = true }
 uuid7 = { workspace = true }
 
 [dev-dependencies]

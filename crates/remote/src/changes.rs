@@ -90,16 +90,11 @@ pub async fn detect_changes_from_delta_log(
 
     // Get all active files from the snapshot (Add actions after applying all Remove actions)
     let log_store = table_at_version.log_store();
-    let mut file_stream = state.snapshot().files(log_store.as_ref(), None);
-    let mut files = Vec::new();
-
-    while let Some(file_view) = file_stream
-        .try_next()
+    let file_stream = state.snapshot().file_views(log_store.as_ref(), None);
+    let files: Vec<_> = file_stream
+        .try_collect()
         .await
-        .map_err(|e| RemoteError::DeltaTableError(format!("Failed to read file: {}", e)))?
-    {
-        files.push(file_view);
-    }
+        .map_err(|e| RemoteError::DeltaTableError(format!("Failed to read files: {}", e)))?;
 
     for file_view in files {
         let file_change = FileChange {

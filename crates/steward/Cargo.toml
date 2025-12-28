@@ -39,6 +39,7 @@ thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
 utilities = { workspace = true }
 uuid7 = { workspace = true }
 

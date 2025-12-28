@@ -28,9 +28,8 @@ async fn test_init_from_local_backup() {
     // Setup: Create a simple backup with metadata
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let backup_path = temp_dir.path().join("backup");
-    let backup_url = format!("file://{}", backup_path.display());
 
-    let mut remote_table = RemoteTable::create(&backup_url)
+    let mut remote_table = RemoteTable::create(&backup_path)
         .await
         .expect("Failed to create remote table");
 
@@ -59,7 +58,7 @@ async fn test_init_from_local_backup() {
         .expect("Failed to write metadata");
 
     // Test: Scan for versions
-    let versions = remote::scan_remote_versions(&backup_url, Some(&pond_id))
+    let versions = remote::scan_remote_versions(backup_path.to_str().unwrap(), Some(&pond_id))
         .await
         .expect("Failed to scan versions");
 
@@ -83,9 +82,8 @@ async fn test_scan_remote_versions() {
     // Create a remote backup table with multiple transactions
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let backup_path = temp_dir.path().join("backup");
-    let backup_url = format!("file://{}", backup_path.display());
 
-    let mut remote_table = RemoteTable::create(&backup_url)
+    let mut remote_table = RemoteTable::create(&backup_path)
         .await
         .expect("Failed to create remote table");
 
@@ -110,7 +108,7 @@ async fn test_scan_remote_versions() {
     }
 
     // Scan for versions
-    let versions = remote::scan_remote_versions(&backup_url, Some(&pond_id))
+    let versions = remote::scan_remote_versions(backup_path.to_str().unwrap(), Some(&pond_id))
         .await
         .expect("Failed to scan versions");
 
@@ -124,16 +122,15 @@ async fn test_scan_empty_backup() {
     // Create empty backup table
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let backup_path = temp_dir.path().join("empty_backup");
-    let backup_url = format!("file://{}", backup_path.display());
 
-    let _remote_table = RemoteTable::create(&backup_url)
+    let _remote_table = RemoteTable::create(&backup_path)
         .await
         .expect("Failed to create remote table");
 
     let pond_id = uuid7::uuid7();
 
     // Scan should return empty vec
-    let versions = remote::scan_remote_versions(&backup_url, Some(&pond_id))
+    let versions = remote::scan_remote_versions(backup_path.to_str().unwrap(), Some(&pond_id))
         .await
         .expect("Failed to scan versions");
 

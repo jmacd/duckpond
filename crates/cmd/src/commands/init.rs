@@ -8,6 +8,7 @@ use crate::common::ShipContext;
 use log::{info, warn};
 use std::path::Path;
 use std::str::FromStr;
+use url::Url;
 use uuid7::Uuid;
 
 /// Configuration source for pond initialization
@@ -179,7 +180,10 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     let pond_path = ship_context.resolve_pond_path()?;
     let data_path = pond_path.join("data");
     let data_path_str = data_path.to_string_lossy().to_string();
-    let mut local_table = deltalake::open_table(&data_path_str)
+    let url = Url::from_directory_path(&data_path)
+        .or_else(|_| Url::from_file_path(&data_path))
+        .map_err(|_| anyhow!("Failed to create URL from path: {}", data_path_str))?;
+    let mut local_table = deltalake::open_table(url)
         .await
         .map_err(|e| anyhow!("Failed to open local Delta table: {}", e))?;
 
