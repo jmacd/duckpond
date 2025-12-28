@@ -35,7 +35,7 @@ remote = { path = "crates/remote" }
 anyhow = "1.0.82"
 arrow = { version = "56", default-features = false, features = ["prettyprint", "ipc"] }
 arrow-arith = "56"
-arrow-array = "56"
+arrow-array = "57"
 arrow-buffer = "56"
 arrow-cast = { version = "56", features = ["prettyprint"] }
 arrow-csv = "56"
