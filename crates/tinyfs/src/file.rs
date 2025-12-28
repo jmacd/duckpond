@@ -22,7 +22,7 @@ impl<T: AsyncRead + AsyncSeek + Send + Unpin> AsyncReadSeek for T {}
 pub trait FileMetadataWriter: AsyncWrite + Send + Unpin {
     /// Set temporal metadata for series files (used when metadata is known at write time)
     fn set_temporal_metadata(&mut self, min: i64, max: i64, timestamp_column: String);
-    
+
     /// Infer temporal bounds from the written parquet file by reading only the footer.
     /// After calling this, further writes will fail. Calls shutdown() internally.
     /// Returns (min_timestamp, max_timestamp, timestamp_column_name)

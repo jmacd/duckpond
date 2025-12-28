@@ -129,7 +129,7 @@ pub async fn detect_changes_from_delta_log(
 /// and may fail for non-standard paths.
 fn extract_part_id_from_parquet_path(path: &str) -> Option<u64> {
     // Extract filename from path
-    let filename = path.split('/').last()?;
+    let filename = path.split('/').next_back()?;
 
     // Remove .parquet extension
     let stem = filename.strip_suffix(".parquet")?;

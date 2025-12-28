@@ -368,8 +368,15 @@ impl<'a> StewardTransactionGuard<'a> {
                         config.factory_name
                     );
                     // Set the default mode in control table for future use
-                    if let Err(e) = self.control_table.set_factory_mode(&config.factory_name, "push").await {
-                        error!("Failed to set default factory mode for '{}': {}", config.factory_name, e);
+                    if let Err(e) = self
+                        .control_table
+                        .set_factory_mode(&config.factory_name, "push")
+                        .await
+                    {
+                        error!(
+                            "Failed to set default factory mode for '{}': {}",
+                            config.factory_name, e
+                        );
                         continue; // Skip this factory if we can't set mode
                     }
                     "push".to_string()

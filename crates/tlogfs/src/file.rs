@@ -10,8 +10,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tinyfs::{
-    AsyncReadSeek, Error as TinyFSError, File, FileID, FileMetadataWriter, Metadata, NodeID, NodeMetadata, PartID,
-    persistence::PersistenceLayer,
+    AsyncReadSeek, Error as TinyFSError, File, FileID, FileMetadataWriter, Metadata, NodeID,
+    NodeMetadata, PartID, persistence::PersistenceLayer,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
@@ -137,7 +137,10 @@ impl File for OpLogFile {
             .await
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
-        debug!("Pre-allocated version {allocated_version} for file {}", self.id);
+        debug!(
+            "Pre-allocated version {allocated_version} for file {}",
+            self.id
+        );
 
         // Create streaming writer that will store content via persistence layer
         let persistence = self.state.clone();
@@ -202,7 +205,6 @@ impl OpLogFileWriter {
             allocated_version,
         }
     }
-
 }
 
 #[async_trait]
@@ -214,53 +216,60 @@ impl FileMetadataWriter for OpLogFileWriter {
             timestamp_column,
         });
     }
-    
+
     async fn infer_temporal_bounds(&mut self) -> tinyfs::Result<(i64, i64, String)> {
         // First, flush the writer to ensure all bytes are written (but don't shutdown yet)
         use tokio::io::AsyncWriteExt;
         self.flush().await.map_err(|e| {
             tinyfs::Error::Other(format!("Failed to flush before inferring bounds: {}", e))
         })?;
-        
+
         // Read back the bytes from the temp file in HybridWriter
         // This is efficient because parquet footer parsing only needs the end of the file
-        let temp_path = self.storage.temp_file_path()
+        let temp_path = self
+            .storage
+            .temp_file_path()
             .ok_or_else(|| tinyfs::Error::Other("No temp file for inferring bounds".to_string()))?
             .clone();
-        
-        let bytes = tokio::fs::read(&temp_path).await
+
+        let bytes = tokio::fs::read(&temp_path)
+            .await
             .map_err(|e| tinyfs::Error::Other(format!("Failed to read temp file: {}", e)))?;
-        
+
         // Parse parquet footer to extract temporal bounds
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         use tokio_util::bytes::Bytes;
-        
+
         let bytes = Bytes::from(bytes);
         let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
             .map_err(|e| tinyfs::Error::Other(format!("Failed to parse parquet: {}", e)))?;
-        
+
         let parquet_metadata = reader_builder.metadata();
         let schema = reader_builder.schema();
-        
+
         // Detect timestamp column
-        let timestamp_column = crate::schema::detect_timestamp_column(&schema)
+        let timestamp_column = crate::schema::detect_timestamp_column(schema)
             .map_err(|e| tinyfs::Error::Other(format!("No timestamp column found: {}", e)))?;
-        
+
         // Extract temporal bounds
-        let (min_time, max_time) = tinyfs::arrow::parquet::extract_temporal_bounds_from_parquet_metadata(
-            parquet_metadata.as_ref(),
-            &schema,
-            &timestamp_column,
-        )?;
-        
+        let (min_time, max_time) =
+            tinyfs::arrow::parquet::extract_temporal_bounds_from_parquet_metadata(
+                parquet_metadata.as_ref(),
+                schema,
+                &timestamp_column,
+            )?;
+
         // Set the metadata on ourselves
         self.set_temporal_metadata(min_time, max_time, timestamp_column.clone());
-        
+
         // Now shutdown with the metadata set
         self.shutdown().await.map_err(|e| {
-            tinyfs::Error::Other(format!("Failed to finalize write after setting metadata: {}", e))
+            tinyfs::Error::Other(format!(
+                "Failed to finalize write after setting metadata: {}",
+                e
+            ))
         })?;
-        
+
         Ok((min_time, max_time, timestamp_column))
     }
 }

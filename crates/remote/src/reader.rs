@@ -53,7 +53,12 @@ impl<'a> ChunkedReader<'a> {
     /// * `path` - Original file path to uniquely identify file within partition
     /// * `pond_txn_id` - Transaction sequence number
     #[must_use]
-    pub fn new(table: &'a DeltaTable, bundle_id: impl Into<String>, path: impl Into<String>, pond_txn_id: i64) -> Self {
+    pub fn new(
+        table: &'a DeltaTable,
+        bundle_id: impl Into<String>,
+        path: impl Into<String>,
+        pond_txn_id: i64,
+    ) -> Self {
         Self {
             table,
             bundle_id: bundle_id.into(),
@@ -99,7 +104,12 @@ impl<'a> ChunkedReader<'a> {
             ))
             .await?;
 
-        log::info!("Reading chunks for bundle_id: {}, path: {}, txn: {}", self.bundle_id, self.path, self.pond_txn_id);
+        log::info!(
+            "Reading chunks for bundle_id: {}, path: {}, txn: {}",
+            self.bundle_id,
+            self.path,
+            self.pond_txn_id
+        );
 
         let mut stream = df.execute_stream().await?;
 
@@ -128,26 +138,26 @@ impl<'a> ChunkedReader<'a> {
         }
 
         // Verify total size
-        if let Some(expected_size) = expected_total_size {
-            if total_bytes_read != expected_size as u64 {
-                return Err(RemoteError::FileIntegrityFailed {
-                    bundle_id: self.bundle_id.clone(),
-                    expected: format!("{} bytes", expected_size),
-                    actual: format!("{} bytes", total_bytes_read),
-                });
-            }
+        if let Some(expected_size) = expected_total_size
+            && total_bytes_read != expected_size as u64
+        {
+            return Err(RemoteError::FileIntegrityFailed {
+                bundle_id: self.bundle_id.clone(),
+                expected: format!("{} bytes", expected_size),
+                actual: format!("{} bytes", total_bytes_read),
+            });
         }
 
         // Verify SHA256
         let actual_sha256 = format!("{:x}", file_hasher.finalize());
-        if let Some(expected) = expected_sha256 {
-            if actual_sha256 != expected {
-                return Err(RemoteError::FileIntegrityFailed {
-                    bundle_id: self.bundle_id.clone(),
-                    expected,
-                    actual: actual_sha256,
-                });
-            }
+        if let Some(expected) = expected_sha256
+            && actual_sha256 != expected
+        {
+            return Err(RemoteError::FileIntegrityFailed {
+                bundle_id: self.bundle_id.clone(),
+                expected,
+                actual: actual_sha256,
+            });
         }
 
         writer.flush().await?;
@@ -219,8 +229,13 @@ impl<'a> ChunkedReader<'a> {
             let expected_crc = chunk_crc32s.value(i) as u32; // Cast back to u32
             let chunk_data = chunk_datas.value(i);
 
-            log::info!("Processing chunk_id={}, expected={}, batch row {}/{}", 
-                       chunk_id, *expected_chunk_id, i+1, batch.num_rows());
+            log::info!(
+                "Processing chunk_id={}, expected={}, batch row {}/{}",
+                chunk_id,
+                *expected_chunk_id,
+                i + 1,
+                batch.num_rows()
+            );
 
             // Verify chunk sequence
             if chunk_id != *expected_chunk_id {
@@ -281,18 +296,16 @@ mod tests {
         let reader = Cursor::new(original_data.clone());
 
         let bundle_id = table
-            .write_file(
-                123,
-                "test/roundtrip.dat",
-                reader,
-                vec!["test".to_string()],
-            )
+            .write_file(123, "test/roundtrip.dat", reader, vec!["test".to_string()])
             .await
             .unwrap();
 
         // Read it back
         let mut output = Vec::new();
-        table.read_file(&bundle_id, "test/roundtrip.dat", 123, &mut output).await.unwrap();
+        table
+            .read_file(&bundle_id, "test/roundtrip.dat", 123, &mut output)
+            .await
+            .unwrap();
 
         // Verify data matches
         assert_eq!(output, original_data);
@@ -308,7 +321,9 @@ mod tests {
 
         // Try to read a file that doesn't exist
         let mut output = Vec::new();
-        let result = table.read_file("nonexistent_bundle_id", "nonexistent.dat", 0, &mut output).await;
+        let result = table
+            .read_file("nonexistent_bundle_id", "nonexistent.dat", 0, &mut output)
+            .await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -328,18 +343,16 @@ mod tests {
         // Write empty file
         let reader = Cursor::new(vec![]);
         let bundle_id = table
-            .write_file(
-                789,
-                "test/empty.dat",
-                reader,
-                vec!["test".to_string()],
-            )
+            .write_file(789, "test/empty.dat", reader, vec!["test".to_string()])
             .await
             .unwrap();
 
         // Read it back
         let mut output = Vec::new();
-        table.read_file(&bundle_id, "test/empty.dat", 789, &mut output).await.unwrap();
+        table
+            .read_file(&bundle_id, "test/empty.dat", 789, &mut output)
+            .await
+            .unwrap();
 
         assert_eq!(output.len(), 0);
     }
@@ -359,18 +372,16 @@ mod tests {
 
         let reader = Cursor::new(original_data.clone());
         let bundle_id = table
-            .write_file(
-                456,
-                "test/chunks.dat",
-                reader,
-                vec!["backup".to_string()],
-            )
+            .write_file(456, "test/chunks.dat", reader, vec!["backup".to_string()])
             .await
             .unwrap();
 
         // Read it back
         let mut output = Vec::new();
-        table.read_file(&bundle_id, "test/chunks.dat", 456, &mut output).await.unwrap();
+        table
+            .read_file(&bundle_id, "test/chunks.dat", 456, &mut output)
+            .await
+            .unwrap();
 
         // Verify data matches exactly
         assert_eq!(output, original_data);

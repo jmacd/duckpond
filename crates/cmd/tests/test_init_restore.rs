@@ -75,7 +75,7 @@ async fn test_init_from_local_backup() {
     assert_eq!(metadata.file_count, 1);
     assert_eq!(metadata.cli_args, vec!["test".to_string()]);
 
-    println!("✓ Init from backup test passed");
+    log::info!("✓ Init from backup test passed");
 }
 
 #[tokio::test]
@@ -116,7 +116,7 @@ async fn test_scan_remote_versions() {
 
     assert_eq!(versions, vec![1, 2, 3], "Should find all 3 transactions");
 
-    println!("✓ Scan remote versions test passed");
+    log::info!("✓ Scan remote versions test passed");
 }
 
 #[tokio::test]
@@ -139,5 +139,5 @@ async fn test_scan_empty_backup() {
 
     assert!(versions.is_empty(), "Empty backup should have no versions");
 
-    println!("✓ Scan empty backup test passed");
+    log::info!("✓ Scan empty backup test passed");
 }

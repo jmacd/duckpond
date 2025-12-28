@@ -33,20 +33,20 @@ pub fn extract_temporal_bounds_from_batch(
     timestamp_column: &str,
 ) -> Result<(i64, i64)> {
     use arrow_array::types::{
-        TimestampSecondType, TimestampMillisecondType, 
-        TimestampMicrosecondType, TimestampNanosecondType,
+        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+        TimestampSecondType,
     };
-    
+
     // Find the timestamp column
-    let col_idx = batch
-        .schema()
-        .index_of(timestamp_column)
-        .map_err(|_| crate::Error::Other(format!(
-            "Timestamp column '{}' not found in schema", timestamp_column
-        )))?;
-    
+    let col_idx = batch.schema().index_of(timestamp_column).map_err(|_| {
+        crate::Error::Other(format!(
+            "Timestamp column '{}' not found in schema",
+            timestamp_column
+        ))
+    })?;
+
     let column = batch.column(col_idx);
-    
+
     // Try to get as Int64 array (raw i64 timestamps - assume microseconds for backward compat)
     if let Some(int64_array) = column.as_any().downcast_ref::<arrow_array::Int64Array>() {
         let min = arrow::compute::min(int64_array)
@@ -56,9 +56,12 @@ pub fn extract_temporal_bounds_from_batch(
         // Raw Int64 - assume already microseconds (legacy behavior)
         return Ok((min, max));
     }
-    
+
     // Try TimestampSecondArray - convert seconds to microseconds
-    if let Some(ts_array) = column.as_any().downcast_ref::<arrow_array::TimestampSecondArray>() {
+    if let Some(ts_array) = column
+        .as_any()
+        .downcast_ref::<arrow_array::TimestampSecondArray>()
+    {
         let min = arrow::compute::min::<TimestampSecondType>(ts_array)
             .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
         let max = arrow::compute::max::<TimestampSecondType>(ts_array)
@@ -66,9 +69,12 @@ pub fn extract_temporal_bounds_from_batch(
         // Convert seconds → microseconds
         return Ok((min * 1_000_000, max * 1_000_000));
     }
-    
+
     // Try TimestampMillisecondArray - convert milliseconds to microseconds
-    if let Some(ts_array) = column.as_any().downcast_ref::<arrow_array::TimestampMillisecondArray>() {
+    if let Some(ts_array) = column
+        .as_any()
+        .downcast_ref::<arrow_array::TimestampMillisecondArray>()
+    {
         let min = arrow::compute::min::<TimestampMillisecondType>(ts_array)
             .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
         let max = arrow::compute::max::<TimestampMillisecondType>(ts_array)
@@ -76,18 +82,24 @@ pub fn extract_temporal_bounds_from_batch(
         // Convert milliseconds → microseconds
         return Ok((min * 1_000, max * 1_000));
     }
-    
+
     // Try TimestampMicrosecondArray - already in microseconds
-    if let Some(ts_array) = column.as_any().downcast_ref::<arrow_array::TimestampMicrosecondArray>() {
+    if let Some(ts_array) = column
+        .as_any()
+        .downcast_ref::<arrow_array::TimestampMicrosecondArray>()
+    {
         let min = arrow::compute::min::<TimestampMicrosecondType>(ts_array)
             .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
         let max = arrow::compute::max::<TimestampMicrosecondType>(ts_array)
             .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
         return Ok((min, max));
     }
-    
+
     // Try TimestampNanosecondArray - convert nanoseconds to microseconds
-    if let Some(ts_array) = column.as_any().downcast_ref::<arrow_array::TimestampNanosecondArray>() {
+    if let Some(ts_array) = column
+        .as_any()
+        .downcast_ref::<arrow_array::TimestampNanosecondArray>()
+    {
         let min = arrow::compute::min::<TimestampNanosecondType>(ts_array)
             .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
         let max = arrow::compute::max::<TimestampNanosecondType>(ts_array)
@@ -95,7 +107,7 @@ pub fn extract_temporal_bounds_from_batch(
         // Convert nanoseconds → microseconds
         return Ok((min / 1_000, max / 1_000));
     }
-    
+
     Err(crate::Error::Other(format!(
         "Timestamp column '{}' has unsupported type: {:?}",
         timestamp_column,
@@ -118,16 +130,19 @@ pub fn extract_temporal_bounds_from_parquet_metadata(
         .fields()
         .iter()
         .find(|f| f.name() == ts_column)
-        .ok_or_else(|| crate::Error::Other(format!(
-            "Timestamp column '{}' not found in schema", ts_column
-        )))?;
-    
+        .ok_or_else(|| {
+            crate::Error::Other(format!(
+                "Timestamp column '{}' not found in schema",
+                ts_column
+            ))
+        })?;
+
     let ts_col_idx = schema
         .fields()
         .iter()
         .position(|f| f.name() == ts_column)
         .expect("already validated above");
-    
+
     // Determine the multiplier to convert to microseconds based on Arrow schema
     let to_micros_multiplier: i64 = match ts_field.data_type() {
         DataType::Timestamp(TimeUnit::Second, _) => 1_000_000,
@@ -135,7 +150,7 @@ pub fn extract_temporal_bounds_from_parquet_metadata(
         DataType::Timestamp(TimeUnit::Microsecond, _) => 1,
         DataType::Timestamp(TimeUnit::Nanosecond, _) => -1000, // will divide
         DataType::Int64 => 1, // Assume already microseconds for raw Int64
-        _ => 1, // Default: assume microseconds
+        _ => 1,               // Default: assume microseconds
     };
 
     let mut global_min: Option<i64> = None;
@@ -147,15 +162,12 @@ pub fn extract_temporal_bounds_from_parquet_metadata(
         }
 
         let column_chunk = &row_group.columns()[ts_col_idx];
-        if let Some(stats) = column_chunk.statistics() {
-            if let Statistics::Int64(int64_stats) = stats {
-                if let (Some(&min_val), Some(&max_val)) =
-                    (int64_stats.min_opt(), int64_stats.max_opt())
-                {
-                    global_min = Some(global_min.map_or(min_val, |v| v.min(min_val)));
-                    global_max = Some(global_max.map_or(max_val, |v| v.max(max_val)));
-                }
-            }
+        if let Some(stats) = column_chunk.statistics()
+            && let Statistics::Int64(int64_stats) = stats
+            && let (Some(&min_val), Some(&max_val)) = (int64_stats.min_opt(), int64_stats.max_opt())
+        {
+            global_min = Some(global_min.map_or(min_val, |v| v.min(min_val)));
+            global_max = Some(global_max.map_or(max_val, |v| v.max(max_val)));
         }
     }
 
@@ -171,7 +183,8 @@ pub fn extract_temporal_bounds_from_parquet_metadata(
             Ok((min_micros, max_micros))
         }
         _ => Err(crate::Error::Other(format!(
-            "No statistics found for timestamp column '{}'", ts_column
+            "No statistics found for timestamp column '{}'",
+            ts_column
         ))),
     }
 }
@@ -221,13 +234,13 @@ fn parse_parquet_to_batch(data: Vec<u8>) -> Result<RecordBatch> {
 
     let mut batches = Vec::new();
     for batch_result in reader {
-        let batch = batch_result
-            .map_err(|e| crate::Error::Other(format!("Read batch error: {}", e)))?;
+        let batch =
+            batch_result.map_err(|e| crate::Error::Other(format!("Read batch error: {}", e)))?;
         batches.push(batch);
     }
 
     if batches.is_empty() {
-        return Err(crate::Error::Other("No data in parquet file".to_string()));
+        Err(crate::Error::Other("No data in parquet file".to_string()))
     } else if batches.len() == 1 {
         Ok(batches.into_iter().next().expect("not empty"))
     } else {
@@ -395,13 +408,13 @@ impl ParquetExt for WD {
         P: AsRef<Path> + Send + Sync,
     {
         let ts_col = timestamp_column.unwrap_or("timestamp");
-        
+
         // Extract temporal bounds directly from the RecordBatch using Arrow kernels
         let (min_time, max_time) = extract_temporal_bounds_from_batch(batch, ts_col)?;
-        
+
         // Serialize batch to parquet
         let buffer = serialize_batch_to_parquet(batch)?;
-        
+
         // Write to TinyFS with temporal metadata
         let (_, mut writer) = self
             .create_file_path_streaming_with_type(&path, EntryType::FileSeriesPhysical)
@@ -436,7 +449,8 @@ impl ParquetExt for WD {
         let fields = T::for_arrow();
         let batch = serde_arrow::to_record_batch::<&[T]>(&fields, &items)
             .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
-        self.create_series_from_batch(path, &batch, timestamp_column).await
+        self.create_series_from_batch(path, &batch, timestamp_column)
+            .await
     }
 
     async fn write_series_from_batch<P>(
@@ -449,13 +463,13 @@ impl ParquetExt for WD {
         P: AsRef<Path> + Send + Sync,
     {
         let ts_col = timestamp_column.unwrap_or("timestamp");
-        
+
         // Extract temporal bounds directly from the RecordBatch using Arrow kernels
         let (min_time, max_time) = extract_temporal_bounds_from_batch(batch, ts_col)?;
-        
+
         // Serialize batch to parquet
         let buffer = serialize_batch_to_parquet(batch)?;
-        
+
         // Use async_writer_path_with_type: handles both create AND append cases
         let mut writer = self
             .async_writer_path_with_type(&path, EntryType::FileSeriesPhysical)
@@ -490,7 +504,8 @@ impl ParquetExt for WD {
         let fields = T::for_arrow();
         let batch = serde_arrow::to_record_batch::<&[T]>(&fields, &items)
             .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
-        self.write_series_from_batch(path, &batch, timestamp_column).await
+        self.write_series_from_batch(path, &batch, timestamp_column)
+            .await
     }
 }
 
@@ -501,11 +516,11 @@ impl ParquetExt for WD {
 #[cfg(test)]
 mod tests {
     use crate::EntryType;
-    use crate::arrow::{ForArrow, ParquetExt};
     use crate::arrow::parquet::extract_temporal_bounds_from_batch;
+    use crate::arrow::{ForArrow, ParquetExt};
     use crate::memory::new_fs;
     use arrow::datatypes::{DataType, Field, FieldRef};
-    use arrow_array::{record_batch, RecordBatch};
+    use arrow_array::{RecordBatch, record_batch};
     use log::debug;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
@@ -535,13 +550,26 @@ mod tests {
         let wd = fs.root().await?;
 
         let test_data = vec![
-            TestRecord { id: 1, name: "Alice".to_string(), score: Some(95.5) },
-            TestRecord { id: 2, name: "Bob".to_string(), score: None },
-            TestRecord { id: 3, name: "Charlie".to_string(), score: Some(87.3) },
+            TestRecord {
+                id: 1,
+                name: "Alice".to_string(),
+                score: Some(95.5),
+            },
+            TestRecord {
+                id: 2,
+                name: "Bob".to_string(),
+                score: None,
+            },
+            TestRecord {
+                id: 3,
+                name: "Charlie".to_string(),
+                score: Some(87.3),
+            },
         ];
 
         let test_path = "test_records.parquet";
-        wd.create_table_from_items(test_path, &test_data, EntryType::FileTablePhysical).await?;
+        wd.create_table_from_items(test_path, &test_data, EntryType::FileTablePhysical)
+            .await?;
         let read_data: Vec<TestRecord> = wd.read_table_as_items(test_path).await?;
 
         assert_eq!(test_data.len(), read_data.len());
@@ -565,7 +593,8 @@ mod tests {
         )?;
 
         let test_path = "products.parquet";
-        wd.create_table_from_batch(test_path, &batch, EntryType::FileTablePhysical).await?;
+        wd.create_table_from_batch(test_path, &batch, EntryType::FileTablePhysical)
+            .await?;
         let read_batch = wd.read_table_as_batch(test_path).await?;
 
         assert_eq!(batch.schema(), read_batch.schema());
@@ -578,14 +607,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_temporal_bounds_from_batch() -> Result<(), Box<dyn std::error::Error>> {
-        use arrow_array::{Int64Array, Float64Array};
+        use arrow_array::{Float64Array, Int64Array};
         use arrow_schema::{DataType, Field, Schema};
-        
+
         let schema = Arc::new(Schema::new(vec![
             Field::new("timestamp", DataType::Int64, false),
             Field::new("value", DataType::Float64, false),
         ]));
-        
+
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -611,12 +640,17 @@ mod tests {
             .map(|i| TestRecord {
                 id: i,
                 name: format!("User_{}", i),
-                score: if i % 3 == 0 { None } else { Some((i as f64) * 0.1) },
+                score: if i % 3 == 0 {
+                    None
+                } else {
+                    Some((i as f64) * 0.1)
+                },
             })
             .collect();
 
         let test_path = "large_dataset.parquet";
-        wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical).await?;
+        wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical)
+            .await?;
         let read_data: Vec<TestRecord> = wd.read_table_as_items(test_path).await?;
 
         assert_eq!(large_data.len(), read_data.len());
@@ -634,17 +668,27 @@ mod tests {
         let wd = fs.root().await?;
 
         let test_data = vec![
-            TestRecord { id: 1, name: "Entry1".to_string(), score: Some(100.0) },
-            TestRecord { id: 2, name: "Entry2".to_string(), score: Some(200.0) },
+            TestRecord {
+                id: 1,
+                name: "Entry1".to_string(),
+                score: Some(100.0),
+            },
+            TestRecord {
+                id: 2,
+                name: "Entry2".to_string(),
+                score: Some(200.0),
+            },
         ];
 
         // Test with FileTable entry type
         let table_path = "table_entries.parquet";
-        wd.create_table_from_items(table_path, &test_data, EntryType::FileTablePhysical).await?;
+        wd.create_table_from_items(table_path, &test_data, EntryType::FileTablePhysical)
+            .await?;
 
         // Test with FileData entry type
         let data_path = "data_entries.parquet";
-        wd.create_table_from_items(data_path, &test_data, EntryType::FileDataPhysical).await?;
+        wd.create_table_from_items(data_path, &test_data, EntryType::FileDataPhysical)
+            .await?;
 
         let table_data: Vec<TestRecord> = wd.read_table_as_items(table_path).await?;
         let data_data: Vec<TestRecord> = wd.read_table_as_items(data_path).await?;
@@ -658,9 +702,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_series_create_and_append() -> Result<(), Box<dyn std::error::Error>> {
-        use arrow_array::{Int64Array, Float64Array};
+        use arrow_array::{Float64Array, Int64Array};
         use arrow_schema::{DataType, Field, Schema};
-        
+
         let fs = new_fs().await;
         let wd = fs.root().await?;
 
@@ -674,7 +718,7 @@ mod tests {
             Field::new("timestamp", DataType::Int64, false),
             Field::new("value", DataType::Float64, false),
         ]));
-        
+
         let batch1 = RecordBatch::try_new(
             schema.clone(),
             vec![
@@ -683,10 +727,15 @@ mod tests {
             ],
         )?;
 
-        let (min1, max1) = wd.write_series_from_batch(series_path, &batch1, Some("timestamp")).await?;
+        let (min1, max1) = wd
+            .write_series_from_batch(series_path, &batch1, Some("timestamp"))
+            .await?;
         assert_eq!(min1, 100);
         assert_eq!(max1, 200);
-        debug!("✅ First write (create) successful: min={}, max={}", min1, max1);
+        debug!(
+            "✅ First write (create) successful: min={}, max={}",
+            min1, max1
+        );
 
         // Second write: appends to existing series (should NOT fail with AlreadyExists)
         let batch2 = RecordBatch::try_new(
@@ -697,10 +746,15 @@ mod tests {
             ],
         )?;
 
-        let (min2, max2) = wd.write_series_from_batch(series_path, &batch2, Some("timestamp")).await?;
+        let (min2, max2) = wd
+            .write_series_from_batch(series_path, &batch2, Some("timestamp"))
+            .await?;
         assert_eq!(min2, 300);
         assert_eq!(max2, 400);
-        debug!("✅ Second write (append) successful: min={}, max={}", min2, max2);
+        debug!(
+            "✅ Second write (append) successful: min={}, max={}",
+            min2, max2
+        );
 
         debug!("✅ write_series_from_batch handles both create and append!");
         Ok(())

@@ -609,11 +609,15 @@ mod tests {
                         })?;
 
                         // Write as parquet table using ParquetExt
-                        root.create_table_from_batch(&filename, &batch, tinyfs::EntryType::FileTablePhysical)
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                        root.create_table_from_batch(
+                            &filename,
+                            &batch,
+                            tinyfs::EntryType::FileTablePhysical,
+                        )
+                        .await
+                        .map_err(|e| {
+                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                        })?;
 
                         Ok(())
                     })
@@ -656,15 +660,12 @@ mod tests {
                         })?;
 
                         // Write as file:series using ParquetExt with temporal metadata extraction
-                        let _ = root.create_series_from_batch(
-                            &filename,
-                            &batch,
-                            Some("timestamp"),
-                        )
-                        .await
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                        let _ = root
+                            .create_series_from_batch(&filename, &batch, Some("timestamp"))
+                            .await
+                            .map_err(|e| {
+                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                            })?;
 
                         Ok(())
                     })

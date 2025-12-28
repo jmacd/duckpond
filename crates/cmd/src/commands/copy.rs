@@ -130,27 +130,30 @@ async fn copy_single_file_to_directory_with_name(
         let mut file = File::open(file_path)
             .await
             .map_err(|e| format!("Failed to open source file '{}': {}", file_path, e))?;
-        
+
         let mut magic = [0u8; 4];
         use tokio::io::AsyncReadExt;
-        let _ = file.read_exact(&mut magic)
+        let _ = file
+            .read_exact(&mut magic)
             .await
             .map_err(|e| format!("Failed to read magic bytes from '{}': {}", file_path, e))?;
-        
+
         if &magic != b"PAR1" {
             return Err(format!(
                 "File '{}' is not a valid parquet file (missing PAR1 magic bytes). \
                 Series files must be parquet format.",
                 file_path
-            ).into());
+            )
+            .into());
         }
-        
+
         // Rewind to beginning for streaming copy
         use tokio::io::AsyncSeekExt;
-        let _ = file.seek(std::io::SeekFrom::Start(0))
+        let _ = file
+            .seek(std::io::SeekFrom::Start(0))
             .await
             .map_err(|e| format!("Failed to rewind file: {}", e))?;
-        
+
         // Create writer and stream the file content efficiently
         let mut dest_writer = dest_wd
             .async_writer_path_with_type(filename, entry_type)
@@ -168,10 +171,13 @@ async fn copy_single_file_to_directory_with_name(
             .infer_temporal_bounds()
             .await
             .map_err(|e| format!("Failed to infer temporal bounds: {}", e))?;
-        
+
         log::debug!(
             "Inferred temporal bounds for {}: min={}, max={}, ts_column={}",
-            filename, min_time, max_time, ts_col
+            filename,
+            min_time,
+            max_time,
+            ts_col
         );
     } else {
         // Non-series files: unified streaming copy
@@ -1203,7 +1209,8 @@ mod tests {
                         })?;
 
                         // Write as file:series using ParquetExt with temporal metadata extraction
-                        let _ = root.create_series_from_batch(&path, &batch, Some("timestamp"))
+                        let _ = root
+                            .create_series_from_batch(&path, &batch, Some("timestamp"))
                             .await
                             .map_err(|e| {
                                 steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))

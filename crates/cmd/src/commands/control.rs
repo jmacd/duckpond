@@ -464,21 +464,24 @@ async fn execute_sync_impl(
         log::info!("Using remote config from --config argument");
         let repl_config = remote::ReplicationConfig::from_base64(&encoded)
             .map_err(|e| anyhow!("Failed to decode base64 config: {}", e))?;
-        
+
         let config = repl_config.remote;
         let pond_metadata = control_table.get_pond_metadata().clone();
-        
+
         // Create factory context
         let state = tx.state()?;
         let provider_context = state.as_provider_context();
-        let factory_context =
-            provider::FactoryContext::with_metadata(provider_context, tinyfs::FileID::root(), pond_metadata);
-        
+        let factory_context = provider::FactoryContext::with_metadata(
+            provider_context,
+            tinyfs::FileID::root(),
+            pond_metadata,
+        );
+
         // Serialize config to bytes
         let config_str = serde_yaml::to_string(&config)
             .map_err(|e| anyhow!("Failed to serialize remote config: {}", e))?;
         let config_bytes = config_str.as_bytes().to_vec();
-        
+
         // Execute the remote factory in ControlWriter mode with "pull" arg
         let args = vec!["pull".to_string()];
         FactoryRegistry::execute::<tlogfs::TLogFSError>(
@@ -489,10 +492,10 @@ async fn execute_sync_impl(
         )
         .await
         .map_err(|e| anyhow!("Remote factory execution failed: {}", e))?;
-        
+
         return Ok(());
     }
-    
+
     // Normal case: Look for remote factory node at known path
     let remote_path = "/etc/system.d/1-backup"; // Standard location
     log::info!("Looking for remote factory at: {}", remote_path);

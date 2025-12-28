@@ -210,7 +210,7 @@ impl HybridWriter {
     pub fn total_written(&self) -> usize {
         self.total_written
     }
-    
+
     /// Get the temp file path if it exists (for metadata extraction before finalize)
     pub fn temp_file_path(&self) -> Option<&PathBuf> {
         self.temp_path.as_ref()

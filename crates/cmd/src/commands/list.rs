@@ -130,7 +130,7 @@ mod tests {
 
             // Check shutdown result BEFORE committing
             result.map_err(|e| anyhow::anyhow!("Failed to write file content: {}", e))?;
-            
+
             let _ = tx
                 .commit()
                 .await

@@ -1295,13 +1295,7 @@ impl InnerState {
         let entry = if result.size < crate::large_files::LARGE_FILE_THRESHOLD {
             // Small file: store content directly in Delta Lake
             let now = Utc::now().timestamp_micros();
-            OplogEntry::new_small_file(
-                id,
-                now,
-                version,
-                result.content,
-                self.txn_seq,
-            )
+            OplogEntry::new_small_file(id, now, version, result.content, self.txn_seq)
         } else {
             // Large file: content already stored, just create OplogEntry with SHA256
             let size = result.size;
@@ -1441,13 +1435,7 @@ impl InnerState {
         // Get proper version number immediately - no placeholders
         let version = self.get_next_version_for_node(id).await?;
         let now = Utc::now().timestamp_micros();
-        let entry = OplogEntry::new_small_file(
-            id,
-            now,
-            version,
-            content.to_vec(),
-            self.txn_seq,
-        );
+        let entry = OplogEntry::new_small_file(id, now, version, content.to_vec(), self.txn_seq);
 
         self.records.push(entry);
         Ok(())
@@ -1466,7 +1454,10 @@ impl InnerState {
                 // Log all versions found for debugging duplicates
                 if !records.is_empty() {
                     let versions: Vec<i64> = records.iter().map(|r| r.version).collect();
-                    debug!("get_next_version_for_node existing versions for {id}: {:?}", versions);
+                    debug!(
+                        "get_next_version_for_node existing versions for {id}: {:?}",
+                        versions
+                    );
                 }
 
                 let next_version = if records.is_empty() {
@@ -1474,7 +1465,10 @@ impl InnerState {
                     let allocated = self.allocated_versions.get(&id).and_then(|v| v.last());
                     if let Some(&max_allocated) = allocated {
                         // Someone already allocated versions for this file
-                        debug!("get_next_version_for_node: new node with allocated versions, max_allocated={max_allocated}, returning next_version={}", max_allocated + 1);
+                        debug!(
+                            "get_next_version_for_node: new node with allocated versions, max_allocated={max_allocated}, returning next_version={}",
+                            max_allocated + 1
+                        );
                         max_allocated + 1
                     } else {
                         debug!("get_next_version_for_node: new node, starting with version 1");
@@ -1487,13 +1481,14 @@ impl InnerState {
                         .map(|r| r.version)
                         .max()
                         .expect("records is non-empty, so max() should succeed");
-                    
-                    let max_allocated = self.allocated_versions
+
+                    let max_allocated = self
+                        .allocated_versions
                         .get(&id)
                         .and_then(|v| v.last())
                         .copied()
                         .unwrap_or(0);
-                    
+
                     let max_version = std::cmp::max(max_record_version, max_allocated);
                     let next_version = max_version + 1;
                     debug!(
@@ -1519,13 +1514,13 @@ impl InnerState {
     /// This is called when async_writer() is created, BEFORE any data is written
     async fn allocate_version_for_write(&mut self, id: FileID) -> Result<i64, TLogFSError> {
         let next_version = self.get_next_version_for_node(id).await?;
-        
+
         // Track this allocated version
         self.allocated_versions
             .entry(id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(next_version);
-        
+
         debug!("Allocated version {next_version} for file {id} (pending write)");
         Ok(next_version)
     }
@@ -1740,7 +1735,8 @@ impl InnerState {
         // Check if transaction is poisoned (failed write)
         if self.poisoned {
             return Err(TLogFSError::Transaction {
-                message: "Cannot commit poisoned transaction - a write operation failed".to_string(),
+                message: "Cannot commit poisoned transaction - a write operation failed"
+                    .to_string(),
             });
         }
 
@@ -2003,10 +1999,10 @@ impl InnerState {
             "Appending new version {} for node {id} (immutable log - no replacements)",
             entry.version
         );
-        
+
         // Remove from pending_files since it now has actual content
         _ = self.pending_files.remove(&id);
-        
+
         self.records.push(entry);
 
         debug!("Stored file content reference for node {id}");

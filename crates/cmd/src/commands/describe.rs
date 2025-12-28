@@ -185,7 +185,10 @@ async fn describe_command_impl(
                 }
 
                 // For FileSeriesPhysical, show detailed version statistics
-                if matches!(file_info.metadata.entry_type, tinyfs::EntryType::FileSeriesPhysical) {
+                if matches!(
+                    file_info.metadata.entry_type,
+                    tinyfs::EntryType::FileSeriesPhysical
+                ) {
                     output.push_str("\n   === Version History ===\n");
                     match describe_file_series_versions(tx, &file_info.path).await {
                         Ok(version_stats) => {
@@ -197,7 +200,7 @@ async fn describe_command_impl(
                                         "   Version {}: {} rows",
                                         stats.version, stats.row_count
                                     ));
-                                    
+
                                     // Show timestamp range if available
                                     if let (Some(min_time), Some(max_time)) =
                                         (stats.min_event_time, stats.max_event_time)
@@ -208,7 +211,7 @@ async fn describe_command_impl(
                                             DateTime::<Utc>::from_timestamp_micros(min_time);
                                         let max_dt =
                                             DateTime::<Utc>::from_timestamp_micros(max_time);
-                                        
+
                                         if let (Some(min), Some(max)) = (min_dt, max_dt) {
                                             output.push_str(&format!(
                                                 ", time range: {} to {}",
@@ -225,7 +228,7 @@ async fn describe_command_impl(
                                         .iter()
                                         .filter(|&(_, count)| *count > 0)
                                         .collect();
-                                    
+
                                     if !null_cols.is_empty() {
                                         null_cols.sort_by_key(|(name, _)| *name);
                                         output.push_str("       Null counts: ");
@@ -245,10 +248,8 @@ async fn describe_command_impl(
                             }
                         }
                         Err(e) => {
-                            output.push_str(&format!(
-                                "   Error loading version statistics: {}\n",
-                                e
-                            ));
+                            output
+                                .push_str(&format!("   Error loading version statistics: {}\n", e));
                         }
                     }
                 }
@@ -283,7 +284,10 @@ async fn describe_command_impl(
         }
 
         // Show size for non-series files (series files show it in Version History section)
-        if !matches!(file_info.metadata.entry_type, tinyfs::EntryType::FileSeriesPhysical) {
+        if !matches!(
+            file_info.metadata.entry_type,
+            tinyfs::EntryType::FileSeriesPhysical
+        ) {
             output.push_str(&format!(
                 "   Size: {} bytes\n",
                 file_info.metadata.size.unwrap_or(0)
@@ -291,7 +295,10 @@ async fn describe_command_impl(
         }
         // Note: Version number is already shown in "Version History" section above for series files
         // For non-series files, this is the only place version is shown
-        if !matches!(file_info.metadata.entry_type, tinyfs::EntryType::FileSeriesPhysical) {
+        if !matches!(
+            file_info.metadata.entry_type,
+            tinyfs::EntryType::FileSeriesPhysical
+        ) {
             output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
         }
         output.push('\n');
@@ -469,31 +476,33 @@ async fn describe_file_series_versions(
             additional_urls: vec![],
         };
 
-        let listing_result = provider::create_table_provider(
-            file_id,
-            &provider_context,
-            options,
-        )
-        .await;
+        let listing_result =
+            provider::create_table_provider(file_id, &provider_context, options).await;
 
         let stats = match listing_result {
             Ok(table_provider) => {
                 // Query to count rows and null values per column
                 let schema = table_provider.schema();
-                let field_names: Vec<String> = schema
-                    .fields()
-                    .iter()
-                    .map(|f| f.name().clone())
-                    .collect();
+                let field_names: Vec<String> =
+                    schema.fields().iter().map(|f| f.name().clone()).collect();
 
                 // Build SQL to count nulls for each column
                 let null_count_exprs: Vec<String> = field_names
                     .iter()
-                    .map(|col| format!("COUNT(CASE WHEN \"{}\" IS NULL THEN 1 END) as \"{}_nulls\"", col, col))
+                    .map(|col| {
+                        format!(
+                            "COUNT(CASE WHEN \"{}\" IS NULL THEN 1 END) as \"{}_nulls\"",
+                            col, col
+                        )
+                    })
                     .collect();
 
                 // Use a unique table name to avoid collisions (include file_id and version)
-                let table_name = format!("describe_{}_{}", file_id.node_id().to_short_string(), version_info.version);
+                let table_name = format!(
+                    "describe_{}_{}",
+                    file_id.node_id().to_short_string(),
+                    version_info.version
+                );
                 _ = session_ctx.register_table(&table_name, table_provider.clone())?;
 
                 let sql = format!(
@@ -504,10 +513,10 @@ async fn describe_file_series_versions(
 
                 // Execute the query
                 let query_result = session_ctx.sql(&sql).await;
-                
+
                 // Deregister table immediately after use to keep session clean
                 _ = session_ctx.deregister_table(&table_name);
-                
+
                 match query_result {
                     Ok(df) => {
                         match df.collect().await {
@@ -533,8 +542,8 @@ async fn describe_file_series_versions(
                                     let row_count_col = batch.column(0);
                                     let row_count = if let Some(array) = row_count_col
                                         .as_any()
-                                        .downcast_ref::<arrow::array::Int64Array>()
-                                    {
+                                        .downcast_ref::<arrow::array::Int64Array>(
+                                    ) {
                                         array.value(0) as usize
                                     } else {
                                         0
@@ -543,10 +552,11 @@ async fn describe_file_series_versions(
                                     // Extract null counts
                                     let mut column_null_counts = std::collections::HashMap::new();
                                     for (i, field_name) in field_names.iter().enumerate() {
-                                        if let Some(null_col) = batch.column(i + 1)
+                                        if let Some(null_col) = batch
+                                            .column(i + 1)
                                             .as_any()
-                                            .downcast_ref::<arrow::array::Int64Array>()
-                                        {
+                                            .downcast_ref::<arrow::array::Int64Array>(
+                                        ) {
                                             _ = column_null_counts.insert(
                                                 field_name.clone(),
                                                 null_col.value(0) as usize,
@@ -696,34 +706,34 @@ mod tests {
 
         /// Create a sample Parquet series by writing directly to pond
         async fn create_parquet_series(&self, pond_path: &str, csv_data: &str) -> Result<()> {
-            use arrow_array::{Int64Array, Float64Array, RecordBatch};
+            use arrow_array::{Float64Array, Int64Array, RecordBatch};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
             use tinyfs::arrow::ParquetExt;
-            
+
             // Parse CSV data
             let lines: Vec<&str> = csv_data.lines().collect();
-            
+
             // Build simple test batch with timestamp and value columns
             let mut timestamp_values: Vec<i64> = Vec::new();
             let mut value_values: Vec<f64> = Vec::new();
-            
+
             for line in lines.iter().skip(1) {
                 let values: Vec<&str> = line.split(',').collect();
-                if let Some(ts) = values.get(0) {
+                if let Some(ts) = values.first() {
                     timestamp_values.push(ts.parse::<i64>().unwrap_or(0));
                 }
                 if let Some(v) = values.get(1) {
                     value_values.push(v.parse::<f64>().unwrap_or(0.0));
                 }
             }
-            
+
             // Create schema and arrays
             let schema = Arc::new(Schema::new(vec![
                 Field::new("timestamp", DataType::Int64, false),
                 Field::new("value", DataType::Float64, false),
             ]));
-            
+
             let batch = RecordBatch::try_new(
                 schema,
                 vec![
@@ -731,7 +741,7 @@ mod tests {
                     Arc::new(Float64Array::from(value_values)),
                 ],
             )?;
-            
+
             // Write directly to pond using transact
             let pond_path = pond_path.to_string();
             let mut ship = self.ship_context.open_pond().await?;
@@ -744,19 +754,20 @@ mod tests {
                         let root = fs.root().await.map_err(|e| {
                             steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
                         })?;
-                        
-                        let _ = root.create_series_from_batch(&pond_path, &batch, Some("timestamp"))
+
+                        let _ = root
+                            .create_series_from_batch(&pond_path, &batch, Some("timestamp"))
                             .await
                             .map_err(|e| {
                                 steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
                             })?;
-                        
+
                         Ok(())
                     })
                 },
             )
             .await?;
-            
+
             Ok(())
         }
 

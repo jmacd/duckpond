@@ -9,6 +9,7 @@ use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// Default chunk size: 50MB
@@ -46,9 +47,13 @@ impl FileType {
             Self::Metadata => "metadata",
         }
     }
+}
+
+impl FromStr for FileType {
+    type Err = crate::RemoteError;
 
     /// Parse from string stored in Delta Lake
-    pub fn from_str(s: &str) -> Result<Self, crate::RemoteError> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "pond_parquet" => Ok(Self::PondParquet),
             "large_file" => Ok(Self::LargeFile),
@@ -155,7 +160,7 @@ impl ChunkedFileRecord {
 
     /// Generate a metadata bundle_id for a pond
     /// Format: "POND-META-{pond_id}"
-    /// 
+    ///
     /// All metadata for a pond shares the same bundle_id (partition),
     /// with individual transactions distinguished by pond_txn_id column.
     #[must_use]
@@ -165,7 +170,7 @@ impl ChunkedFileRecord {
 
     /// Generate bundle_id for a transaction file (parquet or Delta log)
     /// Format: "FILE-META-{YYYY-MM-DD}-{txn_seq}"
-    /// 
+    ///
     /// All files in a transaction share this bundle_id for partitioning.
     /// Individual files are distinguished by the path column.
     /// Date and txn_seq enable chronological grouping and transaction identification.
@@ -238,7 +243,9 @@ mod tests {
         assert!(bundle_id.starts_with("FILE-META-"));
         assert!(bundle_id.ends_with("-42"));
         assert!(ChunkedFileRecord::is_transaction_bundle_id(&bundle_id));
-        assert!(!ChunkedFileRecord::is_transaction_bundle_id("POND-FILE-abc123def"));
+        assert!(!ChunkedFileRecord::is_transaction_bundle_id(
+            "POND-FILE-abc123def"
+        ));
     }
 
     #[test]
@@ -247,7 +254,9 @@ mod tests {
         let bundle_id = ChunkedFileRecord::large_file_bundle_id(sha256);
         assert_eq!(bundle_id, "POND-FILE-abc123def456");
         assert!(ChunkedFileRecord::is_large_file_bundle_id(&bundle_id));
-        assert!(!ChunkedFileRecord::is_large_file_bundle_id("POND-META-something"));
+        assert!(!ChunkedFileRecord::is_large_file_bundle_id(
+            "POND-META-something"
+        ));
     }
 
     #[test]

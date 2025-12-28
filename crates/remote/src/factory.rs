@@ -193,7 +193,7 @@ async fn execute_push(
     // Assumption: txn_seq matches Delta version (1:1 mapping)
     let backed_up_set: std::collections::HashSet<_> = backed_up_txns.into_iter().collect();
     let mut missing_versions = Vec::new();
-    
+
     for version in 1..=current_version {
         if !backed_up_set.contains(&version) {
             missing_versions.push(version);
@@ -205,41 +205,55 @@ async fn execute_push(
         return Ok(());
     }
 
-    log::info!("   Need to back up {} transactions: {:?}", missing_versions.len(), missing_versions);
+    log::info!(
+        "   Need to back up {} transactions: {:?}",
+        missing_versions.len(),
+        missing_versions
+    );
 
     // Get pond path for large files
     let pond_path = state.store_path().await;
 
     // Back up each missing transaction
     for version in missing_versions {
-        log::info!("   📦 Backing up transaction {} (version {})...", version, version);
-        
+        log::info!(
+            "   📦 Backing up transaction {} (version {})...",
+            version,
+            version
+        );
+
         // Load Delta table at this specific version
         let store_path = pond_path.to_string_lossy().to_string();
-        let mut versioned_table = deltalake::open_table(&store_path).await
+        let mut versioned_table = deltalake::open_table(&store_path)
+            .await
             .map_err(|e| RemoteError::TableOperation(format!("Failed to open table: {}", e)))?;
-        
-        versioned_table.load_version(version).await
-            .map_err(|e| RemoteError::TableOperation(format!("Failed to load version {}: {}", version, e)))?;
+
+        versioned_table.load_version(version).await.map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to load version {}: {}", version, e))
+        })?;
 
         let local_store = versioned_table.object_store();
-        
+
         // Get NEW files added in this specific transaction (incremental delta only)
         // Each Delta transaction has a commit log with 'add' actions for new parquet files
         let new_files = get_delta_commit_files(&versioned_table, version).await?;
-        log::info!("      Transaction {} added {} new files", version, new_files.len());
+        log::info!(
+            "      Transaction {} added {} new files",
+            version,
+            new_files.len()
+        );
 
         // Back up parquet files with transaction bundle_id
-        let transaction_bundle_id = crate::schema::ChunkedFileRecord::transaction_bundle_id(version);
-        
+        let transaction_bundle_id =
+            crate::schema::ChunkedFileRecord::transaction_bundle_id(version);
+
         for (path, size) in &new_files {
             log::debug!("      Backing up: {} ({} bytes)", path, size);
 
             let file_path = object_store::path::Path::from(path.as_str());
-            let get_result = local_store
-                .get(&file_path)
-                .await
-                .map_err(|e| RemoteError::TableOperation(format!("Failed to read {}: {}", path, e)))?;
+            let get_result = local_store.get(&file_path).await.map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to read {}: {}", path, e))
+            })?;
 
             let bytes = get_result.bytes().await.map_err(|e| {
                 RemoteError::TableOperation(format!("Failed to read bytes from {}: {}", path, e))
@@ -260,13 +274,13 @@ async fn execute_push(
         // Back up Delta commit log for this version
         let commit_log_path = format!("_delta_log/{:020}.json", version);
         let log_file_path = object_store::path::Path::from(commit_log_path.as_str());
-        
+
         match local_store.get(&log_file_path).await {
             Ok(get_result) => {
                 let bytes = get_result.bytes().await.map_err(|e| {
                     RemoteError::TableOperation(format!("Failed to read commit log: {}", e))
                 })?;
-                
+
                 let reader = std::io::Cursor::new(bytes.to_vec());
                 remote_table
                     .write_file_with_bundle_id(
@@ -283,7 +297,11 @@ async fn execute_push(
             }
         }
 
-        log::info!("      ✓ Transaction {} backed up ({} files)", version, new_files.len());
+        log::info!(
+            "      ✓ Transaction {} backed up ({} files)",
+            version,
+            new_files.len()
+        );
     }
 
     // Back up large files (these are cumulative, not per-transaction)
@@ -299,8 +317,11 @@ async fn execute_push(
         .collect();
 
     if !large_files_to_backup.is_empty() {
-        log::info!("   📦 Backing up {} large files...", large_files_to_backup.len());
-        
+        log::info!(
+            "   📦 Backing up {} large files...",
+            large_files_to_backup.len()
+        );
+
         for (path, size) in &large_files_to_backup {
             log::debug!("      Backing up large file: {} ({} bytes)", path, size);
 
@@ -311,19 +332,16 @@ async fn execute_push(
             let file_name = std::path::Path::new(&path)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .ok_or_else(|| RemoteError::TableOperation(format!("Invalid large file path: {}", path)))?;
+                .ok_or_else(|| {
+                    RemoteError::TableOperation(format!("Invalid large file path: {}", path))
+                })?;
 
             let reader = std::io::Cursor::new(file_data);
             remote_table
-                .write_file(
-                    current_version,
-                    file_name,
-                    reader,
-                    vec!["push".to_string()],
-                )
+                .write_file(current_version, file_name, reader, vec!["push".to_string()])
                 .await?;
         }
-        
+
         log::info!("      ✓ Large files backed up");
     }
 
@@ -376,7 +394,9 @@ async fn execute_pull(
 
         // Download using ChunkedReader
         let mut output = Vec::new();
-        remote_table.read_file(&bundle_id, &original_path, pond_txn_id, &mut output).await?;
+        remote_table
+            .read_file(&bundle_id, &original_path, pond_txn_id, &mut output)
+            .await?;
 
         // Write to local Delta table's object store
         let byte_len = output.len();
@@ -464,7 +484,8 @@ async fn execute_verify(
 
         // Query to find all files with this bundle_id
         let files = remote_table.list_files("").await?;
-        let matching_files: Vec<_> = files.into_iter()
+        let matching_files: Vec<_> = files
+            .into_iter()
             .filter(|(bid, _, _, _)| bid == &id)
             .collect();
 
@@ -474,7 +495,9 @@ async fn execute_verify(
 
         for (bundle_id, file_path, pond_txn_id, _) in matching_files {
             let mut output = Vec::new();
-            remote_table.read_file(&bundle_id, &file_path, pond_txn_id, &mut output).await?;
+            remote_table
+                .read_file(&bundle_id, &file_path, pond_txn_id, &mut output)
+                .await?;
             log::info!("   ✓ {} OK ({} bytes)", file_path, output.len());
         }
     } else {
@@ -488,7 +511,10 @@ async fn execute_verify(
         let mut verified = 0;
         for (bundle_id, file_path, pond_txn_id, _size) in files {
             let mut output = Vec::new();
-            match remote_table.read_file(&bundle_id, &file_path, pond_txn_id, &mut output).await {
+            match remote_table
+                .read_file(&bundle_id, &file_path, pond_txn_id, &mut output)
+                .await
+            {
                 Ok(_) => {
                     verified += 1;
                 }
@@ -563,21 +589,32 @@ pub async fn scan_remote_versions(
     let remote_table = crate::RemoteTable::open(remote_url).await?;
 
     // Try new FILE-META approach first
-    let max_txn = remote_table.find_max_transaction(pond_id.map(|id| id.to_string()).as_deref()).await?;
+    let max_txn = remote_table
+        .find_max_transaction(pond_id.map(|id| id.to_string()).as_deref())
+        .await?;
 
     match max_txn {
         Some(max) => {
             let transactions: Vec<i64> = (1..=max).collect();
-            log::info!("Found {} transactions in remote backup (1..={})", transactions.len(), max);
+            log::info!(
+                "Found {} transactions in remote backup (1..={})",
+                transactions.len(),
+                max
+            );
             Ok(transactions)
         }
         None => {
             // Fallback: Try old metadata-based approach for backward compatibility
             log::debug!("No FILE-META partitions found, trying old metadata approach");
-            
+
             if let Some(pond_id) = pond_id {
-                let transactions = remote_table.list_transactions_from_metadata(&pond_id.to_string()).await?;
-                log::info!("Found {} transactions using metadata approach", transactions.len());
+                let transactions = remote_table
+                    .list_transactions_from_metadata(&pond_id.to_string())
+                    .await?;
+                log::info!(
+                    "Found {} transactions using metadata approach",
+                    transactions.len()
+                );
                 Ok(transactions)
             } else {
                 log::info!("No transactions found in remote backup");
@@ -659,7 +696,7 @@ pub async fn apply_parquet_files_from_remote(
 
     // Phase 2: Download and write parquet files + Delta logs
     let mut large_file_refs = std::collections::HashSet::new();
-    
+
     for (bundle_id, path, sha256, size, pond_txn_id) in &files {
         log::debug!("Restoring file: {} ({} bytes)", path, size);
 
@@ -667,7 +704,9 @@ pub async fn apply_parquet_files_from_remote(
         let mut buffer = Vec::new();
 
         // Read file from remote using ChunkedReader
-        remote_table.read_file(bundle_id, path, *pond_txn_id, &mut buffer).await?;
+        remote_table
+            .read_file(bundle_id, path, *pond_txn_id, &mut buffer)
+            .await?;
 
         // Write to local Delta table's object store
         let object_store_path = object_store::path::Path::from(path.as_str());
@@ -688,39 +727,47 @@ pub async fn apply_parquet_files_from_remote(
 
     // Phase 4: Download referenced large files (if any)
     if !large_file_refs.is_empty() {
-        log::info!("Downloading {} referenced large files", large_file_refs.len());
-        
+        log::info!(
+            "Downloading {} referenced large files",
+            large_file_refs.len()
+        );
+
         for sha256 in large_file_refs {
             let bundle_id = crate::schema::ChunkedFileRecord::large_file_bundle_id(&sha256);
             let large_file_path = format!("_large_files/sha256={}", sha256);
-            
+
             log::debug!("Downloading large file: {}", large_file_path);
-            
+
             // Query to get pond_txn_id for this large file
             // Large files use bundle_id=POND-FILE-{sha256}, so we need to query the table
-            let df = remote_table.session_context()
+            let df = remote_table
+                .session_context()
                 .sql(&format!(
                     "SELECT DISTINCT pond_txn_id FROM remote_files \
                      WHERE bundle_id = '{}' AND path = '{}' LIMIT 1",
                     bundle_id, large_file_path
                 ))
                 .await?;
-            
+
             let batches = df.collect().await?;
             let pond_txn_id = if !batches.is_empty() && batches[0].num_rows() > 0 {
                 let txn_ids = batches[0]
                     .column(0)
                     .as_any()
                     .downcast_ref::<arrow_array::Int64Array>()
-                    .ok_or_else(|| RemoteError::TableOperation("Invalid column type".to_string()))?;
+                    .ok_or_else(|| {
+                        RemoteError::TableOperation("Invalid column type".to_string())
+                    })?;
                 txn_ids.value(0)
             } else {
                 0 // Default if not found (shouldn't happen)
             };
-            
+
             let mut buffer = Vec::new();
-            remote_table.read_file(&bundle_id, &large_file_path, pond_txn_id, &mut buffer).await?;
-            
+            remote_table
+                .read_file(&bundle_id, &large_file_path, pond_txn_id, &mut buffer)
+                .await?;
+
             // Write to _large_files directory
             let object_store_path = object_store::path::Path::from(large_file_path.as_str());
             object_store
@@ -729,7 +776,7 @@ pub async fn apply_parquet_files_from_remote(
                 .map_err(|e| {
                     RemoteError::TableOperation(format!("Failed to write large file: {}", e))
                 })?;
-            
+
             log::debug!("  ✓ Downloaded large file {}", sha256);
         }
     }
@@ -781,17 +828,18 @@ async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteE
     }
 
     let mut files = Vec::new();
-    let mut entries = tokio::fs::read_dir(&large_files_dir)
-        .await
-        .map_err(|e| RemoteError::TableOperation(format!("Failed to read _large_files directory: {}", e)))?;
+    let mut entries = tokio::fs::read_dir(&large_files_dir).await.map_err(|e| {
+        RemoteError::TableOperation(format!("Failed to read _large_files directory: {}", e))
+    })?;
 
     while let Some(entry) = entries.next_entry().await.map_err(|e| {
         RemoteError::TableOperation(format!("Failed to read directory entry: {}", e))
     })? {
         let path = entry.path();
-        let file_type = entry.file_type().await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to get file type: {}", e))
-        })?;
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| RemoteError::TableOperation(format!("Failed to get file type: {}", e)))?;
 
         if file_type.is_file() {
             let filename = entry.file_name();
@@ -825,7 +873,10 @@ async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteE
                         let subname = subfilename.to_string_lossy();
                         if subname.starts_with("sha256=") {
                             let metadata = tokio::fs::metadata(&subpath).await.map_err(|e| {
-                                RemoteError::TableOperation(format!("Failed to get file metadata: {}", e))
+                                RemoteError::TableOperation(format!(
+                                    "Failed to get file metadata: {}",
+                                    e
+                                ))
                             })?;
                             files.push((
                                 subpath.to_string_lossy().to_string(),
@@ -852,46 +903,49 @@ async fn get_delta_commit_files(
     version: i64,
 ) -> Result<Vec<(String, i64)>, RemoteError> {
     use object_store::path::Path;
-    
+
     let log_store = table.log_store();
     let commit_log_path = Path::from(format!("_delta_log/{:020}.json", version));
-    
+
     // Read the commit log file
     let log_data = log_store
         .object_store(None)
         .get(&commit_log_path)
         .await
-        .map_err(|e| RemoteError::TableOperation(format!("Failed to read commit log for version {}: {}", version, e)))?;
-    
+        .map_err(|e| {
+            RemoteError::TableOperation(format!(
+                "Failed to read commit log for version {}: {}",
+                version, e
+            ))
+        })?;
+
     let log_bytes = log_data.bytes().await.map_err(|e| {
         RemoteError::TableOperation(format!("Failed to read commit log bytes: {}", e))
     })?;
-    
-    let log_content = String::from_utf8(log_bytes.to_vec()).map_err(|e| {
-        RemoteError::TableOperation(format!("Invalid UTF-8 in commit log: {}", e))
-    })?;
-    
+
+    let log_content = String::from_utf8(log_bytes.to_vec())
+        .map_err(|e| RemoteError::TableOperation(format!("Invalid UTF-8 in commit log: {}", e)))?;
+
     // Parse each line as a JSON action
     let mut files = Vec::new();
     for line in log_content.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        
+
         let action: serde_json::Value = serde_json::from_str(line).map_err(|e| {
             RemoteError::TableOperation(format!("Failed to parse commit log line: {}", e))
         })?;
-        
+
         // Look for 'add' actions
-        if let Some(add) = action.get("add") {
-            if let (Some(path), Some(size)) = (add.get("path"), add.get("size")) {
-                if let (Some(path_str), Some(size_i64)) = (path.as_str(), size.as_i64()) {
-                    files.push((path_str.to_string(), size_i64));
-                }
-            }
+        if let Some(add) = action.get("add")
+            && let (Some(path), Some(size)) = (add.get("path"), add.get("size"))
+            && let (Some(path_str), Some(size_i64)) = (path.as_str(), size.as_i64())
+        {
+            files.push((path_str.to_string(), size_i64));
         }
     }
-    
+
     Ok(files)
 }
 

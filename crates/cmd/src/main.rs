@@ -282,7 +282,9 @@ async fn main() -> Result<()> {
                     commands::control::ControlMode::Detail { txn_seq }
                 }
                 ControlCommand::Incomplete => commands::control::ControlMode::Incomplete,
-                ControlCommand::Sync { config } => commands::control::ControlMode::Sync { config: config.clone() },
+                ControlCommand::Sync { config } => commands::control::ControlMode::Sync {
+                    config: config.clone(),
+                },
                 ControlCommand::ShowConfig => commands::control::ControlMode::ShowConfig,
                 ControlCommand::SetConfig { key, value } => {
                     commands::control::ControlMode::SetConfig { key, value }

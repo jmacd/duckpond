@@ -556,14 +556,13 @@ impl HydroVuCollector {
         debug!("Created Arrow RecordBatch with {batch_rows} rows");
         Ok(record_batch)
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
     use arrow_array::RecordBatch;
+    use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -575,43 +574,48 @@ mod tests {
         // Setup
         let temp_dir = TempDir::new()?;
         let store_path = temp_dir.path().join("test_pond");
-        
+
         // Initialize pond (creates root directory)
         let mut persistence = tlogfs::OpLogPersistence::create(
             store_path.to_str().unwrap(),
             tlogfs::PondUserMetadata::new(vec!["test_init".to_string()]),
-        ).await?;
-        
+        )
+        .await?;
+
         let txn_meta = tlogfs::PondTxnMetadata::new(
             2, // txn_seq=2 because root init used txn_seq=1
             tlogfs::PondUserMetadata::new(vec!["test_duplicate_versions".to_string()]),
         );
         let tx = persistence.begin_write(&txn_meta).await?;
-        
+
         // TransactionGuard derefs to FS, so we can use it directly
         let root = tx.root().await?;
-        
+
         // Create the /hydrovu directory
         let _ = root.create_dir_path("/hydrovu").await?;
-        
+
         // Create test data path
         let test_path = "/hydrovu/test_device.series";
-        
+
         // Create first batch (simulating first HydroVu run)
         let schema1 = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                false,
+            ),
             Field::new("temperature", DataType::Float64, true),
         ]));
-        
+
         let mut ts_builder1 = TimestampSecondBuilder::new();
         let mut temp_builder1 = Float64Builder::new();
-        
+
         // Add 3 records
         for i in 0..3 {
             ts_builder1.append_value(1000000 + i);
             temp_builder1.append_value(20.0 + i as f64);
         }
-        
+
         let batch1 = RecordBatch::try_new(
             schema1.clone(),
             vec![
@@ -619,22 +623,23 @@ mod tests {
                 Arc::new(temp_builder1.finish()),
             ],
         )?;
-        
+
         // Write first batch (creates version 1)
         debug!("Writing first batch...");
-        let _ = root.write_series_from_batch(test_path, &batch1, Some("timestamp"))
+        let _ = root
+            .write_series_from_batch(test_path, &batch1, Some("timestamp"))
             .await?;
-        
+
         // Create second batch (simulating second HydroVu run)
         let mut ts_builder2 = TimestampSecondBuilder::new();
         let mut temp_builder2 = Float64Builder::new();
-        
+
         // Add 3 more records
         for i in 3..6 {
             ts_builder2.append_value(1000000 + i);
             temp_builder2.append_value(20.0 + i as f64);
         }
-        
+
         let batch2 = RecordBatch::try_new(
             schema1.clone(),
             vec![
@@ -642,15 +647,16 @@ mod tests {
                 Arc::new(temp_builder2.finish()),
             ],
         )?;
-        
+
         // Write second batch (should create version 2)
         debug!("Writing second batch...");
-        let _ = root.write_series_from_batch(test_path, &batch2, Some("timestamp"))
+        let _ = root
+            .write_series_from_batch(test_path, &batch2, Some("timestamp"))
             .await?;
-        
+
         // Commit transaction (txn_seq=2)
         let _ = tx.commit().await?;
-        
+
         // Now check versions using list_file_versions
         // Read transactions use last_write_sequence (which is 2 after the commit above)
         let mut persistence2 = tlogfs::OpLogPersistence::open(store_path.to_str().unwrap()).await?;
@@ -660,37 +666,40 @@ mod tests {
         );
         let tx2 = persistence2.begin_read(&txn_meta2).await?;
         let root2 = tx2.root().await?;
-        
+
         let versions = root2.list_file_versions(test_path).await?;
-        
+
         // Check for duplicate versions
         let mut seen_versions = std::collections::HashSet::new();
         let mut duplicate_found = false;
         for version_info in &versions {
             if !seen_versions.insert(version_info.version) {
-                eprintln!(
+                log::error!(
                     "❌ DUPLICATE VERSION FOUND: version {} appears multiple times",
                     version_info.version
                 );
                 duplicate_found = true;
             }
         }
-        
+
         // Log all versions for debugging
         debug!("All versions found:");
         for version_info in &versions {
-            debug!("  Version {}: timestamp={}", version_info.version, version_info.timestamp);
+            debug!(
+                "  Version {}: timestamp={}",
+                version_info.version, version_info.timestamp
+            );
         }
-        
+
         let _ = tx2.commit().await?;
-        
+
         // Assert no duplicates
         assert!(
             !duplicate_found,
             "Duplicate versions found! Versions: {:?}",
             versions.iter().map(|v| v.version).collect::<Vec<_>>()
         );
-        
+
         // Assert we have at least 2 versions (one per write_series_from_batch call)
         // NOTE: Implementation may create multiple versions per write (e.g., node creation + content write)
         assert!(
@@ -698,7 +707,7 @@ mod tests {
             "Expected at least 2 versions, got {}. This test verifies no DUPLICATE versions, not exact count.",
             versions.len()
         );
-        
+
         // Verify all versions are unique (no reuse)
         let mut sorted_versions: Vec<_> = versions.iter().map(|v| v.version).collect();
         sorted_versions.sort();

@@ -162,18 +162,6 @@ impl RemoteTable {
     }
 
     /// Create or open a remote backup table
-    ///
-    /// Convenience method that creates a new table if it doesn't exist,
-    /// or opens an existing table.
-    ///
-    /// # Arguments
-    /// * `path` - Directory path for the Delta Lake table
-    /// * `create_new` - If true, require table creation (error if exists)
-    ///                  If false, open existing table (error if doesn't exist)
-    /// Open an existing table or create it if it doesn't exist
-    /// 
-    /// Despite the parameter name, this always tries to open first,
-    /// then creates only if the table doesn't exist.
     pub async fn open_or_create<P: AsRef<Path>>(path: P, _create_new: bool) -> Result<Self> {
         match Self::open(&path).await {
             Ok(table) => Ok(table),
@@ -222,13 +210,8 @@ impl RemoteTable {
         reader: R,
         cli_args: Vec<String>,
     ) -> Result<()> {
-        let writer = ChunkedWriter::new(
-            pond_txn_id,
-            path.into(),
-            reader,
-            cli_args,
-        )
-        .with_bundle_id(bundle_id.to_string());
+        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader, cli_args)
+            .with_bundle_id(bundle_id.to_string());
 
         writer.write_to_table(&mut self.table).await?;
 
@@ -270,12 +253,7 @@ impl RemoteTable {
         reader: R,
         cli_args: Vec<String>,
     ) -> Result<String> {
-        let writer = ChunkedWriter::new(
-            pond_txn_id,
-            path.into(),
-            reader,
-            cli_args,
-        );
+        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader, cli_args);
 
         let bundle_id = writer.write_to_table(&mut self.table).await?;
 
@@ -310,7 +288,13 @@ impl RemoteTable {
     /// - SHA256 hash mismatch
     /// - Cannot read from Delta Lake
     /// - Cannot write to output
-    pub async fn read_file<W: AsyncWrite + Unpin>(&self, bundle_id: &str, path: &str, pond_txn_id: i64, writer: W) -> Result<()> {
+    pub async fn read_file<W: AsyncWrite + Unpin>(
+        &self,
+        bundle_id: &str,
+        path: &str,
+        pond_txn_id: i64,
+        writer: W,
+    ) -> Result<()> {
         let reader = ChunkedReader::new(&self.table, bundle_id, path, pond_txn_id);
         reader.read_to_writer(writer).await
     }
@@ -379,7 +363,7 @@ impl RemoteTable {
         pond_txn_id: i64,
     ) -> Result<crate::schema::TransactionMetadata> {
         let bundle_id = ChunkedFileRecord::metadata_bundle_id(pond_id);
-        
+
         // Query for the specific transaction's metadata
         let df = self
             .session_context
@@ -392,7 +376,7 @@ impl RemoteTable {
             .await?;
 
         let batches = df.collect().await?;
-        
+
         if batches.is_empty() {
             return Err(RemoteError::FileNotFound(format!(
                 "Metadata not found for pond {} txn {}",
@@ -478,7 +462,7 @@ impl RemoteTable {
             .sql(
                 "SELECT DISTINCT bundle_id, path, pond_txn_id, total_size 
                  FROM remote_files 
-                 ORDER BY path"
+                 ORDER BY path",
             )
             .await?;
 
@@ -549,9 +533,9 @@ impl RemoteTable {
     /// Returns error if cannot list object store
     pub async fn find_max_transaction(&self, _pond_id: Option<&str>) -> Result<Option<i64>> {
         use object_store::path::Path;
-        
+
         let store = self.table.object_store();
-        
+
         // List with delimiter to get only directories (partitions)
         let prefix = Some(Path::from("bundle_id=FILE-META-"));
         let list_result = store
@@ -589,9 +573,9 @@ impl RemoteTable {
     /// Returns error if listing fails
     pub async fn list_available_transactions(&self) -> Result<Vec<i64>> {
         use object_store::path::Path;
-        
+
         let store = self.table.object_store();
-        
+
         // List with delimiter to get only directories (partitions)
         let prefix = Some(Path::from("bundle_id=FILE-META-"));
         let list_result = store
@@ -634,11 +618,15 @@ impl RemoteTable {
     pub async fn list_transaction_numbers(&self, _pond_id: Option<&str>) -> Result<Vec<i64>> {
         // Query Delta table's file list directly from metadata
         // This is more reliable than object_store.list() which may not reflect latest commits
-        let snapshot = self.table.snapshot()
-            .map_err(|e| RemoteError::TableOperation(format!("Failed to get Delta snapshot: {}", e)))?;
-        
-        log::info!("Querying Delta files (table version: {:?})", self.table.version());
-        
+        let snapshot = self.table.snapshot().map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to get Delta snapshot: {}", e))
+        })?;
+
+        log::info!(
+            "Querying Delta files (table version: {:?})",
+            self.table.version()
+        );
+
         let mut paths = Vec::new();
         for file in snapshot.file_paths_iter() {
             let path_str = file.as_ref();
@@ -648,9 +636,9 @@ impl RemoteTable {
                 paths.push(path_str.to_string());
             }
         }
-        
+
         log::info!("Found {} FILE-META files in Delta", paths.len());
-        
+
         // Extract unique partition directories from file paths
         let mut partition_dirs = std::collections::HashSet::new();
         for path_str in &paths {
@@ -664,7 +652,7 @@ impl RemoteTable {
                 }
             }
         }
-        
+
         log::debug!("Found {} FILE-META partitions", partition_dirs.len());
 
         // Parse directory names to extract transaction numbers
@@ -682,7 +670,11 @@ impl RemoteTable {
             .collect();
 
         txn_numbers.sort_unstable();
-        log::info!("Found {} transaction numbers: {:?}", txn_numbers.len(), txn_numbers);
+        log::info!(
+            "Found {} transaction numbers: {:?}",
+            txn_numbers.len(),
+            txn_numbers
+        );
         Ok(txn_numbers)
     }
 

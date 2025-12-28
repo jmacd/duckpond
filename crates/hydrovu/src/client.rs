@@ -335,7 +335,10 @@ impl Client {
     fn location_data_url(location_id: i64, start_time: i64, end_time: Option<i64>) -> String {
         // Convert from internal microseconds to HydroVu's expected seconds
         let start_time_seconds = start_time / 1_000_000;
-        let mut url = format!("v1/locations/{}/data?startTime={}", location_id, start_time_seconds);
+        let mut url = format!(
+            "v1/locations/{}/data?startTime={}",
+            location_id, start_time_seconds
+        );
 
         if let Some(end_time) = end_time {
             let end_time_seconds = end_time / 1_000_000;

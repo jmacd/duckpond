@@ -70,12 +70,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     /// * `reader` - Async reader providing file content
     /// * `cli_args` - CLI arguments that triggered this backup
     #[must_use]
-    pub fn new(
-        pond_txn_id: i64,
-        path: String,
-        reader: R,
-        cli_args: Vec<String>,
-    ) -> Self {
+    pub fn new(pond_txn_id: i64, path: String, reader: R, cli_args: Vec<String>) -> Self {
         Self {
             pond_txn_id,
             path,
@@ -161,7 +156,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
 
         // Compute raw SHA256 hash
         let sha256_hash = format!("{:x}", file_hasher.finalize());
-        
+
         let bundle_id = if let Some(ref override_id) = self.bundle_id_override {
             // Use provided bundle_id (for transaction files)
             override_id.clone()
@@ -187,7 +182,13 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         // Second pass: create RecordBatches with final metadata
         let mut all_batches = Vec::new();
         for chunk_batch in all_chunk_data.chunks(CHUNKS_PER_BATCH) {
-            let batch = self.create_batch(chunk_batch, &bundle_id, &sha256_hash, total_size, chunk_count)?;
+            let batch = self.create_batch(
+                chunk_batch,
+                &bundle_id,
+                &sha256_hash,
+                total_size,
+                chunk_count,
+            )?;
             all_batches.push(batch);
         }
 
@@ -311,12 +312,7 @@ mod tests {
         let reader = Cursor::new(data.clone());
 
         let bundle_id = table
-            .write_file(
-                123,
-                "test/file.dat",
-                reader,
-                vec!["test".to_string()],
-            )
+            .write_file(123, "test/file.dat", reader, vec!["test".to_string()])
             .await
             .unwrap();
 
@@ -377,12 +373,7 @@ mod tests {
         let reader = Cursor::new(data);
 
         let bundle_id = table
-            .write_file(
-                1,
-                "test/empty.dat",
-                reader,
-                vec!["test".to_string()],
-            )
+            .write_file(1, "test/empty.dat", reader, vec!["test".to_string()])
             .await
             .unwrap();
 

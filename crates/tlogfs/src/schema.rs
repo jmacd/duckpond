@@ -116,7 +116,7 @@ impl ExtendedAttributes {
 
 /// Extract temporal range from Arrow RecordBatch
 /// Returns timestamps normalized to **microseconds** for consistent storage.
-/// 
+///
 /// This is a thin wrapper around the canonical implementation in tinyfs::arrow::parquet.
 pub fn extract_temporal_range_from_batch(
     batch: &arrow::record_batch::RecordBatch,

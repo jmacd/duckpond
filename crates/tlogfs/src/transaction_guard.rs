@@ -117,11 +117,11 @@ impl<'a> TransactionGuard<'a> {
         }
 
         let result = self.persistence.commit(self.metadata.clone()).await;
-        
+
         // Clear state so Drop handler knows we committed
         self.persistence.state = None;
         self.persistence.fs = None;
-        
+
         // tinyfs guard drop happens here, clearing the transaction state
 
         result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))

@@ -215,12 +215,12 @@ impl crate::file::FileMetadataWriter for MemoryFileWriter {
         // Memory files don't persist metadata - this is a no-op
         // In a real implementation, we'd store this in MemoryFile
     }
-    
+
     async fn infer_temporal_bounds(&mut self) -> error::Result<(i64, i64, String)> {
         // For memory files, we don't support infer_temporal_bounds
         // This would require reading the bytes and parsing parquet
         Err(crate::Error::Other(
-            "infer_temporal_bounds not supported for memory files".to_string()
+            "infer_temporal_bounds not supported for memory files".to_string(),
         ))
     }
 }
