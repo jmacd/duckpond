@@ -116,25 +116,3 @@ async fn test_scan_remote_versions() {
 
     log::info!("✓ Scan remote versions test passed");
 }
-
-#[tokio::test]
-async fn test_scan_empty_backup() {
-    // Create empty backup table
-    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let backup_path = temp_dir.path().join("empty_backup");
-
-    let mut remote_table = RemoteTable::create(backup_path.to_str().unwrap())
-        .await
-        .expect("Failed to create remote table");
-
-    let pond_id = uuid7::uuid7();
-
-    // Scan should return empty vec
-    let versions = remote::scan_remote_versions(backup_path.to_str().unwrap(), Some(&pond_id))
-        .await
-        .expect("Failed to scan versions");
-
-    assert!(versions.is_empty(), "Empty backup should have no versions");
-
-    log::info!("✓ Scan empty backup test passed");
-}

@@ -1,12 +1,12 @@
 //! Register S3-compatible storage (like R2) with Delta Lake without AWS SDK dependencies
 
 use deltalake::logstore::{
-    default_logstore, logstore_factories, object_store_factories, LogStore, LogStoreFactory,
-    ObjectStoreFactory, ObjectStoreRef, StorageConfig,
+    LogStore, LogStoreFactory, ObjectStoreFactory, ObjectStoreRef, StorageConfig, default_logstore,
+    logstore_factories, object_store_factories,
 };
 use deltalake::{DeltaResult, DeltaTableError, Path};
-use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::ObjectStoreScheme;
+use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
@@ -20,12 +20,14 @@ impl ObjectStoreFactory for S3CompatibleStoreFactory {
         url: &Url,
         config: &StorageConfig,
     ) -> DeltaResult<(ObjectStoreRef, Path)> {
-        log::debug!("S3CompatibleStoreFactory::parse_url_opts called for URL: {}", url);
+        log::debug!(
+            "S3CompatibleStoreFactory::parse_url_opts called for URL: {}",
+            url
+        );
         log::debug!("Config options: {:?}", config.raw);
 
         // Build the S3 client using AmazonS3Builder
-        let mut builder = AmazonS3Builder::new()
-            .with_url(url.to_string());
+        let mut builder = AmazonS3Builder::new().with_url(url.to_string());
 
         // Apply configuration options from the storage config
         for (key, value) in config.raw.iter() {
@@ -38,9 +40,10 @@ impl ObjectStoreFactory for S3CompatibleStoreFactory {
         }
 
         // Parse the path from the URL
-        let (_, path) = ObjectStoreScheme::parse(url).map_err(|e| DeltaTableError::GenericError {
-            source: Box::new(e),
-        })?;
+        let (_, path) =
+            ObjectStoreScheme::parse(url).map_err(|e| DeltaTableError::GenericError {
+                source: Box::new(e),
+            })?;
         let prefix = Path::parse(path)?;
 
         // Build the store
@@ -65,7 +68,10 @@ impl LogStoreFactory for S3CompatibleLogStoreFactory {
         location: &Url,
         options: &StorageConfig,
     ) -> DeltaResult<Arc<dyn LogStore>> {
-        log::debug!("S3CompatibleLogStoreFactory::with_options called for URL: {}", location);
+        log::debug!(
+            "S3CompatibleLogStoreFactory::with_options called for URL: {}",
+            location
+        );
         // Use the default logstore implementation
         Ok(default_logstore(
             prefixed_store,
@@ -81,7 +87,7 @@ pub fn register_s3_handlers() {
     log::info!("Registering S3-compatible storage handlers for s3:// and s3a:// schemes");
     let object_factory = Arc::new(S3CompatibleStoreFactory::default());
     let log_factory = Arc::new(S3CompatibleLogStoreFactory::default());
-    
+
     for scheme in ["s3", "s3a"] {
         let url = Url::parse(&format!("{scheme}://")).expect("valid scheme URL");
         log::info!("  Registering scheme: {}", scheme);

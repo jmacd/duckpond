@@ -141,7 +141,7 @@ async fn execute_remote(
 ) -> Result<(), RemoteError> {
     // Register S3-compatible storage handlers for R2/S3
     crate::s3_registration::register_s3_handlers();
-    
+
     let config: RemoteConfig = serde_json::from_value(config)?;
 
     log::info!("🌐 REMOTE FACTORY (Chunked Parquet)");
@@ -164,7 +164,7 @@ async fn execute_remote(
     // Open or create remote table
     // DeltaOps supports both file:// and s3:// URLs through object_store
     let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
-    
+
     // If S3 URL is just bucket without path (e.g., s3://bucket), append pond UUID as table path
     // DeltaLake 0.29+ requires a full table path, not just a bucket
     let path = if path.starts_with("s3://") && path.matches('/').count() == 2 {
@@ -174,7 +174,7 @@ async fn execute_remote(
     } else {
         path.to_string()
     };
-    
+
     // Build storage options for S3/R2 configuration
     let mut storage_options = std::collections::HashMap::new();
     if path.starts_with("s3://") {
@@ -190,12 +190,19 @@ async fn execute_remote(
         if !config.endpoint.is_empty() {
             storage_options.insert("endpoint".to_string(), config.endpoint.clone());
             // R2-specific settings - use virtual_hosted_style_request = false for path-style access
-            storage_options.insert("virtual_hosted_style_request".to_string(), "false".to_string());
+            storage_options.insert(
+                "virtual_hosted_style_request".to_string(),
+                "false".to_string(),
+            );
         }
-        log::debug!("   Final storage_options keys: {:?}", storage_options.keys().collect::<Vec<_>>());
+        log::debug!(
+            "   Final storage_options keys: {:?}",
+            storage_options.keys().collect::<Vec<_>>()
+        );
     }
-    
-    let remote_table = RemoteTable::open_or_create_with_storage_options(&path, true, storage_options).await?;
+
+    let remote_table =
+        RemoteTable::open_or_create_with_storage_options(&path, true, storage_options).await?;
 
     match cmd {
         RemoteCommand::Push => execute_push(remote_table, &context).await,
@@ -370,7 +377,7 @@ async fn execute_push(
                 .file_name()
                 .and_then(|s| s.to_str())?;
             let relative_path = format!("_large_files/{}", file_name);
-            
+
             if remote_paths.contains(relative_path.as_str()) {
                 None // Already backed up
             } else {
@@ -386,16 +393,28 @@ async fn execute_push(
         );
 
         for (abs_path, relative_path, size) in &large_files_to_backup {
-            log::debug!("      Backing up large file: {} ({} bytes)", relative_path, size);
+            log::debug!(
+                "      Backing up large file: {} ({} bytes)",
+                relative_path,
+                size
+            );
 
             let file_data = tokio::fs::read(&abs_path).await.map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to read large file {}: {}", abs_path, e))
+                RemoteError::TableOperation(format!(
+                    "Failed to read large file {}: {}",
+                    abs_path, e
+                ))
             })?;
 
             let reader = std::io::Cursor::new(file_data);
             // Use the relative path with _large_files/ prefix so restore knows where to put it
             remote_table
-                .write_file(current_version, relative_path, reader, vec!["push".to_string()])
+                .write_file(
+                    current_version,
+                    relative_path,
+                    reader,
+                    vec!["push".to_string()],
+                )
                 .await?;
         }
 
@@ -444,13 +463,13 @@ async fn execute_pull(
         if original_path.starts_with("_large_files/") {
             // Large files go to the filesystem
             let large_file_fs_path = pond_path.join(&original_path);
-            
+
             // Check if file exists on filesystem
             if large_file_fs_path.exists() {
                 log::debug!("   Skip {} (already exists on filesystem)", original_path);
                 continue;
             }
-            
+
             log::info!("   Pulling large file: {}", original_path);
 
             // Download using ChunkedReader
@@ -471,15 +490,21 @@ async fn execute_pull(
 
             // Write to filesystem
             let byte_len = output.len();
-            tokio::fs::write(&large_file_fs_path, &output).await.map_err(|e| {
-                RemoteError::TableOperation(format!(
-                    "Failed to write large file to {}: {}",
-                    large_file_fs_path.display(),
-                    e
-                ))
-            })?;
+            tokio::fs::write(&large_file_fs_path, &output)
+                .await
+                .map_err(|e| {
+                    RemoteError::TableOperation(format!(
+                        "Failed to write large file to {}: {}",
+                        large_file_fs_path.display(),
+                        e
+                    ))
+                })?;
 
-            log::info!("      ✓ Pulled {} bytes to {}", byte_len, large_file_fs_path.display());
+            log::info!(
+                "      ✓ Pulled {} bytes to {}",
+                byte_len,
+                large_file_fs_path.display()
+            );
         } else {
             // Regular files go to the object store
             let file_path = object_store::path::Path::from(original_path.as_str());
@@ -814,7 +839,7 @@ pub async fn apply_parquet_files_from_remote(
         if path.starts_with("_large_files/") {
             // Large files go to the filesystem, not the object store
             let large_file_fs_path = pond_path.join(path);
-            
+
             // Ensure parent directory exists
             if let Some(parent) = large_file_fs_path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -824,17 +849,22 @@ pub async fn apply_parquet_files_from_remote(
                     ))
                 })?;
             }
-            
+
             // Write to filesystem
-            tokio::fs::write(&large_file_fs_path, &buffer).await.map_err(|e| {
-                RemoteError::TableOperation(format!(
-                    "Failed to write large file to {}: {}",
-                    large_file_fs_path.display(),
-                    e
-                ))
-            })?;
-            
-            log::debug!("  ✓ Restored large file to {}", large_file_fs_path.display());
+            tokio::fs::write(&large_file_fs_path, &buffer)
+                .await
+                .map_err(|e| {
+                    RemoteError::TableOperation(format!(
+                        "Failed to write large file to {}: {}",
+                        large_file_fs_path.display(),
+                        e
+                    ))
+                })?;
+
+            log::debug!(
+                "  ✓ Restored large file to {}",
+                large_file_fs_path.display()
+            );
         } else {
             // Regular files (parquet, delta log) go to the object store
             let object_store_path = object_store::path::Path::from(path.as_str());
@@ -842,9 +872,12 @@ pub async fn apply_parquet_files_from_remote(
                 .put(&object_store_path, buffer.into())
                 .await
                 .map_err(|e| {
-                    RemoteError::TableOperation(format!("Failed to write file to local table: {}", e))
+                    RemoteError::TableOperation(format!(
+                        "Failed to write file to local table: {}",
+                        e
+                    ))
                 })?;
-            
+
             log::debug!("  ✓ Restored {}", path);
         }
     }
@@ -939,13 +972,15 @@ pub async fn restore_large_files_from_remote(
 
         // Write to filesystem
         let byte_len = buffer.len();
-        tokio::fs::write(&large_file_fs_path, &buffer).await.map_err(|e| {
-            RemoteError::TableOperation(format!(
-                "Failed to write large file to {}: {}",
-                large_file_fs_path.display(),
-                e
-            ))
-        })?;
+        tokio::fs::write(&large_file_fs_path, &buffer)
+            .await
+            .map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to write large file to {}: {}",
+                    large_file_fs_path.display(),
+                    e
+                ))
+            })?;
 
         log::info!("      ✓ Restored {} bytes", byte_len);
         restored += 1;
