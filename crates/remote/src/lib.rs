@@ -51,6 +51,7 @@
 //! # }
 //! ```
 
+mod s3_registration;
 mod changes;
 mod error;
 pub mod factory;

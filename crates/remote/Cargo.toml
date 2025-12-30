@@ -24,9 +24,9 @@ arrow-array = { workspace = true }
 arrow-cast = { workspace = true }
 arrow-schema = { workspace = true }
 parquet = { workspace = true, features = ["async", "arrow"] }
-deltalake = { workspace = true, features = ["datafusion"] }
+deltalake = { workspace = true }
 datafusion = { workspace = true }
-object_store = { workspace = true }
+object_store = { workspace = true, features = ["aws"] }
 tokio = { workspace = true, features = ["io-util", "rt", "fs", "macros"] }
 tokio-util = { workspace = true, features = ["io", "compat"] }
 async-trait = { workspace = true }

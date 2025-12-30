@@ -65,7 +65,7 @@ humantime = "2.1"
 linkme = "0.3"
 log = "0.4.17"
 oauth2 = { version = "4.4.2", features = ["reqwest"] }
-object_store = { version = "0.12" }
+object_store = { version = "0.12", features = ["aws"] }
 opentelemetry-proto = { version = "0.31.0", features = ["gen-tonic-messages", "metrics", "with-serde"] }
 parquet = { version = "56", features = ["async", "arrow"] }
 parse_duration = "2.1.1"

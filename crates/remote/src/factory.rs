@@ -76,19 +76,19 @@ pub struct RemoteConfig {
     /// Remote Delta Lake table URL (e.g., "file:///path/to/remote" or "s3://bucket/remote")
     pub url: String,
 
-    /// AWS region (for S3)
+    /// Region
     #[serde(default)]
     pub region: String,
 
-    /// AWS access key
+    /// Access key
     #[serde(default)]
     pub access_key: String,
 
-    /// AWS secret key
+    /// Secret key
     #[serde(default)]
     pub secret_key: String,
 
-    /// Custom S3 endpoint (for MinIO, R2, etc.)
+    /// Custom S3 endpoint (non-AWS)
     #[serde(default)]
     pub endpoint: String,
 }
@@ -139,18 +139,63 @@ async fn execute_remote(
     context: FactoryContext,
     ctx: ExecutionContext,
 ) -> Result<(), RemoteError> {
+    // Register S3-compatible storage handlers for R2/S3
+    crate::s3_registration::register_s3_handlers();
+    
     let config: RemoteConfig = serde_json::from_value(config)?;
 
     log::info!("🌐 REMOTE FACTORY (Chunked Parquet)");
     log::info!("   Remote URL: {}", config.url);
+    log::debug!("   Config region: '{}'", config.region);
+    log::debug!("   Config access_key length: {}", config.access_key.len());
+    log::debug!("   Config secret_key length: {}", config.secret_key.len());
+    log::debug!("   Config endpoint: '{}'", config.endpoint);
 
     let cmd: RemoteCommand = ctx.to_command::<RemoteCommand, RemoteError>()?;
     log::info!("   Command: {:?}", cmd);
 
+    // Get pond UUID for path prefix
+    let pond_metadata = context
+        .pond_metadata
+        .as_ref()
+        .ok_or_else(|| RemoteError::Configuration("No pond metadata available".to_string()))?;
+    let pond_id = pond_metadata.pond_id.to_string();
+
     // Open or create remote table
     // DeltaOps supports both file:// and s3:// URLs through object_store
     let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
-    let remote_table = RemoteTable::open_or_create(path, true).await?;
+    
+    // If S3 URL is just bucket without path (e.g., s3://bucket), append pond UUID as table path
+    // DeltaLake 0.29+ requires a full table path, not just a bucket
+    let path = if path.starts_with("s3://") && path.matches('/').count() == 2 {
+        let table_path = format!("{}/pond-{}", path, pond_id);
+        log::info!("   Appending pond UUID to path: {}", table_path);
+        table_path
+    } else {
+        path.to_string()
+    };
+    
+    // Build storage options for S3/R2 configuration
+    let mut storage_options = std::collections::HashMap::new();
+    if path.starts_with("s3://") {
+        if !config.region.is_empty() {
+            storage_options.insert("region".to_string(), config.region.clone());
+        }
+        if !config.access_key.is_empty() {
+            storage_options.insert("access_key_id".to_string(), config.access_key.clone());
+        }
+        if !config.secret_key.is_empty() {
+            storage_options.insert("secret_access_key".to_string(), config.secret_key.clone());
+        }
+        if !config.endpoint.is_empty() {
+            storage_options.insert("endpoint".to_string(), config.endpoint.clone());
+            // R2-specific settings - use virtual_hosted_style_request = false for path-style access
+            storage_options.insert("virtual_hosted_style_request".to_string(), "false".to_string());
+        }
+        log::debug!("   Final storage_options keys: {:?}", storage_options.keys().collect::<Vec<_>>());
+    }
+    
+    let remote_table = RemoteTable::open_or_create_with_storage_options(&path, true, storage_options).await?;
 
     match cmd {
         RemoteCommand::Push => execute_push(remote_table, &context).await,

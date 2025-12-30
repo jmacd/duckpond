@@ -308,7 +308,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("remote");
 
-        let mut table = RemoteTable::create(&table_path).await.unwrap();
+        let mut table = RemoteTable::create(table_path.to_str().unwrap()).await.unwrap();
 
         // Create a small test file (< 1 chunk)
         let data = vec![42u8; 1024 * 1024]; // 1MB
@@ -340,7 +340,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("remote");
 
-        let mut table = RemoteTable::create(&table_path).await.unwrap();
+        let mut table = RemoteTable::create(table_path.to_str().unwrap()).await.unwrap();
 
         // Create a large test file (multiple chunks)
         let chunk_size = 1024 * 1024; // 1MB chunks for fast test
@@ -369,7 +369,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("remote");
 
-        let mut table = RemoteTable::create(&table_path).await.unwrap();
+        let mut table = RemoteTable::create(table_path.to_str().unwrap()).await.unwrap();
 
         // Empty file
         let data: Vec<u8> = vec![];

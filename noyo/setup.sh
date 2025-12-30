@@ -24,8 +24,10 @@ ${EXE} mkdir -p /laketech
 ${EXE} copy host://${NOYO}/laketech /laketech/data
 
 # Disable backup
-#${EXE} mkdir /etc/system.d
-${EXE} mknod remote /etc/test_backup --config-path ${NOYO}/backup.yaml
+${EXE} mkdir /etc/system.d
+#${EXE} mknod remote /etc/test_backup --config-path ${NOYO}/backup.yaml
+#RUST_LOG=tlogfs=debug,remote=debug
+${EXE} mknod remote /etc/system.d/1-backup --config-path ${NOYO}/backup.yaml
 
 # Disable hydrovu
 ${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml

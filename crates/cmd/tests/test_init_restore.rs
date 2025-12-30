@@ -29,7 +29,7 @@ async fn test_init_from_local_backup() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let backup_path = temp_dir.path().join("backup");
 
-    let mut remote_table = RemoteTable::create(&backup_path)
+    let mut remote_table = RemoteTable::create(backup_path.to_str().unwrap())
         .await
         .expect("Failed to create remote table");
 
@@ -83,7 +83,7 @@ async fn test_scan_remote_versions() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let backup_path = temp_dir.path().join("backup");
 
-    let mut remote_table = RemoteTable::create(&backup_path)
+    let mut remote_table = RemoteTable::create(backup_path.to_str().unwrap())
         .await
         .expect("Failed to create remote table");
 
@@ -123,7 +123,7 @@ async fn test_scan_empty_backup() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let backup_path = temp_dir.path().join("empty_backup");
 
-    let _remote_table = RemoteTable::create(&backup_path)
+    let mut remote_table = RemoteTable::create(backup_path.to_str().unwrap())
         .await
         .expect("Failed to create remote table");
 

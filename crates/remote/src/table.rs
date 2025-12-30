@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use url::Url;
 
+
 /// Remote backup table using Delta Lake
 ///
 /// Manages a Delta Lake table storing chunked files with the schema:
@@ -33,10 +34,13 @@ use url::Url;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use remote::RemoteTable;
 ///
-/// // Create new remote table
+/// // Create new remote table (local path)
 /// let mut table = RemoteTable::create("/path/to/remote").await?;
 ///
-/// // Or open existing table
+/// // Or with S3 URL
+/// let mut table = RemoteTable::create("s3://bucket/remote").await?;
+///
+/// // Open existing table
 /// let mut table = RemoteTable::open("/path/to/remote").await?;
 /// # Ok(())
 /// # }
@@ -58,21 +62,46 @@ impl RemoteTable {
     /// Returns an error if the table already exists.
     ///
     /// # Arguments
-    /// * `path` - Directory path for the Delta Lake table
+    /// * `path_or_url` - Either a local directory path or a URL (file:///, s3://, etc.)
     ///
     /// # Errors
     /// Returns error if:
     /// - Table already exists
-    /// - Cannot create directory
+    /// - Cannot create directory (for local paths)
     /// - Delta Lake initialization fails
-    pub async fn create<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_str = path.as_ref().to_string_lossy().to_string();
-        debug!("Creating new remote backup table at {}", path_str);
+    pub async fn create(path_or_url: &str) -> Result<Self> {
+        Self::create_with_storage_options(path_or_url, HashMap::new()).await
+    }
 
-        // Ensure parent directory exists
-        std::fs::create_dir_all(path.as_ref()).map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to create directory: {}", e))
-        })?;
+    /// Create a new Delta Lake table with custom storage options
+    ///
+    /// # Arguments
+    /// * `path_or_url` - Either a local directory path or a full URL
+    /// * `storage_options` - Storage configuration (S3 credentials, etc.)
+    pub async fn create_with_storage_options(
+        path_or_url: &str,
+        storage_options: HashMap<String, String>,
+    ) -> Result<Self> {
+        debug!("Creating new remote backup table at {}", path_or_url);
+
+        // Try to parse as URL first (for s3://, etc), otherwise treat as local path
+        let url = if path_or_url.contains("://") {
+            // Already a URL (s3://, file://, etc)
+            Url::parse(path_or_url).map_err(|e| {
+                RemoteError::TableOperation(format!("Invalid URL: {}", e))
+            })?
+        } else {
+            // Local path - create directory and convert to file:// URL
+            std::fs::create_dir_all(path_or_url).map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to create directory: {}", e))
+            })?;
+            
+            Url::from_directory_path(path_or_url)
+                .or_else(|_| Url::from_file_path(path_or_url))
+                .map_err(|_| {
+                    RemoteError::TableOperation(format!("Failed to create URL from path: {}", path_or_url))
+                })?
+        };
 
         // Configure Delta Lake table to skip stats on binary column
         // This avoids warnings about large binary data in statistics
@@ -87,18 +116,13 @@ impl RemoteTable {
         .into_iter()
         .collect();
 
-        // Create Delta Lake table
-        let url = Url::from_directory_path(path.as_ref())
-            .or_else(|_| Url::from_file_path(path.as_ref()))
-            .map_err(|_| {
-                RemoteError::TableOperation(format!("Failed to create URL from path: {}", path_str))
-            })?;
-
         debug!("Using URL: {}", url);
+        debug!("Storage options: {:?}", storage_options);
 
-        let table = DeltaOps::try_from_uri(url)
+        let table = DeltaOps::try_from_uri_with_storage_options(url, storage_options.clone())
             .await
             .map_err(|e| {
+                log::error!("DeltaOps::try_from_uri_with_storage_options failed: {}", e);
                 RemoteError::TableOperation(format!("Failed to initialize table URI: {}", e))
             })?
             .create()
@@ -114,7 +138,7 @@ impl RemoteTable {
                 ))
             })?;
 
-        debug!("Created remote backup table at {}", path_str);
+        debug!("Created remote backup table at {}", path_or_url);
 
         // Create SessionContext and register table
         let session_context = Arc::new(SessionContext::new());
@@ -123,7 +147,7 @@ impl RemoteTable {
             .map_err(|e| RemoteError::TableOperation(format!("Failed to register table: {}", e)))?;
 
         Ok(Self {
-            path: path_str,
+            path: path_or_url.to_string(),
             table,
             session_context,
         })
@@ -135,23 +159,47 @@ impl RemoteTable {
     /// Returns an error if the table doesn't exist.
     ///
     /// # Arguments
-    /// * `path` - Directory path to the Delta Lake table
+    /// * `path_or_url` - Either a local directory path or a URL (file:///, s3://, etc.)
     ///
     /// # Errors
     /// Returns error if:
     /// - Table doesn't exist
     /// - Cannot open table
     /// - Schema is invalid
-    pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_str = path.as_ref().to_string_lossy().to_string();
-        debug!("Opening existing remote backup table at {}", path_str);
+    pub async fn open(path_or_url: &str) -> Result<Self> {
+        Self::open_with_storage_options(path_or_url, HashMap::new()).await
+    }
 
-        let url = Url::from_directory_path(path.as_ref())
-            .map_err(|_| RemoteError::TableOperation(format!("Invalid path: {}", path_str)))?;
-        let table = deltalake::open_table(url).await.map_err(|e| {
+    /// Open an existing Delta Lake table with custom storage options
+    ///
+    /// # Arguments
+    /// * `path_or_url` - Either a local directory path or a full URL
+    /// * `storage_options` - Storage configuration (S3 credentials, etc.)
+    pub async fn open_with_storage_options(
+        path_or_url: &str,
+        storage_options: HashMap<String, String>,
+    ) -> Result<Self> {
+        debug!("Opening existing remote backup table at {}", path_or_url);
+
+        // Try to parse as URL first (for s3://, etc), otherwise treat as local path
+        let url = if path_or_url.contains("://") {
+            // Already a URL (s3://, file://, etc)
+            Url::parse(path_or_url).map_err(|e| {
+                RemoteError::TableOperation(format!("Invalid URL: {}", e))
+            })?
+        } else {
+            // Local path - convert to file:// URL
+            Url::from_directory_path(path_or_url)
+                .or_else(|_| Url::from_file_path(path_or_url))
+                .map_err(|_| RemoteError::TableOperation(format!("Invalid path: {}", path_or_url)))?
+        };
+        
+        debug!("Calling deltalake::open_table_with_storage_options with URL: {}, storage_options: {:?}", url, storage_options);
+        let table = deltalake::open_table_with_storage_options(url.clone(), storage_options.clone()).await.map_err(|e| {
+            log::error!("deltalake::open_table_with_storage_options failed: {}", e);
             RemoteError::TableOperation(format!(
                 "Failed to open remote table at {}: {}",
-                path_str, e
+                path_or_url, e
             ))
         })?;
 
@@ -161,20 +209,32 @@ impl RemoteTable {
             .register_table("remote_files", Arc::new(table.clone()))
             .map_err(|e| RemoteError::TableOperation(format!("Failed to register table: {}", e)))?;
 
-        debug!("Opened remote backup table at {}", path_str);
+        debug!("Opened remote backup table at {}", path_or_url);
 
         Ok(Self {
-            path: path_str,
+            path: path_or_url.to_string(),
             table,
             session_context,
         })
     }
 
     /// Create or open a remote backup table
-    pub async fn open_or_create<P: AsRef<Path>>(path: P, _create_new: bool) -> Result<Self> {
-        match Self::open(&path).await {
+    ///
+    /// # Arguments
+    /// * `path_or_url` - Either a local directory path or a URL (file:///, s3://, etc.)
+    pub async fn open_or_create(path_or_url: &str, _create_new: bool) -> Result<Self> {
+        Self::open_or_create_with_storage_options(path_or_url, _create_new, HashMap::new()).await
+    }
+
+    /// Create or open a remote backup table with storage options
+    pub async fn open_or_create_with_storage_options(
+        path_or_url: &str,
+        _create_new: bool,
+        storage_options: HashMap<String, String>,
+    ) -> Result<Self> {
+        match Self::open_with_storage_options(path_or_url, storage_options.clone()).await {
             Ok(table) => Ok(table),
-            Err(_) => Self::create(path).await,
+            Err(_) => Self::create_with_storage_options(path_or_url, storage_options).await,
         }
     }
 
@@ -837,11 +897,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("remote_backup");
 
-        let table = RemoteTable::create(&table_path).await.unwrap();
+        let table = RemoteTable::create(table_path.to_str().unwrap()).await.unwrap();
         assert_eq!(table.path(), table_path.to_string_lossy());
 
         // Should fail to create again
-        let result = RemoteTable::create(&table_path).await;
+        let result = RemoteTable::create(table_path.to_str().unwrap()).await;
         assert!(result.is_err());
     }
 
@@ -852,10 +912,10 @@ mod tests {
         let table_path = temp_dir.path().join("remote_backup");
 
         // Create table
-        let _table = RemoteTable::create(&table_path).await.unwrap();
+        let _table = RemoteTable::create(table_path.to_str().unwrap()).await.unwrap();
 
         // Open table
-        let table = RemoteTable::open(&table_path).await.unwrap();
+        let table = RemoteTable::open(table_path.to_str().unwrap()).await.unwrap();
         assert_eq!(table.path(), table_path.to_string_lossy());
     }
 
@@ -864,7 +924,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("nonexistent");
 
-        let result = RemoteTable::open(&table_path).await;
+        let result = RemoteTable::open(table_path.to_str().unwrap()).await;
         assert!(result.is_err());
     }
 }
