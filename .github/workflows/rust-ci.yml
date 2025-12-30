@@ -62,9 +62,13 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.6.0
       
-      - name: Log in to Container Registry
+      - name: Log in to Container Registry (Podman)
         if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+      
+      - name: Log in to Container Registry (Cosign)
+        if: github.event_name != 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       
       - name: Extract metadata
         id: meta
@@ -83,10 +87,13 @@ jobs:
       
       - name: Push container image
         if: github.event_name != 'pull_request'
+        id: push
         run: |
           podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
+          DIGEST=$(podman inspect --format='{{.Digest}}' ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }})
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
       
       - name: Sign container image with Sigstore
         if: github.event_name != 'pull_request'
         run: |
-          cosign sign --yes ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
+          cosign sign --yes ${{ steps.meta.outputs.image_id }}@${{ steps.push.outputs.digest }}
