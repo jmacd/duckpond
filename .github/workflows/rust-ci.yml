@@ -77,34 +77,6 @@ jobs:
           echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       
-      - name: Setup Rust for packaging
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Install cargo-deb
-        run: cargo install cargo-deb
-      
-      - name: Build .deb package
-        run: |
-          cd crates/cmd
-          cargo deb
-          mkdir -p ../../artifacts
-          cp ../../target/debian/*.deb ../../artifacts/
-      
-      - name: Sign .deb with Sigstore
-        run: |
-          cosign sign-blob artifacts/*.deb \
-            --bundle artifacts/pond.deb.bundle \
-            --yes
-      
-      - name: Upload .deb package
-        uses: actions/upload-artifact@v4
-        with:
-          name: pond-debian-package
-          path: |
-            artifacts/*.deb
-            artifacts/*.bundle
-          retention-days: 90
-      
       - name: Build container image
         run: |
           podman build -f Dockerfile -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} .

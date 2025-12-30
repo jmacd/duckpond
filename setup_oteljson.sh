@@ -6,6 +6,7 @@ ROOT=/Volumes/sourcecode/src/duckpond
 POND=/tmp/pond
 POND2=/tmp/pond-replica
 SAMPLE=${ROOT}/sample-oteljson
+SAMPLE_OUT=/tmp/sample-oteljson
 REMOTE_CONFIG=/tmp/oteljson-remote.yaml
 BACKUP_TO=/tmp/pond-backups
 
@@ -16,6 +17,7 @@ export POND
 rm -rf ${POND}
 rm -rf ${POND2}
 rm -rf ${BACKUP_TO}
+rm -rf ${SAMPLE_OUT}
 
 # Create remote backup configuration
 cat > ${REMOTE_CONFIG} <<EOF
@@ -41,7 +43,7 @@ echo "=== Describing OTel JSON file schema ==="
 ${EXE} describe oteljson:///otel/caspar-jul02.json
 
 echo "=== Original pond SHA256 values ==="
-shasum -a 256 ${POND}/data/_large_files/*
+shasum -a 256 ${SAMPLE}/casparwater-2025-07-02T07-31-58.222.json ${SAMPLE}/casparwater-2025-07-13T08-54-27.820.json ${SAMPLE}/casparwater-2025-07-24T09-29-56.192.json
 
 echo ""
 echo "=== Generating replication command ==="
@@ -55,20 +57,22 @@ export POND=${POND2}
 INIT_ARGS=$(echo "${INIT_CMD}" | sed 's/^pond init //')
 ${EXE} init ${INIT_ARGS}
 
-echo "=== Replica pond SHA256 values ==="
-shasum -a 256 ${POND2}/data/_large_files/*
+#echo "=== Replica pond SHA256 values ==="
+#shasum -a 256 ${POND2}/data/_large_files/*
 
-echo ""
-echo "=== Comparing SHA256 values ==="
-echo "If the backup/restore worked correctly, these should match:"
-diff <(shasum -a 256 /tmp/pond/data/_large_files/* | awk '{print $1}' | sort) \
-     <(shasum -a 256 /tmp/pond-replica/data/_large_files/* | awk '{print $1}' | sort) \
-  && echo "✅ SUCCESS: All SHA256 values match!" \
-  || echo "❌ FAILURE: SHA256 values don't match"
+# echo ""
+# echo "=== Comparing SHA256 values ==="
+# echo "If the backup/restore worked correctly, these should match:"
+# diff <(shasum -a 256 /tmp/pond/data/_large_files/* | awk '{print $1}' | sort) \
+#      <(shasum -a 256 /tmp/pond-replica/data/_large_files/* | awk '{print $1}' | sort) \
+#   && echo "✅ SUCCESS: All SHA256 values match!" \
+#   || echo "❌ FAILURE: SHA256 values don't match"
 
 # Cat the data from first file
-#echo "=== Displaying data from first file ==="
-#${EXE} cat --format=table oteljson:///otel/caspar-jul02.json | head -40
+echo "=== Displaying data from first file ==="
+mkdir ${SAMPLE_OUT}
+${EXE} copy '/otel/*.json' "host://${SAMPLE_OUT}/"
+shasum -a 256 ${SAMPLE_OUT}/*
 
 # # Cat with a glob pattern to combine all files
 # echo "=== Displaying combined data from all OTel files ==="

@@ -192,15 +192,29 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         info!("   Restoring transaction {}...", txn_seq);
 
         // Use apply_parquet_files_from_remote to download and restore files
-        remote::factory::apply_parquet_files_from_remote(&remote_table, &mut local_table, *txn_seq)
-            .await
-            .map_err(|e| anyhow!("Failed to restore transaction {}: {}", txn_seq, e))?;
+        remote::factory::apply_parquet_files_from_remote(
+            &remote_table,
+            &mut local_table,
+            &pond_path,
+            *txn_seq,
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to restore transaction {}: {}", txn_seq, e))?;
 
         info!("      ✓ Transaction {} restored", txn_seq);
     }
 
+    // Restore large files (stored separately from transactions)
+    let large_file_count =
+        remote::factory::restore_large_files_from_remote(&remote_table, &pond_path)
+            .await
+            .map_err(|e| anyhow!("Failed to restore large files: {}", e))?;
+
     info!("✓ Pond initialized from backup successfully");
     info!("   Restored {} transactions", transactions.len());
+    if large_file_count > 0 {
+        info!("   Restored {} large files", large_file_count);
+    }
 
     // Set remote factory mode to "pull" for replica
     // This tells Steward to only run the remote factory on manual sync (pond control --mode sync)

@@ -55,6 +55,7 @@ mod changes;
 mod error;
 pub mod factory;
 mod reader;
+mod s3_registration;
 mod schema;
 mod table;
 mod writer;

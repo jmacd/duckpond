@@ -289,7 +289,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("remote");
 
-        let mut table = RemoteTable::create(&table_path).await.unwrap();
+        let mut table = RemoteTable::create(table_path.to_str().unwrap())
+            .await
+            .unwrap();
 
         // Write a test file
         let original_data = vec![42u8; 5 * 1024 * 1024]; // 5MB
@@ -317,7 +319,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("remote");
 
-        let table = RemoteTable::create(&table_path).await.unwrap();
+        let table = RemoteTable::create(table_path.to_str().unwrap())
+            .await
+            .unwrap();
 
         // Try to read a file that doesn't exist
         let mut output = Vec::new();
@@ -338,7 +342,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("remote");
 
-        let mut table = RemoteTable::create(&table_path).await.unwrap();
+        let mut table = RemoteTable::create(table_path.to_str().unwrap())
+            .await
+            .unwrap();
 
         // Write empty file
         let reader = Cursor::new(vec![]);
@@ -363,7 +369,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().join("remote");
 
-        let mut table = RemoteTable::create(&table_path).await.unwrap();
+        let mut table = RemoteTable::create(table_path.to_str().unwrap())
+            .await
+            .unwrap();
 
         // Write a large file with multiple chunks
         let chunk_size = 1024 * 1024; // 1MB chunks
