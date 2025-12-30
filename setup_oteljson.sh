@@ -71,7 +71,7 @@ ${EXE} init ${INIT_ARGS}
 # Cat the data from first file
 echo "=== Displaying data from first file ==="
 mkdir ${SAMPLE_OUT}
-${EXE} copy '/otel/*.json' 'host://${SAMPLE_OUT}/'
+${EXE} copy '/otel/*.json' "host://${SAMPLE_OUT}/"
 shasum -a 256 ${SAMPLE_OUT}/*
 
 # # Cat with a glob pattern to combine all files

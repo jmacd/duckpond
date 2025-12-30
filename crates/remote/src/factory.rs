@@ -359,9 +359,24 @@ async fn execute_push(
         remote_files.iter().map(|f| f.1.as_str()).collect();
 
     let large_files = get_large_files(pond_path.as_path()).await?;
+    // Convert absolute paths to relative paths for comparison with remote
+    // Absolute: /tmp/pond/_large_files/sha256=abc -> Relative: _large_files/sha256=abc
     let large_files_to_backup: Vec<_> = large_files
         .into_iter()
-        .filter(|(path, _)| !remote_paths.contains(path.as_str()))
+        .filter_map(|(abs_path, size)| {
+            // Extract the relative path: everything after the pond directory
+            // e.g., /tmp/pond/_large_files/sha256=X -> _large_files/sha256=X
+            let file_name = std::path::Path::new(&abs_path)
+                .file_name()
+                .and_then(|s| s.to_str())?;
+            let relative_path = format!("_large_files/{}", file_name);
+            
+            if remote_paths.contains(relative_path.as_str()) {
+                None // Already backed up
+            } else {
+                Some((abs_path, relative_path, size))
+            }
+        })
         .collect();
 
     if !large_files_to_backup.is_empty() {
@@ -370,23 +385,17 @@ async fn execute_push(
             large_files_to_backup.len()
         );
 
-        for (path, size) in &large_files_to_backup {
-            log::debug!("      Backing up large file: {} ({} bytes)", path, size);
+        for (abs_path, relative_path, size) in &large_files_to_backup {
+            log::debug!("      Backing up large file: {} ({} bytes)", relative_path, size);
 
-            let file_data = tokio::fs::read(&path).await.map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to read large file {}: {}", path, e))
+            let file_data = tokio::fs::read(&abs_path).await.map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to read large file {}: {}", abs_path, e))
             })?;
 
-            let file_name = std::path::Path::new(&path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| {
-                    RemoteError::TableOperation(format!("Invalid large file path: {}", path))
-                })?;
-
             let reader = std::io::Cursor::new(file_data);
+            // Use the relative path with _large_files/ prefix so restore knows where to put it
             remote_table
-                .write_file(current_version, file_name, reader, vec!["push".to_string()])
+                .write_file(current_version, relative_path, reader, vec!["push".to_string()])
                 .await?;
         }
 
@@ -423,40 +432,84 @@ async fn execute_pull(
 
     log::info!("   Remote has {} files", remote_files.len());
 
-    // Get local Delta table
+    // Get local Delta table and pond path
     let state = extract_tlogfs_state(context)?;
+    let pond_path = state.store_path().await;
     let local_table = state.table().await;
     let local_store = local_table.object_store();
 
     // Download each remote file that doesn't exist locally
     for (bundle_id, original_path, pond_txn_id, _size) in remote_files {
-        let file_path = object_store::path::Path::from(original_path.as_str());
+        // Check if this is a large file
+        if original_path.starts_with("_large_files/") {
+            // Large files go to the filesystem
+            let large_file_fs_path = pond_path.join(&original_path);
+            
+            // Check if file exists on filesystem
+            if large_file_fs_path.exists() {
+                log::debug!("   Skip {} (already exists on filesystem)", original_path);
+                continue;
+            }
+            
+            log::info!("   Pulling large file: {}", original_path);
 
-        // Check if file exists locally
-        if local_store.head(&file_path).await.is_ok() {
-            log::debug!("   Skip {} (already exists)", original_path);
-            continue;
-        }
+            // Download using ChunkedReader
+            let mut output = Vec::new();
+            remote_table
+                .read_file(&bundle_id, &original_path, pond_txn_id, &mut output)
+                .await?;
 
-        log::info!("   Pulling: {}", original_path);
+            // Ensure parent directory exists
+            if let Some(parent) = large_file_fs_path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    RemoteError::TableOperation(format!(
+                        "Failed to create _large_files directory: {}",
+                        e
+                    ))
+                })?;
+            }
 
-        // Download using ChunkedReader
-        let mut output = Vec::new();
-        remote_table
-            .read_file(&bundle_id, &original_path, pond_txn_id, &mut output)
-            .await?;
-
-        // Write to local Delta table's object store
-        let byte_len = output.len();
-        let bytes = Bytes::from(output);
-        local_store
-            .put(&file_path, bytes.into())
-            .await
-            .map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to write {}: {}", original_path, e))
+            // Write to filesystem
+            let byte_len = output.len();
+            tokio::fs::write(&large_file_fs_path, &output).await.map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to write large file to {}: {}",
+                    large_file_fs_path.display(),
+                    e
+                ))
             })?;
 
-        log::info!("      ✓ Pulled {} bytes", byte_len);
+            log::info!("      ✓ Pulled {} bytes to {}", byte_len, large_file_fs_path.display());
+        } else {
+            // Regular files go to the object store
+            let file_path = object_store::path::Path::from(original_path.as_str());
+
+            // Check if file exists locally
+            if local_store.head(&file_path).await.is_ok() {
+                log::debug!("   Skip {} (already exists)", original_path);
+                continue;
+            }
+
+            log::info!("   Pulling: {}", original_path);
+
+            // Download using ChunkedReader
+            let mut output = Vec::new();
+            remote_table
+                .read_file(&bundle_id, &original_path, pond_txn_id, &mut output)
+                .await?;
+
+            // Write to local Delta table's object store
+            let byte_len = output.len();
+            let bytes = Bytes::from(output);
+            local_store
+                .put(&file_path, bytes.into())
+                .await
+                .map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to write {}: {}", original_path, e))
+                })?;
+
+            log::info!("      ✓ Pulled {} bytes", byte_len);
+        }
     }
 
     log::info!("   ✓ Pull complete");
@@ -707,14 +760,14 @@ pub fn extract_txn_seq_from_bundle(_files: &[(String, Vec<u8>)]) -> Result<i64, 
 /// For chunked format, this function:
 /// 1. Queries for all files in the transaction partition (FILE-META-{txn_seq})
 /// 2. Uses ChunkedReader to reconstruct each file from chunks
-/// 3. Writes files directly to the local Delta table's object store
-/// 4. Parses files locally to find large file SHA256 references
-/// 5. Downloads referenced large files from POND-FILE-{sha256} partitions
-/// 6. Calls table.load() to refresh Delta table state
+/// 3. Writes files directly to the local Delta table's object store (for parquet/delta files)
+/// 4. Writes large files to the filesystem `_large_files` directory
+/// 5. Calls table.load() to refresh Delta table state
 ///
 /// # Arguments
 /// * `remote_table` - The remote backup table to read from
 /// * `local_table` - The local Delta table to write to
+/// * `pond_path` - Path to the pond directory (parent of 'data' directory)
 /// * `txn_seq` - Transaction sequence number to restore
 ///
 /// # Errors
@@ -725,6 +778,7 @@ pub fn extract_txn_seq_from_bundle(_files: &[(String, Vec<u8>)]) -> Result<i64, 
 pub async fn apply_parquet_files_from_remote(
     remote_table: &crate::RemoteTable,
     local_table: &mut deltalake::DeltaTable,
+    pond_path: &std::path::Path,
     txn_seq: i64,
 ) -> Result<(), RemoteError> {
     log::info!("Restoring transaction {} from remote backup", txn_seq);
@@ -742,10 +796,10 @@ pub async fn apply_parquet_files_from_remote(
     // Get the object store from the local table
     let object_store = local_table.object_store();
 
-    // Phase 2: Download and write parquet files + Delta logs
-    let mut large_file_refs = std::collections::HashSet::new();
-
-    for (bundle_id, path, sha256, size, pond_txn_id) in &files {
+    // Phase 2: Download and write files
+    // - Parquet files and Delta logs go to the object store
+    // - Large files (with _large_files/ prefix) go to the filesystem
+    for (bundle_id, path, _sha256, size, pond_txn_id) in &files {
         log::debug!("Restoring file: {} ({} bytes)", path, size);
 
         // Create a buffer to hold the reconstructed file
@@ -756,80 +810,46 @@ pub async fn apply_parquet_files_from_remote(
             .read_file(bundle_id, path, *pond_txn_id, &mut buffer)
             .await?;
 
-        // Write to local Delta table's object store
-        let object_store_path = object_store::path::Path::from(path.as_str());
-        object_store
-            .put(&object_store_path, buffer.clone().into())
-            .await
-            .map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to write file to local table: {}", e))
-            })?;
-
-        log::debug!("  ✓ Restored {}", path);
-
-        // Track large file references (if path indicates it's a large file)
-        if path.starts_with("_large_files/sha256=") {
-            large_file_refs.insert(sha256.clone());
-        }
-    }
-
-    // Phase 4: Download referenced large files (if any)
-    if !large_file_refs.is_empty() {
-        log::info!(
-            "Downloading {} referenced large files",
-            large_file_refs.len()
-        );
-
-        for sha256 in large_file_refs {
-            let bundle_id = crate::schema::ChunkedFileRecord::large_file_bundle_id(&sha256);
-            let large_file_path = format!("_large_files/sha256={}", sha256);
-
-            log::debug!("Downloading large file: {}", large_file_path);
-
-            // Query to get pond_txn_id for this large file
-            // Large files use bundle_id=POND-FILE-{sha256}, so we need to query the table
-            let df = remote_table
-                .session_context()
-                .sql(&format!(
-                    "SELECT DISTINCT pond_txn_id FROM remote_files \
-                     WHERE bundle_id = '{}' AND path = '{}' LIMIT 1",
-                    bundle_id, large_file_path
+        // Check if this is a large file (stored in _large_files/ directory)
+        if path.starts_with("_large_files/") {
+            // Large files go to the filesystem, not the object store
+            let large_file_fs_path = pond_path.join(path);
+            
+            // Ensure parent directory exists
+            if let Some(parent) = large_file_fs_path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    RemoteError::TableOperation(format!(
+                        "Failed to create _large_files directory: {}",
+                        e
+                    ))
+                })?;
+            }
+            
+            // Write to filesystem
+            tokio::fs::write(&large_file_fs_path, &buffer).await.map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to write large file to {}: {}",
+                    large_file_fs_path.display(),
+                    e
                 ))
-                .await?;
-
-            let batches = df.collect().await?;
-            let pond_txn_id = if !batches.is_empty() && batches[0].num_rows() > 0 {
-                let txn_ids = batches[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<arrow_array::Int64Array>()
-                    .ok_or_else(|| {
-                        RemoteError::TableOperation("Invalid column type".to_string())
-                    })?;
-                txn_ids.value(0)
-            } else {
-                0 // Default if not found (shouldn't happen)
-            };
-
-            let mut buffer = Vec::new();
-            remote_table
-                .read_file(&bundle_id, &large_file_path, pond_txn_id, &mut buffer)
-                .await?;
-
-            // Write to _large_files directory
-            let object_store_path = object_store::path::Path::from(large_file_path.as_str());
+            })?;
+            
+            log::debug!("  ✓ Restored large file to {}", large_file_fs_path.display());
+        } else {
+            // Regular files (parquet, delta log) go to the object store
+            let object_store_path = object_store::path::Path::from(path.as_str());
             object_store
                 .put(&object_store_path, buffer.into())
                 .await
                 .map_err(|e| {
-                    RemoteError::TableOperation(format!("Failed to write large file: {}", e))
+                    RemoteError::TableOperation(format!("Failed to write file to local table: {}", e))
                 })?;
-
-            log::debug!("  ✓ Downloaded large file {}", sha256);
+            
+            log::debug!("  ✓ Restored {}", path);
         }
     }
 
-    // Phase 5: Reload the table to pick up the new files
+    // Phase 3: Reload the table to pick up the new files
     local_table
         .load()
         .await
@@ -850,6 +870,89 @@ pub async fn apply_parquet_files(
     Err(RemoteError::TableOperation(
         "apply_parquet_files not used in chunked format. Use apply_parquet_files_from_remote instead.".to_string(),
     ))
+}
+
+/// Restore large files from remote backup to the filesystem
+///
+/// Large files are stored with bundle_id="POND-FILE-{sha256}" and path="_large_files/sha256=..."
+/// This function lists all such files from the remote table and restores them to the pond's
+/// _large_files directory.
+///
+/// # Arguments
+/// * `remote_table` - The remote backup table to read from
+/// * `pond_path` - Path to the pond directory (parent of 'data' directory)
+///
+/// # Errors
+/// Returns error if cannot read or write files
+pub async fn restore_large_files_from_remote(
+    remote_table: &crate::RemoteTable,
+    pond_path: &std::path::Path,
+) -> Result<usize, RemoteError> {
+    log::info!("Scanning for large files in remote backup...");
+
+    // List all files in remote
+    let all_files = remote_table.list_files("").await?;
+
+    // Filter to only large files (those with _large_files/ prefix in path)
+    let large_files: Vec<_> = all_files
+        .into_iter()
+        .filter(|(_, path, _, _)| path.starts_with("_large_files/"))
+        .collect();
+
+    if large_files.is_empty() {
+        log::info!("   No large files found in backup");
+        return Ok(0);
+    }
+
+    log::info!("   Found {} large files to restore", large_files.len());
+
+    // Large files are stored within the 'data' subdirectory of the pond
+    let data_path = pond_path.join("data");
+
+    let mut restored = 0;
+    for (bundle_id, path, pond_txn_id, _size) in large_files {
+        let large_file_fs_path = data_path.join(&path);
+
+        // Skip if already exists
+        if large_file_fs_path.exists() {
+            log::debug!("   Skip {} (already exists)", path);
+            continue;
+        }
+
+        log::info!("   Restoring: {}", path);
+
+        // Download file from remote
+        let mut buffer = Vec::new();
+        remote_table
+            .read_file(&bundle_id, &path, pond_txn_id, &mut buffer)
+            .await?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = large_file_fs_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to create _large_files directory: {}",
+                    e
+                ))
+            })?;
+        }
+
+        // Write to filesystem
+        let byte_len = buffer.len();
+        tokio::fs::write(&large_file_fs_path, &buffer).await.map_err(|e| {
+            RemoteError::TableOperation(format!(
+                "Failed to write large file to {}: {}",
+                large_file_fs_path.display(),
+                e
+            ))
+        })?;
+
+        log::info!("      ✓ Restored {} bytes", byte_len);
+        restored += 1;
+    }
+
+    log::info!("   ✓ Restored {} large files", restored);
+    Ok(restored)
 }
 
 // Helper functions
