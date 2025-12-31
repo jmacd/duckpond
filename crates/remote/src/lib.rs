@@ -62,6 +62,7 @@ mod writer;
 
 pub use changes::{Changeset, FileChange, detect_changes_from_delta_log};
 pub use error::RemoteError;
+pub use s3_registration::register_s3_handlers;
 pub use factory::{
     RemoteConfig, ReplicationConfig, apply_parquet_files, apply_parquet_files_from_remote,
     build_object_store, download_bundle, extract_bundle, extract_txn_seq_from_bundle,

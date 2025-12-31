@@ -91,16 +91,28 @@ impl ShipContext {
     }
 }
 
-/// Get the pond path with an optional override, falling back to POND environment variable
+/// Get the pond path with an optional override, falling back to POND environment variable.
+/// Converts relative paths to absolute paths using the current working directory.
 pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = override_path {
-        return Ok(path);
-    }
+    let path = if let Some(path) = override_path {
+        path
+    } else {
+        env::var("POND")
+            .map_err(|_| anyhow!("POND environment variable not set"))
+            .map(PathBuf::from)?
+    };
 
-    let pond_base = env::var("POND")
-        .map_err(|_| anyhow!("POND environment variable not set"))
-        .map(PathBuf::from)?;
-    Ok(pond_base)
+    // Convert relative paths to absolute paths
+    // This is required because Url::from_directory_path() only accepts absolute paths
+    let absolute_path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map_err(|e| anyhow!("Failed to get current directory: {}", e))?
+            .join(&path)
+    };
+
+    Ok(absolute_path)
 }
 
 /// Number of hex characters to show when shortening UUID7 values
@@ -272,3 +284,89 @@ impl tinyfs::Visitor<FileInfo> for FileInfoVisitor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_get_pond_path_with_override_absolute_path() {
+        // Absolute path should be returned as-is
+        let absolute_path = PathBuf::from("/some/absolute/path");
+        let result = get_pond_path_with_override(Some(absolute_path.clone())).unwrap();
+        assert_eq!(result, absolute_path);
+        assert!(result.is_absolute());
+    }
+
+    #[test]
+    fn test_get_pond_path_with_override_relative_path() {
+        // Relative path should be converted to absolute
+        let relative_path = PathBuf::from("pond");
+        let result = get_pond_path_with_override(Some(relative_path.clone())).unwrap();
+
+        // Result should be absolute
+        assert!(
+            result.is_absolute(),
+            "Expected absolute path, got: {:?}",
+            result
+        );
+
+        // Result should end with the relative path component
+        assert!(
+            result.ends_with("pond"),
+            "Expected path to end with 'pond', got: {:?}",
+            result
+        );
+
+        // Result should be prefixed with current working directory
+        let cwd = env::current_dir().unwrap();
+        assert_eq!(result, cwd.join("pond"));
+    }
+
+    #[test]
+    fn test_get_pond_path_with_override_relative_nested_path() {
+        // Nested relative path should be converted to absolute
+        let relative_path = PathBuf::from("some/nested/pond");
+        let result = get_pond_path_with_override(Some(relative_path)).unwrap();
+
+        assert!(result.is_absolute());
+        assert!(result.ends_with("some/nested/pond"));
+
+        let cwd = env::current_dir().unwrap();
+        assert_eq!(result, cwd.join("some/nested/pond"));
+    }
+
+    #[test]
+    fn test_get_pond_path_with_override_dot_relative_path() {
+        // Relative path with ./ prefix should be converted to absolute
+        let relative_path = PathBuf::from("./my_pond");
+        let result = get_pond_path_with_override(Some(relative_path)).unwrap();
+
+        assert!(
+            result.is_absolute(),
+            "Expected absolute path, got: {:?}",
+            result
+        );
+
+        let cwd = env::current_dir().unwrap();
+        assert_eq!(result, cwd.join("./my_pond"));
+    }
+
+    #[test]
+    fn test_get_pond_path_with_override_parent_relative_path() {
+        // Relative path with ../ should be converted to absolute
+        let relative_path = PathBuf::from("../sibling/pond");
+        let result = get_pond_path_with_override(Some(relative_path)).unwrap();
+
+        assert!(
+            result.is_absolute(),
+            "Expected absolute path, got: {:?}",
+            result
+        );
+
+        let cwd = env::current_dir().unwrap();
+        assert_eq!(result, cwd.join("../sibling/pond"));
+    }
+}
+
