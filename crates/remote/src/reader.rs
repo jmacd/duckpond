@@ -298,7 +298,7 @@ mod tests {
         let reader = Cursor::new(original_data.clone());
 
         let bundle_id = table
-            .write_file(123, "test/roundtrip.dat", reader, vec!["test".to_string()])
+            .write_file(123, "test/roundtrip.dat", reader)
             .await
             .unwrap();
 
@@ -349,7 +349,7 @@ mod tests {
         // Write empty file
         let reader = Cursor::new(vec![]);
         let bundle_id = table
-            .write_file(789, "test/empty.dat", reader, vec!["test".to_string()])
+            .write_file(789, "test/empty.dat", reader)
             .await
             .unwrap();
 
@@ -380,7 +380,7 @@ mod tests {
 
         let reader = Cursor::new(original_data.clone());
         let bundle_id = table
-            .write_file(456, "test/chunks.dat", reader, vec!["backup".to_string()])
+            .write_file(456, "test/chunks.dat", reader)
             .await
             .unwrap();
 

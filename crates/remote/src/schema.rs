@@ -29,9 +29,7 @@ pub const CHUNK_SIZE_MAX: usize = 100 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileType {
-    /// Parquet file from pond data filesystem
-    PondParquet,
-    /// Large file stored in tlogfs
+    /// Large file stored in tlogfs or pond data
     LargeFile,
     /// Transaction metadata summary
     Metadata,
@@ -42,7 +40,6 @@ impl FileType {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::PondParquet => "pond_parquet",
             Self::LargeFile => "large_file",
             Self::Metadata => "metadata",
         }
@@ -55,7 +52,6 @@ impl FromStr for FileType {
     /// Parse from string stored in Delta Lake
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "pond_parquet" => Ok(Self::PondParquet),
             "large_file" => Ok(Self::LargeFile),
             "metadata" => Ok(Self::Metadata),
             _ => Err(crate::RemoteError::Configuration(format!(
@@ -98,12 +94,6 @@ pub struct ChunkedFileRecord {
     pub total_sha256: String,
     /// Total number of chunks in this file
     pub chunk_count: i64,
-
-    // === Transaction metadata ===
-    /// CLI arguments that created this backup (JSON array as string)
-    pub cli_args: String,
-    /// Unix timestamp in milliseconds
-    pub created_at: i64,
 }
 
 impl ChunkedFileRecord {
@@ -124,13 +114,6 @@ impl ChunkedFileRecord {
             Field::new("total_size", DataType::Int64, false),
             Field::new("total_sha256", DataType::Utf8, false),
             Field::new("chunk_count", DataType::Int64, false),
-            // Transaction metadata
-            Field::new("cli_args", DataType::Utf8, false),
-            Field::new(
-                "created_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
         ]))
     }
 
@@ -262,7 +245,6 @@ mod tests {
     #[test]
     fn test_file_type_roundtrip() {
         for ft in [
-            FileType::PondParquet,
             FileType::LargeFile,
             FileType::Metadata,
         ] {

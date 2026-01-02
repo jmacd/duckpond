@@ -47,7 +47,7 @@ async fn test_init_from_local_backup() {
                     path: "test_file.parquet".to_string(),
                     sha256: "abc123".to_string(),
                     size: 100,
-                    file_type: remote::FileType::PondParquet,
+                    file_type: remote::FileType::LargeFile,
                 }],
                 cli_args: vec!["test".to_string()],
                 created_at: chrono::Utc::now().timestamp_millis(),

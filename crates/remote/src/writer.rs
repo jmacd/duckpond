@@ -9,10 +9,7 @@
 
 use crate::Result;
 use crate::schema::{CHUNK_SIZE_DEFAULT, ChunkedFileRecord};
-use arrow_array::{
-    BinaryArray, Int32Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
-};
-use chrono::Utc;
+use arrow_array::{BinaryArray, Int32Array, Int64Array, RecordBatch, StringArray};
 use deltalake::DeltaTable;
 use deltalake::operations::write::WriteBuilder;
 use log::debug;
@@ -39,9 +36,7 @@ use tokio::io::AsyncReadExt;
 /// let mut writer = ChunkedWriter::new(
 ///     123,  // pond_txn_id
 ///     "part_id=abc/file.parquet",
-///     FileType::PondParquet,
 ///     reader,
-///     vec!["backup".to_string()],
 /// );
 ///
 /// // Will be called internally by RemoteTable::write_file
@@ -53,7 +48,6 @@ pub struct ChunkedWriter<R> {
     pond_txn_id: i64,
     path: String,
     reader: R,
-    cli_args: Vec<String>,
     chunk_size: usize,
     /// Optional override for bundle_id (used for metadata to avoid SHA256 computation)
     bundle_id_override: Option<String>,
@@ -63,19 +57,15 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     /// Create a new chunked writer
     ///
     /// # Arguments
-    /// * `pond_id` - UUID of the pond
     /// * `pond_txn_id` - Transaction sequence number from pond
     /// * `path` - File path in Delta table
-    /// * `version` - Delta table version number
     /// * `reader` - Async reader providing file content
-    /// * `cli_args` - CLI arguments that triggered this backup
     #[must_use]
-    pub fn new(pond_txn_id: i64, path: String, reader: R, cli_args: Vec<String>) -> Self {
+    pub fn new(pond_txn_id: i64, path: String, reader: R) -> Self {
         Self {
             pond_txn_id,
             path,
             reader,
-            cli_args,
             chunk_size: CHUNK_SIZE_DEFAULT,
             bundle_id_override: None,
         }
@@ -233,8 +223,6 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             .into());
         }
 
-        let cli_args_json = serde_json::to_string(&self.cli_args)?;
-        let created_at = Utc::now().timestamp_micros();
         let num_chunks = chunks.len();
 
         let mut bundle_ids = Vec::with_capacity(num_chunks);
@@ -246,8 +234,6 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         let mut total_sizes = Vec::with_capacity(num_chunks);
         let mut total_sha256s = Vec::with_capacity(num_chunks);
         let mut chunk_counts = Vec::with_capacity(num_chunks);
-        let mut cli_args_vec = Vec::with_capacity(num_chunks);
-        let mut created_ats = Vec::with_capacity(num_chunks);
 
         for (chunk_id, crc, data) in chunks {
             bundle_ids.push(bundle_id.to_string());
@@ -259,8 +245,6 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             total_sizes.push(total_size as i64);
             total_sha256s.push(sha256_hash.to_string());
             chunk_counts.push(chunk_count);
-            cli_args_vec.push(cli_args_json.clone());
-            created_ats.push(created_at);
         }
 
         let schema = ChunkedFileRecord::arrow_schema();
@@ -286,8 +270,6 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
                 Arc::new(Int64Array::from(total_sizes)),
                 Arc::new(StringArray::from(total_sha256s)),
                 Arc::new(Int64Array::from(chunk_counts)),
-                Arc::new(StringArray::from(cli_args_vec)),
-                Arc::new(TimestampMicrosecondArray::from(created_ats).with_timezone("UTC")),
             ],
         )?;
 
@@ -317,7 +299,7 @@ mod tests {
         let reader = Cursor::new(data.clone());
 
         let bundle_id = table
-            .write_file(123, "test/file.dat", reader, vec!["test".to_string()])
+            .write_file(123, "test/file.dat", reader)
             .await
             .unwrap();
 
@@ -356,7 +338,6 @@ mod tests {
                 456,
                 "test/large.dat",
                 Cursor::new(data.clone()),
-                vec!["backup".to_string()],
             )
             .await
             .unwrap();
@@ -382,7 +363,7 @@ mod tests {
         let reader = Cursor::new(data);
 
         let bundle_id = table
-            .write_file(1, "test/empty.dat", reader, vec!["test".to_string()])
+            .write_file(1, "test/empty.dat", reader)
             .await
             .unwrap();
 

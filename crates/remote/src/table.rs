@@ -24,7 +24,6 @@ use url::Url;
 /// - pond_txn_id, original_path, file_type
 /// - chunk_id, chunk_crc32, chunk_data
 /// - total_size, total_sha256, chunk_count
-/// - cli_args, created_at
 ///
 /// # Example
 ///
@@ -109,7 +108,7 @@ impl RemoteTable {
             "delta.dataSkippingStatsColumns".to_string(),
             Some(
                 "bundle_id,pond_txn_id,original_path,file_type,chunk_id,chunk_crc32,\
-                 total_size,total_sha256,chunk_count,cli_args,created_at"
+                 total_size,total_sha256,chunk_count"
                     .to_string(),
             ),
         )]
@@ -284,9 +283,8 @@ impl RemoteTable {
         pond_txn_id: i64,
         path: impl Into<String>,
         reader: R,
-        cli_args: Vec<String>,
     ) -> Result<()> {
-        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader, cli_args)
+        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader)
             .with_bundle_id(bundle_id.to_string());
 
         writer.write_to_table(&mut self.table).await?;
@@ -312,7 +310,6 @@ impl RemoteTable {
     /// * `pond_txn_id` - Transaction sequence number from pond
     /// * `path` - Original path in pond
     /// * `reader` - Async reader providing file content
-    /// * `cli_args` - CLI arguments that triggered this backup
     ///
     /// # Returns
     /// The bundle_id (SHA256 hash) of the written file
@@ -327,9 +324,8 @@ impl RemoteTable {
         pond_txn_id: i64,
         path: impl Into<String>,
         reader: R,
-        cli_args: Vec<String>,
     ) -> Result<String> {
-        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader, cli_args);
+        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader);
 
         let bundle_id = writer.write_to_table(&mut self.table).await?;
 
@@ -402,7 +398,6 @@ impl RemoteTable {
             pond_txn_id,
             "METADATA".to_string(),
             metadata_reader,
-            metadata.cli_args.clone(),
         )
         .with_bundle_id(bundle_id);
 

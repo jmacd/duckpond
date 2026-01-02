@@ -345,7 +345,6 @@ async fn execute_push(
                     version,
                     path,
                     reader,
-                    vec!["push".to_string()],
                 )
                 .await?;
         }
@@ -367,7 +366,6 @@ async fn execute_push(
                         version,
                         &commit_log_path,
                         reader,
-                        vec!["push".to_string()],
                     )
                     .await?;
             }
@@ -437,7 +435,6 @@ async fn execute_push(
                     current_version,
                     relative_path,
                     reader,
-                    vec!["push".to_string()],
                 )
                 .await?;
         }

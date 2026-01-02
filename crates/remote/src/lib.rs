@@ -40,7 +40,6 @@
 //! table.write_file(
 //!     123,  // pond_txn_id
 //!     "part_id=abc/file.parquet",  // original_path
-//!     "pond_parquet",  // file_type
 //!     file_data,
 //! ).await?;
 //!
