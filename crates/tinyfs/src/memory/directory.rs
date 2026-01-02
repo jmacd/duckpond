@@ -26,7 +26,7 @@ impl Metadata for MemoryDirectory {
         Ok(NodeMetadata {
             version: 1,   // Memory directories don't track versions
             size: None,   // Directories don't have sizes
-            sha256: None, // Directories don't have checksums
+            blake3: None, // Directories don't have checksums
             entry_type: EntryType::DirectoryPhysical,
             timestamp: 0, // TODO
         })

@@ -84,3 +84,9 @@ impl From<String> for RemoteError {
         RemoteError::Configuration(s)
     }
 }
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for RemoteError {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        RemoteError::Configuration(e.to_string())
+    }
+}

@@ -43,8 +43,8 @@ async-stream.workspace = true
 humantime.workspace = true
 tera.workspace = true
 regex.workspace = true
-tl = "0.7.8"
-opentelemetry-proto = { version = "0.31.0", features = ["gen-tonic-messages", "metrics", "with-serde"] }
+tl.workspace = true
+opentelemetry-proto.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

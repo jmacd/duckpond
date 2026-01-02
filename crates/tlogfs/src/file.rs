@@ -367,19 +367,19 @@ impl AsyncWrite for OpLogFileWriter {
 
                     let content = hybrid_result.content;
                     let content_len = hybrid_result.size;
-                    let sha256 = hybrid_result.sha256;
+                    let blake3 = hybrid_result.blake3;
 
                     debug!(
-                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, sha256={}, is_large={}",
+                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, blake3={}, is_large={}",
                         content_len,
-                        sha256,
+                        blake3,
                         content.is_empty() && content_len > 0
                     );
 
                     // Determine ContentRef based on whether content is empty (large file external)
                     let content_ref = if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
                         // Large file - stored externally
-                        crate::file_writer::ContentRef::Large(sha256, content_len as u64)
+                        crate::file_writer::ContentRef::Large(blake3, content_len as u64)
                     } else {
                         // Small file - content in memory
                         crate::file_writer::ContentRef::Small(content.clone())

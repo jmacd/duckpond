@@ -12,25 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// Default chunk size: 16MB (power of 2 for optimal BLAKE3 tree alignment)
-/// Balances between:
-/// - Granular checksums (smaller = better)
-/// - Fewer rows/overhead (larger = better)
-/// - In-memory buffer size (smaller = better)
-/// - BLAKE3 tree alignment (power of 2 = optimal)
-pub const CHUNK_SIZE_DEFAULT: usize = 16 * 1024 * 1024;
-
-/// Minimum chunk size: 4MB
-pub const CHUNK_SIZE_MIN: usize = 4 * 1024 * 1024;
-
-/// Maximum chunk size: 64MB
-pub const CHUNK_SIZE_MAX: usize = 64 * 1024 * 1024;
-
-/// BLAKE3 block size: 16KB (chunk_log=4)
-/// Each block produces one leaf hash in the Merkle tree.
-/// Outboard overhead = (blocks - 1) * 64 bytes ≈ 0.39%
-pub const BLAKE3_BLOCK_SIZE: usize = 16 * 1024;
-
 /// Type of file being backed up
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -580,7 +580,7 @@ impl Metadata for ConfigFile {
         Ok(NodeMetadata {
             version: 1,
             size: Some(self.config_yaml.len() as u64),
-            sha256: None,
+            blake3: None,
             entry_type: EntryType::FileDataDynamic,
             timestamp: 0,
         })

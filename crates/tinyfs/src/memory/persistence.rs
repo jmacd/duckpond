@@ -295,7 +295,7 @@ impl State {
                     version: v.version,
                     timestamp: v.timestamp,
                     size: v.content.len() as u64,
-                    sha256: None,
+                    blake3: None,
                     entry_type: v.entry_type,
                     extended_metadata: v.extended_metadata.clone(),
                 })

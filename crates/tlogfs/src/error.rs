@@ -52,9 +52,9 @@ pub enum TLogFSError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_arrow::Error),
 
-    #[error("Large file not found: {sha256} at path {path}")]
+    #[error("Large file not found: {blake3} at path {path}")]
     LargeFileNotFound {
-        sha256: String,
+        blake3: String,
         path: String,
         #[source]
         source: std::io::Error,

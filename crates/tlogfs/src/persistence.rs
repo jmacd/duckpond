@@ -176,7 +176,7 @@ impl OpLogPersistence {
         // Create the Delta table structure
         let config: HashMap<String, Option<String>> = vec![(
             "delta.dataSkippingStatsColumns".to_string(),
-            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,sha256,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
         )]
         .into_iter()
         .collect();
@@ -250,7 +250,7 @@ impl OpLogPersistence {
                 let config: HashMap<String, Option<String>> = vec![(
                     "delta.dataSkippingStatsColumns".to_string(),
 		    // @@@ Awful
-                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,sha256,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
                 )]
                 .into_iter()
                 .collect();
@@ -1326,7 +1326,7 @@ impl InnerState {
             let now = Utc::now().timestamp_micros();
             OplogEntry::new_small_file(id, now, version, result.content, self.txn_seq)
         } else {
-            // Large file: content already stored, just create OplogEntry with SHA256
+            // Large file: content already stored, just create OplogEntry with BLAKE3
             let size = result.size;
             debug!("Storing large file: {size} bytes");
             let now = Utc::now().timestamp_micros();
@@ -1407,7 +1407,7 @@ impl InnerState {
                         id,
                         now,
                         version,
-                        result.sha256,
+                        result.blake3,
                         result.size as i64, // Cast to i64 to match Delta Lake protocol
                         global_min,
                         global_max,
@@ -1421,7 +1421,7 @@ impl InnerState {
                         id,
                         now,
                         version,
-                        result.sha256,
+                        result.blake3,
                         result.size as i64, // Cast to i64 to match Delta Lake protocol
                         self.txn_seq,
                     )
@@ -1641,11 +1641,11 @@ impl InnerState {
             let result = writer.finalize().await?;
 
             // Extract hybrid writer result data
-            let sha256 = result.sha256.clone();
+            let sha256 = result.blake3.clone();
             let size = result.size as i64;
             let now = Utc::now().timestamp_micros();
 
-            debug!("Stored large FileSeries via HybridWriter: {size} bytes, SHA256: {sha256}");
+            debug!("Stored large FileSeries via HybridWriter: {size} bytes, BLAKE3: {sha256}");
 
             let entry = OplogEntry::new_large_file_series(
                 id,
@@ -1711,8 +1711,8 @@ impl InnerState {
             // Changed condition to always enter this block
             if record.is_large_file() {
                 // Large file: create async file reader
-                let sha256 = record.sha256.as_ref().ok_or_else(|| {
-                    TLogFSError::ArrowMessage("Large file entry missing SHA256".to_string())
+                let sha256 = record.blake3.as_ref().ok_or_else(|| {
+                    TLogFSError::ArrowMessage("Large file entry missing BLAKE3".to_string())
                 })?;
 
                 // Find the file in either flat or hierarchical structure
@@ -1722,24 +1722,31 @@ impl InnerState {
                         TLogFSError::ArrowMessage(format!("Error searching for large file: {}", e))
                     })?
                     .ok_or_else(|| TLogFSError::LargeFileNotFound {
-                        sha256: sha256.clone(),
-                        path: format!("_large_files/sha256={}", sha256),
+                        blake3: sha256.clone(),
+                        path: format!("_large_files/blake3={}", sha256),
                         source: std::io::Error::new(
                             std::io::ErrorKind::NotFound,
                             "Large file not found in any location",
                         ),
                     })?;
 
-                // Open file for async reading
-                let file = tokio::fs::File::open(&large_file_path).await.map_err(|e| {
-                    TLogFSError::LargeFileNotFound {
-                        sha256: sha256.clone(),
-                        path: large_file_path.display().to_string(),
-                        source: e,
-                    }
-                })?;
-
-                Ok(Box::pin(file))
+                // Read parquet file using streaming verified reader
+                debug!("Reading large file from parquet: {:?}", large_file_path);
+                
+                // Use ParquetFileReader for streaming verified access
+                let reader = crate::large_files::ParquetFileReader::new(large_file_path.clone())
+                    .await
+                    .map_err(|e| {
+                        TLogFSError::LargeFileNotFound {
+                            blake3: sha256.clone(),
+                            path: large_file_path.display().to_string(),
+                            source: e,
+                        }
+                    })?;
+                
+                debug!("Created streaming verified reader for large file");
+                
+                Ok(Box::pin(reader))
             } else {
                 // Small file: create cursor from inline content
                 let content = record.content.clone().ok_or_else(|| {
@@ -2804,7 +2811,7 @@ impl InnerState {
             return Ok(NodeMetadata {
                 entry_type,
                 size: Some(0),
-                sha256: None,
+                blake3: None,
                 version: 0, // No version yet - will be 1 when first written
                 timestamp: Utc::now().timestamp_micros(),
             });
@@ -2892,7 +2899,7 @@ impl InnerState {
                     version,
                     timestamp: record.timestamp,
                     size: size as u64, // Cast back to u64 for tinyfs interface
-                    sha256: record.sha256.clone(),
+                    blake3: record.blake3.clone(),
                     entry_type: record.file_type,
                     extended_metadata,
                 }
@@ -2961,8 +2968,8 @@ impl InnerState {
         // Load content based on file type
         if target_record.is_large_file() {
             // Large file: read from external storage
-            let sha256 = target_record.sha256.as_ref().ok_or_else(|| {
-                tinyfs::Error::Other("Large file entry missing SHA256".to_string())
+            let sha256 = target_record.blake3.as_ref().ok_or_else(|| {
+                tinyfs::Error::Other("Large file entry missing BLAKE3".to_string())
             })?;
 
             let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256)
@@ -2972,7 +2979,7 @@ impl InnerState {
                 })?
                 .ok_or_else(|| {
                     tinyfs::Error::NotFound(PathBuf::from(format!(
-                        "Large file with SHA256 {} not found",
+                        "Large file with BLAKE3 {} not found",
                         sha256
                     )))
                 })?;

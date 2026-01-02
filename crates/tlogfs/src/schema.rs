@@ -10,7 +10,6 @@ use deltalake::kernel::{
 };
 use log::debug;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tinyfs::{EntryType, FileID, NodeID, PartID};
@@ -158,12 +157,10 @@ pub fn detect_timestamp_column(
     ))
 }
 
-/// Compute SHA256 for any content (small or large files)
+/// Compute BLAKE3 hash for any content (small or large files)
 #[must_use]
-pub fn compute_sha256(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    format!("{:x}", hasher.finalize())
+pub fn compute_blake3(content: &[u8]) -> String {
+    blake3::hash(content).to_hex().to_string()
 }
 
 /// Storage format for OplogEntry content
@@ -229,9 +226,9 @@ pub struct OplogEntry {
     /// - For symlinks: target path
     /// - For directories: Arrow IPC encoded VersionedDirectoryEntry records
     pub content: Option<Vec<u8>>,
-    /// SHA256 checksum for large files (> threshold)
+    /// BLAKE3 checksum for large files (> threshold)
     /// Some() for large files stored externally, None for small files stored inline
-    pub sha256: Option<String>,
+    pub blake3: Option<String>,
     /// File size in bytes (Some() for all files, None for directories/symlinks)
     /// NOTE: Uses i64 instead of u64 to match Delta Lake protocol (Java ecosystem legacy)
     pub size: Option<i64>,
@@ -279,7 +276,7 @@ impl ForArrow for OplogEntry {
             )),
             Arc::new(Field::new("version", DataType::Int64, false)),
             Arc::new(Field::new("content", DataType::Binary, true)), // Now nullable for large files
-            Arc::new(Field::new("sha256", DataType::Utf8, true)), // New field for large file checksums
+            Arc::new(Field::new("blake3", DataType::Utf8, true)), // BLAKE3 hash for large file checksums
             Arc::new(Field::new("size", DataType::Int64, true)), // File size in bytes (Int64 to match Delta Lake protocol)
             // NEW: Temporal metadata fields for FileSeries support
             Arc::new(Field::new("min_event_time", DataType::Int64, true)), // Min timestamp from data for fast queries
@@ -325,7 +322,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(content.clone()),
-            sha256: Some(compute_sha256(&content)), // NEW: Always compute SHA256
+            blake3: Some(compute_blake3(&content)), // NEW: Always compute SHA256
             size: Some(size as i64),                // Cast to i64 to match Delta Lake protocol
             // Temporal metadata - None for non-series files
             min_event_time: None,
@@ -346,7 +343,7 @@ impl OplogEntry {
         id: FileID,
         timestamp: i64,
         version: i64,
-        sha256: String,
+        blake3_hash: String,
         size: i64,
         txn_seq: i64,
     ) -> Self {
@@ -364,7 +361,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: None,
-            sha256: Some(sha256),
+            blake3: Some(blake3_hash),
             size: Some(size), // NEW: Store size explicitly
             // Temporal metadata - None for non-series files
             min_event_time: None,
@@ -401,7 +398,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(content),
-            sha256: None,
+            blake3: None,
             size: None, // None for directories and symlinks
             // Temporal metadata - None for directories and symlinks
             min_event_time: None,
@@ -456,7 +453,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(content.clone()),
-            sha256: Some(compute_sha256(&content)),
+            blake3: Some(compute_blake3(&content)),
             size: Some(size as i64), // Cast to i64 to match Delta Lake protocol
             // Temporal metadata for efficient DataFusion queries
             min_event_time: Some(min_event_time),
@@ -477,7 +474,7 @@ impl OplogEntry {
         id: FileID,
         timestamp: i64,
         version: i64,
-        sha256: String,
+        blake3_hash: String,
         size: i64, // Changed from u64 to i64 to match Delta Lake protocol
         min_event_time: i64,
         max_event_time: i64,
@@ -499,7 +496,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: None,
-            sha256: Some(sha256),
+            blake3: Some(blake3_hash),
             size: Some(size),
             // Temporal metadata for efficient DataFusion queries
             min_event_time: Some(min_event_time),
@@ -575,7 +572,7 @@ impl OplogEntry {
         tinyfs::NodeMetadata {
             version: self.version as u64,
             size: self.size.map(|s| s as u64), // Cast i64 back to u64 for tinyfs interface
-            sha256: self.sha256.clone(),
+            blake3: self.blake3.clone(),
             entry_type: self.file_type,
             timestamp: self.timestamp,
         }
@@ -602,7 +599,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(config_content),
-            sha256: None,
+            blake3: None,
             size: None,
             min_event_time: None,
             max_event_time: None,
@@ -654,7 +651,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(content),
-            sha256: None,
+            blake3: None,
             size: None,
             min_event_time: None,
             max_event_time: None,

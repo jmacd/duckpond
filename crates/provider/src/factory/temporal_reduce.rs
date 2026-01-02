@@ -449,7 +449,7 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
         Ok(NodeMetadata {
             version: 1,
             size: None,   // Unknown until SQL is generated and data computed
-            sha256: None, // Unknown until SQL is generated and data computed
+            blake3: None, // Unknown until SQL is generated and data computed
             entry_type: EntryType::FileSeriesDynamic, // Temporal reduce always creates series files
             timestamp: 0, // Use epoch time for dynamic content
         })
@@ -851,7 +851,7 @@ impl tinyfs::Metadata for TemporalReduceDirectory {
         Ok(NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
@@ -996,7 +996,7 @@ impl tinyfs::Metadata for TemporalReduceSiteDirectory {
         Ok(NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })

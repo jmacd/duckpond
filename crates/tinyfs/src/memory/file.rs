@@ -36,13 +36,13 @@ impl Metadata for MemoryFile {
         let size = content.len() as u64;
 
         // For memory files, we'll compute a simple hash for now
-        // In a real implementation, we'd use SHA256
-        let sha256 = format!("{:016x}", simple_hash(&content));
+        // In a real implementation, we'd use BLAKE3
+        let blake3 = format!("{:016x}", simple_hash(&content));
 
         Ok(NodeMetadata {
             version: 1, // Memory files don't track versions
             size: Some(size),
-            sha256: Some(sha256),
+            blake3: Some(blake3),
             entry_type: self.entry_type, // Use the stored entry type
             timestamp: 0,                // TODO
         })

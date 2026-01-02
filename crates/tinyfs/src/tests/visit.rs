@@ -186,7 +186,7 @@ impl crate::Metadata for VisitDirectory {
         Ok(crate::NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
             entry_type: crate::EntryType::DirectoryDynamic,
             timestamp: 0, // TODO
         })

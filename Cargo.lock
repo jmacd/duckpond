@@ -781,7 +781,6 @@ dependencies = [
  "serde_arrow",
  "serde_json",
  "serde_yaml",
- "sha2",
  "steward",
  "tempfile",
  "tera",
@@ -4388,6 +4387,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "utilities",
  "uuid7",
 ]
 
@@ -5312,6 +5312,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "blake3",
  "bytes",
  "chrono",
  "datafusion",
@@ -5323,7 +5324,6 @@ dependencies = [
  "serde_arrow",
  "serde_json",
  "serde_yaml",
- "sha2",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
@@ -5373,7 +5373,9 @@ dependencies = [
  "async-compression",
  "async-stream",
  "async-trait",
+ "bao-tree",
  "base64 0.22.1",
+ "blake3",
  "bytes",
  "chrono",
  "clap",
@@ -5395,7 +5397,6 @@ dependencies = [
  "serde_arrow",
  "serde_json",
  "serde_yaml",
- "sha2",
  "tempfile",
  "tera",
  "thiserror 2.0.17",
@@ -5724,10 +5725,18 @@ name = "utilities"
 version = "0.19.0"
 dependencies = [
  "arrow",
+ "arrow-array",
+ "arrow-schema",
+ "bao-tree",
+ "blake3",
  "chrono",
+ "datafusion",
+ "deltalake",
+ "futures",
  "log",
  "parquet",
  "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]

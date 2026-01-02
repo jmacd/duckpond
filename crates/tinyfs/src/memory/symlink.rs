@@ -23,7 +23,7 @@ impl Metadata for MemorySymlink {
         Ok(NodeMetadata {
             version: 1,   // Memory symlinks don't track versions
             size: None,   // Symlinks don't have sizes
-            sha256: None, // Symlinks don't have checksums
+            blake3: None, // Symlinks don't have checksums
             entry_type: EntryType::Symlink,
             timestamp: 0, // TODO
         })

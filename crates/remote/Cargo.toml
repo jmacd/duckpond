@@ -46,6 +46,7 @@ tlogfs = { workspace = true }
 steward = { workspace = true }
 provider = { workspace = true }
 tinyfs = { workspace = true }
+utilities = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }

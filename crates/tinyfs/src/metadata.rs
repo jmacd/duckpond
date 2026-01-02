@@ -15,8 +15,8 @@ pub struct NodeMetadata {
     /// File size in bytes (None for directories and symlinks)
     pub size: Option<u64>,
 
-    /// SHA256 checksum (Some for all files, None for directories/symlinks)
-    pub sha256: Option<String>,
+    /// BLAKE3 checksum (Some for all files, None for directories/symlinks)
+    pub blake3: Option<String>,
 
     /// Entry type (file, directory, symlink with file format variants)
     pub entry_type: EntryType,

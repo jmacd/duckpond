@@ -282,7 +282,7 @@ impl tinyfs::Metadata for TemplateDirectory {
         Ok(NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
@@ -405,7 +405,7 @@ impl tinyfs::Metadata for TemplateFile {
         Ok(NodeMetadata {
             version: 1,
             size: Some(0), // Placeholder size - will be accurate when file is read
-            sha256: None,
+            blake3: None,
             entry_type: EntryType::FileDataDynamic,
             timestamp: 0,
         })

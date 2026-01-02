@@ -630,7 +630,7 @@ impl Metadata for SqlDerivedFile {
         Ok(NodeMetadata {
             version: 1,
             size: None,   // Unknown until data is actually computed
-            sha256: None, // Unknown until data is actually computed
+            blake3: None, // Unknown until data is actually computed
             entry_type,
             timestamp: 0,
         })

@@ -69,12 +69,14 @@ pub use factory::{
     scan_remote_versions,
 };
 pub use reader::ChunkedReader;
-pub use schema::{
-    BLAKE3_BLOCK_SIZE, CHUNK_SIZE_DEFAULT, ChunkedFileRecord, FileInfo, FileType,
-    TransactionMetadata,
-};
+pub use schema::{ChunkedFileRecord, FileInfo, FileType, TransactionMetadata};
 pub use table::RemoteTable;
 pub use writer::ChunkedWriter;
+
+// Re-export chunking constants from utilities for backward compatibility
+pub use utilities::chunked_files::{
+    BLAKE3_BLOCK_SIZE, CHUNK_SIZE_DEFAULT, CHUNK_SIZE_MAX, CHUNK_SIZE_MIN,
+};
 
 /// Result type for remote operations
 pub type Result<T> = std::result::Result<T, RemoteError>;
