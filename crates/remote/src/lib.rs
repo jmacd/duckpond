@@ -5,26 +5,27 @@
 //! Remote backup system using chunked parquet files in Delta Lake
 //!
 //! This crate provides streaming backup and restore functionality for pond commits.
-//! Files are chunked into manageable pieces (default 50MB) and stored in parquet
-//! format within a Delta Lake table. Each chunk has CRC32 validation, and files
-//! have SHA256 hashes for integrity verification.
+//! Files are chunked into manageable pieces (default 16MB) and stored in parquet
+//! format within a Delta Lake table. Each chunk has BLAKE3 hash validation with
+//! outboard Merkle tree data for verified streaming.
 //!
 //! # Architecture
 //!
 //! - **RemoteTable**: Delta Lake table managing all backup data
-//! - **ChunkedWriter**: Streams data to chunked parquet files with checksums
+//! - **ChunkedWriter**: Streams data to chunked parquet files with BLAKE3 hashes
 //! - **ChunkedReader**: Streams data from chunked parquet files with verification
-//! - **Partitioning**: Uses `bundle_id` (SHA256 hash) as partition column
+//! - **Partitioning**: Uses `bundle_id` (BLAKE3 root hash) as partition column
 //!
 //! # Schema
 //!
 //! Each row represents one chunk of a file:
-//! - `bundle_id` (partition): SHA256 hash of file, or `metadata_{txn_id}` for metadata
+//! - `bundle_id` (partition): BLAKE3 root hash of file, or `metadata_{txn_id}` for metadata
 //! - `pond_txn_id`: Transaction sequence number from pond
 //! - `chunk_id`: Sequential chunk number within file
-//! - `chunk_data`: The actual data (10-100MB per chunk)
-//! - `chunk_crc32`: CRC32 checksum of chunk_data
-//! - Plus metadata fields for file type, size, paths, timestamps
+//! - `chunk_data`: The actual data (4-64MB per chunk)
+//! - `chunk_hash`: BLAKE3 subtree hash of chunk_data
+//! - `chunk_outboard`: BLAKE3 Merkle tree outboard data (~0.4% of chunk)
+//! - Plus metadata fields for file type, size, paths, root_hash
 //!
 //! # Usage
 //!
@@ -45,7 +46,7 @@
 //!
 //! // Read file back with verification
 //! let mut output = std::fs::File::create("/restore/file.parquet")?;
-//! table.read_file("abc123def...sha256...", &mut output).await?;
+//! table.read_file("abc123def...blake3...", &mut output).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -68,7 +69,10 @@ pub use factory::{
     scan_remote_versions,
 };
 pub use reader::ChunkedReader;
-pub use schema::{CHUNK_SIZE_DEFAULT, ChunkedFileRecord, FileInfo, FileType, TransactionMetadata};
+pub use schema::{
+    BLAKE3_BLOCK_SIZE, CHUNK_SIZE_DEFAULT, ChunkedFileRecord, FileInfo, FileType,
+    TransactionMetadata,
+};
 pub use table::RemoteTable;
 pub use writer::ChunkedWriter;
 

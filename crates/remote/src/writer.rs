@@ -4,24 +4,25 @@
 
 //! Streaming writer for chunked files
 //!
-//! Reads from an AsyncRead source, chunks the data, computes checksums,
+//! Reads from an AsyncRead source, chunks the data, computes BLAKE3 hashes,
 //! and writes to Delta Lake in a single transaction.
 
 use crate::Result;
-use crate::schema::{CHUNK_SIZE_DEFAULT, ChunkedFileRecord};
-use arrow_array::{BinaryArray, Int32Array, Int64Array, RecordBatch, StringArray};
+use crate::schema::{BLAKE3_BLOCK_SIZE, CHUNK_SIZE_DEFAULT, ChunkedFileRecord};
+use arrow_array::{BinaryArray, Int64Array, RecordBatch, StringArray};
+use bao_tree::io::outboard::PostOrderMemOutboard;
+use bao_tree::BlockSize;
 use deltalake::DeltaTable;
 use deltalake::operations::write::WriteBuilder;
 use log::debug;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
 /// Streaming writer that chunks files and writes to Delta Lake
 ///
 /// Reads data from an AsyncRead source, chunks it into pieces,
-/// computes CRC32 per chunk and SHA256 for the entire file,
-/// then writes all chunks to Delta Lake in a single transaction.
+/// computes BLAKE3 subtree hash and outboard per chunk, then combines
+/// into a file root hash. Writes all chunks to Delta Lake in a single transaction.
 ///
 /// # Example
 ///
@@ -49,7 +50,7 @@ pub struct ChunkedWriter<R> {
     path: String,
     reader: R,
     chunk_size: usize,
-    /// Optional override for bundle_id (used for metadata to avoid SHA256 computation)
+    /// Optional override for bundle_id (used for metadata to avoid BLAKE3 computation)
     bundle_id_override: Option<String>,
 }
 
@@ -83,7 +84,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
 
     /// Set bundle_id override (for metadata)
     ///
-    /// When set, this bundle_id will be used instead of computing SHA256.
+    /// When set, this bundle_id will be used instead of computing BLAKE3 root hash.
     /// This is used for metadata records which need predictable bundle_ids
     /// in the format "metadata_{pond_txn_id}".
     #[must_use]
@@ -94,17 +95,17 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
 
     /// Write the file to Delta Lake in chunks with bounded memory
     ///
-    /// Reads the file in chunks, computes checksums, and writes to Delta Lake
+    /// Reads the file in chunks, computes BLAKE3 hashes, and writes to Delta Lake
     /// using streaming writes. Memory usage is bounded by writing batches of
     /// chunks rather than accumulating all chunks before writing.
     ///
     /// # Returns
-    /// The bundle_id (SHA256 hash) of the written file
+    /// The bundle_id (BLAKE3 root hash with POND-FILE- prefix) of the written file
     ///
     /// # Errors
     /// Returns error if:
     /// - Cannot read from input
-    /// - Cannot compute checksums
+    /// - Cannot compute hashes
     /// - Cannot write to Delta Lake
     pub async fn write_to_table(mut self, table: &mut DeltaTable) -> Result<String> {
         debug!(
@@ -114,20 +115,22 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             self.chunk_size / (1024 * 1024)
         );
 
-        // Streaming write with bounded memory
-        let mut file_hasher = Sha256::new();
+        // BLAKE3 block size: 16KB (chunk_log=4)
+        let block_size = BlockSize::from_chunk_log(
+            (BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8, // 16KB = 2^14, chunk = 2^10, so log = 4
+        );
+
         let mut total_size = 0u64;
         let mut chunk_id = 0i64;
         let mut buffer = vec![0u8; self.chunk_size];
 
         // Maximum chunks buffered before creating RecordBatch
-        // 10 chunks × 50MB = ~500MB per batch
+        // 10 chunks × 16MB = ~160MB per batch
         const CHUNKS_PER_BATCH: usize = 10;
-        // TODO: Implement batched writing if needed for performance
-        // Currently writing all chunks at once due to WriteBuilder API
 
-        // First pass: read file, compute checksums, store chunks temporarily
-        let mut all_chunk_data = Vec::new();
+        // Collect chunk data with BLAKE3 subtree hashes and outboards
+        // Format: (chunk_id, subtree_hash, outboard, data)
+        let mut all_chunk_data: Vec<(i64, blake3::Hash, Vec<u8>, Vec<u8>)> = Vec::new();
 
         loop {
             let n = self.reader.read(&mut buffer).await?;
@@ -136,48 +139,64 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
             }
 
             let chunk = &buffer[..n];
-            file_hasher.update(chunk);
             total_size += n as u64;
 
-            let crc = crc32fast::hash(chunk) as i64;
-            all_chunk_data.push((chunk_id, crc, chunk.to_vec()));
+            // Create BLAKE3 outboard for this chunk
+            let outboard = PostOrderMemOutboard::create(chunk, block_size);
+            
+            // The outboard.root is the chunk's hash (computed as if standalone)
+            // For combining into file hash, we'll use these directly
+            let chunk_hash = outboard.root;
+            let outboard_data = outboard.data;
+
+            all_chunk_data.push((chunk_id, chunk_hash, outboard_data, chunk.to_vec()));
             chunk_id += 1;
         }
 
-        // Compute raw SHA256 hash
-        let sha256_hash = format!("{:x}", file_hasher.finalize());
+        // Compute file root hash by combining all chunk hashes
+        let root_hash = if all_chunk_data.is_empty() {
+            // Empty file: hash of empty data
+            blake3::hash(&[])
+        } else if all_chunk_data.len() == 1 {
+            // Single chunk: chunk hash IS the root hash
+            all_chunk_data[0].1
+        } else {
+            // Multiple chunks: combine using BLAKE3 tree
+            combine_chunk_hashes(&all_chunk_data.iter().map(|(_, h, _, _)| *h).collect::<Vec<_>>())
+        };
+
+        let root_hash_hex = root_hash.to_hex().to_string();
 
         let bundle_id = if let Some(ref override_id) = self.bundle_id_override {
             // Use provided bundle_id (for transaction files)
             override_id.clone()
         } else {
-            // Use SHA256-based bundle_id for content-addressed large files
-            ChunkedFileRecord::large_file_bundle_id(&sha256_hash)
+            // Use BLAKE3-based bundle_id for content-addressed large files
+            ChunkedFileRecord::large_file_bundle_id(&root_hash_hex)
         };
-        let chunk_count = chunk_id;
 
         debug!(
-            "File {} has {} chunks, {} bytes, SHA256={}",
+            "File {} has {} chunks, {} bytes, BLAKE3={}",
             self.path,
-            chunk_count,
+            chunk_id,
             total_size,
-            &sha256_hash[..16.min(sha256_hash.len())]
+            &root_hash_hex[..16.min(root_hash_hex.len())]
         );
 
         // Special case: empty file needs at least one row with empty chunk_data
         if all_chunk_data.is_empty() {
-            all_chunk_data.push((0, 0i64, vec![])); // CRC32 of empty data is 0
+            let outboard = PostOrderMemOutboard::create(&[], block_size);
+            all_chunk_data.push((0, outboard.root, outboard.data, vec![]));
         }
 
-        // Second pass: create RecordBatches with final metadata
+        // Create RecordBatches with final metadata
         let mut all_batches = Vec::new();
         for chunk_batch in all_chunk_data.chunks(CHUNKS_PER_BATCH) {
             let batch = self.create_batch(
                 chunk_batch,
                 &bundle_id,
-                &sha256_hash,
+                &root_hash_hex,
                 total_size,
-                chunk_count,
             )?;
             all_batches.push(batch);
         }
@@ -201,7 +220,7 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
 
         debug!(
             "Successfully wrote file {} ({} chunks) to remote",
-            self.path, chunk_count
+            self.path, chunk_id
         );
 
         Ok(bundle_id)
@@ -210,11 +229,10 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     /// Create a RecordBatch from a slice of chunks with final metadata
     fn create_batch(
         &self,
-        chunks: &[(i64, i64, Vec<u8>)],
+        chunks: &[(i64, blake3::Hash, Vec<u8>, Vec<u8>)],
         bundle_id: &str,
-        sha256_hash: &str,
+        root_hash: &str,
         total_size: u64,
-        chunk_count: i64,
     ) -> Result<RecordBatch> {
         if chunks.is_empty() {
             return Err(arrow::error::ArrowError::InvalidArgumentError(
@@ -229,22 +247,22 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         let mut pond_txn_ids = Vec::with_capacity(num_chunks);
         let mut paths = Vec::with_capacity(num_chunks);
         let mut chunk_ids = Vec::with_capacity(num_chunks);
-        let mut chunk_crc32s = Vec::with_capacity(num_chunks);
+        let mut chunk_hashes = Vec::with_capacity(num_chunks);
+        let mut chunk_outboards = Vec::with_capacity(num_chunks);
         let mut chunk_datas = Vec::with_capacity(num_chunks);
         let mut total_sizes = Vec::with_capacity(num_chunks);
-        let mut total_sha256s = Vec::with_capacity(num_chunks);
-        let mut chunk_counts = Vec::with_capacity(num_chunks);
+        let mut root_hashes = Vec::with_capacity(num_chunks);
 
-        for (chunk_id, crc, data) in chunks {
+        for (chunk_id, chunk_hash, outboard, data) in chunks {
             bundle_ids.push(bundle_id.to_string());
             pond_txn_ids.push(self.pond_txn_id);
             paths.push(self.path.clone());
             chunk_ids.push(*chunk_id);
-            chunk_crc32s.push(*crc);
+            chunk_hashes.push(chunk_hash.to_hex().to_string());
+            chunk_outboards.push(outboard.clone());
             chunk_datas.push(data.clone());
             total_sizes.push(total_size as i64);
-            total_sha256s.push(sha256_hash.to_string());
-            chunk_counts.push(chunk_count);
+            root_hashes.push(root_hash.to_string());
         }
 
         let schema = ChunkedFileRecord::arrow_schema();
@@ -255,10 +273,11 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
                 Arc::new(Int64Array::from(pond_txn_ids)),
                 Arc::new(StringArray::from(paths)),
                 Arc::new(Int64Array::from(chunk_ids)),
-                Arc::new(Int32Array::from(
-                    chunk_crc32s
-                        .into_iter()
-                        .map(|crc| crc as i32)
+                Arc::new(StringArray::from(chunk_hashes)),
+                Arc::new(BinaryArray::from(
+                    chunk_outboards
+                        .iter()
+                        .map(|v| Some(v.as_slice()))
                         .collect::<Vec<_>>(),
                 )),
                 Arc::new(BinaryArray::from(
@@ -268,13 +287,60 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
                         .collect::<Vec<_>>(),
                 )),
                 Arc::new(Int64Array::from(total_sizes)),
-                Arc::new(StringArray::from(total_sha256s)),
-                Arc::new(Int64Array::from(chunk_counts)),
+                Arc::new(StringArray::from(root_hashes)),
             ],
         )?;
 
         Ok(batch)
     }
+}
+
+/// Combine multiple chunk hashes into a single root hash using BLAKE3 tree structure
+fn combine_chunk_hashes(hashes: &[blake3::Hash]) -> blake3::Hash {
+    use blake3::hazmat::{ChainingValue, Mode, merge_subtrees_non_root, merge_subtrees_root};
+
+    if hashes.is_empty() {
+        return blake3::hash(&[]);
+    }
+    if hashes.len() == 1 {
+        return hashes[0];
+    }
+
+    // Convert hashes to chaining values
+    let mut current_level: Vec<ChainingValue> = hashes
+        .iter()
+        .map(|h| *h.as_bytes())
+        .collect();
+
+    while current_level.len() > 1 {
+        let mut next_level = Vec::new();
+        let is_final_level = current_level.len() <= 2;
+
+        for pair in current_level.chunks(2) {
+            match pair {
+                [left, right] => {
+                    if is_final_level && next_level.is_empty() {
+                        // Final merge - return root hash
+                        return merge_subtrees_root(left, right, Mode::Hash);
+                    } else {
+                        // Non-root merge
+                        let parent = merge_subtrees_non_root(left, right, Mode::Hash);
+                        next_level.push(parent);
+                    }
+                }
+                [single] => {
+                    // Odd hash carries forward
+                    next_level.push(*single);
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        current_level = next_level;
+    }
+
+    // Single element remaining - convert back to Hash
+    blake3::Hash::from(current_level[0])
 }
 
 #[cfg(test)]
@@ -303,7 +369,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify bundle_id has POND-FILE- prefix and valid SHA256
+        // Verify bundle_id has POND-FILE- prefix and valid BLAKE3 hash
         assert!(bundle_id.starts_with("POND-FILE-"));
         let hash_part = &bundle_id["POND-FILE-".len()..];
         assert_eq!(hash_part.len(), 64);
@@ -367,8 +433,8 @@ mod tests {
             .await
             .unwrap();
 
-        // SHA256 of empty input with POND-FILE- prefix
-        let expected_hash = format!("{:x}", Sha256::digest(b""));
+        // BLAKE3 of empty input with POND-FILE- prefix
+        let expected_hash = blake3::hash(&[]).to_hex().to_string();
         let expected_bundle_id = format!("POND-FILE-{}", expected_hash);
         assert_eq!(bundle_id, expected_bundle_id);
     }

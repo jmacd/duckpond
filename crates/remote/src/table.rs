@@ -20,10 +20,10 @@ use url::Url;
 /// Remote backup table using Delta Lake
 ///
 /// Manages a Delta Lake table storing chunked files with the schema:
-/// - bundle_id (partition): SHA256 hash or "metadata_{txn_id}"
+/// - bundle_id (partition): BLAKE3 root hash or "metadata_{txn_id}"
 /// - pond_txn_id, original_path, file_type
-/// - chunk_id, chunk_crc32, chunk_data
-/// - total_size, total_sha256, chunk_count
+/// - chunk_id, chunk_hash, chunk_outboard, chunk_data
+/// - total_size, root_hash
 ///
 /// # Example
 ///
@@ -107,8 +107,8 @@ impl RemoteTable {
         let config: HashMap<String, Option<String>> = vec![(
             "delta.dataSkippingStatsColumns".to_string(),
             Some(
-                "bundle_id,pond_txn_id,original_path,file_type,chunk_id,chunk_crc32,\
-                 total_size,total_sha256,chunk_count"
+                "bundle_id,pond_txn_id,original_path,file_type,chunk_id,chunk_hash,\
+                 total_size,root_hash"
                     .to_string(),
             ),
         )]
@@ -264,7 +264,7 @@ impl RemoteTable {
 
     /// Write a file to remote storage with custom bundle_id
     ///
-    /// Same as write_file but uses a provided bundle_id instead of computing SHA256.
+    /// Same as write_file but uses a provided bundle_id instead of computing BLAKE3 root hash.
     /// Used for transaction-based partitioning where all files in a transaction
     /// share the same bundle_id (e.g., "FILE-META-{txn_seq}").
     ///
@@ -303,7 +303,7 @@ impl RemoteTable {
     /// Write a file to remote storage in chunks
     ///
     /// Streams the file content, chunking it into manageable pieces,
-    /// computing CRC32 for each chunk and SHA256 for the entire file,
+    /// computing BLAKE3 hash for each chunk and combining into a root hash,
     /// and writing to Delta Lake in a single transaction.
     ///
     /// # Arguments
@@ -312,12 +312,12 @@ impl RemoteTable {
     /// * `reader` - Async reader providing file content
     ///
     /// # Returns
-    /// The bundle_id (SHA256 hash) of the written file
+    /// The bundle_id (BLAKE3 root hash) of the written file
     ///
     /// # Errors
     /// Returns error if:
     /// - Cannot read from input
-    /// - Cannot compute checksums
+    /// - Cannot compute hashes
     /// - Cannot write to Delta Lake
     pub async fn write_file<R: AsyncRead + Unpin>(
         &mut self,
@@ -343,12 +343,12 @@ impl RemoteTable {
 
     /// Read a file from remote storage
     ///
-    /// Streams chunks from Delta Lake, verifies CRC32 for each chunk
-    /// and SHA256 for the entire file, writing the reconstructed file
+    /// Streams chunks from Delta Lake, verifies BLAKE3 hash for each chunk
+    /// and root hash for the entire file, writing the reconstructed file
     /// to the output writer.
     ///
     /// # Arguments
-    /// * `bundle_id` - Partition identifier (FILE-META-{date}-{txn} or POND-FILE-{sha256})
+    /// * `bundle_id` - Partition identifier (FILE-META-{date}-{txn} or POND-FILE-{blake3})
     /// * `path` - Original file path to uniquely identify file within partition
     /// * `pond_txn_id` - Transaction sequence number
     /// * `writer` - Async writer to receive the file content
@@ -356,8 +356,8 @@ impl RemoteTable {
     /// # Errors
     /// Returns error if:
     /// - File not found
-    /// - CRC32 checksum mismatch
-    /// - SHA256 hash mismatch
+    /// - BLAKE3 hash mismatch
+    /// - Root hash mismatch
     /// - Cannot read from Delta Lake
     /// - Cannot write to output
     pub async fn read_file<W: AsyncWrite + Unpin>(
@@ -805,7 +805,7 @@ impl RemoteTable {
     /// * `txn_seq` - Transaction sequence number
     ///
     /// # Returns
-    /// Vec of (path, total_sha256, total_size, file_type)
+    /// Vec of (bundle_id, path, root_hash, total_size, pond_txn_id)
     ///
     /// # Errors
     /// Returns error if query fails
@@ -818,7 +818,7 @@ impl RemoteTable {
         let df = self
             .session_context
             .sql(&format!(
-                "SELECT DISTINCT bundle_id, path, total_sha256, total_size, pond_txn_id \
+                "SELECT DISTINCT bundle_id, path, root_hash, total_size, pond_txn_id \
                  FROM remote_files \
                  WHERE bundle_id = '{}' \
                  ORDER BY path",
@@ -854,7 +854,7 @@ impl RemoteTable {
                 .as_any()
                 .downcast_ref::<arrow_array::StringArray>()
                 .ok_or_else(|| {
-                    RemoteError::TableOperation("Invalid column type for total_sha256".to_string())
+                    RemoteError::TableOperation("Invalid column type for root_hash".to_string())
                 })?;
 
             let sizes = batch

@@ -12,18 +12,24 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// Default chunk size: 50MB
+/// Default chunk size: 16MB (power of 2 for optimal BLAKE3 tree alignment)
 /// Balances between:
 /// - Granular checksums (smaller = better)
 /// - Fewer rows/overhead (larger = better)
 /// - In-memory buffer size (smaller = better)
-pub const CHUNK_SIZE_DEFAULT: usize = 50 * 1024 * 1024;
+/// - BLAKE3 tree alignment (power of 2 = optimal)
+pub const CHUNK_SIZE_DEFAULT: usize = 16 * 1024 * 1024;
 
-/// Minimum chunk size: 10MB
-pub const CHUNK_SIZE_MIN: usize = 10 * 1024 * 1024;
+/// Minimum chunk size: 4MB
+pub const CHUNK_SIZE_MIN: usize = 4 * 1024 * 1024;
 
-/// Maximum chunk size: 100MB
-pub const CHUNK_SIZE_MAX: usize = 100 * 1024 * 1024;
+/// Maximum chunk size: 64MB
+pub const CHUNK_SIZE_MAX: usize = 64 * 1024 * 1024;
+
+/// BLAKE3 block size: 16KB (chunk_log=4)
+/// Each block produces one leaf hash in the Merkle tree.
+/// Outboard overhead = (blocks - 1) * 64 bytes ≈ 0.39%
+pub const BLAKE3_BLOCK_SIZE: usize = 16 * 1024;
 
 /// Type of file being backed up
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +73,7 @@ impl FromStr for FileType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkedFileRecord {
     // === PARTITION COLUMN ===
-    /// Bundle identifier (SHA256 hash) or "metadata_{pond_txn_id}" for metadata records
+    /// Bundle identifier (BLAKE3 root hash) or "metadata_{pond_txn_id}" for metadata records
     /// This is the PARTITION column in Delta Lake
     pub bundle_id: String,
 
@@ -82,18 +88,21 @@ pub struct ChunkedFileRecord {
     // === Chunk information ===
     /// Chunk sequence number (0, 1, 2, ...)
     pub chunk_id: i64,
-    /// CRC32 checksum of chunk_data (stored as i32 for Delta Lake, cast from u32)
-    pub chunk_crc32: i32,
-    /// The actual chunk data (10-100MB)
+    /// BLAKE3 subtree hash of this chunk (hex-encoded, 64 chars)
+    /// Computed with is_root=false and start_chunk = chunk_id * blocks_per_chunk
+    pub chunk_hash: String,
+    /// BLAKE3 outboard data for this chunk (Merkle tree parent nodes)
+    /// Size: (blocks - 1) * 64 bytes, where blocks = chunk_size / 16KB
+    pub chunk_outboard: Vec<u8>,
+    /// The actual chunk data (4-64MB)
     pub chunk_data: Vec<u8>,
 
     // === File-level metadata (same for all chunks) ===
     /// Total file size in bytes
     pub total_size: i64,
-    /// SHA256 hash of entire file
-    pub total_sha256: String,
-    /// Total number of chunks in this file
-    pub chunk_count: i64,
+    /// BLAKE3 root hash of entire file (hex-encoded, 64 chars)
+    /// Computed by combining all chunk subtree hashes with is_root=true
+    pub root_hash: String,
 }
 
 impl ChunkedFileRecord {
@@ -108,12 +117,12 @@ impl ChunkedFileRecord {
             Field::new("path", DataType::Utf8, false),
             // Chunk information
             Field::new("chunk_id", DataType::Int64, false),
-            Field::new("chunk_crc32", DataType::Int32, false),
+            Field::new("chunk_hash", DataType::Utf8, false),
+            Field::new("chunk_outboard", DataType::Binary, false),
             Field::new("chunk_data", DataType::Binary, false),
             // File-level metadata
             Field::new("total_size", DataType::Int64, false),
-            Field::new("total_sha256", DataType::Utf8, false),
-            Field::new("chunk_count", DataType::Int64, false),
+            Field::new("root_hash", DataType::Utf8, false),
         ]))
     }
 
@@ -164,10 +173,10 @@ impl ChunkedFileRecord {
     }
 
     /// Generate a large file bundle_id
-    /// Format: "POND-FILE-{sha256}"
+    /// Format: "POND-FILE-{blake3_root_hash}"
     #[must_use]
-    pub fn large_file_bundle_id(sha256: &str) -> String {
-        format!("POND-FILE-{}", sha256)
+    pub fn large_file_bundle_id(root_hash: &str) -> String {
+        format!("POND-FILE-{}", root_hash)
     }
 
     /// Check if a bundle_id is a transaction record
@@ -206,8 +215,8 @@ pub struct TransactionMetadata {
 pub struct FileInfo {
     /// Original path in pond
     pub path: String,
-    /// SHA256 hash (= bundle_id for this file)
-    pub sha256: String,
+    /// BLAKE3 root hash (= bundle_id for this file)
+    pub root_hash: String,
     /// Total file size in bytes
     pub size: u64,
     /// Type of file
@@ -233,8 +242,8 @@ mod tests {
 
     #[test]
     fn test_large_file_bundle_id() {
-        let sha256 = "abc123def456";
-        let bundle_id = ChunkedFileRecord::large_file_bundle_id(sha256);
+        let root_hash = "abc123def456";
+        let bundle_id = ChunkedFileRecord::large_file_bundle_id(root_hash);
         assert_eq!(bundle_id, "POND-FILE-abc123def456");
         assert!(ChunkedFileRecord::is_large_file_bundle_id(&bundle_id));
         assert!(!ChunkedFileRecord::is_large_file_bundle_id(
