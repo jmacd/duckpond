@@ -1748,10 +1748,9 @@ impl InnerState {
                 
                 Ok(Box::pin(reader))
             } else {
-                // Small file: create cursor from inline content
-                let content = record.content.clone().ok_or_else(|| {
-                    TLogFSError::ArrowMessage("Small file entry missing content".to_string())
-                })?;
+                // Small file: use verified content accessor which checks BLAKE3 hash
+                let content = record.verified_content_required()?.to_vec();
+                debug!("Verified small file ({} bytes)", content.len());
 
                 Ok(Box::pin(std::io::Cursor::new(content)))
             }
@@ -2334,8 +2333,8 @@ impl InnerState {
                         continue;
                     }
                 } else {
-                    // For files, use content field
-                    record.content.clone().unwrap_or_default()
+                    // For files, use verified content field
+                    record.verified_content_required()?.to_vec()
                 };
 
                 return Ok(Some((factory_type.clone(), config_content)));
@@ -2378,8 +2377,8 @@ impl InnerState {
                     return Ok(None);
                 }
             } else {
-                // For files, use content field
-                record.content.clone().unwrap_or_default()
+                // For files, use verified content field
+                record.verified_content_required()?.to_vec()
             };
 
             Ok(Some((factory_type.clone(), config_content)))
@@ -2745,10 +2744,10 @@ impl InnerState {
 
         if let Some(record) = records.first() {
             if record.file_type == EntryType::Symlink {
-                let content = record.content.clone().ok_or_else(|| {
-                    tinyfs::Error::Other("Symlink content is missing".to_string())
-                })?;
-                let target_str = String::from_utf8(content).map_err(|e| {
+                let content = record
+                    .verified_content_required()
+                    .map_err(error_utils::to_tinyfs_error)?;
+                let target_str = String::from_utf8(content.to_vec()).map_err(|e| {
                     tinyfs::Error::Other(format!("Invalid UTF-8 in symlink target: {}", e))
                 })?;
                 Ok(PathBuf::from(target_str))
@@ -3306,14 +3305,11 @@ mod node_factory {
         // Note: Node caching is now handled by CachingPersistence decorator in tinyfs
         // No need for manual caching here
 
-        // Get configuration from the oplog entry
+        // Get verified configuration from the oplog entry
         // For ALL dynamic nodes, config is stored as-is in content field (original YAML bytes)
-        let config_content = oplog_entry.content.as_ref().ok_or_else(|| {
-            tinyfs::Error::Other(format!(
-                "Dynamic node missing configuration for factory '{}'",
-                factory_type
-            ))
-        })?;
+        let config_content = oplog_entry
+            .verified_content_required()
+            .map_err(error_utils::to_tinyfs_error)?;
 
         // Create context with all template variables (vars, export, and any other keys)
         let context = FactoryContext {
@@ -3376,7 +3372,7 @@ mod node_factory {
                             "🔍 Executable factory '{}' - using config as file content",
                             factory_type
                         );
-                        let config_file = provider::ConfigFile::new(config_content.clone());
+                        let config_file = provider::ConfigFile::new(config_content.to_vec());
                         NodeType::File(config_file.create_handle())
                     }
                 } else {
@@ -3388,7 +3384,7 @@ mod node_factory {
             }
             _ => {
                 // Unknown entry type - shouldn't happen
-                let config_file = provider::ConfigFile::new(config_content.clone());
+                let config_file = provider::ConfigFile::new(config_content.to_vec());
                 let file_handle = config_file.create_handle();
                 NodeType::File(file_handle)
             }

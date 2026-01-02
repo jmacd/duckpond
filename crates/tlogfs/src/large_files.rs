@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use log::{debug, info};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -396,8 +397,10 @@ impl AsyncWrite for HybridWriter {
     }
 }
 
-/// Streaming reader for parquet-encoded large files with bao-tree verification
-/// Reads chunks on-demand and verifies each chunk using stored BLAKE3 Merkle tree data
+/// Streaming reader for parquet-encoded large files
+/// 
+/// Reads chunks on-demand without loading entire file into memory.
+/// Verification is optional and happens at 16KB block granularity using bao-tree.
 pub struct ParquetFileReader {
     /// Path to the parquet file
     file_path: PathBuf,
@@ -405,16 +408,28 @@ pub struct ParquetFileReader {
     total_size: u64,
     /// Current position in the logical file
     position: u64,
-    /// Current verified chunk being read (chunk_id, verified_chunk_data)
-    current_chunk: Option<(i64, Vec<u8>)>,
+    /// Current chunk being read (chunk_id, chunk_data)
+    current_chunk: Option<LoadedChunk>,
     /// Position within current chunk
     chunk_position: usize,
-    /// Expected root hash for the entire file (for final verification)
-    expected_root_hash: Option<String>,
+    /// Pending chunk load future (stored to allow proper polling)
+    pending_load: Option<PendingChunkLoad>,
+}
+
+/// A loaded chunk with optional verification data
+struct LoadedChunk {
+    chunk_id: i64,
+    data: Vec<u8>,
+}
+
+/// State for async chunk loading
+struct PendingChunkLoad {
+    chunk_id: i64,
+    future: Pin<Box<dyn Future<Output = std::io::Result<LoadedChunk>> + Send>>,
 }
 
 impl ParquetFileReader {
-    /// Create a new streaming reader for a parquet file with verification
+    /// Create a new streaming reader for a parquet file
     pub async fn new(file_path: PathBuf) -> std::io::Result<Self> {
         use futures::StreamExt;
         
@@ -428,7 +443,7 @@ impl ParquetFileReader {
         let mut stream = builder.build()
             .map_err(|e| std::io::Error::other(format!("Failed to build parquet reader: {}", e)))?;
         
-        let (total_size, expected_root_hash) = if let Some(first_batch) = stream.next().await {
+        let total_size = if let Some(first_batch) = stream.next().await {
             let batch = first_batch
                 .map_err(|e| std::io::Error::other(format!("Failed to read first batch: {}", e)))?;
             
@@ -442,13 +457,7 @@ impl ParquetFileReader {
                 .downcast_ref::<arrow_array::Int64Array>()
                 .ok_or_else(|| std::io::Error::other("Invalid total_size column type"))?;
             
-            // Get root_hash from column 8
-            let root_hashes = batch.column(8)
-                .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
-                .ok_or_else(|| std::io::Error::other("Invalid root_hash column type"))?;
-            
-            (total_sizes.value(0) as u64, root_hashes.value(0).to_string())
+            total_sizes.value(0) as u64
         } else {
             return Err(std::io::Error::other("Empty parquet file"));
         };
@@ -459,97 +468,105 @@ impl ParquetFileReader {
             position: 0,
             current_chunk: None,
             chunk_position: 0,
-            expected_root_hash: Some(expected_root_hash),
+            pending_load: None,
         })
     }
     
-    /// Load and verify a specific chunk from the parquet file using bao-tree
-    async fn load_and_verify_chunk(&mut self, chunk_id: i64) -> std::io::Result<()> {
-        use bao_tree::io::outboard::PostOrderMemOutboard;
-        use bao_tree::BlockSize;
-        use futures::StreamExt;
-        use utilities::chunked_files::BLAKE3_BLOCK_SIZE;
+    /// Get total size of the file
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+}
+
+/// Load and verify a chunk from parquet file using bao-tree (standalone async fn for use in futures)
+/// 
+/// Verification uses the stored BLAKE3 Merkle tree to ensure data integrity.
+/// If the chunk data has been corrupted, this will return an error.
+async fn load_chunk_from_parquet(file_path: PathBuf, chunk_id: i64) -> std::io::Result<LoadedChunk> {
+    use bao_tree::io::outboard::PostOrderMemOutboard;
+    use bao_tree::BlockSize;
+    use futures::StreamExt;
+    use utilities::chunked_files::BLAKE3_BLOCK_SIZE;
+    
+    let file = File::open(&file_path).await?;
+    let mut reader = parquet::arrow::ParquetRecordBatchStreamBuilder::new(file)
+        .await
+        .map_err(|e| std::io::Error::other(format!("Failed to open parquet: {}", e)))?
+        .build()
+        .map_err(|e| std::io::Error::other(format!("Failed to build parquet reader: {}", e)))?;
+    
+    while let Some(batch_result) = reader.next().await {
+        let batch = batch_result
+            .map_err(|e| std::io::Error::other(format!("Failed to read batch: {}", e)))?;
         
-        let file = File::open(&self.file_path).await?;
-        let mut reader = parquet::arrow::ParquetRecordBatchStreamBuilder::new(file)
-            .await
-            .map_err(|e| std::io::Error::other(format!("Failed to open parquet: {}", e)))?
-            .build()
-            .map_err(|e| std::io::Error::other(format!("Failed to build parquet reader: {}", e)))?;
+        let chunk_ids = batch.column(3)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .ok_or_else(|| std::io::Error::other("Invalid chunk_id column type"))?;
         
-        // Read through batches to find the one containing our chunk
-        while let Some(batch_result) = reader.next().await {
-            let batch = batch_result
-                .map_err(|e| std::io::Error::other(format!("Failed to read batch: {}", e)))?;
-            
-            let chunk_ids = batch.column(3)
-                .as_any()
-                .downcast_ref::<arrow_array::Int64Array>()
-                .ok_or_else(|| std::io::Error::other("Invalid chunk_id column type"))?;
-            
-            // Find our chunk in this batch
-            for row in 0..batch.num_rows() {
-                if chunk_ids.value(row) == chunk_id {
-                    // Found it! Extract the chunk data, hash, and outboard
-                    let chunk_hashes = batch.column(4)
-                        .as_any()
-                        .downcast_ref::<arrow_array::StringArray>()
-                        .ok_or_else(|| std::io::Error::other("Invalid chunk_hash column type"))?;
-                    
-                    let chunk_outboards = batch.column(5)
-                        .as_any()
-                        .downcast_ref::<arrow_array::BinaryArray>()
-                        .ok_or_else(|| std::io::Error::other("Invalid chunk_outboard column type"))?;
-                    
-                    let chunk_datas = batch.column(6)
-                        .as_any()
-                        .downcast_ref::<arrow_array::BinaryArray>()
-                        .ok_or_else(|| std::io::Error::other("Invalid chunk_data column type"))?;
-                    
-                    let expected_hash_hex = chunk_hashes.value(row);
-                    let stored_outboard = chunk_outboards.value(row);
-                    let chunk_data = chunk_datas.value(row);
-                    
-                    // Verify the chunk using bao-tree
-                    let block_size = BlockSize::from_chunk_log(
-                        (BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8
-                    );
-                    
-                    // Reconstruct the outboard and verify
-                    let computed_outboard = PostOrderMemOutboard::create(chunk_data, block_size);
-                    let computed_hash_hex = computed_outboard.root.to_hex().to_string();
-                    
-                    if computed_hash_hex != expected_hash_hex {
-                        return Err(std::io::Error::other(format!(
-                            "Chunk {} verification failed: expected hash {}, computed {}",
-                            chunk_id, expected_hash_hex, computed_hash_hex
-                        )));
-                    }
-                    
-                    // Also verify the stored outboard matches what we computed
-                    if computed_outboard.data.as_slice() != stored_outboard {
-                        return Err(std::io::Error::other(format!(
-                            "Chunk {} outboard verification failed: stored outboard doesn't match computed",
-                            chunk_id
-                        )));
-                    }
-                    
-                    debug!(
-                        "Verified chunk {} ({} bytes, hash={})",
-                        chunk_id,
-                        chunk_data.len(),
-                        &computed_hash_hex[..16.min(computed_hash_hex.len())]
-                    );
-                    
-                    self.current_chunk = Some((chunk_id, chunk_data.to_vec()));
-                    self.chunk_position = 0;
-                    return Ok(());
+        for row in 0..batch.num_rows() {
+            if chunk_ids.value(row) == chunk_id {
+                // Load chunk data, hash, and outboard for verification
+                let chunk_hashes = batch.column(4)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .ok_or_else(|| std::io::Error::other("Invalid chunk_hash column type"))?;
+                
+                let chunk_outboards = batch.column(5)
+                    .as_any()
+                    .downcast_ref::<arrow_array::BinaryArray>()
+                    .ok_or_else(|| std::io::Error::other("Invalid chunk_outboard column type"))?;
+                
+                let chunk_datas = batch.column(6)
+                    .as_any()
+                    .downcast_ref::<arrow_array::BinaryArray>()
+                    .ok_or_else(|| std::io::Error::other("Invalid chunk_data column type"))?;
+                
+                let expected_hash_hex = chunk_hashes.value(row);
+                let stored_outboard = chunk_outboards.value(row);
+                let chunk_data = chunk_datas.value(row);
+                
+                // Verify the chunk using bao-tree
+                let block_size = BlockSize::from_chunk_log(
+                    (BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8
+                );
+                
+                // Recompute the Merkle tree and verify it matches expected hash
+                let computed_outboard = PostOrderMemOutboard::create(chunk_data, block_size);
+                let computed_hash_hex = computed_outboard.root.to_hex().to_string();
+                
+                if computed_hash_hex != expected_hash_hex {
+                    return Err(std::io::Error::other(format!(
+                        "Chunk {} verification failed: expected hash {}, computed {}",
+                        chunk_id, expected_hash_hex, computed_hash_hex
+                    )));
                 }
+                
+                // Also verify the stored outboard matches what we computed
+                // This ensures the Merkle tree structure itself wasn't corrupted
+                if computed_outboard.data.as_slice() != stored_outboard {
+                    return Err(std::io::Error::other(format!(
+                        "Chunk {} outboard verification failed: stored Merkle tree doesn't match computed",
+                        chunk_id
+                    )));
+                }
+                
+                debug!(
+                    "Verified chunk {} ({} bytes, hash={})",
+                    chunk_id,
+                    chunk_data.len(),
+                    &computed_hash_hex[..16.min(computed_hash_hex.len())]
+                );
+                
+                return Ok(LoadedChunk {
+                    chunk_id,
+                    data: chunk_data.to_vec(),
+                });
             }
         }
-        
-        Err(std::io::Error::other(format!("Chunk {} not found in parquet file", chunk_id)))
     }
+    
+    Err(std::io::Error::other(format!("Chunk {} not found in parquet file", chunk_id)))
 }
 
 impl tokio::io::AsyncRead for ParquetFileReader {
@@ -569,41 +586,65 @@ impl tokio::io::AsyncRead for ParquetFileReader {
         let chunk_size = utilities::chunked_files::CHUNK_SIZE_DEFAULT;
         let chunk_id = (this.position / chunk_size as u64) as i64;
         
+        // Check if we have a pending load for this chunk
+        if let Some(ref mut pending) = this.pending_load {
+            if pending.chunk_id == chunk_id {
+                // Poll the existing future
+                match pending.future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(chunk)) => {
+                        this.current_chunk = Some(chunk);
+                        this.chunk_position = (this.position % chunk_size as u64) as usize;
+                        this.pending_load = None;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        this.pending_load = None;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            } else {
+                // Different chunk requested, cancel old load
+                this.pending_load = None;
+            }
+        }
+        
         // Check if we need to load a different chunk
         let need_new_chunk = match &this.current_chunk {
             None => true,
-            Some((current_id, _)) => *current_id != chunk_id,
+            Some(chunk) => chunk.chunk_id != chunk_id,
         };
         
-        if need_new_chunk {
-            // Need to load and verify chunk asynchronously
+        if need_new_chunk && this.pending_load.is_none() {
+            // Start loading the chunk
             let file_path = this.file_path.clone();
-            let fut = async move {
-                let mut reader = ParquetFileReader::new(file_path).await?;
-                reader.load_and_verify_chunk(chunk_id).await?;
-                Ok::<_, std::io::Error>(reader.current_chunk.unwrap())
-            };
+            let future = Box::pin(load_chunk_from_parquet(file_path, chunk_id));
+            this.pending_load = Some(PendingChunkLoad { chunk_id, future });
             
-            // Poll the future
-            let mut fut = Box::pin(fut);
-            match fut.as_mut().poll(cx) {
-                Poll::Ready(Ok(chunk)) => {
-                    this.current_chunk = Some(chunk);
-                    this.chunk_position = (this.position % chunk_size as u64) as usize;
+            // Poll it immediately
+            if let Some(ref mut pending) = this.pending_load {
+                match pending.future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(chunk)) => {
+                        this.current_chunk = Some(chunk);
+                        this.chunk_position = (this.position % chunk_size as u64) as usize;
+                        this.pending_load = None;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        this.pending_load = None;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => return Poll::Pending,
                 }
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
             }
         }
         
         // Read from current chunk
-        if let Some((_, chunk_data)) = &this.current_chunk {
-            let available = chunk_data.len() - this.chunk_position;
+        if let Some(chunk) = &this.current_chunk {
+            let available = chunk.data.len() - this.chunk_position;
             let to_read = std::cmp::min(available, buf.remaining());
             let to_read = std::cmp::min(to_read, (this.total_size - this.position) as usize);
             
             if to_read > 0 {
-                buf.put_slice(&chunk_data[this.chunk_position..this.chunk_position + to_read]);
+                buf.put_slice(&chunk.data[this.chunk_position..this.chunk_position + to_read]);
                 this.chunk_position += to_read;
                 this.position += to_read as u64;
             }
@@ -642,9 +683,10 @@ impl tokio::io::AsyncSeek for ParquetFileReader {
         let chunk_size = utilities::chunked_files::CHUNK_SIZE_DEFAULT;
         let new_chunk_id = (new_pos / chunk_size as u64) as i64;
         
-        if let Some((current_id, _)) = &self.current_chunk {
-            if *current_id != new_chunk_id {
+        if let Some(chunk) = &self.current_chunk {
+            if chunk.chunk_id != new_chunk_id {
                 self.current_chunk = None;
+                self.pending_load = None; // Cancel any pending load
             } else {
                 // Same chunk, just update position within chunk
                 self.chunk_position = (new_pos % chunk_size as u64) as usize;

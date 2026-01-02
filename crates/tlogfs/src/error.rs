@@ -63,6 +63,12 @@ pub enum TLogFSError {
     #[error("Large file integrity check failed: expected {expected}, got {actual}")]
     LargeFileIntegrityError { expected: String, actual: String },
 
+    #[error("Content integrity check failed: expected {expected}, got {actual}")]
+    ContentIntegrityError { expected: String, actual: String },
+
+    #[error("Content missing BLAKE3 hash for verification")]
+    ContentMissingHash,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
