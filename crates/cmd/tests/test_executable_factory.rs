@@ -77,7 +77,7 @@ async fn create_test_config(
     let _node_path = root
         .create_dynamic_path(
             path,
-            tinyfs::EntryType::FileDataDynamic,
+            tinyfs::EntryType::FileDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
         )
@@ -157,7 +157,7 @@ repeat_count: 5
     let _node_path = root
         .create_dynamic_path(
             "/configs/test3",
-            tinyfs::EntryType::FileDataDynamic,
+            tinyfs::EntryType::FileDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
         )

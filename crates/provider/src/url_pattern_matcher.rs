@@ -102,16 +102,16 @@ impl UrlPatternMatcher {
     ) -> Result<Vec<MatchedFile>> {
         // Map scheme to EntryType
         let entry_types = match url.scheme() {
-            "series" => vec![EntryType::FileSeriesPhysical, EntryType::FileSeriesDynamic],
-            "table" => vec![EntryType::FileTablePhysical],
-            "data" => vec![EntryType::FileDataPhysical, EntryType::FileDataDynamic],
+            "series" => vec![EntryType::TablePhysicalSeries, EntryType::TableDynamic],
+            "table" => vec![EntryType::TablePhysicalVersion],
+            "data" => vec![EntryType::FilePhysicalVersion, EntryType::FileDynamic],
             "file" => vec![
                 // Accept any file type - actual type determined by EntryType
-                EntryType::FileSeriesPhysical,
-                EntryType::FileSeriesDynamic,
-                EntryType::FileTablePhysical,
-                EntryType::FileDataPhysical,
-                EntryType::FileDataDynamic,
+                EntryType::TablePhysicalSeries,
+                EntryType::TableDynamic,
+                EntryType::TablePhysicalVersion,
+                EntryType::FilePhysicalVersion,
+                EntryType::FileDynamic,
             ],
             scheme => {
                 return Err(Error::InvalidUrl(format!(
@@ -239,9 +239,9 @@ impl MatchedFile {
     pub fn is_builtin_queryable(&self) -> bool {
         matches!(
             self.entry_type,
-            EntryType::FileSeriesPhysical
-                | EntryType::FileSeriesDynamic
-                | EntryType::FileTablePhysical
+            EntryType::TablePhysicalSeries
+                | EntryType::TableDynamic
+                | EntryType::TablePhysicalVersion
         )
     }
 

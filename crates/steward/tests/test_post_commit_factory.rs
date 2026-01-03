@@ -48,11 +48,11 @@ repeat_count: 3
 "#;
 
     // Create executable dynamic file using high-level path-based API
-    // Note: Executable factories use FileDataDynamic, config is the file content
+    // Note: Executable factories use FileDynamic, config is the file content
     let factory_node = root1
         .create_dynamic_path(
             "/etc/system.d/test-post-commit.yaml",
-            tinyfs::EntryType::FileDataDynamic,
+            tinyfs::EntryType::FileDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
         )
@@ -243,7 +243,7 @@ repeat_count: 1
     let factory_node = root1
         .create_dynamic_path(
             "/etc/system.d/test-no-execute.yaml",
-            tinyfs::EntryType::FileDataDynamic,
+            tinyfs::EntryType::FileDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
         )
@@ -335,7 +335,7 @@ repeat_count: 1
         let factory_node = root1
             .create_dynamic_path(
                 format!("/etc/system.d/{}", filename),
-                tinyfs::EntryType::FileDataDynamic,
+                tinyfs::EntryType::FileDynamic,
                 "test-executor",
                 config_yaml.as_bytes().to_vec(),
             )

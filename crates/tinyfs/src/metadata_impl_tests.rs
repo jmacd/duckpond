@@ -13,7 +13,7 @@ mod metadata_tests {
         let file_handle = MemoryFile::new_handle(b"test content");
         let metadata = file_handle.metadata().await.unwrap();
 
-        assert_eq!(metadata.entry_type, EntryType::FileDataPhysical);
+        assert_eq!(metadata.entry_type, EntryType::FilePhysicalVersion);
         assert_eq!(metadata.version, 1);
         assert_eq!(metadata.size, Some(12)); // "test content" is 12 bytes
         assert!(metadata.blake3.is_some());

@@ -163,7 +163,7 @@ async fn describe_command_impl(
         output.push_str(&format!("   Type: {:?}\n", file_info.metadata.entry_type));
 
         match file_info.metadata.entry_type {
-            tinyfs::EntryType::FileSeriesPhysical | tinyfs::EntryType::FileSeriesDynamic => {
+            tinyfs::EntryType::TablePhysicalSeries | tinyfs::EntryType::TableDynamic => {
                 output.push_str("   Format: Parquet series\n");
                 match describe_file_series_schema(ship_context, &file_info.path).await {
                     Ok(schema_info) => {
@@ -184,10 +184,10 @@ async fn describe_command_impl(
                     }
                 }
 
-                // For FileSeriesPhysical, show detailed version statistics
+                // For TablePhysicalSeries, show detailed version statistics
                 if matches!(
                     file_info.metadata.entry_type,
-                    tinyfs::EntryType::FileSeriesPhysical
+                    tinyfs::EntryType::TablePhysicalSeries
                 ) {
                     output.push_str("\n   === Version History ===\n");
                     match describe_file_series_versions(tx, &file_info.path).await {
@@ -254,7 +254,7 @@ async fn describe_command_impl(
                     }
                 }
             }
-            tinyfs::EntryType::FileTablePhysical => {
+            tinyfs::EntryType::TablePhysicalVersion => {
                 output.push_str("   Format: Parquet table\n");
                 match describe_file_table_schema(ship_context, &file_info.path).await {
                     Ok(schema_info) => {
@@ -272,7 +272,7 @@ async fn describe_command_impl(
                     }
                 }
             }
-            tinyfs::EntryType::FileDataPhysical | tinyfs::EntryType::FileDataDynamic => {
+            tinyfs::EntryType::FilePhysicalVersion | tinyfs::EntryType::FileDynamic => {
                 output.push_str("   Format: Raw data\n");
             }
             tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
@@ -286,7 +286,7 @@ async fn describe_command_impl(
         // Show size for non-series files (series files show it in Version History section)
         if !matches!(
             file_info.metadata.entry_type,
-            tinyfs::EntryType::FileSeriesPhysical
+            tinyfs::EntryType::TablePhysicalSeries
         ) {
             output.push_str(&format!(
                 "   Size: {} bytes\n",
@@ -297,7 +297,7 @@ async fn describe_command_impl(
         // For non-series files, this is the only place version is shown
         if !matches!(
             file_info.metadata.entry_type,
-            tinyfs::EntryType::FileSeriesPhysical
+            tinyfs::EntryType::TablePhysicalSeries
         ) {
             output.push_str(&format!("   Version: {}\n", file_info.metadata.version));
         }
@@ -818,11 +818,11 @@ mod tests {
         let output = setup.describe_output("users.parquet").await?;
 
         assert!(output.contains("📄 /users.parquet"));
-        assert!(output.contains("Type: FileTable"));
+        assert!(output.contains("Type: TablePhysicalVersion"));
         let output = setup.describe_output("users.parquet").await?;
 
         assert!(output.contains("📄 /users.parquet"));
-        assert!(output.contains("Type: FileTable"));
+        assert!(output.contains("Type: TablePhysicalVersion"));
         assert!(output.contains("Format: Parquet table"));
         // Schema parsing might fail in tests, so be more flexible
         assert!(output.contains("Schema:"));
@@ -844,7 +844,7 @@ mod tests {
         let output = setup.describe_output("sensors.parquet").await?;
 
         assert!(output.contains("📄 /sensors.parquet"));
-        assert!(output.contains("Type: FileSeries"));
+        assert!(output.contains("Type: TablePhysicalSeries"));
         assert!(output.contains("Format: Parquet series"));
         // Schema parsing might fail in tests, so be more flexible
         assert!(output.contains("Schema:"));
@@ -875,9 +875,9 @@ mod tests {
         assert!(output.contains("📄 /table1.parquet"));
 
         // Check that different types are described correctly
-        assert!(output.contains("Type: FileTable"));
-        assert!(output.contains("Type: FileSeries"));
-        assert!(output.contains("Type: FileData"));
+        assert!(output.contains("Type: TablePhysicalVersion"));
+        assert!(output.contains("Type: TablePhysicalSeries"));
+        assert!(output.contains("Type: FilePhysicalVersion"));
 
         Ok(())
     }

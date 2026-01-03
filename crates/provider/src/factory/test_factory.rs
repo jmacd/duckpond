@@ -286,7 +286,7 @@ impl tinyfs::Metadata for InfiniteCsvFile {
             version: 1,
             size: Some(total_size as u64),
             blake3: None,
-            entry_type: tinyfs::EntryType::FileDataDynamic,
+            entry_type: tinyfs::EntryType::FileDynamic,
             timestamp: 0,
         })
     }

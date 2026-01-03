@@ -1332,7 +1332,7 @@ impl InnerState {
             let now = Utc::now().timestamp_micros();
 
             match id.entry_type() {
-                EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+                EntryType::TablePhysicalSeries | EntryType::TableDynamic => {
                     // For FileSeries, extract temporal metadata from Parquet content
                     use super::schema::{
                         ExtendedAttributes, detect_timestamp_column,
@@ -1939,7 +1939,7 @@ impl InnerState {
             crate::file_writer::ContentRef::Small(content) => {
                 // Small file: store content inline
                 match id.entry_type() {
-                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+                    EntryType::TablePhysicalSeries | EntryType::TableDynamic => {
                         // FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series {
@@ -1981,7 +1981,7 @@ impl InnerState {
             crate::file_writer::ContentRef::Large(sha256, size) => {
                 // Large file: store reference
                 match id.entry_type() {
-                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+                    EntryType::TablePhysicalSeries | EntryType::TableDynamic => {
                         // Large FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series {
@@ -2254,10 +2254,10 @@ impl InnerState {
         // by post-commit discovery or explicit FactoryRegistry calls.
         //
         // Note: OpLog entry created above contains:
-        // - FileDataDynamic: config in content field
+        // - FileDynamic: config in content field
         // - DirectoryDynamic: config in extended_attributes, empty content for directory entries
         let node = match id.entry_type() {
-            EntryType::FileDataDynamic => {
+            EntryType::FileDynamic => {
                 // Create as regular file node - factory metadata in OpLog
                 node_factory::create_file_node(id, state)
             }
@@ -3263,8 +3263,8 @@ mod node_factory {
         // Handle static nodes (traditional TLogFS nodes)
         match oplog_entry.file_type {
             EntryType::DirectoryDynamic
-            | EntryType::FileDataDynamic
-            | EntryType::FileSeriesDynamic => {
+            | EntryType::FileDynamic
+            | EntryType::TableDynamic => {
                 assert!(id.entry_type().is_dynamic());
                 assert!(oplog_entry.factory.is_some());
 
@@ -3272,9 +3272,9 @@ mod node_factory {
                 return create_dynamic_node_from_oplog_entry(oplog_entry, id, state, factory_type)
                     .await;
             }
-            EntryType::FileDataPhysical
-            | EntryType::FileTablePhysical
-            | EntryType::FileSeriesPhysical => {
+            EntryType::FilePhysicalVersion
+            | EntryType::TablePhysicalVersion
+            | EntryType::TablePhysicalSeries => {
                 let oplog_file = crate::file::OpLogFile::new(id, state);
                 let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
                 Ok(Node::new(id, NodeType::File(file_handle)))
@@ -3344,7 +3344,7 @@ mod node_factory {
                 debug!("✅ FactoryRegistry::create_directory succeeded");
                 NodeType::Directory(dir_handle)
             }
-            EntryType::FileDataDynamic => {
+            EntryType::FileDynamic => {
                 // Check if this is an executable factory
                 if let Some(factory) = FactoryRegistry::get_factory(factory_type) {
                     if factory.create_file.is_some() {

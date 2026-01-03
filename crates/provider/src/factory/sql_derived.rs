@@ -425,8 +425,8 @@ impl SqlDerivedFile {
         // Validate scheme matches entry_type
         let scheme = url.scheme();
         let expected_scheme = match entry_type {
-            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "series",
-            EntryType::FileTablePhysical => "table",
+            EntryType::TablePhysicalSeries | EntryType::TableDynamic => "series",
+            EntryType::TablePhysicalVersion => "table",
             _ => {
                 return Err(tinyfs::Error::Other(format!(
                     "Unsupported entry_type {:?} for URL pattern",
@@ -444,13 +444,13 @@ impl SqlDerivedFile {
             )));
         }
 
-        // For format providers, look for FileDataPhysical/Dynamic instead of the requested entry_type
+        // For format providers, look for FilePhysicalVersion/Dynamic instead of the requested entry_type
         // The format provider will convert them to the appropriate type
         let lookup_entry_type = if is_format_provider {
             match entry_type {
-                EntryType::FileSeriesPhysical => EntryType::FileDataPhysical,
-                EntryType::FileSeriesDynamic => EntryType::FileDataDynamic,
-                EntryType::FileTablePhysical => EntryType::FileDataPhysical,
+                EntryType::TablePhysicalSeries => EntryType::FilePhysicalVersion,
+                EntryType::TableDynamic => EntryType::FileDynamic,
+                EntryType::TablePhysicalVersion => EntryType::FilePhysicalVersion,
                 _ => entry_type,
             }
         } else {
@@ -554,7 +554,7 @@ impl SqlDerivedFile {
             if actual_entry_type == lookup_entry_type {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
-                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => file_id,
+                    EntryType::TablePhysicalSeries | EntryType::TableDynamic => file_id,
                     _ => FileID::new_from_ids(file_id.part_id(), file_id.node_id()),
                 };
                 if seen.insert(dedup_key) {
@@ -622,7 +622,7 @@ impl Metadata for SqlDerivedFile {
             version: 1,
             size: None,   // Unknown
             blake3: None, // Unknown
-            entry_type: EntryType::FileSeriesDynamic,
+            entry_type: EntryType::TableDynamic,
             timestamp: 0,
         })
     }
@@ -834,11 +834,11 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
             let entry_types = match self.get_mode() {
                 SqlDerivedMode::Table => {
                     // Table mode looks for physical table sources only
-                    // (dynamic table files don't exist - all dynamic files use FileSeriesDynamic)
-                    vec![EntryType::FileTablePhysical]
+                    // (dynamic table files don't exist - all dynamic files use TableDynamic)
+                    vec![EntryType::TablePhysicalVersion]
                 }
                 SqlDerivedMode::Series => {
-                    vec![EntryType::FileSeriesPhysical, EntryType::FileSeriesDynamic]
+                    vec![EntryType::TablePhysicalSeries, EntryType::TableDynamic]
                 }
             };
             debug!(
@@ -1618,7 +1618,7 @@ query: ""
             persistence,
             "/sensor_data1.parquet",
             &batch1,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1636,7 +1636,7 @@ query: ""
             persistence,
             "/sensor_data2.parquet",
             &batch2,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1711,7 +1711,7 @@ query: ""
             persistence,
             "/sensors/building_a/data.parquet",
             &batch_a,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1730,7 +1730,7 @@ query: ""
             persistence,
             "/sensors/building_b/data.parquet",
             &batch_b,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1819,7 +1819,7 @@ query: ""
             persistence,
             "/metrics/data.parquet",
             &batch_metrics,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1839,7 +1839,7 @@ query: ""
             persistence,
             "/logs/info.parquet",
             &batch_logs,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1936,7 +1936,7 @@ query: ""
             persistence,
             "/sensor_data.parquet",
             &batch,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2013,7 +2013,7 @@ query: ""
             persistence,
             "/sensor_data.parquet",
             &batch,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2104,7 +2104,7 @@ query: ""
                 persistence,
                 &filename,
                 &batch,
-                EntryType::FileTablePhysical,
+                EntryType::TablePhysicalVersion,
             )
             .await
             .unwrap();
@@ -2195,7 +2195,7 @@ query: ""
                 persistence,
                 &filename,
                 &batch,
-                EntryType::FileTablePhysical,
+                EntryType::TablePhysicalVersion,
             )
             .await
             .unwrap();
@@ -2298,7 +2298,7 @@ query: ""
             persistence,
             "/data.parquet",
             parquet_buffer,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2395,7 +2395,7 @@ query: ""
             persistence,
             "/data.parquet",
             parquet_buffer,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2406,7 +2406,7 @@ query: ""
         let first_query = "SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value";
         let first_file_id = FileID::from_content(
             PartID::root(),
-            EntryType::FileSeriesDynamic,
+            EntryType::TableDynamic,
             first_query.as_bytes(),
         );
         let context = test_context(&provider_context, first_file_id);
@@ -2445,7 +2445,7 @@ query: ""
             persistence,
             "/intermediate.parquet",
             first_result_data,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2456,7 +2456,7 @@ query: ""
             let second_query = "SELECT name, adjusted_value * 2 as final_value FROM intermediate WHERE adjusted_value > 250 ORDER BY final_value DESC";
             let second_file_id = FileID::from_content(
                 PartID::root(),
-                EntryType::FileSeriesDynamic,
+                EntryType::TableDynamic,
                 second_query.as_bytes(),
             );
             let context = test_context(&provider_context, second_file_id);
@@ -2587,7 +2587,7 @@ query: ""
                 persistence,
                 "/hydrovu/devices/station_a/SensorA_v1.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap()
@@ -2669,7 +2669,7 @@ query: ""
                 persistence,
                 "/hydrovu/devices/station_b/PressureB.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -2881,7 +2881,7 @@ query: ""
                 persistence,
                 "/sensors/stations/all_data.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -3067,7 +3067,7 @@ query: ""
             root.create_table_from_batch(
                 "/test_data.parquet",
                 &batch,
-                EntryType::FileTablePhysical,
+                EntryType::TablePhysicalVersion,
             )
             .await
             .unwrap();
@@ -3195,7 +3195,7 @@ query: ""
                 persistence,
                 "/sensors/wildcard_test/base_data.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -3492,7 +3492,7 @@ query: ""
                 persistence,
                 "/test/physical.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -3531,7 +3531,7 @@ query: ""
                 persistence,
                 "/test/physical2.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -3610,7 +3610,7 @@ query: ""
             persistence,
             "/Sensors/Temperature.series",
             parquet_buffer,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -4065,7 +4065,7 @@ query: ""
             persistence,
             "/input.parquet",
             parquet_buffer,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -4087,7 +4087,7 @@ rules:
         _ = root
             .create_dynamic_path(
                 "/etc/test_rename",
-                EntryType::FileDataDynamic,
+                EntryType::FileDynamic,
                 "column-rename",
                 rename_config.as_bytes().to_vec(),
             )

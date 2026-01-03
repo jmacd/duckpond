@@ -164,13 +164,13 @@ impl Directory for VisitDirectory {
                 // Use a deterministic FileID for testing (part_id=root for test simplicity)
                 let file_id = crate::FileID::from_content(
                     crate::PartID::root(),
-                    crate::EntryType::FileDataDynamic,
+                    crate::EntryType::FileDynamic,
                     format!("visit:{}", name).as_bytes(),
                 );
                 let dir_entry = DirectoryEntry::new(
                     name.clone(),
                     file_id.node_id(),
-                    crate::EntryType::FileDataDynamic,
+                    crate::EntryType::FileDynamic,
                     0,
                 );
                 Ok(dir_entry)

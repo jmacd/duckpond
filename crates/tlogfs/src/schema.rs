@@ -487,12 +487,12 @@ impl OplogEntry {
             "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
             id.entry_type()
         );
-        assert_eq!(EntryType::FileSeriesPhysical, id.entry_type());
+        assert_eq!(EntryType::TablePhysicalSeries, id.entry_type());
 
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
-            file_type: EntryType::FileSeriesPhysical,
+            file_type: EntryType::TablePhysicalSeries,
             timestamp,
             version,
             content: None,

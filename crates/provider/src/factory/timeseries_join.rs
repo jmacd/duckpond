@@ -546,7 +546,7 @@ impl tinyfs::Metadata for TimeseriesJoinFile {
             version: 1,
             size: None,
             blake3: None,
-            entry_type: EntryType::FileSeriesDynamic,
+            entry_type: EntryType::TableDynamic,
             timestamp: 0, // @@@ Not sure
         })
     }
@@ -783,7 +783,7 @@ mod tests {
             persistence,
             "/source1.series",
             parquet_buffer1,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -819,7 +819,7 @@ mod tests {
             persistence,
             "/source2.series",
             parquet_buffer2,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -910,7 +910,7 @@ mod tests {
             persistence,
             "/source1.series",
             parquet_buffer1,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -943,7 +943,7 @@ mod tests {
             persistence,
             "/source2.series",
             parquet_buffer2,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -1056,7 +1056,7 @@ mod tests {
             persistence,
             "/vulink1.series",
             parquet_buffer1,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -1091,7 +1091,7 @@ mod tests {
             persistence,
             "/vulink2.series",
             parquet_buffer2,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -1124,7 +1124,7 @@ mod tests {
             persistence,
             "/at500.series",
             parquet_buffer3,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -1238,7 +1238,7 @@ mod tests {
             persistence,
             "/sensor1.csv",
             csv1_content.as_bytes().to_vec(),
-            EntryType::FileDataPhysical,
+            EntryType::FilePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1254,7 +1254,7 @@ mod tests {
             persistence,
             "/sensor2.csv",
             csv2_content.as_bytes().to_vec(),
-            EntryType::FileDataPhysical,
+            EntryType::FilePhysicalVersion,
         )
         .await
         .unwrap();

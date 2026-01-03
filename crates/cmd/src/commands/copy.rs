@@ -70,9 +70,9 @@ fn determine_copy_direction(sources: &[String], dest: &str) -> Result<CopyDirect
 
 async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
     match format {
-        "data" => Ok(tinyfs::EntryType::FileDataPhysical),
-        "table" => Ok(tinyfs::EntryType::FileTablePhysical),
-        "series" => Ok(tinyfs::EntryType::FileSeriesPhysical),
+        "data" => Ok(tinyfs::EntryType::FilePhysicalVersion),
+        "table" => Ok(tinyfs::EntryType::TablePhysicalVersion),
+        "series" => Ok(tinyfs::EntryType::TablePhysicalSeries),
         _ => Err(anyhow!("Invalid format '{}'", format)),
     }
 }
@@ -125,7 +125,7 @@ async fn copy_single_file_to_directory_with_name(
 
     // For series files, we need to validate it's actually a parquet file
     // then stream it to the pond and infer temporal bounds after writing
-    if entry_type == tinyfs::EntryType::FileSeriesPhysical {
+    if entry_type == tinyfs::EntryType::TablePhysicalSeries {
         // Check if this is actually a parquet file by reading just the magic bytes
         let mut file = File::open(file_path)
             .await
@@ -961,7 +961,7 @@ mod tests {
 
         // Verify metadata (simplified check)
         setup
-            .verify_file_metadata("copied_test.txt", tinyfs::EntryType::FileDataPhysical)
+            .verify_file_metadata("copied_test.txt", tinyfs::EntryType::FilePhysicalVersion)
             .await?;
 
         Ok(())

@@ -220,7 +220,7 @@ impl tinyfs::Metadata for TimeseriesPivotFile {
             version: 1,
             size: None,
             blake3: None,
-            entry_type: EntryType::FileSeriesDynamic,
+            entry_type: EntryType::TableDynamic,
             timestamp: 0,
         })
     }

@@ -136,7 +136,7 @@ async fn test_temporal_filtered_listing_table_with_memory() {
     // FileID::new_physical_dir_id() creates a proper directory, then we create a series file in it
     use tinyfs::EntryType;
     let dir_id = FileID::new_physical_dir_id();
-    let file_id = FileID::new_in_partition(dir_id.part_id(), EntryType::FileSeriesPhysical);
+    let file_id = FileID::new_in_partition(dir_id.part_id(), EntryType::TablePhysicalSeries);
 
     // Set temporal bounds for the file
     persistence.set_temporal_bounds(file_id, 1000, 2000).await;

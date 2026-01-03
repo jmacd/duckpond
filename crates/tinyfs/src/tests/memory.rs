@@ -417,7 +417,7 @@ async fn test_create_dynamic_file_path() {
     let dynamic_node = root
         .create_dynamic_path(
             "/config/test.yaml",
-            crate::EntryType::FileDataDynamic,
+            crate::EntryType::FileDynamic,
             "test-factory",
             config_content.to_vec(),
         )
@@ -427,7 +427,7 @@ async fn test_create_dynamic_file_path() {
     // Verify the node was created
     assert_eq!(
         dynamic_node.id().entry_type(),
-        crate::EntryType::FileDataDynamic
+        crate::EntryType::FileDynamic
     );
 
     // Verify we can resolve it
@@ -436,7 +436,7 @@ async fn test_create_dynamic_file_path() {
         crate::Lookup::Found(node_path) => {
             assert_eq!(
                 node_path.id().entry_type(),
-                crate::EntryType::FileDataDynamic
+                crate::EntryType::FileDynamic
             );
             assert_eq!(node_path.path(), std::path::Path::new("/config/test.yaml"));
         }

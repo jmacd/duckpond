@@ -174,9 +174,9 @@ impl FileInfo {
         let type_symbol = match self.metadata.entry_type {
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "📁",
             EntryType::Symlink => "🔗",
-            EntryType::FileDataPhysical | EntryType::FileDataDynamic => "📄",
-            EntryType::FileTablePhysical => "📊",
-            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "📈",
+            EntryType::FilePhysicalVersion | EntryType::FileDynamic => "📄",
+            EntryType::TablePhysicalVersion => "📊",
+            EntryType::TablePhysicalSeries | EntryType::TableDynamic => "📈",
         };
 
         let size_str = if self.metadata.entry_type.is_directory() {

@@ -34,7 +34,7 @@ pub struct MemoryPersistence {
 
 pub struct State {
     // Store multiple versions of each file: (node_id, part_id) -> Vec<MemoryFileVersion>
-    // Also used for dynamic nodes (FileDataDynamic, DirectoryDynamic, FileExecutable) - config is the content
+    // Also used for dynamic nodes (FileDynamic, DirectoryDynamic, FileExecutable) - config is the content
     file_versions: HashMap<FileID, Vec<MemoryFileVersion>>,
 
     // Non-file nodes (directories, symlinks): (node_id, part_id) -> Node

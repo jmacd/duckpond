@@ -127,7 +127,7 @@ impl DynamicDirDirectory {
             tinyfs::NodeType::Directory(_) => EntryType::DirectoryDynamic,
             tinyfs::NodeType::File(file_handle) => {
                 // Query the file's metadata to get the correct EntryType
-                // This allows factories like timeseries-join to specify FileSeriesDynamic
+                // This allows factories like timeseries-join to specify TableDynamic
                 let metadata = file_handle.metadata().await?;
                 metadata.entry_type
             }

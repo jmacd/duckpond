@@ -288,7 +288,7 @@ mod tests {
 
         // Write to TinyFS
         let mut file_writer = root
-            .async_writer_path_with_type(path, tinyfs::EntryType::FileDataDynamic)
+            .async_writer_path_with_type(path, tinyfs::EntryType::FileDynamic)
             .await?;
         use tokio::io::AsyncWriteExt;
         file_writer.write_all(&csv_data).await?;

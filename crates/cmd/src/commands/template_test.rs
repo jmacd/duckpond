@@ -77,7 +77,7 @@ mod tests {
                 let mut writer = root
                     .async_writer_path_with_type(
                         pond_template_path,
-                        tinyfs::EntryType::FileDataPhysical,
+                        tinyfs::EntryType::FilePhysicalVersion,
                     )
                     .await?;
                 writer
@@ -133,7 +133,7 @@ mod tests {
                     let mut writer = root
                         .async_writer_path_with_type(
                             &filename_str,
-                            tinyfs::EntryType::FileDataPhysical,
+                            tinyfs::EntryType::FilePhysicalVersion,
                         )
                         .await?;
                     writer.write_all(b"template file content").await?;
@@ -383,7 +383,7 @@ mod tests {
             // Write template content
             let template_path = "/base/greeting.template";
             let mut writer = root
-                .async_writer_path_with_type(&template_path, tinyfs::EntryType::FileDataPhysical)
+                .async_writer_path_with_type(&template_path, tinyfs::EntryType::FilePhysicalVersion)
                 .await?;
             writer.write_all(template_content.as_bytes()).await?;
             writer.flush().await?;

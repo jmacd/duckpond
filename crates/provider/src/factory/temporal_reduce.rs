@@ -450,7 +450,7 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
             version: 1,
             size: None,   // Unknown until SQL is generated and data computed
             blake3: None, // Unknown until SQL is generated and data computed
-            entry_type: EntryType::FileSeriesDynamic, // Temporal reduce always creates series files
+            entry_type: EntryType::TableDynamic, // Temporal reduce always creates series files
             timestamp: 0, // Use epoch time for dynamic content
         })
     }
@@ -936,14 +936,14 @@ impl Directory for TemporalReduceSiteDirectory {
             let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
             let file_id = tinyfs::FileID::from_content(
                 parent_part_id,
-                EntryType::FileSeriesDynamic,
+                EntryType::TableDynamic,
                 &id_bytes,
             );
 
             let dir_entry = tinyfs::DirectoryEntry::new(
                 filename.clone(),
                 file_id.node_id(),
-                EntryType::FileSeriesDynamic,
+                EntryType::TableDynamic,
                 0,
             );
             entries.push(Ok(dir_entry));
@@ -971,7 +971,7 @@ impl Directory for TemporalReduceSiteDirectory {
                 let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
                 let file_id = tinyfs::FileID::from_content(
                     parent_part_id,
-                    EntryType::FileSeriesDynamic,
+                    EntryType::TableDynamic,
                     &id_bytes,
                 );
 
@@ -1203,7 +1203,7 @@ mod tests {
                     persistence,
                     &filename,
                     buf,
-                    EntryType::FileSeriesPhysical,
+                    EntryType::TablePhysicalSeries,
                 )
                 .await
                 .unwrap();

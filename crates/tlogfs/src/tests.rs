@@ -1060,7 +1060,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         // Create an empty version with temporal bounds (following CLI pattern)
         // Use TinyFS async writer to add empty version to existing file
         let mut writer = wd
-            .async_writer_path_with_type(series_path, tinyfs::EntryType::FileSeriesPhysical)
+            .async_writer_path_with_type(series_path, tinyfs::EntryType::TablePhysicalSeries)
             .await?;
 
         // Write empty content to create a pending record
@@ -1234,7 +1234,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
         // Get writer for existing file - THIS SHOULD NOT UPDATE THE DIRECTORY
         let mut writer = wd2.async_writer_path_with_type(
             series_path,
-            tinyfs::EntryType::FileSeriesPhysical
+            tinyfs::EntryType::TablePhysicalSeries
         ).await?;
 
         use tokio::io::AsyncWriteExt;
@@ -1529,7 +1529,7 @@ async fn test_create_dynamic_file_path() {
     let dynamic_node = root
         .create_dynamic_path(
             "/config/test.yaml",
-            tinyfs::EntryType::FileDataDynamic,
+            tinyfs::EntryType::FileDynamic,
             "test-file",
             config_content.clone(),
         )
@@ -1544,8 +1544,8 @@ async fn test_create_dynamic_file_path() {
     let entry_type = file_id.entry_type();
     assert_eq!(
         entry_type,
-        tinyfs::EntryType::FileDataDynamic,
-        "Dynamic file should have FileDataDynamic EntryType"
+        tinyfs::EntryType::FileDynamic,
+        "Dynamic file should have FileDynamic EntryType"
     );
     debug!("✅ FileID has correct EntryType: {:?}", entry_type);
 
@@ -1583,8 +1583,8 @@ async fn test_create_dynamic_file_path() {
     let entry_type2 = file_id2.entry_type();
     assert_eq!(
         entry_type2,
-        tinyfs::EntryType::FileDataDynamic,
-        "Persisted dynamic file should have valid FileDataDynamic EntryType"
+        tinyfs::EntryType::FileDynamic,
+        "Persisted dynamic file should have valid FileDynamic EntryType"
     );
     debug!(
         "✅ Persisted FileID has correct EntryType: {:?}",
@@ -1761,7 +1761,7 @@ async fn test_dynamic_node_entry_type_validation() {
     let dynamic_file = root
         .create_dynamic_path(
             "/dynamic-test/test.yaml",
-            tinyfs::EntryType::FileDataDynamic,
+            tinyfs::EntryType::FileDynamic,
             "test-file",
             file_config_bytes,
         )
@@ -1776,8 +1776,8 @@ async fn test_dynamic_node_entry_type_validation() {
     log::debug!("  EntryType from FileID: {:?}", file_entry_type);
     assert_eq!(
         file_entry_type,
-        tinyfs::EntryType::FileDataDynamic,
-        "Dynamic file should have FileDataDynamic EntryType"
+        tinyfs::EntryType::FileDynamic,
+        "Dynamic file should have FileDynamic EntryType"
     );
 
     // Create dynamic directory using test-dir factory
@@ -1842,8 +1842,8 @@ async fn test_dynamic_node_entry_type_validation() {
     );
     assert_eq!(
         read_file_entry_type,
-        tinyfs::EntryType::FileDataDynamic,
-        "Persisted dynamic file should have valid FileDataDynamic EntryType"
+        tinyfs::EntryType::FileDynamic,
+        "Persisted dynamic file should have valid FileDynamic EntryType"
     );
 
     // Verify we can actually read the file content

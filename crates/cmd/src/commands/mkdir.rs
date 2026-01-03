@@ -221,7 +221,7 @@ mod tests {
                 let fs = &*tx;
                 let root = fs.root().await?;
                 let mut writer = root
-                    .async_writer_path_with_type(path, tinyfs::EntryType::FileDataPhysical)
+                    .async_writer_path_with_type(path, tinyfs::EntryType::FilePhysicalVersion)
                     .await?;
                 writer.write_all(content.as_bytes()).await?;
                 writer.flush().await?;

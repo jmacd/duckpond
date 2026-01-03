@@ -293,7 +293,7 @@ struct PondStats {
     total_node_count: i64,
     /// Number of unique partitions (part_id values)
     partition_count: i64,
-    /// Breakdown of nodes by file_type (DirectoryPhysical, FileDataPhysical, etc.)
+    /// Breakdown of nodes by file_type (DirectoryPhysical, FilePhysicalVersion, etc.)
     nodes_by_type: std::collections::HashMap<String, i64>,
 }
 
@@ -505,8 +505,8 @@ async fn test_pond_structural_statistics() -> Result<()> {
     );
 
     // Verify we have file nodes of different types
-    let has_data_files = stats.nodes_by_type.contains_key("file:data:physical");
-    let has_table_files = stats.nodes_by_type.contains_key("file:table:physical");
+    let has_data_files = stats.nodes_by_type.contains_key("file:physical:version");
+    let has_table_files = stats.nodes_by_type.contains_key("table:physical:version");
 
     assert!(
         has_data_files,

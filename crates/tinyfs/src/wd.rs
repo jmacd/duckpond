@@ -176,7 +176,7 @@ impl WD {
         &self,
         path: P,
     ) -> Result<(NodePath, Pin<Box<dyn crate::file::FileMetadataWriter>>)> {
-        self.create_file_path_streaming_with_type(path, EntryType::FileDataPhysical)
+        self.create_file_path_streaming_with_type(path, EntryType::FilePhysicalVersion)
             .await
     }
 
@@ -360,7 +360,7 @@ impl WD {
         &self,
         path: P,
     ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
-        self.async_writer_path_with_type(path, EntryType::FileDataPhysical)
+        self.async_writer_path_with_type(path, EntryType::FilePhysicalVersion)
             .await
     }
 

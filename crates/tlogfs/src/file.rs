@@ -387,7 +387,7 @@ impl AsyncWrite for OpLogFileWriter {
 
                     // Extract metadata based on file type
                     let metadata = match entry_type {
-                        tinyfs::EntryType::FileSeriesPhysical => {
+                        tinyfs::EntryType::TablePhysicalSeries => {
                             // Series files should have precomputed metadata from the parquet writer
                             // Exception: empty writes (for extended attributes only) are allowed without metadata
                             if let Some(precomputed) = precomputed_metadata {
@@ -401,11 +401,11 @@ impl AsyncWrite for OpLogFileWriter {
                                 }
                             } else {
                                 return Err(tinyfs::Error::Other(
-                                    "FileSeriesPhysical written without temporal metadata - caller must use FileMetadataWriter::set_temporal_metadata() or infer_temporal_bounds()".to_string()
+                                    "TablePhysicalSeries written without temporal metadata - caller must use FileMetadataWriter::set_temporal_metadata() or infer_temporal_bounds()".to_string()
                                 ));
                             }
                         }
-                        tinyfs::EntryType::FileTablePhysical => {
+                        tinyfs::EntryType::TablePhysicalVersion => {
                             if let Some(precomputed) = precomputed_metadata {
                                 precomputed
                             } else if content.is_empty() {

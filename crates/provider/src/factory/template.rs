@@ -142,7 +142,7 @@ impl Directory for TemplateDirectory {
                 let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
                 let file_id = tinyfs::FileID::from_content(
                     parent_part_id,
-                    EntryType::FileDataDynamic,
+                    EntryType::FileDynamic,
                     &id_bytes,
                 );
 
@@ -203,7 +203,7 @@ impl Directory for TemplateDirectory {
                     let dir_entry = tinyfs::DirectoryEntry::new(
                         expanded_name.clone(),
                         node_ref.id().node_id(),
-                        EntryType::FileDataDynamic,
+                        EntryType::FileDynamic,
                         0,
                     );
                     entries.push(Ok(dir_entry));
@@ -406,7 +406,7 @@ impl tinyfs::Metadata for TemplateFile {
             version: 1,
             size: Some(0), // Placeholder size - will be accurate when file is read
             blake3: None,
-            entry_type: EntryType::FileDataDynamic,
+            entry_type: EntryType::FileDynamic,
             timestamp: 0,
         })
     }
