@@ -1219,8 +1219,7 @@ async fn export_target(
     let (results, schema) = match target.file_type {
         EntryType::FileSeriesPhysical
         | EntryType::FileSeriesDynamic
-        | EntryType::FileTablePhysical
-        | EntryType::FileTableDynamic => {
+        | EntryType::FileTablePhysical => {
             export_queryable_file(
                 tx_guard,
                 target,
@@ -1429,7 +1428,6 @@ async fn execute_direct_copy_query(
 
             match metadata.entry_type {
                 EntryType::FileTablePhysical
-                | EntryType::FileTableDynamic
                 | EntryType::FileSeriesPhysical
                 | EntryType::FileSeriesDynamic => {
                     let file_arc = file_handle.handle.get_file().await;

@@ -51,7 +51,6 @@ pub async fn execute_sql_on_file<'a>(
 
             match node_path.id().entry_type() {
                 tinyfs::EntryType::FileTablePhysical
-                | tinyfs::EntryType::FileTableDynamic
                 | tinyfs::EntryType::FileSeriesPhysical
                 | tinyfs::EntryType::FileSeriesDynamic => {
                     // Use trait dispatch instead of type checking - follows anti-duplication principles
@@ -165,7 +164,6 @@ pub async fn get_file_schema(
 
             match node_path.entry_type() {
                 tinyfs::EntryType::FileTablePhysical
-                | tinyfs::EntryType::FileTableDynamic
                 | tinyfs::EntryType::FileSeriesPhysical
                 | tinyfs::EntryType::FileSeriesDynamic => {
                     let file_arc = file_handle.handle.get_file().await;

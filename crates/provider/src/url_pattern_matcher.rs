@@ -103,14 +103,13 @@ impl UrlPatternMatcher {
         // Map scheme to EntryType
         let entry_types = match url.scheme() {
             "series" => vec![EntryType::FileSeriesPhysical, EntryType::FileSeriesDynamic],
-            "table" => vec![EntryType::FileTablePhysical, EntryType::FileTableDynamic],
+            "table" => vec![EntryType::FileTablePhysical],
             "data" => vec![EntryType::FileDataPhysical, EntryType::FileDataDynamic],
             "file" => vec![
                 // Accept any file type - actual type determined by EntryType
                 EntryType::FileSeriesPhysical,
                 EntryType::FileSeriesDynamic,
                 EntryType::FileTablePhysical,
-                EntryType::FileTableDynamic,
                 EntryType::FileDataPhysical,
                 EntryType::FileDataDynamic,
             ],
@@ -243,7 +242,6 @@ impl MatchedFile {
             EntryType::FileSeriesPhysical
                 | EntryType::FileSeriesDynamic
                 | EntryType::FileTablePhysical
-                | EntryType::FileTableDynamic
         )
     }
 

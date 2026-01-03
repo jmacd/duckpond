@@ -3264,7 +3264,6 @@ mod node_factory {
         match oplog_entry.file_type {
             EntryType::DirectoryDynamic
             | EntryType::FileDataDynamic
-            | EntryType::FileTableDynamic
             | EntryType::FileSeriesDynamic => {
                 assert!(id.entry_type().is_dynamic());
                 assert!(oplog_entry.factory.is_some());

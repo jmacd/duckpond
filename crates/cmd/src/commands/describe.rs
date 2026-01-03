@@ -254,7 +254,7 @@ async fn describe_command_impl(
                     }
                 }
             }
-            tinyfs::EntryType::FileTablePhysical | tinyfs::EntryType::FileTableDynamic => {
+            tinyfs::EntryType::FileTablePhysical => {
                 output.push_str("   Format: Parquet table\n");
                 match describe_file_table_schema(ship_context, &file_info.path).await {
                     Ok(schema_info) => {

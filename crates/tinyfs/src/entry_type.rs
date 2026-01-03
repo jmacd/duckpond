@@ -33,9 +33,8 @@ pub enum EntryType {
     #[serde(rename = "file:table:physical")]
     FileTablePhysical = 6,
 
-    /// Dynamic table file - factory-generated table
-    #[serde(rename = "file:table:dynamic")]
-    FileTableDynamic = 7,
+    // NOTE: FileTableDynamic (value 7) was removed - dynamic files use FileSeriesDynamic
+    // since factories generate rows identically for both table and series patterns.
 
     /// Physical series file - multi-version table series, supports time-travel queries
     #[serde(rename = "file:series:physical")]
@@ -55,7 +54,6 @@ impl EntryType {
             EntryType::FileDataPhysical
                 | EntryType::FileDataDynamic
                 | EntryType::FileTablePhysical
-                | EntryType::FileTableDynamic
                 | EntryType::FileSeriesPhysical
                 | EntryType::FileSeriesDynamic
         )
@@ -77,7 +75,6 @@ impl EntryType {
             self,
             EntryType::DirectoryDynamic
                 | EntryType::FileDataDynamic
-                | EntryType::FileTableDynamic
                 | EntryType::FileSeriesDynamic
         )
     }
@@ -97,13 +94,10 @@ impl EntryType {
         )
     }
 
-    /// Check if this entry is a table file (physical or dynamic)
+    /// Check if this entry is a table file (physical only - dynamic files use series)
     #[must_use]
     pub fn is_table_file(&self) -> bool {
-        matches!(
-            self,
-            EntryType::FileTablePhysical | EntryType::FileTableDynamic
-        )
+        matches!(self, EntryType::FileTablePhysical)
     }
 
     /// Check if this entry is a series file (physical or dynamic)
@@ -121,7 +115,6 @@ impl EntryType {
         matches!(
             self,
             EntryType::FileTablePhysical
-                | EntryType::FileTableDynamic
                 | EntryType::FileSeriesPhysical
                 | EntryType::FileSeriesDynamic
         )
@@ -134,7 +127,7 @@ impl EntryType {
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "directory",
             EntryType::Symlink => "symlink",
             EntryType::FileDataPhysical | EntryType::FileDataDynamic => "file:data",
-            EntryType::FileTablePhysical | EntryType::FileTableDynamic => "file:table",
+            EntryType::FileTablePhysical => "file:table",
             EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "file:series",
         }
     }
@@ -149,7 +142,6 @@ impl EntryType {
             EntryType::FileDataPhysical => "file:data:physical",
             EntryType::FileDataDynamic => "file:data:dynamic",
             EntryType::FileTablePhysical => "file:table:physical",
-            EntryType::FileTableDynamic => "file:table:dynamic",
             EntryType::FileSeriesPhysical => "file:series:physical",
             EntryType::FileSeriesDynamic => "file:series:dynamic",
         }
@@ -167,7 +159,7 @@ impl TryFrom<u8> for EntryType {
             4 => Ok(EntryType::FileDataPhysical),
             5 => Ok(EntryType::FileDataDynamic),
             6 => Ok(EntryType::FileTablePhysical),
-            7 => Ok(EntryType::FileTableDynamic),
+            // 7 was FileTableDynamic - now reserved/unused
             8 => Ok(EntryType::FileSeriesPhysical),
             9 => Ok(EntryType::FileSeriesDynamic),
             _ => Err(format!("Unknown EntryType: {}", v)),
@@ -188,7 +180,7 @@ impl FromStr for EntryType {
             "file:data:physical" => Ok(EntryType::FileDataPhysical),
             "file:data:dynamic" => Ok(EntryType::FileDataDynamic),
             "file:table:physical" => Ok(EntryType::FileTablePhysical),
-            "file:table:dynamic" => Ok(EntryType::FileTableDynamic),
+            // "file:table:dynamic" no longer exists - use file:series:dynamic instead
             "file:series:physical" => Ok(EntryType::FileSeriesPhysical),
             "file:series:dynamic" => Ok(EntryType::FileSeriesDynamic),
 
@@ -215,7 +207,6 @@ mod tests {
         assert_eq!(EntryType::FileDataPhysical.as_str(), "file:data:physical");
         assert_eq!(EntryType::FileDataDynamic.as_str(), "file:data:dynamic");
         assert_eq!(EntryType::FileTablePhysical.as_str(), "file:table:physical");
-        assert_eq!(EntryType::FileTableDynamic.as_str(), "file:table:dynamic");
         assert_eq!(
             EntryType::FileSeriesPhysical.as_str(),
             "file:series:physical"
@@ -246,10 +237,8 @@ mod tests {
             EntryType::from_str("file:table:physical").unwrap(),
             EntryType::FileTablePhysical
         );
-        assert_eq!(
-            EntryType::from_str("file:table:dynamic").unwrap(),
-            EntryType::FileTableDynamic
-        );
+        // file:table:dynamic no longer exists - should fail
+        assert!(EntryType::from_str("file:table:dynamic").is_err());
         assert_eq!(
             EntryType::from_str("file:series:physical").unwrap(),
             EntryType::FileSeriesPhysical
@@ -275,7 +264,6 @@ mod tests {
         assert!(EntryType::FileDataPhysical.is_file());
         assert!(EntryType::FileDataDynamic.is_file());
         assert!(EntryType::FileTablePhysical.is_file());
-        assert!(EntryType::FileTableDynamic.is_file());
         assert!(EntryType::FileSeriesPhysical.is_file());
         assert!(EntryType::FileSeriesDynamic.is_file());
         assert!(!EntryType::DirectoryPhysical.is_file());
@@ -291,7 +279,6 @@ mod tests {
         // Test is_dynamic()
         assert!(EntryType::DirectoryDynamic.is_dynamic());
         assert!(EntryType::FileDataDynamic.is_dynamic());
-        assert!(EntryType::FileTableDynamic.is_dynamic());
         assert!(EntryType::FileSeriesDynamic.is_dynamic());
         assert!(!EntryType::DirectoryPhysical.is_dynamic());
         assert!(!EntryType::FileDataPhysical.is_dynamic());
@@ -310,13 +297,12 @@ mod tests {
         assert!(EntryType::FileDataPhysical.is_data_file());
         assert!(EntryType::FileDataDynamic.is_data_file());
         assert!(!EntryType::FileTablePhysical.is_data_file());
-        assert!(!EntryType::FileTableDynamic.is_data_file());
+        assert!(!EntryType::FileSeriesDynamic.is_data_file());
 
-        // Test is_table_file()
+        // Test is_table_file() - only physical tables exist
         assert!(EntryType::FileTablePhysical.is_table_file());
-        assert!(EntryType::FileTableDynamic.is_table_file());
+        assert!(!EntryType::FileSeriesDynamic.is_table_file());
         assert!(!EntryType::FileDataPhysical.is_table_file());
-        assert!(!EntryType::FileDataDynamic.is_table_file());
 
         // Test is_series_file()
         assert!(EntryType::FileSeriesPhysical.is_series_file());
@@ -326,7 +312,6 @@ mod tests {
 
         // Test is_parquet_file()
         assert!(EntryType::FileTablePhysical.is_parquet_file());
-        assert!(EntryType::FileTableDynamic.is_parquet_file());
         assert!(EntryType::FileSeriesPhysical.is_parquet_file());
         assert!(EntryType::FileSeriesDynamic.is_parquet_file());
         assert!(!EntryType::FileDataPhysical.is_parquet_file());
@@ -348,10 +333,6 @@ mod tests {
             "file:table:physical"
         );
         assert_eq!(
-            format!("{}", EntryType::FileTableDynamic),
-            "file:table:dynamic"
-        );
-        assert_eq!(
             format!("{}", EntryType::FileSeriesPhysical),
             "file:series:physical"
         );
@@ -370,8 +351,8 @@ mod tests {
         let data_file_json = serde_json::to_string(&EntryType::FileDataPhysical).unwrap();
         assert_eq!(data_file_json, "\"file:data:physical\"");
 
-        let table_file_json = serde_json::to_string(&EntryType::FileTableDynamic).unwrap();
-        assert_eq!(table_file_json, "\"file:table:dynamic\"");
+        let table_file_json = serde_json::to_string(&EntryType::FileTablePhysical).unwrap();
+        assert_eq!(table_file_json, "\"file:table:physical\"");
 
         let series_file_json = serde_json::to_string(&EntryType::FileSeriesPhysical).unwrap();
         assert_eq!(series_file_json, "\"file:series:physical\"");
@@ -389,8 +370,8 @@ mod tests {
         let data_file_parsed: EntryType = serde_json::from_str("\"file:data:physical\"").unwrap();
         assert_eq!(data_file_parsed, EntryType::FileDataPhysical);
 
-        let table_file_parsed: EntryType = serde_json::from_str("\"file:table:dynamic\"").unwrap();
-        assert_eq!(table_file_parsed, EntryType::FileTableDynamic);
+        let table_file_parsed: EntryType = serde_json::from_str("\"file:table:physical\"").unwrap();
+        assert_eq!(table_file_parsed, EntryType::FileTablePhysical);
 
         let series_file_parsed: EntryType =
             serde_json::from_str("\"file:series:physical\"").unwrap();
@@ -410,7 +391,6 @@ mod tests {
         assert_eq!(EntryType::FileDataPhysical.base_format(), "file:data");
         assert_eq!(EntryType::FileDataDynamic.base_format(), "file:data");
         assert_eq!(EntryType::FileTablePhysical.base_format(), "file:table");
-        assert_eq!(EntryType::FileTableDynamic.base_format(), "file:table");
         assert_eq!(EntryType::FileSeriesPhysical.base_format(), "file:series");
         assert_eq!(EntryType::FileSeriesDynamic.base_format(), "file:series");
         assert_eq!(EntryType::Symlink.base_format(), "symlink");

@@ -175,7 +175,7 @@ impl FileInfo {
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "📁",
             EntryType::Symlink => "🔗",
             EntryType::FileDataPhysical | EntryType::FileDataDynamic => "📄",
-            EntryType::FileTablePhysical | EntryType::FileTableDynamic => "📊",
+            EntryType::FileTablePhysical => "📊",
             EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "📈",
         };
 

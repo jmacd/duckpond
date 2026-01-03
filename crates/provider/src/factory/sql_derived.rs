@@ -426,7 +426,7 @@ impl SqlDerivedFile {
         let scheme = url.scheme();
         let expected_scheme = match entry_type {
             EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "series",
-            EntryType::FileTablePhysical | EntryType::FileTableDynamic => "table",
+            EntryType::FileTablePhysical => "table",
             _ => {
                 return Err(tinyfs::Error::Other(format!(
                     "Unsupported entry_type {:?} for URL pattern",
@@ -451,7 +451,6 @@ impl SqlDerivedFile {
                 EntryType::FileSeriesPhysical => EntryType::FileDataPhysical,
                 EntryType::FileSeriesDynamic => EntryType::FileDataDynamic,
                 EntryType::FileTablePhysical => EntryType::FileDataPhysical,
-                EntryType::FileTableDynamic => EntryType::FileDataDynamic,
                 _ => entry_type,
             }
         } else {
@@ -620,11 +619,9 @@ impl File for SqlDerivedFile {
 impl Metadata for SqlDerivedFile {
     async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
         // Metadata should be lightweight - don't compute the actual data
-        // The entry type can be determined from mode without expensive computation
-        let entry_type = match self.mode {
-            SqlDerivedMode::Table => EntryType::FileTableDynamic,
-            SqlDerivedMode::Series => EntryType::FileSeriesDynamic,
-        };
+        // All dynamic files use FileSeriesDynamic regardless of mode
+        // (FileTableDynamic was removed - dynamic files behave identically)
+        let entry_type = EntryType::FileSeriesDynamic;
 
         // Return lightweight metadata - size and hash will be computed on actual data access
         Ok(NodeMetadata {
@@ -842,7 +839,9 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
             // since source files can be created by factories (Dynamic) or direct uploads (Physical)
             let entry_types = match self.get_mode() {
                 SqlDerivedMode::Table => {
-                    vec![EntryType::FileTablePhysical, EntryType::FileTableDynamic]
+                    // Table mode looks for physical table sources only
+                    // (dynamic table files don't exist - all dynamic files use FileSeriesDynamic)
+                    vec![EntryType::FileTablePhysical]
                 }
                 SqlDerivedMode::Series => {
                     vec![EntryType::FileSeriesPhysical, EntryType::FileSeriesDynamic]
@@ -2413,7 +2412,7 @@ query: ""
         let first_query = "SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value";
         let first_file_id = FileID::from_content(
             PartID::root(),
-            EntryType::FileTableDynamic,
+            EntryType::FileSeriesDynamic,
             first_query.as_bytes(),
         );
         let context = test_context(&provider_context, first_file_id);
@@ -2463,7 +2462,7 @@ query: ""
             let second_query = "SELECT name, adjusted_value * 2 as final_value FROM intermediate WHERE adjusted_value > 250 ORDER BY final_value DESC";
             let second_file_id = FileID::from_content(
                 PartID::root(),
-                EntryType::FileTableDynamic,
+                EntryType::FileSeriesDynamic,
                 second_query.as_bytes(),
             );
             let context = test_context(&provider_context, second_file_id);
