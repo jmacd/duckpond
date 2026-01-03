@@ -5387,7 +5387,6 @@ dependencies = [
  "deltalake",
  "env_logger",
  "futures",
- "glob",
  "humantime",
  "linkme",
  "log",
