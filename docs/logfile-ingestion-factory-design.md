@@ -67,23 +67,83 @@ The bao-tree blake3 digest enables:
 
 ### Bao-Tree Outboard Storage
 
-A new optional field `bao_outboard: Option<Vec<u8>>` in `OplogEntry` stores blake3 Merkle tree data for verified streaming. This applies to both `FilePhysicalVersion` and `FilePhysicalSeries` entries regardless of size.
+The `bao_outboard` field in `OplogEntry` stores blake3 Merkle tree data for verified streaming. **This field is always non-null for `FilePhysicalVersion` and `FilePhysicalSeries` entries**, regardless of whether content is inline or stored externally (large files).
+
+#### Design Intent
+
+1. **blake3 field**: Simple content checksum for individual version verification
+   - For inline files: stored in `OplogEntry.blake3`
+   - For large files: stored in each segment row of chunked parquet
+
+2. **bao_outboard field**: Merkle tree state for verified streaming
+   - **Inline `FilePhysicalSeries`**: Only cumulative outboard (version-dependent offset)
+   - **Large `FilePhysicalSeries`**: Both version-independent AND cumulative outboard
+   - **`FilePhysicalVersion`**: Complete outboard for verified streaming
+
+#### Why Different for Inline vs Large?
+
+For **inline content**, the full data is already in the OplogEntry:
+- The `blake3` hash is sufficient to verify individual version content
+- Only the cumulative outboard is needed for prefix verification on append
+- No verified streaming needed (data fits in memory)
+
+For **large files**, you can't hold the entire version in memory:
+- Need version-independent (offset=0) bao outboard for verified streaming download
+- Cumulative outboard still needed for prefix verification
+
+#### Storage Format
+
+For `FilePhysicalVersion`:
+```rust
+// Simple outboard for standalone version
+pub struct VersionOutboard {
+    pub outboard: Vec<u8>,  // Post-order hash pairs
+    pub size: u64,          // Content size
+}
+```
+
+For `FilePhysicalSeries`:
+```rust
+// Combined outboard for series version
+pub struct SeriesOutboard {
+    /// Empty for inline content, populated for large files
+    pub version_outboard: Vec<u8>,
+    /// Outboard for v1..vN concatenated (always populated)
+    pub cumulative_outboard: Vec<u8>,
+    pub version_size: u64,
+    pub cumulative_size: u64,
+}
+```
+
+#### When Are Two Outboards Needed?
+
+Only for **large file** `FilePhysicalSeries` versions:
+
+1. **version_outboard** (offset=0 independent):
+   - Enables verified streaming of just this version's content
+   - Computed as if this version's content started at byte 0
+   - Used when reading/streaming individual versions
+   - **Empty for inline content** (blake3 hash is sufficient)
+
+2. **cumulative_outboard** (always populated):
+   - Enables verified streaming of concatenated content v1..vN
+   - Includes offset-dependent hashing for proper tree structure
+   - Used for prefix verification when appending new versions
+   - Enables streaming the combined view
 
 #### Schema Addition
 
 ```rust
 // In OplogEntry
 /// Bao-tree outboard data for blake3 verified streaming
-/// Binary array of (left_hash, right_hash) pairs in post-order traversal
 ///
-/// For FilePhysicalVersion: complete outboard for content verification
-/// For FilePhysicalSeries: incremental outboard covering cumulative content
-///   - Stable nodes (left subtrees) come first in post-order
-///   - Unstable nodes (rightmost path) at end
-///   - Pending fragment is tail of content (no separate storage needed)
+/// ALWAYS non-null for FilePhysicalVersion and FilePhysicalSeries entries.
+/// Content varies based on file type and storage mode:
+/// - FilePhysicalVersion: VersionOutboard for verified streaming
+/// - FilePhysicalSeries (inline): SeriesOutboard with only cumulative_outboard
+/// - FilePhysicalSeries (large): SeriesOutboard with both outboards
 ///
-/// Format: Raw concatenated hash pairs, 64 bytes each (32 + 32)
-/// Size: (blocks - 1) * 64 bytes for complete file, less for partial
+/// Format: Binary-serialized VersionOutboard or SeriesOutboard struct
 /// Block size: 16KB (BlockSize::from_chunk_log(4))
 pub bao_outboard: Option<Vec<u8>>,
 ```

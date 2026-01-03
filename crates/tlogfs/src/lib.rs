@@ -14,6 +14,9 @@
 /// Core schema and data structures
 pub mod schema;
 
+/// Bao-tree incremental hashing for append-only files
+pub mod bao_outboard;
+
 /// Delta Lake integration
 pub mod delta;
 

@@ -261,6 +261,38 @@ pub struct OplogEntry {
     /// Transaction sequence number from Steward
     /// This links OpLog records to transaction sequences for chronological ordering
     pub txn_seq: i64,
+
+    /// Bao-tree outboard data for blake3 verified streaming
+    ///
+    /// ALWAYS non-null for FilePhysicalVersion and FilePhysicalSeries entries.
+    /// Content varies based on file type and storage mode.
+    ///
+    /// ## Storage Format
+    /// Binary array of (left_hash, right_hash) pairs in post-order traversal.
+    /// Format: Raw concatenated hash pairs, 64 bytes each (32 + 32)
+    /// Size: (blocks - 1) * 64 bytes for complete file, less for partial
+    /// Block size: 16KB (BlockSize::from_chunk_log(4))
+    ///
+    /// ## For FilePhysicalVersion
+    /// Complete outboard for the version's content (VersionOutboard struct).
+    /// Enables verified streaming of the individual version.
+    ///
+    /// ## For FilePhysicalSeries (Inline Content)
+    /// Only cumulative outboard is stored (SeriesOutboard with empty version_outboard):
+    /// - blake3 hash in OplogEntry is sufficient for individual version verification
+    /// - Cumulative outboard enables prefix verification when appending
+    ///
+    /// ## For FilePhysicalSeries (Large Files)
+    /// Both outboards stored (SeriesOutboard):
+    /// 1. **Version-independent outboard** (offset=0): For verified streaming of
+    ///    this individual version's content in isolation.
+    /// 2. **Cumulative outboard**: The bao-tree state for concatenated content
+    ///    from version 1 through this version.
+    ///
+    /// The cumulative outboard enables prefix verification when appending:
+    /// new versions can verify the existing concatenated content matches
+    /// the stored state before adding new data.
+    pub bao_outboard: Option<Vec<u8>>,
 }
 
 impl ForArrow for OplogEntry {
@@ -287,6 +319,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
             Arc::new(Field::new("format", DataType::Utf8, false)), // Storage format - required field
             Arc::new(Field::new("txn_seq", DataType::Int64, false)), // Transaction sequence number from Steward (required)
+            Arc::new(Field::new("bao_outboard", DataType::Binary, true)), // Bao-tree outboard for verified streaming
         ]
     }
 }
@@ -333,6 +366,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Small files use inline storage
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -372,6 +406,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Large files use inline format (content is external)
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -409,6 +444,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Symlinks and small metadata use inline storage
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -464,6 +500,7 @@ impl OplogEntry {
             factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Small FileSeries use inline storage
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -507,6 +544,7 @@ impl OplogEntry {
             factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Large FileSeries use inline format (content is external)
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -609,6 +647,7 @@ impl OplogEntry {
             factory: Some(factory_type.to_string()), // Factory type identifier
             format: StorageFormat::Inline,           // Config is always inline
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -636,6 +675,39 @@ impl OplogEntry {
         } else {
             Ok(None)
         }
+    }
+
+    /// Get the bao-tree outboard data if present
+    #[must_use]
+    pub fn get_bao_outboard(&self) -> Option<&[u8]> {
+        self.bao_outboard.as_deref()
+    }
+
+    /// Set the bao-tree outboard data
+    pub fn set_bao_outboard(&mut self, outboard: Vec<u8>) {
+        self.bao_outboard = Some(outboard);
+    }
+
+    /// Check if this entry has bao-tree outboard data
+    #[must_use]
+    pub fn has_bao_outboard(&self) -> bool {
+        self.bao_outboard.is_some()
+    }
+
+    /// Create a new small file entry with bao-tree outboard
+    /// This is the preferred constructor for FilePhysicalSeries entries
+    #[must_use]
+    pub fn new_small_file_with_outboard(
+        id: FileID,
+        timestamp: i64,
+        version: i64,
+        content: Vec<u8>,
+        txn_seq: i64,
+        bao_outboard: Vec<u8>,
+    ) -> Self {
+        let mut entry = Self::new_small_file(id, timestamp, version, content, txn_seq);
+        entry.bao_outboard = Some(bao_outboard);
+        entry
     }
 
     /// Get verified content bytes, checking BLAKE3 hash if available.
@@ -716,6 +788,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::FullDir, // Full directory snapshot
             txn_seq,
+            bao_outboard: None,
         }
     }
 }
