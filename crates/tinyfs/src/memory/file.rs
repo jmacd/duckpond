@@ -253,6 +253,11 @@ impl crate::file::FileMetadataWriter for MemoryFileWriter {
         // In a real implementation, we'd store this in MemoryFile
     }
 
+    fn set_bao_outboard(&mut self, _outboard: Vec<u8>) {
+        // Memory files don't persist bao_outboard - this is a no-op
+        // In a real implementation, we'd store this in MemoryFile
+    }
+
     async fn infer_temporal_bounds(&mut self) -> error::Result<(i64, i64, String)> {
         // For memory files, we don't support infer_temporal_bounds
         // This would require reading the bytes and parsing parquet

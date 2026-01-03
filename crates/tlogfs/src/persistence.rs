@@ -935,11 +935,12 @@ impl State {
         content_ref: crate::file_writer::ContentRef,
         metadata: crate::file_writer::FileMetadata,
         pre_allocated_version: Option<i64>,
+        bao_outboard: Option<Vec<u8>>,
     ) -> Result<(), TLogFSError> {
         self.inner
             .lock()
             .await
-            .store_file_content_ref(id, content_ref, metadata, pre_allocated_version)
+            .store_file_content_ref(id, content_ref, metadata, pre_allocated_version, bao_outboard)
             .await
     }
 
@@ -1985,6 +1986,7 @@ impl InnerState {
         content_ref: crate::file_writer::ContentRef,
         metadata: crate::file_writer::FileMetadata,
         pre_allocated_version: Option<i64>,
+        bao_outboard: Option<Vec<u8>>,
     ) -> Result<(), TLogFSError> {
         debug!("store_file_content_ref_transactional called for node_id={id}");
 
@@ -2117,6 +2119,12 @@ impl InnerState {
 
         // Remove from pending_files since it now has actual content
         _ = self.pending_files.remove(&id);
+
+        // Set bao_outboard if provided
+        let mut entry = entry;
+        if let Some(outboard) = bao_outboard {
+            entry.set_bao_outboard(outboard);
+        }
 
         self.records.push(entry);
 

@@ -179,6 +179,9 @@ pub struct OpLogFileWriter {
     precomputed_metadata: Option<crate::file_writer::FileMetadata>,
     /// Pre-allocated version number for this write (allocated at writer creation)
     allocated_version: i64,
+    /// Bao-tree outboard data for blake3 verified streaming
+    /// Set via set_bao_outboard() before shutdown()
+    bao_outboard: Option<Vec<u8>>,
 }
 
 // OpLogFileWriter is Unpin because all its fields are Unpin
@@ -203,6 +206,7 @@ impl OpLogFileWriter {
             entry_type,
             precomputed_metadata: None,
             allocated_version,
+            bao_outboard: None,
         }
     }
 }
@@ -215,6 +219,10 @@ impl FileMetadataWriter for OpLogFileWriter {
             max_timestamp: max,
             timestamp_column,
         });
+    }
+
+    fn set_bao_outboard(&mut self, outboard: Vec<u8>) {
+        self.bao_outboard = Some(outboard);
     }
 
     async fn infer_temporal_bounds(&mut self) -> tinyfs::Result<(i64, i64, String)> {
@@ -358,6 +366,7 @@ impl AsyncWrite for OpLogFileWriter {
             let entry_type = this.entry_type;
             let precomputed_metadata = this.precomputed_metadata.clone();
             let allocated_version = this.allocated_version;
+            let bao_outboard = this.bao_outboard.take();
 
             let future = Box::pin(async move {
                 // Finalize HybridWriter to get content
@@ -430,7 +439,7 @@ impl AsyncWrite for OpLogFileWriter {
                         _ => crate::file_writer::FileMetadata::Data,
                     };
 
-                    state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version)).await
+                    state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version), bao_outboard).await
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to store file: {}", e)))
                 }.await;
 

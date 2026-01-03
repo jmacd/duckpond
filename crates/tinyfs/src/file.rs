@@ -23,6 +23,10 @@ pub trait FileMetadataWriter: AsyncWrite + Send + Unpin {
     /// Set temporal metadata for series files (used when metadata is known at write time)
     fn set_temporal_metadata(&mut self, min: i64, max: i64, timestamp_column: String);
 
+    /// Set bao-tree outboard data for blake3 verified streaming
+    /// This stores the Merkle tree data alongside the file content in OplogEntry.bao_outboard
+    fn set_bao_outboard(&mut self, outboard: Vec<u8>);
+
     /// Infer temporal bounds from the written parquet file by reading only the footer.
     /// After calling this, further writes will fail. Calls shutdown() internally.
     /// Returns (min_timestamp, max_timestamp, timestamp_column_name)

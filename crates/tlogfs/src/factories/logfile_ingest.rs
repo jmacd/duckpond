@@ -285,27 +285,54 @@ async fn read_pond_state(
     let session_ctx = state.session_context().await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     
-    // Create tinyfs to resolve pond_path to part_id
+    // Create tinyfs to navigate to pond_path and list directory entries
     let fs = tinyfs::FS::new(state.clone()).await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let root = fs.root().await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     
-    // Try to resolve the pond_path to get the directory's node_id (which becomes part_id for children)
-    let (_, lookup) = root.resolve_path(pond_path).await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
-    let dir_node_id = match lookup {
-        tinyfs::Lookup::Found(node_path) => node_path.id(),
-        tinyfs::Lookup::NotFound(_, _) => {
+    // Navigate to the pond directory
+    let pond_dir = match root.open_dir_path(pond_path).await {
+        Ok(wd) => wd,
+        Err(tinyfs::Error::NotFound(_)) => {
             // Directory doesn't exist yet - return empty state
             debug!("Pond directory '{}' doesn't exist yet", pond_path);
             return Ok(pond_files);
         }
-        tinyfs::Lookup::Empty(_) => {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Empty path"));
+        Err(e) => {
+            return Err(std::io::Error::other(e.to_string()));
         }
     };
+    
+    // Get directory node_id which becomes part_id for children
+    let dir_node_id = pond_dir.node_path().id();
+    let part_id = tinyfs::PartID::from_hex_string(&dir_node_id.to_string())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    
+    // List directory entries to get filename → node_id mapping
+    use futures::StreamExt;
+    let mut entries_stream = pond_dir.entries().await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    
+    let mut filename_to_node: HashMap<String, tinyfs::NodeID> = HashMap::new();
+    while let Some(entry_result) = entries_stream.next().await {
+        let entry = entry_result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        // Only include file entries (not directories)
+        if entry.entry_type.is_file() {
+            let _ = filename_to_node.insert(entry.name.clone(), entry.child_node_id);
+        }
+    }
+    
+    if filename_to_node.is_empty() {
+        debug!("Pond directory '{}' is empty", pond_path);
+        return Ok(pond_files);
+    }
+    
+    // Build reverse map: node_id → filename
+    let node_to_filename: HashMap<String, String> = filename_to_node
+        .iter()
+        .map(|(name, node_id)| (node_id.to_string(), name.clone()))
+        .collect();
     
     // Query delta_table for files in this directory (part_id = dir_node_id)
     // Get the latest version of each file
@@ -374,12 +401,17 @@ async fn read_pond_state(
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             let file_id = FileID::new_from_ids(part_id, node_id);
             
-            // Get filename from directory entries
-            // For now, we'll use the node_id as a placeholder key
-            // TODO: Look up actual filename from directory entries
-            let filename_key = node_id_str.to_string();
+            // Look up filename from directory entries
+            let filename = match node_to_filename.get(node_id_str) {
+                Some(name) => name.clone(),
+                None => {
+                    // Node exists in delta_table but not in directory - orphaned, skip it
+                    debug!("Skipping orphaned node_id {} (not in directory)", node_id_str);
+                    continue;
+                }
+            };
             
-            let _ = pond_files.insert(filename_key, PondFileState {
+            let _ = pond_files.insert(filename, PondFileState {
                 node_id: file_id,
                 version,
                 size,
@@ -531,20 +563,20 @@ async fn ingest_new_file(
     let _ = root.create_dir_path(&config.pond_path).await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     
-    // Write the file content
-    // For FilePhysicalSeries, we would use a series-aware writer
-    // For now, use simple file write (which creates FilePhysicalVersion)
-    root.write_file_path_from_slice(&pond_dest, &content).await
+    // Write file with bao_outboard using the low-level writer API
+    use tokio::io::AsyncWriteExt;
+    let mut writer = root.async_writer_path(&pond_dest).await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     
-    // TODO: Set bao_outboard on the OplogEntry
-    // Currently tinyfs doesn't have an API to set bao_outboard during write.
-    // This would require either:
-    // 1. Extending FileMetadataWriter trait with set_bao_outboard()
-    // 2. Post-write update to the OplogEntry
-    // For now, the outboard is computed but not persisted to OplogEntry.
-    debug!(
-        "Wrote file to pond: {} (bao_outboard not yet persisted - TODO)",
+    // Set bao_outboard before writing content
+    writer.set_bao_outboard(bao_bytes);
+    
+    // Write content and finalize
+    writer.write_all(&content).await?;
+    writer.shutdown().await?;
+    
+    info!(
+        "Wrote file to pond with bao_outboard: {}",
         pond_dest
     );
 
@@ -564,8 +596,18 @@ async fn ingest_append(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid filename"))?;
+    
+    let pond_dest = format!("{}/{}", config.pond_path, filename);
 
-    // Read only the new bytes
+    // Extract State from context to access tinyfs (once for all operations)
+    let state = crate::extract_state(context)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let fs = tinyfs::FS::new(state.clone()).await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let root = fs.root().await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+    // Read only the new bytes from host file
     let mut file = std::fs::File::open(&host_file.path)?;
     use std::io::{Read, Seek, SeekFrom};
     let _ = file.seek(SeekFrom::Start(pond_state.cumulative_size))?;
@@ -580,58 +622,90 @@ async fn ingest_append(
         pond_state.cumulative_size + new_content.len() as u64
     );
 
+    // Deserialize previous outboard if available
+    let prev_series = if let Some(prev_outboard) = &pond_state.bao_outboard {
+        Some(
+            SeriesOutboard::from_bytes(prev_outboard)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        )
+    } else {
+        None
+    };
+
     if is_strict {
         // Verify prefix hasn't changed
-        if let Some(prev_outboard) = &pond_state.bao_outboard {
-            // Read the prefix to verify
+        if let Some(ref prev) = prev_series {
+            // Read the prefix from host file to verify
             let mut prefix_file = std::fs::File::open(&host_file.path)?;
             let mut prefix_content = vec![0u8; pond_state.cumulative_size as usize];
             prefix_file.read_exact(&mut prefix_content)?;
             
-            // Deserialize previous outboard
-            let prev_series = SeriesOutboard::from_bytes(prev_outboard)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            
-            verify_prefix(&prefix_content, &prev_series.cumulative_outboard, pond_state.cumulative_size)
+            verify_prefix(&prefix_content, &prev.cumulative_outboard, pond_state.cumulative_size)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             
             info!("Prefix verification passed for {}", filename);
         }
     }
 
-    // Compute new SeriesOutboard for the appended content
-    // For proper incremental computation, we'd use append_to_outboard
-    // For now, compute from full content (simpler but less efficient)
-    let full_content = std::fs::read(&host_file.path)?;
-    let new_series_outboard = SeriesOutboard::first_version_inline(&full_content);
+    // Compute new SeriesOutboard incrementally using append_to_outboard
+    let new_series_outboard = if let Some(ref prev) = prev_series {
+        // Read pending bytes from the pond (last cumulative_size % BLOCK_SIZE bytes)
+        use crate::bao_outboard::BLOCK_SIZE;
+        let pending_size = (pond_state.cumulative_size % BLOCK_SIZE as u64) as usize;
+        
+        let mut pending_bytes = vec![0u8; pending_size];
+        
+        if pending_size > 0 {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            let mut reader = root.async_reader_path(&pond_dest).await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let seek_pos = pond_state.cumulative_size - pending_size as u64;
+            let _ = reader.seek(SeekFrom::Start(seek_pos)).await?;
+            let _ = reader.read_exact(&mut pending_bytes).await?;
+        }
+        
+        // Compute incrementally using only new bytes
+        let (_, new_cumulative_outboard, _) = crate::bao_outboard::append_to_outboard(
+            &prev.cumulative_outboard,
+            pond_state.cumulative_size,
+            &pending_bytes,
+            &new_content,
+        ).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        
+        SeriesOutboard {
+            version_outboard: Vec::new(), // Inline content doesn't need this
+            cumulative_outboard: new_cumulative_outboard,
+            version_size: new_content.len() as u64,
+            cumulative_size: pond_state.cumulative_size + new_content.len() as u64,
+        }
+    } else {
+        // No previous outboard - compute from full content as fallback
+        let full_content = std::fs::read(&host_file.path)?;
+        SeriesOutboard::first_version_inline(&full_content)
+    };
+    
     let bao_bytes = new_series_outboard.to_bytes();
-
-    let pond_dest = format!("{}/{}", config.pond_path, filename);
     
     debug!(
         "Computed new bao_outboard for append: {} bytes",
         bao_bytes.len()
     );
 
-    // Extract State from context to access tinyfs
-    let state = crate::extract_state(context)
+    // Write new version with updated bao_outboard
+    use tokio::io::AsyncWriteExt;
+    let mut writer = root.async_writer_path(&pond_dest).await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     
-    // Create filesystem from state
-    let fs = tinyfs::FS::new(state.clone()).await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let root = fs.root().await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    // Set bao_outboard before writing content
+    writer.set_bao_outboard(bao_bytes);
     
-    // For append-only files, we need to append the new content
-    // Current tinyfs write_file_path_from_slice overwrites, so we'll write full content
-    // TODO: Implement proper append API in tinyfs for series files
-    root.write_file_path_from_slice(&pond_dest, &full_content).await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    // Write only the new content (as a new version in the FilePhysicalSeries)
+    // The ChainedReader will concatenate all versions when reading
+    writer.write_all(&new_content).await?;
+    writer.shutdown().await?;
     
-    // TODO: Set bao_outboard on the new version's OplogEntry
-    debug!(
-        "Wrote append to pond: {} version {} (bao_outboard not yet persisted - TODO)",
+    info!(
+        "Wrote append to pond with bao_outboard: {} version {}",
         pond_dest,
         pond_state.version + 1
     );
