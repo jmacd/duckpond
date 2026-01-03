@@ -716,49 +716,6 @@ impl OplogEntry {
             txn_seq,
         }
     }
-
-    // /// Get comprehensive EntryType that includes physical/dynamic distinction
-    // /// This is the authoritative method for determining the complete entry type
-    // /// including whether the node is factory-based or not.
-    // #[must_use]
-    // pub fn comprehensive_entry_type(&self) -> EntryType {
-    //     let is_dynamic = self.is_dynamic();
-
-    //     match self.file_type {
-    //         EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => {
-    //             // Directory: check factory field to determine physical vs dynamic
-    //             if is_dynamic {
-    //                 EntryType::DirectoryDynamic
-    //             } else {
-    //                 EntryType::DirectoryPhysical
-    //             }
-    //         }
-    //         EntryType::Symlink => EntryType::Symlink,
-
-    //         // Files: check factory field and preserve base format
-    //         EntryType::FileDataPhysical | EntryType::FileDataDynamic => {
-    //             if is_dynamic {
-    //                 EntryType::FileDataDynamic
-    //             } else {
-    //                 EntryType::FileDataPhysical
-    //             }
-    //         }
-    //         EntryType::FileTablePhysical | EntryType::FileTableDynamic => {
-    //             if is_dynamic {
-    //                 EntryType::FileTableDynamic
-    //             } else {
-    //                 EntryType::FileTablePhysical
-    //             }
-    //         }
-    //         EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
-    //             if is_dynamic {
-    //                 EntryType::FileSeriesDynamic
-    //             } else {
-    //                 EntryType::FileSeriesPhysical
-    //             }
-    //         }
-    //     }
-    // }
 }
 
 /// Type alias - use tinyfs::DirectoryEntry as the canonical type

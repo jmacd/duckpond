@@ -33,9 +33,6 @@ pub enum EntryType {
     #[serde(rename = "file:table:physical")]
     FileTablePhysical = 6,
 
-    // NOTE: FileTableDynamic (value 7) was removed - dynamic files use FileSeriesDynamic
-    // since factories generate rows identically for both table and series patterns.
-
     /// Physical series file - multi-version table series, supports time-travel queries
     #[serde(rename = "file:series:physical")]
     FileSeriesPhysical = 8,
@@ -159,7 +156,7 @@ impl TryFrom<u8> for EntryType {
             4 => Ok(EntryType::FileDataPhysical),
             5 => Ok(EntryType::FileDataDynamic),
             6 => Ok(EntryType::FileTablePhysical),
-            // 7 was FileTableDynamic - now reserved/unused
+
             8 => Ok(EntryType::FileSeriesPhysical),
             9 => Ok(EntryType::FileSeriesDynamic),
             _ => Err(format!("Unknown EntryType: {}", v)),

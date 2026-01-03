@@ -618,17 +618,11 @@ impl File for SqlDerivedFile {
 #[async_trait]
 impl Metadata for SqlDerivedFile {
     async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
-        // Metadata should be lightweight - don't compute the actual data
-        // All dynamic files use FileSeriesDynamic regardless of mode
-        // (FileTableDynamic was removed - dynamic files behave identically)
-        let entry_type = EntryType::FileSeriesDynamic;
-
-        // Return lightweight metadata - size and hash will be computed on actual data access
         Ok(NodeMetadata {
             version: 1,
-            size: None,   // Unknown until data is actually computed
-            blake3: None, // Unknown until data is actually computed
-            entry_type,
+            size: None,   // Unknown
+            blake3: None, // Unknown
+            entry_type: EntryType::FileSeriesDynamic,
             timestamp: 0,
         })
     }
