@@ -12,7 +12,7 @@ mod entry_type;
 mod error;
 mod file;
 mod fs;
-mod glob;
+pub mod glob;
 pub mod memory;
 mod metadata;
 mod node;

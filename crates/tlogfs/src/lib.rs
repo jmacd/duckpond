@@ -17,6 +17,9 @@ pub mod schema;
 /// Bao-tree incremental hashing for append-only files
 pub mod bao_outboard;
 
+/// Factory implementations
+pub mod factories;
+
 /// Large file storage utilities
 pub mod large_files;
 

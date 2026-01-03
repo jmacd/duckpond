@@ -8,5 +8,6 @@
 
 pub mod banner;
 pub mod chunked_files;
+pub mod glob;
 pub mod perf_trace;
 pub mod test_helpers;

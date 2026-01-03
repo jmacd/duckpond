@@ -114,6 +114,13 @@ impl Error {
     }
 }
 
+// Convert glob errors from utilities
+impl From<utilities::glob::GlobError> for Error {
+    fn from(e: utilities::glob::GlobError) -> Self {
+        Error::Internal(format!("Glob error: {}", e))
+    }
+}
+
 // impl std::fmt::Display for Error {
 //     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 //         match self {
