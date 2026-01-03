@@ -206,8 +206,22 @@ impl FileID {
 
         // Extract bits for the random part
         let bits = u128::from_be_bytes([
-            hash_bytes[0], hash_bytes[1], hash_bytes[2], hash_bytes[3], hash_bytes[4], hash_bytes[5], hash_bytes[6], hash_bytes[7], hash_bytes[8],
-            hash_bytes[9], hash_bytes[10], hash_bytes[11], hash_bytes[12], hash_bytes[13], hash_bytes[14], hash_bytes[15],
+            hash_bytes[0],
+            hash_bytes[1],
+            hash_bytes[2],
+            hash_bytes[3],
+            hash_bytes[4],
+            hash_bytes[5],
+            hash_bytes[6],
+            hash_bytes[7],
+            hash_bytes[8],
+            hash_bytes[9],
+            hash_bytes[10],
+            hash_bytes[11],
+            hash_bytes[12],
+            hash_bytes[13],
+            hash_bytes[14],
+            hash_bytes[15],
         ]);
         let rand_a = ((bits >> 66) & 0xFFF) as u16; // 12 bits
         let rand_b = ((bits >> 4) & 0x3FFF_FFFF_FFFF_FFFF) as u64; // 62 bits

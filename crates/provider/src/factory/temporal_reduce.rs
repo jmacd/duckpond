@@ -934,11 +934,8 @@ impl Directory for TemporalReduceSiteDirectory {
             id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
             // Use this temporal reduce site directory's NodeID as the PartID for children
             let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-            let file_id = tinyfs::FileID::from_content(
-                parent_part_id,
-                EntryType::TableDynamic,
-                &id_bytes,
-            );
+            let file_id =
+                tinyfs::FileID::from_content(parent_part_id, EntryType::TableDynamic, &id_bytes);
 
             let dir_entry = tinyfs::DirectoryEntry::new(
                 filename.clone(),

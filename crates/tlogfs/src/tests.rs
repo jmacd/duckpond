@@ -1906,3 +1906,378 @@ async fn test_dynamic_node_entry_type_validation() {
     log::debug!("- Verified EntryType from persisted NodeIDs (would have panicked with bug)");
     log::debug!("- Successfully used dynamic nodes (read file, list directory)");
 }
+
+/// Test FilePhysicalSeries: write multiple versions and read concatenated content
+/// FilePhysicalSeries entries have "all-version" semantics where each write appends data.
+/// When reading, all versions are concatenated in oldest-to-newest order.
+#[tokio::test]
+async fn test_file_physical_series_version_concatenation() {
+    log::debug!("=== Starting FilePhysicalSeries Version Concatenation Test ===");
+
+    let store_path = test_dir();
+
+    // Create TLogFS persistence layer
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence");
+
+    let file_path = "data/events.csv";
+
+    // Write first version (CSV header + first data row)
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let wd = tx.root().await.expect("Failed to get root");
+
+        // Create data directory
+        if !wd.exists(std::path::Path::new("data")).await {
+            _ = wd
+                .create_dir_path("data")
+                .await
+                .expect("Failed to create data dir");
+        }
+
+        // Write first version with header and first data row
+        let csv_v1 = b"name,value\nalice,100\n";
+
+        // Use async_writer_path_with_type to specify FilePhysicalSeries entry type
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("Failed to create writer for version 1");
+        writer
+            .write_all(csv_v1)
+            .await
+            .expect("Failed to write version 1");
+        writer
+            .shutdown()
+            .await
+            .expect("Failed to shutdown version 1 writer");
+
+        tx.commit_test().await.expect("Failed to commit version 1");
+        log::debug!("✅ Committed version 1 with {} bytes", csv_v1.len());
+    }
+
+    // Write second version (more data rows)
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let wd = tx.root().await.expect("Failed to get root");
+
+        let csv_v2 = b"bob,200\n";
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("Failed to create writer for version 2");
+        writer
+            .write_all(csv_v2)
+            .await
+            .expect("Failed to write version 2");
+        writer
+            .shutdown()
+            .await
+            .expect("Failed to shutdown version 2 writer");
+
+        tx.commit_test().await.expect("Failed to commit version 2");
+        log::debug!("✅ Committed version 2 with {} bytes", csv_v2.len());
+    }
+
+    // Write third version (even more data rows)
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let wd = tx.root().await.expect("Failed to get root");
+
+        let csv_v3 = b"carol,300\n";
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("Failed to create writer for version 3");
+        writer
+            .write_all(csv_v3)
+            .await
+            .expect("Failed to write version 3");
+        writer
+            .shutdown()
+            .await
+            .expect("Failed to shutdown version 3 writer");
+
+        tx.commit_test().await.expect("Failed to commit version 3");
+        log::debug!("✅ Committed version 3 with {} bytes", csv_v3.len());
+    }
+
+    // Read back and verify concatenated content
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin read transaction");
+        let wd = tx.root().await.expect("Failed to get root");
+
+        // Read as raw bytes - should be concatenation of all versions
+        let content = wd
+            .read_file_path_to_vec(file_path)
+            .await
+            .expect("Failed to read file");
+
+        let content_str = String::from_utf8(content.clone()).expect("Invalid UTF-8");
+        log::debug!("Read {} bytes: {:?}", content.len(), content_str);
+
+        // Verify the content is concatenated in oldest-to-newest order
+        let expected = "name,value\nalice,100\nbob,200\ncarol,300\n";
+        assert_eq!(
+            content_str, expected,
+            "FilePhysicalSeries should concatenate all versions in oldest-to-newest order"
+        );
+
+        log::debug!("✅ Content matches expected concatenation");
+    }
+
+    log::debug!("\n✅ TEST PASSED!");
+    log::debug!("- Wrote 3 versions to FilePhysicalSeries file");
+    log::debug!("- Each version appended data");
+    log::debug!("- Read back yielded concatenated content in correct order");
+}
+
+/// Test FilePhysicalSeries with CSV format provider and DataFusion SQL queries
+/// This verifies the full integration: write multiple CSV versions, read via csv:// URL, query with SQL
+#[tokio::test]
+async fn test_file_physical_series_csv_provider_sql() {
+    use datafusion::prelude::SessionContext;
+    use futures::StreamExt;
+    use provider::{FileProvider, FormatRegistry, Url};
+    use std::sync::Arc;
+
+    log::debug!("=== Starting FilePhysicalSeries CSV Provider SQL Test ===");
+
+    let store_path = test_dir();
+
+    // Create TLogFS persistence layer
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence");
+
+    let file_path = "data/events.csv";
+
+    // Write first version (CSV header + first data rows)
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let wd = tx.root().await.expect("Failed to get root");
+
+        // Create data directory
+        if !wd.exists(std::path::Path::new("data")).await {
+            _ = wd
+                .create_dir_path("data")
+                .await
+                .expect("Failed to create data dir");
+        }
+
+        // Write first version with header and initial data
+        let csv_v1 = b"name,value\nalice,100\nbob,200\n";
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("Failed to create writer for version 1");
+        writer
+            .write_all(csv_v1)
+            .await
+            .expect("Failed to write version 1");
+        writer
+            .shutdown()
+            .await
+            .expect("Failed to shutdown version 1 writer");
+
+        tx.commit_test().await.expect("Failed to commit version 1");
+        log::debug!("✅ Committed version 1 with {} bytes", csv_v1.len());
+    }
+
+    // Write second version (more data rows - no header since it's appending)
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let wd = tx.root().await.expect("Failed to get root");
+
+        let csv_v2 = b"carol,300\ndave,400\n";
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("Failed to create writer for version 2");
+        writer
+            .write_all(csv_v2)
+            .await
+            .expect("Failed to write version 2");
+        writer
+            .shutdown()
+            .await
+            .expect("Failed to shutdown version 2 writer");
+
+        tx.commit_test().await.expect("Failed to commit version 2");
+        log::debug!("✅ Committed version 2 with {} bytes", csv_v2.len());
+    }
+
+    // Write third version (even more data)
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin transaction");
+        let wd = tx.root().await.expect("Failed to get root");
+
+        let csv_v3 = b"eve,500\nfrank,600\n";
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("Failed to create writer for version 3");
+        writer
+            .write_all(csv_v3)
+            .await
+            .expect("Failed to write version 3");
+        writer
+            .shutdown()
+            .await
+            .expect("Failed to shutdown version 3 writer");
+
+        tx.commit_test().await.expect("Failed to commit version 3");
+        log::debug!("✅ Committed version 3 with {} bytes", csv_v3.len());
+    }
+
+    // Now read via CSV provider and query with DataFusion
+    {
+        let tx = persistence
+            .begin_test()
+            .await
+            .expect("Failed to begin read transaction");
+
+        // Get the FS via Deref (TransactionGuard derefs to FS)
+        let fs: &tinyfs::FS = &*tx;
+
+        // Open the file using csv:// URL
+        let url = Url::parse(&format!("csv:///{}", file_path)).expect("Failed to parse URL");
+        log::debug!("Opening file via URL: {}", url);
+
+        let reader = fs.open_url(&url).await.expect("Failed to open URL");
+
+        // Use CsvProvider from FormatRegistry
+        let csv_provider =
+            FormatRegistry::get_provider("csv").expect("CSV provider not registered");
+        let (schema, stream) = csv_provider
+            .open_stream(reader, &url)
+            .await
+            .expect("Failed to open CSV stream");
+
+        log::debug!("Schema: {:?}", schema);
+        assert_eq!(schema.fields().len(), 2, "Should have 2 columns");
+        assert_eq!(schema.field(0).name(), "name");
+        assert_eq!(schema.field(1).name(), "value");
+
+        // Collect all batches
+        let batches: Vec<arrow::record_batch::RecordBatch> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<provider::Result<Vec<_>>>()
+            .expect("Failed to collect batches");
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        log::debug!(
+            "Read {} total rows across {} batches",
+            total_rows,
+            batches.len()
+        );
+        assert_eq!(total_rows, 6, "Should have 6 total rows from all versions");
+
+        // Register in DataFusion and run SQL queries
+        let ctx = SessionContext::new();
+        let mem_table = datafusion::datasource::MemTable::try_new(schema.clone(), vec![batches])
+            .expect("Failed to create MemTable");
+        let _ = ctx
+            .register_table("events", Arc::new(mem_table))
+            .expect("Failed to register table");
+
+        // Query: COUNT(*)
+        let df = ctx
+            .sql("SELECT COUNT(*) as count FROM events")
+            .await
+            .expect("Failed to execute COUNT query");
+        let results = df.collect().await.expect("Failed to collect results");
+        let count = results[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 6, "COUNT(*) should be 6");
+        log::debug!("✅ COUNT(*) = {}", count);
+
+        // Query: SUM(value)
+        let df = ctx
+            .sql("SELECT SUM(CAST(value AS INT)) as total FROM events")
+            .await
+            .expect("Failed to execute SUM query");
+        let results = df.collect().await.expect("Failed to collect results");
+        let total = results[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        // 100 + 200 + 300 + 400 + 500 + 600 = 2100
+        assert_eq!(total, 2100, "SUM(value) should be 2100");
+        log::debug!("✅ SUM(value) = {}", total);
+
+        // Query: SELECT * with ordering
+        let df = ctx
+            .sql("SELECT name, CAST(value AS INT) as value FROM events ORDER BY value")
+            .await
+            .expect("Failed to execute SELECT query");
+        let results = df.collect().await.expect("Failed to collect results");
+
+        // Verify order: alice(100), bob(200), carol(300), dave(400), eve(500), frank(600)
+        let names: Vec<_> = results
+            .iter()
+            .flat_map(|batch| {
+                let name_col = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .unwrap();
+                (0..batch.num_rows()).map(move |i| name_col.value(i).to_string())
+            })
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["alice", "bob", "carol", "dave", "eve", "frank"],
+            "Names should be in value order"
+        );
+        log::debug!("✅ SELECT ORDER BY verified: {:?}", names);
+    }
+
+    log::debug!("\n✅ TEST PASSED!");
+    log::debug!("- Wrote 3 versions to FilePhysicalSeries CSV file");
+    log::debug!("- Opened via csv:// URL with CsvProvider");
+    log::debug!("- Streamed 6 total rows (concatenated from all versions)");
+    log::debug!("- Queried with DataFusion SQL: COUNT, SUM, ORDER BY");
+}

@@ -235,7 +235,7 @@ impl HybridWriter {
 
         let content = if self.total_written >= LARGE_FILE_THRESHOLD {
             debug!("Large file: converting to parquet format");
-            
+
             // Large file: convert temp file to parquet format using ChunkedWriter
             let temp_path = self
                 .temp_path
@@ -243,47 +243,58 @@ impl HybridWriter {
 
             // Open temp file for reading
             let temp_file_reader = File::open(&temp_path).await?;
-            
+
             // Create ChunkedWriter to process the file
             // Use pond_txn_id=0 and path=blake3 as identifiers (tlogfs doesn't track pond_txn_id at this level)
-            let chunked_writer = utilities::chunked_files::ChunkedWriter::new(0, blake3.clone(), temp_file_reader);
-            
+            let chunked_writer =
+                utilities::chunked_files::ChunkedWriter::new(0, blake3.clone(), temp_file_reader);
+
             // Write to record batches
-            let (_bundle_id, batches) = chunked_writer.write_to_batches().await
+            let (_bundle_id, batches) = chunked_writer
+                .write_to_batches()
+                .await
                 .map_err(|e| std::io::Error::other(format!("ChunkedWriter error: {}", e)))?;
-            
+
             let large_files_dir = self.pond_path.join("_large_files");
             tokio::fs::create_dir_all(&large_files_dir).await?;
 
             let final_path = large_file_path(&self.pond_path, &blake3).await?;
-            
+
             // Write batches to parquet file
             let parquet_file = File::create(&final_path).await?;
             let schema = utilities::chunked_files::arrow_schema();
-            
+
             // Write parquet file using ArrowWriter
             let props = parquet::file::properties::WriterProperties::builder()
-                .set_compression(parquet::basic::Compression::ZSTD(parquet::basic::ZstdLevel::default()))
+                .set_compression(parquet::basic::Compression::ZSTD(
+                    parquet::basic::ZstdLevel::default(),
+                ))
                 .build();
-            
+
             let mut writer = parquet::arrow::AsyncArrowWriter::try_new(
                 parquet_file,
                 schema.clone(),
                 Some(props),
-            ).map_err(|e| std::io::Error::other(format!("Failed to create parquet writer: {}", e)))?;
-            
+            )
+            .map_err(|e| {
+                std::io::Error::other(format!("Failed to create parquet writer: {}", e))
+            })?;
+
             for batch in batches {
-                writer.write(&batch).await
+                writer
+                    .write(&batch)
+                    .await
                     .map_err(|e| std::io::Error::other(format!("Failed to write batch: {}", e)))?;
             }
-            
-            let _metadata = writer.close().await
-                .map_err(|e| std::io::Error::other(format!("Failed to close parquet writer: {}", e)))?;
-            
+
+            let _metadata = writer.close().await.map_err(|e| {
+                std::io::Error::other(format!("Failed to close parquet writer: {}", e))
+            })?;
+
             // Sync the file after write
             let file = File::open(&final_path).await?;
             file.sync_all().await?;
-            
+
             // Clean up temp file
             tokio::fs::remove_file(&temp_path).await?;
 
@@ -398,7 +409,7 @@ impl AsyncWrite for HybridWriter {
 }
 
 /// Streaming reader for parquet-encoded large files
-/// 
+///
 /// Reads chunks on-demand without loading entire file into memory.
 /// Verification is optional and happens at 16KB block granularity using bao-tree.
 pub struct ParquetFileReader {
@@ -432,36 +443,38 @@ impl ParquetFileReader {
     /// Create a new streaming reader for a parquet file
     pub async fn new(file_path: PathBuf) -> std::io::Result<Self> {
         use futures::StreamExt;
-        
+
         // Open parquet file and read metadata to get total size
         let file = File::open(&file_path).await?;
-        
+
         let builder = parquet::arrow::ParquetRecordBatchStreamBuilder::new(file)
             .await
             .map_err(|e| std::io::Error::other(format!("Failed to open parquet: {}", e)))?;
-        
-        let mut stream = builder.build()
+
+        let mut stream = builder
+            .build()
             .map_err(|e| std::io::Error::other(format!("Failed to build parquet reader: {}", e)))?;
-        
+
         let total_size = if let Some(first_batch) = stream.next().await {
             let batch = first_batch
                 .map_err(|e| std::io::Error::other(format!("Failed to read first batch: {}", e)))?;
-            
+
             if batch.num_rows() == 0 {
                 return Err(std::io::Error::other("Empty parquet file"));
             }
-            
+
             // Get total_size from column 7
-            let total_sizes = batch.column(7)
+            let total_sizes = batch
+                .column(7)
                 .as_any()
                 .downcast_ref::<arrow_array::Int64Array>()
                 .ok_or_else(|| std::io::Error::other("Invalid total_size column type"))?;
-            
+
             total_sizes.value(0) as u64
         } else {
             return Err(std::io::Error::other("Empty parquet file"));
         };
-        
+
         Ok(Self {
             file_path,
             total_size,
@@ -471,77 +484,84 @@ impl ParquetFileReader {
             pending_load: None,
         })
     }
-    
+
     /// Get total size of the file
+    #[must_use]
     pub fn total_size(&self) -> u64 {
         self.total_size
     }
 }
 
 /// Load and verify a chunk from parquet file using bao-tree (standalone async fn for use in futures)
-/// 
+///
 /// Verification uses the stored BLAKE3 Merkle tree to ensure data integrity.
 /// If the chunk data has been corrupted, this will return an error.
-async fn load_chunk_from_parquet(file_path: PathBuf, chunk_id: i64) -> std::io::Result<LoadedChunk> {
-    use bao_tree::io::outboard::PostOrderMemOutboard;
+async fn load_chunk_from_parquet(
+    file_path: PathBuf,
+    chunk_id: i64,
+) -> std::io::Result<LoadedChunk> {
     use bao_tree::BlockSize;
+    use bao_tree::io::outboard::PostOrderMemOutboard;
     use futures::StreamExt;
     use utilities::chunked_files::BLAKE3_BLOCK_SIZE;
-    
+
     let file = File::open(&file_path).await?;
     let mut reader = parquet::arrow::ParquetRecordBatchStreamBuilder::new(file)
         .await
         .map_err(|e| std::io::Error::other(format!("Failed to open parquet: {}", e)))?
         .build()
         .map_err(|e| std::io::Error::other(format!("Failed to build parquet reader: {}", e)))?;
-    
+
     while let Some(batch_result) = reader.next().await {
         let batch = batch_result
             .map_err(|e| std::io::Error::other(format!("Failed to read batch: {}", e)))?;
-        
-        let chunk_ids = batch.column(3)
+
+        let chunk_ids = batch
+            .column(3)
             .as_any()
             .downcast_ref::<arrow_array::Int64Array>()
             .ok_or_else(|| std::io::Error::other("Invalid chunk_id column type"))?;
-        
+
         for row in 0..batch.num_rows() {
             if chunk_ids.value(row) == chunk_id {
                 // Load chunk data, hash, and outboard for verification
-                let chunk_hashes = batch.column(4)
+                let chunk_hashes = batch
+                    .column(4)
                     .as_any()
                     .downcast_ref::<arrow_array::StringArray>()
                     .ok_or_else(|| std::io::Error::other("Invalid chunk_hash column type"))?;
-                
-                let chunk_outboards = batch.column(5)
+
+                let chunk_outboards = batch
+                    .column(5)
                     .as_any()
                     .downcast_ref::<arrow_array::BinaryArray>()
                     .ok_or_else(|| std::io::Error::other("Invalid chunk_outboard column type"))?;
-                
-                let chunk_datas = batch.column(6)
+
+                let chunk_datas = batch
+                    .column(6)
                     .as_any()
                     .downcast_ref::<arrow_array::BinaryArray>()
                     .ok_or_else(|| std::io::Error::other("Invalid chunk_data column type"))?;
-                
+
                 let expected_hash_hex = chunk_hashes.value(row);
                 let stored_outboard = chunk_outboards.value(row);
                 let chunk_data = chunk_datas.value(row);
-                
+
                 // Verify the chunk using bao-tree
-                let block_size = BlockSize::from_chunk_log(
-                    (BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8
-                );
-                
+                let block_size =
+                    BlockSize::from_chunk_log((BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8);
+
                 // Recompute the Merkle tree and verify it matches expected hash
                 let computed_outboard = PostOrderMemOutboard::create(chunk_data, block_size);
                 let computed_hash_hex = computed_outboard.root.to_hex().to_string();
-                
+
                 if computed_hash_hex != expected_hash_hex {
                     return Err(std::io::Error::other(format!(
                         "Chunk {} verification failed: expected hash {}, computed {}",
                         chunk_id, expected_hash_hex, computed_hash_hex
                     )));
                 }
-                
+
                 // Also verify the stored outboard matches what we computed
                 // This ensures the Merkle tree structure itself wasn't corrupted
                 if computed_outboard.data.as_slice() != stored_outboard {
@@ -550,14 +570,14 @@ async fn load_chunk_from_parquet(file_path: PathBuf, chunk_id: i64) -> std::io::
                         chunk_id
                     )));
                 }
-                
+
                 debug!(
                     "Verified chunk {} ({} bytes, hash={})",
                     chunk_id,
                     chunk_data.len(),
                     &computed_hash_hex[..16.min(computed_hash_hex.len())]
                 );
-                
+
                 return Ok(LoadedChunk {
                     chunk_id,
                     data: chunk_data.to_vec(),
@@ -565,8 +585,11 @@ async fn load_chunk_from_parquet(file_path: PathBuf, chunk_id: i64) -> std::io::
             }
         }
     }
-    
-    Err(std::io::Error::other(format!("Chunk {} not found in parquet file", chunk_id)))
+
+    Err(std::io::Error::other(format!(
+        "Chunk {} not found in parquet file",
+        chunk_id
+    )))
 }
 
 impl tokio::io::AsyncRead for ParquetFileReader {
@@ -576,16 +599,16 @@ impl tokio::io::AsyncRead for ParquetFileReader {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = &mut *self;
-        
+
         // Check if we're at EOF
         if this.position >= this.total_size {
             return Poll::Ready(Ok(()));
         }
-        
+
         // Calculate which chunk we need
         let chunk_size = utilities::chunked_files::CHUNK_SIZE_DEFAULT;
         let chunk_id = (this.position / chunk_size as u64) as i64;
-        
+
         // Check if we have a pending load for this chunk
         if let Some(ref mut pending) = this.pending_load {
             if pending.chunk_id == chunk_id {
@@ -607,19 +630,19 @@ impl tokio::io::AsyncRead for ParquetFileReader {
                 this.pending_load = None;
             }
         }
-        
+
         // Check if we need to load a different chunk
         let need_new_chunk = match &this.current_chunk {
             None => true,
             Some(chunk) => chunk.chunk_id != chunk_id,
         };
-        
+
         if need_new_chunk && this.pending_load.is_none() {
             // Start loading the chunk
             let file_path = this.file_path.clone();
             let future = Box::pin(load_chunk_from_parquet(file_path, chunk_id));
             this.pending_load = Some(PendingChunkLoad { chunk_id, future });
-            
+
             // Poll it immediately
             if let Some(ref mut pending) = this.pending_load {
                 match pending.future.as_mut().poll(cx) {
@@ -636,20 +659,20 @@ impl tokio::io::AsyncRead for ParquetFileReader {
                 }
             }
         }
-        
+
         // Read from current chunk
         if let Some(chunk) = &this.current_chunk {
             let available = chunk.data.len() - this.chunk_position;
             let to_read = std::cmp::min(available, buf.remaining());
             let to_read = std::cmp::min(to_read, (this.total_size - this.position) as usize);
-            
+
             if to_read > 0 {
                 buf.put_slice(&chunk.data[this.chunk_position..this.chunk_position + to_read]);
                 this.chunk_position += to_read;
                 this.position += to_read as u64;
             }
         }
-        
+
         Poll::Ready(Ok(()))
     }
 }
@@ -661,14 +684,14 @@ impl tokio::io::AsyncSeek for ParquetFileReader {
             std::io::SeekFrom::End(offset) => self.total_size as i64 + offset,
             std::io::SeekFrom::Current(offset) => self.position as i64 + offset,
         };
-        
+
         if new_pos < 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "Invalid seek to negative position",
             ));
         }
-        
+
         let new_pos = new_pos as u64;
         if new_pos > self.total_size {
             return Err(std::io::Error::new(
@@ -676,13 +699,13 @@ impl tokio::io::AsyncSeek for ParquetFileReader {
                 "Seek beyond end of file",
             ));
         }
-        
+
         self.position = new_pos;
-        
+
         // Invalidate current chunk if we seeked to a different chunk
         let chunk_size = utilities::chunked_files::CHUNK_SIZE_DEFAULT;
         let new_chunk_id = (new_pos / chunk_size as u64) as i64;
-        
+
         if let Some(chunk) = &self.current_chunk {
             if chunk.chunk_id != new_chunk_id {
                 self.current_chunk = None;
@@ -692,10 +715,10 @@ impl tokio::io::AsyncSeek for ParquetFileReader {
                 self.chunk_position = (new_pos % chunk_size as u64) as usize;
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
         Poll::Ready(Ok(self.position))
     }

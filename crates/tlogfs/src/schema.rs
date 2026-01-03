@@ -641,7 +641,7 @@ impl OplogEntry {
     /// Get verified content bytes, checking BLAKE3 hash if available.
     /// For content that has a blake3 hash stored, this verifies integrity before returning.
     /// For content without a hash (e.g., directory snapshots), returns content directly.
-    /// 
+    ///
     /// # Errors
     /// Returns `ContentIntegrityError` if the hash doesn't match.
     /// Returns `ContentMissingHash` if content exists but blake3 is None for types that require it.
@@ -649,15 +649,18 @@ impl OplogEntry {
         let Some(content) = self.content.as_deref() else {
             return Ok(None);
         };
-        
+
         // For types that don't store blake3 (directories, symlinks), return content directly
         // Directories have content (serialized entries) but no blake3
         // Symlinks have content (target path) but no blake3
         // Only files have blake3 hashes
-        if matches!(self.file_type, EntryType::DirectoryPhysical | EntryType::DirectoryDynamic | EntryType::Symlink) {
+        if matches!(
+            self.file_type,
+            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic | EntryType::Symlink
+        ) {
             return Ok(Some(content));
         }
-        
+
         // For files and symlinks with content, verify blake3 if present
         if let Some(expected_hash) = &self.blake3 {
             let actual_hash = blake3::hash(content).to_hex().to_string();
@@ -671,7 +674,7 @@ impl OplogEntry {
         // Note: Small files in the old format might not have blake3 hashes
         // In that case, we return the content without verification
         // New writes always compute blake3 via new_small_file()
-        
+
         Ok(Some(content))
     }
 
@@ -683,8 +686,7 @@ impl OplogEntry {
     /// Returns `ContentIntegrityError` if the hash doesn't match.
     /// Returns `Missing` if content is None.
     pub fn verified_content_required(&self) -> Result<&[u8], crate::TLogFSError> {
-        self.verified_content()?
-            .ok_or(crate::TLogFSError::Missing)
+        self.verified_content()?.ok_or(crate::TLogFSError::Missing)
     }
 
     /// Create entry for directory full snapshot (new storage format)

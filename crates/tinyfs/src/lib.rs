@@ -5,6 +5,7 @@
 pub mod arrow;
 pub mod async_helpers;
 pub mod caching_persistence;
+pub mod chained_reader;
 pub mod context;
 mod dir;
 mod entry_type;

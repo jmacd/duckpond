@@ -33,7 +33,11 @@ pub enum EntryType {
     #[serde(rename = "table:physical:version")]
     TablePhysicalVersion = 6,
 
-    /// Physical series file - multi-version table series, supports time-travel queries
+    /// Physical data series - multi-version byte data, versions concatenated on read (oldest first)
+    #[serde(rename = "file:physical:series")]
+    FilePhysicalSeries = 7,
+
+    /// Physical series file - m    FilePhysicalSeries → ChainedReader (version concatenation) → csv:// URL → CsvProvider → RecordBatch stream → MemTable → DataFusion SQLulti-version table series, supports time-travel queries
     #[serde(rename = "table:physical:series")]
     TablePhysicalSeries = 8,
 
@@ -49,6 +53,7 @@ impl EntryType {
         matches!(
             self,
             EntryType::FilePhysicalVersion
+                | EntryType::FilePhysicalSeries
                 | EntryType::FileDynamic
                 | EntryType::TablePhysicalVersion
                 | EntryType::TablePhysicalSeries
@@ -70,9 +75,7 @@ impl EntryType {
     pub fn is_dynamic(&self) -> bool {
         matches!(
             self,
-            EntryType::DirectoryDynamic
-                | EntryType::FileDynamic
-                | EntryType::TableDynamic
+            EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic
         )
     }
 
@@ -82,12 +85,12 @@ impl EntryType {
         !self.is_dynamic() && *self != EntryType::Symlink
     }
 
-    /// Check if this entry is a data file (physical or dynamic)
+    /// Check if this entry is a data file (raw bytes, physical or dynamic)
     #[must_use]
     pub fn is_data_file(&self) -> bool {
         matches!(
             self,
-            EntryType::FilePhysicalVersion | EntryType::FileDynamic
+            EntryType::FilePhysicalVersion | EntryType::FilePhysicalSeries | EntryType::FileDynamic
         )
     }
 
@@ -123,7 +126,9 @@ impl EntryType {
         match self {
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "directory",
             EntryType::Symlink => "symlink",
-            EntryType::FilePhysicalVersion | EntryType::FileDynamic => "file:data",
+            EntryType::FilePhysicalVersion
+            | EntryType::FilePhysicalSeries
+            | EntryType::FileDynamic => "file:data",
             EntryType::TablePhysicalVersion => "file:table",
             EntryType::TablePhysicalSeries | EntryType::TableDynamic => "file:series",
         }
@@ -137,6 +142,7 @@ impl EntryType {
             EntryType::DirectoryDynamic => "dir:dynamic",
             EntryType::Symlink => "symlink",
             EntryType::FilePhysicalVersion => "file:physical:version",
+            EntryType::FilePhysicalSeries => "file:physical:series",
             EntryType::FileDynamic => "file:dynamic",
             EntryType::TablePhysicalVersion => "table:physical:version",
             EntryType::TablePhysicalSeries => "table:physical:series",
@@ -156,7 +162,7 @@ impl TryFrom<u8> for EntryType {
             4 => Ok(EntryType::FilePhysicalVersion),
             5 => Ok(EntryType::FileDynamic),
             6 => Ok(EntryType::TablePhysicalVersion),
-
+            7 => Ok(EntryType::FilePhysicalSeries),
             8 => Ok(EntryType::TablePhysicalSeries),
             9 => Ok(EntryType::TableDynamic),
             _ => Err(format!("Unknown EntryType: {}", v)),
@@ -175,6 +181,7 @@ impl FromStr for EntryType {
             "dir:dynamic" => Ok(EntryType::DirectoryDynamic),
             "symlink" => Ok(EntryType::Symlink),
             "file:physical:version" => Ok(EntryType::FilePhysicalVersion),
+            "file:physical:series" => Ok(EntryType::FilePhysicalSeries),
             "file:dynamic" => Ok(EntryType::FileDynamic),
             "table:physical:version" => Ok(EntryType::TablePhysicalVersion),
             // "file:table:dynamic" no longer exists - use table:dynamic instead
@@ -201,9 +208,19 @@ mod tests {
         assert_eq!(EntryType::DirectoryPhysical.as_str(), "dir:physical");
         assert_eq!(EntryType::DirectoryDynamic.as_str(), "dir:dynamic");
         assert_eq!(EntryType::Symlink.as_str(), "symlink");
-        assert_eq!(EntryType::FilePhysicalVersion.as_str(), "file:physical:version");
+        assert_eq!(
+            EntryType::FilePhysicalVersion.as_str(),
+            "file:physical:version"
+        );
+        assert_eq!(
+            EntryType::FilePhysicalSeries.as_str(),
+            "file:physical:series"
+        );
         assert_eq!(EntryType::FileDynamic.as_str(), "file:dynamic");
-        assert_eq!(EntryType::TablePhysicalVersion.as_str(), "table:physical:version");
+        assert_eq!(
+            EntryType::TablePhysicalVersion.as_str(),
+            "table:physical:version"
+        );
         assert_eq!(
             EntryType::TablePhysicalSeries.as_str(),
             "table:physical:series"
@@ -225,6 +242,10 @@ mod tests {
         assert_eq!(
             EntryType::from_str("file:physical:version").unwrap(),
             EntryType::FilePhysicalVersion
+        );
+        assert_eq!(
+            EntryType::from_str("file:physical:series").unwrap(),
+            EntryType::FilePhysicalSeries
         );
         assert_eq!(
             EntryType::from_str("file:dynamic").unwrap(),
@@ -259,6 +280,7 @@ mod tests {
     fn test_file_type_queries() {
         // Test is_file()
         assert!(EntryType::FilePhysicalVersion.is_file());
+        assert!(EntryType::FilePhysicalSeries.is_file());
         assert!(EntryType::FileDynamic.is_file());
         assert!(EntryType::TablePhysicalVersion.is_file());
         assert!(EntryType::TablePhysicalSeries.is_file());
@@ -284,6 +306,7 @@ mod tests {
         // Test is_physical()
         assert!(EntryType::DirectoryPhysical.is_physical());
         assert!(EntryType::FilePhysicalVersion.is_physical());
+        assert!(EntryType::FilePhysicalSeries.is_physical());
         assert!(EntryType::TablePhysicalVersion.is_physical());
         assert!(EntryType::TablePhysicalSeries.is_physical());
         assert!(!EntryType::DirectoryDynamic.is_physical());
@@ -292,6 +315,7 @@ mod tests {
 
         // Test is_data_file()
         assert!(EntryType::FilePhysicalVersion.is_data_file());
+        assert!(EntryType::FilePhysicalSeries.is_data_file());
         assert!(EntryType::FileDynamic.is_data_file());
         assert!(!EntryType::TablePhysicalVersion.is_data_file());
         assert!(!EntryType::TableDynamic.is_data_file());
@@ -312,6 +336,7 @@ mod tests {
         assert!(EntryType::TablePhysicalSeries.is_parquet_file());
         assert!(EntryType::TableDynamic.is_parquet_file());
         assert!(!EntryType::FilePhysicalVersion.is_parquet_file());
+        assert!(!EntryType::FilePhysicalSeries.is_parquet_file());
         assert!(!EntryType::FileDynamic.is_parquet_file());
     }
 
@@ -322,9 +347,10 @@ mod tests {
             "file:physical:version"
         );
         assert_eq!(
-            format!("{}", EntryType::FileDynamic),
-            "file:dynamic"
+            format!("{}", EntryType::FilePhysicalSeries),
+            "file:physical:series"
         );
+        assert_eq!(format!("{}", EntryType::FileDynamic), "file:dynamic");
         assert_eq!(
             format!("{}", EntryType::TablePhysicalVersion),
             "table:physical:version"
@@ -333,10 +359,7 @@ mod tests {
             format!("{}", EntryType::TablePhysicalSeries),
             "table:physical:series"
         );
-        assert_eq!(
-            format!("{}", EntryType::TableDynamic),
-            "table:dynamic"
-        );
+        assert_eq!(format!("{}", EntryType::TableDynamic), "table:dynamic");
         assert_eq!(format!("{}", EntryType::DirectoryPhysical), "dir:physical");
         assert_eq!(format!("{}", EntryType::DirectoryDynamic), "dir:dynamic");
         assert_eq!(format!("{}", EntryType::Symlink), "symlink");
@@ -364,10 +387,12 @@ mod tests {
         assert_eq!(symlink_json, "\"symlink\"");
 
         // Test deserialization
-        let data_file_parsed: EntryType = serde_json::from_str("\"file:physical:version\"").unwrap();
+        let data_file_parsed: EntryType =
+            serde_json::from_str("\"file:physical:version\"").unwrap();
         assert_eq!(data_file_parsed, EntryType::FilePhysicalVersion);
 
-        let table_file_parsed: EntryType = serde_json::from_str("\"table:physical:version\"").unwrap();
+        let table_file_parsed: EntryType =
+            serde_json::from_str("\"table:physical:version\"").unwrap();
         assert_eq!(table_file_parsed, EntryType::TablePhysicalVersion);
 
         let series_file_parsed: EntryType =
@@ -386,6 +411,7 @@ mod tests {
         assert_eq!(EntryType::DirectoryPhysical.base_format(), "directory");
         assert_eq!(EntryType::DirectoryDynamic.base_format(), "directory");
         assert_eq!(EntryType::FilePhysicalVersion.base_format(), "file:data");
+        assert_eq!(EntryType::FilePhysicalSeries.base_format(), "file:data");
         assert_eq!(EntryType::FileDynamic.base_format(), "file:data");
         assert_eq!(EntryType::TablePhysicalVersion.base_format(), "file:table");
         assert_eq!(EntryType::TablePhysicalSeries.base_format(), "file:series");

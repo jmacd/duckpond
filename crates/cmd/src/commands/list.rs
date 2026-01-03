@@ -195,7 +195,11 @@ mod tests {
 
         // Create multiple test files in pond
         setup
-            .create_pond_file("file1.txt", "content1", tinyfs::EntryType::FilePhysicalVersion)
+            .create_pond_file(
+                "file1.txt",
+                "content1",
+                tinyfs::EntryType::FilePhysicalVersion,
+            )
             .await
             .expect("Failed to create pond file1");
         setup
@@ -308,7 +312,11 @@ mod tests {
             .expect("Failed to create nested pond file2");
 
         setup
-            .create_pond_file("file3.txt", "content3", tinyfs::EntryType::FilePhysicalVersion)
+            .create_pond_file(
+                "file3.txt",
+                "content3",
+                tinyfs::EntryType::FilePhysicalVersion,
+            )
             .await
             .expect("Failed to create root pond file");
 
@@ -377,7 +385,11 @@ mod tests {
 
         // Create a file that won't match the pattern
         setup
-            .create_pond_file("file.txt", "content", tinyfs::EntryType::FilePhysicalVersion)
+            .create_pond_file(
+                "file.txt",
+                "content",
+                tinyfs::EntryType::FilePhysicalVersion,
+            )
             .await
             .expect("Failed to create pond file");
 

@@ -434,10 +434,7 @@ async fn test_create_dynamic_file_path() {
     let (_, lookup) = root.resolve_path("/config/test.yaml").await.unwrap();
     match lookup {
         crate::Lookup::Found(node_path) => {
-            assert_eq!(
-                node_path.id().entry_type(),
-                crate::EntryType::FileDynamic
-            );
+            assert_eq!(node_path.id().entry_type(), crate::EntryType::FileDynamic);
             assert_eq!(node_path.path(), std::path::Path::new("/config/test.yaml"));
         }
         _ => panic!("Expected to find the dynamic file"),
@@ -480,6 +477,83 @@ async fn test_create_dynamic_directory_path() {
         }
         _ => panic!("Expected to find the dynamic directory"),
     }
+}
+
+/// Test FilePhysicalSeries version concatenation at the MemoryFile level
+/// This verifies that when entry_type is FilePhysicalSeries, async_reader()
+/// returns a ChainedReader that concatenates all versions oldest-to-newest.
+#[tokio::test]
+async fn test_memory_file_physical_series_version_concatenation() {
+    use crate::EntryType;
+    use crate::file::File;
+    use crate::memory::{MemoryFile, MemoryPersistence};
+    use crate::node::{FileID, PartID};
+    use tokio::io::AsyncReadExt;
+
+    // Create persistence layer
+    let persistence = MemoryPersistence::default();
+    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalSeries);
+
+    // Store multiple versions - these represent appended data
+    persistence
+        .store_file_version(id, 1, b"First line\n".to_vec())
+        .await
+        .unwrap();
+    persistence
+        .store_file_version(id, 2, b"Second line\n".to_vec())
+        .await
+        .unwrap();
+    persistence
+        .store_file_version(id, 3, b"Third line\n".to_vec())
+        .await
+        .unwrap();
+
+    // Create MemoryFile with FilePhysicalSeries entry type
+    let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalSeries);
+
+    // Read via async_reader - should concatenate all versions
+    let mut reader = memory_file.async_reader().await.unwrap();
+    let mut content = String::new();
+    let _ = reader.read_to_string(&mut content).await.unwrap();
+
+    // Verify versions are concatenated oldest-to-newest
+    assert_eq!(content, "First line\nSecond line\nThird line\n");
+}
+
+/// Test that FilePhysicalVersion entry type reads only current content (not versions)
+#[tokio::test]
+async fn test_memory_file_physical_version_single_content() {
+    use crate::EntryType;
+    use crate::file::File;
+    use crate::memory::{MemoryFile, MemoryPersistence};
+    use crate::node::{FileID, PartID};
+    use tokio::io::AsyncReadExt;
+
+    // Create persistence layer
+    let persistence = MemoryPersistence::default();
+    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalVersion);
+
+    // Store versions in persistence (but FilePhysicalVersion won't use them for reading)
+    persistence
+        .store_file_version(id, 1, b"Version 1".to_vec())
+        .await
+        .unwrap();
+    persistence
+        .store_file_version(id, 2, b"Version 2".to_vec())
+        .await
+        .unwrap();
+
+    // Create MemoryFile with FilePhysicalVersion entry type
+    // Content starts empty for new files
+    let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalVersion);
+
+    // Read via async_reader - should return empty (the in-memory content, not versions)
+    let mut reader = memory_file.async_reader().await.unwrap();
+    let mut content = Vec::new();
+    let _ = reader.read_to_end(&mut content).await.unwrap();
+
+    // FilePhysicalVersion reads from content field, which starts empty
+    assert!(content.is_empty());
 }
 
 #[async_trait::async_trait]

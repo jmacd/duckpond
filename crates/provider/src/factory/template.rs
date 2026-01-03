@@ -140,11 +140,8 @@ impl Directory for TemplateDirectory {
                 id_bytes.extend_from_slice(self.config.template_file.to_string().as_bytes());
                 // Use this template directory's NodeID as the PartID for children
                 let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-                let file_id = tinyfs::FileID::from_content(
-                    parent_part_id,
-                    EntryType::FileDynamic,
-                    &id_bytes,
-                );
+                let file_id =
+                    tinyfs::FileID::from_content(parent_part_id, EntryType::FileDynamic, &id_bytes);
 
                 let node_ref = Node::new(
                     file_id,

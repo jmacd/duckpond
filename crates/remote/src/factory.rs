@@ -340,12 +340,7 @@ async fn execute_push(
 
             let reader = std::io::Cursor::new(bytes.to_vec());
             remote_table
-                .write_file_with_bundle_id(
-                    &transaction_bundle_id,
-                    version,
-                    path,
-                    reader,
-                )
+                .write_file_with_bundle_id(&transaction_bundle_id, version, path, reader)
                 .await?;
         }
 
@@ -431,11 +426,7 @@ async fn execute_push(
             let reader = std::io::Cursor::new(file_data);
             // Use the relative path with _large_files/ prefix so restore knows where to put it
             remote_table
-                .write_file(
-                    current_version,
-                    relative_path,
-                    reader,
-                )
+                .write_file(current_version, relative_path, reader)
                 .await?;
         }
 

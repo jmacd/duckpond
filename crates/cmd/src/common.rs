@@ -174,7 +174,9 @@ impl FileInfo {
         let type_symbol = match self.metadata.entry_type {
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "📁",
             EntryType::Symlink => "🔗",
-            EntryType::FilePhysicalVersion | EntryType::FileDynamic => "📄",
+            EntryType::FilePhysicalVersion
+            | EntryType::FilePhysicalSeries
+            | EntryType::FileDynamic => "📄",
             EntryType::TablePhysicalVersion => "📊",
             EntryType::TablePhysicalSeries | EntryType::TableDynamic => "📈",
         };
@@ -369,4 +371,3 @@ mod tests {
         assert_eq!(result, cwd.join("../sibling/pond"));
     }
 }
-

@@ -394,12 +394,8 @@ impl RemoteTable {
         // Use pond-specific metadata partition
         let bundle_id = ChunkedFileRecord::metadata_bundle_id(&metadata.pond_id);
 
-        let writer = ChunkedWriter::new(
-            pond_txn_id,
-            "METADATA".to_string(),
-            metadata_reader,
-        )
-        .with_bundle_id(bundle_id);
+        let writer = ChunkedWriter::new(pond_txn_id, "METADATA".to_string(), metadata_reader)
+            .with_bundle_id(bundle_id);
 
         writer.write_to_table(&mut self.table).await?;
 

@@ -1699,6 +1699,13 @@ impl InnerState {
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         let records = self.query_records(id).await?;
 
+        // Check if this is a FilePhysicalSeries - concatenate all versions oldest-to-newest
+        if let Some(first_record) = records.first()
+            && first_record.file_type == EntryType::FilePhysicalSeries
+        {
+            return self.async_file_reader_series(&records).await;
+        }
+
         // Find the latest record with actual content (skip empty temporal override versions)
         let record = records
             .iter()
@@ -1732,20 +1739,18 @@ impl InnerState {
 
                 // Read parquet file using streaming verified reader
                 debug!("Reading large file from parquet: {:?}", large_file_path);
-                
+
                 // Use ParquetFileReader for streaming verified access
                 let reader = crate::large_files::ParquetFileReader::new(large_file_path.clone())
                     .await
-                    .map_err(|e| {
-                        TLogFSError::LargeFileNotFound {
-                            blake3: sha256.clone(),
-                            path: large_file_path.display().to_string(),
-                            source: e,
-                        }
+                    .map_err(|e| TLogFSError::LargeFileNotFound {
+                        blake3: sha256.clone(),
+                        path: large_file_path.display().to_string(),
+                        source: e,
                     })?;
-                
+
                 debug!("Created streaming verified reader for large file");
-                
+
                 Ok(Box::pin(reader))
             } else {
                 // Small file: use verified content accessor which checks BLAKE3 hash
@@ -1759,6 +1764,81 @@ impl InnerState {
                 path: PathBuf::from(format!("File {id} not found")),
             })
         }
+    }
+
+    /// Create an async reader for a FilePhysicalSeries that concatenates all versions
+    ///
+    /// FilePhysicalSeries entries have "all-version" semantics where each version
+    /// appends data. When reading, all versions are concatenated in oldest-to-newest order.
+    async fn async_file_reader_series(
+        &self,
+        records: &[OplogEntry],
+    ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
+        use tinyfs::chained_reader::ChainedReader;
+
+        // Filter for non-empty versions and reverse to get oldest-first order
+        // (query_records returns newest-first)
+        let mut valid_records: Vec<&OplogEntry> =
+            records.iter().filter(|r| r.size.unwrap_or(0) > 0).collect();
+        valid_records.reverse(); // Now oldest-first
+
+        if valid_records.is_empty() {
+            // Return empty reader for empty series
+            return Ok(Box::pin(ChainedReader::from_bytes(vec![])));
+        }
+
+        // Collect readers and sizes for each version
+        let mut readers: Vec<Pin<Box<dyn tokio::io::AsyncRead + Send>>> =
+            Vec::with_capacity(valid_records.len());
+        let mut sizes: Vec<u64> = Vec::with_capacity(valid_records.len());
+
+        for record in valid_records {
+            if record.is_large_file() {
+                // Large file: create async file reader
+                let sha256 = record.blake3.as_ref().ok_or_else(|| {
+                    TLogFSError::ArrowMessage("Large file entry missing BLAKE3".to_string())
+                })?;
+
+                // Find the file in either flat or hierarchical structure
+                let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256)
+                    .await
+                    .map_err(|e| {
+                        TLogFSError::ArrowMessage(format!("Error searching for large file: {}", e))
+                    })?
+                    .ok_or_else(|| TLogFSError::LargeFileNotFound {
+                        blake3: sha256.clone(),
+                        path: format!("_large_files/blake3={}", sha256),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "Large file not found in any location",
+                        ),
+                    })?;
+
+                let reader = crate::large_files::ParquetFileReader::new(large_file_path.clone())
+                    .await
+                    .map_err(|e| TLogFSError::LargeFileNotFound {
+                        blake3: sha256.clone(),
+                        path: large_file_path.display().to_string(),
+                        source: e,
+                    })?;
+
+                sizes.push(record.size.unwrap_or(0) as u64);
+                readers.push(Box::pin(reader));
+            } else {
+                // Small file: use verified content accessor
+                let content = record.verified_content_required()?.to_vec();
+                sizes.push(content.len() as u64);
+                readers.push(Box::pin(std::io::Cursor::new(content)));
+            }
+        }
+
+        debug!(
+            "Created ChainedReader for FilePhysicalSeries with {} versions, total {} bytes",
+            readers.len(),
+            sizes.iter().sum::<u64>()
+        );
+
+        Ok(Box::pin(ChainedReader::new(readers, sizes)))
     }
 
     /// Commit pending records to Delta Lake
@@ -3262,9 +3342,7 @@ mod node_factory {
     ) -> Result<Node, tinyfs::Error> {
         // Handle static nodes (traditional TLogFS nodes)
         match oplog_entry.file_type {
-            EntryType::DirectoryDynamic
-            | EntryType::FileDynamic
-            | EntryType::TableDynamic => {
+            EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic => {
                 assert!(id.entry_type().is_dynamic());
                 assert!(oplog_entry.factory.is_some());
 
@@ -3273,6 +3351,7 @@ mod node_factory {
                     .await;
             }
             EntryType::FilePhysicalVersion
+            | EntryType::FilePhysicalSeries
             | EntryType::TablePhysicalVersion
             | EntryType::TablePhysicalSeries => {
                 let oplog_file = crate::file::OpLogFile::new(id, state);

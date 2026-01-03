@@ -50,7 +50,11 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     pub async fn write_to_table(self, table: &mut DeltaTable) -> Result<String> {
         let (bundle_id, batches) = self.inner.write_to_batches().await?;
 
-        debug!("Writing {} batches to Delta Lake for {}", batches.len(), bundle_id);
+        debug!(
+            "Writing {} batches to Delta Lake for {}",
+            batches.len(),
+            bundle_id
+        );
 
         let updated_table = WriteBuilder::new(
             table.log_store(),

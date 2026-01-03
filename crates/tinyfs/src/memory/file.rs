@@ -3,9 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::EntryType;
+use crate::FileID;
+use crate::chained_reader::ChainedReader;
 use crate::error;
 use crate::file::{AsyncReadSeek, File, Handle};
+use crate::memory::MemoryPersistence;
 use crate::metadata::{Metadata, NodeMetadata};
+use crate::persistence::PersistenceLayer;
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
@@ -17,9 +21,20 @@ use tokio::sync::{Mutex, RwLock};
 /// Represents a file backed by memory with integrated write protection
 /// This implementation stores file content in a Vec<u8> and manages
 /// its own write state to prevent concurrent writes.
+///
+/// MemoryFile has a reference to MemoryPersistence to support:
+/// - FilePhysicalSeries: reads all versions and concatenates them
+/// - Future features requiring version access
 pub struct MemoryFile {
+    /// File identifier
+    id: FileID,
+    /// Reference to persistence layer for version lookups
+    persistence: MemoryPersistence,
+    /// Current content (latest version written via async_writer)
     content: Arc<Mutex<Vec<u8>>>,
+    /// Write state for preventing concurrent writes
     write_state: Arc<RwLock<WriteState>>,
+    /// Entry type (determines read behavior)
     entry_type: EntryType,
 }
 
@@ -69,9 +84,32 @@ impl File for MemoryFile {
         }
         drop(state);
 
-        let content = self.content.lock().await;
-        // std::io::Cursor implements both AsyncRead and AsyncSeek
-        Ok(Box::pin(std::io::Cursor::new(content.clone())))
+        // For FilePhysicalSeries, concatenate all versions in oldest-to-newest order
+        if self.entry_type == EntryType::FilePhysicalSeries {
+            let versions = self.persistence.list_file_versions(self.id).await?;
+
+            if versions.is_empty() {
+                // No versions yet, return empty reader
+                return Ok(Box::pin(std::io::Cursor::new(Vec::new())));
+            }
+
+            // Read all versions and collect their contents
+            let mut chunks = Vec::with_capacity(versions.len());
+            for version_info in versions {
+                let content = self
+                    .persistence
+                    .read_file_version(self.id, version_info.version)
+                    .await?;
+                chunks.push(content);
+            }
+
+            // Use ChainedReader to concatenate all versions
+            Ok(Box::pin(ChainedReader::from_bytes(chunks)))
+        } else {
+            // Standard behavior: return current content
+            let content = self.content.lock().await;
+            Ok(Box::pin(std::io::Cursor::new(content.clone())))
+        }
     }
 
     async fn async_writer(&self) -> error::Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
@@ -104,7 +142,7 @@ impl File for MemoryFile {
 impl crate::file::QueryableFile for MemoryFile {
     async fn as_table_provider(
         &self,
-        id: crate::FileID,
+        id: FileID,
         context: &crate::ProviderContext,
     ) -> error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
         use datafusion::datasource::file_format::parquet::ParquetFormat;
@@ -167,23 +205,22 @@ impl crate::file::QueryableFile for MemoryFile {
 }
 
 impl MemoryFile {
-    /// Create a new MemoryFile handle with the given content
-    pub fn new_handle<T: AsRef<[u8]>>(content: T) -> Handle {
-        let memory_file = MemoryFile {
-            content: Arc::new(Mutex::new(content.as_ref().to_vec())),
-            write_state: Arc::new(RwLock::new(WriteState::Ready)),
-            entry_type: EntryType::FilePhysicalVersion, // Default for memory files
-        };
-        Handle::new(Arc::new(Mutex::new(Box::new(memory_file))))
-    }
-
-    /// Create a new MemoryFile handle with the given content and entry type
-    pub fn new_handle_with_entry_type<T: AsRef<[u8]>>(content: T, entry_type: EntryType) -> Handle {
-        let memory_file = MemoryFile {
-            content: Arc::new(Mutex::new(content.as_ref().to_vec())),
+    /// Create a new MemoryFile with the given id, persistence, and entry type
+    #[must_use]
+    pub fn new(id: FileID, persistence: MemoryPersistence, entry_type: EntryType) -> Self {
+        MemoryFile {
+            id,
+            persistence,
+            content: Arc::new(Mutex::new(Vec::new())),
             write_state: Arc::new(RwLock::new(WriteState::Ready)),
             entry_type,
-        };
+        }
+    }
+
+    /// Create a new MemoryFile handle with the given id, persistence, and entry type
+    #[must_use]
+    pub fn new_handle(id: FileID, persistence: MemoryPersistence, entry_type: EntryType) -> Handle {
+        let memory_file = Self::new(id, persistence, entry_type);
         Handle::new(Arc::new(Mutex::new(Box::new(memory_file))))
     }
 }

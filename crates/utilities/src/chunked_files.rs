@@ -15,8 +15,8 @@
 
 use arrow_array::{BinaryArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use bao_tree::io::outboard::PostOrderMemOutboard;
 use bao_tree::BlockSize;
+use bao_tree::io::outboard::PostOrderMemOutboard;
 use log::debug;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -107,8 +107,7 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
         );
 
         // BLAKE3 block size: 16KB (chunk_log=4)
-        let block_size =
-            BlockSize::from_chunk_log((BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8);
+        let block_size = BlockSize::from_chunk_log((BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8);
 
         let mut total_size = 0u64;
         let mut chunk_id = 0i64;
@@ -144,7 +143,12 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
         } else if all_chunk_data.len() == 1 {
             all_chunk_data[0].1
         } else {
-            combine_chunk_hashes(&all_chunk_data.iter().map(|(_, h, _, _)| *h).collect::<Vec<_>>())
+            combine_chunk_hashes(
+                &all_chunk_data
+                    .iter()
+                    .map(|(_, h, _, _)| *h)
+                    .collect::<Vec<_>>(),
+            )
         };
 
         let root_hash_hex = root_hash.to_hex().to_string();
@@ -165,7 +169,7 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
 
         // Special case: empty file needs at least one row with empty chunk_data
         if all_chunk_data.is_empty() {
-            let outboard = PostOrderMemOutboard::create(&[], block_size);
+            let outboard = PostOrderMemOutboard::create([], block_size);
             all_chunk_data.push((0, outboard.root, outboard.data, vec![]));
         }
 
@@ -226,8 +230,7 @@ impl ChunkedReader {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tokio::io::AsyncWriteExt;
 
-        let block_size =
-            BlockSize::from_chunk_log((BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8);
+        let block_size = BlockSize::from_chunk_log((BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8);
 
         let mut chunk_hashes: Vec<blake3::Hash> = Vec::new();
         let mut total_bytes_read = 0u64;
@@ -466,7 +469,7 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
 
 /// Combine multiple chunk hashes into a single root hash using BLAKE3 tree structure
 fn combine_chunk_hashes(hashes: &[blake3::Hash]) -> blake3::Hash {
-    use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
+    use blake3::hazmat::{ChainingValue, Mode, merge_subtrees_non_root, merge_subtrees_root};
 
     if hashes.is_empty() {
         return blake3::hash(&[]);

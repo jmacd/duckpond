@@ -234,10 +234,7 @@ mod tests {
 
     #[test]
     fn test_file_type_roundtrip() {
-        for ft in [
-            FileType::LargeFile,
-            FileType::Metadata,
-        ] {
+        for ft in [FileType::LargeFile, FileType::Metadata] {
             let s = ft.as_str();
             let parsed = FileType::from_str(s).unwrap();
             assert_eq!(ft, parsed);

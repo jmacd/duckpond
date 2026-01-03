@@ -275,6 +275,9 @@ async fn describe_command_impl(
             tinyfs::EntryType::FilePhysicalVersion | tinyfs::EntryType::FileDynamic => {
                 output.push_str("   Format: Raw data\n");
             }
+            tinyfs::EntryType::FilePhysicalSeries => {
+                output.push_str("   Format: Raw data series (versions concatenated on read)\n");
+            }
             tinyfs::EntryType::DirectoryPhysical | tinyfs::EntryType::DirectoryDynamic => {
                 output.push_str("   Format: Directory\n");
             }

@@ -91,7 +91,10 @@ impl PersistenceLayer for MemoryPersistence {
 
     // Factory methods for creating nodes directly with persistence
     async fn create_file_node(&self, id: FileID) -> Result<Node> {
-        self.state.lock().await.create_file_node(id).await
+        // Create MemoryFile with a reference to this persistence layer
+        // This enables FilePhysicalSeries version concatenation
+        let file_handle = crate::memory::MemoryFile::new_handle(id, self.clone(), id.entry_type());
+        Ok(Node::new(id, NodeType::File(file_handle)))
     }
 
     async fn create_directory_node(&self, id: FileID) -> Result<Node> {
@@ -112,11 +115,16 @@ impl PersistenceLayer for MemoryPersistence {
         factory_type: &str,
         config_content: Vec<u8>,
     ) -> Result<Node> {
+        // Store the config content as a file version
         self.state
             .lock()
             .await
-            .create_dynamic_node(id, factory_type, config_content)
-            .await
+            .store_dynamic_node_config(id, factory_type, config_content)
+            .await?;
+
+        // Create a MemoryFile with persistence reference (for version lookups)
+        let file_handle = crate::memory::MemoryFile::new_handle(id, self.clone(), id.entry_type());
+        Ok(Node::new(id, NodeType::File(file_handle)))
     }
 
     async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>> {
@@ -224,13 +232,6 @@ impl State {
     async fn store_node(&mut self, node: &Node) -> Result<()> {
         _ = self.nodes.insert(node.id, node.clone());
         Ok(())
-    }
-
-    async fn create_file_node(&self, id: FileID) -> Result<Node> {
-        // @@@ shouldn't pass content
-        let file_handle =
-            crate::memory::MemoryFile::new_handle_with_entry_type([], id.entry_type());
-        Ok(Node::new(id, NodeType::File(file_handle)))
     }
 
     async fn create_directory_node(&self, id: FileID) -> Result<Node> {
@@ -352,12 +353,13 @@ impl State {
         }
     }
 
-    async fn create_dynamic_node(
+    /// Store config for a dynamic node (called by MemoryPersistence::create_dynamic_node)
+    async fn store_dynamic_node_config(
         &mut self,
         id: FileID,
         factory_type: &str,
         config_content: Vec<u8>,
-    ) -> Result<Node> {
+    ) -> Result<()> {
         // Dynamic nodes are stored like files with config as content
         // Factory type goes in extended_metadata["factory"]
         let mut extended_metadata = HashMap::new();
@@ -377,12 +379,7 @@ impl State {
         };
 
         self.file_versions.entry(id).or_default().push(version);
-
-        // Create a dummy node - actual factory instantiation happens on read
-        Ok(Node::new(
-            id,
-            NodeType::File(super::MemoryFile::new_handle(vec![])),
-        ))
+        Ok(())
     }
 
     async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>> {

@@ -41,10 +41,7 @@ impl<'a> ChunkedReader<'a> {
     }
 
     /// Read the complete file, verifying checksums
-    pub async fn read_to_writer<W: tokio::io::AsyncWrite + Unpin>(
-        self,
-        writer: W,
-    ) -> Result<()> {
+    pub async fn read_to_writer<W: tokio::io::AsyncWrite + Unpin>(self, writer: W) -> Result<()> {
         debug!("Reading file {} from remote", self.bundle_id);
 
         // Query Delta Lake for chunks
@@ -76,9 +73,10 @@ impl<'a> ChunkedReader<'a> {
         let reader = utilities::chunked_files::ChunkedReader::new(batches)
             .with_expected_bundle_id(self.bundle_id.clone());
 
-        reader.read_to_writer(writer).await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to read file: {}", e))
-        })?;
+        reader
+            .read_to_writer(writer)
+            .await
+            .map_err(|e| RemoteError::TableOperation(format!("Failed to read file: {}", e)))?;
 
         Ok(())
     }
