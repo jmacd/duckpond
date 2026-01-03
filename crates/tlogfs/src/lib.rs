@@ -17,9 +17,6 @@ pub mod schema;
 /// Bao-tree incremental hashing for append-only files
 pub mod bao_outboard;
 
-/// Delta Lake integration
-pub mod delta;
-
 /// Large file storage utilities
 pub mod large_files;
 
