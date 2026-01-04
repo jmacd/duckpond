@@ -622,9 +622,6 @@ async fn test_memory_file_series_async_writer_with_versions() {
         crate::Lookup::Found(node_path) => {
             let file_node = node_path.into_file().await.unwrap();
             let metadata = file_node.handle.metadata().await.unwrap();
-            eprintln!("metadata.version = {}", metadata.version);
-            eprintln!("metadata.bao_outboard.is_some() = {}", metadata.bao_outboard.is_some());
-            eprintln!("metadata.entry_type = {:?}", metadata.entry_type);
             assert!(
                 metadata.bao_outboard.is_some(),
                 "Latest version should have bao_outboard"

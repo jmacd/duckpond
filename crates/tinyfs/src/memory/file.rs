@@ -47,30 +47,9 @@ enum WriteState {
 #[async_trait]
 impl Metadata for MemoryFile {
     async fn metadata(&self) -> error::Result<NodeMetadata> {
-        let content = self.content.lock().await;
-        let size = content.len() as u64;
-
-        // For memory files, we'll compute a simple hash for now
-        // In a real implementation, we'd use BLAKE3
-        let blake3 = format!("{:016x}", simple_hash(&content));
-
-        Ok(NodeMetadata {
-            version: 1, // Memory files don't track versions
-            size: Some(size),
-            blake3: Some(blake3),
-            bao_outboard: None, // Memory files don't track bao-tree data
-            entry_type: self.entry_type, // Use the stored entry type
-            timestamp: 0,                // TODO
-        })
+        // Query persistence for latest metadata (includes versions and bao_outboard)
+        self.persistence.metadata(self.id).await
     }
-}
-
-/// Simple hash function for memory files (not cryptographically secure)
-fn simple_hash(data: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut hasher);
-    hasher.finish()
 }
 
 #[async_trait]
