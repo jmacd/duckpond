@@ -450,6 +450,7 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
             version: 1,
             size: None,   // Unknown until SQL is generated and data computed
             blake3: None, // Unknown until SQL is generated and data computed
+            bao_outboard: None,
             entry_type: EntryType::TableDynamic, // Temporal reduce always creates series files
             timestamp: 0, // Use epoch time for dynamic content
         })
@@ -852,6 +853,7 @@ impl tinyfs::Metadata for TemporalReduceDirectory {
             version: 1,
             size: None,
             blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
@@ -994,6 +996,7 @@ impl tinyfs::Metadata for TemporalReduceSiteDirectory {
             version: 1,
             size: None,
             blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
@@ -1105,11 +1108,7 @@ mod tests {
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
 
-        // Store in persistence (version 1 for MemoryPersistence)
-        persistence
-            .store_file_version(file_id, 1, parquet_data)
-            .await?;
-
+        // async_writer already stores the version in persistence, no need to duplicate
         Ok(file_id)
     }
 

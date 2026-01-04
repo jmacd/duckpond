@@ -611,6 +611,7 @@ impl OplogEntry {
             version: self.version as u64,
             size: self.size.map(|s| s as u64), // Cast i64 back to u64 for tinyfs interface
             blake3: self.blake3.clone(),
+            bao_outboard: self.bao_outboard.clone(),
             entry_type: self.file_type,
             timestamp: self.timestamp,
         }

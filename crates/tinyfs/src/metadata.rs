@@ -18,6 +18,9 @@ pub struct NodeMetadata {
     /// BLAKE3 checksum (Some for all files, None for directories/symlinks)
     pub blake3: Option<String>,
 
+    /// BAO-tree outboard data (Some for files with bao_outboard, None otherwise)
+    pub bao_outboard: Option<Vec<u8>>,
+
     /// Entry type (file, directory, symlink with file format variants)
     pub entry_type: EntryType,
 

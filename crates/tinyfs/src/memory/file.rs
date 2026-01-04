@@ -58,6 +58,7 @@ impl Metadata for MemoryFile {
             version: 1, // Memory files don't track versions
             size: Some(size),
             blake3: Some(blake3),
+            bao_outboard: None, // Memory files don't track bao-tree data
             entry_type: self.entry_type, // Use the stored entry type
             timestamp: 0,                // TODO
         })
@@ -123,7 +124,14 @@ impl File for MemoryFile {
         *state = WriteState::Writing;
         drop(state);
 
+        // Allocate version number (like OpLogFile does)
+        let allocated_version = self.persistence.allocate_version_for_write(self.id).await?;
+
         Ok(Box::pin(MemoryFileWriter::new(
+            self.id,
+            self.persistence.clone(),
+            allocated_version,
+            self.entry_type,
             self.content.clone(),
             self.write_state.clone(),
         )))
@@ -225,8 +233,12 @@ impl MemoryFile {
     }
 }
 
-/// Writer that resets state on drop
+/// Writer that resets state on drop and stores content with version in persistence
 struct MemoryFileWriter {
+    id: FileID,
+    persistence: MemoryPersistence,
+    allocated_version: u64,
+    entry_type: EntryType,
     content: Arc<Mutex<Vec<u8>>>,
     write_state: Arc<RwLock<WriteState>>,
     buffer: Vec<u8>,
@@ -235,8 +247,19 @@ struct MemoryFileWriter {
 }
 
 impl MemoryFileWriter {
-    fn new(content: Arc<Mutex<Vec<u8>>>, write_state: Arc<RwLock<WriteState>>) -> Self {
+    fn new(
+        id: FileID,
+        persistence: MemoryPersistence,
+        allocated_version: u64,
+        entry_type: EntryType,
+        content: Arc<Mutex<Vec<u8>>>,
+        write_state: Arc<RwLock<WriteState>>,
+    ) -> Self {
         Self {
+            id,
+            persistence,
+            allocated_version,
+            entry_type,
             content,
             write_state,
             buffer: Vec::new(),
@@ -250,11 +273,6 @@ impl MemoryFileWriter {
 impl crate::file::FileMetadataWriter for MemoryFileWriter {
     fn set_temporal_metadata(&mut self, _min: i64, _max: i64, _timestamp_column: String) {
         // Memory files don't persist metadata - this is a no-op
-        // In a real implementation, we'd store this in MemoryFile
-    }
-
-    fn set_bao_outboard(&mut self, _outboard: Vec<u8>) {
-        // Memory files don't persist bao_outboard - this is a no-op
         // In a real implementation, we'd store this in MemoryFile
     }
 
@@ -315,12 +333,80 @@ impl AsyncWrite for MemoryFileWriter {
 
         // Create completion future if not already created
         if self.completion_future.is_none() {
+            let id = self.id;
+            let persistence = self.persistence.clone();
+            let allocated_version = self.allocated_version;
+            let entry_type = self.entry_type;
             let content = self.content.clone();
             let write_state = self.write_state.clone();
             let buffer = std::mem::take(&mut self.buffer);
 
             let future = Box::pin(async move {
-                // Update content
+                // Compute bao_outboard if this is a FilePhysicalSeries or FilePhysicalVersion
+                let bao_outboard = match entry_type {
+                    EntryType::FilePhysicalSeries => {
+                        // Get previous version's bao_outboard (if any)
+                        let prev_version = if allocated_version > 1 {
+                            allocated_version - 1
+                        } else {
+                            0
+                        };
+
+                        let prev_bao = if prev_version > 0 {
+                            // Get bao_outboard from metadata
+                            persistence
+                                .metadata(id)
+                                .await
+                                .ok()
+                                .and_then(|meta| meta.bao_outboard)
+                        } else {
+                            None
+                        };
+
+                        let series_outboard = if let Some(prev_bao_bytes) = prev_bao {
+                            // Deserialize previous SeriesOutboard
+                            utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
+                                .ok()
+                                .map(|prev_outboard| {
+                                    // Append new version (always inline for memory files)
+                                    utilities::bao_outboard::SeriesOutboard::append_version_inline(
+                                        &prev_outboard,
+                                        &buffer,
+                                    )
+                                })
+                        } else {
+                            // First version
+                            Some(utilities::bao_outboard::SeriesOutboard::first_version_inline(
+                                &buffer,
+                            ))
+                        };
+
+                        series_outboard.map(|so| so.to_bytes())
+                    }
+                    EntryType::FilePhysicalVersion => {
+                        // Compute standalone VersionOutboard
+                        let version_outboard = utilities::bao_outboard::VersionOutboard::new(&buffer);
+                        Some(version_outboard.to_bytes())
+                    }
+                    _ => None,
+                };
+
+                // Store content with version and bao_outboard in persistence
+                let store_result = if let Some(bao_bytes) = bao_outboard {
+                    persistence
+                        .store_file_version_with_bao(id, allocated_version, buffer.clone(), bao_bytes)
+                        .await
+                } else {
+                    persistence
+                        .store_file_version(id, allocated_version, buffer.clone())
+                        .await
+                };
+
+                if let Err(e) = store_result {
+                    eprintln!("MemoryFileWriter: Failed to store version: {}", e);
+                }
+
+                // Update content (for backward compatibility with tests that read from content directly)
                 {
                     let mut content_guard = content.lock().await;
                     *content_guard = buffer;
@@ -335,7 +421,7 @@ impl AsyncWrite for MemoryFileWriter {
             self.completion_future = Some(future);
         }
 
-        // Poll the completion future. (Memory readers do not fail.)
+        // Poll the completion future
         match self
             .completion_future
             .as_mut()

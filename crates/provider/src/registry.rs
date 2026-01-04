@@ -581,6 +581,7 @@ impl Metadata for ConfigFile {
             version: 1,
             size: Some(self.config_yaml.len() as u64),
             blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::FileDynamic,
             timestamp: 0,
         })

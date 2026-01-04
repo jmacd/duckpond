@@ -101,3 +101,4 @@ pub trait PersistenceLayer: Send + Sync {
     /// - Err(_) if the query fails
     async fn get_temporal_bounds(&self, id: FileID) -> Result<Option<(i64, i64)>>;
 }
+

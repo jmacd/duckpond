@@ -21,6 +21,8 @@ struct MemoryFileVersion {
     content: Vec<u8>,
     entry_type: EntryType,
     extended_metadata: Option<HashMap<String, String>>,
+    /// Bao-tree outboard data for verified streaming (optional)
+    bao_outboard: Option<Vec<u8>>,
 }
 
 /// In-memory persistence layer for testing and derived file computation
@@ -219,6 +221,33 @@ impl MemoryPersistence {
             .store_file_version_with_metadata(id, version, content, entry_type, extended_metadata)
             .await
     }
+
+    /// Store a file version with bao_outboard data (for testing)
+    pub async fn store_file_version_with_bao(
+        &self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+        bao_outboard: Vec<u8>,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .await
+            .store_file_version_with_bao(id, version, content, bao_outboard)
+            .await
+    }
+
+    /// Allocate next version number for a file write
+    /// This ensures proper version sequencing for FilePhysicalSeries
+    pub async fn allocate_version_for_write(&self, id: FileID) -> Result<u64> {
+        let state = self.state.lock().await;
+        let next_version = if let Some(versions) = state.file_versions.get(&id) {
+            versions.last().map(|v| v.version + 1).unwrap_or(1)
+        } else {
+            1
+        };
+        Ok(next_version)
+    }
 }
 
 impl State {
@@ -247,13 +276,34 @@ impl State {
     }
 
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
+        // Look up node (node should always exist if created through proper tinyfs APIs)
         let node = self.nodes.get(&id).ok_or_else(|| {
-            Error::NotFound(std::path::PathBuf::from(format!("Node {id} not found",)))
+            Error::NotFound(std::path::PathBuf::from(format!("Node {id} not found")))
         })?;
 
+        // Get metadata from stored versions if they exist (for files with version history)
+        if let Some(versions) = self.file_versions.get(&id) {
+            if let Some(latest) = versions.last() {
+                // Compute blake3 hash of content
+                let blake3_hash = blake3::hash(&latest.content);
+                let blake3 = Some(blake3_hash.to_hex().to_string());
+
+                return Ok(NodeMetadata {
+                    version: latest.version,
+                    size: Some(latest.content.len() as u64),
+                    blake3,
+                    bao_outboard: latest.bao_outboard.clone(),
+                    entry_type: latest.entry_type,
+                    timestamp: latest.timestamp,
+                });
+            }
+        }
+
+        // Fall back to node's own metadata (for newly created files without versions yet)
         match &node.node_type {
             NodeType::File(handle) => handle.metadata().await,
-            _ => Err(Error::Other("Non-file metadata unimplemented".to_string())),
+            NodeType::Directory(handle) => handle.metadata().await,
+            NodeType::Symlink(handle) => handle.metadata().await,
         }
     }
 
@@ -263,7 +313,7 @@ impl State {
         version: u64,
         content: Vec<u8>,
     ) -> Result<()> {
-        self.store_file_version_with_metadata(id, version, content, id.entry_type(), None)
+        self.store_file_version_full(id, version, content, id.entry_type(), None, None)
             .await
     }
 
@@ -275,12 +325,44 @@ impl State {
         entry_type: EntryType,
         extended_metadata: Option<HashMap<String, String>>,
     ) -> Result<()> {
+        self.store_file_version_full(id, version, content, entry_type, extended_metadata, None)
+            .await
+    }
+
+    async fn store_file_version_with_bao(
+        &mut self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+        bao_outboard: Vec<u8>,
+    ) -> Result<()> {
+        self.store_file_version_full(
+            id,
+            version,
+            content,
+            id.entry_type(),
+            None,
+            Some(bao_outboard),
+        )
+        .await
+    }
+
+    async fn store_file_version_full(
+        &mut self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+        entry_type: EntryType,
+        extended_metadata: Option<HashMap<String, String>>,
+        bao_outboard: Option<Vec<u8>>,
+    ) -> Result<()> {
         let file_version = MemoryFileVersion {
             version,
             timestamp: chrono::Utc::now().timestamp_millis(),
             content,
             entry_type,
             extended_metadata,
+            bao_outboard,
         };
 
         self.file_versions.entry(id).or_default().push(file_version);
@@ -376,6 +458,7 @@ impl State {
             content: config_content,
             entry_type: id.entry_type(),
             extended_metadata: Some(extended_metadata),
+            bao_outboard: None,
         };
 
         self.file_versions.entry(id).or_default().push(version);
@@ -415,6 +498,7 @@ impl State {
                 content: config_content,
                 entry_type: id.entry_type(),
                 extended_metadata: Some(extended_metadata),
+                bao_outboard: None,
             }
         } else {
             return Err(Error::Other(format!("Dynamic node not found: {}", id)));

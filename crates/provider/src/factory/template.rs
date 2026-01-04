@@ -280,6 +280,7 @@ impl tinyfs::Metadata for TemplateDirectory {
             version: 1,
             size: None,
             blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
@@ -403,6 +404,7 @@ impl tinyfs::Metadata for TemplateFile {
             version: 1,
             size: Some(0), // Placeholder size - will be accurate when file is read
             blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::FileDynamic,
             timestamp: 0,
         })

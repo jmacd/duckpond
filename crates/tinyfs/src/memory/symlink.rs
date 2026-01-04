@@ -24,6 +24,7 @@ impl Metadata for MemorySymlink {
             version: 1,   // Memory symlinks don't track versions
             size: None,   // Symlinks don't have sizes
             blake3: None, // Symlinks don't have checksums
+            bao_outboard: None, // Symlinks don't have bao-tree data
             entry_type: EntryType::Symlink,
             timestamp: 0, // TODO
         })

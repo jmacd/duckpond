@@ -2922,6 +2922,7 @@ impl InnerState {
                 entry_type,
                 size: Some(0),
                 blake3: None,
+                bao_outboard: None, // No bao-tree data yet
                 version: 0, // No version yet - will be 1 when first written
                 timestamp: Utc::now().timestamp_micros(),
             });

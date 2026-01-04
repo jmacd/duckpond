@@ -622,6 +622,7 @@ impl Metadata for SqlDerivedFile {
             version: 1,
             size: None,   // Unknown
             blake3: None, // Unknown
+            bao_outboard: None,
             entry_type: EntryType::TableDynamic,
             timestamp: 0,
         })
@@ -1439,13 +1440,7 @@ mod tests {
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
 
-        // ALSO store in persistence so TinyFsObjectStore can read it
-        // This is the key: MemoryFile stores content internally, but TinyFsObjectStore
-        // reads from persistence.read_file_version(), so we need both
-        persistence
-            .store_file_version(file_id, 1, parquet_data)
-            .await?;
-
+        // async_writer already stores the version in persistence, no need to duplicate
         Ok(file_id)
     }
 
@@ -2623,11 +2618,14 @@ query: ""
                 _ = writer.close().unwrap();
             }
 
-            // Write new version to same path - store as version 2 using same FileID
-            persistence
-                .store_file_version(file_id_a, 2, parquet_buffer)
+            // Write new version to same path using async_writer (version 2)
+            let mut file_writer = root
+                .async_writer_path("/hydrovu/devices/station_a/SensorA_v1.series")
                 .await
                 .unwrap();
+            use tokio::io::AsyncWriteExt;
+            file_writer.write_all(&parquet_buffer).await.unwrap();
+            file_writer.shutdown().await.unwrap();
         }
 
         // Create File B: timestamps 1-6 with columns: timestamp, pressure

@@ -245,6 +245,7 @@ impl Metadata for DynamicDirDirectory {
             version: 1,
             size: None,
             blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })

@@ -546,6 +546,7 @@ impl tinyfs::Metadata for TimeseriesJoinFile {
             version: 1,
             size: None,
             blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::TableDynamic,
             timestamp: 0, // @@@ Not sure
         })
@@ -665,11 +666,7 @@ mod tests {
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
 
-        // Store in persistence (version 1 for MemoryPersistence)
-        persistence
-            .store_file_version(file_id, 1, parquet_data)
-            .await?;
-
+        // async_writer already stores the version in persistence, no need to duplicate
         Ok(file_id)
     }
 
@@ -692,9 +689,7 @@ mod tests {
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
 
-        // Store in persistence (version 1 for MemoryPersistence)
-        persistence.store_file_version(file_id, 1, content).await?;
-
+        // async_writer already stores the version in persistence, no need to duplicate
         Ok(file_id)
     }
 

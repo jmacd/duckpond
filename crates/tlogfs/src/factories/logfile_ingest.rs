@@ -9,7 +9,6 @@
 //! and supports both archived (immutable) and active (append-only) files.
 
 use crate::TLogFSError;
-use crate::bao_outboard::{SeriesOutboard, compute_outboard, verify_prefix};
 use datafusion::arrow::array::{Array, BinaryArray, Int64Array, StringArray};
 use log::{debug, info, warn};
 use provider::{ExecutionContext, FactoryContext, register_executable_factory};
@@ -18,6 +17,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tinyfs::{FileID, Result as TinyFSResult};
+use utilities::bao_outboard::{SeriesOutboard, verify_prefix};
 
 /// Configuration for the logfile ingestion factory
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,9 +493,6 @@ async fn ingest_new_file(
 
     let blake3_hash = blake3::hash(&content);
 
-    // Compute bao-tree outboard for verified streaming
-    let _ = compute_outboard(&content);
-
     let pond_dest = format!("{}/{}", config.pond_path, filename);
 
     info!(
@@ -504,17 +501,6 @@ async fn ingest_new_file(
         pond_dest,
         content.len(),
         &blake3_hash.to_hex()[..16]
-    );
-
-    // Create SeriesOutboard for tracking cumulative content
-    let series_outboard = SeriesOutboard::first_version_inline(&content);
-    let bao_bytes = series_outboard.to_bytes();
-
-    debug!(
-        "Computed bao_outboard: {} bytes (version_outboard={}, cumulative_outboard={})",
-        bao_bytes.len(),
-        series_outboard.version_outboard.len(),
-        series_outboard.cumulative_outboard.len()
     );
 
     // Extract State from context to access tinyfs
@@ -532,15 +518,12 @@ async fn ingest_new_file(
         .await
         .map_err(TLogFSError::TinyFS)?;
 
-    // Write file with bao_outboard using the low-level writer API
+    // Write file - tinyfs will compute bao_outboard automatically
     use tokio::io::AsyncWriteExt;
     let mut writer = root
         .async_writer_path(&pond_dest)
         .await
         .map_err(TLogFSError::TinyFS)?;
-
-    // Set bao_outboard before writing content
-    writer.set_bao_outboard(bao_bytes);
 
     // Write content and finalize
     writer
@@ -552,7 +535,7 @@ async fn ingest_new_file(
         .await
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
-    info!("Wrote file to pond with bao_outboard: {}", pond_dest);
+    info!("Wrote file to pond: {}", pond_dest);
 
     Ok(())
 }
@@ -623,62 +606,12 @@ async fn ingest_append(
         info!("Prefix verification passed for {}", filename);
     }
 
-    // Compute new SeriesOutboard incrementally using append_to_outboard
-    // Read pending bytes from the pond (last cumulative_size % BLOCK_SIZE bytes)
-    use crate::bao_outboard::BLOCK_SIZE;
-    let pending_size = (pond_state.cumulative_size % BLOCK_SIZE as u64) as usize;
-
-    let mut pending_bytes = vec![0u8; pending_size];
-
-    if pending_size > 0 {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let mut reader = root
-            .async_reader_path(&pond_dest)
-            .await
-            .map_err(TLogFSError::TinyFS)?;
-        let seek_pos = pond_state.cumulative_size - pending_size as u64;
-        let _ = reader
-            .seek(SeekFrom::Start(seek_pos))
-            .await
-            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
-        let _ = reader
-            .read_exact(&mut pending_bytes)
-            .await
-            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
-    }
-
-    // Compute incrementally using only new bytes
-    let (_, new_cumulative_outboard, _) = crate::bao_outboard::append_to_outboard(
-        &prev_series.cumulative_outboard,
-        pond_state.cumulative_size,
-        &pending_bytes,
-        &new_content,
-    )
-    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
-
-    let new_series_outboard = SeriesOutboard {
-        version_outboard: Vec::new(), // Inline content doesn't need this
-        cumulative_outboard: new_cumulative_outboard,
-        version_size: new_content.len() as u64,
-        cumulative_size: pond_state.cumulative_size + new_content.len() as u64,
-    };
-
-    let bao_bytes = new_series_outboard.to_bytes();
-
-    debug!(
-        "Computed new bao_outboard for append: {} bytes",
-        bao_bytes.len()
-    );
-
-    // Write new version with updated bao_outboard
+    // Write new version - tinyfs will compute bao_outboard automatically
     use tokio::io::AsyncWriteExt;
     let mut writer = root
         .async_writer_path(&pond_dest)
         .await
         .map_err(TLogFSError::TinyFS)?;
-
-    // Set bao_outboard before writing content
-    writer.set_bao_outboard(bao_bytes);
 
     // Write only the new content (as a new version in the FilePhysicalSeries)
     // The ChainedReader will concatenate all versions when reading
@@ -692,7 +625,7 @@ async fn ingest_append(
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     info!(
-        "Wrote append to pond with bao_outboard: {} version {}",
+        "Wrote append to pond: {} version {}",
         pond_dest,
         pond_state.version + 1
     );

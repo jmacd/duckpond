@@ -14,9 +14,6 @@
 /// Core schema and data structures
 pub mod schema;
 
-/// Bao-tree incremental hashing for append-only files
-pub mod bao_outboard;
-
 /// Factory implementations
 pub mod factories;
 
@@ -25,6 +22,9 @@ pub mod large_files;
 
 /// Persistence layer implementation
 pub mod persistence;
+
+// Re-export bao_outboard from utilities for backwards compatibility
+pub use utilities::bao_outboard;
 
 // Transaction guard implementation
 pub mod transaction_guard;

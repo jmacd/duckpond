@@ -102,6 +102,7 @@ impl crate::Metadata for ReverseDirectory {
             version: 1,
             size: None,
             blake3: None,
+            bao_outboard: None,
             entry_type: crate::EntryType::DirectoryDynamic,
             timestamp: 0, // TODO
         })

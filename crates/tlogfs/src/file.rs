@@ -179,9 +179,6 @@ pub struct OpLogFileWriter {
     precomputed_metadata: Option<crate::file_writer::FileMetadata>,
     /// Pre-allocated version number for this write (allocated at writer creation)
     allocated_version: i64,
-    /// Bao-tree outboard data for blake3 verified streaming
-    /// Set via set_bao_outboard() before shutdown()
-    bao_outboard: Option<Vec<u8>>,
 }
 
 // OpLogFileWriter is Unpin because all its fields are Unpin
@@ -206,7 +203,6 @@ impl OpLogFileWriter {
             entry_type,
             precomputed_metadata: None,
             allocated_version,
-            bao_outboard: None,
         }
     }
 }
@@ -219,10 +215,6 @@ impl FileMetadataWriter for OpLogFileWriter {
             max_timestamp: max,
             timestamp_column,
         });
-    }
-
-    fn set_bao_outboard(&mut self, outboard: Vec<u8>) {
-        self.bao_outboard = Some(outboard);
     }
 
     async fn infer_temporal_bounds(&mut self) -> tinyfs::Result<(i64, i64, String)> {
@@ -366,7 +358,6 @@ impl AsyncWrite for OpLogFileWriter {
             let entry_type = this.entry_type;
             let precomputed_metadata = this.precomputed_metadata.clone();
             let allocated_version = this.allocated_version;
-            let bao_outboard = this.bao_outboard.take();
 
             let future = Box::pin(async move {
                 // Finalize HybridWriter to get content
@@ -392,6 +383,61 @@ impl AsyncWrite for OpLogFileWriter {
                     } else {
                         // Small file - content in memory
                         crate::file_writer::ContentRef::Small(content.clone())
+                    };
+
+                    // Compute bao_outboard automatically based on entry_type
+                    let bao_outboard = match entry_type {
+                        tinyfs::EntryType::FilePhysicalSeries => {
+                            // For series files, compute incremental bao_outboard
+                            // Get previous version's bao_outboard (if any)
+                            let prev_version = if allocated_version > 1 {
+                                allocated_version - 1
+                            } else {
+                                0
+                            };
+
+                            let prev_bao = if prev_version > 0 {
+                                // Get bao_outboard from metadata instead of separate method
+                                state.metadata(file_id).await.ok().and_then(|meta| meta.bao_outboard)
+                            } else {
+                                None
+                            };
+
+                            let series_outboard = if let Some(prev_bao_bytes) = prev_bao {
+                                // Deserialize previous SeriesOutboard
+                                let prev_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
+                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize previous bao_outboard: {}", e)))?;
+
+                                // Append new version
+                                if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
+                                    // Large file
+                                    utilities::bao_outboard::SeriesOutboard::append_version_large(&prev_outboard, &content)
+                                } else {
+                                    // Inline file
+                                    utilities::bao_outboard::SeriesOutboard::append_version_inline(&prev_outboard, &content)
+                                }
+                            } else {
+                                // First version
+                                if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
+                                    // Large file
+                                    utilities::bao_outboard::SeriesOutboard::first_version_large(&content)
+                                } else {
+                                    // Inline file
+                                    utilities::bao_outboard::SeriesOutboard::first_version_inline(&content)
+                                }
+                            };
+
+                            Some(series_outboard.to_bytes())
+                        }
+                        tinyfs::EntryType::FilePhysicalVersion => {
+                            // For version files, compute standalone VersionOutboard
+                            let version_outboard = utilities::bao_outboard::VersionOutboard::new(&content);
+                            Some(version_outboard.to_bytes())
+                        }
+                        _ => {
+                            // Other entry types don't use bao_outboard
+                            None
+                        }
                     };
 
                     // Extract metadata based on file type
