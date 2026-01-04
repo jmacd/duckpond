@@ -174,9 +174,7 @@ pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator> {
             std::path::Component::Normal(os_str) => os_str
                 .to_str()
                 .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    GlobError::InvalidComponent(format!("{:?}", os_str))
-                }),
+                .ok_or_else(|| GlobError::InvalidComponent(format!("{:?}", os_str))),
             _ => Err(GlobError::InvalidComponent(format!("{:?}", path))),
         })
         .collect::<Result<Vec<String>>>()?;
@@ -213,7 +211,7 @@ pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator> {
 }
 
 /// Split an absolute glob pattern into (base_dir, relative_pattern)
-/// 
+///
 /// Extracts the longest non-wildcard prefix as the base directory,
 /// and returns the remaining pattern with wildcards as a relative pattern.
 ///
@@ -288,7 +286,7 @@ pub async fn collect_host_matches<P: AsRef<Path>, B: AsRef<Path>>(
     base_dir: B,
 ) -> Result<Vec<(std::path::PathBuf, Vec<String>)>> {
     let pattern_path = pattern.as_ref();
-    
+
     // Handle absolute patterns by extracting the base directory
     let (actual_base, relative_pattern) = if pattern_path.is_absolute() {
         let (base, rel) = split_absolute_pattern(pattern_path);
@@ -303,7 +301,10 @@ pub async fn collect_host_matches<P: AsRef<Path>, B: AsRef<Path>>(
         }
         (base, rel)
     } else {
-        (base_dir.as_ref().to_path_buf(), pattern_path.to_string_lossy().to_string())
+        (
+            base_dir.as_ref().to_path_buf(),
+            pattern_path.to_string_lossy().to_string(),
+        )
     };
 
     // Parse the relative pattern (no leading /)
@@ -332,98 +333,69 @@ fn visit_host_recursive<'a>(
     results: &'a mut Vec<(std::path::PathBuf, Vec<String>)>,
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
-    // Handle empty pattern case
-    if pattern.is_empty() {
-        return Ok(());
-    }
-
-    match &pattern[0] {
-        WildcardComponent::Normal(name) => {
-            // Direct match with a literal name
-            let child_path = current_path.join(name);
-            if child_path.exists() {
-                visit_host_match(
-                    &child_path,
-                    false,
-                    pattern,
-                    captured,
-                    results,
-                )
-                .await?;
-            }
+        // Handle empty pattern case
+        if pattern.is_empty() {
+            return Ok(());
         }
-        WildcardComponent::Wildcard { .. } => {
-            // Read directory entries
-            let entries = read_host_dir(current_path)?;
 
-            for entry_name in entries {
-                if let Some(wildcard_captures) = pattern[0].match_component(&entry_name) {
-                    let child_path = current_path.join(&entry_name);
-                    let captures_count = wildcard_captures.len();
-                    captured.extend(wildcard_captures);
+        match &pattern[0] {
+            WildcardComponent::Normal(name) => {
+                // Direct match with a literal name
+                let child_path = current_path.join(name);
+                if child_path.exists() {
+                    visit_host_match(&child_path, false, pattern, captured, results).await?;
+                }
+            }
+            WildcardComponent::Wildcard { .. } => {
+                // Read directory entries
+                let entries = read_host_dir(current_path)?;
 
-                    visit_host_match(
-                        &child_path,
-                        false,
-                        pattern,
-                        captured,
-                        results,
-                    )
-                    .await?;
+                for entry_name in entries {
+                    if let Some(wildcard_captures) = pattern[0].match_component(&entry_name) {
+                        let child_path = current_path.join(&entry_name);
+                        let captures_count = wildcard_captures.len();
+                        captured.extend(wildcard_captures);
 
-                    // Remove captures we added
-                    for _ in 0..captures_count {
-                        _ = captured.pop();
+                        visit_host_match(&child_path, false, pattern, captured, results).await?;
+
+                        // Remove captures we added
+                        for _ in 0..captures_count {
+                            _ = captured.pop();
+                        }
                     }
                 }
             }
-        }
-        WildcardComponent::DoubleWildcard { .. } => {
-            // Case 1: Match zero directories - try the next pattern component in current directory
-            if pattern.len() > 1 {
-                visit_host_recursive(current_path, &pattern[1..], captured, results)
-                    .await?;
-            } else {
-                // Terminal ** - match all files recursively in current directory
+            WildcardComponent::DoubleWildcard { .. } => {
+                // Case 1: Match zero directories - try the next pattern component in current directory
+                if pattern.len() > 1 {
+                    visit_host_recursive(current_path, &pattern[1..], captured, results).await?;
+                } else {
+                    // Terminal ** - match all files recursively in current directory
+                    let entries = read_host_dir(current_path)?;
+                    for entry_name in entries {
+                        let child_path = current_path.join(&entry_name);
+                        if child_path.is_file() {
+                            captured.push(entry_name.clone());
+                            visit_host_match(&child_path, true, pattern, captured, results).await?;
+                            _ = captured.pop();
+                        }
+                    }
+                }
+
+                // Case 2: Recurse into child directories
                 let entries = read_host_dir(current_path)?;
                 for entry_name in entries {
                     let child_path = current_path.join(&entry_name);
-                    if child_path.is_file() {
+                    if child_path.is_dir() {
                         captured.push(entry_name.clone());
-                        visit_host_match(
-                            &child_path,
-                            true,
-                            pattern,
-                            captured,
-                            results,
-                        )
-                        .await?;
+                        visit_host_match(&child_path, true, pattern, captured, results).await?;
                         _ = captured.pop();
                     }
                 }
             }
-
-            // Case 2: Recurse into child directories
-            let entries = read_host_dir(current_path)?;
-            for entry_name in entries {
-                let child_path = current_path.join(&entry_name);
-                if child_path.is_dir() {
-                    captured.push(entry_name.clone());
-                    visit_host_match(
-                        &child_path,
-                        true,
-                        pattern,
-                        captured,
-                        results,
-                    )
-                    .await?;
-                    _ = captured.pop();
-                }
-            }
         }
-    }
 
-    Ok(())
+        Ok(())
     })
 }
 
@@ -436,35 +408,35 @@ fn visit_host_match<'a>(
     results: &'a mut Vec<(std::path::PathBuf, Vec<String>)>,
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
-    if pattern.is_empty() {
-        return Ok(());
-    }
-
-    let is_dir = path.is_dir();
-    let is_last_component = pattern.len() == 1;
-
-    if is_last_component {
-        // Terminal component - add to results if it matches
-        if is_double_wildcard {
-            // For **, we already checked in the recursive function
-            results.push((path.to_path_buf(), captured.clone()));
-        } else {
-            // For normal wildcard or literal, add if it exists
-            results.push((path.to_path_buf(), captured.clone()));
+        if pattern.is_empty() {
+            return Ok(());
         }
-    } else if is_dir {
-        // Not the last component - continue recursing if it's a directory
-        if is_double_wildcard {
-            // For **, keep the same pattern (stay on **)
-            visit_host_recursive(path, pattern, captured, results).await?;
-        } else {
-            // For normal components, advance to next pattern component
-            visit_host_recursive(path, &pattern[1..], captured, results).await?;
-        }
-    }
-    // If not a directory and not last component, this path is a dead end
 
-    Ok(())
+        let is_dir = path.is_dir();
+        let is_last_component = pattern.len() == 1;
+
+        if is_last_component {
+            // Terminal component - add to results if it matches
+            if is_double_wildcard {
+                // For **, we already checked in the recursive function
+                results.push((path.to_path_buf(), captured.clone()));
+            } else {
+                // For normal wildcard or literal, add if it exists
+                results.push((path.to_path_buf(), captured.clone()));
+            }
+        } else if is_dir {
+            // Not the last component - continue recursing if it's a directory
+            if is_double_wildcard {
+                // For **, keep the same pattern (stay on **)
+                visit_host_recursive(path, pattern, captured, results).await?;
+            } else {
+                // For normal components, advance to next pattern component
+                visit_host_recursive(path, &pattern[1..], captured, results).await?;
+            }
+        }
+        // If not a directory and not last component, this path is a dead end
+
+        Ok(())
     })
 }
 
@@ -472,12 +444,14 @@ fn visit_host_match<'a>(
 fn read_host_dir(path: &Path) -> Result<Vec<String>> {
     let mut entries = Vec::new();
 
-    let dir_entries = std::fs::read_dir(path)
-        .map_err(|e| GlobError::InvalidComponent(format!("Failed to read directory {:?}: {}", path, e)))?;
+    let dir_entries = std::fs::read_dir(path).map_err(|e| {
+        GlobError::InvalidComponent(format!("Failed to read directory {:?}: {}", path, e))
+    })?;
 
     for entry in dir_entries {
-        let entry = entry
-            .map_err(|e| GlobError::InvalidComponent(format!("Failed to read entry in {:?}: {}", path, e)))?;
+        let entry = entry.map_err(|e| {
+            GlobError::InvalidComponent(format!("Failed to read entry in {:?}: {}", path, e))
+        })?;
         if let Some(name) = entry.file_name().to_str() {
             entries.push(name.to_string());
         }
@@ -488,7 +462,8 @@ fn read_host_dir(path: &Path) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;    use std::collections::HashSet;
+    use super::*;
+    use std::collections::HashSet;
     #[test]
     fn test_match_exact() {
         let comp = WildcardComponent::Normal("file.txt".to_string());
@@ -780,9 +755,7 @@ mod tests {
         std::fs::write(base_path.join("dataABC.csv"), b"test3").unwrap();
 
         // Test wildcard with capture
-        let results = collect_host_matches("data*.csv", base_path)
-            .await
-            .unwrap();
+        let results = collect_host_matches("data*.csv", base_path).await.unwrap();
         assert_eq!(results.len(), 3);
 
         // Verify captures
@@ -845,7 +818,7 @@ mod tests {
 
         // Test ** pattern to match all .txt files recursively
         let results = collect_host_matches("**/*.txt", base_path).await.unwrap();
-        
+
         assert_eq!(results.len(), 3);
 
         // Verify all files are found

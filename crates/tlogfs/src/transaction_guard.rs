@@ -185,7 +185,7 @@ impl<'a> Drop for TransactionGuard<'a> {
         if let Some(ref state) = self.persistence.state {
             let (pending_records, modified_dirs) = state.pending_operation_counts();
             let total_pending = pending_records + modified_dirs;
-            
+
             if total_pending > 0 {
                 // This is a write transaction being dropped - potential data loss!
                 log::warn!(

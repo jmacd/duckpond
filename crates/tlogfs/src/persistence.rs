@@ -722,20 +722,19 @@ impl State {
     }
 
     /// Get count of pending operations (records + modified directories)
-    /// 
+    ///
     /// This is used for diagnostics when a transaction is dropped without commit.
     /// Returns (pending_records, modified_directories) counts.
+    #[must_use]
     pub fn pending_operation_counts(&self) -> (usize, usize) {
         // Use try_lock to avoid blocking in Drop - if locked, return (0,0) as unknown
         match self.inner.try_lock() {
             Ok(guard) => {
                 let record_count = guard.records.len();
-                let modified_dirs = guard.directories.values()
-                    .filter(|d| d.modified)
-                    .count();
+                let modified_dirs = guard.directories.values().filter(|d| d.modified).count();
                 (record_count, modified_dirs)
             }
-            Err(_) => (0, 0) // Can't get counts if lock is held
+            Err(_) => (0, 0), // Can't get counts if lock is held
         }
     }
 
@@ -958,7 +957,13 @@ impl State {
         self.inner
             .lock()
             .await
-            .store_file_content_ref(id, content_ref, metadata, pre_allocated_version, bao_outboard)
+            .store_file_content_ref(
+                id,
+                content_ref,
+                metadata,
+                pre_allocated_version,
+                bao_outboard,
+            )
             .await
     }
 

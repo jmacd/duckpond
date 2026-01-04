@@ -38,7 +38,9 @@
 //! Uses 16KB blocks (chunk_log=4) for good balance between overhead (~0.4%)
 //! and granularity for verified streaming.
 
-use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, HasherExt, Mode};
+use blake3::hazmat::{
+    ChainingValue, HasherExt, Mode, merge_subtrees_non_root, merge_subtrees_root,
+};
 use log::debug;
 use std::io;
 use thiserror::Error;
@@ -148,16 +150,13 @@ impl VersionOutboard {
             ));
         }
 
-        let size = u64::from_le_bytes(
-            bytes[0..8].try_into().map_err(|_| {
+        let size =
+            u64::from_le_bytes(bytes[0..8].try_into().map_err(|_| {
                 BaoOutboardError::InvalidOutboard("Invalid size bytes".to_string())
-            })?
-        );
-        let outboard_len = u32::from_le_bytes(
-            bytes[8..12].try_into().map_err(|_| {
-                BaoOutboardError::InvalidOutboard("Invalid outboard length bytes".to_string())
-            })?
-        ) as usize;
+            })?);
+        let outboard_len = u32::from_le_bytes(bytes[8..12].try_into().map_err(|_| {
+            BaoOutboardError::InvalidOutboard("Invalid outboard length bytes".to_string())
+        })?) as usize;
 
         if bytes.len() < 12 + outboard_len {
             return Err(BaoOutboardError::InvalidOutboard(
@@ -214,7 +213,7 @@ impl SeriesOutboard {
         let new_cumulative_size = prev.cumulative_size + new_content.len() as u64;
 
         Self {
-            version_outboard: Vec::new(), // Not needed for inline
+            version_outboard: Vec::new(),    // Not needed for inline
             cumulative_outboard: Vec::new(), // TODO: compute incrementally
             version_size: new_content.len() as u64,
             cumulative_size: new_cumulative_size,
@@ -274,21 +273,15 @@ impl SeriesOutboard {
             ));
         }
 
-        let version_size = u64::from_le_bytes(
-            bytes[0..8].try_into().map_err(|_| {
-                BaoOutboardError::InvalidOutboard("Invalid version_size bytes".to_string())
-            })?
-        );
-        let cumulative_size = u64::from_le_bytes(
-            bytes[8..16].try_into().map_err(|_| {
-                BaoOutboardError::InvalidOutboard("Invalid cumulative_size bytes".to_string())
-            })?
-        );
-        let version_outboard_len = u32::from_le_bytes(
-            bytes[16..20].try_into().map_err(|_| {
-                BaoOutboardError::InvalidOutboard("Invalid version_outboard_len bytes".to_string())
-            })?
-        ) as usize;
+        let version_size = u64::from_le_bytes(bytes[0..8].try_into().map_err(|_| {
+            BaoOutboardError::InvalidOutboard("Invalid version_size bytes".to_string())
+        })?);
+        let cumulative_size = u64::from_le_bytes(bytes[8..16].try_into().map_err(|_| {
+            BaoOutboardError::InvalidOutboard("Invalid cumulative_size bytes".to_string())
+        })?);
+        let version_outboard_len = u32::from_le_bytes(bytes[16..20].try_into().map_err(|_| {
+            BaoOutboardError::InvalidOutboard("Invalid version_outboard_len bytes".to_string())
+        })?) as usize;
 
         let version_outboard_end = 20 + version_outboard_len;
         if bytes.len() < version_outboard_end + 4 {
@@ -299,9 +292,13 @@ impl SeriesOutboard {
 
         let version_outboard = bytes[20..version_outboard_end].to_vec();
         let cumulative_outboard_len = u32::from_le_bytes(
-            bytes[version_outboard_end..version_outboard_end + 4].try_into().map_err(|_| {
-                BaoOutboardError::InvalidOutboard("Invalid cumulative_outboard_len bytes".to_string())
-            })?
+            bytes[version_outboard_end..version_outboard_end + 4]
+                .try_into()
+                .map_err(|_| {
+                    BaoOutboardError::InvalidOutboard(
+                        "Invalid cumulative_outboard_len bytes".to_string(),
+                    )
+                })?,
         ) as usize;
 
         let cumulative_outboard_end = version_outboard_end + 4 + cumulative_outboard_len;
@@ -311,8 +308,7 @@ impl SeriesOutboard {
             ));
         }
 
-        let cumulative_outboard =
-            bytes[version_outboard_end + 4..cumulative_outboard_end].to_vec();
+        let cumulative_outboard = bytes[version_outboard_end + 4..cumulative_outboard_end].to_vec();
 
         Ok(Self {
             version_outboard,
@@ -513,7 +509,7 @@ impl IncrementalHashState {
             // non-root hash and convert it to root format.
             // For BLAKE3, a single block file should just be blake3::hash(data).
             // Since we don't have the data, this is a limitation of the incremental approach.
-            // 
+            //
             // WORKAROUND: For true single-block files, the caller should use blake3::hash() directly.
             // This implementation is for files that may grow (FilePhysicalSeries).
             // We return the non-root hash, which is different from blake3::hash() but is
@@ -539,9 +535,11 @@ impl IncrementalHashState {
 
         // Merge all subtrees from right to left
         while subtrees.len() > 1 {
-            let (right_level, right_hash, _) = subtrees.pop()
+            let (right_level, right_hash, _) = subtrees
+                .pop()
                 .expect("subtrees.len() > 1 guarantees right exists");
-            let (left_level, left_hash, left_start) = subtrees.pop()
+            let (left_level, left_hash, left_start) = subtrees
+                .pop()
                 .expect("subtrees.len() > 1 guarantees left exists");
 
             // Determine if this merge produces the final root
@@ -582,10 +580,7 @@ impl IncrementalHashState {
         for subtree in &self.completed_subtrees {
             // Note: For a complete implementation, we'd need to store
             // intermediate hash pairs as we build the tree
-            debug!(
-                "Subtree: level={}, start_block={}",
-                subtree.0, subtree.2
-            );
+            debug!("Subtree: level={}, start_block={}", subtree.0, subtree.2);
         }
 
         outboard
@@ -711,11 +706,8 @@ pub fn append_to_outboard(
     new_content: &[u8],
 ) -> Result<(blake3::Hash, Vec<u8>, Vec<u8>), BaoOutboardError> {
     // Reconstruct state from previous outboard
-    let mut state = IncrementalHashState::from_outboard(
-        prev_outboard,
-        prev_cumulative_size,
-        pending_bytes,
-    )?;
+    let mut state =
+        IncrementalHashState::from_outboard(prev_outboard, prev_cumulative_size, pending_bytes)?;
 
     // Ingest new content
     state.ingest(new_content);

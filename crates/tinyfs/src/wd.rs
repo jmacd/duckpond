@@ -7,7 +7,6 @@ use crate::dir::*;
 use crate::error::*;
 use crate::fs::FS;
 use crate::node::*;
-use utilities::glob::{parse_glob, WildcardComponent};
 use crate::symlink::*;
 use async_trait::async_trait;
 use futures::stream::Stream;
@@ -20,6 +19,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use tokio::io::AsyncRead;
+use utilities::glob::{WildcardComponent, parse_glob};
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -321,7 +321,8 @@ impl WD {
                 Component::ParentDir => {
                     // Parent dir references are not supported in create_dir_all
                     return Err(Error::Other(
-                        "Parent directory references (..) not supported in create_dir_all".to_string()
+                        "Parent directory references (..) not supported in create_dir_all"
+                            .to_string(),
                     ));
                 }
                 Component::Prefix(_) => {
@@ -337,10 +338,13 @@ impl WD {
                             // Entry exists - make sure it's a directory and navigate into it
                             match &child.node.node_type {
                                 NodeType::Directory(_) => {
-                                    current_wd = current_wd.fs.wd(&NodePath::new(
-                                        child.node.clone(),
-                                        ddir.path().join(&name_str),
-                                    )).await?;
+                                    current_wd = current_wd
+                                        .fs
+                                        .wd(&NodePath::new(
+                                            child.node.clone(),
+                                            ddir.path().join(&name_str),
+                                        ))
+                                        .await?;
                                 }
                                 _ => {
                                     return Err(Error::not_a_directory(path));
@@ -352,11 +356,14 @@ impl WD {
                             let id = FileID::new_physical_dir_id();
                             let node = current_wd.fs.persistence.create_directory_node(id).await?;
                             current_wd.fs.persistence.store_node(&node).await?;
-                            current_wd.dref.insert(name_str.clone(), node.clone()).await?;
-                            current_wd = current_wd.fs.wd(&NodePath::new(
-                                node,
-                                ddir.path().join(&name_str),
-                            )).await?;
+                            current_wd
+                                .dref
+                                .insert(name_str.clone(), node.clone())
+                                .await?;
+                            current_wd = current_wd
+                                .fs
+                                .wd(&NodePath::new(node, ddir.path().join(&name_str)))
+                                .await?;
                         }
                         Err(e) => {
                             return Err(Error::Other(format!(

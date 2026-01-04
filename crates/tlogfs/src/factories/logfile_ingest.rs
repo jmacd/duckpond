@@ -120,9 +120,7 @@ pub async fn execute(
     );
 
     // Step 1: Enumerate host files
-    let host_files = enumerate_host_files(&config)
-        .await
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+    let host_files = enumerate_host_files(&config).await?;
     info!(
         "Found {} host files ({} archived, {} active)",
         host_files.len(),
@@ -131,9 +129,7 @@ pub async fn execute(
     );
 
     // Step 2: Read pond state
-    let pond_files = read_pond_state(&context, &config.pond_path)
-        .await
-        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+    let pond_files = read_pond_state(&context, &config.pond_path).await?;
     info!("Found {} files in pond", pond_files.len());
 
     // Step 3: Detect changes and ingest
@@ -150,14 +146,10 @@ pub async fn execute(
 
         if host_file.is_active {
             // Active file: detect appends
-            process_active_file(&context, &config, host_file, pond_file)
-                .await
-                .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+            process_active_file(&context, &config, host_file, pond_file).await?;
         } else {
             // Archived file: detect new or changed
-            process_archived_file(&context, &config, host_file, pond_file)
-                .await
-                .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+            process_archived_file(&context, &config, host_file, pond_file).await?;
         }
     }
 
@@ -166,13 +158,15 @@ pub async fn execute(
 }
 
 /// Enumerate files matching the configured patterns
-async fn enumerate_host_files(config: &LogfileIngestConfig) -> std::io::Result<Vec<HostFileState>> {
+async fn enumerate_host_files(
+    config: &LogfileIngestConfig,
+) -> Result<Vec<HostFileState>, TLogFSError> {
     let mut files = Vec::new();
 
     // Match archived files - absolute patterns handled automatically
     let matches = utilities::glob::collect_host_matches(&config.archived_pattern, ".")
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     for (path, _captures) in matches {
         if let Ok(metadata) = std::fs::metadata(&path)
@@ -189,7 +183,7 @@ async fn enumerate_host_files(config: &LogfileIngestConfig) -> std::io::Result<V
     // Match active file - absolute patterns handled automatically
     let matches = utilities::glob::collect_host_matches(&config.active_pattern, ".")
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     for (path, _captures) in matches {
         if let Ok(metadata) = std::fs::metadata(&path)
@@ -213,27 +207,24 @@ async fn enumerate_host_files(config: &LogfileIngestConfig) -> std::io::Result<V
 async fn read_pond_state(
     context: &FactoryContext,
     pond_path: &str,
-) -> std::io::Result<HashMap<String, PondFileState>> {
+) -> Result<HashMap<String, PondFileState>, TLogFSError> {
     let mut pond_files = HashMap::new();
 
     debug!("Reading pond state from: {}", pond_path);
 
     // Extract State from context to get DataFusion SessionContext
-    let state = crate::extract_state(context).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let state = crate::extract_state(context)?;
 
     let session_ctx = state
         .session_context()
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     // Create tinyfs to navigate to pond_path and list directory entries
     let fs = tinyfs::FS::new(state.clone())
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let root = fs
-        .root()
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(TLogFSError::TinyFS)?;
+    let root = fs.root().await.map_err(TLogFSError::TinyFS)?;
 
     // Navigate to the pond directory
     let pond_dir = match root.open_dir_path(pond_path).await {
@@ -244,7 +235,7 @@ async fn read_pond_state(
             return Ok(pond_files);
         }
         Err(e) => {
-            return Err(std::io::Error::other(e.to_string()));
+            return Err(TLogFSError::TinyFS(e));
         }
     };
 
@@ -254,14 +245,11 @@ async fn read_pond_state(
 
     // List directory entries to get filename → FileID mapping
     use futures::StreamExt;
-    let mut entries_stream = pond_dir
-        .entries()
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut entries_stream = pond_dir.entries().await.map_err(TLogFSError::TinyFS)?;
 
     let mut filename_to_file_id: HashMap<String, FileID> = HashMap::new();
     while let Some(entry_result) = entries_stream.next().await {
-        let entry = entry_result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        let entry = entry_result.map_err(TLogFSError::TinyFS)?;
         // Only include file entries (not directories)
         if entry.entry_type.is_file() {
             // Construct FileID from parent's part_id and child's node_id
@@ -297,12 +285,12 @@ async fn read_pond_state(
     let df = session_ctx
         .sql(&sql)
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     let batches: Vec<_> = df
         .collect()
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     // Process results, keeping only the latest version per node_id
     let mut seen_nodes = std::collections::HashSet::new();
@@ -312,14 +300,14 @@ async fn read_pond_state(
             .column_by_name("node_id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
             .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing node_id column")
+                TLogFSError::TinyFS(tinyfs::Error::Other("Missing node_id column".to_string()))
             })?;
 
         let version_col = batch
             .column_by_name("version")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
             .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing version column")
+                TLogFSError::TinyFS(tinyfs::Error::Other("Missing version column".to_string()))
             })?;
 
         let size_col = batch
@@ -350,20 +338,20 @@ async fn read_pond_state(
             let blake3 = match blake3_col {
                 Some(col) if !col.is_null(row) => col.value(row).to_string(),
                 _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Pond file {} missing required blake3 hash", node_id_str),
-                    ));
+                    return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                        "Pond file {} missing required blake3 hash",
+                        node_id_str
+                    ))));
                 }
             };
 
             let bao_outboard = match bao_col {
                 Some(col) if !col.is_null(row) => col.value(row).to_vec(),
                 _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Pond file {} missing required bao_outboard", node_id_str),
-                    ));
+                    return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                        "Pond file {} missing required bao_outboard",
+                        node_id_str
+                    ))));
                 }
             };
 
@@ -409,7 +397,7 @@ async fn process_active_file(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
     pond_file: Option<&PondFileState>,
-) -> std::io::Result<()> {
+) -> Result<(), TLogFSError> {
     let filename = host_file
         .path
         .file_name()
@@ -455,12 +443,12 @@ async fn process_archived_file(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
     pond_file: Option<&PondFileState>,
-) -> std::io::Result<()> {
+) -> Result<(), TLogFSError> {
     let filename = host_file
         .path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid filename"))?;
+        .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other("Invalid filename".to_string())))?;
 
     match pond_file {
         None => {
@@ -474,12 +462,12 @@ async fn process_archived_file(
             let host_hash = blake3::hash(&host_content);
 
             if host_hash.to_hex().to_string() != pond_state.blake3 {
-                warn!(
-                    "Archived file {} CHANGED - this violates immutability assumption!",
-                    filename
-                );
-                // Re-ingest the changed file
-                ingest_new_file(context, config, host_file).await?;
+                let host_hash_str = host_hash.to_hex().to_string();
+                return Err(TLogFSError::TinyFS(tinyfs::Error::Other(format!(
+                    "Archived file {} CHANGED - violates immutability assumption! \
+                         Expected blake3={}, got blake3={}, size={} bytes",
+                    filename, pond_state.blake3, host_hash_str, host_file.size
+                ))));
             } else {
                 debug!("Archived file {} unchanged", filename);
             }
@@ -494,13 +482,14 @@ async fn ingest_new_file(
     context: &FactoryContext,
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
-) -> std::io::Result<()> {
-    let content = std::fs::read(&host_file.path)?;
+) -> Result<(), TLogFSError> {
+    let content = std::fs::read(&host_file.path)
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
     let filename = host_file
         .path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid filename"))?;
+        .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other("Invalid filename".to_string())))?;
 
     let blake3_hash = blake3::hash(&content);
 
@@ -529,36 +518,39 @@ async fn ingest_new_file(
     );
 
     // Extract State from context to access tinyfs
-    let state = crate::extract_state(context).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let state = crate::extract_state(context)?;
 
     // Create filesystem from state
     let fs = tinyfs::FS::new(state.clone())
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let root = fs
-        .root()
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(TLogFSError::TinyFS)?;
+    let root = fs.root().await.map_err(TLogFSError::TinyFS)?;
 
     // Ensure the pond directory exists (create all parent directories as needed)
     let _ = root
         .create_dir_all(&config.pond_path)
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(TLogFSError::TinyFS)?;
 
     // Write file with bao_outboard using the low-level writer API
     use tokio::io::AsyncWriteExt;
     let mut writer = root
         .async_writer_path(&pond_dest)
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(TLogFSError::TinyFS)?;
 
     // Set bao_outboard before writing content
     writer.set_bao_outboard(bao_bytes);
 
     // Write content and finalize
-    writer.write_all(&content).await?;
-    writer.shutdown().await?;
+    writer
+        .write_all(&content)
+        .await
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+    writer
+        .shutdown()
+        .await
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     info!("Wrote file to pond with bao_outboard: {}", pond_dest);
 
@@ -571,32 +563,34 @@ async fn ingest_append(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
     pond_state: &PondFileState,
-) -> std::io::Result<()> {
+) -> Result<(), TLogFSError> {
     let filename = host_file
         .path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid filename"))?;
+        .ok_or_else(|| TLogFSError::TinyFS(tinyfs::Error::Other("Invalid filename".to_string())))?;
 
     let pond_dest = format!("{}/{}", config.pond_path, filename);
 
     // Extract State from context to access tinyfs (once for all operations)
-    let state = crate::extract_state(context).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let state = crate::extract_state(context)?;
     let fs = tinyfs::FS::new(state.clone())
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let root = fs
-        .root()
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(TLogFSError::TinyFS)?;
+    let root = fs.root().await.map_err(TLogFSError::TinyFS)?;
 
     // Read only the new bytes from host file
-    let mut file = std::fs::File::open(&host_file.path)?;
+    let mut file = std::fs::File::open(&host_file.path)
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
     use std::io::{Read, Seek, SeekFrom};
-    let _ = file.seek(SeekFrom::Start(pond_state.cumulative_size))?;
+    let _ = file
+        .seek(SeekFrom::Start(pond_state.cumulative_size))
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     let mut new_content = Vec::new();
-    let _ = file.read_to_end(&mut new_content)?;
+    let _ = file
+        .read_to_end(&mut new_content)
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     info!(
         "Ingesting append to {}: {} new bytes (total will be {})",
@@ -607,21 +601,24 @@ async fn ingest_append(
 
     // Deserialize previous outboard - required for append verification
     let prev_series = SeriesOutboard::from_bytes(&pond_state.bao_outboard)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     // Always verify prefix hasn't changed before appending
     {
         // Read the prefix from host file to verify
-        let mut prefix_file = std::fs::File::open(&host_file.path)?;
+        let mut prefix_file = std::fs::File::open(&host_file.path)
+            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
         let mut prefix_content = vec![0u8; pond_state.cumulative_size as usize];
-        prefix_file.read_exact(&mut prefix_content)?;
+        prefix_file
+            .read_exact(&mut prefix_content)
+            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
         verify_prefix(
             &prefix_content,
             &prev_series.cumulative_outboard,
             pond_state.cumulative_size,
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
         info!("Prefix verification passed for {}", filename);
     }
@@ -638,10 +635,16 @@ async fn ingest_append(
         let mut reader = root
             .async_reader_path(&pond_dest)
             .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            .map_err(TLogFSError::TinyFS)?;
         let seek_pos = pond_state.cumulative_size - pending_size as u64;
-        let _ = reader.seek(SeekFrom::Start(seek_pos)).await?;
-        let _ = reader.read_exact(&mut pending_bytes).await?;
+        let _ = reader
+            .seek(SeekFrom::Start(seek_pos))
+            .await
+            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+        let _ = reader
+            .read_exact(&mut pending_bytes)
+            .await
+            .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
     }
 
     // Compute incrementally using only new bytes
@@ -651,7 +654,7 @@ async fn ingest_append(
         &pending_bytes,
         &new_content,
     )
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     let new_series_outboard = SeriesOutboard {
         version_outboard: Vec::new(), // Inline content doesn't need this
@@ -672,15 +675,21 @@ async fn ingest_append(
     let mut writer = root
         .async_writer_path(&pond_dest)
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(TLogFSError::TinyFS)?;
 
     // Set bao_outboard before writing content
     writer.set_bao_outboard(bao_bytes);
 
     // Write only the new content (as a new version in the FilePhysicalSeries)
     // The ChainedReader will concatenate all versions when reading
-    writer.write_all(&new_content).await?;
-    writer.shutdown().await?;
+    writer
+        .write_all(&new_content)
+        .await
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+    writer
+        .shutdown()
+        .await
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
 
     info!(
         "Wrote append to pond with bao_outboard: {} version {}",
@@ -1057,9 +1066,15 @@ mod test {
         pond.execute_factory(&config).await.unwrap();
 
         // Verify: File should exist in pond with correct content
-        pond.verify_file("logs/test_app", "app.log", size_v1, &blake3_v1, logfile.content())
-            .await
-            .unwrap();
+        pond.verify_file(
+            "logs/test_app",
+            "app.log",
+            size_v1,
+            &blake3_v1,
+            logfile.content(),
+        )
+        .await
+        .unwrap();
 
         println!("✓ Initial snapshot successful");
 
@@ -1092,9 +1107,15 @@ mod test {
         pond.execute_factory(&config).await.unwrap();
 
         // Verify: File should have updated content
-        pond.verify_file("logs/test_app", "app.log", size_v2, &blake3_v2, logfile.content())
-            .await
-            .unwrap();
+        pond.verify_file(
+            "logs/test_app",
+            "app.log",
+            size_v2,
+            &blake3_v2,
+            logfile.content(),
+        )
+        .await
+        .unwrap();
 
         println!("✓ Incremental append successful");
 
@@ -1131,9 +1152,15 @@ mod test {
         pond.execute_factory(&config).await.unwrap();
 
         // Verify: File should have latest content
-        pond.verify_file("logs/test_app", "app.log", size_v3, &blake3_v3, logfile.content())
-            .await
-            .unwrap();
+        pond.verify_file(
+            "logs/test_app",
+            "app.log",
+            size_v3,
+            &blake3_v3,
+            logfile.content(),
+        )
+        .await
+        .unwrap();
 
         println!("✓ Second incremental append successful");
         println!("✓ All snapshots and verifications passed!");
