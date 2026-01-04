@@ -9,7 +9,7 @@
 
 use crate::error::{Error, Result};
 use std::path::Path;
-pub use utilities::glob::{parse_glob, GlobComponentIterator, WildcardComponent};
+pub use utilities::glob::{parse_glob, split_absolute_pattern, GlobComponentIterator, WildcardComponent};
 
 /// Expand a glob pattern on the host filesystem, returning matching paths with their captures
 ///

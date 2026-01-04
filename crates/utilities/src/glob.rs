@@ -212,6 +212,48 @@ pub fn parse_glob<P: AsRef<Path>>(pattern: P) -> Result<GlobComponentIterator> {
     })
 }
 
+/// Split an absolute glob pattern into (base_dir, relative_pattern)
+/// 
+/// Extracts the longest non-wildcard prefix as the base directory,
+/// and returns the remaining pattern with wildcards as a relative pattern.
+///
+/// # Examples
+/// ```
+/// use utilities::glob::split_absolute_pattern;
+/// use std::path::Path;
+///
+/// let (base, pattern) = split_absolute_pattern("/var/log/*.log");
+/// assert_eq!(base, Path::new("/var/log"));
+/// assert_eq!(pattern, "*.log");
+///
+/// let (base, pattern) = split_absolute_pattern("/data/**/logs/*.txt");
+/// assert_eq!(base, Path::new("/data"));
+/// assert_eq!(pattern, "**/logs/*.txt");
+/// ```
+pub fn split_absolute_pattern<P: AsRef<Path>>(pattern: P) -> (std::path::PathBuf, String) {
+    let path = pattern.as_ref();
+    let mut base_components = Vec::new();
+    let mut pattern_components = Vec::new();
+    let mut found_wildcard = false;
+
+    for component in path.components() {
+        let s = component.as_os_str().to_string_lossy();
+        if found_wildcard {
+            pattern_components.push(s.to_string());
+        } else if s.contains('*') || s.contains('?') {
+            found_wildcard = true;
+            pattern_components.push(s.to_string());
+        } else {
+            base_components.push(component);
+        }
+    }
+
+    let base_dir: std::path::PathBuf = base_components.iter().collect();
+    let relative_pattern = pattern_components.join("/");
+
+    (base_dir, relative_pattern)
+}
+
 /// Expand a glob pattern on the host filesystem, returning matching paths with their captures
 ///
 /// This function walks the host filesystem matching the pattern and collecting wildcard
@@ -245,17 +287,34 @@ pub async fn collect_host_matches<P: AsRef<Path>, B: AsRef<Path>>(
     pattern: P,
     base_dir: B,
 ) -> Result<Vec<(std::path::PathBuf, Vec<String>)>> {
-    let components = parse_glob(pattern)?;
+    let pattern_path = pattern.as_ref();
+    
+    // Handle absolute patterns by extracting the base directory
+    let (actual_base, relative_pattern) = if pattern_path.is_absolute() {
+        let (base, rel) = split_absolute_pattern(pattern_path);
+        // If pattern is just an absolute path with no wildcards, treat as direct match
+        if rel.is_empty() {
+            // Check if the path exists and return it directly
+            if pattern_path.exists() {
+                return Ok(vec![(pattern_path.to_path_buf(), Vec::new())]);
+            } else {
+                return Ok(Vec::new());
+            }
+        }
+        (base, rel)
+    } else {
+        (base_dir.as_ref().to_path_buf(), pattern_path.to_string_lossy().to_string())
+    };
+
+    // Parse the relative pattern (no leading /)
+    let components = parse_glob(&relative_pattern)?;
     let pattern_components: Vec<_> = components.collect();
 
     let mut results = Vec::new();
     let mut captured = Vec::new();
 
-    // Start traversal from base directory
-    let base_path = base_dir.as_ref().to_path_buf();
-
     visit_host_recursive(
-        &base_path,
+        &actual_base,
         &pattern_components,
         &mut captured,
         &mut results,

@@ -8,15 +8,15 @@
 //! It tracks files with bao-tree blake3 digests for efficient change detection
 //! and supports both archived (immutable) and active (append-only) files.
 
-use crate::bao_outboard::{SeriesOutboard, compute_outboard, verify_prefix};
 use crate::TLogFSError;
+use crate::bao_outboard::{SeriesOutboard, compute_outboard, verify_prefix};
 use datafusion::arrow::array::{Array, BinaryArray, Int64Array, StringArray};
 use log::{debug, info, warn};
-use provider::{register_executable_factory, ExecutionContext, FactoryContext};
+use provider::{ExecutionContext, FactoryContext, register_executable_factory};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tinyfs::{FileID, Result as TinyFSResult};
 
 /// Configuration for the logfile ingestion factory
@@ -37,16 +37,6 @@ pub struct LogfileIngestConfig {
     /// Destination path within the pond (relative to pond root)
     /// Example: "logs/casparwater"
     pub pond_path: String,
-
-    /// Verification mode for append-only files
-    /// - "trust": Only compute new outboard from new bytes (fast)
-    /// - "strict": Re-hash prefix and verify against stored outboard (slower, catches corruption)
-    #[serde(default = "default_verification_mode")]
-    pub verification_mode: String,
-}
-
-fn default_verification_mode() -> String {
-    "trust".to_string()
 }
 
 impl LogfileIngestConfig {
@@ -74,29 +64,17 @@ impl LogfileIngestConfig {
             ));
         }
 
-        if self.verification_mode != "trust" && self.verification_mode != "strict" {
-            return Err(tinyfs::Error::Other(format!(
-                "verification_mode must be 'trust' or 'strict', got '{}'",
-                self.verification_mode
-            )));
-        }
-
         Ok(())
     }
 }
 
 /// State of a host file for tracking changes
-#[allow(dead_code)] // Fields will be used when persistence layer is wired up
 #[derive(Debug, Clone)]
 struct HostFileState {
     /// Full path to the host file
     path: PathBuf,
     /// File size in bytes
     size: u64,
-    /// Blake3 hash of the content
-    blake3: Option<String>,
-    /// Bao-tree outboard data (for FilePhysicalSeries)
-    bao_outboard: Option<Vec<u8>>,
     /// Whether this is the active (append-only) file
     is_active: bool,
 }
@@ -111,35 +89,34 @@ struct PondFileState {
     version: i64,
     /// File size in bytes
     size: u64,
-    /// Blake3 hash of the content
-    blake3: Option<String>,
-    /// Bao-tree outboard data
-    bao_outboard: Option<Vec<u8>>,
+    /// Blake3 hash of the content (always present for pond files)
+    blake3: String,
+    /// Bao-tree outboard data (always present for pond files)
+    bao_outboard: Vec<u8>,
     /// Cumulative size (for FilePhysicalSeries)
     cumulative_size: u64,
 }
 
 /// Initialize factory (called once per dynamic node creation)
-async fn initialize(
-    _config: Value,
-    _context: FactoryContext,
-) -> Result<(), TLogFSError> {
+async fn initialize(_config: Value, _context: FactoryContext) -> Result<(), TLogFSError> {
     // No initialization needed for executable factory
     Ok(())
 }
 
 /// Execute the log ingestion process
-async fn execute(
+#[cfg_attr(test, allow(dead_code))] // Allow in tests even if not directly called
+pub async fn execute(
     config: Value,
     context: FactoryContext,
     ctx: ExecutionContext,
 ) -> Result<(), TLogFSError> {
     let config: LogfileIngestConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
-    
+
     info!(
         "Starting logfile ingestion for '{}' (mode: {:?})",
-        config.name, ctx.mode()
+        config.name,
+        ctx.mode()
     );
 
     // Step 1: Enumerate host files
@@ -160,8 +137,6 @@ async fn execute(
     info!("Found {} files in pond", pond_files.len());
 
     // Step 3: Detect changes and ingest
-    let is_strict = config.verification_mode == "strict";
-    
     for host_file in &host_files {
         let filename = host_file
             .path
@@ -175,7 +150,7 @@ async fn execute(
 
         if host_file.is_active {
             // Active file: detect appends
-            process_active_file(&context, &config, host_file, pond_file, is_strict)
+            process_active_file(&context, &config, host_file, pond_file)
                 .await
                 .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
         } else {
@@ -190,42 +165,12 @@ async fn execute(
     Ok(())
 }
 
-/// Parse a glob pattern into (base_dir, relative_pattern)
-/// 
-/// Splits at the first path component containing a wildcard.
-/// E.g., "/var/log/*.log" -> ("/var/log", "*.log")
-///       "/data/**/logs/*.txt" -> ("/data", "**/logs/*.txt")
-fn parse_glob_pattern(pattern: &str) -> (PathBuf, String) {
-    let path = Path::new(pattern);
-    let mut base_components = Vec::new();
-    let mut pattern_components = Vec::new();
-    let mut found_wildcard = false;
-
-    for component in path.components() {
-        let s = component.as_os_str().to_string_lossy();
-        if found_wildcard {
-            pattern_components.push(s.to_string());
-        } else if s.contains('*') || s.contains('?') {
-            found_wildcard = true;
-            pattern_components.push(s.to_string());
-        } else {
-            base_components.push(component);
-        }
-    }
-
-    let base_dir: PathBuf = base_components.iter().collect();
-    let relative_pattern = pattern_components.join("/");
-
-    (base_dir, relative_pattern)
-}
-
 /// Enumerate files matching the configured patterns
 async fn enumerate_host_files(config: &LogfileIngestConfig) -> std::io::Result<Vec<HostFileState>> {
     let mut files = Vec::new();
 
-    // Match archived files
-    let (base_dir, pattern) = parse_glob_pattern(&config.archived_pattern);
-    let matches = tinyfs::glob::collect_host_matches(&pattern, &base_dir)
+    // Match archived files - absolute patterns handled automatically
+    let matches = utilities::glob::collect_host_matches(&config.archived_pattern, ".")
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
@@ -236,16 +181,13 @@ async fn enumerate_host_files(config: &LogfileIngestConfig) -> std::io::Result<V
             files.push(HostFileState {
                 path,
                 size: metadata.len(),
-                blake3: None,
-                bao_outboard: None,
                 is_active: false,
             });
         }
     }
 
-    // Match active file
-    let (base_dir, pattern) = parse_glob_pattern(&config.active_pattern);
-    let matches = tinyfs::glob::collect_host_matches(&pattern, &base_dir)
+    // Match active file - absolute patterns handled automatically
+    let matches = utilities::glob::collect_host_matches(&config.active_pattern, ".")
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
@@ -256,8 +198,6 @@ async fn enumerate_host_files(config: &LogfileIngestConfig) -> std::io::Result<V
             files.push(HostFileState {
                 path,
                 size: metadata.len(),
-                blake3: None,
-                bao_outboard: None,
                 is_active: true,
             });
         }
@@ -277,20 +217,24 @@ async fn read_pond_state(
     let mut pond_files = HashMap::new();
 
     debug!("Reading pond state from: {}", pond_path);
-    
+
     // Extract State from context to get DataFusion SessionContext
-    let state = crate::extract_state(context)
+    let state = crate::extract_state(context).map_err(|e| std::io::Error::other(e.to_string()))?;
+
+    let session_ctx = state
+        .session_context()
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
-    let session_ctx = state.session_context().await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
+
     // Create tinyfs to navigate to pond_path and list directory entries
-    let fs = tinyfs::FS::new(state.clone()).await
+    let fs = tinyfs::FS::new(state.clone())
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let root = fs.root().await
+    let root = fs
+        .root()
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
+
     // Navigate to the pond directory
     let pond_dir = match root.open_dir_path(pond_path).await {
         Ok(wd) => wd,
@@ -303,37 +247,40 @@ async fn read_pond_state(
             return Err(std::io::Error::other(e.to_string()));
         }
     };
-    
+
     // Get directory node_id which becomes part_id for children
-    let dir_node_id = pond_dir.node_path().id();
-    let part_id = tinyfs::PartID::from_hex_string(&dir_node_id.to_string())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    
-    // List directory entries to get filename → node_id mapping
+    let dir_file_id = pond_dir.node_path().id();
+    let part_id = tinyfs::PartID::from_node_id(dir_file_id.node_id());
+
+    // List directory entries to get filename → FileID mapping
     use futures::StreamExt;
-    let mut entries_stream = pond_dir.entries().await
+    let mut entries_stream = pond_dir
+        .entries()
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
-    let mut filename_to_node: HashMap<String, tinyfs::NodeID> = HashMap::new();
+
+    let mut filename_to_file_id: HashMap<String, FileID> = HashMap::new();
     while let Some(entry_result) = entries_stream.next().await {
         let entry = entry_result.map_err(|e| std::io::Error::other(e.to_string()))?;
         // Only include file entries (not directories)
         if entry.entry_type.is_file() {
-            let _ = filename_to_node.insert(entry.name.clone(), entry.child_node_id);
+            // Construct FileID from parent's part_id and child's node_id
+            let file_id = FileID::new_from_ids(part_id, entry.child_node_id);
+            let _ = filename_to_file_id.insert(entry.name.clone(), file_id);
         }
     }
-    
-    if filename_to_node.is_empty() {
+
+    if filename_to_file_id.is_empty() {
         debug!("Pond directory '{}' is empty", pond_path);
         return Ok(pond_files);
     }
-    
-    // Build reverse map: node_id → filename
-    let node_to_filename: HashMap<String, String> = filename_to_node
+
+    // Build reverse map: node_id_string → filename (for looking up from delta_table results)
+    let node_to_filename: HashMap<String, String> = filename_to_file_id
         .iter()
-        .map(|(name, node_id)| (node_id.to_string(), name.clone()))
+        .map(|(name, file_id)| (file_id.node_id().to_string(), name.clone()))
         .collect();
-    
+
     // Query delta_table for files in this directory (part_id = dir_node_id)
     // Get the latest version of each file
     let sql = format!(
@@ -342,86 +289,116 @@ async fn read_pond_state(
          WHERE part_id = '{}' \
            AND file_type IN ('file:physical', 'file:series:physical') \
          ORDER BY node_id, version DESC",
-        dir_node_id
+        dir_file_id.node_id() // Use the directory's node_id as the part_id for children
     );
-    
+
     debug!("Querying pond state: {}", sql);
-    
-    let df = session_ctx.sql(&sql).await
+
+    let df = session_ctx
+        .sql(&sql)
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
-    let batches: Vec<_> = df.collect().await
+
+    let batches: Vec<_> = df
+        .collect()
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
-    // Get the part_id for constructing FileIDs
-    let part_id = tinyfs::PartID::from_hex_string(&dir_node_id.to_string())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    
+
     // Process results, keeping only the latest version per node_id
     let mut seen_nodes = std::collections::HashSet::new();
-    
+
     for batch in &batches {
-        let node_id_col = batch.column_by_name("node_id")
+        let node_id_col = batch
+            .column_by_name("node_id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing node_id column"))?;
-        
-        let version_col = batch.column_by_name("version")
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing node_id column")
+            })?;
+
+        let version_col = batch
+            .column_by_name("version")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing version column"))?;
-        
-        let size_col = batch.column_by_name("size")
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing version column")
+            })?;
+
+        let size_col = batch
+            .column_by_name("size")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-        
-        let blake3_col = batch.column_by_name("blake3")
+
+        let blake3_col = batch
+            .column_by_name("blake3")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        
-        let bao_col = batch.column_by_name("bao_outboard")
+
+        let bao_col = batch
+            .column_by_name("bao_outboard")
             .and_then(|c| c.as_any().downcast_ref::<BinaryArray>());
-        
+
         for row in 0..batch.num_rows() {
             let node_id_str = node_id_col.value(row);
-            
+
             // Skip if we've already seen this node (we ordered DESC, so first is latest)
             if seen_nodes.contains(node_id_str) {
                 continue;
             }
             let _ = seen_nodes.insert(node_id_str.to_string());
-            
+
             let version = version_col.value(row);
             let size = size_col.map(|c| c.value(row) as u64).unwrap_or(0);
-            let blake3 = blake3_col.and_then(|c| {
-                if c.is_null(row) { None } else { Some(c.value(row).to_string()) }
-            });
-            let bao_outboard = bao_col.and_then(|c| {
-                if c.is_null(row) { None } else { Some(c.value(row).to_vec()) }
-            });
-            
-            // Construct FileID from part_id and node_id
-            let node_id = tinyfs::NodeID::from_hex_string(node_id_str)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            let file_id = FileID::new_from_ids(part_id, node_id);
-            
-            // Look up filename from directory entries
+
+            // Require blake3 and bao_outboard - fail fast if missing
+            let blake3 = match blake3_col {
+                Some(col) if !col.is_null(row) => col.value(row).to_string(),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Pond file {} missing required blake3 hash", node_id_str),
+                    ));
+                }
+            };
+
+            let bao_outboard = match bao_col {
+                Some(col) if !col.is_null(row) => col.value(row).to_vec(),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Pond file {} missing required bao_outboard", node_id_str),
+                    ));
+                }
+            };
+
+            // Look up filename and FileID from directory entries
             let filename = match node_to_filename.get(node_id_str) {
                 Some(name) => name.clone(),
                 None => {
                     // Node exists in delta_table but not in directory - orphaned, skip it
-                    debug!("Skipping orphaned node_id {} (not in directory)", node_id_str);
+                    debug!(
+                        "Skipping orphaned node_id {} (not in directory)",
+                        node_id_str
+                    );
                     continue;
                 }
             };
-            
-            let _ = pond_files.insert(filename, PondFileState {
-                node_id: file_id,
-                version,
-                size,
-                blake3,
-                bao_outboard: bao_outboard.clone(),
-                cumulative_size: size, // For series, this would be sum of all versions
-            });
+
+            // Get the FileID we already constructed from directory entries
+            let file_id = *filename_to_file_id
+                .get(&filename)
+                .expect("filename must exist in map since we got it from node_to_filename");
+
+            let _ = pond_files.insert(
+                filename,
+                PondFileState {
+                    node_id: file_id,
+                    version,
+                    size,
+                    blake3,
+                    bao_outboard,
+                    cumulative_size: size, // For series, this would be sum of all versions
+                },
+            );
         }
     }
-    
+
     debug!("Found {} files in pond", pond_files.len());
     Ok(pond_files)
 }
@@ -432,7 +409,6 @@ async fn process_active_file(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
     pond_file: Option<&PondFileState>,
-    is_strict: bool,
 ) -> std::io::Result<()> {
     let filename = host_file
         .path
@@ -454,15 +430,18 @@ async fn process_active_file(
                     "Active file {} grew by {} bytes (was {}, now {})",
                     filename, new_bytes, pond_state.cumulative_size, host_file.size
                 );
-                
-                ingest_append(context, config, host_file, pond_state, is_strict).await?;
+
+                ingest_append(context, config, host_file, pond_state).await?;
             } else if host_file.size < pond_state.cumulative_size {
                 warn!(
                     "Active file {} SHRUNK from {} to {} bytes - unexpected!",
                     filename, pond_state.cumulative_size, host_file.size
                 );
             } else {
-                debug!("Active file {} unchanged ({} bytes)", filename, host_file.size);
+                debug!(
+                    "Active file {} unchanged ({} bytes)",
+                    filename, host_file.size
+                );
             }
         }
     }
@@ -493,8 +472,8 @@ async fn process_archived_file(
             // Verify archived file hasn't changed (should be immutable)
             let host_content = std::fs::read(&host_file.path)?;
             let host_hash = blake3::hash(&host_content);
-            
-            if Some(host_hash.to_hex().to_string()) != pond_state.blake3 {
+
+            if host_hash.to_hex().to_string() != pond_state.blake3 {
                 warn!(
                     "Archived file {} CHANGED - this violates immutability assumption!",
                     filename
@@ -524,12 +503,12 @@ async fn ingest_new_file(
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid filename"))?;
 
     let blake3_hash = blake3::hash(&content);
-    
+
     // Compute bao-tree outboard for verified streaming
     let _ = compute_outboard(&content);
-    
+
     let pond_dest = format!("{}/{}", config.pond_path, filename);
-    
+
     info!(
         "Ingesting new file: {} -> {} ({} bytes, blake3={})",
         host_file.path.display(),
@@ -541,7 +520,7 @@ async fn ingest_new_file(
     // Create SeriesOutboard for tracking cumulative content
     let series_outboard = SeriesOutboard::first_version_inline(&content);
     let bao_bytes = series_outboard.to_bytes();
-    
+
     debug!(
         "Computed bao_outboard: {} bytes (version_outboard={}, cumulative_outboard={})",
         bao_bytes.len(),
@@ -550,35 +529,38 @@ async fn ingest_new_file(
     );
 
     // Extract State from context to access tinyfs
-    let state = crate::extract_state(context)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
+    let state = crate::extract_state(context).map_err(|e| std::io::Error::other(e.to_string()))?;
+
     // Create filesystem from state
-    let fs = tinyfs::FS::new(state.clone()).await
+    let fs = tinyfs::FS::new(state.clone())
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let root = fs.root().await
+    let root = fs
+        .root()
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
-    // Ensure the pond directory exists
-    let _ = root.create_dir_path(&config.pond_path).await
+
+    // Ensure the pond directory exists (create all parent directories as needed)
+    let _ = root
+        .create_dir_all(&config.pond_path)
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
+
     // Write file with bao_outboard using the low-level writer API
     use tokio::io::AsyncWriteExt;
-    let mut writer = root.async_writer_path(&pond_dest).await
+    let mut writer = root
+        .async_writer_path(&pond_dest)
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
+
     // Set bao_outboard before writing content
     writer.set_bao_outboard(bao_bytes);
-    
+
     // Write content and finalize
     writer.write_all(&content).await?;
     writer.shutdown().await?;
-    
-    info!(
-        "Wrote file to pond with bao_outboard: {}",
-        pond_dest
-    );
+
+    info!("Wrote file to pond with bao_outboard: {}", pond_dest);
 
     Ok(())
 }
@@ -589,29 +571,30 @@ async fn ingest_append(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
     pond_state: &PondFileState,
-    is_strict: bool,
 ) -> std::io::Result<()> {
     let filename = host_file
         .path
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid filename"))?;
-    
+
     let pond_dest = format!("{}/{}", config.pond_path, filename);
 
     // Extract State from context to access tinyfs (once for all operations)
-    let state = crate::extract_state(context)
+    let state = crate::extract_state(context).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let fs = tinyfs::FS::new(state.clone())
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let fs = tinyfs::FS::new(state.clone()).await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let root = fs.root().await
+    let root = fs
+        .root()
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     // Read only the new bytes from host file
     let mut file = std::fs::File::open(&host_file.path)?;
     use std::io::{Read, Seek, SeekFrom};
     let _ = file.seek(SeekFrom::Start(pond_state.cumulative_size))?;
-    
+
     let mut new_content = Vec::new();
     let _ = file.read_to_end(&mut new_content)?;
 
@@ -622,70 +605,63 @@ async fn ingest_append(
         pond_state.cumulative_size + new_content.len() as u64
     );
 
-    // Deserialize previous outboard if available
-    let prev_series = if let Some(prev_outboard) = &pond_state.bao_outboard {
-        Some(
-            SeriesOutboard::from_bytes(prev_outboard)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-        )
-    } else {
-        None
-    };
+    // Deserialize previous outboard - required for append verification
+    let prev_series = SeriesOutboard::from_bytes(&pond_state.bao_outboard)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    if is_strict {
-        // Verify prefix hasn't changed
-        if let Some(ref prev) = prev_series {
-            // Read the prefix from host file to verify
-            let mut prefix_file = std::fs::File::open(&host_file.path)?;
-            let mut prefix_content = vec![0u8; pond_state.cumulative_size as usize];
-            prefix_file.read_exact(&mut prefix_content)?;
-            
-            verify_prefix(&prefix_content, &prev.cumulative_outboard, pond_state.cumulative_size)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            
-            info!("Prefix verification passed for {}", filename);
-        }
+    // Always verify prefix hasn't changed before appending
+    {
+        // Read the prefix from host file to verify
+        let mut prefix_file = std::fs::File::open(&host_file.path)?;
+        let mut prefix_content = vec![0u8; pond_state.cumulative_size as usize];
+        prefix_file.read_exact(&mut prefix_content)?;
+
+        verify_prefix(
+            &prefix_content,
+            &prev_series.cumulative_outboard,
+            pond_state.cumulative_size,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        info!("Prefix verification passed for {}", filename);
     }
 
     // Compute new SeriesOutboard incrementally using append_to_outboard
-    let new_series_outboard = if let Some(ref prev) = prev_series {
-        // Read pending bytes from the pond (last cumulative_size % BLOCK_SIZE bytes)
-        use crate::bao_outboard::BLOCK_SIZE;
-        let pending_size = (pond_state.cumulative_size % BLOCK_SIZE as u64) as usize;
-        
-        let mut pending_bytes = vec![0u8; pending_size];
-        
-        if pending_size > 0 {
-            use tokio::io::{AsyncReadExt, AsyncSeekExt};
-            let mut reader = root.async_reader_path(&pond_dest).await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let seek_pos = pond_state.cumulative_size - pending_size as u64;
-            let _ = reader.seek(SeekFrom::Start(seek_pos)).await?;
-            let _ = reader.read_exact(&mut pending_bytes).await?;
-        }
-        
-        // Compute incrementally using only new bytes
-        let (_, new_cumulative_outboard, _) = crate::bao_outboard::append_to_outboard(
-            &prev.cumulative_outboard,
-            pond_state.cumulative_size,
-            &pending_bytes,
-            &new_content,
-        ).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        
-        SeriesOutboard {
-            version_outboard: Vec::new(), // Inline content doesn't need this
-            cumulative_outboard: new_cumulative_outboard,
-            version_size: new_content.len() as u64,
-            cumulative_size: pond_state.cumulative_size + new_content.len() as u64,
-        }
-    } else {
-        // No previous outboard - compute from full content as fallback
-        let full_content = std::fs::read(&host_file.path)?;
-        SeriesOutboard::first_version_inline(&full_content)
+    // Read pending bytes from the pond (last cumulative_size % BLOCK_SIZE bytes)
+    use crate::bao_outboard::BLOCK_SIZE;
+    let pending_size = (pond_state.cumulative_size % BLOCK_SIZE as u64) as usize;
+
+    let mut pending_bytes = vec![0u8; pending_size];
+
+    if pending_size > 0 {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let mut reader = root
+            .async_reader_path(&pond_dest)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let seek_pos = pond_state.cumulative_size - pending_size as u64;
+        let _ = reader.seek(SeekFrom::Start(seek_pos)).await?;
+        let _ = reader.read_exact(&mut pending_bytes).await?;
+    }
+
+    // Compute incrementally using only new bytes
+    let (_, new_cumulative_outboard, _) = crate::bao_outboard::append_to_outboard(
+        &prev_series.cumulative_outboard,
+        pond_state.cumulative_size,
+        &pending_bytes,
+        &new_content,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let new_series_outboard = SeriesOutboard {
+        version_outboard: Vec::new(), // Inline content doesn't need this
+        cumulative_outboard: new_cumulative_outboard,
+        version_size: new_content.len() as u64,
+        cumulative_size: pond_state.cumulative_size + new_content.len() as u64,
     };
-    
+
     let bao_bytes = new_series_outboard.to_bytes();
-    
+
     debug!(
         "Computed new bao_outboard for append: {} bytes",
         bao_bytes.len()
@@ -693,17 +669,19 @@ async fn ingest_append(
 
     // Write new version with updated bao_outboard
     use tokio::io::AsyncWriteExt;
-    let mut writer = root.async_writer_path(&pond_dest).await
+    let mut writer = root
+        .async_writer_path(&pond_dest)
+        .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
+
     // Set bao_outboard before writing content
     writer.set_bao_outboard(bao_bytes);
-    
+
     // Write only the new content (as a new version in the FilePhysicalSeries)
     // The ChainedReader will concatenate all versions when reading
     writer.write_all(&new_content).await?;
     writer.shutdown().await?;
-    
+
     info!(
         "Wrote append to pond with bao_outboard: {} version {}",
         pond_dest,
@@ -744,7 +722,6 @@ mod tests {
             archived_pattern: "/var/log/test-*.json".to_string(),
             active_pattern: "/var/log/test.json".to_string(),
             pond_path: "logs/test".to_string(),
-            verification_mode: "trust".to_string(),
         };
 
         assert!(config.validate().is_ok());
@@ -757,22 +734,453 @@ mod tests {
             archived_pattern: "/var/log/test-*.json".to_string(),
             active_pattern: "/var/log/test.json".to_string(),
             pond_path: "logs/test".to_string(),
-            verification_mode: "trust".to_string(),
         };
 
         assert!(config.validate().is_err());
     }
+}
 
-    #[test]
-    fn test_validate_config_invalid_verification_mode() {
+#[cfg(test)]
+mod test {
+    //! Integration tests for logfile snapshotting and incremental verification
+    //!
+    //! This test simulates a growing logfile and verifies that:
+    //! 1. Initial snapshots capture the full file correctly
+    //! 2. Appends are detected and ingested incrementally
+    //! 3. Incremental checksum verification (bao-tree) works correctly
+    //! 4. Content is correctly copied into the pond
+
+    use super::LogfileIngestConfig;
+    use provider::{ExecutionContext, FactoryContext};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use tokio::fs;
+
+    /// Test fixture for simulating a growing logfile
+    struct LogfileSimulator {
+        _temp_dir: TempDir,
+        log_path: PathBuf,
+        content: Vec<u8>,
+    }
+
+    impl LogfileSimulator {
+        /// Create a new simulator with an empty logfile
+        async fn new() -> std::io::Result<Self> {
+            let temp_dir = TempDir::new()?;
+            let log_path = temp_dir.path().join("app.log");
+
+            // Create empty file
+            fs::write(&log_path, b"").await?;
+
+            Ok(Self {
+                _temp_dir: temp_dir,
+                log_path,
+                content: Vec::new(),
+            })
+        }
+
+        /// Append a line to the logfile
+        async fn append_line(&mut self, line: &str) -> std::io::Result<()> {
+            let mut line_bytes = line.as_bytes().to_vec();
+            line_bytes.push(b'\n');
+
+            self.content.extend_from_slice(&line_bytes);
+
+            // Append to file
+            use tokio::io::AsyncWriteExt;
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&self.log_path)
+                .await?;
+            file.write_all(&line_bytes).await?;
+            file.flush().await?;
+
+            Ok(())
+        }
+
+        /// Get the current size of the logfile
+        fn size(&self) -> u64 {
+            self.content.len() as u64
+        }
+
+        /// Get the full content for verification
+        fn content(&self) -> &[u8] {
+            &self.content
+        }
+
+        /// Get the path to the logfile
+        fn path(&self) -> &PathBuf {
+            &self.log_path
+        }
+
+        /// Compute blake3 hash of current content
+        fn blake3(&self) -> String {
+            blake3::hash(&self.content).to_hex().to_string()
+        }
+    }
+
+    /// Test fixture for pond state
+    struct PondSimulator {
+        _temp_dir: TempDir,
+        store_path: String,
+        /// FileID of the config node (created in new())
+        config_file_id: tinyfs::FileID,
+    }
+
+    impl PondSimulator {
+        /// Create a new pond with a config file for logfile-ingest factory
+        async fn new(config: &LogfileIngestConfig) -> std::io::Result<Self> {
+            let temp_dir = TempDir::new()?;
+            let store_path = temp_dir
+                .path()
+                .join("pond.db")
+                .to_string_lossy()
+                .to_string();
+
+            // Initialize pond persistence using tlogfs OpLogPersistence
+            let mut persistence = crate::persistence::OpLogPersistence::create_test(&store_path)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            // Create config file in the pond and associate with factory
+            let config_file_id = {
+                let tx = persistence
+                    .begin_test()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                let state = tx
+                    .state()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                let fs = tinyfs::FS::new(state)
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let root = fs
+                    .root()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                // Create /etc/system.d/ directory structure
+                _ = root
+                    .create_dir_path("/etc")
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                _ = root
+                    .create_dir_path("/etc/system.d")
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                // Serialize config to YAML
+                let config_yaml = serde_yaml::to_string(&config)
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                // Create config file with factory association
+                let config_node = root
+                    .create_dynamic_path(
+                        "/etc/system.d/logfile-ingest.yaml",
+                        tinyfs::EntryType::FileDynamic,
+                        "logfile-ingest",
+                        config_yaml.as_bytes().to_vec(),
+                    )
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                let file_id = config_node.id();
+
+                tx.commit_test()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                file_id
+            };
+
+            Ok(Self {
+                _temp_dir: temp_dir,
+                store_path,
+                config_file_id,
+            })
+        }
+
+        /// Get store path
+        fn store_path(&self) -> &str {
+            &self.store_path
+        }
+
+        /// Execute the logfile-ingest factory within a transaction
+        /// This properly opens a transaction, creates the context, executes, and commits
+        async fn execute_factory(&self, config: &LogfileIngestConfig) -> std::io::Result<()> {
+            let mut persistence = crate::persistence::OpLogPersistence::open(self.store_path())
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            let tx = persistence
+                .begin_test()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            // Get State from transaction - it implements PersistenceLayer
+            let state = tx
+                .state()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            // Create ProviderContext from State
+            let provider_ctx = state.as_provider_context();
+
+            // Create FactoryContext with real config FileID
+            let factory_ctx = FactoryContext::new(provider_ctx, self.config_file_id);
+
+            // Execute the factory
+            let exec_ctx = ExecutionContext::pond_readwriter(vec![]);
+            crate::factories::logfile_ingest::execute(
+                serde_json::to_value(config).map_err(|e| std::io::Error::other(e.to_string()))?,
+                factory_ctx,
+                exec_ctx,
+            )
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            // Commit the transaction to persist changes
+            tx.commit_test()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            Ok(())
+        }
+
+        /// Verify a file exists in the pond with expected properties
+        async fn verify_file(
+            &self,
+            pond_path: &str,
+            filename: &str,
+            expected_size: u64,
+            expected_blake3: &str,
+            expected_content: &[u8],
+        ) -> std::io::Result<()> {
+            let mut persistence = crate::persistence::OpLogPersistence::open(self.store_path())
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            let tx = persistence
+                .begin_test()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            let root = tx
+                .root()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            let file_path = format!("{}/{}", pond_path, filename);
+            let file_node = root
+                .get_node_path(&file_path)
+                .await
+                .map_err(|e| std::io::Error::other(format!("File not found: {}", e)))?;
+            let file = file_node
+                .as_file()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            // Read content
+            use tokio::io::AsyncReadExt;
+            let mut content = Vec::new();
+            let mut reader = file
+                .async_reader()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let _ = reader.read_to_end(&mut content).await?;
+
+            tx.commit_test()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            // Verify size
+            assert_eq!(
+                content.len() as u64,
+                expected_size,
+                "File size mismatch: expected {}, got {}",
+                expected_size,
+                content.len()
+            );
+
+            // Verify blake3
+            let actual_blake3 = blake3::hash(&content).to_hex().to_string();
+            assert_eq!(actual_blake3, expected_blake3, "Blake3 hash mismatch");
+
+            // Verify byte-by-byte content
+            assert_eq!(
+                content.as_slice(),
+                expected_content,
+                "Content mismatch: bytes differ"
+            );
+
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_single_logfile_growth_and_snapshots() {
+        // Setup: Create a simulated logfile first
+        let mut logfile = LogfileSimulator::new().await.unwrap();
+
+        // Configuration for logfile ingestion (needs logfile path)
         let config = LogfileIngestConfig {
-            name: "test".to_string(),
-            archived_pattern: "/var/log/test-*.json".to_string(),
-            active_pattern: "/var/log/test.json".to_string(),
-            pond_path: "logs/test".to_string(),
-            verification_mode: "invalid".to_string(),
+            name: "test_app".to_string(),
+            active_pattern: logfile.path().to_string_lossy().to_string(),
+            archived_pattern: "".to_string(), // No archived files for this test
+            pond_path: "logs/test_app".to_string(),
         };
 
-        assert!(config.validate().is_err());
+        // Create pond with the config (creates real config file with FileID)
+        let pond = PondSimulator::new(&config).await.unwrap();
+
+        // Step 1: Append initial content to logfile
+        logfile
+            .append_line("2025-01-03 00:00:00 INFO Starting application")
+            .await
+            .unwrap();
+        logfile
+            .append_line("2025-01-03 00:00:01 INFO Initialized database")
+            .await
+            .unwrap();
+        logfile
+            .append_line("2025-01-03 00:00:02 INFO Listening on port 8080")
+            .await
+            .unwrap();
+
+        let size_v1 = logfile.size();
+        let blake3_v1 = logfile.blake3();
+
+        println!("Logfile v1: {} bytes, blake3={}", size_v1, &blake3_v1[..16]);
+
+        // Step 2: First ingestion - should capture entire file as v1
+        pond.execute_factory(&config).await.unwrap();
+
+        // Verify: File should exist in pond with correct content
+        pond.verify_file("logs/test_app", "app.log", size_v1, &blake3_v1, logfile.content())
+            .await
+            .unwrap();
+
+        println!("✓ Initial snapshot successful");
+
+        // Step 3: Append more content to logfile
+        logfile
+            .append_line("2025-01-03 00:01:00 INFO Processed 100 requests")
+            .await
+            .unwrap();
+        logfile
+            .append_line("2025-01-03 00:02:00 INFO Processed 200 requests")
+            .await
+            .unwrap();
+        logfile
+            .append_line("2025-01-03 00:03:00 WARN Connection timeout for client 127.0.0.1")
+            .await
+            .unwrap();
+
+        let size_v2 = logfile.size();
+        let blake3_v2 = logfile.blake3();
+        let appended_bytes = size_v2 - size_v1;
+
+        println!(
+            "Logfile v2: {} bytes (+{} appended), blake3={}",
+            size_v2,
+            appended_bytes,
+            &blake3_v2[..16]
+        );
+
+        // Step 4: Second ingestion - should detect append and create v2
+        pond.execute_factory(&config).await.unwrap();
+
+        // Verify: File should have updated content
+        pond.verify_file("logs/test_app", "app.log", size_v2, &blake3_v2, logfile.content())
+            .await
+            .unwrap();
+
+        println!("✓ Incremental append successful");
+
+        // Step 5: Append even more content
+        logfile
+            .append_line("2025-01-03 00:04:00 INFO Processed 300 requests")
+            .await
+            .unwrap();
+        logfile
+            .append_line("2025-01-03 00:05:00 ERROR Database connection failed")
+            .await
+            .unwrap();
+        logfile
+            .append_line("2025-01-03 00:05:01 INFO Reconnected to database")
+            .await
+            .unwrap();
+        logfile
+            .append_line("2025-01-03 00:06:00 INFO Processed 400 requests")
+            .await
+            .unwrap();
+
+        let size_v3 = logfile.size();
+        let blake3_v3 = logfile.blake3();
+        let appended_bytes_v3 = size_v3 - size_v2;
+
+        println!(
+            "Logfile v3: {} bytes (+{} appended), blake3={}",
+            size_v3,
+            appended_bytes_v3,
+            &blake3_v3[..16]
+        );
+
+        // Step 6: Third ingestion - should detect second append and create v3
+        pond.execute_factory(&config).await.unwrap();
+
+        // Verify: File should have latest content
+        pond.verify_file("logs/test_app", "app.log", size_v3, &blake3_v3, logfile.content())
+            .await
+            .unwrap();
+
+        println!("✓ Second incremental append successful");
+        println!("✓ All snapshots and verifications passed!");
+    }
+
+    #[tokio::test]
+    async fn test_logfile_no_change_detection() {
+        // Test that running ingestion multiple times without file changes is idempotent
+        let mut logfile = LogfileSimulator::new().await.unwrap();
+
+        let config = LogfileIngestConfig {
+            name: "test_app".to_string(),
+            active_pattern: logfile.path().to_string_lossy().to_string(),
+            archived_pattern: "".to_string(),
+            pond_path: "logs/test_app".to_string(),
+        };
+
+        // Create pond with config (gets real FileID)
+        let pond = PondSimulator::new(&config).await.unwrap();
+
+        // Append some content
+        logfile
+            .append_line("2025-01-03 00:00:00 INFO Test line 1")
+            .await
+            .unwrap();
+        logfile
+            .append_line("2025-01-03 00:00:01 INFO Test line 2")
+            .await
+            .unwrap();
+
+        let size = logfile.size();
+        let blake3 = logfile.blake3();
+
+        // First ingestion
+        pond.execute_factory(&config).await.unwrap();
+
+        // Second ingestion - no changes
+        pond.execute_factory(&config).await.unwrap();
+
+        // Third ingestion - still no changes
+        pond.execute_factory(&config).await.unwrap();
+
+        // Verify: File should still have same content
+        pond.verify_file("logs/test_app", "app.log", size, &blake3, logfile.content())
+            .await
+            .unwrap();
+
+        println!("✓ Idempotency test passed - multiple ingestions without changes work correctly");
     }
 }

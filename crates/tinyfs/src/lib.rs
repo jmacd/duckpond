@@ -12,7 +12,6 @@ mod entry_type;
 mod error;
 mod file;
 mod fs;
-pub mod glob;
 pub mod memory;
 mod metadata;
 mod node;
