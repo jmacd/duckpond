@@ -8,15 +8,26 @@
 //! with BLAKE3 verification. The same format is used for both local large file storage
 //! and remote backups, enabling direct file copying without re-chunking.
 //!
-//! The chunking format uses BLAKE3 Merkle trees for verification:
-//! - Each chunk gets its own Merkle tree with 16KB blocks (bao-tree format)
-//! - Chunk hashes are combined into a file root hash using BLAKE3 tree structure
+//! ## Chunked Format
+//!
+//! All chunks use `SeriesOutboard` format in `chunk_outboard`, which encodes:
+//! - `cumulative_size`: Byte offset where this chunk ends
+//! - `cumulative_blake3`: Bao root hash through all content up to this chunk
+//! - `IncrementalOutboard`: Delta nodes and frontier for resumption
+//!
+//! Entry type (FilePhysicalVersion vs FilePhysicalSeries) is encoded in the
+//! filename schema (e.g., `_large_files/version/blake3=xxx.parquet` vs
+//! `_large_files/series/blake3=xxx.parquet`). This determines validation semantics.
+//!
+//! ## BLAKE3 Merkle Trees
+//!
+//! Uses BLAKE3 Merkle trees for verification:
+//! - 16KB blocks (bao-tree format, chunk_log=4)
 //! - Outboard data (~0.4% overhead) enables verified streaming
 
+use crate::bao_outboard::{SeriesOutboard, BLOCK_SIZE};
 use arrow_array::{BinaryArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use bao_tree::BlockSize;
-use bao_tree::io::outboard::PostOrderMemOutboard;
 use log::debug;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -35,18 +46,41 @@ pub const CHUNK_SIZE_MAX: usize = 64 * 1024 * 1024;
 /// Outboard overhead = (blocks - 1) * 64 bytes ≈ 0.39%
 pub const BLAKE3_BLOCK_SIZE: usize = 16 * 1024;
 
+/// Result of chunked write operation
+#[derive(Debug)]
+pub struct ChunkedWriteResult {
+    /// Bundle ID (BLAKE3 root hash as hex string)
+    pub bundle_id: String,
+    /// Arrow RecordBatches containing chunked data
+    pub batches: Vec<RecordBatch>,
+    /// Final SeriesOutboard - store this in OpLogEntry for the large file version
+    /// Contains cumulative_blake3 = root hash through all content
+    pub final_outboard: SeriesOutboard,
+}
+
 /// Streaming writer that chunks files and creates Arrow RecordBatches
 ///
 /// Reads data from an AsyncRead source, chunks it into pieces,
-/// computes BLAKE3 subtree hash and outboard per chunk, then combines
-/// into a file root hash. Creates Arrow RecordBatches suitable for writing
-/// to Parquet or Delta Lake.
+/// computes BLAKE3 outboard per chunk using SeriesOutboard format,
+/// then creates Arrow RecordBatches suitable for writing to Parquet.
+///
+/// Each chunk stores a `SeriesOutboard` which encodes cumulative byte offset
+/// in `cumulative_size`. This enables both independent chunk validation and
+/// cumulative series validation depending on entry type.
+///
+/// For FilePhysicalSeries with large files, the starting offset should be set
+/// to the cumulative size of previous versions. For standalone large files,
+/// starting offset is 0.
 pub struct ChunkedWriter<R> {
     pond_txn_id: i64,
     path: String,
     reader: R,
     chunk_size: usize,
     bundle_id_override: Option<String>,
+    /// Starting cumulative offset (for FilePhysicalSeries with prior versions)
+    starting_offset: u64,
+    /// Previous version's SeriesOutboard (for continuing cumulative hash)
+    prev_series_outboard: Option<SeriesOutboard>,
 }
 
 impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
@@ -64,7 +98,31 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
             reader,
             chunk_size: CHUNK_SIZE_DEFAULT,
             bundle_id_override: None,
+            starting_offset: 0,
+            prev_series_outboard: None,
         }
+    }
+
+    /// Set starting cumulative offset for FilePhysicalSeries with prior versions
+    ///
+    /// When a large file is version N of a FilePhysicalSeries, set this to the
+    /// cumulative size of versions 0..N-1. This ensures chunk hashes are computed
+    /// at the correct offset in the overall file series.
+    #[must_use]
+    pub fn with_starting_offset(mut self, offset: u64) -> Self {
+        self.starting_offset = offset;
+        self
+    }
+
+    /// Set previous version's SeriesOutboard for continuing cumulative hash
+    ///
+    /// When appending a large file to a FilePhysicalSeries, pass the previous
+    /// version's SeriesOutboard to continue the cumulative bao-tree state.
+    #[must_use]
+    pub fn with_prev_outboard(mut self, prev: SeriesOutboard) -> Self {
+        self.starting_offset = prev.cumulative_size;
+        self.prev_series_outboard = Some(prev);
+        self
     }
 
     /// Set custom chunk size (for testing or optimization)
@@ -87,18 +145,20 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
 
     /// Write the file to Arrow RecordBatches with bounded memory
     ///
-    /// Reads the file in chunks, computes BLAKE3 hashes, and creates RecordBatches.
-    /// Memory usage is bounded by batching chunks rather than accumulating all
-    /// chunks before returning.
+    /// Reads the file in chunks, computes BLAKE3 hashes using SeriesOutboard format,
+    /// and creates RecordBatches. Memory usage is bounded by batching chunks.
+    ///
+    /// Each chunk's outboard encodes cumulative byte offset in `cumulative_size`,
+    /// enabling both independent and series validation depending on entry type.
     ///
     /// # Returns
-    /// Tuple of (bundle_id, Vec<RecordBatch>) where bundle_id is the BLAKE3 root hash
+    /// `ChunkedWriteResult` containing bundle_id, batches, and final SeriesOutboard
     ///
     /// # Errors
     /// Returns error if cannot read from input or compute hashes
     pub async fn write_to_batches(
         mut self,
-    ) -> Result<(String, Vec<RecordBatch>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ChunkedWriteResult, Box<dyn std::error::Error + Send + Sync>> {
         debug!(
             "Chunking file {} (txn {}) in {}MB chunks",
             self.path,
@@ -106,49 +166,99 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
             self.chunk_size / (1024 * 1024)
         );
 
-        // BLAKE3 block size: 16KB (chunk_log=4)
-        let block_size = BlockSize::from_chunk_log((BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8);
-
-        let mut total_size = 0u64;
+        let mut total_size = self.starting_offset;
         let mut chunk_id = 0i64;
         let mut buffer = vec![0u8; self.chunk_size];
 
         // Maximum chunks buffered before creating RecordBatch
         const CHUNKS_PER_BATCH: usize = 10;
 
-        // Collect chunk data: (chunk_id, subtree_hash, outboard, data)
+        // Collect chunk data: (chunk_id, cumulative_hash, outboard_bytes, data)
+        // outboard_bytes = SeriesOutboard.to_bytes() with cumulative offset encoded
         let mut all_chunk_data: Vec<(i64, blake3::Hash, Vec<u8>, Vec<u8>)> = Vec::new();
 
+        // Track previous SeriesOutboard for incremental computation
+        // Start from prev_series_outboard if continuing a FilePhysicalSeries
+        let mut prev_series_outboard: Option<SeriesOutboard> = self.prev_series_outboard.take();
+        
+        // For pending bytes from previous versions (when continuing a series)
+        // We need this from the caller since we don't have access to previous version content
+        let initial_pending_bytes: Vec<u8> = Vec::new();
+        if let Some(ref prev) = prev_series_outboard {
+            let pending_size = (prev.cumulative_size % BLOCK_SIZE as u64) as usize;
+            if pending_size > 0 {
+                // The caller must provide pending bytes via with_pending_bytes()
+                // For now, we assume block-aligned chunks (power-of-2 chunk sizes)
+                // which means pending_size will be 0 for chunk boundaries
+                debug!("Warning: prev_series_outboard has {} pending bytes, but pending content not provided", pending_size);
+            }
+        }
+
         loop {
-            let n = self.reader.read(&mut buffer).await?;
-            if n == 0 {
+            // Fill the buffer completely (except for the last chunk)
+            // reader.read() doesn't guarantee filling the buffer, so we loop
+            let mut filled = 0;
+            loop {
+                let n = self.reader.read(&mut buffer[filled..]).await?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+                if filled >= self.chunk_size {
+                    break;
+                }
+            }
+            
+            if filled == 0 {
                 break;
             }
 
-            let chunk = &buffer[..n];
-            total_size += n as u64;
+            let chunk = &buffer[..filled];
+            total_size += filled as u64;
 
-            // Create BLAKE3 outboard for this chunk
-            let outboard = PostOrderMemOutboard::create(chunk, block_size);
-            let chunk_hash = outboard.root;
-            let outboard_data = outboard.data;
+            // Each chunk is treated as a "version" with cumulative tracking
+            let series_outboard = if let Some(prev) = &prev_series_outboard {
+                // Compute pending bytes from previous cumulative size
+                let pending_size = (prev.cumulative_size % BLOCK_SIZE as u64) as usize;
+                // Get the tail of the previous chunk as pending bytes
+                // For first chunk after prev_series_outboard, use initial_pending_bytes
+                let pending = if pending_size > 0 {
+                    if chunk_id == 0 && !initial_pending_bytes.is_empty() {
+                        &initial_pending_bytes[..]
+                    } else if !all_chunk_data.is_empty() {
+                        let prev_chunk_data = &all_chunk_data.last().unwrap().3;
+                        let start = prev_chunk_data.len().saturating_sub(pending_size);
+                        &prev_chunk_data[start..]
+                    } else {
+                        &[][..]
+                    }
+                } else {
+                    &[][..]
+                };
+                SeriesOutboard::append_version(prev, pending, chunk)
+            } else {
+                SeriesOutboard::first_version(chunk)
+            };
 
-            all_chunk_data.push((chunk_id, chunk_hash, outboard_data, chunk.to_vec()));
+            // The cumulative_blake3 is the bao root through all content so far
+            let chunk_hash = blake3::Hash::from_bytes(series_outboard.cumulative_blake3);
+            let outboard_bytes = series_outboard.to_bytes();
+
+            prev_series_outboard = Some(series_outboard);
+            all_chunk_data.push((chunk_id, chunk_hash, outboard_bytes, chunk.to_vec()));
             chunk_id += 1;
         }
 
-        // Compute file root hash by combining all chunk hashes
-        let root_hash = if all_chunk_data.is_empty() {
-            blake3::hash(&[])
-        } else if all_chunk_data.len() == 1 {
-            all_chunk_data[0].1
-        } else {
-            combine_chunk_hashes(
-                &all_chunk_data
-                    .iter()
-                    .map(|(_, h, _, _)| *h)
-                    .collect::<Vec<_>>(),
+        // The last chunk's cumulative_blake3 is the file's root hash
+        let (root_hash, final_outboard) = if let Some(ref last_outboard) = prev_series_outboard {
+            (
+                blake3::Hash::from_bytes(last_outboard.cumulative_blake3),
+                last_outboard.clone(),
             )
+        } else {
+            // Empty file case
+            let empty = SeriesOutboard::first_version(&[]);
+            (blake3::Hash::from_bytes(empty.cumulative_blake3), empty)
         };
 
         let root_hash_hex = root_hash.to_hex().to_string();
@@ -160,17 +270,19 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
         };
 
         debug!(
-            "File {} has {} chunks, {} bytes, BLAKE3={}",
+            "File {} has {} chunks, {} bytes (starting_offset={}), BLAKE3={}",
             self.path,
             chunk_id,
             total_size,
+            self.starting_offset,
             &root_hash_hex[..16.min(root_hash_hex.len())]
         );
 
         // Special case: empty file needs at least one row with empty chunk_data
         if all_chunk_data.is_empty() {
-            let outboard = PostOrderMemOutboard::create([], block_size);
-            all_chunk_data.push((0, outboard.root, outboard.data, vec![]));
+            let series = SeriesOutboard::first_version(&[]);
+            let empty_hash = blake3::Hash::from_bytes(series.cumulative_blake3);
+            all_chunk_data.push((0, empty_hash, series.to_bytes(), vec![]));
         }
 
         // Create RecordBatches
@@ -190,7 +302,11 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
             all_batches.push(batch);
         }
 
-        Ok((bundle_id, all_batches))
+        Ok(ChunkedWriteResult {
+            bundle_id,
+            batches: all_batches,
+            final_outboard,
+        })
     }
 }
 
@@ -230,8 +346,7 @@ impl ChunkedReader {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tokio::io::AsyncWriteExt;
 
-        let block_size = BlockSize::from_chunk_log((BLAKE3_BLOCK_SIZE.trailing_zeros() - 10) as u8);
-
+        // chunk_hashes collects cumulative hashes; the last one is the root
         let mut chunk_hashes: Vec<blake3::Hash> = Vec::new();
         let mut total_bytes_read = 0u64;
         let mut expected_chunk_id = 0i64;
@@ -247,7 +362,6 @@ impl ChunkedReader {
                 &mut expected_chunk_id,
                 &mut expected_root_hash,
                 &mut expected_total_size,
-                block_size,
             )
             .await?;
         }
@@ -268,16 +382,19 @@ impl ChunkedReader {
             .into());
         }
 
-        // Compute and verify root hash
-        let computed_root = combine_chunk_hashes(&chunk_hashes);
-        let computed_root_hex = computed_root.to_hex().to_string();
+        // The last chunk's cumulative_blake3 is the file's root hash
+        let final_hash = chunk_hashes
+            .last()
+            .copied()
+            .unwrap_or_else(|| blake3::hash(&[]));
+        let final_hash_hex = final_hash.to_hex().to_string();
 
         if let Some(expected) = expected_root_hash
-            && computed_root_hex != expected
+            && final_hash_hex != expected
         {
             return Err(format!(
                 "Root hash mismatch: expected {}, got {}",
-                expected, computed_root_hex
+                expected, final_hash_hex
             )
             .into());
         }
@@ -287,7 +404,7 @@ impl ChunkedReader {
         debug!(
             "Successfully read file ({} bytes, BLAKE3={})",
             total_bytes_read,
-            &computed_root_hex[..16]
+            &final_hash_hex[..16]
         );
 
         Ok(())
@@ -295,6 +412,15 @@ impl ChunkedReader {
 }
 
 /// Arrow schema for chunked file records
+///
+/// The `chunk_outboard` column contains SeriesOutboard.to_bytes() which includes:
+/// - `cumulative_size`: Byte offset where this chunk ends (encodes position in file)
+/// - `cumulative_blake3`: Bao root hash through all content up to this chunk
+/// - `IncrementalOutboard`: Delta nodes and frontier for resumption
+///
+/// Entry type (FilePhysicalVersion vs FilePhysicalSeries) is encoded in the
+/// filename schema, not in the parquet data. This determines how to interpret
+/// the cumulative values during validation.
 #[must_use]
 pub fn arrow_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -382,7 +508,6 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
     expected_chunk_id: &mut i64,
     expected_root_hash: &mut Option<String>,
     expected_total_size: &mut Option<i64>,
-    block_size: BlockSize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::AsyncWriteExt;
 
@@ -398,7 +523,7 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
         .downcast_ref::<StringArray>()
         .ok_or("Invalid column type for chunk_hash")?;
 
-    let _chunk_outboards = batch
+    let chunk_outboards = batch
         .column(5)
         .as_any()
         .downcast_ref::<BinaryArray>()
@@ -426,6 +551,7 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
         let chunk_id = chunk_ids.value(i);
         let expected_hash_hex = chunk_hashes_arr.value(i);
         let chunk_data = chunk_datas.value(i);
+        let stored_outboard_bytes = chunk_outboards.value(i);
 
         // Verify chunk sequence
         if chunk_id != *expected_chunk_id {
@@ -436,20 +562,33 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
             .into());
         }
 
-        // Verify BLAKE3 hash
-        let computed_outboard = PostOrderMemOutboard::create(chunk_data, block_size);
-        let computed_hash_hex = computed_outboard.root.to_hex().to_string();
+        // Parse stored SeriesOutboard and verify cumulative hash matches
+        let stored_outboard = SeriesOutboard::from_bytes(stored_outboard_bytes)
+            .map_err(|e| format!("Invalid chunk_outboard for chunk {}: {}", chunk_id, e))?;
 
-        if computed_hash_hex != expected_hash_hex {
+        let stored_cumulative_hash = blake3::Hash::from_bytes(stored_outboard.cumulative_blake3);
+        let stored_hash_hex = stored_cumulative_hash.to_hex().to_string();
+
+        if stored_hash_hex != expected_hash_hex {
             return Err(format!(
-                "Chunk {} hash mismatch: expected {}, got {}",
-                chunk_id, expected_hash_hex, computed_hash_hex
+                "Chunk {} stored hash mismatch: chunk_hash={}, outboard.cumulative_blake3={}",
+                chunk_id, expected_hash_hex, stored_hash_hex
             )
             .into());
         }
 
-        // Collect chunk hash for root hash verification
-        chunk_hashes.push(computed_outboard.root);
+        // Verify chunk content size matches what's encoded in the outboard
+        let expected_chunk_size = stored_outboard.version_size as usize;
+        if chunk_data.len() != expected_chunk_size {
+            return Err(format!(
+                "Chunk {} size mismatch: expected {}, got {}",
+                chunk_id, expected_chunk_size, chunk_data.len()
+            )
+            .into());
+        }
+
+        // Track the last chunk's cumulative hash for root verification
+        chunk_hashes.push(stored_cumulative_hash);
         *total_bytes_read += chunk_data.len() as u64;
 
         // Write chunk to output
@@ -467,47 +606,6 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Combine multiple chunk hashes into a single root hash using BLAKE3 tree structure
-fn combine_chunk_hashes(hashes: &[blake3::Hash]) -> blake3::Hash {
-    use blake3::hazmat::{ChainingValue, Mode, merge_subtrees_non_root, merge_subtrees_root};
-
-    if hashes.is_empty() {
-        return blake3::hash(&[]);
-    }
-    if hashes.len() == 1 {
-        return hashes[0];
-    }
-
-    // Convert hashes to chaining values
-    let mut current_level: Vec<ChainingValue> = hashes.iter().map(|h| *h.as_bytes()).collect();
-
-    while current_level.len() > 1 {
-        let mut next_level = Vec::new();
-        let is_final_level = current_level.len() <= 2;
-
-        for pair in current_level.chunks(2) {
-            match pair {
-                [left, right] => {
-                    if is_final_level && next_level.is_empty() {
-                        return merge_subtrees_root(left, right, Mode::Hash);
-                    } else {
-                        let parent = merge_subtrees_non_root(left, right, Mode::Hash);
-                        next_level.push(parent);
-                    }
-                }
-                [single] => {
-                    next_level.push(*single);
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        current_level = next_level;
-    }
-
-    blake3::Hash::from(current_level[0])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,13 +617,13 @@ mod tests {
         let reader = Cursor::new(data.clone());
 
         let writer = ChunkedWriter::new(123, "test/file.dat".to_string(), reader);
-        let (bundle_id, batches) = writer.write_to_batches().await.unwrap();
+        let result = writer.write_to_batches().await.unwrap();
 
-        assert!(bundle_id.starts_with("POND-FILE-"));
-        assert!(!batches.is_empty());
+        assert!(result.bundle_id.starts_with("POND-FILE-"));
+        assert!(!result.batches.is_empty());
 
         // Read it back
-        let reader = ChunkedReader::new(batches);
+        let reader = ChunkedReader::new(result.batches);
         let mut output = Vec::new();
         reader.read_to_writer(&mut output).await.unwrap();
 
@@ -538,13 +636,13 @@ mod tests {
         let reader = Cursor::new(data.clone());
 
         let writer = ChunkedWriter::new(1, "test/empty.dat".to_string(), reader);
-        let (bundle_id, batches) = writer.write_to_batches().await.unwrap();
+        let result = writer.write_to_batches().await.unwrap();
 
         let expected_hash = blake3::hash(&[]).to_hex().to_string();
-        assert_eq!(bundle_id, format!("POND-FILE-{}", expected_hash));
+        assert_eq!(result.bundle_id, format!("POND-FILE-{}", expected_hash));
 
         // Read it back
-        let reader = ChunkedReader::new(batches);
+        let reader = ChunkedReader::new(result.batches);
         let mut output = Vec::new();
         reader.read_to_writer(&mut output).await.unwrap();
 

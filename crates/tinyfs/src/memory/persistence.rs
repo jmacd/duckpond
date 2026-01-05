@@ -23,6 +23,8 @@ struct MemoryFileVersion {
     extended_metadata: Option<HashMap<String, String>>,
     /// Bao-tree outboard data for verified streaming (optional)
     bao_outboard: Option<Vec<u8>>,
+    /// Blake3 hash computed at write time (for integrity verification)
+    blake3: String,
 }
 
 /// In-memory persistence layer for testing and derived file computation
@@ -248,6 +250,43 @@ impl MemoryPersistence {
         };
         Ok(next_version)
     }
+
+    /// Corrupt file content at a specific byte offset (for testing)
+    ///
+    /// This mutates the stored content to simulate corruption for validation testing.
+    /// Returns an error if the file version doesn't exist or the offset is out of bounds.
+    pub async fn corrupt_file_content(
+        &self,
+        id: FileID,
+        version: u64,
+        byte_offset: usize,
+        new_value: u8,
+    ) -> Result<()> {
+        let mut state = self.state.lock().await;
+        
+        let versions = state
+            .file_versions
+            .get_mut(&id)
+            .ok_or_else(|| Error::not_found(format!("File {id} not found")))?;
+        
+        let file_version = versions
+            .iter_mut()
+            .find(|v| v.version == version)
+            .ok_or_else(|| {
+                Error::not_found(format!("Version {version} not found for file {id}"))
+            })?;
+        
+        if byte_offset >= file_version.content.len() {
+            return Err(Error::Other(format!(
+                "Byte offset {} out of bounds (content size: {})",
+                byte_offset,
+                file_version.content.len()
+            )));
+        }
+        
+        file_version.content[byte_offset] = new_value;
+        Ok(())
+    }
 }
 
 impl State {
@@ -276,17 +315,12 @@ impl State {
     }
 
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
-        // Look up node (node should always exist if created through proper tinyfs APIs)
-        let node = self.nodes.get(&id).ok_or_else(|| {
-            Error::NotFound(std::path::PathBuf::from(format!("Node {id} not found")))
-        })?;
-
         // Get metadata from stored versions if they exist (for files with version history)
         if let Some(versions) = self.file_versions.get(&id) {
             if let Some(latest) = versions.last() {
-                // Compute blake3 hash of content
-                let blake3_hash = blake3::hash(&latest.content);
-                let blake3 = Some(blake3_hash.to_hex().to_string());
+                // Use stored blake3 hash (computed at write time)
+                // This is critical for corruption detection - must NOT recompute from content
+                let blake3 = Some(latest.blake3.clone());
 
                 return Ok(NodeMetadata {
                     version: latest.version,
@@ -298,6 +332,11 @@ impl State {
                 });
             }
         }
+
+        // Look up node (for nodes without version history, or as fallback)
+        let node = self.nodes.get(&id).ok_or_else(|| {
+            Error::NotFound(std::path::PathBuf::from(format!("Node {id} not found")))
+        })?;
 
         // Fall back to node's own metadata (for newly created files without versions yet)
         match &node.node_type {
@@ -336,15 +375,47 @@ impl State {
         content: Vec<u8>,
         bao_outboard: Vec<u8>,
     ) -> Result<()> {
-        self.store_file_version_full(
+        // For series types, extract cumulative_blake3 from SeriesOutboard
+        // For version types, extract root hash from VersionOutboard
+        // This avoids hashing the content twice
+        let blake3_from_outboard = Self::extract_blake3_from_outboard(&bao_outboard, id.entry_type());
+        
+        self.store_file_version_full_with_blake3(
             id,
             version,
             content,
             id.entry_type(),
             None,
             Some(bao_outboard),
+            blake3_from_outboard,
         )
         .await
+    }
+
+    /// Extract blake3 hash from bao_outboard based on entry type
+    fn extract_blake3_from_outboard(bao_outboard: &[u8], entry_type: EntryType) -> Option<String> {
+        match entry_type {
+            EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
+                // For series types, use cumulative_blake3 from SeriesOutboard
+                utilities::bao_outboard::SeriesOutboard::from_bytes(bao_outboard)
+                    .ok()
+                    .map(|so| blake3::Hash::from(so.cumulative_blake3).to_hex().to_string())
+            }
+            EntryType::FilePhysicalVersion => {
+                // For version types, compute root from outboard
+                utilities::bao_outboard::VersionOutboard::from_bytes(bao_outboard)
+                    .ok()
+                    .map(|vo| {
+                        // The VersionOutboard stores the outboard, we need to compute root
+                        // For now, fall back to None (will compute from content)
+                        // TODO: Store root hash in VersionOutboard
+                        let _ = vo;
+                        None
+                    })
+                    .flatten()
+            }
+            _ => None,
+        }
     }
 
     async fn store_file_version_full(
@@ -356,6 +427,34 @@ impl State {
         extended_metadata: Option<HashMap<String, String>>,
         bao_outboard: Option<Vec<u8>>,
     ) -> Result<()> {
+        self.store_file_version_full_with_blake3(
+            id,
+            version,
+            content,
+            entry_type,
+            extended_metadata,
+            bao_outboard,
+            None, // Compute from content
+        )
+        .await
+    }
+
+    async fn store_file_version_full_with_blake3(
+        &mut self,
+        id: FileID,
+        version: u64,
+        content: Vec<u8>,
+        entry_type: EntryType,
+        extended_metadata: Option<HashMap<String, String>>,
+        bao_outboard: Option<Vec<u8>>,
+        precomputed_blake3: Option<String>,
+    ) -> Result<()> {
+        // Use precomputed blake3 if provided (for series types from SeriesOutboard)
+        // Otherwise compute fresh from content (for version types)
+        let blake3 = precomputed_blake3.unwrap_or_else(|| {
+            blake3::hash(&content).to_hex().to_string()
+        });
+        
         let file_version = MemoryFileVersion {
             version,
             timestamp: chrono::Utc::now().timestamp_millis(),
@@ -363,6 +462,7 @@ impl State {
             entry_type,
             extended_metadata,
             bao_outboard,
+            blake3,
         };
 
         self.file_versions.entry(id).or_default().push(file_version);
@@ -378,7 +478,7 @@ impl State {
                     version: v.version,
                     timestamp: v.timestamp,
                     size: v.content.len() as u64,
-                    blake3: None,
+                    blake3: Some(v.blake3.clone()),
                     entry_type: v.entry_type,
                     extended_metadata: v.extended_metadata.clone(),
                 })
@@ -452,6 +552,10 @@ impl State {
             .expect("positive")
             .as_micros() as i64;
 
+        // Compute blake3 at write time for integrity verification
+        let blake3_hash = blake3::hash(&config_content);
+        let blake3 = blake3_hash.to_hex().to_string();
+
         let version = MemoryFileVersion {
             version: 1,
             timestamp,
@@ -459,6 +563,7 @@ impl State {
             entry_type: id.entry_type(),
             extended_metadata: Some(extended_metadata),
             bao_outboard: None,
+            blake3,
         };
 
         self.file_versions.entry(id).or_default().push(version);
@@ -492,6 +597,10 @@ impl State {
                 .expect("system time is after UNIX_EPOCH")
                 .as_micros() as i64;
 
+            // Compute blake3 at write time for integrity verification
+            let blake3_hash = blake3::hash(&config_content);
+            let blake3 = blake3_hash.to_hex().to_string();
+
             MemoryFileVersion {
                 version: next_version,
                 timestamp,
@@ -499,6 +608,7 @@ impl State {
                 entry_type: id.entry_type(),
                 extended_metadata: Some(extended_metadata),
                 bao_outboard: None,
+                blake3,
             }
         } else {
             return Err(Error::Other(format!("Dynamic node not found: {}", id)));

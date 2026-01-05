@@ -650,7 +650,6 @@ mod tests {
     /// Helper to create a parquet file in both FS and persistence
     async fn create_parquet_file(
         fs: &FS,
-        persistence: &MemoryPersistence,
         path: &str,
         parquet_data: Vec<u8>,
         entry_type: EntryType,
@@ -673,7 +672,6 @@ mod tests {
     /// Helper to create a text file (e.g., CSV) in both FS and persistence
     async fn create_text_file(
         fs: &FS,
-        persistence: &MemoryPersistence,
         path: &str,
         content: Vec<u8>,
         entry_type: EntryType,
@@ -741,11 +739,6 @@ mod tests {
     #[tokio::test]
     async fn test_timeseries_join_factory_integration() {
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create source1.series with timestamps [1, 2, 3] and temp_a column
         let schema1 = Arc::new(Schema::new(vec![
@@ -775,7 +768,6 @@ mod tests {
 
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/source1.series",
             parquet_buffer1,
             EntryType::TablePhysicalSeries,
@@ -811,7 +803,6 @@ mod tests {
 
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/source2.series",
             parquet_buffer2,
             EntryType::TablePhysicalSeries,
@@ -871,11 +862,6 @@ mod tests {
     #[tokio::test]
     async fn test_timeseries_join_with_scope_prefixes() {
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create source1.series with temp column
         let schema1 = Arc::new(Schema::new(vec![
@@ -902,7 +888,6 @@ mod tests {
         }
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/source1.series",
             parquet_buffer1,
             EntryType::TablePhysicalSeries,
@@ -935,7 +920,6 @@ mod tests {
         }
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/source2.series",
             parquet_buffer2,
             EntryType::TablePhysicalSeries,
@@ -1015,11 +999,6 @@ mod tests {
         // Test the Silver case: two Vulink devices with same scope but non-overlapping time ranges
         // This should use UNION BY NAME and produce proper column names with scope prefix
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create vulink1.series with temp and conductivity columns (timestamps 1-3)
         let schema1 = Arc::new(Schema::new(vec![
@@ -1048,7 +1027,6 @@ mod tests {
         }
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/vulink1.series",
             parquet_buffer1,
             EntryType::TablePhysicalSeries,
@@ -1083,7 +1061,6 @@ mod tests {
         }
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/vulink2.series",
             parquet_buffer2,
             EntryType::TablePhysicalSeries,
@@ -1116,7 +1093,6 @@ mod tests {
         }
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/at500.series",
             parquet_buffer3,
             EntryType::TablePhysicalSeries,
@@ -1216,11 +1192,6 @@ mod tests {
         // Test CSV format provider with multiple files having different schemas
         // This validates the UNION BY NAME logic in sql_derived.rs
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create sensor1.csv with timestamp, temp, humidity
         let csv1_content = "timestamp,temp,humidity\n\
@@ -1230,7 +1201,6 @@ mod tests {
 
         _ = create_text_file(
             &fs,
-            persistence,
             "/sensor1.csv",
             csv1_content.as_bytes().to_vec(),
             EntryType::FilePhysicalVersion,
@@ -1246,7 +1216,6 @@ mod tests {
 
         _ = create_text_file(
             &fs,
-            persistence,
             "/sensor2.csv",
             csv2_content.as_bytes().to_vec(),
             EntryType::FilePhysicalVersion,

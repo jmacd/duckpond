@@ -408,13 +408,62 @@ impl AsyncWrite for OpLogFileWriter {
                                 let prev_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
                                     .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize previous bao_outboard: {}", e)))?;
 
+                                // Calculate pending bytes needed from previous content
+                                // pending_size = tail of cumulative content that doesn't form a complete block
+                                let pending_size = (prev_outboard.cumulative_size % utilities::bao_outboard::BLOCK_SIZE as u64) as usize;
+                                
+                                // Efficiently read only the pending bytes we need
+                                // Read versions from newest to oldest until we have enough bytes
+                                let pending_bytes = if pending_size > 0 {
+                                    let versions = state.list_file_versions(file_id).await
+                                        .map_err(|e| tinyfs::Error::Other(format!("Failed to list versions: {}", e)))?;
+                                    
+                                    // Collect bytes from tail, reading only necessary versions
+                                    let mut tail_bytes = Vec::with_capacity(pending_size);
+                                    
+                                    // Iterate versions in reverse (newest first)
+                                    for v in versions.iter().rev() {
+                                        if tail_bytes.len() >= pending_size {
+                                            break;
+                                        }
+                                        
+                                        let bytes_still_needed = pending_size - tail_bytes.len();
+                                        
+                                        let version_content = state.read_file_version(file_id, v.version).await
+                                            .unwrap_or_default();
+                                        
+                                        if version_content.len() >= bytes_still_needed {
+                                            // This version has enough bytes - take only the tail we need
+                                            let start = version_content.len().saturating_sub(bytes_still_needed);
+                                            // Prepend to tail_bytes (since we're going backwards)
+                                            let mut new_tail = version_content[start..].to_vec();
+                                            new_tail.append(&mut tail_bytes);
+                                            tail_bytes = new_tail;
+                                        } else {
+                                            // Need entire version - prepend it
+                                            let mut new_tail = version_content;
+                                            new_tail.append(&mut tail_bytes);
+                                            tail_bytes = new_tail;
+                                        }
+                                    }
+                                    
+                                    // Trim to exact pending size (safety check)
+                                    if tail_bytes.len() > pending_size {
+                                        tail_bytes = tail_bytes[tail_bytes.len() - pending_size..].to_vec();
+                                    }
+                                    
+                                    tail_bytes
+                                } else {
+                                    Vec::new()
+                                };
+
                                 // Append new version
                                 if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
                                     // Large file
-                                    utilities::bao_outboard::SeriesOutboard::append_version_large(&prev_outboard, &content)
+                                    utilities::bao_outboard::SeriesOutboard::append_version_large(&prev_outboard, &pending_bytes, &content)
                                 } else {
                                     // Inline file
-                                    utilities::bao_outboard::SeriesOutboard::append_version_inline(&prev_outboard, &content)
+                                    utilities::bao_outboard::SeriesOutboard::append_version_inline(&prev_outboard, &pending_bytes, &content)
                                 }
                             } else {
                                 // First version

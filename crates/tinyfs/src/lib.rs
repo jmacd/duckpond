@@ -4,6 +4,7 @@
 
 pub mod arrow;
 pub mod async_helpers;
+pub mod bao_validating_reader;
 pub mod caching_persistence;
 pub mod chained_reader;
 pub mod context;

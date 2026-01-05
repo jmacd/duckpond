@@ -1092,7 +1092,6 @@ mod tests {
     /// Helper to create a parquet file in both FS and persistence
     async fn create_parquet_file(
         fs: &FS,
-        persistence: &MemoryPersistence,
         path: &str,
         parquet_data: Vec<u8>,
         entry_type: EntryType,
@@ -1125,14 +1124,6 @@ mod tests {
         let _ = env_logger::try_init();
 
         let (fs, provider_context) = create_test_environment().await;
-
-        // Get persistence for create_parquet_file helper
-        // We know it's MemoryPersistence from create_test_environment
-        let persistence = Arc::clone(&provider_context.persistence);
-        let persistence = persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Should be MemoryPersistence");
 
         // Create source series files with 3 days of hourly data
         {
@@ -1196,7 +1187,7 @@ mod tests {
 
                 let _ = create_parquet_file(
                     &fs,
-                    persistence,
+
                     &filename,
                     buf,
                     EntryType::TablePhysicalSeries,

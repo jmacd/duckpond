@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+mod large_file_corruption;
+
 use crate::persistence::OpLogPersistence;
 use arrow_array::record_batch;
 use log::{debug, info};

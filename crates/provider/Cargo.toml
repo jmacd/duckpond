@@ -45,6 +45,8 @@ tera.workspace = true
 regex.workspace = true
 tl.workspace = true
 opentelemetry-proto.workspace = true
+utilities.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

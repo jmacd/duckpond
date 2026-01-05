@@ -48,24 +48,24 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
     /// # Returns
     /// The bundle_id (BLAKE3 root hash) of the written file
     pub async fn write_to_table(self, table: &mut DeltaTable) -> Result<String> {
-        let (bundle_id, batches) = self.inner.write_to_batches().await?;
+        let result = self.inner.write_to_batches().await?;
 
         debug!(
             "Writing {} batches to Delta Lake for {}",
-            batches.len(),
-            bundle_id
+            result.batches.len(),
+            result.bundle_id
         );
 
         let updated_table = WriteBuilder::new(
             table.log_store(),
             table.state.as_ref().map(|s| s.snapshot().clone()),
         )
-        .with_input_batches(batches)
+        .with_input_batches(result.batches)
         .await?;
 
         *table = updated_table;
-        debug!("Successfully wrote file {} to remote", bundle_id);
+        debug!("Successfully wrote file {} to remote", result.bundle_id);
 
-        Ok(bundle_id)
+        Ok(result.bundle_id)
     }
 }

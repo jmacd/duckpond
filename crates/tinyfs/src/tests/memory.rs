@@ -6,7 +6,6 @@ use super::super::memory::new_fs;
 use crate::error::Error;
 use crate::path::normalize;
 use crate::path::strip_root;
-use crate::persistence::PersistenceLayer;
 
 use std::path::PathBuf;
 

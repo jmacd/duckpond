@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod metadata_tests {
     use crate::EntryType;
-    use crate::memory::{MemoryDirectory, MemoryFile, MemoryPersistence, MemorySymlink};
+    use crate::memory::{MemoryDirectory, MemoryPersistence, MemorySymlink};
     use crate::node::{FileID, PartID};
     use crate::persistence::PersistenceLayer;
     use std::path::PathBuf;

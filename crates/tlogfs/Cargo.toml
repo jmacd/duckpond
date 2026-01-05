@@ -56,7 +56,6 @@ tera = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tokio = { workspace = true }
-tokio-tar = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
 utilities = { workspace = true }

@@ -49,7 +49,7 @@ base64 = "0.22"
 bytes = "1.6.0"
 chrono = { version = "0.4" }
 clap = { version = "4.5.4", features = ["derive"] }
-bao-tree = "0.16"
+bao-tree = { version = "0.16", features = ["validate"] }
 blake3 = "1.8"
 data_privacy = { version = "0.5.0", default-features = false, features = ["serde"] }
 data_privacy_macros = { version = "0.3.0", default-features = false }
@@ -89,11 +89,9 @@ tera = "1"
 thiserror = "2.0.12"
 tl = "0.7.8"
 tokio = { version = "1.32", features = ["io-util", "rt"] }
-tokio-tar = "0.3"
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 url = "2.5"
 uuid7 = { version = "1.0", features = ["serde"] }
-zstd = "0.13.2"
 
 [workspace.lints.rust]
 # General compatibility lints

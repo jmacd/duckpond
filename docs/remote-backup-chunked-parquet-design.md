@@ -1,13 +1,16 @@
 # Remote Backup: Chunked Parquet Design
 
 **Date:** December 19, 2025  
-**Updated:** January 1, 2026  
+**Updated:** January 4, 2026  
 **Status:** Implemented  
-**Replaces:** tar+zstd bundle format (bundle.rs)
+**Replaced:** tar+zstd bundle format (removed)  
+**See Also:** [bao-tree-design.md](bao-tree-design.md) for detailed bao-tree validation strategies
 
 ## Overview
 
 This document describes the new remote backup design that replaces tar bundles with chunked parquet files stored in a remote Delta Lake instance. This design provides better support for large files, atomic transactions, streaming I/O, and data integrity verification.
+
+**Key Implementation Note:** Remote backups share the same chunked parquet format as local large file storage via `utilities::chunked_files`. Remote bundles always use **offset=0** for bao-tree hashing (they are standalone files, not versions within a FilePhysicalSeries).
 
 ## Design Goals
 
@@ -33,10 +36,10 @@ Schema {
     original_path: String,     // Original path in pond (e.g., "part_id=abc.../part-00001.parquet")
     file_type: String,         // "large_file" | "metadata"
     
-    // Chunk information with BLAKE3 Merkle tree
+    // Chunk information with BLAKE3 Merkle tree (SeriesOutboard format)
     chunk_id: Int64,           // 0, 1, 2, ... (ordering within file)
-    chunk_hash: String,        // BLAKE3 hash of this chunk (hex)
-    chunk_outboard: Binary,    // bao-tree Merkle outboard for verified streaming
+    chunk_hash: String,        // Cumulative BLAKE3 bao-root through this chunk (hex)
+    chunk_outboard: Binary,    // SeriesOutboard.to_bytes() - cumulative state for verification
     chunk_data: Binary,        // The actual chunk (4-64MB, default 16MB)
     
     // File-level metadata (same for all chunks of a file)
@@ -54,11 +57,11 @@ Schema {
 | `original_path` | String | Source path in pond | Relative path including `part_id=` prefix |
 | `file_type` | String | File classification | "large_file" or "metadata" |
 | `chunk_id` | Int64 | Chunk ordering | 0-based, sequential within file |
-| `chunk_hash` | String | Chunk BLAKE3 hash | 64-char hex string, root of chunk's Merkle tree |
-| `chunk_outboard` | Binary | Merkle outboard data | bao-tree format for verified streaming (~0.4% overhead) |
+| `chunk_hash` | String | Cumulative BLAKE3 | 64-char hex, bao-root through chunks 0..N |
+| `chunk_outboard` | Binary | SeriesOutboard | Encodes cumulative_size, cumulative_blake3, frontier |
 | `chunk_data` | Binary | Actual data | 4-64MB per chunk (default 16MB) |
 | `total_size` | Int64 | File size | Same for all chunks of a file |
-| `root_hash` | String | File root hash | Combined from chunk hashes using BLAKE3 tree |
+| `root_hash` | String | File root hash | Final chunk's cumulative_blake3 |
 
 ## Partition Strategy
 
@@ -140,24 +143,26 @@ WriterProperties::builder()
 
 ### BLAKE3 Merkle Tree Integrity
 
-The implementation uses BLAKE3 hash trees at two levels:
+The implementation uses `SeriesOutboard` format from `utilities::bao_outboard` (see [bao-tree-design.md](bao-tree-design.md)):
 
-**Per-Chunk Level** (via `bao-tree` crate):
-- Each chunk gets its own Merkle tree with 16KB blocks
-- Outboard data stored in `chunk_outboard` column
-- Enables verified streaming: validate data as it's read
-- ~0.39% space overhead: `(blocks - 1) * 64 bytes`
+**Per-Chunk Level** (via `SeriesOutboard`):
+- Each chunk stores cumulative bao-tree state through all chunks 0..N
+- `chunk_hash` = cumulative bao-root (not per-chunk hash)
+- `chunk_outboard` = `SeriesOutboard.to_bytes()` encoding:
+  - `cumulative_size`: Total bytes through this chunk
+  - `cumulative_blake3`: Bao-root through all content so far
+  - `frontier`: Rightmost Merkle tree path for resumption
+  - `version_size`: This chunk's size
+- 16KB blocks (chunk_log=4), ~0.39% space overhead
 
-**Per-File Level** (via `blake3::hazmat`):
-- Chunk hashes combined into file `root_hash`
-- Uses `merge_subtrees_root` / `merge_subtrees_non_root` functions
-- Validates entire file integrity from chunk hashes
+**Remote Backup vs Local Large Files**:
+- **Remote backups**: Always start at offset=0 (standalone files)
+- **Local large files in FilePhysicalSeries**: May start at cumulative offset from prior versions
 
-```toml
-[dependencies]
-bao-tree = "0.16"  # Per-chunk Merkle outboards
-blake3 = "1.8"     # Hash combining via hazmat API
-```
+**Verification on Restore**:
+- Chunk 0: Verify `SeriesOutboard::first_version(chunk_data).cumulative_blake3 == stored`
+- Chunk N: Verify cumulative hash progression using stored `SeriesOutboard`
+- Final chunk's `cumulative_blake3` must equal file's `root_hash`
 
 ## Example: Backing Up One Pond Commit
 
@@ -448,55 +453,60 @@ async fn restore_file(
 
 ## Migration Plan
 
-1. **Phase 1**: Implement chunked parquet writer
-   - Keep tar bundle writer for compatibility
-   - New backups use chunked format
-   - Old backups remain in tar format
+**No backwards compatibility required.** The tar bundle format has been removed.
 
-2. **Phase 2**: Implement restore from both formats
-   - Auto-detect format (tar vs chunked)
-   - Restore from either format transparently
-
-3. **Phase 3**: Optional migration tool
-   - Convert old tar bundles to chunked format
-   - Maintain same pond_txn_id references
-
-4. **Phase 4**: Remove tar bundle code
-   - After all old backups expired or migrated
-   - Remove bundle.rs and dependencies
+1. ~~**Phase 1**: Implement chunked parquet writer~~ → **Done**
+2. ~~**Phase 2**: Implement restore from both formats~~ → **Skipped** (no backwards compat)
+3. ~~**Phase 3**: Optional migration tool~~ → **Skipped** (no backwards compat)
+4. ~~**Phase 4**: Remove tar bundle code~~ → **Done** (bundle.rs removed, tokio-tar/zstd dependencies removed)
 
 ## Implementation Summary (January 2026)
 
 The BLAKE3 migration was completed with the following changes:
 
+### Architecture: Shared Chunked Parquet Format
+
+Remote backups now share the same chunked parquet logic as local large file storage:
+
+```
+utilities::chunked_files  ← Shared chunking + SeriesOutboard logic
+       ↑                ↑
+       │                │
+  tlogfs::large_files   remote::writer
+  (local _large_files)  (Delta Lake backup)
+```
+
+**Key difference**: Local large files in `FilePhysicalSeries` may use non-zero starting offsets for cumulative checksumming. Remote backups always use offset=0 since each file is standalone.
+
 ### Schema Changes
 | Old Field | New Field | Change |
 |-----------|-----------|--------|
-| `chunk_crc32` | `chunk_hash` | CRC32 → BLAKE3 hex string |
-| - | `chunk_outboard` | New: bao-tree Merkle outboard |
-| `total_sha256` | `root_hash` | SHA256 → BLAKE3 (combined from chunks) |
+| `chunk_crc32` | `chunk_hash` | CRC32 → cumulative BLAKE3 bao-root |
+| - | `chunk_outboard` | New: SeriesOutboard.to_bytes() |
+| `total_sha256` | `root_hash` | SHA256 → final cumulative_blake3 |
 | `cli_args` | - | Removed (redundant) |
 | `created_at` | - | Removed (redundant) |
 | `chunk_count` | - | Removed (derivable from row count) |
 | `file_id` | `bundle_id` | Renamed for clarity |
 
 ### Crate Dependencies
-- **Added**: `bao-tree = "0.16"` for per-chunk outboard creation
-- **Added**: `blake3 = "1.8"` for hash combining via `hazmat` API
-- **Removed**: `sha2`, `crc32fast`
+- **Shared**: `utilities::chunked_files` - chunking, SeriesOutboard, Arrow schema
+- **Shared**: `utilities::bao_outboard` - SeriesOutboard, IncrementalHashState
+- **Added**: `blake3 = "1.8"` for hash computation
+- **Removed**: `sha2`, `crc32fast`, `bao-tree` (now internal to utilities)
 
 ### Key Implementation Details
-1. **Per-chunk hashing**: `bao_tree::PostOrderMemOutboard::create()` with 16KB blocks
-2. **Hash combining**: `blake3::hazmat::{merge_subtrees_root, merge_subtrees_non_root}`
-3. **Verification on read**: Recompute chunk hash + combine for root hash verification
-4. **Empty file handling**: `blake3::hash(&[])` for zero-byte files
+1. **SeriesOutboard format**: Each chunk stores cumulative bao-tree state (not per-chunk)
+2. **Chunk hash semantics**: `chunk_hash` = cumulative bao-root through chunks 0..N
+3. **Verification on read**: Parse SeriesOutboard, verify cumulative progression
+4. **Empty file handling**: `SeriesOutboard::first_version(&[])` for zero-byte files
+5. **root_hash**: Final chunk's cumulative_blake3 (bao-root of entire file)
 
-### Files Modified
-- [crates/remote/src/schema.rs](../crates/remote/src/schema.rs) - Schema constants and Arrow schema
-- [crates/remote/src/writer.rs](../crates/remote/src/writer.rs) - Chunk hashing and outboard creation
-- [crates/remote/src/reader.rs](../crates/remote/src/reader.rs) - Verification on restore
-- [crates/remote/src/table.rs](../crates/remote/src/table.rs) - SQL column names
-- [crates/remote/src/lib.rs](../crates/remote/src/lib.rs) - Public exports
+### Files Implementing Chunked Parquet
+- [crates/utilities/src/chunked_files.rs](../crates/utilities/src/chunked_files.rs) - Shared chunking logic
+- [crates/utilities/src/bao_outboard.rs](../crates/utilities/src/bao_outboard.rs) - SeriesOutboard struct
+- [crates/remote/src/writer.rs](../crates/remote/src/writer.rs) - Delta Lake wrapper
+- [crates/tlogfs/src/large_files.rs](../crates/tlogfs/src/large_files.rs) - Local large file storage
 
 ---
 
@@ -554,24 +564,26 @@ async fn expire_old_commits(
 
 ## References
 
+- [bao-tree-design.md](bao-tree-design.md) - DuckPond bao-tree validation strategies and SeriesOutboard format
 - Delta Lake Transaction Protocol: https://github.com/delta-io/delta/blob/master/PROTOCOL.md
 - Parquet Format Specification: https://parquet.apache.org/docs/file-format/
-- bao-tree crate (Merkle outboards): https://crates.io/crates/bao-tree
+- bao-tree crate (underlying Merkle implementation): https://crates.io/crates/bao-tree
 - BLAKE3 specification: https://github.com/BLAKE3-team/BLAKE3-specs
 - bao format (verified streaming): https://github.com/oconnor663/bao
-- Current Bundle Implementation: crates/tlogfs/src/bundle.rs (to be replaced)
 
 ## Open Questions
 
 1. ~~**Chunk size**: 10MB, 50MB, or 100MB?~~ → **Resolved**: 16MB default (power-of-2)
 2. **Compression**: Should we compress chunk_data? (Recommend: only for large files, not pond files)
-3. ~~**BLAKE3**: Add now or later?~~ → **Resolved**: Implemented with full Merkle tree support
-4. **Migration**: Mandatory or optional? (Recommend: optional, keep tar for old backups)
-5. **Parquet files per partition**: One large file or split by row count? (Recommend: one file per bundle_id)
+3. ~~**BLAKE3**: Add now or later?~~ → **Resolved**: Implemented with SeriesOutboard format
+4. ~~**Migration**: Mandatory or optional?~~ → **Resolved**: No backwards compatibility required, tar bundle code removed
+5. ~~**Parquet files per partition**: One large file or split by row count?~~ → **Resolved**: One file per bundle_id
 
 ## Approval Status
 
 - [x] Design review
-- [x] Schema finalized (January 2026 - BLAKE3 migration)
+- [x] Schema finalized (January 2026 - SeriesOutboard format)
 - [x] Implementation plan approved
+- [x] Shared chunked_files module implemented
 - [ ] Migration strategy confirmed
+

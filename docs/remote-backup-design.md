@@ -1,5 +1,9 @@
 # Remote Backup System Design for DuckPond
 
+> **⚠️ SUPERSEDED**: This document describes the original tar+zstd bundle design.
+> The implementation uses chunked parquet in Delta Lake instead.
+> See [remote-backup-chunked-parquet-design.md](remote-backup-chunked-parquet-design.md) for the current implementation.
+
 ## Executive Summary
 
 This document describes the design for a remote backup system that bundles and uploads pond files to S3-compatible object storage as a post-commit action. The system will:

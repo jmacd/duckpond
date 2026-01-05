@@ -298,18 +298,19 @@ HydroVu API integration with factory-based execution:
 
 #### `remote` - Backup & Replication System
 
-Streaming backup and restore using tar+zstd bundles:
+Streaming backup and restore using chunked parquet in Delta Lake:
 
-- **Bundle Format**: Compressed tar archives with transaction metadata
+- **Chunked Format**: Large files split into ~16MB chunks with BLAKE3 Merkle verification
 - **Object Store**: S3-compatible storage (AWS S3, MinIO, Cloudflare R2, local files)
 - **Transaction-Based**: One bundle per transaction for incremental backups
 - **Replica Support**: Create replica ponds with preserved identity
 - **Factory Modes**: `push` (primary) vs `pull` (replica) execution
 
-**Bundle Structure**:
-- `metadata.json`: Transaction metadata and file manifest
-- Parquet files: All data for that transaction
-- Named by sequence: `txn_00005.bundle.tar.zst`
+**Schema Structure**:
+- `bundle_id`: Partition key (UUID per backup)
+- `chunk_data`: Binary blob (~16MB per chunk)
+- `chunk_hash`: Cumulative BLAKE3 bao-root for verification
+- `chunk_outboard`: SeriesOutboard for streaming validation
 
 #### `utilities` - Shared Helpers
 
