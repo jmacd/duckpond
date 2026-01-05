@@ -40,6 +40,8 @@ pub struct OpLogPersistence {
     pub(crate) last_txn_seq: i64, // Track last committed transaction sequence for validation
     /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
     pub(crate) txn_state: Arc<TinyFsTransactionState>,
+    /// Options for large file storage (compression, etc.)
+    large_file_options: crate::large_files::LargeFileOptions,
 }
 
 /// In-memory directory state during a transaction
@@ -86,6 +88,8 @@ pub struct InnerState {
     poisoned: bool,
     session_context: Arc<SessionContext>,
     txn_seq: i64,
+    /// Options for large file storage (compression, etc.)
+    large_file_options: crate::large_files::LargeFileOptions,
 }
 
 #[derive(Clone)]
@@ -105,6 +109,8 @@ pub struct State {
     >,
     /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
     txn_state: Arc<TinyFsTransactionState>,
+    /// Options for large file storage (compression, etc.)
+    large_file_options: crate::large_files::LargeFileOptions,
 }
 
 // Re-export TableProviderKey from provider for backward compatibility
@@ -144,6 +150,19 @@ impl OpLogPersistence {
             PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
         )
         .await
+    }
+
+    /// Test-only helper: Create a new pond with uncompressed large file storage.
+    /// Used for corruption testing where we need to modify raw bytes in parquet files.
+    #[cfg(test)]
+    pub async fn create_test_uncompressed(path: &str) -> Result<Self, TLogFSError> {
+        let mut persistence = Self::create(
+            path,
+            PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
+        )
+        .await?;
+        persistence.large_file_options = crate::large_files::LargeFileOptions::uncompressed();
+        Ok(persistence)
     }
 
     /// Test-only helper: Begin a transaction with automatic sequence numbering.
@@ -204,6 +223,7 @@ impl OpLogPersistence {
             state: None,
             last_txn_seq: 0, // No transactions yet - bundles will provide them
             txn_state: Arc::new(TinyFsTransactionState::new()),
+            large_file_options: Default::default(),
         })
     }
 
@@ -281,6 +301,7 @@ impl OpLogPersistence {
             state: None,
             last_txn_seq: 0, // Will be updated below
             txn_state: Arc::new(TinyFsTransactionState::new()),
+            large_file_options: Default::default(),
         };
 
         // Initialize root directory ONLY when creating a new pond
@@ -444,7 +465,7 @@ impl OpLogPersistence {
         }
 
         let inner_state =
-            InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?;
+            InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq, self.large_file_options.clone()).await?;
         let session_context = inner_state.session_context.clone();
 
         let state = State {
@@ -454,6 +475,7 @@ impl OpLogPersistence {
             template_variables: Arc::new(std::sync::Mutex::new(HashMap::new())),
             table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             txn_state: self.txn_state.clone(),
+            large_file_options: self.large_file_options.clone(),
         };
 
         // Complete SessionContext setup with ObjectStore registration
@@ -656,6 +678,12 @@ impl State {
     /// This is used for large file external storage
     pub async fn store_path(&self) -> PathBuf {
         self.inner.lock().await.path.clone()
+    }
+
+    /// Get the large file storage options (compression settings, etc.)
+    #[must_use]
+    pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
+        &self.large_file_options
     }
 
     /// Get template variables for CLI variable expansion
@@ -1151,6 +1179,7 @@ impl InnerState {
         path: P,
         table: DeltaTable,
         txn_seq: i64,
+        large_file_options: crate::large_files::LargeFileOptions,
     ) -> Result<Self, TLogFSError> {
         // Create the SessionContext with caching enabled (64MiB limit)
         use datafusion::execution::{
@@ -1210,6 +1239,7 @@ impl InnerState {
             poisoned: false,
             session_context: ctx,
             txn_seq,
+            large_file_options,
         })
     }
 
@@ -1334,7 +1364,7 @@ impl InnerState {
 
     /// Create a hybrid writer for streaming file content
     async fn create_hybrid_writer(&self) -> crate::large_files::HybridWriter {
-        crate::large_files::HybridWriter::new(self.path.clone())
+        crate::large_files::HybridWriter::with_options(self.path.clone(), self.large_file_options.clone())
     }
 
     /// Store file content from hybrid writer result

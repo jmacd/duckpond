@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use log::{debug, info};
+use parquet::basic::Compression;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -18,6 +19,38 @@ pub const DIRECTORY_SPLIT_THRESHOLD: usize = 100;
 
 /// Number of bits (4 hex digits) for directory prefix
 pub const PREFIX_BITS: usize = 16;
+
+/// Options for large file storage
+#[derive(Clone, Debug)]
+pub struct LargeFileOptions {
+    /// Compression codec for parquet files
+    pub compression: Compression,
+    /// Maximum rows per row group (None = parquet default)
+    /// Setting to 1 puts each chunk in its own row group for isolated corruption detection
+    pub max_row_group_size: Option<usize>,
+}
+
+impl Default for LargeFileOptions {
+    fn default() -> Self {
+        Self {
+            compression: Compression::ZSTD(parquet::basic::ZstdLevel::default()),
+            max_row_group_size: None,
+        }
+    }
+}
+
+impl LargeFileOptions {
+    /// Create options optimized for corruption testing:
+    /// - No compression (so we can corrupt specific bytes)
+    /// - 1 row per row group (so each chunk is isolated)
+    #[cfg(test)]
+    pub fn uncompressed() -> Self {
+        Self {
+            compression: Compression::UNCOMPRESSED,
+            max_row_group_size: Some(1),
+        }
+    }
+}
 
 /// Get large file path with hierarchical directory structure (writes to new .parquet format)
 /// Returns the path where the file should be stored, handling directory migration automatically
@@ -193,10 +226,16 @@ pub struct HybridWriter {
     pond_path: PathBuf,
     /// Future for creating temp file
     create_future: Option<Pin<Box<dyn Future<Output = std::io::Result<(File, PathBuf)>> + Send>>>,
+    /// Options for large file storage
+    options: LargeFileOptions,
 }
 
 impl HybridWriter {
     pub fn new<P: AsRef<Path>>(pond_path: P) -> Self {
+        Self::with_options(pond_path, LargeFileOptions::default())
+    }
+    
+    pub fn with_options<P: AsRef<Path>>(pond_path: P, options: LargeFileOptions) -> Self {
         Self {
             temp_file: None,
             temp_path: None,
@@ -204,6 +243,7 @@ impl HybridWriter {
             total_written: 0,
             pond_path: pond_path.as_ref().into(),
             create_future: None,
+            options,
         }
     }
 
@@ -264,12 +304,16 @@ impl HybridWriter {
             let parquet_file = File::create(&final_path).await?;
             let schema = utilities::chunked_files::arrow_schema();
 
-            // Write parquet file using ArrowWriter
-            let props = parquet::file::properties::WriterProperties::builder()
-                .set_compression(parquet::basic::Compression::ZSTD(
-                    parquet::basic::ZstdLevel::default(),
-                ))
-                .build();
+            // Write parquet file using ArrowWriter with configured options
+            let mut props_builder = parquet::file::properties::WriterProperties::builder()
+                .set_compression(self.options.compression);
+            
+            // Optionally set max_row_group_size (used in tests for per-chunk isolation)
+            if let Some(max_size) = self.options.max_row_group_size {
+                props_builder = props_builder.set_max_row_group_size(max_size);
+            }
+            
+            let props = props_builder.build();
 
             let mut writer = parquet::arrow::AsyncArrowWriter::try_new(
                 parquet_file,

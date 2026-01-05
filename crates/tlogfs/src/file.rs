@@ -193,8 +193,9 @@ impl OpLogFileWriter {
         store_path: std::path::PathBuf,
         allocated_version: i64,
     ) -> Self {
+        let options = state.large_file_options().clone();
         Self {
-            storage: crate::large_files::HybridWriter::new(store_path),
+            storage: crate::large_files::HybridWriter::with_options(store_path, options),
             state,
             file_id,
             transaction_state,
@@ -350,7 +351,7 @@ impl AsyncWrite for OpLogFileWriter {
             // Take ownership of storage to finalize it
             let storage = std::mem::replace(
                 &mut this.storage,
-                crate::large_files::HybridWriter::new(std::path::PathBuf::new()),
+                crate::large_files::HybridWriter::with_options(std::path::PathBuf::new(), Default::default()),
             );
             let state = this.state.clone();
             let file_id = this.file_id;
