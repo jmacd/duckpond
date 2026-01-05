@@ -2479,7 +2479,7 @@ query: ""
         let root = fs.root().await.unwrap();
 
         // Create File A v1: timestamps 1,2,3 with columns: timestamp, temperature
-        let file_id_a = {
+        let _file_id_a = {
             let schema = Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",

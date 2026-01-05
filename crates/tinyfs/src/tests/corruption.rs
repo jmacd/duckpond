@@ -90,12 +90,6 @@ impl CorruptionTestConfig {
         self.corruption_offsets = offsets;
         self
     }
-    
-    /// Set custom fill byte
-    fn with_fill_byte(mut self, byte: u8) -> Self {
-        self.fill_byte = byte;
-        self
-    }
 }
 
 /// Test fixture for corruption detection tests
