@@ -17,18 +17,14 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::path::PathBuf;
 use tinyfs::{EntryType, FileID, Result as TinyFSResult};
-use utilities::bao_outboard::{find_matching_prefix, SeriesOutboard, verify_series_prefix};
+use utilities::bao_outboard::IncrementalHashState;
 
 /// Configuration for the logfile ingestion factory
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogfileIngestConfig {
-    /// Human-readable name for this source
-    pub name: String,
-
     /// Glob pattern for archived (immutable) log files
     /// Example: "/var/log/casparwater-*.json"
     pub archived_pattern: String,
@@ -45,10 +41,6 @@ pub struct LogfileIngestConfig {
 impl LogfileIngestConfig {
     /// Validate the configuration
     pub fn validate(&self) -> TinyFSResult<()> {
-        if self.name.is_empty() {
-            return Err(tinyfs::Error::Other("name cannot be empty".to_string()));
-        }
-
         if self.archived_pattern.is_empty() {
             return Err(tinyfs::Error::Other(
                 "archived_pattern cannot be empty".to_string(),
@@ -92,10 +84,8 @@ struct PondFileState {
     version: u64,
     /// File size in bytes
     size: u64,
-    /// Blake3 hash of the content (always present for pond files)
+    /// Blake3 hash of the content (bao-tree root, computed by tinyfs)
     blake3: String,
-    /// Bao-tree outboard data (always present for pond files)
-    bao_outboard: Vec<u8>,
     /// Cumulative size (for FilePhysicalSeries)
     cumulative_size: u64,
 }
@@ -117,8 +107,7 @@ pub async fn execute(
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
 
     info!(
-        "Starting logfile ingestion for '{}' (mode: {:?})",
-        config.name,
+        "Starting logfile ingestion for (mode: {:?})",
         ctx.mode()
     );
 
@@ -132,12 +121,13 @@ pub async fn execute(
     );
 
     // Step 2: Read pond state (persistence-agnostic)
-    let mut pond_files = read_pond_state(&context, &config.pond_path).await?;
+    let pond_files = read_pond_state(&context, &config.pond_path).await?;
     info!("Found {} files in pond", pond_files.len());
 
     // Step 3: Detect rotation - must happen BEFORE processing individual files
     // Rotation is detected when:
     // - Active file shrunk (size < pond's cumulative_size)
+    // - Active file content doesn't match pond's prefix (rotation to same/larger size file)
     // - A new archived file exists that matches pond's tracked content
     let active_host_file = host_files.iter().find(|f| f.is_active);
     if let Some(host_active) = active_host_file {
@@ -148,13 +138,52 @@ pub async fn execute(
             .unwrap_or("");
 
         if let Some(pond_active) = pond_files.get(active_filename) {
-            if host_active.size < pond_active.cumulative_size {
-                // Active file shrunk - likely rotation
+            // Check if rotation might have occurred:
+            // 1. File shrunk (classic case)
+            // 2. File same size or larger, but content doesn't match prefix
+            let might_be_rotated = if host_active.size < pond_active.cumulative_size {
                 info!(
                     "Active file {} shrunk from {} to {} bytes - checking for rotation",
                     active_filename, pond_active.cumulative_size, host_active.size
                 );
+                true
+            } else if pond_active.cumulative_size > 0 {
+                // Content mismatch detection: compute blake3 of prefix and compare
+                // Read prefix from host file (first cumulative_size bytes)
+                let prefix_len = pond_active.cumulative_size as usize;
+                if host_active.size >= pond_active.cumulative_size {
+                    let mut prefix_file = std::fs::File::open(&host_active.path)
+                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                    let mut prefix_content = vec![0u8; prefix_len];
+                    use std::io::Read;
+                    prefix_file.read_exact(&mut prefix_content)
+                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                    
+                    // Compute blake3 of prefix using same method as tinyfs (bao-tree root)
+                    let mut hasher = IncrementalHashState::new();
+                    hasher.ingest(&prefix_content);
+                    let prefix_blake3 = hasher.root_hash().to_hex().to_string();
+                    
+                    // Compare to pond's stored blake3
+                    if prefix_blake3 == pond_active.blake3 {
+                        debug!("Active file {} prefix matches - no rotation", active_filename);
+                        false
+                    } else {
+                        info!(
+                            "Active file {} content mismatch (prefix blake3 {} != pond blake3 {}) - checking for rotation",
+                            active_filename, &prefix_blake3[..16], &pond_active.blake3[..16]
+                        );
+                        true
+                    }
+                } else {
+                    // File smaller than what we tracked - definitely rotated
+                    true
+                }
+            } else {
+                false
+            };
 
+            if might_be_rotated {
                 // Find new archived files (not in pond) that might match
                 let new_archived: Vec<_> = host_files
                     .iter()
@@ -183,14 +212,27 @@ pub async fn execute(
                             active_filename, archived_filename
                         );
 
-                        // Rename the pond file from active name to archived name
+                        // FIRST: Append any missed bytes to the ACTIVE pond file
+                        // (before renaming, so TinyFS computes correct cumulative checksums)
+                        if matched_archived.size > pond_active.cumulative_size {
+                            let missed_bytes = matched_archived.size - pond_active.cumulative_size;
+                            info!(
+                                "Appending {} missed bytes to active file {} before rename (grew from {} to {} bytes)",
+                                missed_bytes, active_filename, pond_active.cumulative_size, matched_archived.size
+                            );
+                            
+                            // Read the full archived file content, append only the new portion
+                            let content = std::fs::read(&matched_archived.path)
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            let new_data = &content[pond_active.cumulative_size as usize..];
+                            
+                            // Append to the ACTIVE pond file (TinyFS handles checksums)
+                            append_to_active_pond_file(&context, &config, active_filename, new_data).await?;
+                        }
+
+                        // THEN: Rename the (now complete) active pond file to archived name
                         rename_pond_file(&context, &config, active_filename, archived_filename)
                             .await?;
-
-                        // Update pond_files map to reflect the rename
-                        if let Some(state) = pond_files.remove(active_filename) {
-                            let _ = pond_files.insert(archived_filename.to_string(), state);
-                        }
 
                         info!(
                             "Renamed pond file: {} -> {}",
@@ -198,7 +240,7 @@ pub async fn execute(
                         );
                     } else {
                         warn!(
-                            "Active file {} shrunk but no matching archived file found",
+                            "Active file {} changed but no matching archived file found",
                             active_filename
                         );
                     }
@@ -206,6 +248,10 @@ pub async fn execute(
             }
         }
     }
+
+    // Re-read pond state after rotation handling to get fresh metadata from TinyFS
+    // (TinyFS has computed new blake3 after any appends)
+    let pond_files = read_pond_state(&context, &config.pond_path).await?;
 
     // Step 4: Process all files (with updated pond state after any rotation handling)
     for host_file in &host_files {
@@ -327,7 +373,7 @@ async fn read_pond_state(
         // Get metadata from persistence layer (works with any backend)
         let metadata = persistence.metadata(file_id).await?;
 
-        // Require blake3 and bao_outboard - fail fast if missing
+        // Require blake3 - fail fast if missing
         let blake3 = metadata.blake3.ok_or_else(|| {
             tinyfs::Error::Other(format!(
                 "Pond file {} missing required blake3 hash",
@@ -335,21 +381,16 @@ async fn read_pond_state(
             ))
         })?;
 
-        let bao_outboard = metadata.bao_outboard.ok_or_else(|| {
-            tinyfs::Error::Other(format!(
-                "Pond file {} missing required bao_outboard",
-                filename
-            ))
-        })?;
-
-        // For FilePhysicalSeries, extract cumulative_size from the SeriesOutboard
+        // For FilePhysicalSeries, extract cumulative_size from the bao_outboard
         // The metadata.size is just the latest version's size, not cumulative
-        let cumulative_size = match SeriesOutboard::from_bytes(&bao_outboard) {
-            Ok(series) => series.cumulative_size,
-            Err(_) => {
-                // Fall back to metadata.size if not a series outboard
-                metadata.size.unwrap_or(0)
+        // NOTE: We use SeriesOutboard ONLY to get cumulative_size, not for verification
+        let cumulative_size = if let Some(bao_outboard) = &metadata.bao_outboard {
+            match utilities::bao_outboard::SeriesOutboard::from_bytes(bao_outboard) {
+                Ok(series) => series.cumulative_size,
+                Err(_) => metadata.size.unwrap_or(0),
             }
+        } else {
+            metadata.size.unwrap_or(0)
         };
 
         let size = metadata.size.unwrap_or(0);
@@ -361,7 +402,6 @@ async fn read_pond_state(
                 version: metadata.version,
                 size,
                 blake3,
-                bao_outboard,
                 cumulative_size,
             },
         );
@@ -443,7 +483,7 @@ async fn process_archived_file(
             let host_content = std::fs::read(&host_file.path)
                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
             
-            let mut state = utilities::bao_outboard::IncrementalHashState::new();
+            let mut state = IncrementalHashState::new();
             state.ingest(&host_content);
             let host_hash = state.root_hash();
 
@@ -556,13 +596,9 @@ async fn ingest_append(
         pond_state.cumulative_size + new_content.len() as u64
     );
 
-    // Deserialize previous outboard - required for append verification
-    let prev_series = SeriesOutboard::from_bytes(&pond_state.bao_outboard)
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
-    // Always verify prefix hasn't changed before appending
+    // Verify prefix hasn't changed before appending (using simple blake3 comparison)
     {
-        // Read the prefix from host file to verify
+        // Read the prefix from host file
         let mut prefix_file = std::fs::File::open(&host_file.path)
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         let mut prefix_content = vec![0u8; pond_state.cumulative_size as usize];
@@ -570,13 +606,24 @@ async fn ingest_append(
             .read_exact(&mut prefix_content)
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
-        verify_series_prefix(&prefix_content, &prev_series)
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        // Compute blake3 of prefix (using same method as TinyFS - bao-tree root)
+        let mut hasher = IncrementalHashState::new();
+        hasher.ingest(&prefix_content);
+        let prefix_blake3 = hasher.root_hash().to_hex().to_string();
+
+        // Compare to pond's stored blake3
+        if prefix_blake3 != pond_state.blake3 {
+            return Err(tinyfs::Error::Other(format!(
+                "Prefix verification failed for {}: expected blake3={}, got blake3={}",
+                filename, pond_state.blake3, prefix_blake3
+            )));
+        }
 
         info!("Prefix verification passed for {}", filename);
     }
 
-    // Write new version as FilePhysicalSeries - maintains cumulative bao_outboard
+    // Write new version as FilePhysicalSeries
+    // TinyFS automatically maintains cumulative blake3 and bao_outboard
     use tokio::io::AsyncWriteExt;
     let mut writer = root
         .async_writer_path_with_type(&pond_dest, EntryType::FilePhysicalSeries)
@@ -603,30 +650,40 @@ async fn ingest_append(
 }
 
 /// Find which archived file matches the pond's tracked content (for rotation detection)
+/// Uses simple blake3 comparison: if archived file's prefix matches pond's blake3, it's the rotated file
 async fn find_rotated_file<'a>(
     archived_files: &[&'a HostFileState],
     pond_state: &PondFileState,
 ) -> Result<Option<&'a HostFileState>, tinyfs::Error> {
-    // Deserialize the pond's outboard data
-    let tracked_series = SeriesOutboard::from_bytes(&pond_state.bao_outboard)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize outboard: {}", e)))?;
-
-    // Read all archived files into Cursors for find_matching_prefix
-    let mut file_contents: Vec<(usize, Cursor<Vec<u8>>)> = Vec::new();
-    for (i, host_file) in archived_files.iter().enumerate() {
+    let tracked_size = pond_state.cumulative_size as usize;
+    
+    for host_file in archived_files {
+        // File must be at least as large as what we tracked
+        if host_file.size < pond_state.cumulative_size {
+            continue;
+        }
+        
+        // Read the prefix (first tracked_size bytes)
         let content = std::fs::read(&host_file.path)
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-        file_contents.push((i, Cursor::new(content)));
+        let prefix = &content[..tracked_size];
+        
+        // Compute blake3 of prefix using same method as tinyfs (bao-tree root)
+        let mut hasher = IncrementalHashState::new();
+        hasher.ingest(prefix);
+        let prefix_blake3 = hasher.root_hash().to_hex().to_string();
+        
+        // If prefix matches pond's blake3, this is the rotated file
+        if prefix_blake3 == pond_state.blake3 {
+            info!(
+                "Found rotated file {} matching pond blake3 {}...",
+                host_file.path.display(), &pond_state.blake3[..16]
+            );
+            return Ok(Some(host_file));
+        }
     }
-
-    // Create iterator of just the Cursors for find_matching_prefix
-    let readers: Vec<_> = file_contents.iter().map(|(_, c)| Cursor::new(c.get_ref().clone())).collect();
     
-    match find_matching_prefix(readers.into_iter(), &tracked_series) {
-        Ok(Some(idx)) => Ok(Some(archived_files[idx])),
-        Ok(None) => Ok(None),
-        Err(e) => Err(tinyfs::Error::Other(format!("Prefix matching failed: {}", e))),
-    }
+    Ok(None)
 }
 
 /// Rename a file in the pond (preserving version history)
@@ -647,6 +704,47 @@ async fn rename_pond_file(
     dir.rename_entry(old_name, new_name).await?;
 
     info!("Renamed pond file: {} -> {}", old_path, new_path);
+
+    Ok(())
+}
+
+/// Append missed bytes to an active pond file before rename
+/// (TinyFS handles cumulative checksum computation via FilePhysicalSeries)
+async fn append_to_active_pond_file(
+    context: &FactoryContext,
+    config: &LogfileIngestConfig,
+    filename: &str,
+    new_data: &[u8],
+) -> Result<(), tinyfs::Error> {
+    let pond_dest = format!("{}/{}", config.pond_path, filename);
+
+    // Get filesystem from ProviderContext
+    let fs = context.context.filesystem();
+    let root = fs.root().await?;
+
+    info!(
+        "Appending {} missed bytes to {} before rename",
+        new_data.len(),
+        filename
+    );
+
+    // Write new version as FilePhysicalSeries
+    // TinyFS automatically computes cumulative blake3 and bao_outboard
+    use tokio::io::AsyncWriteExt;
+    let mut writer = root
+        .async_writer_path_with_type(&pond_dest, EntryType::FilePhysicalSeries)
+        .await?;
+
+    writer
+        .write_all(new_data)
+        .await
+        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    writer
+        .shutdown()
+        .await
+        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+    info!("Appended missed bytes to pond file: {}", pond_dest);
 
     Ok(())
 }

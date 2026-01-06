@@ -47,7 +47,8 @@ Different TinyFS entry types use different validation approaches:
 | `TablePhysicalSeries`  | Fresh `compute_outboard()` | Each version independent (parquet) |
 | `TableDynamic`         | None                       | Factory-generated on demand        |
 
-**Key insight**: Only `FilePhysicalSeries` uses incremental checksumming with resume capability. `TablePhysicalSeries` versions are independent parquet files that cannot be concatenated, so each version is verified at offset 0. All other physical types also compute fresh outboards starting at offset 0.
+**Key insight**: Only `FilePhysicalSeries` uses incremental checksumming with resume capability. `TablePhysicalSeries` versions are independent parquet files that cannot be concatenated, so each version is verified at offset 0. All other physical types also compute fresh outboards starti\
+ng at offset 0.
 
 ## Validation for Series Types
 

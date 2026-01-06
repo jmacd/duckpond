@@ -22,6 +22,10 @@ doctest = false
 name = "pond"
 path = "src/main.rs"
 
+[[bin]]
+name = "synth-logs"
+path = "src/synth-logs.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 arrow = { workspace = true }
@@ -30,6 +34,7 @@ arrow-cast = { workspace = true }
 arrow-csv = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -39,6 +44,7 @@ datafusion-common-runtime = { workspace = true }
 datafusion-expr = { workspace = true }
 deltalake = { workspace = true }
 env_logger = { workspace = true }
+file-rotate = { workspace = true }
 futures = { workspace = true }
 hydrovu = { workspace = true }
 linkme = { workspace = true }

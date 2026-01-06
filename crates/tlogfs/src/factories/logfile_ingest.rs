@@ -1070,5 +1070,513 @@ mod integration_tests {
 
         println!("\n✓ All block boundary blake3 validation tests passed!");
     }
-}
 
+    // =========================================================================
+    // SCENARIO-BASED TEST FIXTURE
+    // =========================================================================
+    //
+    // This test fixture exercises various rotation scenarios and independently
+    // verifies that the final state of the host filesystem matches the pond.
+    // It does NOT trust self-reported blake3 checksums - it reads files and
+    // computes fresh checksums on a separate code path.
+
+    /// Actions that can be performed on the host filesystem
+    #[derive(Debug, Clone)]
+    enum HostAction {
+        /// Append content to the active file
+        AppendToActive(Vec<u8>),
+        /// Rotate: rename active to archived name, create new empty active
+        Rotate { archived_name: String },
+        /// Run the factory (take a snapshot)
+        Snapshot,
+    }
+
+    /// Final state of a file for verification
+    #[derive(Debug)]
+    struct FileState {
+        filename: String,
+        content: Vec<u8>,
+        blake3: String,
+    }
+
+    /// Scenario-based test runner that independently verifies final state
+    struct ScenarioRunner {
+        temp_dir: TempDir,
+        active_path: PathBuf,
+        pond: PondSimulator,
+        config: LogfileIngestConfig,
+        /// Current content of the active file on host
+        active_content: Vec<u8>,
+        /// Archived files on host: filename -> content
+        archived_files: std::collections::HashMap<String, Vec<u8>>,
+    }
+
+    impl ScenarioRunner {
+        async fn new(test_name: &str) -> std::io::Result<Self> {
+            let temp_dir = TempDir::new()?;
+            let active_path = temp_dir.path().join("app.log");
+            let archived_pattern = temp_dir.path().join("app-*.log").to_string_lossy().to_string();
+
+            // Create empty active file
+            fs::write(&active_path, b"").await?;
+
+            let config = LogfileIngestConfig {
+                name: test_name.to_string(),
+                active_pattern: active_path.to_string_lossy().to_string(),
+                archived_pattern: archived_pattern.clone(),
+                pond_path: format!("logs/{}", test_name),
+            };
+
+            let pond = PondSimulator::new(&config).await?;
+
+            Ok(Self {
+                temp_dir,
+                active_path,
+                pond,
+                config,
+                active_content: Vec::new(),
+                archived_files: std::collections::HashMap::new(),
+            })
+        }
+
+        /// Execute a single action
+        async fn execute_action(&mut self, action: &HostAction) -> std::io::Result<()> {
+            match action {
+                HostAction::AppendToActive(content) => {
+                    self.active_content.extend_from_slice(content);
+                    fs::write(&self.active_path, &self.active_content).await?;
+                    println!("  → Appended {} bytes to active (total: {} bytes)", 
+                             content.len(), self.active_content.len());
+                }
+                HostAction::Rotate { archived_name } => {
+                    let archived_path = self.temp_dir.path().join(archived_name);
+                    
+                    // Move active -> archived
+                    fs::rename(&self.active_path, &archived_path).await?;
+                    let _ = self.archived_files.insert(archived_name.clone(), self.active_content.clone());
+                    
+                    // Create new empty active
+                    self.active_content = Vec::new();
+                    fs::write(&self.active_path, b"").await?;
+                    
+                    println!("  → Rotated: active ({} bytes) -> {}", 
+                             self.archived_files[archived_name].len(), archived_name);
+                }
+                HostAction::Snapshot => {
+                    self.pond.execute_factory(&self.config).await?;
+                    println!("  → Snapshot taken");
+                }
+            }
+            Ok(())
+        }
+
+        /// Execute a sequence of actions
+        async fn run_scenario(&mut self, actions: &[HostAction]) -> std::io::Result<()> {
+            for (i, action) in actions.iter().enumerate() {
+                println!("Step {}: {:?}", i + 1, action);
+                self.execute_action(action).await?;
+            }
+            Ok(())
+        }
+
+        /// Get expected final state of all files on host
+        fn expected_host_state(&self) -> Vec<FileState> {
+            let mut states = Vec::new();
+
+            // Active file (if non-empty)
+            if !self.active_content.is_empty() {
+                let mut hasher = utilities::bao_outboard::IncrementalHashState::new();
+                hasher.ingest(&self.active_content);
+                states.push(FileState {
+                    filename: "app.log".to_string(),
+                    content: self.active_content.clone(),
+                    blake3: hasher.root_hash().to_hex().to_string(),
+                });
+            }
+
+            // Archived files
+            for (filename, content) in &self.archived_files {
+                let mut hasher = utilities::bao_outboard::IncrementalHashState::new();
+                hasher.ingest(content);
+                states.push(FileState {
+                    filename: filename.clone(),
+                    content: content.clone(),
+                    blake3: hasher.root_hash().to_hex().to_string(),
+                });
+            }
+
+            states
+        }
+
+        /// INDEPENDENTLY verify that pond matches host filesystem
+        /// This reads actual bytes and computes fresh checksums - does NOT trust metadata
+        async fn verify_final_state(&self) -> std::io::Result<()> {
+            println!("\n=== INDEPENDENT VERIFICATION ===");
+            
+            let expected_states = self.expected_host_state();
+            println!("Expected {} files in pond", expected_states.len());
+
+            let mut persistence = crate::persistence::OpLogPersistence::open(self.pond.store_path())
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            let tx = persistence
+                .begin_test()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            let root = tx
+                .root()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            // Verify each expected file exists in pond with correct content
+            for expected in &expected_states {
+                let file_path = format!("{}/{}", self.config.pond_path, expected.filename);
+                
+                // Read actual content from pond
+                let file_node = root
+                    .get_node_path(&file_path)
+                    .await
+                    .map_err(|e| std::io::Error::other(format!(
+                        "File {} not found in pond: {}", expected.filename, e
+                    )))?;
+                
+                let file_id = file_node.id();
+                
+                let file = file_node
+                    .as_file()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                use tokio::io::AsyncReadExt;
+                let mut actual_content = Vec::new();
+                let mut reader = file
+                    .async_reader()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let _ = reader.read_to_end(&mut actual_content).await?;
+
+                // Compute fresh blake3 on actual content (independent code path)
+                let mut hasher = utilities::bao_outboard::IncrementalHashState::new();
+                hasher.ingest(&actual_content);
+                let actual_blake3 = hasher.root_hash().to_hex().to_string();
+
+                // Verify size
+                if actual_content.len() != expected.content.len() {
+                    return Err(std::io::Error::other(format!(
+                        "SIZE MISMATCH for {}: expected {} bytes, got {} bytes\n  expected content: {:?}\n  actual content:   {:?}",
+                        expected.filename, expected.content.len(), actual_content.len(),
+                        String::from_utf8_lossy(&expected.content),
+                        String::from_utf8_lossy(&actual_content)
+                    )));
+                }
+
+                // Verify blake3 (computed independently, not from metadata)
+                if actual_blake3 != expected.blake3 {
+                    return Err(std::io::Error::other(format!(
+                        "BLAKE3 MISMATCH for {}:\n  expected: {}\n  actual:   {}\n  expected content ({} bytes): {:?}\n  actual content ({} bytes):   {:?}",
+                        expected.filename, expected.blake3, actual_blake3,
+                        expected.content.len(), String::from_utf8_lossy(&expected.content),
+                        actual_content.len(), String::from_utf8_lossy(&actual_content)
+                    )));
+                }
+
+                // Verify byte-for-byte content
+                if actual_content != expected.content {
+                    // Find first differing byte
+                    let diff_pos = actual_content
+                        .iter()
+                        .zip(expected.content.iter())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(actual_content.len().min(expected.content.len()));
+                    
+                    return Err(std::io::Error::other(format!(
+                        "CONTENT MISMATCH for {} at byte {}: expected {:02x}, got {:02x}",
+                        expected.filename, diff_pos,
+                        expected.content.get(diff_pos).copied().unwrap_or(0),
+                        actual_content.get(diff_pos).copied().unwrap_or(0)
+                    )));
+                }
+
+                // CRITICAL: Verify TinyFS metadata blake3 matches computed blake3
+                // This ensures multi-version FilePhysicalSeries has correct checksums
+                let state = tx.state().map_err(|e| std::io::Error::other(e.to_string()))?;
+                let entries = state
+                    .query_records(file_id)
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                
+                let latest_entry = entries
+                    .iter()
+                    .max_by_key(|e| e.version)
+                    .ok_or_else(|| std::io::Error::other(format!(
+                        "No OplogEntry records found for {}", expected.filename
+                    )))?;
+                
+                let stored_blake3 = latest_entry.blake3.as_ref().ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "METADATA MISSING: {} has no blake3 in OplogEntry", expected.filename
+                    ))
+                })?;
+                
+                if stored_blake3 != &expected.blake3 {
+                    return Err(std::io::Error::other(format!(
+                        "METADATA BLAKE3 MISMATCH for {}:\n  expected (computed): {}\n  stored (TinyFS):     {}\n  version: {}",
+                        expected.filename, expected.blake3, stored_blake3, latest_entry.version
+                    )));
+                }
+                
+                // Also verify SeriesOutboard.cumulative_blake3 if present
+                if let Some(bao_bytes) = latest_entry.get_bao_outboard() {
+                    let series_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(bao_bytes)
+                        .map_err(|e| std::io::Error::other(format!(
+                            "Failed to parse SeriesOutboard for {}: {}", expected.filename, e
+                        )))?;
+                    
+                    let outboard_blake3 = blake3::Hash::from_bytes(series_outboard.cumulative_blake3)
+                        .to_hex()
+                        .to_string();
+                    
+                    if outboard_blake3 != expected.blake3 {
+                        return Err(std::io::Error::other(format!(
+                            "OUTBOARD BLAKE3 MISMATCH for {}:\n  expected: {}\n  outboard: {}",
+                            expected.filename, expected.blake3, outboard_blake3
+                        )));
+                    }
+                    
+                    // Verify cumulative_size matches content length
+                    if series_outboard.cumulative_size != expected.content.len() as u64 {
+                        return Err(std::io::Error::other(format!(
+                            "OUTBOARD SIZE MISMATCH for {}: expected {} bytes, outboard says {}",
+                            expected.filename, expected.content.len(), series_outboard.cumulative_size
+                        )));
+                    }
+                }
+
+                println!("  ✓ {} ({} bytes, blake3={}...)", 
+                         expected.filename, expected.content.len(), &expected.blake3[..16]);
+            }
+
+            // Verify no extra files in pond
+            let pond_dir = root
+                .open_dir_path(&self.config.pond_path)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            
+            use futures::StreamExt;
+            let mut entries_stream = pond_dir
+                .entries()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            
+            let mut pond_entries: Vec<String> = Vec::new();
+            while let Some(entry_result) = entries_stream.next().await {
+                let entry = entry_result.map_err(|e| std::io::Error::other(e.to_string()))?;
+                pond_entries.push(entry.name);
+            }
+
+            let expected_names: std::collections::HashSet<_> = expected_states
+                .iter()
+                .map(|s| s.filename.clone())
+                .collect();
+
+            for pond_name in &pond_entries {
+                if !expected_names.contains(pond_name) {
+                    return Err(std::io::Error::other(format!(
+                        "UNEXPECTED FILE in pond: {} (not on host)",
+                        pond_name
+                    )));
+                }
+            }
+
+            tx.commit_test()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+            println!("=== VERIFICATION PASSED ===\n");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_blake3_computation_sanity() {
+        //! Verify our blake3 computation matches expectations
+        let content = b"Day 3 logs\n";
+        
+        // Method 1: IncrementalHashState (what test fixture uses)
+        let mut hasher = utilities::bao_outboard::IncrementalHashState::new();
+        hasher.ingest(content);
+        let incremental_hash = hasher.root_hash().to_hex().to_string();
+        
+        // Method 2: Direct blake3::hash (standard)
+        let direct_hash = blake3::hash(content).to_hex().to_string();
+        
+        println!("Content: {:?} ({} bytes)", content, content.len());
+        println!("IncrementalHashState: {}", incremental_hash);
+        println!("blake3::hash:         {}", direct_hash);
+        
+        // For small content (< 16KB), these should be identical
+        assert_eq!(incremental_hash, direct_hash, 
+            "Small content hash mismatch between incremental and direct");
+        
+        // The expected hash from test failure was: f88090e6b17b04f8214a08f6f73f09a6e932a3d74ae70ef459a27dadb8e56310
+        // Let's verify this is what we compute
+        assert_eq!(
+            incremental_hash,
+            "f88090e6b17b04f8214a08f6f73f09a6e932a3d74ae70ef459a27dadb8e56310",
+            "Hash doesn't match expected value for 'Day 3 logs\\n'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scenario_simple_growth() {
+        //! Scenario: Simple file growth without rotation
+        //! append -> snapshot -> append -> snapshot -> append -> snapshot
+
+        let mut runner = ScenarioRunner::new("scenario_simple_growth").await.unwrap();
+        
+        runner.run_scenario(&[
+            HostAction::AppendToActive(b"Line 1\n".to_vec()),
+            HostAction::Snapshot,
+            HostAction::AppendToActive(b"Line 2\n".to_vec()),
+            HostAction::Snapshot,
+            HostAction::AppendToActive(b"Line 3\nLine 4\nLine 5\n".to_vec()),
+            HostAction::Snapshot,
+        ]).await.unwrap();
+
+        runner.verify_final_state().await.unwrap();
+        println!("✓ Scenario: simple growth passed");
+    }
+
+    #[tokio::test]
+    async fn test_scenario_rotation_fully_captured() {
+        //! Scenario: Rotation where all content was captured before rotation
+        //! (The "happy path" - no missed bytes)
+
+        let mut runner = ScenarioRunner::new("scenario_rotation_captured").await.unwrap();
+        
+        runner.run_scenario(&[
+            HostAction::AppendToActive(b"Initial content\n".to_vec()),
+            HostAction::Snapshot,
+            HostAction::AppendToActive(b"More content before rotation\n".to_vec()),
+            HostAction::Snapshot,  // Capture everything before rotation
+            HostAction::Rotate { archived_name: "app-2025-01-03.log".to_string() },
+            HostAction::AppendToActive(b"New log session\n".to_vec()),
+            HostAction::Snapshot,
+        ]).await.unwrap();
+
+        runner.verify_final_state().await.unwrap();
+        println!("✓ Scenario: rotation fully captured passed");
+    }
+
+    #[tokio::test]
+    async fn test_scenario_rotation_with_missed_bytes() {
+        //! Scenario: Rotation where growth happened AFTER last snapshot
+        //! This is the bug case we identified:
+        //! - snapshot at 100 bytes
+        //! - file grows to 200 bytes (NO SNAPSHOT)
+        //! - rotation occurs
+        //! - next snapshot must capture the missed 100 bytes in archived file
+
+        let mut runner = ScenarioRunner::new("scenario_rotation_missed").await.unwrap();
+        
+        runner.run_scenario(&[
+            HostAction::AppendToActive(b"Initial snapshot content\n".to_vec()),
+            HostAction::Snapshot,  // Capture initial state
+            HostAction::AppendToActive(b"This content will be MISSED before rotation!\n".to_vec()),
+            // NO SNAPSHOT HERE - simulates growth between snapshot intervals
+            HostAction::Rotate { archived_name: "app-2025-01-03.log".to_string() },
+            HostAction::AppendToActive(b"New log after rotation\n".to_vec()),
+            HostAction::Snapshot,  // This should: rename pond file, append missed bytes, create new active
+        ]).await.unwrap();
+
+        runner.verify_final_state().await.unwrap();
+        println!("✓ Scenario: rotation with missed bytes passed");
+    }
+
+    #[tokio::test]
+    async fn test_scenario_multiple_rotations() {
+        //! Scenario: Multiple rotations over time
+
+        let mut runner = ScenarioRunner::new("scenario_multi_rotation").await.unwrap();
+        
+        runner.run_scenario(&[
+            // First file lifecycle
+            HostAction::AppendToActive(b"Day 1 logs\n".to_vec()),
+            HostAction::Snapshot,
+            HostAction::AppendToActive(b"Day 1 more logs\n".to_vec()),
+            HostAction::Snapshot,
+            HostAction::Rotate { archived_name: "app-day1.log".to_string() },
+            
+            // Second file lifecycle
+            HostAction::AppendToActive(b"Day 2 logs\n".to_vec()),
+            HostAction::Snapshot,
+            HostAction::Rotate { archived_name: "app-day2.log".to_string() },
+            
+            // Third file (current active)
+            HostAction::AppendToActive(b"Day 3 logs\n".to_vec()),
+            HostAction::Snapshot,
+        ]).await.unwrap();
+
+        runner.verify_final_state().await.unwrap();
+        println!("✓ Scenario: multiple rotations passed");
+    }
+
+    #[tokio::test]
+    async fn test_scenario_large_file_rotation() {
+        //! Scenario: Large files (> 16KB block size) with rotation
+
+        let mut runner = ScenarioRunner::new("scenario_large_rotation").await.unwrap();
+        
+        // Create content > 16KB
+        let large_content_1: Vec<u8> = (0..20_000)
+            .map(|i| format!("Log line {}: some data here\n", i))
+            .flat_map(|s| s.into_bytes())
+            .take(20_000)
+            .collect();
+        
+        let large_content_2: Vec<u8> = (0..15_000)
+            .map(|i| format!("More log {}: additional data\n", i))
+            .flat_map(|s| s.into_bytes())
+            .take(15_000)
+            .collect();
+
+        runner.run_scenario(&[
+            HostAction::AppendToActive(large_content_1.clone()),
+            HostAction::Snapshot,
+            HostAction::AppendToActive(large_content_2.clone()),
+            // Miss some content before rotation
+            HostAction::Rotate { archived_name: "app-large.log".to_string() },
+            HostAction::AppendToActive(b"New session after large file rotation\n".to_vec()),
+            HostAction::Snapshot,
+        ]).await.unwrap();
+
+        runner.verify_final_state().await.unwrap();
+        println!("✓ Scenario: large file rotation passed");
+    }
+
+    #[tokio::test]
+    async fn test_scenario_block_boundary_rotation() {
+        //! Scenario: Rotation at exact block boundary (16KB)
+
+        let mut runner = ScenarioRunner::new("scenario_block_boundary").await.unwrap();
+        
+        // Exactly 16KB
+        let exactly_one_block = vec![b'A'; 16 * 1024];
+        
+        runner.run_scenario(&[
+            HostAction::AppendToActive(exactly_one_block.clone()),
+            HostAction::Snapshot,
+            // Append exactly one more block
+            HostAction::AppendToActive(vec![b'B'; 16 * 1024]),
+            // Miss the second block before rotation
+            HostAction::Rotate { archived_name: "app-boundary.log".to_string() },
+            HostAction::AppendToActive(b"After boundary rotation\n".to_vec()),
+            HostAction::Snapshot,
+        ]).await.unwrap();
+
+        runner.verify_final_state().await.unwrap();
+        println!("✓ Scenario: block boundary rotation passed");
+    }
+}

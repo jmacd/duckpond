@@ -1,0 +1,3 @@
+archived_pattern: /tmp/synth-incremental/app.log.*
+active_pattern: /tmp/synth-incremental/app.log
+pond_path: /ingest

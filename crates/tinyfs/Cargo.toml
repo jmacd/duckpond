@@ -39,8 +39,8 @@ deltalake.workspace = true
 tokio-util.workspace = true
 serde_arrow.workspace = true
 bytes.workspace = true
-utilities = { path = "../utilities" }
-bao-tree = { workspace = true }
+utilities.workspace = true
+bao-tree.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
