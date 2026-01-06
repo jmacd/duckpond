@@ -7,27 +7,45 @@
 //! This module provides incremental BLAKE3 hash computation using bao-tree
 //! structures for FilePhysicalVersion and FilePhysicalSeries entries.
 //!
+//! ## blake3 Field Semantics (CRITICAL)
+//!
+//! The `OplogEntry.blake3` field has **different semantics** depending on entry type:
+//!
+//! | EntryType              | `blake3` contains                              | Verifiable per-version? |
+//! |------------------------|------------------------------------------------|-------------------------|
+//! | `FilePhysicalVersion`  | `blake3(this_version)` - per-version hash      | ✓ Yes                   |
+//! | `FilePhysicalSeries`   | `bao_root(v1\|\|v2\|\|...\|\|vN)` - **CUMULATIVE** | ✗ No                    |
+//! | `TablePhysicalVersion` | `blake3(this_version)` - per-version hash      | ✓ Yes                   |
+//! | `TablePhysicalSeries`  | `blake3(this_version)` - per-version (parquet) | ✓ Yes                   |
+//!
+//! **Why FilePhysicalSeries is cumulative**: Raw file content (like logs) can be
+//! concatenated: `read(series) = v1 || v2 || ... || vN`. The cumulative hash
+//! enables verified streaming of the entire series. Individual versions cannot
+//! be verified in isolation - they're verified as part of the cumulative chain.
+//!
+//! **Why TablePhysicalSeries is per-version**: Parquet files have headers/footers
+//! and cannot be concatenated. Each version is a self-contained file verified
+//! independently.
+//!
 //! ## Entry Type Validation Strategies
 //!
-//! Different entry types require different validation approaches:
+//! | EntryType              | Validation Strategy        | Notes                              |
+//! |------------------------|----------------------------|------------------------------------|
+//! | `DirectoryPhysical`    | None                       | Metadata only, no byte content     |
+//! | `DirectoryDynamic`     | None                       | Factory-generated on demand        |
+//! | `Symlink`              | `blake3::hash()` only      | Always < 16KB, no outboard needed  |
+//! | `FilePhysicalVersion`  | Fresh `compute_outboard()` | Each version starts at byte 0      |
+//! | `FilePhysicalSeries`   | **Incremental resume**     | Cumulative across versions         |
+//! | `FileDynamic`          | None                       | Factory-generated on demand        |
+//! | `TablePhysicalVersion` | Fresh `compute_outboard()` | Each version starts at byte 0      |
+//! | `TablePhysicalSeries`  | Fresh `compute_outboard()` | Each version independent (parquet) |
+//! | `TableDynamic`         | None                       | Factory-generated on demand        |
 //!
-//! | EntryType              | Strategy              | Notes                         |
-//! |------------------------|-----------------------|-------------------------------|
-//! | `DirectoryPhysical`    | None                  | Metadata only, no byte content |
-//! | `DirectoryDynamic`     | None                  | Factory-generated on demand   |
-//! | `Symlink`              | `blake3::hash()` only | Always < 16KB, no outboard    |
-//! | `FilePhysicalVersion`  | Fresh `compute_outboard()` | Each version starts at byte 0 |
-//! | `FilePhysicalSeries`   | **Incremental resume** | Cumulative across versions    |
-//! | `FileDynamic`          | None                  | Factory-generated on demand   |
-//! | `TablePhysicalVersion` | Fresh `compute_outboard()` | Each version starts at byte 0 |
-//! | `TablePhysicalSeries`  | **Incremental resume** | Cumulative across versions    |
-//! | `TableDynamic`         | None                  | Factory-generated on demand   |
+//! **Key insight**: Only `FilePhysicalSeries` uses incremental checksumming with
+//! resume capability. `TablePhysicalSeries` computes fresh outboards per-version
+//! because parquet files cannot be concatenated.
 //!
-//! **Key insight**: Only `FilePhysicalSeries` and `TablePhysicalSeries` need
-//! incremental checksumming with resume capability. All other physical types
-//! compute fresh outboards starting at offset 0.
-//!
-//! ## The Pending Bytes Problem (Series Types Only)
+//! ## The Pending Bytes Problem (FilePhysicalSeries Only)
 //!
 //! When computing cumulative checksums across versions, blocks may span version
 //! boundaries. For example, with 16KB blocks:
@@ -93,36 +111,64 @@ pub enum BaoOutboardError {
     Io(#[from] io::Error),
 }
 
-/// Outboard data for FilePhysicalSeries versions
+/// Outboard data for `FilePhysicalSeries` versions with incremental checksumming support.
+///
+/// # Cumulative Hash Design (CRITICAL)
+///
+/// The `cumulative_blake3` field contains `bao_root(v1 || v2 || ... || vN)` - the
+/// bao-tree root hash of ALL version content concatenated together. This is the
+/// **canonical hash** for a `FilePhysicalSeries` and must be copied to
+/// `OplogEntry.blake3` via `set_bao_outboard()`.
+///
+/// **Why cumulative?** File series represent append-only logs. Readers read the
+/// concatenated content (v1 || v2 || ... || vN). The cumulative hash enables:
+/// 1. Verified streaming of the entire series via bao-tree
+/// 2. Efficient append via incremental checksumming (don't re-hash v1..vN-1)
+///
+/// **Important**: You CANNOT verify individual version content against this hash.
+/// `blake3(vN) != bao_root(v1 || ... || vN)`. Individual version verification
+/// is not supported for series types.
+///
+/// # Storage Modes
 ///
 /// For **inline content** (small files):
-/// - `version_outboard` is empty (not needed - blake3 hash is sufficient)
-/// - `cumulative_outboard` contains the outboard for v1..vN concatenated content
+/// - `incremental.new_stable_subtrees`: Empty or minimal
+/// - Cumulative outboard computed incrementally via `append_version_inline()`
 ///
 /// For **large files**:
-/// - `version_outboard` contains offset=0 independent outboard for verified streaming
-/// - `cumulative_outboard` contains the outboard for v1..vN concatenated content
+/// - `incremental`: Contains offset=0 independent outboard for verified streaming
+/// - Cumulative outboard tracks concatenated content position
 ///
-/// The `frontier` field stores the rightmost path of the Merkle tree, which is
-/// needed to efficiently resume checksumming when appending new versions.
-/// Note: We do NOT store pending bytes (partial block data). Instead, the caller
-/// re-reads and verifies those bytes from storage using stored version hashes.
+/// # Frontier for Resumption
 ///
-/// This struct is serialized to binary and stored in the `bao_outboard` field.
+/// The `incremental.frontier` stores the rightmost path of the Merkle tree,
+/// enabling efficient resume of checksumming when appending new versions.
+/// We do NOT store pending bytes - the caller re-reads and verifies them
+/// from storage using the previous version's SeriesOutboard.
+///
+/// This struct is serialized to binary and stored in `OplogEntry.bao_outboard`.
 #[derive(Clone, Debug)]
 pub struct SeriesOutboard {
-    /// Incremental outboard delta for this version
-    /// Contains only nodes that became stable or changed from previous version
+    /// Incremental outboard delta for this version.
+    /// Contains nodes that became stable or changed, plus the updated frontier.
     pub incremental: IncrementalOutboard,
 
-    /// Cumulative BLAKE3 hash through this version: blake3(v1 || v2 || ... || vN)
-    /// This is used for validation when cumulative content is < 16KB (empty bao outboard)
+    /// **THE CUMULATIVE HASH**: `bao_root(v1 || v2 || ... || vN)`
+    ///
+    /// This is the bao-tree root hash of ALL content through this version.
+    /// It is NOT `blake3(this_version_content)` - that would be useless for series.
+    ///
+    /// When `set_bao_outboard()` is called on an OplogEntry, this value is
+    /// extracted and stored in `OplogEntry.blake3`. This ensures the entry's
+    /// blake3 always reflects cumulative content, not per-version content.
+    ///
+    /// Used for validation when cumulative content is < 16KB (empty bao outboard).
     pub cumulative_blake3: [u8; 32],
 
     /// Size of this version's content (for reconstruction)
     pub version_size: u64,
 
-    /// Cumulative size through this version
+    /// Cumulative size through this version: `size(v1) + size(v2) + ... + size(vN)`
     pub cumulative_size: u64,
 }
 
@@ -356,8 +402,17 @@ impl SeriesOutboard {
         let mut state = IncrementalHashState::new();
         state.ingest(content);
 
-        // Compute cumulative blake3 hash
-        let cumulative_blake3 = *blake3::hash(content).as_bytes();
+        // CRITICAL: Use state.root_hash() for cumulative_blake3, NOT blake3::hash()!
+        // 
+        // For consistency with verify_series_prefix() and append_version(), we must
+        // use the bao-tree incremental root hash. This ensures:
+        // 1. first_version() and append_version() use the same hashing approach
+        // 2. verify_series_prefix() can verify content against cumulative_blake3
+        //
+        // Note: For exactly 1 block (16KB), IncrementalHashState::root_hash() returns
+        // a non-root hash (different from blake3::hash()) because the file may grow.
+        // This is intentional - it enables seamless continuation when appending.
+        let cumulative_blake3 = *state.root_hash().as_bytes();
 
         // For the first version, all subtrees are "new stable"
         // (there was no previous frontier to compare against)
@@ -1276,6 +1331,377 @@ pub fn compute_single_version_outboard(content: &[u8]) -> (blake3::Hash, Vec<u8>
     compute_outboard(content)
 }
 
+// ============================================================================
+// Streaming Prefix Verification (for logfile ingestion)
+// ============================================================================
+
+/// Result of prefix verification
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefixVerifyResult {
+    /// Prefix matches - safe to append new data
+    Match,
+    /// Prefix does not match - file was modified or rotated
+    Mismatch {
+        expected_hash: [u8; 32],
+        computed_hash: [u8; 32],
+    },
+    /// File is smaller than expected prefix size
+    FileTooSmall { expected: u64, actual: u64 },
+}
+
+impl PrefixVerifyResult {
+    /// Returns true if the prefix matches
+    #[must_use]
+    pub fn is_match(&self) -> bool {
+        matches!(self, Self::Match)
+    }
+
+    /// Returns true if the file was modified (mismatch or too small)
+    #[must_use]
+    pub fn is_modified(&self) -> bool {
+        !matches!(self, Self::Match)
+    }
+}
+
+/// Verify that an external file's prefix matches a stored SeriesOutboard.
+///
+/// This is the core function for logfile ingestion's two use cases:
+///
+/// 1. **Rollover detection**: When an active file rotates, check if a new
+///    archived file's content matches what we previously tracked as active.
+///
+/// 2. **Incremental append verification**: Before appending new content from
+///    the active file, verify the existing prefix hasn't changed.
+///
+/// The function streams through the file in BLOCK_SIZE chunks, computing
+/// the bao-tree root hash incrementally. This is efficient for large files
+/// as it only reads the prefix portion once and doesn't require loading
+/// the entire file into memory.
+///
+/// # Arguments
+/// * `reader` - A reader positioned at the start of the file
+/// * `series` - The stored SeriesOutboard to verify against
+///
+/// # Returns
+/// * `PrefixVerifyResult::Match` if prefix matches
+/// * `PrefixVerifyResult::Mismatch` if hashes don't match
+/// * `PrefixVerifyResult::FileTooSmall` if file is smaller than prefix size
+///
+/// # Example
+/// ```ignore
+/// use std::fs::File;
+/// use std::io::BufReader;
+/// use utilities::bao_outboard::{verify_prefix_streaming, SeriesOutboard};
+///
+/// let file = File::open("/var/log/app.log")?;
+/// let reader = BufReader::new(file);
+/// let series = SeriesOutboard::from_bytes(&stored_outboard)?;
+///
+/// match verify_prefix_streaming(reader, &series)? {
+///     PrefixVerifyResult::Match => {
+///         // Safe to append - read new bytes starting at series.cumulative_size
+///     }
+///     PrefixVerifyResult::Mismatch { .. } => {
+///         // File was modified - handle as rotation or corruption
+///     }
+///     PrefixVerifyResult::FileTooSmall { .. } => {
+///         // File shrank - unexpected, log warning
+///     }
+/// }
+/// ```
+pub fn verify_prefix_streaming<R: io::Read>(
+    mut reader: R,
+    series: &SeriesOutboard,
+) -> Result<PrefixVerifyResult, BaoOutboardError> {
+    let prefix_size = series.cumulative_size;
+
+    if prefix_size == 0 {
+        // Empty prefix always matches
+        return Ok(PrefixVerifyResult::Match);
+    }
+
+    // Stream through the prefix, computing hash incrementally
+    let mut state = IncrementalHashState::new();
+    let mut buffer = vec![0u8; BLOCK_SIZE];
+    let mut bytes_remaining = prefix_size;
+
+    while bytes_remaining > 0 {
+        let to_read = (bytes_remaining as usize).min(BLOCK_SIZE);
+        let bytes_read = match reader.read(&mut buffer[..to_read]) {
+            Ok(0) => {
+                // EOF before reading full prefix
+                return Ok(PrefixVerifyResult::FileTooSmall {
+                    expected: prefix_size,
+                    actual: prefix_size - bytes_remaining,
+                });
+            }
+            Ok(n) => n,
+            Err(e) => return Err(BaoOutboardError::Io(e)),
+        };
+
+        state.ingest(&buffer[..bytes_read]);
+        bytes_remaining -= bytes_read as u64;
+    }
+
+    // Compare computed hash against stored
+    let computed_hash = *state.root_hash().as_bytes();
+    if computed_hash == series.cumulative_blake3 {
+        Ok(PrefixVerifyResult::Match)
+    } else {
+        Ok(PrefixVerifyResult::Mismatch {
+            expected_hash: series.cumulative_blake3,
+            computed_hash,
+        })
+    }
+}
+
+/// Verify multiple files against stored prefix hashes efficiently.
+///
+/// This is useful for rollover detection when multiple new archived files
+/// appear and we need to find which one (if any) matches our stored prefix.
+///
+/// Returns the index of the first matching file, or None if no match found.
+///
+/// # Arguments
+/// * `files` - Iterator of readers, each positioned at the start of a file
+/// * `series` - The stored SeriesOutboard to verify against
+///
+/// # Returns
+/// Some(index) of the first matching file, or None
+///
+/// # Example
+/// ```ignore
+/// let archived_files: Vec<_> = new_archived_paths
+///     .iter()
+///     .map(|p| BufReader::new(File::open(p)?))
+///     .collect();
+///
+/// if let Some(idx) = find_matching_prefix(archived_files.into_iter(), &series)? {
+///     println!("File {} matches the former active file prefix", new_archived_paths[idx]);
+/// }
+/// ```
+pub fn find_matching_prefix<R, I>(files: I, series: &SeriesOutboard) -> Result<Option<usize>, BaoOutboardError>
+where
+    R: io::Read,
+    I: Iterator<Item = R>,
+{
+    for (idx, reader) in files.enumerate() {
+        match verify_prefix_streaming(reader, series)? {
+            PrefixVerifyResult::Match => return Ok(Some(idx)),
+            PrefixVerifyResult::Mismatch { .. } | PrefixVerifyResult::FileTooSmall { .. } => {
+                // Continue checking other files
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Compute the bao-tree root hash of a prefix from a reader.
+///
+/// This is useful for creating a new SeriesOutboard for a file that
+/// hasn't been tracked yet (e.g., initial ingest of an archived file).
+///
+/// # Arguments
+/// * `reader` - A reader positioned at the start of the file
+/// * `size` - Number of bytes to read and hash
+///
+/// # Returns
+/// The computed bao-tree root hash and the resulting IncrementalHashState
+/// (which includes the frontier for future incremental operations).
+pub fn compute_prefix_hash_streaming<R: io::Read>(
+    mut reader: R,
+    size: u64,
+) -> Result<IncrementalHashState, BaoOutboardError> {
+    let mut state = IncrementalHashState::new();
+    let mut buffer = vec![0u8; BLOCK_SIZE];
+    let mut bytes_remaining = size;
+
+    while bytes_remaining > 0 {
+        let to_read = (bytes_remaining as usize).min(BLOCK_SIZE);
+        let bytes_read = match reader.read(&mut buffer[..to_read]) {
+            Ok(0) => {
+                return Err(BaoOutboardError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("EOF after {} bytes, expected {}", size - bytes_remaining, size),
+                )));
+            }
+            Ok(n) => n,
+            Err(e) => return Err(BaoOutboardError::Io(e)),
+        };
+
+        state.ingest(&buffer[..bytes_read]);
+        bytes_remaining -= bytes_read as u64;
+    }
+
+    Ok(state)
+}
+
+/// Create a SeriesOutboard from streaming content.
+///
+/// This is useful for initial ingest of a file that hasn't been tracked yet.
+/// It computes the bao-tree hash and creates the appropriate SeriesOutboard
+/// without loading the entire file into memory.
+///
+/// # Arguments
+/// * `reader` - A reader positioned at the start of the file
+/// * `size` - Total size of the content to hash
+///
+/// # Returns
+/// A new SeriesOutboard covering the content
+pub fn series_outboard_from_streaming<R: io::Read>(
+    reader: R,
+    size: u64,
+) -> Result<SeriesOutboard, BaoOutboardError> {
+    let state = compute_prefix_hash_streaming(reader, size)?;
+    let frontier = state.to_frontier();
+    let root_hash = *state.root_hash().as_bytes();
+
+    // For the first version, all subtrees are "new stable"
+    let new_stable_subtrees: Vec<(u32, [u8; 32])> = frontier
+        .iter()
+        .map(|(level, hash, _start)| (*level, *hash))
+        .collect();
+
+    Ok(SeriesOutboard {
+        incremental: IncrementalOutboard {
+            new_stable_subtrees,
+            frontier,
+        },
+        cumulative_blake3: root_hash,
+        version_size: size,
+        cumulative_size: size,
+    })
+}
+
+/// Append new content to a series from a streaming source.
+///
+/// This handles the incremental append case efficiently:
+/// 1. Verifies the prefix matches (if verify=true)
+/// 2. Computes the new SeriesOutboard for the extended content
+///
+/// # Arguments
+/// * `reader` - A reader positioned at the start of the file
+/// * `file_size` - Total size of the current file (prefix + new data)
+/// * `prev_series` - The previous SeriesOutboard
+/// * `verified_pending` - Pending bytes from previous state (must be verified by caller)
+/// * `verify_prefix` - Whether to verify the prefix before appending
+///
+/// # Returns
+/// The new SeriesOutboard covering all content, or an error if prefix doesn't match
+pub fn append_series_from_streaming<R: io::Read>(
+    mut reader: R,
+    file_size: u64,
+    prev_series: &SeriesOutboard,
+    verified_pending: &[u8],
+    verify_prefix: bool,
+) -> Result<SeriesOutboard, BaoOutboardError> {
+    let prefix_size = prev_series.cumulative_size;
+
+    if file_size < prefix_size {
+        return Err(BaoOutboardError::FileShrunk {
+            current: file_size,
+            previous: prefix_size,
+        });
+    }
+
+    // Step 1: Optionally verify prefix by reading and hashing it
+    if verify_prefix && prefix_size > 0 {
+        // Compute hash of prefix by reading it
+        let mut verify_state = IncrementalHashState::new();
+        let mut buffer = vec![0u8; BLOCK_SIZE];
+        let mut bytes_remaining = prefix_size;
+
+        while bytes_remaining > 0 {
+            let to_read = (bytes_remaining as usize).min(BLOCK_SIZE);
+            let bytes_read = match reader.read(&mut buffer[..to_read]) {
+                Ok(0) => {
+                    return Err(BaoOutboardError::FileShrunk {
+                        current: prefix_size - bytes_remaining,
+                        previous: prefix_size,
+                    });
+                }
+                Ok(n) => n,
+                Err(e) => return Err(BaoOutboardError::Io(e)),
+            };
+
+            verify_state.ingest(&buffer[..bytes_read]);
+            bytes_remaining -= bytes_read as u64;
+        }
+
+        // Compare computed hash against stored
+        let computed_hash = *verify_state.root_hash().as_bytes();
+        if computed_hash != prev_series.cumulative_blake3 {
+            return Err(BaoOutboardError::PrefixMismatch);
+        }
+    } else if prefix_size > 0 {
+        // Skip the prefix without verifying
+        let mut buffer = vec![0u8; BLOCK_SIZE];
+        let mut bytes_remaining = prefix_size;
+
+        while bytes_remaining > 0 {
+            let to_read = (bytes_remaining as usize).min(BLOCK_SIZE);
+            let bytes_read = match reader.read(&mut buffer[..to_read]) {
+                Ok(0) => {
+                    return Err(BaoOutboardError::FileShrunk {
+                        current: prefix_size - bytes_remaining,
+                        previous: prefix_size,
+                    });
+                }
+                Ok(n) => n,
+                Err(e) => return Err(BaoOutboardError::Io(e)),
+            };
+            bytes_remaining -= bytes_read as u64;
+        }
+    }
+
+    // Step 2: Resume from previous state and ingest new content
+    let mut state = IncrementalHashState::resume(
+        &prev_series.incremental.frontier,
+        prev_series.cumulative_size,
+        verified_pending,
+    )?;
+
+    // Capture the previous frontier for delta computation
+    let prev_frontier = prev_series.incremental.frontier.clone();
+
+    // Read and ingest the new content
+    let new_content_size = file_size - prefix_size;
+    let mut buffer = vec![0u8; BLOCK_SIZE];
+    let mut bytes_remaining = new_content_size;
+
+    while bytes_remaining > 0 {
+        let to_read = (bytes_remaining as usize).min(BLOCK_SIZE);
+        let bytes_read = match reader.read(&mut buffer[..to_read]) {
+            Ok(0) => {
+                return Err(BaoOutboardError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF reading new content",
+                )));
+            }
+            Ok(n) => n,
+            Err(e) => return Err(BaoOutboardError::Io(e)),
+        };
+
+        state.ingest(&buffer[..bytes_read]);
+        bytes_remaining -= bytes_read as u64;
+    }
+
+    // Step 3: Build the new SeriesOutboard
+    let new_frontier = state.to_frontier();
+    let new_stable_subtrees = compute_stable_delta(&prev_frontier, &new_frontier);
+    let root_hash = *state.root_hash().as_bytes();
+
+    Ok(SeriesOutboard {
+        incremental: IncrementalOutboard {
+            new_stable_subtrees,
+            frontier: new_frontier,
+        },
+        cumulative_blake3: root_hash,
+        version_size: new_content_size,
+        cumulative_size: file_size,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1449,6 +1875,78 @@ mod tests {
         assert_eq!(so.cumulative_size, so2.cumulative_size);
         assert_eq!(so.cumulative_blake3, so2.cumulative_blake3);
         assert_eq!(so.incremental.frontier, so2.incremental.frontier);
+    }
+
+    #[test]
+    fn test_series_outboard_exactly_one_block() {
+        //! Critical edge case: exactly 16KB (1 block) content.
+        //!
+        //! For FilePhysicalSeries, cumulative_blake3 must use IncrementalHashState::root_hash(),
+        //! NOT blake3::hash(). This ensures:
+        //! 1. first_version() and append_version() use consistent hashing
+        //! 2. verify_series_prefix() can verify content against cumulative_blake3
+        //!
+        //! For exactly 1 block, IncrementalHashState::root_hash() returns a NON-ROOT hash
+        //! (different from blake3::hash()) because the file may grow. This is intentional.
+
+        let content = vec![0x42u8; BLOCK_SIZE]; // Exactly 16KB
+        let so = SeriesOutboard::first_version(&content);
+
+        // Verify cumulative_blake3 matches IncrementalHashState::root_hash()
+        let mut state = IncrementalHashState::new();
+        state.ingest(&content);
+        let expected_hash = *state.root_hash().as_bytes();
+
+        assert_eq!(
+            so.cumulative_blake3, expected_hash,
+            "cumulative_blake3 must match IncrementalHashState::root_hash()"
+        );
+
+        // This is NOT the same as blake3::hash() for exactly 1 block
+        let direct_hash = *blake3::hash(&content).as_bytes();
+        assert_ne!(
+            so.cumulative_blake3, direct_hash,
+            "For exactly 1 block, cumulative_blake3 should differ from blake3::hash()"
+        );
+
+        // Verify that verify_series_prefix works
+        let result = verify_series_prefix(&content, &so);
+        assert!(result.is_ok(), "verify_series_prefix should succeed");
+    }
+
+    #[test]
+    fn test_series_outboard_append_at_block_boundary() {
+        //! Test appending when first version is exactly 1 block (16KB).
+        //!
+        //! This exercises the edge case where the first version fills exactly one block,
+        //! then we append more content. The cumulative hash must be consistent.
+
+        let v1 = vec![0xAAu8; BLOCK_SIZE]; // Exactly 16KB
+        let v2 = vec![0xBBu8; BLOCK_SIZE]; // Another 16KB
+
+        let so1 = SeriesOutboard::first_version(&v1);
+
+        // After v1, there are no pending bytes (exactly 1 complete block)
+        let pending_size = (so1.cumulative_size % BLOCK_SIZE as u64) as usize;
+        assert_eq!(pending_size, 0, "No pending bytes after exactly 1 block");
+        let pending: &[u8] = &[];
+
+        let so2 = SeriesOutboard::append_version(&so1, pending, &v2);
+
+        // Verify cumulative hash
+        let combined = [v1.as_slice(), v2.as_slice()].concat();
+        let mut state = IncrementalHashState::new();
+        state.ingest(&combined);
+        let expected_hash = *state.root_hash().as_bytes();
+
+        assert_eq!(
+            so2.cumulative_blake3, expected_hash,
+            "cumulative_blake3 after append must match fresh computation"
+        );
+
+        // Verify prefix check works
+        let result = verify_series_prefix(&combined, &so2);
+        assert!(result.is_ok(), "verify_series_prefix should succeed after append");
     }
 
     #[test]
@@ -1778,5 +2276,348 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, BaoOutboardError::InvalidOutboard(_)));
+    }
+
+    // ============ Streaming Prefix Verification Tests ============
+
+    #[test]
+    fn test_verify_prefix_streaming_match() {
+        use std::io::Cursor;
+
+        // Create original content and SeriesOutboard
+        let content = vec![0xAAu8; 50 * 1024]; // 50KB
+        let series = SeriesOutboard::first_version(&content);
+
+        // Verify against same content
+        let reader = Cursor::new(&content);
+        let result = verify_prefix_streaming(reader, &series).expect("verify should succeed");
+
+        assert!(result.is_match());
+    }
+
+    #[test]
+    fn test_verify_prefix_streaming_mismatch() {
+        use std::io::Cursor;
+
+        // Create original content
+        let content = vec![0xAAu8; 50 * 1024]; // 50KB
+        let series = SeriesOutboard::first_version(&content);
+
+        // Modify the content
+        let mut modified = content.clone();
+        modified[1000] = 0xBB;
+
+        // Verify against modified content
+        let reader = Cursor::new(&modified);
+        let result = verify_prefix_streaming(reader, &series).expect("verify should succeed");
+
+        assert!(result.is_modified());
+        assert!(matches!(result, PrefixVerifyResult::Mismatch { .. }));
+    }
+
+    #[test]
+    fn test_verify_prefix_streaming_file_too_small() {
+        use std::io::Cursor;
+
+        // Create original content
+        let content = vec![0xAAu8; 50 * 1024]; // 50KB
+        let series = SeriesOutboard::first_version(&content);
+
+        // Create smaller content (simulates file truncation)
+        let smaller = vec![0xAAu8; 30 * 1024]; // 30KB
+
+        // Verify against smaller content
+        let reader = Cursor::new(&smaller);
+        let result = verify_prefix_streaming(reader, &series).expect("verify should succeed");
+
+        assert!(result.is_modified());
+        match result {
+            PrefixVerifyResult::FileTooSmall { expected, actual } => {
+                assert_eq!(expected, 50 * 1024);
+                assert_eq!(actual, 30 * 1024);
+            }
+            _ => panic!("Expected FileTooSmall"),
+        }
+    }
+
+    #[test]
+    fn test_verify_prefix_streaming_empty() {
+        use std::io::Cursor;
+
+        // Empty series
+        let series = SeriesOutboard::first_version(&[]);
+
+        // Any file matches empty prefix
+        let content = vec![0xAAu8; 1024];
+        let reader = Cursor::new(&content);
+        let result = verify_prefix_streaming(reader, &series).expect("verify should succeed");
+
+        assert!(result.is_match());
+    }
+
+    #[test]
+    fn test_find_matching_prefix() {
+        use std::io::Cursor;
+
+        // Create original content
+        let original = vec![0xAAu8; 50 * 1024]; // 50KB
+        let series = SeriesOutboard::first_version(&original);
+
+        // Create multiple files, one matches
+        let file1 = vec![0xBBu8; 50 * 1024]; // Different content
+        let file2 = vec![0xAAu8; 30 * 1024]; // Too small
+        let file3 = original.clone();         // Matches!
+        let file4 = vec![0xCCu8; 50 * 1024]; // Different content
+
+        let readers = vec![
+            Cursor::new(&file1),
+            Cursor::new(&file2),
+            Cursor::new(&file3),
+            Cursor::new(&file4),
+        ];
+
+        let result = find_matching_prefix(readers.into_iter(), &series)
+            .expect("find should succeed");
+
+        assert_eq!(result, Some(2)); // file3 at index 2 matches
+    }
+
+    #[test]
+    fn test_find_matching_prefix_none() {
+        use std::io::Cursor;
+
+        // Create original content
+        let original = vec![0xAAu8; 50 * 1024];
+        let series = SeriesOutboard::first_version(&original);
+
+        // No files match
+        let file1 = vec![0xBBu8; 50 * 1024];
+        let file2 = vec![0xCCu8; 50 * 1024];
+
+        let readers = vec![
+            Cursor::new(&file1),
+            Cursor::new(&file2),
+        ];
+
+        let result = find_matching_prefix(readers.into_iter(), &series)
+            .expect("find should succeed");
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_compute_prefix_hash_streaming() {
+        use std::io::Cursor;
+
+        let content = vec![0xDDu8; 100 * 1024]; // 100KB
+
+        // Compute via streaming
+        let reader = Cursor::new(&content);
+        let state = compute_prefix_hash_streaming(reader, content.len() as u64)
+            .expect("compute should succeed");
+
+        // Compare with non-streaming computation
+        let series = SeriesOutboard::first_version(&content);
+
+        assert_eq!(*state.root_hash().as_bytes(), series.cumulative_blake3);
+    }
+
+    #[test]
+    fn test_series_outboard_from_streaming() {
+        use std::io::Cursor;
+
+        let content = vec![0xEEu8; 75 * 1024]; // 75KB
+
+        // Create via streaming
+        let reader = Cursor::new(&content);
+        let streaming = series_outboard_from_streaming(reader, content.len() as u64)
+            .expect("create should succeed");
+
+        // Create via non-streaming
+        let direct = SeriesOutboard::first_version(&content);
+
+        assert_eq!(streaming.cumulative_size, direct.cumulative_size);
+        assert_eq!(streaming.cumulative_blake3, direct.cumulative_blake3);
+        assert_eq!(streaming.frontier(), direct.frontier());
+    }
+
+    #[test]
+    fn test_append_series_from_streaming() {
+        use std::io::Cursor;
+
+        // Initial content
+        let v1 = vec![0x11u8; 20 * 1024]; // 20KB
+        let series1 = SeriesOutboard::first_version(&v1);
+
+        // Extended file (v1 + v2)
+        let v2 = vec![0x22u8; 30 * 1024]; // 30KB
+        let combined: Vec<u8> = [v1.as_slice(), v2.as_slice()].concat();
+
+        // Pending bytes from v1 (20KB % 16KB = 4KB)
+        let pending_size = v1.len() % BLOCK_SIZE;
+        let pending = &v1[v1.len() - pending_size..];
+
+        // Append via streaming (with verification)
+        let reader = Cursor::new(&combined);
+        let series2 = append_series_from_streaming(
+            reader,
+            combined.len() as u64,
+            &series1,
+            pending,
+            true, // verify prefix
+        ).expect("append should succeed");
+
+        // Compare with direct computation
+        let direct = {
+            let s1 = SeriesOutboard::first_version(&v1);
+            SeriesOutboard::append_version(&s1, pending, &v2)
+        };
+
+        assert_eq!(series2.cumulative_size, direct.cumulative_size);
+        assert_eq!(series2.cumulative_blake3, direct.cumulative_blake3);
+    }
+
+    #[test]
+    fn test_append_series_from_streaming_mismatch() {
+        use std::io::Cursor;
+
+        // Initial content
+        let v1 = vec![0x11u8; 20 * 1024]; // 20KB
+        let series1 = SeriesOutboard::first_version(&v1);
+
+        // Modified prefix + new data
+        let mut modified_v1 = v1.clone();
+        modified_v1[5000] = 0xFF; // Corrupt the prefix
+        let v2 = vec![0x22u8; 30 * 1024];
+        let combined: Vec<u8> = [modified_v1.as_slice(), v2.as_slice()].concat();
+
+        let pending_size = v1.len() % BLOCK_SIZE;
+        let pending = &v1[v1.len() - pending_size..];
+
+        // Append should fail due to prefix mismatch
+        let reader = Cursor::new(&combined);
+        let result = append_series_from_streaming(
+            reader,
+            combined.len() as u64,
+            &series1,
+            pending,
+            true, // verify prefix
+        );
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), BaoOutboardError::PrefixMismatch));
+    }
+
+    #[test]
+    fn test_append_series_from_streaming_skip_verification() {
+        use std::io::Cursor;
+
+        // Initial content
+        let v1 = vec![0x11u8; 20 * 1024]; // 20KB
+        let series1 = SeriesOutboard::first_version(&v1);
+
+        // Different prefix but we skip verification
+        // This simulates "trust mode" where we assume append-only
+        let different_v1 = vec![0xFFu8; 20 * 1024]; // Different content!
+        let v2 = vec![0x22u8; 30 * 1024];
+        let combined: Vec<u8> = [different_v1.as_slice(), v2.as_slice()].concat();
+
+        let pending_size = v1.len() % BLOCK_SIZE;
+        let pending = &v1[v1.len() - pending_size..];
+
+        // Append with verification disabled
+        let reader = Cursor::new(&combined);
+        let series2 = append_series_from_streaming(
+            reader,
+            combined.len() as u64,
+            &series1,
+            pending,
+            false, // skip verification
+        ).expect("append should succeed without verification");
+
+        // The hash will be computed from the resumed state + new content
+        // (which won't match actual file content since prefix differs)
+        assert_eq!(series2.cumulative_size, combined.len() as u64);
+    }
+
+    #[test]
+    fn test_verify_prefix_rollover_scenario() {
+        use std::io::Cursor;
+
+        // Simulate logfile rollover detection:
+        // 1. We have a tracked active file with 100KB content
+        // 2. File rotates - active file now has new content starting from 0
+        // 3. A new archived file appears that should match our tracked prefix
+
+        // Original "active file" content we tracked
+        let active_content = vec![0xAAu8; 100 * 1024]; // 100KB
+        let tracked_series = SeriesOutboard::first_version(&active_content);
+
+        // New "active file" - completely different (new log started)
+        let new_active = vec![0xBBu8; 5 * 1024]; // 5KB - new content
+
+        // New archived file that should match the old active
+        let archived = active_content.clone();
+
+        // Verify new active doesn't match (it's a rotation)
+        let result = verify_prefix_streaming(
+            Cursor::new(&new_active),
+            &tracked_series,
+        ).expect("verify should succeed");
+
+        assert!(result.is_modified()); // New active is different
+
+        // Verify archived file matches (it's the rotated file)
+        let result = verify_prefix_streaming(
+            Cursor::new(&archived),
+            &tracked_series,
+        ).expect("verify should succeed");
+
+        assert!(result.is_match()); // Archived is the old active
+    }
+
+    #[test]
+    fn test_verify_prefix_incremental_append_scenario() {
+        use std::io::Cursor;
+
+        // Simulate incremental append detection:
+        // 1. We have tracked 100KB of an active file
+        // 2. File grows to 150KB
+        // 3. Verify prefix matches before appending new 50KB
+
+        // First snapshot: 100KB
+        let v1 = vec![0xAAu8; 100 * 1024];
+        let series1 = SeriesOutboard::first_version(&v1);
+
+        // File grew: 100KB + 50KB new data
+        let v2 = vec![0xBBu8; 50 * 1024];
+        let grown_file: Vec<u8> = [v1.as_slice(), v2.as_slice()].concat();
+
+        // Verify prefix matches (first 100KB unchanged)
+        let result = verify_prefix_streaming(
+            Cursor::new(&grown_file),
+            &series1,
+        ).expect("verify should succeed");
+
+        assert!(result.is_match()); // Prefix is intact
+
+        // Now safe to append new content
+        let pending_size = v1.len() % BLOCK_SIZE;
+        let pending = &v1[v1.len() - pending_size..];
+
+        let series2 = append_series_from_streaming(
+            Cursor::new(&grown_file),
+            grown_file.len() as u64,
+            &series1,
+            pending,
+            false, // Already verified above
+        ).expect("append should succeed");
+
+        // Verify final state
+        assert_eq!(series2.cumulative_size, grown_file.len() as u64);
+
+        // Verify hash matches combined content
+        let direct_combined = SeriesOutboard::first_version(&grown_file);
+        assert_eq!(series2.cumulative_blake3, direct_combined.cumulative_blake3);
     }
 }

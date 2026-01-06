@@ -226,8 +226,23 @@ pub struct OplogEntry {
     /// - For symlinks: target path
     /// - For directories: Arrow IPC encoded VersionedDirectoryEntry records
     pub content: Option<Vec<u8>>,
-    /// BLAKE3 checksum for large files (> threshold)
-    /// Some() for large files stored externally, None for small files stored inline
+    /// BLAKE3 hash - semantics vary by entry type:
+    ///
+    /// | Entry Type            | blake3 contains                                      |
+    /// |-----------------------|------------------------------------------------------|
+    /// | FilePhysicalVersion   | `blake3(this_version_content)` - verifiable per-version |
+    /// | FilePhysicalSeries    | `bao_root(v1||v2||...||vN)` - **CUMULATIVE**, set by `set_bao_outboard()` |
+    /// | TablePhysicalVersion  | `blake3(this_version_content)` - verifiable per-version |
+    /// | TablePhysicalSeries   | `blake3(this_version_content)` - per-version (parquet can't concat) |
+    /// | DirectoryPhysical     | None - directories don't store blake3               |
+    /// | Symlink               | None - symlinks don't store blake3                  |
+    ///
+    /// **CRITICAL for FilePhysicalSeries**: The blake3 field is the cumulative bao-tree
+    /// root hash through ALL versions, NOT just this version's content. This means:
+    /// - You CANNOT verify individual version content against this hash
+    /// - Verification happens when reading concatenated series via bao-tree
+    /// - The cumulative hash is extracted from `SeriesOutboard.cumulative_blake3`
+    ///   when `set_bao_outboard()` is called
     pub blake3: Option<String>,
     /// File size in bytes (Some() for all files, None for directories/symlinks)
     /// NOTE: Uses i64 instead of u64 to match Delta Lake protocol (Java ecosystem legacy)
@@ -684,8 +699,36 @@ impl OplogEntry {
         self.bao_outboard.as_deref()
     }
 
-    /// Set the bao-tree outboard data
+    /// Set the bao-tree outboard data.
+    ///
+    /// # FilePhysicalSeries: Updates blake3 to Cumulative Hash
+    ///
+    /// For `FilePhysicalSeries`, this method performs a **critical side effect**:
+    /// it extracts `cumulative_blake3` from the `SeriesOutboard` and overwrites
+    /// the `blake3` field.
+    ///
+    /// **Why?** The `blake3` field for series types must be the cumulative
+    /// bao-tree root hash: `bao_root(v1 || v2 || ... || vN)`. This hash cannot
+    /// be computed from individual version hashes - it requires the cumulative
+    /// outboard computation done during version append.
+    ///
+    /// The `SeriesOutboard.cumulative_blake3` field contains exactly this value,
+    /// computed incrementally as versions are appended. By extracting it here,
+    /// we ensure the OplogEntry's blake3 always reflects the cumulative state.
+    ///
+    /// **Design Decision**: We could have required callers to set blake3 separately,
+    /// but that would be error-prone. Coupling the outboard storage with blake3
+    /// update ensures consistency.
     pub fn set_bao_outboard(&mut self, outboard: Vec<u8>) {
+        // For FilePhysicalSeries, the blake3 field MUST be the cumulative hash.
+        // Extract it from SeriesOutboard.cumulative_blake3 to maintain this invariant.
+        // See bao-tree-design.md for the full explanation of cumulative vs per-version hashing.
+        if self.file_type == EntryType::FilePhysicalSeries {
+            if let Ok(series_outboard) = utilities::bao_outboard::SeriesOutboard::from_bytes(&outboard) {
+                let hash = blake3::Hash::from_bytes(series_outboard.cumulative_blake3);
+                self.blake3 = Some(hash.to_hex().to_string());
+            }
+        }
         self.bao_outboard = Some(outboard);
     }
 
@@ -712,8 +755,33 @@ impl OplogEntry {
     }
 
     /// Get verified content bytes, checking BLAKE3 hash if available.
+    ///
     /// For content that has a blake3 hash stored, this verifies integrity before returning.
     /// For content without a hash (e.g., directory snapshots), returns content directly.
+    ///
+    /// # Entry Type Verification Behavior
+    ///
+    /// | Entry Type            | Verification                                     |
+    /// |-----------------------|--------------------------------------------------|
+    /// | FilePhysicalVersion   | `blake3(content) == stored_blake3` ✓            |
+    /// | FilePhysicalSeries    | **SKIPPED** - see below                          |
+    /// | TablePhysicalVersion  | `blake3(content) == stored_blake3` ✓            |
+    /// | TablePhysicalSeries   | `blake3(content) == stored_blake3` ✓            |
+    /// | DirectoryPhysical     | None stored - returns content directly           |
+    /// | Symlink               | None stored - returns content directly           |
+    ///
+    /// # Why FilePhysicalSeries Skips Verification
+    ///
+    /// For `FilePhysicalSeries`, the `blake3` field contains the **cumulative**
+    /// bao-tree root hash: `bao_root(v1 || v2 || ... || vN)`. This is fundamentally
+    /// different from `blake3(this_version_content)`.
+    ///
+    /// You **cannot** verify individual version content against a cumulative hash.
+    /// The math doesn't work: `blake3(v2) != bao_root(v1 || v2)`.
+    ///
+    /// Instead, integrity verification for series content happens:
+    /// 1. At write time: Content is hashed into the cumulative outboard
+    /// 2. At read time: BaoValidatingReader validates concatenated content against cumulative hash
     ///
     /// # Errors
     /// Returns `ContentIntegrityError` if the hash doesn't match.
@@ -723,14 +791,19 @@ impl OplogEntry {
             return Ok(None);
         };
 
-        // For types that don't store blake3 (directories, symlinks), return content directly
-        // Directories have content (serialized entries) but no blake3
-        // Symlinks have content (target path) but no blake3
-        // Only files have blake3 hashes
+        // Directories and symlinks don't store blake3 - return content directly
         if matches!(
             self.file_type,
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic | EntryType::Symlink
         ) {
+            return Ok(Some(content));
+        }
+
+        // FilePhysicalSeries: blake3 is CUMULATIVE (bao_root of all versions concatenated).
+        // Individual version content CANNOT be verified against cumulative hash.
+        // Verification happens via bao-tree when reading the concatenated series.
+        // See bao-tree-design.md "Unified blake3 Field Semantics" for details.
+        if self.file_type == EntryType::FilePhysicalSeries {
             return Ok(Some(content));
         }
 

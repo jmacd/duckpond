@@ -17,9 +17,10 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::path::PathBuf;
 use tinyfs::{EntryType, FileID, Result as TinyFSResult};
-use utilities::bao_outboard::{SeriesOutboard, verify_series_prefix};
+use utilities::bao_outboard::{find_matching_prefix, SeriesOutboard, verify_series_prefix};
 
 /// Configuration for the logfile ingestion factory
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,10 +132,82 @@ pub async fn execute(
     );
 
     // Step 2: Read pond state (persistence-agnostic)
-    let pond_files = read_pond_state(&context, &config.pond_path).await?;
+    let mut pond_files = read_pond_state(&context, &config.pond_path).await?;
     info!("Found {} files in pond", pond_files.len());
 
-    // Step 3: Detect changes and ingest
+    // Step 3: Detect rotation - must happen BEFORE processing individual files
+    // Rotation is detected when:
+    // - Active file shrunk (size < pond's cumulative_size)
+    // - A new archived file exists that matches pond's tracked content
+    let active_host_file = host_files.iter().find(|f| f.is_active);
+    if let Some(host_active) = active_host_file {
+        let active_filename = host_active
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        if let Some(pond_active) = pond_files.get(active_filename) {
+            if host_active.size < pond_active.cumulative_size {
+                // Active file shrunk - likely rotation
+                info!(
+                    "Active file {} shrunk from {} to {} bytes - checking for rotation",
+                    active_filename, pond_active.cumulative_size, host_active.size
+                );
+
+                // Find new archived files (not in pond) that might match
+                let new_archived: Vec<_> = host_files
+                    .iter()
+                    .filter(|f| !f.is_active)
+                    .filter(|f| {
+                        let filename = f.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        !pond_files.contains_key(filename)
+                    })
+                    .collect();
+
+                if !new_archived.is_empty() {
+                    // Try to find a match using prefix verification
+                    if let Some(matched_archived) =
+                        find_rotated_file(&new_archived, pond_active).await?
+                    {
+                        let archived_filename = matched_archived
+                            .path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .ok_or_else(|| {
+                                tinyfs::Error::Other("Invalid archived filename".to_string())
+                            })?;
+
+                        info!(
+                            "Rotation detected: {} -> {} (matched content)",
+                            active_filename, archived_filename
+                        );
+
+                        // Rename the pond file from active name to archived name
+                        rename_pond_file(&context, &config, active_filename, archived_filename)
+                            .await?;
+
+                        // Update pond_files map to reflect the rename
+                        if let Some(state) = pond_files.remove(active_filename) {
+                            let _ = pond_files.insert(archived_filename.to_string(), state);
+                        }
+
+                        info!(
+                            "Renamed pond file: {} -> {}",
+                            active_filename, archived_filename
+                        );
+                    } else {
+                        warn!(
+                            "Active file {} shrunk but no matching archived file found",
+                            active_filename
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 4: Process all files (with updated pond state after any rotation handling)
     for host_file in &host_files {
         let filename = host_file
             .path
@@ -145,7 +218,7 @@ pub async fn execute(
         let pond_file = pond_files.get(filename);
 
         if host_file.is_active {
-            // Active file: detect appends
+            // Active file: detect appends or ingest new after rotation
             process_active_file(&context, &config, host_file, pond_file).await?;
         } else {
             // Archived file: detect new or changed
@@ -365,9 +438,14 @@ async fn process_archived_file(
         }
         Some(pond_state) => {
             // Verify archived file hasn't changed (should be immutable)
+            // Use bao-tree root hash (IncrementalHashState), not simple blake3::hash
+            // because metadata.blake3 stores the cumulative bao-tree root
             let host_content = std::fs::read(&host_file.path)
                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-            let host_hash = blake3::hash(&host_content);
+            
+            let mut state = utilities::bao_outboard::IncrementalHashState::new();
+            state.ingest(&host_content);
+            let host_hash = state.root_hash();
 
             if host_hash.to_hex().to_string() != pond_state.blake3 {
                 let host_hash_str = host_hash.to_hex().to_string();
@@ -520,6 +598,55 @@ async fn ingest_append(
         pond_dest,
         pond_state.version + 1
     );
+
+    Ok(())
+}
+
+/// Find which archived file matches the pond's tracked content (for rotation detection)
+async fn find_rotated_file<'a>(
+    archived_files: &[&'a HostFileState],
+    pond_state: &PondFileState,
+) -> Result<Option<&'a HostFileState>, tinyfs::Error> {
+    // Deserialize the pond's outboard data
+    let tracked_series = SeriesOutboard::from_bytes(&pond_state.bao_outboard)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize outboard: {}", e)))?;
+
+    // Read all archived files into Cursors for find_matching_prefix
+    let mut file_contents: Vec<(usize, Cursor<Vec<u8>>)> = Vec::new();
+    for (i, host_file) in archived_files.iter().enumerate() {
+        let content = std::fs::read(&host_file.path)
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        file_contents.push((i, Cursor::new(content)));
+    }
+
+    // Create iterator of just the Cursors for find_matching_prefix
+    let readers: Vec<_> = file_contents.iter().map(|(_, c)| Cursor::new(c.get_ref().clone())).collect();
+    
+    match find_matching_prefix(readers.into_iter(), &tracked_series) {
+        Ok(Some(idx)) => Ok(Some(archived_files[idx])),
+        Ok(None) => Ok(None),
+        Err(e) => Err(tinyfs::Error::Other(format!("Prefix matching failed: {}", e))),
+    }
+}
+
+/// Rename a file in the pond (preserving version history)
+async fn rename_pond_file(
+    context: &FactoryContext,
+    config: &LogfileIngestConfig,
+    old_name: &str,
+    new_name: &str,
+) -> Result<(), tinyfs::Error> {
+    let fs = context.context.filesystem();
+    let root = fs.root().await?;
+
+    let old_path = format!("{}/{}", config.pond_path, old_name);
+    let new_path = format!("{}/{}", config.pond_path, new_name);
+
+    // Get the directory and rename the entry
+    let dir = root.open_dir_path(&config.pond_path).await?;
+    dir.rename_entry(old_name, new_name).await?;
+
+    info!("Renamed pond file: {} -> {}", old_path, new_path);
 
     Ok(())
 }

@@ -168,6 +168,12 @@ impl Directory for TemplateDirectory {
         ))
     }
 
+    async fn remove(&mut self, _name: &str) -> TinyFSResult<Option<Node>> {
+        Err(tinyfs::Error::Other(
+            "Template directories are read-only".to_string(),
+        ))
+    }
+
     async fn entries(
         &self,
     ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>>

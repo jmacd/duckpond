@@ -190,6 +190,13 @@ impl Directory for DynamicDirDirectory {
         ))
     }
 
+    async fn remove(&mut self, _name: &str) -> tinyfs::Result<Option<Node>> {
+        debug!("DynamicDirDirectory::remove - mutation not permitted on dynamic directory");
+        Err(tinyfs::Error::Other(
+            "Dynamic directory is read-only".to_string(),
+        ))
+    }
+
     async fn entries(
         &self,
     ) -> tinyfs::Result<

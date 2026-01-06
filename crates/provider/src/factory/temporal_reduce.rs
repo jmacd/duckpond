@@ -809,6 +809,12 @@ impl Directory for TemporalReduceDirectory {
         ))
     }
 
+    async fn remove(&mut self, _name: &str) -> TinyFSResult<Option<Node>> {
+        Err(tinyfs::Error::Other(
+            "temporal-reduce directory is read-only".to_string(),
+        ))
+    }
+
     async fn entries(
         &self,
     ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>>
@@ -982,6 +988,13 @@ impl Directory for TemporalReduceSiteDirectory {
     }
 
     async fn insert(&mut self, _name: String, _node: Node) -> TinyFSResult<()> {
+        // Temporal reduce site directories are read-only
+        Err(tinyfs::Error::Other(
+            "Temporal reduce site directories are read-only".to_string(),
+        ))
+    }
+
+    async fn remove(&mut self, _name: &str) -> TinyFSResult<Option<Node>> {
         // Temporal reduce site directories are read-only
         Err(tinyfs::Error::Other(
             "Temporal reduce site directories are read-only".to_string(),

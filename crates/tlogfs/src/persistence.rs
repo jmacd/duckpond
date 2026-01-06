@@ -1009,6 +1009,20 @@ impl State {
             .insert_directory_entry(dir_id, entry)
     }
 
+    /// Remove a directory entry by name
+    /// Returns the removed entry if it existed, None if not found
+    /// Marks directory as modified
+    pub async fn remove_directory_entry(
+        &self,
+        dir_id: FileID,
+        name: &str,
+    ) -> Result<Option<tinyfs::DirectoryEntry>, TLogFSError> {
+        self.inner
+            .lock()
+            .await
+            .remove_directory_entry(dir_id, name)
+    }
+
     /// Get the shared DataFusion SessionContext
     ///
     /// This method ensures a single SessionContext across all operations using this State,
@@ -1350,6 +1364,33 @@ impl InnerState {
             dir_id
         );
         Ok(())
+    }
+
+    /// Remove a directory entry from in-memory state
+    /// Directory must be loaded first via ensure_directory_loaded
+    /// Returns the removed entry if found, marks directory as modified
+    fn remove_directory_entry(
+        &mut self,
+        dir_id: FileID,
+        name: &str,
+    ) -> Result<Option<tinyfs::DirectoryEntry>, TLogFSError> {
+        let dir_state = self
+            .directories
+            .get_mut(&dir_id)
+            .ok_or_else(|| TLogFSError::Internal(format!("Directory {} not loaded", dir_id)))?;
+
+        // Remove entry if it exists
+        let removed = dir_state.mapping.remove(name);
+
+        if removed.is_some() {
+            dir_state.modified = true;
+            debug!(
+                "Removed entry '{}' from directory {}, marked as modified",
+                name, dir_id
+            );
+        }
+
+        Ok(removed)
     }
 
     /// Begin a new transaction

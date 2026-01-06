@@ -48,6 +48,10 @@ impl Directory for MemoryDirectory {
         Ok(())
     }
 
+    async fn remove(&mut self, name: &str) -> Result<Option<Node>> {
+        Ok(self.entries.remove(name))
+    }
+
     async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
         let mut items = Vec::new();
         for (name, node) in &self.entries {

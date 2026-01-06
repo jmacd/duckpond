@@ -375,6 +375,136 @@ Rotation is detected by checking both **file size** and **content hash** (via ex
 - Detection: Match using content hash from blake3 bao-tree data
 - The matched file can be completed in tinyfs; others are ingested as new archives
 
+### Streaming Prefix Verification API
+
+The `utilities::bao_outboard` module provides efficient streaming functions for the two core logfile ingestion use cases:
+
+#### Use Case 0: Rollover Detection
+
+When an active file rotates, we need to find which new archived file matches the previous active file's content. The `find_matching_prefix` function efficiently checks multiple files:
+
+```rust
+use std::fs::File;
+use std::io::BufReader;
+use utilities::bao_outboard::{find_matching_prefix, SeriesOutboard};
+
+// We have a SeriesOutboard tracking the active file's cumulative content
+let tracked_series: SeriesOutboard = /* from pond metadata */;
+
+// New archived files appeared
+let new_archived_paths = vec![
+    "/var/log/app-2025-01-01.json",
+    "/var/log/app-2025-01-02.json",
+    "/var/log/app-2025-01-03.json",
+];
+
+// Open readers for each file
+let readers: Vec<_> = new_archived_paths
+    .iter()
+    .map(|p| BufReader::new(File::open(p).expect("open")))
+    .collect();
+
+// Find which file matches our tracked prefix
+match find_matching_prefix(readers.into_iter(), &tracked_series)? {
+    Some(idx) => {
+        println!("File {} is the rotated active file", new_archived_paths[idx]);
+        // Complete this file in the pond, ingest others as new
+    }
+    None => {
+        println!("No match found - all files are new archived content");
+    }
+}
+```
+
+#### Use Case 1: Incremental Append Verification
+
+Before appending new content from a grown active file, verify the prefix hasn't changed:
+
+```rust
+use std::fs::File;
+use std::io::BufReader;
+use utilities::bao_outboard::{
+    verify_prefix_streaming, append_series_from_streaming,
+    PrefixVerifyResult, SeriesOutboard, BLOCK_SIZE,
+};
+
+// Previous tracked state
+let prev_series: SeriesOutboard = /* from pond metadata */;
+let host_file_size: u64 = /* from fs metadata */;
+
+// Step 1: Verify prefix is unchanged (strict mode)
+let reader = BufReader::new(File::open("/var/log/app.json")?);
+match verify_prefix_streaming(reader, &prev_series)? {
+    PrefixVerifyResult::Match => {
+        // Prefix intact - safe to append
+    }
+    PrefixVerifyResult::Mismatch { expected_hash, computed_hash } => {
+        // File was modified! Log warning, possibly rotation without archiving
+        log::warn!("Active file prefix changed - possible untracked rotation");
+        return handle_unexpected_change();
+    }
+    PrefixVerifyResult::FileTooSmall { expected, actual } => {
+        // File shrank - unexpected, probably rotation
+        log::warn!("Active file shrank from {} to {} bytes", expected, actual);
+        return handle_rotation();
+    }
+}
+
+// Step 2: Compute new SeriesOutboard for extended content
+let pending_size = (prev_series.cumulative_size % BLOCK_SIZE as u64) as usize;
+let pending_bytes = read_tail_from_pond(pending_size)?;  // From stored content
+
+let reader = BufReader::new(File::open("/var/log/app.json")?);
+let new_series = append_series_from_streaming(
+    reader,
+    host_file_size,
+    &prev_series,
+    &pending_bytes,
+    false,  // Already verified above
+)?;
+
+// Store new_series and new content in pond
+```
+
+#### Trust Mode (Skip Verification)
+
+For high-throughput scenarios where the append-only assumption is trusted:
+
+```rust
+// Skip prefix verification - assume file only grew
+let new_series = append_series_from_streaming(
+    reader,
+    host_file_size,
+    &prev_series,
+    &pending_bytes,
+    false,  // verify_prefix = false
+)?;
+```
+
+#### Initial File Ingest
+
+For first-time ingest of a file (e.g., archived files):
+
+```rust
+use utilities::bao_outboard::series_outboard_from_streaming;
+
+let reader = BufReader::new(File::open(path)?);
+let file_size = std::fs::metadata(path)?.len();
+let series = series_outboard_from_streaming(reader, file_size)?;
+
+// Store series in pond with file content
+```
+
+#### API Summary
+
+| Function | Purpose | Reads Prefix | Reads New Content |
+|----------|---------|--------------|-------------------|
+| `verify_prefix_streaming` | Check if prefix matches | Yes | No |
+| `find_matching_prefix` | Find which file matches | Yes (each file) | No |
+| `append_series_from_streaming` | Compute updated SeriesOutboard | Optional | Yes |
+| `series_outboard_from_streaming` | Initial ingest | Yes (full file) | - |
+| `compute_prefix_hash_streaming` | Compute hash for any prefix | Yes | No |
+
 ## Storage Format
 
 ### Pond Structure

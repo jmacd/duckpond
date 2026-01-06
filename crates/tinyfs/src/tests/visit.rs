@@ -146,6 +146,10 @@ impl Directory for VisitDirectory {
         Err(error::Error::immutable(name))
     }
 
+    async fn remove(&mut self, name: &str) -> error::Result<Option<Node>> {
+        Err(error::Error::immutable(name))
+    }
+
     async fn entries(
         &self,
     ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<DirectoryEntry>> + Send>>> {
