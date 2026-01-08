@@ -47,6 +47,9 @@ for i in $(seq 1 $NUM_BATCHES); do
         --lines $LINES_PER_FILE \
         --max-files $MAX_FILES \
         --start-row $START_ROW
+
+    # Run the logfile ingest execute command
+    cargo run --bin pond run /config
     
     # # Progress indicator
     # CURRENT_TOTAL=$((i * BATCH_SIZE))

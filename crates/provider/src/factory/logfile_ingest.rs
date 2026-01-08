@@ -751,8 +751,8 @@ async fn append_to_active_pond_file(
 
 /// Validate configuration
 fn validate_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config: LogfileIngestConfig = serde_json::from_slice(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config JSON: {}", e)))?;
+    let config: LogfileIngestConfig = serde_yaml::from_slice(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid config YAML: {}", e)))?;
 
     config.validate()?;
 
