@@ -1,0 +1,8 @@
+compression_level: 3
+region: "auto"
+url: "s3://septic-dev"
+
+endpoint: "{{ env(name='R2_ENDPOINT') }}"
+access_key: "{{ env(name='R2_KEY') }}"
+secret_key: "{{ env(name='R2_SECRET') }}"
+

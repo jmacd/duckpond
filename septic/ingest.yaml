@@ -1,0 +1,3 @@
+archived_pattern: /home/data/septicstation.json.*
+active_pattern: /home/data/septicstation.json
+pond_path: /ingest

@@ -20,7 +20,6 @@ mod tests {
     #[test]
     fn test_validate_config() {
         let config = LogfileIngestConfig {
-            name: "test".to_string(),
             archived_pattern: "/var/log/test-*.json".to_string(),
             active_pattern: "/var/log/test.json".to_string(),
             pond_path: "logs/test".to_string(),
@@ -30,12 +29,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_empty_name() {
+    fn test_validate_config_empty_pond_path() {
         let config = LogfileIngestConfig {
-            name: "".to_string(),
             archived_pattern: "/var/log/test-*.json".to_string(),
             active_pattern: "/var/log/test.json".to_string(),
-            pond_path: "logs/test".to_string(),
+            pond_path: "".to_string(),
         };
 
         assert!(config.validate().is_err());
@@ -327,7 +325,6 @@ mod integration_tests {
 
         // Configuration for logfile ingestion (needs logfile path)
         let config = LogfileIngestConfig {
-            name: "test_app".to_string(),
             active_pattern: logfile.path().to_string_lossy().to_string(),
             archived_pattern: "".to_string(), // No archived files for this test
             pond_path: "logs/test_app".to_string(),
@@ -465,7 +462,6 @@ mod integration_tests {
         let mut logfile = LogfileSimulator::new().await.unwrap();
 
         let config = LogfileIngestConfig {
-            name: "test_app".to_string(),
             active_pattern: logfile.path().to_string_lossy().to_string(),
             archived_pattern: "".to_string(),
             pond_path: "logs/test_app".to_string(),
@@ -532,7 +528,6 @@ mod integration_tests {
 
         // Configuration
         let config = LogfileIngestConfig {
-            name: "test_app".to_string(),
             active_pattern: active_path.to_string_lossy().to_string(),
             archived_pattern: archived_pattern.clone(),
             pond_path: "logs/test_app".to_string(),
@@ -862,7 +857,6 @@ mod integration_tests {
         fs::write(&active_path, v1_content).await.unwrap();
 
         let config = LogfileIngestConfig {
-            name: "blake3_test".to_string(),
             active_pattern: active_path.to_string_lossy().to_string(),
             archived_pattern: archived_pattern.clone(),
             pond_path: "logs/blake3_test".to_string(),
@@ -959,7 +953,6 @@ mod integration_tests {
         fs::write(&active_path, &v1_content).await.unwrap();
 
         let config = LogfileIngestConfig {
-            name: "large_blake3_test".to_string(),
             active_pattern: active_path.to_string_lossy().to_string(),
             archived_pattern: archived_pattern.clone(),
             pond_path: "logs/large_test".to_string(),
@@ -1025,7 +1018,6 @@ mod integration_tests {
         fs::write(&active_path, &v1_content).await.unwrap();
 
         let config = LogfileIngestConfig {
-            name: "boundary_test".to_string(),
             active_pattern: active_path.to_string_lossy().to_string(),
             archived_pattern: "".to_string(),
             pond_path: "logs/boundary_test".to_string(),
@@ -1121,7 +1113,6 @@ mod integration_tests {
             fs::write(&active_path, b"").await?;
 
             let config = LogfileIngestConfig {
-                name: test_name.to_string(),
                 active_pattern: active_path.to_string_lossy().to_string(),
                 archived_pattern: archived_pattern.clone(),
                 pond_path: format!("logs/{}", test_name),

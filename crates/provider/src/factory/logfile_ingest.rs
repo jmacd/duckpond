@@ -12,7 +12,8 @@
 //! - `MemoryPersistence` for fast testing
 //! - `OpLogPersistence` (tlogfs) for production
 
-use crate::{ExecutionContext, FactoryContext, register_executable_factory};
+use crate::{ExecutionContext, ExecutionMode, FactoryContext, register_executable_factory};
+use clap::{Parser, Subcommand};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +21,38 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tinyfs::{EntryType, FileID, Result as TinyFSResult};
 use utilities::bao_outboard::IncrementalHashState;
+
+/// Logfile ingest factory subcommands
+#[derive(Debug, Parser)]
+struct LogfileCommand {
+    #[command(subcommand)]
+    command: Option<LogfileSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum LogfileSubcommand {
+    /// Print blake3 checksums in b3sum format
+    ///
+    /// Outputs checksums compatible with `b3sum --check`.
+    /// Use: pond run /config b3sum > checksums.txt
+    /// Then: cd /host_dir && b3sum --check checksums.txt
+    B3sum,
+}
+
+/// Parse command-line arguments into LogfileCommand
+fn parse_command(ctx: ExecutionContext) -> Result<LogfileCommand, tinyfs::Error> {
+    // Build args list with fake program name for clap
+    let args_with_prog_name: Vec<String> = std::iter::once("factory".to_string())
+        .chain(ctx.args().iter().cloned())
+        .collect();
+    
+    LogfileCommand::try_parse_from(args_with_prog_name)
+        .map_err(|e| {
+            // Print Clap's helpful error message
+            eprintln!("{}", e);
+            tinyfs::Error::Other(format!("Command parse error: {}", e))
+        })
+}
 
 /// Configuration for the logfile ingestion factory
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,12 +136,24 @@ pub async fn execute(
     context: FactoryContext,
     ctx: ExecutionContext,
 ) -> Result<(), tinyfs::Error> {
-    let config: LogfileIngestConfig = serde_json::from_value(config)
+    let config: LogfileIngestConfig = serde_json::from_value(config.clone())
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+
+    // Parse command (default to sync if no subcommand)
+    let cmd = parse_command(ctx)?;
+    
+    match cmd.command {
+        Some(LogfileSubcommand::B3sum) => {
+            return execute_b3sum(&context, &config).await;
+        }
+        None => {
+            // Default: sync operation
+        }
+    }
 
     info!(
         "Starting logfile ingestion for (mode: {:?})",
-        ctx.mode()
+        ExecutionMode::PondReadWriter
     );
 
     // Step 1: Enumerate host files
@@ -273,6 +318,50 @@ pub async fn execute(
     }
 
     info!("Logfile ingestion completed successfully");
+    Ok(())
+}
+
+/// Execute the b3sum command - print checksums in b3sum format
+///
+/// Outputs blake3 checksums for all files in the pond ingest directory
+/// in a format compatible with `b3sum --check`:
+///
+/// ```text
+/// <64-char-hex-hash>  <filename>
+/// ```
+///
+/// This allows verification on the host:
+/// ```bash
+/// pond run /config b3sum > checksums.txt
+/// cd /host_dir && b3sum --check checksums.txt
+/// ```
+async fn execute_b3sum(
+    context: &FactoryContext,
+    config: &LogfileIngestConfig,
+) -> Result<(), tinyfs::Error> {
+    debug!("Executing b3sum for pond path: {}", config.pond_path);
+
+    // Read all files from the pond directory
+    let pond_files = read_pond_state(context, &config.pond_path).await?;
+    
+    if pond_files.is_empty() {
+        // No files to checksum - silent success
+        return Ok(());
+    }
+
+    // Sort filenames for deterministic output
+    let mut filenames: Vec<_> = pond_files.keys().collect();
+    filenames.sort();
+
+    // Print in b3sum format: "<hash>  <filename>"
+    // Note: b3sum uses two spaces between hash and filename
+    for filename in filenames {
+        if let Some(pond_state) = pond_files.get(filename) {
+            // The blake3 hash is stored as a 64-character hex string
+            println!("{}  {}", pond_state.blake3, filename);
+        }
+    }
+
     Ok(())
 }
 
@@ -776,7 +865,6 @@ mod tests {
     #[test]
     fn test_validate_config() {
         let config = LogfileIngestConfig {
-            name: "test".to_string(),
             archived_pattern: "/var/log/test-*.json".to_string(),
             active_pattern: "/var/log/test.json".to_string(),
             pond_path: "logs/test".to_string(),
@@ -786,12 +874,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_empty_name() {
+    fn test_validate_config_empty_pond_path() {
         let config = LogfileIngestConfig {
-            name: "".to_string(),
             archived_pattern: "/var/log/test-*.json".to_string(),
             active_pattern: "/var/log/test.json".to_string(),
-            pond_path: "logs/test".to_string(),
+            pond_path: "".to_string(),
         };
 
         assert!(config.validate().is_err());

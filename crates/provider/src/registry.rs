@@ -75,6 +75,12 @@ impl ExecutionContext {
     pub fn mode(&self) -> ExecutionMode {
         self.mode
     }
+
+    /// Get the command arguments
+    #[must_use]
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
 }
 
 /// Trait for factory commands that can be executed
