@@ -564,8 +564,8 @@ async fn test_memory_file_physical_version_single_content() {
 #[tokio::test]
 async fn test_memory_file_series_async_writer_with_versions() {
     use crate::EntryType;
-    use crate::memory::MemoryPersistence;
     use crate::FS;
+    use crate::memory::MemoryPersistence;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Create filesystem with memory persistence
@@ -576,7 +576,7 @@ async fn test_memory_file_series_async_writer_with_versions() {
     // Write 3 versions using proper tinyfs API (async_writer_path_with_type)
     // This API creates the file on first call and adds versions on subsequent calls
     let file_path = "test.series";
-    
+
     // Write first version
     {
         let mut writer = root

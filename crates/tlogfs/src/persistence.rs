@@ -464,8 +464,13 @@ impl OpLogPersistence {
             panic!("🚨 INTERNAL ERROR: state/fs is Some at begin_impl start");
         }
 
-        let inner_state =
-            InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq, self.large_file_options.clone()).await?;
+        let inner_state = InnerState::new(
+            self.path.clone(),
+            self.table.clone(),
+            metadata.txn_seq,
+            self.large_file_options.clone(),
+        )
+        .await?;
         let session_context = inner_state.session_context.clone();
 
         let state = State {
@@ -1017,10 +1022,7 @@ impl State {
         dir_id: FileID,
         name: &str,
     ) -> Result<Option<tinyfs::DirectoryEntry>, TLogFSError> {
-        self.inner
-            .lock()
-            .await
-            .remove_directory_entry(dir_id, name)
+        self.inner.lock().await.remove_directory_entry(dir_id, name)
     }
 
     /// Get the shared DataFusion SessionContext
@@ -1405,7 +1407,10 @@ impl InnerState {
 
     /// Create a hybrid writer for streaming file content
     async fn create_hybrid_writer(&self) -> crate::large_files::HybridWriter {
-        crate::large_files::HybridWriter::with_options(self.path.clone(), self.large_file_options.clone())
+        crate::large_files::HybridWriter::with_options(
+            self.path.clone(),
+            self.large_file_options.clone(),
+        )
     }
 
     /// Store file content from hybrid writer result
@@ -1600,12 +1605,8 @@ impl InnerState {
                     }
                 } else {
                     // This is an existing node - find max version from both records and allocated
-                    let max_record_version = records
-                        .iter()
-                        .map(|r| r.version)
-                        .max()
-                        .unwrap();
-                        //.expect("records is non-empty, so max() should succeed");
+                    let max_record_version = records.iter().map(|r| r.version).max().unwrap();
+                    //.expect("records is non-empty, so max() should succeed");
 
                     let max_allocated = self
                         .allocated_versions
@@ -2995,7 +2996,7 @@ impl InnerState {
                 size: Some(0),
                 blake3: None,
                 bao_outboard: None, // No bao-tree data yet
-                version: 0, // No version yet - will be 1 when first written
+                version: 0,         // No version yet - will be 1 when first written
                 timestamp: Utc::now().timestamp_micros(),
             });
         }

@@ -25,7 +25,7 @@
 //! - 16KB blocks (bao-tree format, chunk_log=4)
 //! - Outboard data (~0.4% overhead) enables verified streaming
 
-use crate::bao_outboard::{SeriesOutboard, BLOCK_SIZE};
+use crate::bao_outboard::{BLOCK_SIZE, SeriesOutboard};
 use arrow_array::{BinaryArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use log::debug;
@@ -180,7 +180,7 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
         // Track previous SeriesOutboard for incremental computation
         // Start from prev_series_outboard if continuing a FilePhysicalSeries
         let mut prev_series_outboard: Option<SeriesOutboard> = self.prev_series_outboard.take();
-        
+
         // For pending bytes from previous versions (when continuing a series)
         // We need this from the caller since we don't have access to previous version content
         let initial_pending_bytes: Vec<u8> = Vec::new();
@@ -190,7 +190,10 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
                 // The caller must provide pending bytes via with_pending_bytes()
                 // For now, we assume block-aligned chunks (power-of-2 chunk sizes)
                 // which means pending_size will be 0 for chunk boundaries
-                debug!("Warning: prev_series_outboard has {} pending bytes, but pending content not provided", pending_size);
+                debug!(
+                    "Warning: prev_series_outboard has {} pending bytes, but pending content not provided",
+                    pending_size
+                );
             }
         }
 
@@ -208,7 +211,7 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
                     break;
                 }
             }
-            
+
             if filled == 0 {
                 break;
             }
@@ -582,7 +585,9 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
         if chunk_data.len() != expected_chunk_size {
             return Err(format!(
                 "Chunk {} size mismatch: expected {}, got {}",
-                chunk_id, expected_chunk_size, chunk_data.len()
+                chunk_id,
+                expected_chunk_size,
+                chunk_data.len()
             )
             .into());
         }

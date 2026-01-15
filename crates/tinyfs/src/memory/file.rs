@@ -65,7 +65,9 @@ impl File for MemoryFile {
         drop(state);
 
         // For FilePhysicalSeries and TablePhysicalSeries, concatenate all versions in oldest-to-newest order
-        if self.entry_type == EntryType::FilePhysicalSeries || self.entry_type == EntryType::TablePhysicalSeries {
+        if self.entry_type == EntryType::FilePhysicalSeries
+            || self.entry_type == EntryType::TablePhysicalSeries
+        {
             let versions = self.persistence.list_file_versions(self.id).await?;
 
             if versions.is_empty() {
@@ -88,7 +90,7 @@ impl File for MemoryFile {
 
             // Get metadata - blake3 field contains cumulative bao-tree root for series types
             let metadata = self.persistence.metadata(self.id).await?;
-            
+
             // Validate cumulative content using bao-tree root hash
             // The metadata.blake3 field stores the cumulative root (from SeriesOutboard.cumulative_blake3)
             if let Some(ref stored_blake3) = metadata.blake3 {
@@ -96,7 +98,7 @@ impl File for MemoryFile {
                 state.ingest(&total_content);
                 let computed_root = state.root_hash();
                 let computed_hex = computed_root.to_hex().to_string();
-                
+
                 if &computed_hex != stored_blake3 {
                     return Err(error::Error::Other(format!(
                         "Cumulative hash mismatch: expected {}, got {}",
@@ -110,32 +112,34 @@ impl File for MemoryFile {
         } else {
             // Read from persistence (single version) - ensures corruption is visible
             let versions = self.persistence.list_file_versions(self.id).await?;
-            
+
             if versions.is_empty() {
                 // No versions yet, return empty reader
                 return Ok(Box::pin(std::io::Cursor::new(Vec::new())));
             }
-            
+
             // Get the latest (and only) version for FilePhysicalVersion
-            let latest_version = versions.last().ok_or_else(|| {
-                error::Error::Other("No versions found".to_string())
-            })?;
-            
+            let latest_version = versions
+                .last()
+                .ok_or_else(|| error::Error::Other("No versions found".to_string()))?;
+
             let content = self
                 .persistence
                 .read_file_version(self.id, latest_version.version)
                 .await?;
-            
+
             // Validate using VersionOutboard (bao-tree) and blake3 hash
             let metadata = self.persistence.metadata(self.id).await?;
-            
+
             // For FilePhysicalVersion, validate content integrity
             // Small files (<= 16KB with chunk_log=4) have empty bao outboards, rely on blake3
             if let Some(bao_outboard_bytes) = &metadata.bao_outboard {
                 use utilities::bao_outboard::VersionOutboard;
-                let version_outboard = VersionOutboard::from_bytes(bao_outboard_bytes)
-                    .map_err(|e| error::Error::Other(format!("Failed to deserialize VersionOutboard: {}", e)))?;
-                
+                let version_outboard =
+                    VersionOutboard::from_bytes(bao_outboard_bytes).map_err(|e| {
+                        error::Error::Other(format!("Failed to deserialize VersionOutboard: {}", e))
+                    })?;
+
                 // Only validate with bao-tree if outboard is non-empty (file > 16KB)
                 if !version_outboard.outboard.is_empty() {
                     utilities::bao_outboard::verify_prefix(
@@ -143,10 +147,12 @@ impl File for MemoryFile {
                         &version_outboard.outboard,
                         version_outboard.size,
                     )
-                    .map_err(|e| error::Error::Other(format!("Bao-tree validation failed: {}", e)))?;
+                    .map_err(|e| {
+                        error::Error::Other(format!("Bao-tree validation failed: {}", e))
+                    })?;
                 }
             }
-            
+
             // Always verify blake3 hash (works for all file sizes)
             let computed_hash = blake3::hash(&content);
             if let Some(stored_blake3) = &metadata.blake3 {
@@ -158,7 +164,7 @@ impl File for MemoryFile {
                     )));
                 }
             }
-            
+
             Ok(Box::pin(std::io::Cursor::new(content)))
         }
     }
@@ -411,74 +417,95 @@ impl AsyncWrite for MemoryFileWriter {
 
                         let series_outboard = if let Some(prev_bao_bytes) = prev_bao {
                             // Deserialize previous SeriesOutboard
-                            if let Ok(prev_outboard) = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes) {
+                            if let Ok(prev_outboard) =
+                                utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
+                            {
                                 // Calculate pending bytes needed from previous content
-                                let pending_size = (prev_outboard.cumulative_size % utilities::bao_outboard::BLOCK_SIZE as u64) as usize;
-                                
+                                let pending_size = (prev_outboard.cumulative_size
+                                    % utilities::bao_outboard::BLOCK_SIZE as u64)
+                                    as usize;
+
                                 // Efficiently read only the pending bytes we need
                                 // Read versions from newest to oldest until we have enough bytes
                                 let pending_bytes = if pending_size > 0 {
-                                    let versions = persistence.list_file_versions(id).await.unwrap_or_default();
-                                    
+                                    let versions = persistence
+                                        .list_file_versions(id)
+                                        .await
+                                        .unwrap_or_default();
+
                                     // Collect bytes from tail, reading only necessary versions
                                     let mut tail_bytes = Vec::with_capacity(pending_size);
-                                    
+
                                     // Iterate versions in reverse (newest first)
                                     for v in versions.iter().rev() {
                                         if tail_bytes.len() >= pending_size {
                                             break;
                                         }
-                                        
+
                                         let bytes_still_needed = pending_size - tail_bytes.len();
-                                        
+
                                         if v.size as usize >= bytes_still_needed {
                                             // This version has enough bytes - read only the tail we need
-                                            let version_content = persistence.read_file_version(id, v.version).await.unwrap_or_default();
-                                            let start = version_content.len().saturating_sub(bytes_still_needed);
+                                            let version_content = persistence
+                                                .read_file_version(id, v.version)
+                                                .await
+                                                .unwrap_or_default();
+                                            let start = version_content
+                                                .len()
+                                                .saturating_sub(bytes_still_needed);
                                             // Prepend to tail_bytes (since we're going backwards)
                                             let mut new_tail = version_content[start..].to_vec();
                                             new_tail.append(&mut tail_bytes);
                                             tail_bytes = new_tail;
                                         } else {
                                             // Need entire version - prepend it
-                                            let version_content = persistence.read_file_version(id, v.version).await.unwrap_or_default();
+                                            let version_content = persistence
+                                                .read_file_version(id, v.version)
+                                                .await
+                                                .unwrap_or_default();
                                             let mut new_tail = version_content;
                                             new_tail.append(&mut tail_bytes);
                                             tail_bytes = new_tail;
                                         }
                                     }
-                                    
+
                                     // Trim to exact pending size (should already be correct, but safety)
                                     if tail_bytes.len() > pending_size {
-                                        tail_bytes = tail_bytes[tail_bytes.len() - pending_size..].to_vec();
+                                        tail_bytes =
+                                            tail_bytes[tail_bytes.len() - pending_size..].to_vec();
                                     }
-                                    
+
                                     tail_bytes
                                 } else {
                                     Vec::new()
                                 };
-                                
+
                                 // Append new version
-                                Some(utilities::bao_outboard::SeriesOutboard::append_version_inline(
-                                    &prev_outboard,
-                                    &pending_bytes,
-                                    &buffer,
-                                ))
+                                Some(
+                                    utilities::bao_outboard::SeriesOutboard::append_version_inline(
+                                        &prev_outboard,
+                                        &pending_bytes,
+                                        &buffer,
+                                    ),
+                                )
                             } else {
                                 None
                             }
                         } else {
                             // First version
-                            Some(utilities::bao_outboard::SeriesOutboard::first_version_inline(
-                                &buffer,
-                            ))
+                            Some(
+                                utilities::bao_outboard::SeriesOutboard::first_version_inline(
+                                    &buffer,
+                                ),
+                            )
                         };
 
                         series_outboard.map(|so| so.to_bytes())
                     }
                     EntryType::FilePhysicalVersion => {
                         // Compute standalone VersionOutboard
-                        let version_outboard = utilities::bao_outboard::VersionOutboard::new(&buffer);
+                        let version_outboard =
+                            utilities::bao_outboard::VersionOutboard::new(&buffer);
                         Some(version_outboard.to_bytes())
                     }
                     _ => None,
@@ -487,7 +514,12 @@ impl AsyncWrite for MemoryFileWriter {
                 // Store content with version and bao_outboard in persistence
                 let store_result = if let Some(bao_bytes) = bao_outboard {
                     persistence
-                        .store_file_version_with_bao(id, allocated_version, buffer.clone(), bao_bytes)
+                        .store_file_version_with_bao(
+                            id,
+                            allocated_version,
+                            buffer.clone(),
+                            bao_bytes,
+                        )
                         .await
                 } else {
                     persistence

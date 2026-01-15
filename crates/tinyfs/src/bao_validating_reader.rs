@@ -123,7 +123,11 @@ impl BaoValidatingReader {
         // Use valid_ranges to check if this block is valid
         // This is the public API for validation - it returns ranges that are valid
         let mut has_valid_chunks = false;
-        if let Some(result) = bao_tree::io::sync::valid_ranges(&self.outboard, &self.content[..], &range_to_validate).into_iter().next() {
+        if let Some(result) =
+            bao_tree::io::sync::valid_ranges(&self.outboard, &self.content[..], &range_to_validate)
+                .into_iter()
+                .next()
+        {
             match result {
                 Ok(_range) => {
                     has_valid_chunks = true;
@@ -202,14 +206,14 @@ impl Seek for BaoValidatingReader {
             SeekFrom::End(p) => self.content.len() as i64 + p,
             SeekFrom::Current(p) => self.position as i64 + p,
         };
-        
+
         if new_pos < 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Seek before start of file",
             ));
         }
-        
+
         self.position = new_pos as u64;
         Ok(self.position)
     }
@@ -300,10 +304,12 @@ mod tests {
         let mut buf = vec![0u8; 1000];
         let result = reader.read(&mut buf);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Bao-tree validation failed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Bao-tree validation failed")
+        );
     }
 
     #[test]

@@ -452,7 +452,7 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
             blake3: None, // Unknown until SQL is generated and data computed
             bao_outboard: None,
             entry_type: EntryType::TableDynamic, // Temporal reduce always creates series files
-            timestamp: 0, // Use epoch time for dynamic content
+            timestamp: 0,                        // Use epoch time for dynamic content
         })
     }
 }
@@ -1198,15 +1198,9 @@ mod tests {
                     let _ = writer.close().unwrap();
                 }
 
-                let _ = create_parquet_file(
-                    &fs,
-
-                    &filename,
-                    buf,
-                    EntryType::TablePhysicalSeries,
-                )
-                .await
-                .unwrap();
+                let _ = create_parquet_file(&fs, &filename, buf, EntryType::TablePhysicalSeries)
+                    .await
+                    .unwrap();
             }
         }
 

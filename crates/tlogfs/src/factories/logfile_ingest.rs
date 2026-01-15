@@ -515,7 +515,11 @@ mod integration_tests {
         // Setup: Create temp directory for log files
         let temp_dir = TempDir::new().unwrap();
         let active_path = temp_dir.path().join("app.log");
-        let archived_pattern = temp_dir.path().join("app-*.log").to_string_lossy().to_string();
+        let archived_pattern = temp_dir
+            .path()
+            .join("app-*.log")
+            .to_string_lossy()
+            .to_string();
 
         // Create initial active file with some content
         let initial_content = b"2025-01-03 00:00:00 INFO Starting application\n\
@@ -549,7 +553,10 @@ mod integration_tests {
         .await
         .unwrap();
 
-        println!("✓ Step 1: Initial snapshot captured ({} bytes)", initial_size);
+        println!(
+            "✓ Step 1: Initial snapshot captured ({} bytes)",
+            initial_size
+        );
 
         // Step 2: Simulate file growth before rotation
         let growth_content = b"2025-01-03 00:01:00 INFO Processed 100 requests\n\
@@ -637,7 +644,9 @@ mod integration_tests {
         let mut final_active_content = new_active_content.to_vec();
         final_active_content.extend_from_slice(more_content);
 
-        fs::write(&active_path, &final_active_content).await.unwrap();
+        fs::write(&active_path, &final_active_content)
+            .await
+            .unwrap();
 
         let final_active_blake3 = blake3::hash(&final_active_content).to_hex().to_string();
         let final_active_size = final_active_content.len() as u64;
@@ -713,7 +722,7 @@ mod integration_tests {
                 .get_node_path(&file_path)
                 .await
                 .map_err(|e| std::io::Error::other(format!("File not found: {}", e)))?;
-            
+
             let file_id = file_node.id();
 
             // 1. Read content and verify it matches expected
@@ -745,7 +754,9 @@ mod integration_tests {
             let expected_blake3 = hash_state.root_hash().to_hex().to_string();
 
             // 3. Query OplogEntry records to verify stored blake3
-            let state = tx.state().map_err(|e| std::io::Error::other(e.to_string()))?;
+            let state = tx
+                .state()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             let entries = state
                 .query_records(file_id)
                 .await
@@ -773,13 +784,15 @@ mod integration_tests {
 
             // 5. Verify SeriesOutboard.cumulative_blake3 (if bao_outboard present)
             if let Some(bao_bytes) = latest_entry.get_bao_outboard() {
-                let series_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(bao_bytes)
-                    .map_err(|e| std::io::Error::other(format!("Failed to parse SeriesOutboard: {}", e)))?;
-                
+                let series_outboard =
+                    utilities::bao_outboard::SeriesOutboard::from_bytes(bao_bytes).map_err(
+                        |e| std::io::Error::other(format!("Failed to parse SeriesOutboard: {}", e)),
+                    )?;
+
                 let outboard_blake3 = blake3::Hash::from_bytes(series_outboard.cumulative_blake3)
                     .to_hex()
                     .to_string();
-                
+
                 assert_eq!(
                     outboard_blake3, expected_blake3,
                     "SeriesOutboard.cumulative_blake3 mismatch!\n  Expected: {}\n  Outboard: {}",
@@ -802,7 +815,11 @@ mod integration_tests {
         }
 
         /// Get version count for a file
-        async fn get_version_count(&self, pond_path: &str, filename: &str) -> std::io::Result<usize> {
+        async fn get_version_count(
+            &self,
+            pond_path: &str,
+            filename: &str,
+        ) -> std::io::Result<usize> {
             let mut persistence = crate::persistence::OpLogPersistence::open(&self.store_path)
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -823,7 +840,9 @@ mod integration_tests {
                 .await
                 .map_err(|e| std::io::Error::other(format!("File not found: {}", e)))?;
 
-            let state = tx.state().map_err(|e| std::io::Error::other(e.to_string()))?;
+            let state = tx
+                .state()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             let entries = state
                 .query_records(file_node.id())
                 .await
@@ -850,7 +869,11 @@ mod integration_tests {
 
         let temp_dir = TempDir::new().unwrap();
         let active_path = temp_dir.path().join("app.log");
-        let archived_pattern = temp_dir.path().join("app-*.log").to_string_lossy().to_string();
+        let archived_pattern = temp_dir
+            .path()
+            .join("app-*.log")
+            .to_string_lossy()
+            .to_string();
 
         // === Phase 1: Small Version 1 ===
         let v1_content = b"2025-01-03 00:00:00 INFO Starting\n";
@@ -866,8 +889,14 @@ mod integration_tests {
         let verifier = Blake3Verifier::new(pond.store_path());
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/blake3_test", "app.log", v1_content).await.unwrap();
-        println!("✓ v1 ({} bytes): cumulative blake3 correct", v1_content.len());
+        verifier
+            .verify_file_blake3("logs/blake3_test", "app.log", v1_content)
+            .await
+            .unwrap();
+        println!(
+            "✓ v1 ({} bytes): cumulative blake3 correct",
+            v1_content.len()
+        );
 
         // === Phase 2: Append small content (v2) ===
         let v2_append = b"2025-01-03 00:01:00 INFO Processing\n";
@@ -876,10 +905,20 @@ mod integration_tests {
         fs::write(&active_path, &v2_cumulative).await.unwrap();
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/blake3_test", "app.log", &v2_cumulative).await.unwrap();
-        let v2_versions = verifier.get_version_count("logs/blake3_test", "app.log").await.unwrap();
+        verifier
+            .verify_file_blake3("logs/blake3_test", "app.log", &v2_cumulative)
+            .await
+            .unwrap();
+        let v2_versions = verifier
+            .get_version_count("logs/blake3_test", "app.log")
+            .await
+            .unwrap();
         assert_eq!(v2_versions, 2, "Should have 2 versions after append");
-        println!("✓ v2 ({} bytes, {} versions): cumulative blake3 correct", v2_cumulative.len(), v2_versions);
+        println!(
+            "✓ v2 ({} bytes, {} versions): cumulative blake3 correct",
+            v2_cumulative.len(),
+            v2_versions
+        );
 
         // === Phase 3: Append more content (v3) ===
         let v3_append = b"2025-01-03 00:02:00 INFO More work\n2025-01-03 00:03:00 INFO Done\n";
@@ -888,10 +927,20 @@ mod integration_tests {
         fs::write(&active_path, &v3_cumulative).await.unwrap();
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/blake3_test", "app.log", &v3_cumulative).await.unwrap();
-        let v3_versions = verifier.get_version_count("logs/blake3_test", "app.log").await.unwrap();
+        verifier
+            .verify_file_blake3("logs/blake3_test", "app.log", &v3_cumulative)
+            .await
+            .unwrap();
+        let v3_versions = verifier
+            .get_version_count("logs/blake3_test", "app.log")
+            .await
+            .unwrap();
         assert_eq!(v3_versions, 3, "Should have 3 versions");
-        println!("✓ v3 ({} bytes, {} versions): cumulative blake3 correct", v3_cumulative.len(), v3_versions);
+        println!(
+            "✓ v3 ({} bytes, {} versions): cumulative blake3 correct",
+            v3_cumulative.len(),
+            v3_versions
+        );
 
         // === Phase 4: Rotation ===
         let archived_filename = "app-2025-01-03T00-04-00.log";
@@ -905,16 +954,39 @@ mod integration_tests {
         pond.execute_factory(&config).await.unwrap();
 
         // === Phase 5: Verify archived file ===
-        verifier.verify_file_blake3("logs/blake3_test", archived_filename, &v3_cumulative).await.unwrap();
-        let archived_versions = verifier.get_version_count("logs/blake3_test", archived_filename).await.unwrap();
-        assert_eq!(archived_versions, 3, "Archived file should preserve 3 versions");
-        println!("✓ Archived file ({} bytes, {} versions): cumulative blake3 preserved", v3_cumulative.len(), archived_versions);
+        verifier
+            .verify_file_blake3("logs/blake3_test", archived_filename, &v3_cumulative)
+            .await
+            .unwrap();
+        let archived_versions = verifier
+            .get_version_count("logs/blake3_test", archived_filename)
+            .await
+            .unwrap();
+        assert_eq!(
+            archived_versions, 3,
+            "Archived file should preserve 3 versions"
+        );
+        println!(
+            "✓ Archived file ({} bytes, {} versions): cumulative blake3 preserved",
+            v3_cumulative.len(),
+            archived_versions
+        );
 
         // === Phase 6: Verify new active file ===
-        verifier.verify_file_blake3("logs/blake3_test", "app.log", new_v1_content).await.unwrap();
-        let new_v1_versions = verifier.get_version_count("logs/blake3_test", "app.log").await.unwrap();
+        verifier
+            .verify_file_blake3("logs/blake3_test", "app.log", new_v1_content)
+            .await
+            .unwrap();
+        let new_v1_versions = verifier
+            .get_version_count("logs/blake3_test", "app.log")
+            .await
+            .unwrap();
         assert_eq!(new_v1_versions, 1, "New active should have 1 version");
-        println!("✓ New active v1 ({} bytes, {} version): blake3 correct", new_v1_content.len(), new_v1_versions);
+        println!(
+            "✓ New active v1 ({} bytes, {} version): blake3 correct",
+            new_v1_content.len(),
+            new_v1_versions
+        );
 
         // === Phase 7: Append to new active ===
         let new_v2_append = b"2025-01-03 00:05:00 INFO Post-rotation work\n";
@@ -923,13 +995,26 @@ mod integration_tests {
         fs::write(&active_path, &new_v2_cumulative).await.unwrap();
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/blake3_test", "app.log", &new_v2_cumulative).await.unwrap();
-        let new_v2_versions = verifier.get_version_count("logs/blake3_test", "app.log").await.unwrap();
+        verifier
+            .verify_file_blake3("logs/blake3_test", "app.log", &new_v2_cumulative)
+            .await
+            .unwrap();
+        let new_v2_versions = verifier
+            .get_version_count("logs/blake3_test", "app.log")
+            .await
+            .unwrap();
         assert_eq!(new_v2_versions, 2, "New active should have 2 versions");
-        println!("✓ New active v2 ({} bytes, {} versions): cumulative blake3 correct", new_v2_cumulative.len(), new_v2_versions);
+        println!(
+            "✓ New active v2 ({} bytes, {} versions): cumulative blake3 correct",
+            new_v2_cumulative.len(),
+            new_v2_versions
+        );
 
         // Final verification: archived file unchanged
-        verifier.verify_file_blake3("logs/blake3_test", archived_filename, &v3_cumulative).await.unwrap();
+        verifier
+            .verify_file_blake3("logs/blake3_test", archived_filename, &v3_cumulative)
+            .await
+            .unwrap();
         println!("✓ Archived file still correct after new active changes");
 
         println!("\n✓ All blake3 validation tests passed!");
@@ -942,7 +1027,11 @@ mod integration_tests {
 
         let temp_dir = TempDir::new().unwrap();
         let active_path = temp_dir.path().join("large.log");
-        let archived_pattern = temp_dir.path().join("large-*.log").to_string_lossy().to_string();
+        let archived_pattern = temp_dir
+            .path()
+            .join("large-*.log")
+            .to_string_lossy()
+            .to_string();
 
         // === Phase 1: Create 20KB file (> 1 block) ===
         let v1_content: Vec<u8> = (0..20_000)
@@ -962,8 +1051,15 @@ mod integration_tests {
         let verifier = Blake3Verifier::new(pond.store_path());
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/large_test", "large.log", &v1_content).await.unwrap();
-        println!("✓ Large v1 ({} bytes, {} blocks): blake3 correct", v1_content.len(), v1_content.len() / 16384 + 1);
+        verifier
+            .verify_file_blake3("logs/large_test", "large.log", &v1_content)
+            .await
+            .unwrap();
+        println!(
+            "✓ Large v1 ({} bytes, {} blocks): blake3 correct",
+            v1_content.len(),
+            v1_content.len() / 16384 + 1
+        );
 
         // === Phase 2: Append 18KB (crosses block boundary) ===
         let v2_append: Vec<u8> = (0..18_000)
@@ -976,9 +1072,15 @@ mod integration_tests {
         fs::write(&active_path, &v2_cumulative).await.unwrap();
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/large_test", "large.log", &v2_cumulative).await.unwrap();
-        println!("✓ Large v2 ({} bytes, {} blocks): cumulative blake3 correct", 
-                 v2_cumulative.len(), v2_cumulative.len() / 16384 + 1);
+        verifier
+            .verify_file_blake3("logs/large_test", "large.log", &v2_cumulative)
+            .await
+            .unwrap();
+        println!(
+            "✓ Large v2 ({} bytes, {} blocks): cumulative blake3 correct",
+            v2_cumulative.len(),
+            v2_cumulative.len() / 16384 + 1
+        );
 
         // === Phase 3: Rotation with large file ===
         let archived_filename = "large-2025-01-03.log";
@@ -995,12 +1097,24 @@ mod integration_tests {
 
         pond.execute_factory(&config).await.unwrap();
 
-        verifier.verify_file_blake3("logs/large_test", archived_filename, &v2_cumulative).await.unwrap();
-        println!("✓ Archived large ({} bytes): blake3 preserved", v2_cumulative.len());
+        verifier
+            .verify_file_blake3("logs/large_test", archived_filename, &v2_cumulative)
+            .await
+            .unwrap();
+        println!(
+            "✓ Archived large ({} bytes): blake3 preserved",
+            v2_cumulative.len()
+        );
 
-        verifier.verify_file_blake3("logs/large_test", "large.log", &new_v1_content).await.unwrap();
-        println!("✓ New large v1 ({} bytes, {} blocks): blake3 correct", 
-                 new_v1_content.len(), new_v1_content.len() / 16384 + 1);
+        verifier
+            .verify_file_blake3("logs/large_test", "large.log", &new_v1_content)
+            .await
+            .unwrap();
+        println!(
+            "✓ New large v1 ({} bytes, {} blocks): blake3 correct",
+            new_v1_content.len(),
+            new_v1_content.len() / 16384 + 1
+        );
 
         println!("\n✓ All large file blake3 validation tests passed!");
     }
@@ -1027,7 +1141,10 @@ mod integration_tests {
         let verifier = Blake3Verifier::new(pond.store_path());
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/boundary_test", "boundary.log", &v1_content).await.unwrap();
+        verifier
+            .verify_file_blake3("logs/boundary_test", "boundary.log", &v1_content)
+            .await
+            .unwrap();
         println!("✓ Exactly 1 block (16384 bytes): blake3 correct");
 
         // Append exactly 16KB more (now 2 full blocks)
@@ -1037,7 +1154,10 @@ mod integration_tests {
         fs::write(&active_path, &v2_cumulative).await.unwrap();
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/boundary_test", "boundary.log", &v2_cumulative).await.unwrap();
+        verifier
+            .verify_file_blake3("logs/boundary_test", "boundary.log", &v2_cumulative)
+            .await
+            .unwrap();
         println!("✓ Exactly 2 blocks (32768 bytes): cumulative blake3 correct");
 
         // Append 1 byte (partial 3rd block)
@@ -1047,7 +1167,10 @@ mod integration_tests {
         fs::write(&active_path, &v3_cumulative).await.unwrap();
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/boundary_test", "boundary.log", &v3_cumulative).await.unwrap();
+        verifier
+            .verify_file_blake3("logs/boundary_test", "boundary.log", &v3_cumulative)
+            .await
+            .unwrap();
         println!("✓ 2 blocks + 1 byte (32769 bytes): cumulative blake3 correct");
 
         // Fill to exactly 3 blocks
@@ -1057,7 +1180,10 @@ mod integration_tests {
         fs::write(&active_path, &v4_cumulative).await.unwrap();
 
         pond.execute_factory(&config).await.unwrap();
-        verifier.verify_file_blake3("logs/boundary_test", "boundary.log", &v4_cumulative).await.unwrap();
+        verifier
+            .verify_file_blake3("logs/boundary_test", "boundary.log", &v4_cumulative)
+            .await
+            .unwrap();
         println!("✓ Exactly 3 blocks (49152 bytes): cumulative blake3 correct");
 
         println!("\n✓ All block boundary blake3 validation tests passed!");
@@ -1107,7 +1233,11 @@ mod integration_tests {
         async fn new(test_name: &str) -> std::io::Result<Self> {
             let temp_dir = TempDir::new()?;
             let active_path = temp_dir.path().join("app.log");
-            let archived_pattern = temp_dir.path().join("app-*.log").to_string_lossy().to_string();
+            let archived_pattern = temp_dir
+                .path()
+                .join("app-*.log")
+                .to_string_lossy()
+                .to_string();
 
             // Create empty active file
             fs::write(&active_path, b"").await?;
@@ -1136,22 +1266,30 @@ mod integration_tests {
                 HostAction::AppendToActive(content) => {
                     self.active_content.extend_from_slice(content);
                     fs::write(&self.active_path, &self.active_content).await?;
-                    println!("  → Appended {} bytes to active (total: {} bytes)", 
-                             content.len(), self.active_content.len());
+                    println!(
+                        "  → Appended {} bytes to active (total: {} bytes)",
+                        content.len(),
+                        self.active_content.len()
+                    );
                 }
                 HostAction::Rotate { archived_name } => {
                     let archived_path = self.temp_dir.path().join(archived_name);
-                    
+
                     // Move active -> archived
                     fs::rename(&self.active_path, &archived_path).await?;
-                    let _ = self.archived_files.insert(archived_name.clone(), self.active_content.clone());
-                    
+                    let _ = self
+                        .archived_files
+                        .insert(archived_name.clone(), self.active_content.clone());
+
                     // Create new empty active
                     self.active_content = Vec::new();
                     fs::write(&self.active_path, b"").await?;
-                    
-                    println!("  → Rotated: active ({} bytes) -> {}", 
-                             self.archived_files[archived_name].len(), archived_name);
+
+                    println!(
+                        "  → Rotated: active ({} bytes) -> {}",
+                        self.archived_files[archived_name].len(),
+                        archived_name
+                    );
                 }
                 HostAction::Snapshot => {
                     self.pond.execute_factory(&self.config).await?;
@@ -1203,13 +1341,14 @@ mod integration_tests {
         /// This reads actual bytes and computes fresh checksums - does NOT trust metadata
         async fn verify_final_state(&self) -> std::io::Result<()> {
             println!("\n=== INDEPENDENT VERIFICATION ===");
-            
+
             let expected_states = self.expected_host_state();
             println!("Expected {} files in pond", expected_states.len());
 
-            let mut persistence = crate::persistence::OpLogPersistence::open(self.pond.store_path())
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence =
+                crate::persistence::OpLogPersistence::open(self.pond.store_path())
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()
@@ -1224,17 +1363,17 @@ mod integration_tests {
             // Verify each expected file exists in pond with correct content
             for expected in &expected_states {
                 let file_path = format!("{}/{}", self.config.pond_path, expected.filename);
-                
+
                 // Read actual content from pond
-                let file_node = root
-                    .get_node_path(&file_path)
-                    .await
-                    .map_err(|e| std::io::Error::other(format!(
-                        "File {} not found in pond: {}", expected.filename, e
-                    )))?;
-                
+                let file_node = root.get_node_path(&file_path).await.map_err(|e| {
+                    std::io::Error::other(format!(
+                        "File {} not found in pond: {}",
+                        expected.filename, e
+                    ))
+                })?;
+
                 let file_id = file_node.id();
-                
+
                 let file = file_node
                     .as_file()
                     .await
@@ -1257,7 +1396,9 @@ mod integration_tests {
                 if actual_content.len() != expected.content.len() {
                     return Err(std::io::Error::other(format!(
                         "SIZE MISMATCH for {}: expected {} bytes, got {} bytes\n  expected content: {:?}\n  actual content:   {:?}",
-                        expected.filename, expected.content.len(), actual_content.len(),
+                        expected.filename,
+                        expected.content.len(),
+                        actual_content.len(),
                         String::from_utf8_lossy(&expected.content),
                         String::from_utf8_lossy(&actual_content)
                     )));
@@ -1267,9 +1408,13 @@ mod integration_tests {
                 if actual_blake3 != expected.blake3 {
                     return Err(std::io::Error::other(format!(
                         "BLAKE3 MISMATCH for {}:\n  expected: {}\n  actual:   {}\n  expected content ({} bytes): {:?}\n  actual content ({} bytes):   {:?}",
-                        expected.filename, expected.blake3, actual_blake3,
-                        expected.content.len(), String::from_utf8_lossy(&expected.content),
-                        actual_content.len(), String::from_utf8_lossy(&actual_content)
+                        expected.filename,
+                        expected.blake3,
+                        actual_blake3,
+                        expected.content.len(),
+                        String::from_utf8_lossy(&expected.content),
+                        actual_content.len(),
+                        String::from_utf8_lossy(&actual_content)
                     )));
                 }
 
@@ -1281,10 +1426,11 @@ mod integration_tests {
                         .zip(expected.content.iter())
                         .position(|(a, b)| a != b)
                         .unwrap_or(actual_content.len().min(expected.content.len()));
-                    
+
                     return Err(std::io::Error::other(format!(
                         "CONTENT MISMATCH for {} at byte {}: expected {:02x}, got {:02x}",
-                        expected.filename, diff_pos,
+                        expected.filename,
+                        diff_pos,
                         expected.content.get(diff_pos).copied().unwrap_or(0),
                         actual_content.get(diff_pos).copied().unwrap_or(0)
                     )));
@@ -1292,61 +1438,76 @@ mod integration_tests {
 
                 // CRITICAL: Verify TinyFS metadata blake3 matches computed blake3
                 // This ensures multi-version FilePhysicalSeries has correct checksums
-                let state = tx.state().map_err(|e| std::io::Error::other(e.to_string()))?;
+                let state = tx
+                    .state()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
                 let entries = state
                     .query_records(file_id)
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
-                
-                let latest_entry = entries
-                    .iter()
-                    .max_by_key(|e| e.version)
-                    .ok_or_else(|| std::io::Error::other(format!(
-                        "No OplogEntry records found for {}", expected.filename
-                    )))?;
-                
-                let stored_blake3 = latest_entry.blake3.as_ref().ok_or_else(|| {
+
+                let latest_entry = entries.iter().max_by_key(|e| e.version).ok_or_else(|| {
                     std::io::Error::other(format!(
-                        "METADATA MISSING: {} has no blake3 in OplogEntry", expected.filename
+                        "No OplogEntry records found for {}",
+                        expected.filename
                     ))
                 })?;
-                
+
+                let stored_blake3 = latest_entry.blake3.as_ref().ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "METADATA MISSING: {} has no blake3 in OplogEntry",
+                        expected.filename
+                    ))
+                })?;
+
                 if stored_blake3 != &expected.blake3 {
                     return Err(std::io::Error::other(format!(
                         "METADATA BLAKE3 MISMATCH for {}:\n  expected (computed): {}\n  stored (TinyFS):     {}\n  version: {}",
                         expected.filename, expected.blake3, stored_blake3, latest_entry.version
                     )));
                 }
-                
+
                 // Also verify SeriesOutboard.cumulative_blake3 if present
                 if let Some(bao_bytes) = latest_entry.get_bao_outboard() {
-                    let series_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(bao_bytes)
-                        .map_err(|e| std::io::Error::other(format!(
-                            "Failed to parse SeriesOutboard for {}: {}", expected.filename, e
-                        )))?;
-                    
-                    let outboard_blake3 = blake3::Hash::from_bytes(series_outboard.cumulative_blake3)
-                        .to_hex()
-                        .to_string();
-                    
+                    let series_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(
+                        bao_bytes,
+                    )
+                    .map_err(|e| {
+                        std::io::Error::other(format!(
+                            "Failed to parse SeriesOutboard for {}: {}",
+                            expected.filename, e
+                        ))
+                    })?;
+
+                    let outboard_blake3 =
+                        blake3::Hash::from_bytes(series_outboard.cumulative_blake3)
+                            .to_hex()
+                            .to_string();
+
                     if outboard_blake3 != expected.blake3 {
                         return Err(std::io::Error::other(format!(
                             "OUTBOARD BLAKE3 MISMATCH for {}:\n  expected: {}\n  outboard: {}",
                             expected.filename, expected.blake3, outboard_blake3
                         )));
                     }
-                    
+
                     // Verify cumulative_size matches content length
                     if series_outboard.cumulative_size != expected.content.len() as u64 {
                         return Err(std::io::Error::other(format!(
                             "OUTBOARD SIZE MISMATCH for {}: expected {} bytes, outboard says {}",
-                            expected.filename, expected.content.len(), series_outboard.cumulative_size
+                            expected.filename,
+                            expected.content.len(),
+                            series_outboard.cumulative_size
                         )));
                     }
                 }
 
-                println!("  ✓ {} ({} bytes, blake3={}...)", 
-                         expected.filename, expected.content.len(), &expected.blake3[..16]);
+                println!(
+                    "  ✓ {} ({} bytes, blake3={}...)",
+                    expected.filename,
+                    expected.content.len(),
+                    &expected.blake3[..16]
+                );
             }
 
             // Verify no extra files in pond
@@ -1354,23 +1515,21 @@ mod integration_tests {
                 .open_dir_path(&self.config.pond_path)
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            
+
             use futures::StreamExt;
             let mut entries_stream = pond_dir
                 .entries()
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            
+
             let mut pond_entries: Vec<String> = Vec::new();
             while let Some(entry_result) = entries_stream.next().await {
                 let entry = entry_result.map_err(|e| std::io::Error::other(e.to_string()))?;
                 pond_entries.push(entry.name);
             }
 
-            let expected_names: std::collections::HashSet<_> = expected_states
-                .iter()
-                .map(|s| s.filename.clone())
-                .collect();
+            let expected_names: std::collections::HashSet<_> =
+                expected_states.iter().map(|s| s.filename.clone()).collect();
 
             for pond_name in &pond_entries {
                 if !expected_names.contains(pond_name) {
@@ -1394,28 +1553,29 @@ mod integration_tests {
     fn test_blake3_computation_sanity() {
         //! Verify our blake3 computation matches expectations
         let content = b"Day 3 logs\n";
-        
+
         // Method 1: IncrementalHashState (what test fixture uses)
         let mut hasher = utilities::bao_outboard::IncrementalHashState::new();
         hasher.ingest(content);
         let incremental_hash = hasher.root_hash().to_hex().to_string();
-        
+
         // Method 2: Direct blake3::hash (standard)
         let direct_hash = blake3::hash(content).to_hex().to_string();
-        
+
         println!("Content: {:?} ({} bytes)", content, content.len());
         println!("IncrementalHashState: {}", incremental_hash);
         println!("blake3::hash:         {}", direct_hash);
-        
+
         // For small content (< 16KB), these should be identical
-        assert_eq!(incremental_hash, direct_hash, 
-            "Small content hash mismatch between incremental and direct");
-        
+        assert_eq!(
+            incremental_hash, direct_hash,
+            "Small content hash mismatch between incremental and direct"
+        );
+
         // The expected hash from test failure was: f88090e6b17b04f8214a08f6f73f09a6e932a3d74ae70ef459a27dadb8e56310
         // Let's verify this is what we compute
         assert_eq!(
-            incremental_hash,
-            "f88090e6b17b04f8214a08f6f73f09a6e932a3d74ae70ef459a27dadb8e56310",
+            incremental_hash, "f88090e6b17b04f8214a08f6f73f09a6e932a3d74ae70ef459a27dadb8e56310",
             "Hash doesn't match expected value for 'Day 3 logs\\n'"
         );
     }
@@ -1426,15 +1586,18 @@ mod integration_tests {
         //! append -> snapshot -> append -> snapshot -> append -> snapshot
 
         let mut runner = ScenarioRunner::new("scenario_simple_growth").await.unwrap();
-        
-        runner.run_scenario(&[
-            HostAction::AppendToActive(b"Line 1\n".to_vec()),
-            HostAction::Snapshot,
-            HostAction::AppendToActive(b"Line 2\n".to_vec()),
-            HostAction::Snapshot,
-            HostAction::AppendToActive(b"Line 3\nLine 4\nLine 5\n".to_vec()),
-            HostAction::Snapshot,
-        ]).await.unwrap();
+
+        runner
+            .run_scenario(&[
+                HostAction::AppendToActive(b"Line 1\n".to_vec()),
+                HostAction::Snapshot,
+                HostAction::AppendToActive(b"Line 2\n".to_vec()),
+                HostAction::Snapshot,
+                HostAction::AppendToActive(b"Line 3\nLine 4\nLine 5\n".to_vec()),
+                HostAction::Snapshot,
+            ])
+            .await
+            .unwrap();
 
         runner.verify_final_state().await.unwrap();
         println!("✓ Scenario: simple growth passed");
@@ -1445,17 +1608,24 @@ mod integration_tests {
         //! Scenario: Rotation where all content was captured before rotation
         //! (The "happy path" - no missed bytes)
 
-        let mut runner = ScenarioRunner::new("scenario_rotation_captured").await.unwrap();
-        
-        runner.run_scenario(&[
-            HostAction::AppendToActive(b"Initial content\n".to_vec()),
-            HostAction::Snapshot,
-            HostAction::AppendToActive(b"More content before rotation\n".to_vec()),
-            HostAction::Snapshot,  // Capture everything before rotation
-            HostAction::Rotate { archived_name: "app-2025-01-03.log".to_string() },
-            HostAction::AppendToActive(b"New log session\n".to_vec()),
-            HostAction::Snapshot,
-        ]).await.unwrap();
+        let mut runner = ScenarioRunner::new("scenario_rotation_captured")
+            .await
+            .unwrap();
+
+        runner
+            .run_scenario(&[
+                HostAction::AppendToActive(b"Initial content\n".to_vec()),
+                HostAction::Snapshot,
+                HostAction::AppendToActive(b"More content before rotation\n".to_vec()),
+                HostAction::Snapshot, // Capture everything before rotation
+                HostAction::Rotate {
+                    archived_name: "app-2025-01-03.log".to_string(),
+                },
+                HostAction::AppendToActive(b"New log session\n".to_vec()),
+                HostAction::Snapshot,
+            ])
+            .await
+            .unwrap();
 
         runner.verify_final_state().await.unwrap();
         println!("✓ Scenario: rotation fully captured passed");
@@ -1470,17 +1640,26 @@ mod integration_tests {
         //! - rotation occurs
         //! - next snapshot must capture the missed 100 bytes in archived file
 
-        let mut runner = ScenarioRunner::new("scenario_rotation_missed").await.unwrap();
-        
-        runner.run_scenario(&[
-            HostAction::AppendToActive(b"Initial snapshot content\n".to_vec()),
-            HostAction::Snapshot,  // Capture initial state
-            HostAction::AppendToActive(b"This content will be MISSED before rotation!\n".to_vec()),
-            // NO SNAPSHOT HERE - simulates growth between snapshot intervals
-            HostAction::Rotate { archived_name: "app-2025-01-03.log".to_string() },
-            HostAction::AppendToActive(b"New log after rotation\n".to_vec()),
-            HostAction::Snapshot,  // This should: rename pond file, append missed bytes, create new active
-        ]).await.unwrap();
+        let mut runner = ScenarioRunner::new("scenario_rotation_missed")
+            .await
+            .unwrap();
+
+        runner
+            .run_scenario(&[
+                HostAction::AppendToActive(b"Initial snapshot content\n".to_vec()),
+                HostAction::Snapshot, // Capture initial state
+                HostAction::AppendToActive(
+                    b"This content will be MISSED before rotation!\n".to_vec(),
+                ),
+                // NO SNAPSHOT HERE - simulates growth between snapshot intervals
+                HostAction::Rotate {
+                    archived_name: "app-2025-01-03.log".to_string(),
+                },
+                HostAction::AppendToActive(b"New log after rotation\n".to_vec()),
+                HostAction::Snapshot, // This should: rename pond file, append missed bytes, create new active
+            ])
+            .await
+            .unwrap();
 
         runner.verify_final_state().await.unwrap();
         println!("✓ Scenario: rotation with missed bytes passed");
@@ -1490,25 +1669,32 @@ mod integration_tests {
     async fn test_scenario_multiple_rotations() {
         //! Scenario: Multiple rotations over time
 
-        let mut runner = ScenarioRunner::new("scenario_multi_rotation").await.unwrap();
-        
-        runner.run_scenario(&[
-            // First file lifecycle
-            HostAction::AppendToActive(b"Day 1 logs\n".to_vec()),
-            HostAction::Snapshot,
-            HostAction::AppendToActive(b"Day 1 more logs\n".to_vec()),
-            HostAction::Snapshot,
-            HostAction::Rotate { archived_name: "app-day1.log".to_string() },
-            
-            // Second file lifecycle
-            HostAction::AppendToActive(b"Day 2 logs\n".to_vec()),
-            HostAction::Snapshot,
-            HostAction::Rotate { archived_name: "app-day2.log".to_string() },
-            
-            // Third file (current active)
-            HostAction::AppendToActive(b"Day 3 logs\n".to_vec()),
-            HostAction::Snapshot,
-        ]).await.unwrap();
+        let mut runner = ScenarioRunner::new("scenario_multi_rotation")
+            .await
+            .unwrap();
+
+        runner
+            .run_scenario(&[
+                // First file lifecycle
+                HostAction::AppendToActive(b"Day 1 logs\n".to_vec()),
+                HostAction::Snapshot,
+                HostAction::AppendToActive(b"Day 1 more logs\n".to_vec()),
+                HostAction::Snapshot,
+                HostAction::Rotate {
+                    archived_name: "app-day1.log".to_string(),
+                },
+                // Second file lifecycle
+                HostAction::AppendToActive(b"Day 2 logs\n".to_vec()),
+                HostAction::Snapshot,
+                HostAction::Rotate {
+                    archived_name: "app-day2.log".to_string(),
+                },
+                // Third file (current active)
+                HostAction::AppendToActive(b"Day 3 logs\n".to_vec()),
+                HostAction::Snapshot,
+            ])
+            .await
+            .unwrap();
 
         runner.verify_final_state().await.unwrap();
         println!("✓ Scenario: multiple rotations passed");
@@ -1518,30 +1704,37 @@ mod integration_tests {
     async fn test_scenario_large_file_rotation() {
         //! Scenario: Large files (> 16KB block size) with rotation
 
-        let mut runner = ScenarioRunner::new("scenario_large_rotation").await.unwrap();
-        
+        let mut runner = ScenarioRunner::new("scenario_large_rotation")
+            .await
+            .unwrap();
+
         // Create content > 16KB
         let large_content_1: Vec<u8> = (0..20_000)
             .map(|i| format!("Log line {}: some data here\n", i))
             .flat_map(|s| s.into_bytes())
             .take(20_000)
             .collect();
-        
+
         let large_content_2: Vec<u8> = (0..15_000)
             .map(|i| format!("More log {}: additional data\n", i))
             .flat_map(|s| s.into_bytes())
             .take(15_000)
             .collect();
 
-        runner.run_scenario(&[
-            HostAction::AppendToActive(large_content_1.clone()),
-            HostAction::Snapshot,
-            HostAction::AppendToActive(large_content_2.clone()),
-            // Miss some content before rotation
-            HostAction::Rotate { archived_name: "app-large.log".to_string() },
-            HostAction::AppendToActive(b"New session after large file rotation\n".to_vec()),
-            HostAction::Snapshot,
-        ]).await.unwrap();
+        runner
+            .run_scenario(&[
+                HostAction::AppendToActive(large_content_1.clone()),
+                HostAction::Snapshot,
+                HostAction::AppendToActive(large_content_2.clone()),
+                // Miss some content before rotation
+                HostAction::Rotate {
+                    archived_name: "app-large.log".to_string(),
+                },
+                HostAction::AppendToActive(b"New session after large file rotation\n".to_vec()),
+                HostAction::Snapshot,
+            ])
+            .await
+            .unwrap();
 
         runner.verify_final_state().await.unwrap();
         println!("✓ Scenario: large file rotation passed");
@@ -1551,21 +1744,28 @@ mod integration_tests {
     async fn test_scenario_block_boundary_rotation() {
         //! Scenario: Rotation at exact block boundary (16KB)
 
-        let mut runner = ScenarioRunner::new("scenario_block_boundary").await.unwrap();
-        
+        let mut runner = ScenarioRunner::new("scenario_block_boundary")
+            .await
+            .unwrap();
+
         // Exactly 16KB
         let exactly_one_block = vec![b'A'; 16 * 1024];
-        
-        runner.run_scenario(&[
-            HostAction::AppendToActive(exactly_one_block.clone()),
-            HostAction::Snapshot,
-            // Append exactly one more block
-            HostAction::AppendToActive(vec![b'B'; 16 * 1024]),
-            // Miss the second block before rotation
-            HostAction::Rotate { archived_name: "app-boundary.log".to_string() },
-            HostAction::AppendToActive(b"After boundary rotation\n".to_vec()),
-            HostAction::Snapshot,
-        ]).await.unwrap();
+
+        runner
+            .run_scenario(&[
+                HostAction::AppendToActive(exactly_one_block.clone()),
+                HostAction::Snapshot,
+                // Append exactly one more block
+                HostAction::AppendToActive(vec![b'B'; 16 * 1024]),
+                // Miss the second block before rotation
+                HostAction::Rotate {
+                    archived_name: "app-boundary.log".to_string(),
+                },
+                HostAction::AppendToActive(b"After boundary rotation\n".to_vec()),
+                HostAction::Snapshot,
+            ])
+            .await
+            .unwrap();
 
         runner.verify_final_state().await.unwrap();
         println!("✓ Scenario: block boundary rotation passed");

@@ -234,7 +234,7 @@ impl HybridWriter {
     pub fn new<P: AsRef<Path>>(pond_path: P) -> Self {
         Self::with_options(pond_path, LargeFileOptions::default())
     }
-    
+
     pub fn with_options<P: AsRef<Path>>(pond_path: P, options: LargeFileOptions) -> Self {
         Self {
             temp_file: None,
@@ -307,12 +307,12 @@ impl HybridWriter {
             // Write parquet file using ArrowWriter with configured options
             let mut props_builder = parquet::file::properties::WriterProperties::builder()
                 .set_compression(self.options.compression);
-            
+
             // Optionally set max_row_group_size (used in tests for per-chunk isolation)
             if let Some(max_size) = self.options.max_row_group_size {
                 props_builder = props_builder.set_max_row_group_size(max_size);
             }
-            
+
             let props = props_builder.build();
 
             let mut writer = parquet::arrow::AsyncArrowWriter::try_new(
@@ -595,16 +595,21 @@ async fn load_chunk_from_parquet(
                 let chunk_data = chunk_datas.value(row);
 
                 // Parse the stored SeriesOutboard
-                let stored_outboard = SeriesOutboard::from_bytes(stored_outboard_bytes)
-                    .map_err(|e| std::io::Error::other(format!(
-                        "Chunk {} has invalid SeriesOutboard: {}", chunk_id, e
-                    )))?;
+                let stored_outboard =
+                    SeriesOutboard::from_bytes(stored_outboard_bytes).map_err(|e| {
+                        std::io::Error::other(format!(
+                            "Chunk {} has invalid SeriesOutboard: {}",
+                            chunk_id, e
+                        ))
+                    })?;
 
                 // Verify chunk size matches stored version_size
                 if chunk_data.len() as u64 != stored_outboard.version_size {
                     return Err(std::io::Error::other(format!(
                         "Chunk {} size mismatch: data has {} bytes, outboard says {}",
-                        chunk_id, chunk_data.len(), stored_outboard.version_size
+                        chunk_id,
+                        chunk_data.len(),
+                        stored_outboard.version_size
                     )));
                 }
 
@@ -626,7 +631,8 @@ async fn load_chunk_from_parquet(
                     if computed_hash != stored_hash {
                         return Err(std::io::Error::other(format!(
                             "Chunk 0 verification failed: expected {}, computed {}",
-                            stored_hash_hex, computed_hash.to_hex()
+                            stored_hash_hex,
+                            computed_hash.to_hex()
                         )));
                     }
                 }

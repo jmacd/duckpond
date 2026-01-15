@@ -2054,14 +2054,9 @@ query: ""
             .unwrap();
 
             let filename = format!("/multi_sensor_data_v{}.parquet", version);
-            _ = create_parquet_from_batch(
-                &fs,
-                &filename,
-                &batch,
-                EntryType::TablePhysicalVersion,
-            )
-            .await
-            .unwrap();
+            _ = create_parquet_from_batch(&fs, &filename, &batch, EntryType::TablePhysicalVersion)
+                .await
+                .unwrap();
         }
 
         // Create the SQL-derived file with multi-version FileSeries source
@@ -2139,14 +2134,9 @@ query: ""
             .unwrap();
 
             let filename = format!("/multi_sensor_data_v{}.parquet", version);
-            _ = create_parquet_from_batch(
-                &fs,
-                &filename,
-                &batch,
-                EntryType::TablePhysicalVersion,
-            )
-            .await
-            .unwrap();
+            _ = create_parquet_from_batch(&fs, &filename, &batch, EntryType::TablePhysicalVersion)
+                .await
+                .unwrap();
         }
 
         // Create the SQL-derived file that should union all 3 versions

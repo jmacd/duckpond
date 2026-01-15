@@ -45,13 +45,12 @@ fn parse_command(ctx: ExecutionContext) -> Result<LogfileCommand, tinyfs::Error>
     let args_with_prog_name: Vec<String> = std::iter::once("factory".to_string())
         .chain(ctx.args().iter().cloned())
         .collect();
-    
-    LogfileCommand::try_parse_from(args_with_prog_name)
-        .map_err(|e| {
-            // Print Clap's helpful error message
-            // Error will be propagated up
-            tinyfs::Error::Other(format!("Command parse error: {}", e))
-        })
+
+    LogfileCommand::try_parse_from(args_with_prog_name).map_err(|e| {
+        // Print Clap's helpful error message
+        // Error will be propagated up
+        tinyfs::Error::Other(format!("Command parse error: {}", e))
+    })
 }
 
 /// Configuration for the logfile ingestion factory
@@ -141,7 +140,7 @@ pub async fn execute(
 
     // Parse command (default to sync if no subcommand)
     let cmd = parse_command(ctx)?;
-    
+
     match cmd.command {
         Some(LogfileSubcommand::B3sum) => {
             return execute_b3sum(&context, &config).await;
@@ -201,22 +200,28 @@ pub async fn execute(
                         .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                     let mut prefix_content = vec![0u8; prefix_len];
                     use std::io::Read;
-                    prefix_file.read_exact(&mut prefix_content)
+                    prefix_file
+                        .read_exact(&mut prefix_content)
                         .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                    
+
                     // Compute blake3 of prefix using same method as tinyfs (bao-tree root)
                     let mut hasher = IncrementalHashState::new();
                     hasher.ingest(&prefix_content);
                     let prefix_blake3 = hasher.root_hash().to_hex().to_string();
-                    
+
                     // Compare to pond's stored blake3
                     if prefix_blake3 == pond_active.blake3 {
-                        debug!("Active file {} prefix matches - no rotation", active_filename);
+                        debug!(
+                            "Active file {} prefix matches - no rotation",
+                            active_filename
+                        );
                         false
                     } else {
                         info!(
                             "Active file {} content mismatch (prefix blake3 {} != pond blake3 {}) - checking for rotation",
-                            active_filename, &prefix_blake3[..16], &pond_active.blake3[..16]
+                            active_filename,
+                            &prefix_blake3[..16],
+                            &pond_active.blake3[..16]
                         );
                         true
                     }
@@ -263,16 +268,25 @@ pub async fn execute(
                             let missed_bytes = matched_archived.size - pond_active.cumulative_size;
                             info!(
                                 "Appending {} missed bytes to active file {} before rename (grew from {} to {} bytes)",
-                                missed_bytes, active_filename, pond_active.cumulative_size, matched_archived.size
+                                missed_bytes,
+                                active_filename,
+                                pond_active.cumulative_size,
+                                matched_archived.size
                             );
-                            
+
                             // Read the full archived file content, append only the new portion
                             let content = std::fs::read(&matched_archived.path)
                                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                             let new_data = &content[pond_active.cumulative_size as usize..];
-                            
+
                             // Append to the ACTIVE pond file (TinyFS handles checksums)
-                            append_to_active_pond_file(&context, &config, active_filename, new_data).await?;
+                            append_to_active_pond_file(
+                                &context,
+                                &config,
+                                active_filename,
+                                new_data,
+                            )
+                            .await?;
                         }
 
                         // THEN: Rename the (now complete) active pond file to archived name
@@ -343,7 +357,7 @@ async fn execute_b3sum(
 
     // Read all files from the pond directory
     let pond_files = read_pond_state(context, &config.pond_path).await?;
-    
+
     if pond_files.is_empty() {
         // No files to checksum - silent success
         return Ok(());
@@ -450,7 +464,7 @@ async fn read_pond_state(
 
     while let Some(entry_result) = entries_stream.next().await {
         let entry = entry_result?;
-        
+
         // Only include file entries (not directories)
         if !entry.entry_type.is_file() {
             continue;
@@ -570,9 +584,9 @@ async fn process_archived_file(
             // Verify archived file hasn't changed (should be immutable)
             // Use bao-tree root hash (IncrementalHashState), not simple blake3::hash
             // because metadata.blake3 stores the cumulative bao-tree root
-            let host_content = std::fs::read(&host_file.path)
-                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-            
+            let host_content =
+                std::fs::read(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
             let mut state = IncrementalHashState::new();
             state.ingest(&host_content);
             let host_hash = state.root_hash();
@@ -599,8 +613,8 @@ async fn ingest_new_file(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
 ) -> Result<(), tinyfs::Error> {
-    let content = std::fs::read(&host_file.path)
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    let content =
+        std::fs::read(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
     let filename = host_file
         .path
         .file_name()
@@ -667,8 +681,8 @@ async fn ingest_append(
     let root = fs.root().await?;
 
     // Read only the new bytes from host file
-    let mut file = std::fs::File::open(&host_file.path)
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    let mut file =
+        std::fs::File::open(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
     use std::io::{Read, Seek, SeekFrom};
     let _ = file
         .seek(SeekFrom::Start(pond_state.cumulative_size))
@@ -746,33 +760,34 @@ async fn find_rotated_file<'a>(
     pond_state: &PondFileState,
 ) -> Result<Option<&'a HostFileState>, tinyfs::Error> {
     let tracked_size = pond_state.cumulative_size as usize;
-    
+
     for host_file in archived_files {
         // File must be at least as large as what we tracked
         if host_file.size < pond_state.cumulative_size {
             continue;
         }
-        
+
         // Read the prefix (first tracked_size bytes)
-        let content = std::fs::read(&host_file.path)
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        let content =
+            std::fs::read(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
         let prefix = &content[..tracked_size];
-        
+
         // Compute blake3 of prefix using same method as tinyfs (bao-tree root)
         let mut hasher = IncrementalHashState::new();
         hasher.ingest(prefix);
         let prefix_blake3 = hasher.root_hash().to_hex().to_string();
-        
+
         // If prefix matches pond's blake3, this is the rotated file
         if prefix_blake3 == pond_state.blake3 {
             info!(
                 "Found rotated file {} matching pond blake3 {}...",
-                host_file.path.display(), &pond_state.blake3[..16]
+                host_file.path.display(),
+                &pond_state.blake3[..16]
             );
             return Ok(Some(host_file));
         }
     }
-    
+
     Ok(None)
 }
 

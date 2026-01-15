@@ -18,9 +18,9 @@
 
 use clap::Parser;
 use file_rotate::{
+    ContentLimit, FileRotate,
     compression::Compression,
     suffix::{AppendTimestamp, DateFrom, FileLimit},
-    ContentLimit, FileRotate,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -84,7 +84,10 @@ fn generate_line(row_number: u64) -> String {
 fn verify_line(line: &str, expected_row: u64) -> Result<(), String> {
     let parts: Vec<&str> = line.trim().split(',').collect();
     if parts.len() != 2 {
-        return Err(format!("Invalid format: expected 2 fields, got {}", parts.len()));
+        return Err(format!(
+            "Invalid format: expected 2 fields, got {}",
+            parts.len()
+        ));
     }
 
     let row_number: u64 = parts[0]
@@ -179,7 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // List generated files
     println!();
     println!("=== Generated Files ===");
-    
+
     // Active file
     if log_path.exists() {
         let size = std::fs::metadata(&log_path)?.len();
@@ -247,7 +250,11 @@ fn verify_all_files(
 
     #[allow(clippy::print_stdout)]
     {
-        println!("✓ Verified {} lines across {} files", total_lines, all_paths.len());
+        println!(
+            "✓ Verified {} lines across {} files",
+            total_lines,
+            all_paths.len()
+        );
         println!("✓ All hashes match expected values");
     }
 
@@ -304,7 +311,7 @@ mod tests {
         // If these change, something is wrong with the hash function
         let hash_1 = row_hash(1);
         let hash_2 = row_hash(2);
-        
+
         // Just verify they're 16 hex chars
         assert_eq!(hash_1.len(), 16);
         assert_eq!(hash_2.len(), 16);

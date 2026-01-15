@@ -263,19 +263,19 @@ impl MemoryPersistence {
         new_value: u8,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
-        
+
         let versions = state
             .file_versions
             .get_mut(&id)
             .ok_or_else(|| Error::not_found(format!("File {id} not found")))?;
-        
+
         let file_version = versions
             .iter_mut()
             .find(|v| v.version == version)
             .ok_or_else(|| {
                 Error::not_found(format!("Version {version} not found for file {id}"))
             })?;
-        
+
         if byte_offset >= file_version.content.len() {
             return Err(Error::Other(format!(
                 "Byte offset {} out of bounds (content size: {})",
@@ -283,7 +283,7 @@ impl MemoryPersistence {
                 file_version.content.len()
             )));
         }
-        
+
         file_version.content[byte_offset] = new_value;
         Ok(())
     }
@@ -378,8 +378,9 @@ impl State {
         // For series types, extract cumulative_blake3 from SeriesOutboard
         // For version types, extract root hash from VersionOutboard
         // This avoids hashing the content twice
-        let blake3_from_outboard = Self::extract_blake3_from_outboard(&bao_outboard, id.entry_type());
-        
+        let blake3_from_outboard =
+            Self::extract_blake3_from_outboard(&bao_outboard, id.entry_type());
+
         self.store_file_version_full_with_blake3(
             id,
             version,
@@ -399,7 +400,11 @@ impl State {
                 // For series types, use cumulative_blake3 from SeriesOutboard
                 utilities::bao_outboard::SeriesOutboard::from_bytes(bao_outboard)
                     .ok()
-                    .map(|so| blake3::Hash::from(so.cumulative_blake3).to_hex().to_string())
+                    .map(|so| {
+                        blake3::Hash::from(so.cumulative_blake3)
+                            .to_hex()
+                            .to_string()
+                    })
             }
             EntryType::FilePhysicalVersion => {
                 // For version types, compute root from outboard
@@ -450,10 +455,9 @@ impl State {
     ) -> Result<()> {
         // Use precomputed blake3 if provided (for series types from SeriesOutboard)
         // Otherwise compute fresh from content (for version types)
-        let blake3 = precomputed_blake3.unwrap_or_else(|| {
-            blake3::hash(&content).to_hex().to_string()
-        });
-        
+        let blake3 =
+            precomputed_blake3.unwrap_or_else(|| blake3::hash(&content).to_hex().to_string());
+
         let file_version = MemoryFileVersion {
             version,
             timestamp: chrono::Utc::now().timestamp_millis(),

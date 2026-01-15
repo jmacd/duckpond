@@ -384,11 +384,11 @@ impl WD {
     /// Rename an entry in this directory.
     /// This is a compound operation: remove the old name + insert with new name.
     /// The underlying node's FileID and version history are preserved.
-    /// 
+    ///
     /// # Arguments
     /// * `old_name` - Current name of the entry
     /// * `new_name` - New name for the entry
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` if rename succeeded
     /// * `Err(NotFound)` if old_name doesn't exist
@@ -400,13 +400,20 @@ impl WD {
         }
 
         // Remove old entry (returns the node)
-        let node = self.dref.handle.remove(old_name).await?
+        let node = self
+            .dref
+            .handle
+            .remove(old_name)
+            .await?
             .ok_or_else(|| Error::not_found(old_name))?;
 
         // Insert with new name
         self.dref.insert(new_name.to_string(), node).await?;
 
-        debug!("Renamed entry '{}' -> '{}' in directory", old_name, new_name);
+        debug!(
+            "Renamed entry '{}' -> '{}' in directory",
+            old_name, new_name
+        );
 
         Ok(())
     }

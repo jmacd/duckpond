@@ -248,11 +248,10 @@ impl IncrementalOutboard {
         let mut offset = 0;
 
         // Parse new_stable_subtrees
-        let num_subtrees = u32::from_le_bytes(
-            bytes[offset..offset + 4].try_into().map_err(|_| {
+        let num_subtrees =
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| {
                 BaoOutboardError::InvalidOutboard("Invalid subtrees count".to_string())
-            })?,
-        ) as usize;
+            })?) as usize;
         offset += 4;
 
         let mut new_stable_subtrees = Vec::with_capacity(num_subtrees);
@@ -262,11 +261,9 @@ impl IncrementalOutboard {
                     "IncrementalOutboard truncated in subtrees".to_string(),
                 ));
             }
-            let level = u32::from_le_bytes(
-                bytes[offset..offset + 4].try_into().map_err(|_| {
-                    BaoOutboardError::InvalidOutboard("Invalid level bytes".to_string())
-                })?,
-            );
+            let level = u32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| {
+                BaoOutboardError::InvalidOutboard("Invalid level bytes".to_string())
+            })?);
             offset += 4;
 
             let mut hash = [0u8; 32];
@@ -282,11 +279,10 @@ impl IncrementalOutboard {
                 "IncrementalOutboard truncated before frontier".to_string(),
             ));
         }
-        let num_frontier = u32::from_le_bytes(
-            bytes[offset..offset + 4].try_into().map_err(|_| {
+        let num_frontier =
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| {
                 BaoOutboardError::InvalidOutboard("Invalid frontier count".to_string())
-            })?,
-        ) as usize;
+            })?) as usize;
         offset += 4;
 
         let mut frontier = Vec::with_capacity(num_frontier);
@@ -296,22 +292,19 @@ impl IncrementalOutboard {
                     "IncrementalOutboard truncated in frontier".to_string(),
                 ));
             }
-            let level = u32::from_le_bytes(
-                bytes[offset..offset + 4].try_into().map_err(|_| {
-                    BaoOutboardError::InvalidOutboard("Invalid frontier level".to_string())
-                })?,
-            );
+            let level = u32::from_le_bytes(bytes[offset..offset + 4].try_into().map_err(|_| {
+                BaoOutboardError::InvalidOutboard("Invalid frontier level".to_string())
+            })?);
             offset += 4;
 
             let mut hash = [0u8; 32];
             hash.copy_from_slice(&bytes[offset..offset + 32]);
             offset += 32;
 
-            let start_block = u64::from_le_bytes(
-                bytes[offset..offset + 8].try_into().map_err(|_| {
+            let start_block =
+                u64::from_le_bytes(bytes[offset..offset + 8].try_into().map_err(|_| {
                     BaoOutboardError::InvalidOutboard("Invalid frontier start_block".to_string())
-                })?,
-            );
+                })?);
             offset += 8;
 
             frontier.push((level, hash, start_block));
@@ -403,7 +396,7 @@ impl SeriesOutboard {
         state.ingest(content);
 
         // CRITICAL: Use state.root_hash() for cumulative_blake3, NOT blake3::hash()!
-        // 
+        //
         // For consistency with verify_series_prefix() and append_version(), we must
         // use the bao-tree incremental root hash. This ensures:
         // 1. first_version() and append_version() use the same hashing approach
@@ -687,13 +680,14 @@ impl SeriesOutboard {
         let mut frontier = Vec::with_capacity(frontier_len);
         for i in 0..frontier_len {
             let entry_start = frontier_data_start + i * 44;
-            let level = u32::from_le_bytes(
-                bytes[entry_start..entry_start + 4]
-                    .try_into()
-                    .map_err(|_| {
-                        BaoOutboardError::InvalidOutboard("Invalid frontier level bytes".to_string())
-                    })?,
-            );
+            let level =
+                u32::from_le_bytes(bytes[entry_start..entry_start + 4].try_into().map_err(
+                    |_| {
+                        BaoOutboardError::InvalidOutboard(
+                            "Invalid frontier level bytes".to_string(),
+                        )
+                    },
+                )?);
             let hash: [u8; 32] = bytes[entry_start + 4..entry_start + 36]
                 .try_into()
                 .map_err(|_| {
@@ -767,9 +761,11 @@ fn compute_stable_delta(
 
     for (new_level, new_hash, new_start) in new_frontier {
         // Check if this subtree existed in previous frontier
-        let was_in_prev = prev_frontier.iter().any(|(prev_level, prev_hash, prev_start)| {
-            prev_level == new_level && prev_start == new_start && prev_hash == new_hash
-        });
+        let was_in_prev = prev_frontier
+            .iter()
+            .any(|(prev_level, prev_hash, prev_start)| {
+                prev_level == new_level && prev_start == new_start && prev_hash == new_hash
+            });
 
         // If not in previous, it's a new stable subtree
         if !was_in_prev {
@@ -861,9 +857,7 @@ impl IncrementalHashState {
         // Convert frontier to completed_subtrees
         let completed_subtrees: Vec<(u32, blake3::Hash, u64)> = frontier
             .iter()
-            .map(|(level, hash, start_block)| {
-                (*level, blake3::Hash::from(*hash), *start_block)
-            })
+            .map(|(level, hash, start_block)| (*level, blake3::Hash::from(*hash), *start_block))
             .collect();
 
         Ok(Self {
@@ -1171,13 +1165,13 @@ fn parent_cv(left: &blake3::Hash, right: &blake3::Hash, is_root: bool) -> blake3
 #[must_use]
 pub fn compute_outboard(content: &[u8]) -> (blake3::Hash, Vec<u8>) {
     // Use bao_tree crate's proper implementation
-    use bao_tree::io::outboard::PostOrderMemOutboard;
     use bao_tree::BlockSize;
-    
+    use bao_tree::io::outboard::PostOrderMemOutboard;
+
     // Use 16KB blocks (chunk_log=4) as per our design
     let block_size = BlockSize::from_chunk_log(4); // 2^4 * 1024 = 16KB
     let outboard = PostOrderMemOutboard::create(content, block_size);
-    
+
     (outboard.root, outboard.data)
 }
 
@@ -1207,9 +1201,9 @@ pub fn verify_prefix(
     }
 
     // Compute outboard for the content using the real bao_tree implementation
-    use bao_tree::io::outboard::PostOrderMemOutboard;
     use bao_tree::BlockSize;
-    
+    use bao_tree::io::outboard::PostOrderMemOutboard;
+
     let block_size = BlockSize::from_chunk_log(4); // 16KB blocks
     let computed_outboard = PostOrderMemOutboard::create(content, block_size);
 
@@ -1480,7 +1474,10 @@ pub fn verify_prefix_streaming<R: io::Read>(
 ///     println!("File {} matches the former active file prefix", new_archived_paths[idx]);
 /// }
 /// ```
-pub fn find_matching_prefix<R, I>(files: I, series: &SeriesOutboard) -> Result<Option<usize>, BaoOutboardError>
+pub fn find_matching_prefix<R, I>(
+    files: I,
+    series: &SeriesOutboard,
+) -> Result<Option<usize>, BaoOutboardError>
 where
     R: io::Read,
     I: Iterator<Item = R>,
@@ -1522,7 +1519,11 @@ pub fn compute_prefix_hash_streaming<R: io::Read>(
             Ok(0) => {
                 return Err(BaoOutboardError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    format!("EOF after {} bytes, expected {}", size - bytes_remaining, size),
+                    format!(
+                        "EOF after {} bytes, expected {}",
+                        size - bytes_remaining,
+                        size
+                    ),
                 )));
             }
             Ok(n) => n,
@@ -1946,7 +1947,10 @@ mod tests {
 
         // Verify prefix check works
         let result = verify_series_prefix(&combined, &so2);
-        assert!(result.is_ok(), "verify_series_prefix should succeed after append");
+        assert!(
+            result.is_ok(),
+            "verify_series_prefix should succeed after append"
+        );
     }
 
     #[test]
@@ -2023,8 +2027,8 @@ mod tests {
         let size = state1.cumulative_size();
 
         // Resume
-        let state2 = IncrementalHashState::resume(&frontier, size, &pending)
-            .expect("resume should work");
+        let state2 =
+            IncrementalHashState::resume(&frontier, size, &pending).expect("resume should work");
 
         // Should produce same hash
         assert_eq!(state1.root_hash(), state2.root_hash());
@@ -2366,7 +2370,7 @@ mod tests {
         // Create multiple files, one matches
         let file1 = vec![0xBBu8; 50 * 1024]; // Different content
         let file2 = vec![0xAAu8; 30 * 1024]; // Too small
-        let file3 = original.clone();         // Matches!
+        let file3 = original.clone(); // Matches!
         let file4 = vec![0xCCu8; 50 * 1024]; // Different content
 
         let readers = vec![
@@ -2376,8 +2380,8 @@ mod tests {
             Cursor::new(&file4),
         ];
 
-        let result = find_matching_prefix(readers.into_iter(), &series)
-            .expect("find should succeed");
+        let result =
+            find_matching_prefix(readers.into_iter(), &series).expect("find should succeed");
 
         assert_eq!(result, Some(2)); // file3 at index 2 matches
     }
@@ -2394,13 +2398,10 @@ mod tests {
         let file1 = vec![0xBBu8; 50 * 1024];
         let file2 = vec![0xCCu8; 50 * 1024];
 
-        let readers = vec![
-            Cursor::new(&file1),
-            Cursor::new(&file2),
-        ];
+        let readers = vec![Cursor::new(&file1), Cursor::new(&file2)];
 
-        let result = find_matching_prefix(readers.into_iter(), &series)
-            .expect("find should succeed");
+        let result =
+            find_matching_prefix(readers.into_iter(), &series).expect("find should succeed");
 
         assert_eq!(result, None);
     }
@@ -2465,7 +2466,8 @@ mod tests {
             &series1,
             pending,
             true, // verify prefix
-        ).expect("append should succeed");
+        )
+        .expect("append should succeed");
 
         // Compare with direct computation
         let direct = {
@@ -2505,7 +2507,10 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BaoOutboardError::PrefixMismatch));
+        assert!(matches!(
+            result.unwrap_err(),
+            BaoOutboardError::PrefixMismatch
+        ));
     }
 
     #[test]
@@ -2533,7 +2538,8 @@ mod tests {
             &series1,
             pending,
             false, // skip verification
-        ).expect("append should succeed without verification");
+        )
+        .expect("append should succeed without verification");
 
         // The hash will be computed from the resumed state + new content
         // (which won't match actual file content since prefix differs)
@@ -2560,18 +2566,14 @@ mod tests {
         let archived = active_content.clone();
 
         // Verify new active doesn't match (it's a rotation)
-        let result = verify_prefix_streaming(
-            Cursor::new(&new_active),
-            &tracked_series,
-        ).expect("verify should succeed");
+        let result = verify_prefix_streaming(Cursor::new(&new_active), &tracked_series)
+            .expect("verify should succeed");
 
         assert!(result.is_modified()); // New active is different
 
         // Verify archived file matches (it's the rotated file)
-        let result = verify_prefix_streaming(
-            Cursor::new(&archived),
-            &tracked_series,
-        ).expect("verify should succeed");
+        let result = verify_prefix_streaming(Cursor::new(&archived), &tracked_series)
+            .expect("verify should succeed");
 
         assert!(result.is_match()); // Archived is the old active
     }
@@ -2594,10 +2596,8 @@ mod tests {
         let grown_file: Vec<u8> = [v1.as_slice(), v2.as_slice()].concat();
 
         // Verify prefix matches (first 100KB unchanged)
-        let result = verify_prefix_streaming(
-            Cursor::new(&grown_file),
-            &series1,
-        ).expect("verify should succeed");
+        let result = verify_prefix_streaming(Cursor::new(&grown_file), &series1)
+            .expect("verify should succeed");
 
         assert!(result.is_match()); // Prefix is intact
 
@@ -2611,7 +2611,8 @@ mod tests {
             &series1,
             pending,
             false, // Already verified above
-        ).expect("append should succeed");
+        )
+        .expect("append should succeed");
 
         // Verify final state
         assert_eq!(series2.cumulative_size, grown_file.len() as u64);

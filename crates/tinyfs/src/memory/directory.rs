@@ -24,9 +24,9 @@ pub struct MemoryDirectory {
 impl Metadata for MemoryDirectory {
     async fn metadata(&self) -> Result<NodeMetadata> {
         Ok(NodeMetadata {
-            version: 1,   // Memory directories don't track versions
-            size: None,   // Directories don't have sizes
-            blake3: None, // Directories don't have checksums
+            version: 1,         // Memory directories don't track versions
+            size: None,         // Directories don't have sizes
+            blake3: None,       // Directories don't have checksums
             bao_outboard: None, // Directories don't have bao-tree data
             entry_type: EntryType::DirectoryPhysical,
             timestamp: 0, // TODO
