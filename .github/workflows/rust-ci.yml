@@ -45,10 +45,13 @@ jobs:
     name: Build & Publish Container
     needs: check
     runs-on: ubuntu-latest
+    # Note: PRs from forks won't have write access to packages, so the push step will be skipped for them
+    # For PRs from the same repo, this builds and pushes :nightly, :pr-N, and :pr-N-SHA tags
     permissions:
       contents: read
       packages: write
       id-token: write  # For Sigstore signing
+      pull-requests: write  # For commenting on PRs
     
     steps:
       - name: Checkout repository
@@ -75,15 +78,40 @@ jobs:
         run: |
           IMAGE_ID=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
-          [ "$VERSION" == "main" ] && VERSION=latest
+          
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # For PRs: use nightly tag and also create a PR-specific tag
+            VERSION=nightly
+            PR_TAG=pr-${{ github.event.pull_request.number }}
+            SHORT_SHA=$(echo "${{ github.event.pull_request.head.sha }}" | cut -c1-7)
+            echo "pr_tag=$PR_TAG" >> $GITHUB_OUTPUT
+            echo "sha_tag=${PR_TAG}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
+            [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+            [ "$VERSION" == "main" ] && VERSION=latest
+          fi
+          
           echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "is_pr=${{ github.event_name == 'pull_request' }}" >> $GITHUB_OUTPUT
+      
+      - name: Log in to Container Registry (Podman) for PR
+        if: github.event_name == 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+      
+      - name: Log in to Container Registry (Cosign) for PR
+        if: github.event_name == 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       
       - name: Build container image
         run: |
           podman build -f Dockerfile -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} .
+          # For PRs, also tag with PR number and SHA for traceability
+          if [[ "${{ steps.meta.outputs.is_pr }}" == "true" ]]; then
+            podman tag ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
+            podman tag ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
+          fi
       
       - name: Push container image
         if: github.event_name != 'pull_request'
@@ -93,7 +121,60 @@ jobs:
           DIGEST=$(podman inspect --format='{{.Digest}}' ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }})
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
       
+      - name: Push PR container images (nightly)
+        if: github.event_name == 'pull_request'
+        id: push-pr
+        run: |
+          # Push nightly tag (overwrites previous)
+          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
+          # Push PR-specific tag
+          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
+          # Push SHA-specific tag for exact commit tracking
+          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
+          DIGEST=$(podman inspect --format='{{.Digest}}' ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }})
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+      
       - name: Sign container image with Sigstore
         if: github.event_name != 'pull_request'
         run: |
           cosign sign --yes ${{ steps.meta.outputs.image_id }}@${{ steps.push.outputs.digest }}
+      
+      - name: Sign PR container image with Sigstore
+        if: github.event_name == 'pull_request'
+        run: |
+          cosign sign --yes ${{ steps.meta.outputs.image_id }}@${{ steps.push-pr.outputs.digest }}
+      
+      - name: Comment PR with image tags
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const imageId = '${{ steps.meta.outputs.image_id }}';
+            const nightlyTag = '${{ steps.meta.outputs.version }}';
+            const prTag = '${{ steps.meta.outputs.pr_tag }}';
+            const shaTag = '${{ steps.meta.outputs.sha_tag }}';
+            
+            const body = `🐳 **Container images built and pushed!**
+            
+            You can test this PR using any of these tags:
+            
+            | Tag | Image | Description |
+            |-----|-------|-------------|
+            | \`nightly\` | \`${imageId}:${nightlyTag}\` | Latest PR build (overwrites on each PR commit) |
+            | \`${prTag}\` | \`${imageId}:${prTag}\` | Latest build for this PR |
+            | \`${shaTag}\` | \`${imageId}:${shaTag}\` | This exact commit |
+            
+            \`\`\`bash
+            # Pull and run the nightly image
+            podman pull ${imageId}:${nightlyTag}
+            # or
+            docker pull ${imageId}:${nightlyTag}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

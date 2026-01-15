@@ -226,7 +226,7 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
                     if chunk_id == 0 && !initial_pending_bytes.is_empty() {
                         &initial_pending_bytes[..]
                     } else if !all_chunk_data.is_empty() {
-                        let prev_chunk_data = &all_chunk_data.last().unwrap().3;
+                        let prev_chunk_data = &all_chunk_data.last().expect("ok").3;
                         let start = prev_chunk_data.len().saturating_sub(pending_size);
                         &prev_chunk_data[start..]
                     } else {
