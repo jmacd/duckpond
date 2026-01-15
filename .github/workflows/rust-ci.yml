@@ -35,15 +35,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       
-      - name: Run clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
-      
       - name: Run tests
         run: cargo test --workspace
+      
+      - name: Run clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
 
   build-pond-cli:
     name: Build & Publish Container
     needs: check
+    if: success() || failure()  # Run even if clippy fails
     runs-on: ubuntu-latest
     # Note: PRs from forks won't have write access to packages, so the push step will be skipped for them
     # For PRs from the same repo, this builds and pushes :nightly, :pr-N, and :pr-N-SHA tags

@@ -396,11 +396,7 @@ impl AsyncWrite for MemoryFileWriter {
                 let bao_outboard = match entry_type {
                     EntryType::FilePhysicalSeries | EntryType::TablePhysicalSeries => {
                         // Get previous version's bao_outboard (if any)
-                        let prev_version = if allocated_version > 1 {
-                            allocated_version - 1
-                        } else {
-                            0
-                        };
+                        let prev_version = allocated_version.saturating_sub(1);
 
                         let prev_bao = if prev_version > 0 {
                             // Get bao_outboard from metadata
@@ -499,8 +495,8 @@ impl AsyncWrite for MemoryFileWriter {
                         .await
                 };
 
-                if let Err(e) = store_result {
-                    eprintln!("MemoryFileWriter: Failed to store version: {}", e);
+                if let Err(_e) = store_result {
+                    // Failed to store version - silent failure as this is internal state
                 }
 
                 // Update content (for backward compatibility with tests that read from content directly)

@@ -49,7 +49,7 @@ fn parse_command(ctx: ExecutionContext) -> Result<LogfileCommand, tinyfs::Error>
     LogfileCommand::try_parse_from(args_with_prog_name)
         .map_err(|e| {
             // Print Clap's helpful error message
-            eprintln!("{}", e);
+            // Error will be propagated up
             tinyfs::Error::Other(format!("Command parse error: {}", e))
         })
 }
@@ -355,6 +355,7 @@ async fn execute_b3sum(
 
     // Print in b3sum format: "<hash>  <filename>"
     // Note: b3sum uses two spaces between hash and filename
+    #[allow(clippy::print_stdout)]
     for filename in filenames {
         if let Some(pond_state) = pond_files.get(filename) {
             // The blake3 hash is stored as a 64-character hex string

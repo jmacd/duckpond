@@ -1604,7 +1604,8 @@ impl InnerState {
                         .iter()
                         .map(|r| r.version)
                         .max()
-                        .expect("records is non-empty, so max() should succeed");
+                        .unwrap();
+                        //.expect("records is non-empty, so max() should succeed");
 
                     let max_allocated = self
                         .allocated_versions

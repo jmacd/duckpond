@@ -23,7 +23,7 @@ use file_rotate::{
     ContentLimit, FileRotate,
 };
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Synthetic log file generator with rotation
 #[derive(Parser, Debug)]
@@ -109,6 +109,7 @@ fn verify_line(line: &str, expected_row: u64) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -205,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Verify all generated files contain valid, sequential data
 fn verify_all_files(
-    active_path: &PathBuf,
+    active_path: &Path,
     archived_paths: &[PathBuf],
     start_row: u64,
     end_row: u64,
@@ -214,7 +215,7 @@ fn verify_all_files(
     // Lexical sort also works: .2026-01-05 < .2026-01-05.1 < .2026-01-05.2 etc
     let mut all_paths: Vec<PathBuf> = archived_paths.to_vec();
     all_paths.sort(); // Ensure chronological order
-    all_paths.push(active_path.clone()); // Active file is always newest
+    all_paths.push(active_path.to_path_buf()); // Active file is always newest
 
     let mut expected_row = start_row;
     let mut total_lines = 0;
@@ -244,8 +245,11 @@ fn verify_all_files(
         .into());
     }
 
-    println!("✓ Verified {} lines across {} files", total_lines, all_paths.len());
-    println!("✓ All hashes match expected values");
+    #[allow(clippy::print_stdout)]
+    {
+        println!("✓ Verified {} lines across {} files", total_lines, all_paths.len());
+        println!("✓ All hashes match expected values");
+    }
 
     Ok(())
 }

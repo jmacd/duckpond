@@ -723,11 +723,11 @@ impl OplogEntry {
         // For FilePhysicalSeries, the blake3 field MUST be the cumulative hash.
         // Extract it from SeriesOutboard.cumulative_blake3 to maintain this invariant.
         // See bao-tree-design.md for the full explanation of cumulative vs per-version hashing.
-        if self.file_type == EntryType::FilePhysicalSeries {
-            if let Ok(series_outboard) = utilities::bao_outboard::SeriesOutboard::from_bytes(&outboard) {
-                let hash = blake3::Hash::from_bytes(series_outboard.cumulative_blake3);
-                self.blake3 = Some(hash.to_hex().to_string());
-            }
+        if self.file_type == EntryType::FilePhysicalSeries
+            && let Ok(series_outboard) = utilities::bao_outboard::SeriesOutboard::from_bytes(&outboard)
+        {
+            let hash = blake3::Hash::from_bytes(series_outboard.cumulative_blake3);
+            self.blake3 = Some(hash.to_hex().to_string());
         }
         self.bao_outboard = Some(outboard);
     }

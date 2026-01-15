@@ -316,21 +316,21 @@ impl State {
 
     async fn metadata(&self, id: FileID) -> Result<NodeMetadata> {
         // Get metadata from stored versions if they exist (for files with version history)
-        if let Some(versions) = self.file_versions.get(&id) {
-            if let Some(latest) = versions.last() {
-                // Use stored blake3 hash (computed at write time)
-                // This is critical for corruption detection - must NOT recompute from content
-                let blake3 = Some(latest.blake3.clone());
+        if let Some(versions) = self.file_versions.get(&id)
+            && let Some(latest) = versions.last()
+        {
+            // Use stored blake3 hash (computed at write time)
+            // This is critical for corruption detection - must NOT recompute from content
+            let blake3 = Some(latest.blake3.clone());
 
-                return Ok(NodeMetadata {
-                    version: latest.version,
-                    size: Some(latest.content.len() as u64),
-                    blake3,
-                    bao_outboard: latest.bao_outboard.clone(),
-                    entry_type: latest.entry_type,
-                    timestamp: latest.timestamp,
-                });
-            }
+            return Ok(NodeMetadata {
+                version: latest.version,
+                size: Some(latest.content.len() as u64),
+                blake3,
+                bao_outboard: latest.bao_outboard.clone(),
+                entry_type: latest.entry_type,
+                timestamp: latest.timestamp,
+            });
         }
 
         // Look up node (for nodes without version history, or as fallback)
@@ -405,14 +405,13 @@ impl State {
                 // For version types, compute root from outboard
                 utilities::bao_outboard::VersionOutboard::from_bytes(bao_outboard)
                     .ok()
-                    .map(|vo| {
+                    .and_then(|vo| {
                         // The VersionOutboard stores the outboard, we need to compute root
                         // For now, fall back to None (will compute from content)
                         // TODO: Store root hash in VersionOutboard
                         let _ = vo;
                         None
                     })
-                    .flatten()
             }
             _ => None,
         }

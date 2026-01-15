@@ -75,7 +75,7 @@ impl BaoValidatingReader {
         };
 
         // Calculate number of blocks
-        let num_blocks = (content.len() + BLOCK_SIZE_BYTES - 1) / BLOCK_SIZE_BYTES;
+        let num_blocks = content.len().div_ceil(BLOCK_SIZE_BYTES);
         let validated_blocks = vec![false; num_blocks.max(1)];
 
         Ok(Self {
@@ -123,11 +123,10 @@ impl BaoValidatingReader {
         // Use valid_ranges to check if this block is valid
         // This is the public API for validation - it returns ranges that are valid
         let mut has_valid_chunks = false;
-        for result in bao_tree::io::sync::valid_ranges(&self.outboard, &self.content[..], &range_to_validate) {
+        if let Some(result) = bao_tree::io::sync::valid_ranges(&self.outboard, &self.content[..], &range_to_validate).into_iter().next() {
             match result {
                 Ok(_range) => {
                     has_valid_chunks = true;
-                    break;
                 }
                 Err(e) => {
                     return Err(io::Error::new(
