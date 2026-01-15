@@ -105,21 +105,45 @@ jobs:
         if: github.event_name == 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       
-      - name: Build container image
+      - name: Set up QEMU for multi-arch builds
         run: |
-          podman build -f Dockerfile -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} .
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+      
+      - name: Build multi-arch container image
+        run: |
+          # Create a manifest list
+          podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
+          
+          # Build for AMD64
+          podman build \
+            --platform linux/amd64 \
+            --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} \
+            -f Dockerfile .
+          
+          # Build for ARM64
+          podman build \
+            --platform linux/arm64 \
+            --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} \
+            -f Dockerfile .
+          
           # For PRs, also tag with PR number and SHA for traceability
           if [[ "${{ steps.meta.outputs.is_pr }}" == "true" ]]; then
-            podman tag ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
-            podman tag ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
+            podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
+            podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
+            # Add both architectures to PR tags
+            podman build --platform linux/amd64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} -f Dockerfile .
+            podman build --platform linux/arm64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} -f Dockerfile .
+            podman build --platform linux/amd64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} -f Dockerfile .
+            podman build --platform linux/arm64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} -f Dockerfile .
           fi
       
       - name: Push container image
         if: github.event_name != 'pull_request'
         id: push
         run: |
-          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
-          DIGEST=$(podman inspect --format='{{.Digest}}' ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }})
+          podman manifest push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} docker://${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
+          DIGEST=$(podman manifest inspect ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} | jq -r '.manifests[0].digest')
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
       
       - name: Push PR container images (nightly)
@@ -127,12 +151,12 @@ jobs:
         id: push-pr
         run: |
           # Push nightly tag (overwrites previous)
-          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
+          podman manifest push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} docker://${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
           # Push PR-specific tag
-          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
+          podman manifest push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} docker://${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
           # Push SHA-specific tag for exact commit tracking
-          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
-          DIGEST=$(podman inspect --format='{{.Digest}}' ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }})
+          podman manifest push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} docker://${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
+          DIGEST=$(podman manifest inspect ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} | jq -r '.manifests[0].digest')
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
       
       - name: Sign container image with Sigstore
