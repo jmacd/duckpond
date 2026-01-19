@@ -137,9 +137,9 @@ jobs:
             --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} \
             -f Dockerfile .
           
-          # Clean up build cache between architectures to free space
-          echo "Cleaning up after AMD64 build..."
-          podman system prune -f
+          # Clean up only build cache, not images (--filter keeps images referenced by manifests)
+          echo "Cleaning build cache after AMD64..."
+          podman builder prune -f || true
           df -h
           
           # Build for ARM64
@@ -149,15 +149,16 @@ jobs:
             --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} \
             -f Dockerfile .
           
-          # For PRs, also tag with PR number and SHA for traceability
+          # For PRs, copy the manifest for additional tags (don't rebuild)
           if [[ "${{ steps.meta.outputs.is_pr }}" == "true" ]]; then
+            echo "Creating PR tags from existing manifest..."
             podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
             podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
-            # Add both architectures to PR tags (reuse already-built layers)
-            podman build --platform linux/amd64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} -f Dockerfile .
-            podman build --platform linux/arm64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} -f Dockerfile .
-            podman build --platform linux/amd64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} -f Dockerfile .
-            podman build --platform linux/arm64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} -f Dockerfile .
+            # Add existing images to PR manifests by digest
+            for digest in $(podman manifest inspect ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} | jq -r '.manifests[].digest'); do
+              podman manifest add ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} ${{ steps.meta.outputs.image_id }}@$digest
+              podman manifest add ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} ${{ steps.meta.outputs.image_id }}@$digest
+            done
           fi
       
       - name: Push container image
