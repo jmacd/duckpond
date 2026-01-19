@@ -110,18 +110,35 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
       
+      - name: Free up more disk space before builds
+        run: |
+          df -h
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -a -f || true
+          df -h
+      
       - name: Build multi-arch container image
         run: |
           # Create a manifest list
           podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
           
           # Build for AMD64
+          echo "Building AMD64..."
+          df -h
           podman build \
             --platform linux/amd64 \
             --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} \
             -f Dockerfile .
           
+          # Clean up build cache between architectures to free space
+          echo "Cleaning up after AMD64 build..."
+          podman system prune -f
+          df -h
+          
           # Build for ARM64
+          echo "Building ARM64..."
           podman build \
             --platform linux/arm64 \
             --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} \
@@ -131,7 +148,7 @@ jobs:
           if [[ "${{ steps.meta.outputs.is_pr }}" == "true" ]]; then
             podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
             podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
-            # Add both architectures to PR tags
+            # Add both architectures to PR tags (reuse already-built layers)
             podman build --platform linux/amd64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} -f Dockerfile .
             podman build --platform linux/arm64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} -f Dockerfile .
             podman build --platform linux/amd64 --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} -f Dockerfile .
