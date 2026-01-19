@@ -44,7 +44,12 @@ jobs:
   build-pond-cli:
     name: Build & Publish Container
     needs: check
-    if: success() || failure()  # Run even if clippy fails
+    # Run on main/tags always, on PRs only with 'build-container' label
+    if: |
+      (success() || failure()) && (
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'build-container')
+      )
     runs-on: ubuntu-latest
     # Note: PRs from forks won't have write access to packages, so the push step will be skipped for them
     # For PRs from the same repo, this builds and pushes :nightly, :pr-N, and :pr-N-SHA tags
