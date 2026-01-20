@@ -1604,7 +1604,7 @@ impl InnerState {
                         1
                     }
                 } else {
-                    // This is an existing node - find max version from both records and allocated
+                    // This is an existing node Find max version from both records and allocated.
                     let max_record_version = records.iter().map(|r| r.version).max().expect("records is non-empty");
 
                     let max_allocated = self
