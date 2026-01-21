@@ -86,12 +86,7 @@ jobs:
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
           
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # For PRs: use nightly tag and also create a PR-specific tag
             VERSION=nightly
-            PR_TAG=pr-${{ github.event.pull_request.number }}
-            SHORT_SHA=$(echo "${{ github.event.pull_request.head.sha }}" | cut -c1-7)
-            echo "pr_tag=$PR_TAG" >> $GITHUB_OUTPUT
-            echo "sha_tag=${PR_TAG}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           else
             VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
             [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
@@ -100,7 +95,6 @@ jobs:
           
           echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "is_pr=${{ github.event_name == 'pull_request' }}" >> $GITHUB_OUTPUT
       
       - name: Log in to Container Registry (Podman) for PR
         if: github.event_name == 'pull_request'
@@ -137,7 +131,7 @@ jobs:
             --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} \
             -f Dockerfile .
           
-          # Clean up only build cache, not images (--filter keeps images referenced by manifests)
+          # Clean up only build cache, not images
           echo "Cleaning build cache after AMD64..."
           podman builder prune -f || true
           df -h
@@ -148,18 +142,6 @@ jobs:
             --platform linux/arm64 \
             --manifest ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} \
             -f Dockerfile .
-          
-          # For PRs, copy the manifest for additional tags (don't rebuild)
-          if [[ "${{ steps.meta.outputs.is_pr }}" == "true" ]]; then
-            echo "Creating PR tags from existing manifest..."
-            podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
-            podman manifest create ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
-            # Add existing images to PR manifests by digest
-            for digest in $(podman manifest inspect ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} | jq -r '.manifests[].digest'); do
-              podman manifest add ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} ${{ steps.meta.outputs.image_id }}@$digest
-              podman manifest add ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} ${{ steps.meta.outputs.image_id }}@$digest
-            done
-          fi
       
       - name: Push container image
         if: github.event_name != 'pull_request'
@@ -169,16 +151,12 @@ jobs:
           DIGEST=$(podman manifest inspect ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} | jq -r '.manifests[0].digest')
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
       
-      - name: Push PR container images (nightly)
+      - name: Push PR container image (nightly)
         if: github.event_name == 'pull_request'
         id: push-pr
         run: |
           # Push nightly tag (overwrites previous)
           podman manifest push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} docker://${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
-          # Push PR-specific tag
-          podman manifest push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }} docker://${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.pr_tag }}
-          # Push SHA-specific tag for exact commit tracking
-          podman manifest push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }} docker://${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.sha_tag }}
           DIGEST=$(podman manifest inspect ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} | jq -r '.manifests[0].digest')
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
       
@@ -199,21 +177,12 @@ jobs:
           script: |
             const imageId = '${{ steps.meta.outputs.image_id }}';
             const nightlyTag = '${{ steps.meta.outputs.version }}';
-            const prTag = '${{ steps.meta.outputs.pr_tag }}';
-            const shaTag = '${{ steps.meta.outputs.sha_tag }}';
             
-            const body = `🐳 **Container images built and pushed!**
+            const body = `🐳 **Container image built and pushed!**
             
-            You can test this PR using any of these tags:
-            
-            | Tag | Image | Description |
-            |-----|-------|-------------|
-            | \`nightly\` | \`${imageId}:${nightlyTag}\` | Latest PR build (overwrites on each PR commit) |
-            | \`${prTag}\` | \`${imageId}:${prTag}\` | Latest build for this PR |
-            | \`${shaTag}\` | \`${imageId}:${shaTag}\` | This exact commit |
+            Multi-arch image (amd64 + arm64):
             
             \`\`\`bash
-            # Pull and run the nightly image
             podman pull ${imageId}:${nightlyTag}
             # or
             docker pull ${imageId}:${nightlyTag}
