@@ -3055,6 +3055,9 @@ impl InnerState {
                 // Use the actual database version number, not a re-enumerated logical version
                 let version = record.version as u64;
 
+                // For large files, size represents the ORIGINAL content size (before chunking)
+                // The actual parquet file on disk will be different due to compression
+                // but DataFusion needs to know the reconstructed size
                 let size = if record.is_large_file() {
                     record.size.unwrap_or(0)
                 } else {
@@ -3167,9 +3170,19 @@ impl InnerState {
                     )))
                 })?;
 
-            tokio::fs::read(&large_file_path)
+            // Large files are stored as chunked parquet - use ParquetFileReader to reconstruct
+            use tokio::io::AsyncReadExt;
+            let mut reader = crate::large_files::ParquetFileReader::new(large_file_path)
                 .await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to read large file: {}", e)))
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to open large file reader: {}", e)))?;
+            
+            let mut content = Vec::new();
+            let _ = reader
+                .read_to_end(&mut content)
+                .await
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to read large file: {}", e)))?;
+            
+            Ok(content)
         } else {
             // Small file: content stored inline
             target_record

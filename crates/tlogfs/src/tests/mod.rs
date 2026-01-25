@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod large_file_corruption;
+mod large_file_roundtrip;
 
 use crate::persistence::OpLogPersistence;
 use arrow_array::record_batch;
