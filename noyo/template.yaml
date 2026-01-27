@@ -3,11 +3,11 @@ entries:
     factory: "template"
     config:
       in_pattern: "/reduced/single_param/**/*.series"
-      out_pattern: "param=$0.md"
-      template_file: "/etc/data.md.tmpl"
+      out_pattern: "param=$0.html"
+      template_file: "/etc/data.html.tmpl"
   - name: "sites"
     factory: "template"
     config:
       in_pattern: "/reduced/single_site/**/*.series"
-      out_pattern: "site=$0.md"
-      template_file: "/etc/data.md.tmpl"
+      out_pattern: "site=$0.html"
+      template_file: "/etc/data.html.tmpl"

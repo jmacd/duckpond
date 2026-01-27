@@ -17,7 +17,7 @@ ${EXE} init
 
 ${EXE} mkdir -p /etc
 
-${EXE} copy host://${NOYO}/data.md.tmpl /etc
+${EXE} copy host://${NOYO}/data.html.tmpl /etc
 
 ${EXE} mkdir -p /laketech
 
