@@ -2,17 +2,130 @@
 <notebook theme="slate">
   <title>{{ args[0] }} - Water Quality</title>
   
-  <script type="text/markdown">
-    # Noyo Harbor Blue Economy
-    ## Quality detail
+  <script type="text/html">
+    <style>
+      :root {
+        --sidebar-width: 240px;
+        --accent-color: #667eea;
+        --accent-light: rgba(102, 126, 234, 0.1);
+      }
+      
+      body {
+        display: flex;
+        min-height: 100vh;
+        margin: 0;
+      }
+      
+      .sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: var(--sidebar-width);
+        height: 100vh;
+        background: #1a1a2e;
+        color: #fff;
+        padding: 1.5rem 0;
+        overflow-y: auto;
+        z-index: 100;
+        box-shadow: 2px 0 8px rgba(0,0,0,0.2);
+      }
+      
+      .sidebar-header {
+        padding: 0 1rem 1rem;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+        margin-bottom: 1rem;
+      }
+      
+      .sidebar-header h1 {
+        font-size: 1.2rem;
+        margin: 0;
+        font-weight: 600;
+      }
+      
+      .sidebar-section {
+        margin-bottom: 1.5rem;
+      }
+      
+      .sidebar-section-title {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: rgba(255,255,255,0.5);
+        padding: 0 1rem;
+        margin-bottom: 0.5rem;
+      }
+      
+      .sidebar a {
+        display: block;
+        padding: 0.5rem 1rem;
+        color: rgba(255,255,255,0.8);
+        text-decoration: none;
+        font-size: 0.9rem;
+        transition: all 0.15s;
+      }
+      
+      .sidebar a:hover {
+        background: rgba(255,255,255,0.1);
+        color: #fff;
+      }
+      
+      .sidebar a.active {
+        background: var(--accent-light);
+        color: var(--accent-color);
+        border-left: 3px solid var(--accent-color);
+      }
+      
+      .main-content {
+        margin-left: var(--sidebar-width);
+        flex: 1;
+        min-width: 0;
+        padding: 2rem;
+      }
+      
+      .page-header {
+        margin-bottom: 2rem;
+      }
+      
+      .page-header h1 {
+        margin: 0;
+        font-size: 2rem;
+        color: var(--accent-color);
+      }
+      
+      .page-header .breadcrumb {
+        color: var(--theme-foreground-muted);
+        font-size: 0.9rem;
+        margin-top: 0.5rem;
+      }
+      
+      .page-header .breadcrumb a {
+        color: var(--accent-color);
+        text-decoration: none;
+      }
+      
+      @media (max-width: 768px) {
+        .sidebar {
+          transform: translateX(-100%);
+        }
+        .main-content {
+          margin-left: 0;
+        }
+      }
+    </style>
+    
+    {{ insert_from_path(path="/templates/nav/nav.html") }}
+    
+    <div class="main-content">
+      <div class="page-header">
+        <h1>{{ args[0] }}</h1>
+        <div class="breadcrumb">
+          <a href="index.html">Home</a> › Water Quality Data
+        </div>
+      </div>
   </script>
   
   <script type="module">
     import {timepicker, timerange, legendName, plotName} from "../lib.js";
-  </script>
-  
-  <script type="text/html">
-    <link type="text/css" href="../style.css" rel="stylesheet" />
   </script>
   
   <script type="module">
@@ -80,5 +193,9 @@
       }));
       {% endfor %}
     }
+  </script>
+  
+  <script type="text/html">
+    </div><!-- end main-content -->
   </script>
 </notebook>

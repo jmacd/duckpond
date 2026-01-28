@@ -3,95 +3,214 @@
   <title>Noyo Harbor Blue Economy</title>
   
   <script type="text/html">
-    <link type="text/css" href="../style.css" rel="stylesheet" />
     <style>
-      .nav-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-        gap: 1.5rem;
-        margin: 2rem 0;
+      :root {
+        --sidebar-width: 240px;
+        --accent-color: #667eea;
+        --accent-light: rgba(102, 126, 234, 0.1);
       }
-      .nav-card {
-        background: white;
-        border: 2px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 1.5rem;
-        transition: all 0.2s;
-        text-decoration: none;
-        color: inherit;
-        display: block;
-      }
-      .nav-card:hover {
-        border-color: #667eea;
-        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
-        transform: translateY(-2px);
-      }
-      .nav-card h3 {
-        margin: 0 0 0.5rem 0;
-        color: #667eea;
-      }
-      .nav-card p {
+      
+      /* Sidebar layout */
+      body {
+        display: flex;
+        min-height: 100vh;
         margin: 0;
-        color: #6b7280;
+      }
+      
+      .sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: var(--sidebar-width);
+        height: 100vh;
+        background: #1a1a2e;
+        color: #fff;
+        padding: 1.5rem 0;
+        overflow-y: auto;
+        z-index: 100;
+        box-shadow: 2px 0 8px rgba(0,0,0,0.2);
+      }
+      
+      .sidebar-header {
+        padding: 0 1rem 1rem;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+        margin-bottom: 1rem;
+      }
+      
+      .sidebar-header h1 {
+        font-size: 1.2rem;
+        margin: 0;
+        font-weight: 600;
+      }
+      
+      .sidebar-section {
+        margin-bottom: 1.5rem;
+      }
+      
+      .sidebar-section-title {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: rgba(255,255,255,0.5);
+        padding: 0 1rem;
+        margin-bottom: 0.5rem;
+      }
+      
+      .sidebar a {
+        display: block;
+        padding: 0.5rem 1rem;
+        color: rgba(255,255,255,0.8);
+        text-decoration: none;
         font-size: 0.9rem;
+        transition: all 0.15s;
       }
-      .section {
-        margin: 3rem 0;
+      
+      .sidebar a:hover {
+        background: rgba(255,255,255,0.1);
+        color: #fff;
       }
-      .section h2 {
-        color: #667eea;
-        border-bottom: 2px solid #667eea;
+      
+      .sidebar a.active {
+        background: var(--accent-light);
+        color: var(--accent-color);
+        border-left: 3px solid var(--accent-color);
+      }
+      
+      /* Main content area */
+      .main-content {
+        margin-left: var(--sidebar-width);
+        flex: 1;
+        min-width: 0;
+      }
+      
+      /* Hero section */
+      .hero {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        font-family: var(--sans-serif);
+        margin: 4rem 2rem;
+        text-wrap: balance;
+        text-align: center;
+      }
+
+      .hero h1 {
+        margin: 1rem 0;
+        max-width: none;
+        font-size: clamp(2rem, 8vw, 4rem);
+        font-weight: 900;
+        line-height: 1.1;
+        background: linear-gradient(30deg, var(--accent-color), #a855f7);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      .hero h2 {
+        margin: 0;
+        max-width: 34em;
+        font-size: 1.1rem;
+        font-weight: 400;
+        line-height: 1.5;
+        color: var(--theme-foreground-muted);
+      }
+      
+      /* Map container */
+      .map-container {
+        margin: 2rem;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      }
+      
+      /* About section */
+      .about-section {
+        max-width: 800px;
+        margin: 3rem auto;
+        padding: 0 2rem;
+        line-height: 1.7;
+      }
+      
+      .about-section h2 {
+        color: var(--accent-color);
+        border-bottom: 2px solid var(--accent-color);
         padding-bottom: 0.5rem;
+        margin-bottom: 1rem;
+      }
+      
+      /* Responsive */
+      @media (max-width: 768px) {
+        .sidebar {
+          transform: translateX(-100%);
+          transition: transform 0.3s;
+        }
+        .sidebar.open {
+          transform: translateX(0);
+        }
+        .main-content {
+          margin-left: 0;
+        }
       }
     </style>
-  </script>
-  
-  <script type="text/markdown">
-    # Noyo Harbor Blue Economy
-    ## Water Quality Monitoring Dashboard
     
-    Welcome to the Noyo Harbor water quality monitoring system. Select a view below to explore the data.
+    <!-- Sidebar Navigation -->
+    {{ insert_from_path(path="/templates/nav/nav.html") }}
+    
+    <div class="main-content">
   </script>
   
   <script type="text/html">
-    <div class="section">
-      <h2>📊 Parameter Overview</h2>
-      <div class="nav-grid">
-        <a href="DO.html" class="nav-card">
-          <h3>DO</h3>
-          <p>View dissolved oxygen measurements across all monitoring sites</p>
-        </a>
-        <a href="Salinity.html" class="nav-card">
-          <h3>Salinity</h3>
-          <p>View salinity measurements across all monitoring sites</p>
-        </a>
-        <a href="Temperature.html" class="nav-card">
-          <h3>Temperature</h3>
-          <p>View temperature measurements across all monitoring sites</p>
-        </a>
-      </div>
+    <div class="hero">
+      <h1>Noyo Harbor Blue Economy</h1>
+      <h2>Water Quality Monitoring Dashboard</h2>
     </div>
+  </script>
+  
+  <script type="module">
+    import * as L from "npm:leaflet";
     
-    <div class="section">
-      <h2>📍 Site Detail</h2>
-      <div class="nav-grid">
-        <a href="BDock.html" class="nav-card">
-          <h3>B Dock</h3>
-          <p>All parameters measured at this location</p>
-        </a>
-        <a href="FieldStation.html" class="nav-card">
-          <h3>Field Station</h3>
-          <p>All parameters measured at this location</p>
-        </a>
-        <a href="Princess.html" class="nav-card">
-          <h3>Princess</h3>
-          <p>All parameters measured at this location</p>
-        </a>
-        <a href="Silver.html" class="nav-card">
-          <h3>Silver</h3>
-          <p>All parameters measured at this location</p>
-        </a>
-      </div>
-    </div>
+    const latitude = 39.425200984011916;
+    const longitude = -123.80366719309244;
+
+    const div = display(document.createElement("div"));
+    div.className = "map-container";
+    div.style.height = "400px";
+
+    const map = L.map(div, { scrollWheelZoom: false })
+      .setView([latitude, longitude], 16);
+
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+
+    // Monitoring sites
+    L.circle([39.42768783218275, -123.80584629151588], {radius: 20, color: '#667eea'})
+      .bindPopup("<strong>Princess Seafood</strong>")
+      .addTo(map);
+    L.circle([39.42630383307301, -123.80507914592623], {radius: 20, color: '#667eea'})
+      .bindPopup("<strong>The Wharf</strong>")
+      .addTo(map);
+    L.circle([39.42359794726219, -123.80380240755608], {radius: 20, color: '#667eea'})
+      .bindPopup("<strong>Field Station</strong>")
+      .addTo(map);
+    L.circle([39.42398791346205, -123.80214663996874], {radius: 20, color: '#667eea'})
+      .bindPopup("<strong>B-Dock</strong>")
+      .addTo(map);
+  </script>
+  
+  <script type="text/markdown">
+## About This Project
+
+The Noyo Harbor Blue Economy project monitors water quality at key locations throughout Noyo Harbor in Fort Bragg, California. Real-time sensors measure:
+
+- **Dissolved Oxygen (DO)** - Critical for marine life health
+- **Salinity** - Indicates freshwater/seawater mixing
+- **Temperature** - Affects oxygen levels and species habitat
+
+Use the navigation on the left to explore data by parameter (comparing all sites) or by site (viewing all parameters at one location).
+  </script>
+  
+  <script type="text/html">
+    </div><!-- end main-content -->
   </script>
 </notebook>

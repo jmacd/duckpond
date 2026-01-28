@@ -3,13 +3,13 @@ entries:
     factory: "template"
     config:
       in_pattern: "/reduced/single_param/**/*.series"
-      out_pattern: "param=$0.html"
+      out_pattern: "$0.html"
       template_file: "/etc/data.html.tmpl"
   - name: "sites"
     factory: "template"
     config:
       in_pattern: "/reduced/single_site/**/*.series"
-      out_pattern: "site=$0.html"
+      out_pattern: "$0.html"
       template_file: "/etc/data.html.tmpl"
   - name: "index"
     factory: "template"
@@ -17,3 +17,9 @@ entries:
       in_pattern: "/reduced/single_*/**/*.series"
       out_pattern: "index.html"
       template_file: "/etc/index.html.tmpl"
+  - name: "nav"
+    factory: "template"
+    config:
+      in_pattern: "/reduced/single_*/**/*.series"
+      out_pattern: "nav.html"
+      template_file: "/etc/nav.html.tmpl"
