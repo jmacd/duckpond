@@ -19,6 +19,8 @@ ${EXE} mkdir -p /etc
 
 ${EXE} copy host://${NOYO}/data.html.tmpl /etc
 
+${EXE} copy host://${NOYO}/index.html.tmpl /etc
+
 ${EXE} mkdir -p /laketech
 
 ${EXE} copy host://${NOYO}/laketech /laketech/data

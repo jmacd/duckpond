@@ -11,3 +11,9 @@ entries:
       in_pattern: "/reduced/single_site/**/*.series"
       out_pattern: "site=$0.html"
       template_file: "/etc/data.html.tmpl"
+  - name: "index"
+    factory: "template"
+    config:
+      in_pattern: "/reduced/single_*/**/*.series"
+      out_pattern: "index.html"
+      template_file: "/etc/index.html.tmpl"

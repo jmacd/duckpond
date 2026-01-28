@@ -1009,7 +1009,14 @@ fn validate_export_inputs(patterns: &[String], output_dir: &str, temporal: &str)
         return Err(anyhow::anyhow!("Output directory must be specified"));
     }
 
-    // Validate temporal partitioning options
+    // Validate temporal partitioning options (skip if empty - used for non-temporal exports)
+    if temporal.trim().is_empty() {
+        log::debug!("  No temporal partitioning (non-temporal export)");
+        log::debug!("✅ Input validation passed");
+        log::debug!("  {} patterns to process", patterns.len());
+        return Ok(());
+    }
+    
     let valid_temporal_parts = ["year", "month", "day", "hour", "minute", "second"];
     let temporal_parts: Vec<&str> = temporal.split(',').collect();
 

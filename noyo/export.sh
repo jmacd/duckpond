@@ -20,12 +20,11 @@ cargo build
 
 rm -rf ${OUTDIR}
 
-# Use HTML template for notebook-kit instead of markdown
-export POND_TEMPLATE=${NOYO}/data.html.tmpl
-
 # Parameters
-#samply record
 ${EXE} export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/param=*' --dir ${OUTDIR} --temporal "year,month"
 
 # Site detail
 ${EXE} export --pattern '/reduced/single_site/*/*.series' --pattern '/templates/sites/site=*' --dir ${OUTDIR} --temporal "year,month"
+
+# Index page - capture the filename to use as output
+${EXE} export --pattern '/templates/index/*' --dir ${OUTDIR}

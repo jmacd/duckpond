@@ -118,6 +118,10 @@ impl Directory for TemplateDirectory {
         // Discover template files from in_pattern
         let template_matches = self.discover_template_files().await?;
 
+        // Build hierarchical export structure from ALL matches
+        // This allows templates to access the full dataset for navigation/aggregation
+        let matches_export = self.build_matches_export(&template_matches);
+
         // Check if any expanded out_pattern matches the requested filename
         for (_template_path, captured) in template_matches {
             let expanded_name = self.expand_out_pattern(&captured);
@@ -129,8 +133,13 @@ impl Directory for TemplateDirectory {
                 let template_content = self.get_template_content().await?;
 
                 // Create template file that will render content
-                let template_file =
-                    TemplateFile::new(template_content, self.context.clone(), captured);
+                // Pass the full export context so templates can access all matches
+                let template_file = TemplateFile::new(
+                    template_content,
+                    self.context.clone(),
+                    captured,
+                    matches_export.clone(),
+                );
 
                 // Generate deterministic FileID for this template file
                 let mut id_bytes = Vec::new();
@@ -244,6 +253,70 @@ impl TemplateDirectory {
         result
     }
 
+    /// Build hierarchical export structure from pattern matches
+    /// Groups matches by their capture structure (e.g., param/site → name → resolution)
+    fn build_matches_export(
+        &self,
+        matches: &[(PathBuf, Vec<String>)],
+    ) -> Value {
+        use serde_json::Map;
+
+        // Build nested structure from captures
+        // Captures are hierarchical: e.g., ["param", "DO", "res=1h"] or ["site", "FieldStation", "res=1h"]
+        let mut root: Map<String, Value> = Map::new();
+
+        for (path, captures) in matches {
+            if captures.is_empty() {
+                continue;
+            }
+
+            // Navigate/create the nested structure
+            let mut current = &mut root;
+
+            for (i, capture) in captures.iter().enumerate() {
+                if i == captures.len() - 1 {
+                    // Leaf level - store the file path
+                    let file_entry = Value::Object({
+                        let mut m = Map::new();
+                        _ = m.insert(
+                            "file".to_string(),
+                            Value::String(path.to_string_lossy().to_string()),
+                        );
+                        m
+                    });
+
+                    // If this key exists and is an object, merge; otherwise create array
+                    if let Some(existing) = current.get_mut(capture) {
+                        if let Value::Array(arr) = existing {
+                            arr.push(file_entry);
+                        } else {
+                            // Convert to array
+                            let prev = existing.take();
+                            *existing = Value::Array(vec![prev, file_entry]);
+                        }
+                    } else {
+                        _ = current.insert(capture.clone(), file_entry);
+                    }
+                } else {
+                    // Intermediate level - ensure nested object exists
+                    if !current.contains_key(capture) {
+                        _ = current.insert(capture.clone(), Value::Object(Map::new()));
+                    }
+
+                    // Navigate into the nested object
+                    if let Some(Value::Object(nested)) = current.get_mut(capture) {
+                        current = nested;
+                    } else {
+                        // This shouldn't happen but handle gracefully
+                        break;
+                    }
+                }
+            }
+        }
+
+        Value::Object(root)
+    }
+
     /// Get template content from template_file (pond path)
     async fn get_template_content(&self) -> TinyFSResult<String> {
         // Read template file from pond filesystem
@@ -298,15 +371,23 @@ pub struct TemplateFile {
     template_content: String,
     context: FactoryContext,
     args: Vec<String>,
+    /// Export context built from all in_pattern matches (hierarchical structure)
+    matches_export: Value,
 }
 
 impl TemplateFile {
     #[must_use]
-    pub fn new(template_content: String, context: FactoryContext, args: Vec<String>) -> Self {
+    pub fn new(
+        template_content: String,
+        context: FactoryContext,
+        args: Vec<String>,
+        matches_export: Value,
+    ) -> Self {
         Self {
             template_content,
             context,
             args,
+            matches_export,
         }
     }
 
@@ -322,6 +403,7 @@ impl TemplateFile {
 
         tera.register_function("group", tmpl_group);
         tera.register_filter("to_json", tmpl_to_json);
+        tera.register_filter("keys", tmpl_keys);
         debug!("to_json filter registered successfully");
 
         let mut context = TeraContext::new();
@@ -351,9 +433,16 @@ impl TemplateFile {
             .map_err(|_| tinyfs::Error::Other(format!("could not json {:?}", self.args)))?;
         context.insert("args", &argsval);
 
-        // DO NOT add empty export - let template fail if export is missing
-        // This forces us to fix the timing issue instead of hiding it
-        debug!("🎨 RENDER: Template context ready - no fallback for missing export data");
+        // Add export context built from in_pattern matches (if not already present from pipeline)
+        if !context.contains_key("export") && !self.matches_export.is_null() {
+            context.insert("export", &self.matches_export);
+            debug!(
+                "🎨 RENDER: Added 'export' from in_pattern matches: {:?}",
+                self.matches_export
+            );
+        }
+
+        debug!("🎨 RENDER: Template context ready");
 
         debug!("Template context setup complete - vars and export guaranteed available");
 
@@ -527,6 +616,19 @@ fn tmpl_to_json(value: &Value, _: &HashMap<String, Value>) -> Result<Value, Erro
     });
     debug!("to_json filter returning: {}", json_string);
     Ok(Value::String(json_string))
+}
+
+/// Get keys of an object as a sorted array
+/// Usage: {% for key in obj | keys %}
+fn tmpl_keys(value: &Value, _: &HashMap<String, Value>) -> Result<Value, Error> {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            Ok(Value::Array(keys.into_iter().map(Value::String).collect()))
+        }
+        _ => Err(Error::msg("keys filter requires an object")),
+    }
 }
 
 /// Count the number of levels in an error chain
