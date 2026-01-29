@@ -460,7 +460,7 @@ impl TemplateFile {
         );
 
         // Run Tera rendering in spawn_blocking to allow sync functions to use block_on
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             // Get handle to current runtime for block_on calls inside Tera functions
             let handle = tokio::runtime::Handle::current();
             
@@ -546,9 +546,7 @@ impl TemplateFile {
 
             debug!("Rendered template result: {}", rendered);
             Ok(rendered)
-        }).await.map_err(|e| tinyfs::Error::Other(format!("spawn_blocking failed: {}", e)))?;
-
-        result
+        }).await.map_err(|e| tinyfs::Error::Other(format!("spawn_blocking failed: {}", e)))?
     }
 }
 

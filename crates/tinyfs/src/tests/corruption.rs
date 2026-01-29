@@ -117,7 +117,7 @@ impl CorruptionTestFixture {
         let root = fs.root().await?;
         use tokio::io::AsyncWriteExt;
         let mut writer = root
-            .async_writer_path_with_type(config.path, config.entry_type.clone())
+            .async_writer_path_with_type(config.path, config.entry_type)
             .await?;
         writer
             .write_all(&content)

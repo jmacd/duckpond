@@ -350,7 +350,7 @@ mod integration_tests {
         let size_v1 = logfile.size();
         let blake3_v1 = logfile.blake3();
 
-        println!("Logfile v1: {} bytes, blake3={}", size_v1, &blake3_v1[..16]);
+        log::info!("Logfile v1: {} bytes, blake3={}", size_v1, &blake3_v1[..16]);
 
         // Step 2: First ingestion - should capture entire file as v1
         pond.execute_factory(&config).await.unwrap();
@@ -363,10 +363,10 @@ mod integration_tests {
             &blake3_v1,
             logfile.content(),
         )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
-        println!("✓ Initial snapshot successful");
+        log::info!("✓ Initial snapshot successful");
 
         // Step 3: Append more content to logfile
         logfile
@@ -386,7 +386,7 @@ mod integration_tests {
         let blake3_v2 = logfile.blake3();
         let appended_bytes = size_v2 - size_v1;
 
-        println!(
+        log::info!(
             "Logfile v2: {} bytes (+{} appended), blake3={}",
             size_v2,
             appended_bytes,
@@ -404,10 +404,10 @@ mod integration_tests {
             &blake3_v2,
             logfile.content(),
         )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
-        println!("✓ Incremental append successful");
+        log::info!("✓ Incremental append successful");
 
         // Step 5: Append even more content
         logfile
@@ -431,7 +431,7 @@ mod integration_tests {
         let blake3_v3 = logfile.blake3();
         let appended_bytes_v3 = size_v3 - size_v2;
 
-        println!(
+        log::info!(
             "Logfile v3: {} bytes (+{} appended), blake3={}",
             size_v3,
             appended_bytes_v3,
@@ -449,11 +449,11 @@ mod integration_tests {
             &blake3_v3,
             logfile.content(),
         )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
-        println!("✓ Second incremental append successful");
-        println!("✓ All snapshots and verifications passed!");
+        log::info!("✓ Second incremental append successful");
+        log::info!("✓ All snapshots and verifications passed!");
     }
 
     #[tokio::test]
@@ -497,7 +497,7 @@ mod integration_tests {
             .await
             .unwrap();
 
-        println!("✓ Idempotency test passed - multiple ingestions without changes work correctly");
+        log::info!("✓ Idempotency test passed - multiple ingestions without changes work correctly");
     }
 
     #[tokio::test]
@@ -553,7 +553,7 @@ mod integration_tests {
         .await
         .unwrap();
 
-        println!(
+        log::info!(
             "✓ Step 1: Initial snapshot captured ({} bytes)",
             initial_size
         );
@@ -582,7 +582,7 @@ mod integration_tests {
         .await
         .unwrap();
 
-        println!("✓ Step 2: File growth captured ({} bytes)", grown_size);
+        log::info!("✓ Step 2: File growth captured ({} bytes)", grown_size);
 
         // Step 3: Simulate rotation
         // - Active file becomes archived with timestamp
@@ -598,7 +598,7 @@ mod integration_tests {
         let new_active_blake3 = blake3::hash(new_active_content).to_hex().to_string();
         let new_active_size = new_active_content.len() as u64;
 
-        println!(
+        log::info!(
             "Rotation: archived {} bytes to {}, new active {} bytes",
             grown_size,
             archived_path.file_name().unwrap().to_string_lossy(),
@@ -624,7 +624,7 @@ mod integration_tests {
         .await
         .unwrap();
 
-        println!("✓ Step 4a: Archived file preserved with correct content");
+        log::info!("✓ Step 4a: Archived file preserved with correct content");
 
         // Verify: The new active file should have the new content
         pond.verify_file(
@@ -637,7 +637,7 @@ mod integration_tests {
         .await
         .unwrap();
 
-        println!("✓ Step 4b: New active file created with fresh content");
+        log::info!("✓ Step 4b: New active file created with fresh content");
 
         // Step 5: Continue growing the new active file to ensure incremental append still works
         let more_content = b"2025-01-03 00:04:00 INFO Post-rotation processing continues\n";
@@ -663,7 +663,7 @@ mod integration_tests {
         .await
         .unwrap();
 
-        println!("✓ Step 5: Post-rotation append captured");
+        log::info!("✓ Step 5: Post-rotation append captured");
 
         // Verify archived file is still intact
         pond.verify_file(
@@ -676,8 +676,8 @@ mod integration_tests {
         .await
         .unwrap();
 
-        println!("✓ Archived file still intact after subsequent operations");
-        println!("✓ All rotation tests passed!");
+        log::info!("✓ Archived file still intact after subsequent operations");
+        log::info!("✓ All rotation tests passed!");
     }
 
     /// Extended verification helper that checks both content AND metadata blake3
@@ -893,7 +893,7 @@ mod integration_tests {
             .verify_file_blake3("logs/blake3_test", "app.log", v1_content)
             .await
             .unwrap();
-        println!(
+        log::info!(
             "✓ v1 ({} bytes): cumulative blake3 correct",
             v1_content.len()
         );
@@ -914,7 +914,7 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(v2_versions, 2, "Should have 2 versions after append");
-        println!(
+        log::info!(
             "✓ v2 ({} bytes, {} versions): cumulative blake3 correct",
             v2_cumulative.len(),
             v2_versions
@@ -936,7 +936,7 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(v3_versions, 3, "Should have 3 versions");
-        println!(
+        log::info!(
             "✓ v3 ({} bytes, {} versions): cumulative blake3 correct",
             v3_cumulative.len(),
             v3_versions
@@ -966,7 +966,7 @@ mod integration_tests {
             archived_versions, 3,
             "Archived file should preserve 3 versions"
         );
-        println!(
+        log::info!(
             "✓ Archived file ({} bytes, {} versions): cumulative blake3 preserved",
             v3_cumulative.len(),
             archived_versions
@@ -982,7 +982,7 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(new_v1_versions, 1, "New active should have 1 version");
-        println!(
+        log::info!(
             "✓ New active v1 ({} bytes, {} version): blake3 correct",
             new_v1_content.len(),
             new_v1_versions
@@ -1004,7 +1004,7 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(new_v2_versions, 2, "New active should have 2 versions");
-        println!(
+        log::info!(
             "✓ New active v2 ({} bytes, {} versions): cumulative blake3 correct",
             new_v2_cumulative.len(),
             new_v2_versions
@@ -1015,9 +1015,9 @@ mod integration_tests {
             .verify_file_blake3("logs/blake3_test", archived_filename, &v3_cumulative)
             .await
             .unwrap();
-        println!("✓ Archived file still correct after new active changes");
+        log::info!("✓ Archived file still correct after new active changes");
 
-        println!("\n✓ All blake3 validation tests passed!");
+        log::info!("\n✓ All blake3 validation tests passed!");
     }
 
     #[tokio::test]
@@ -1055,7 +1055,7 @@ mod integration_tests {
             .verify_file_blake3("logs/large_test", "large.log", &v1_content)
             .await
             .unwrap();
-        println!(
+        log::info!(
             "✓ Large v1 ({} bytes, {} blocks): blake3 correct",
             v1_content.len(),
             v1_content.len() / 16384 + 1
@@ -1076,7 +1076,7 @@ mod integration_tests {
             .verify_file_blake3("logs/large_test", "large.log", &v2_cumulative)
             .await
             .unwrap();
-        println!(
+        log::info!(
             "✓ Large v2 ({} bytes, {} blocks): cumulative blake3 correct",
             v2_cumulative.len(),
             v2_cumulative.len() / 16384 + 1
@@ -1101,7 +1101,7 @@ mod integration_tests {
             .verify_file_blake3("logs/large_test", archived_filename, &v2_cumulative)
             .await
             .unwrap();
-        println!(
+        log::info!(
             "✓ Archived large ({} bytes): blake3 preserved",
             v2_cumulative.len()
         );
@@ -1110,13 +1110,13 @@ mod integration_tests {
             .verify_file_blake3("logs/large_test", "large.log", &new_v1_content)
             .await
             .unwrap();
-        println!(
+        log::info!(
             "✓ New large v1 ({} bytes, {} blocks): blake3 correct",
             new_v1_content.len(),
             new_v1_content.len() / 16384 + 1
         );
 
-        println!("\n✓ All large file blake3 validation tests passed!");
+        log::info!("\n✓ All large file blake3 validation tests passed!");
     }
 
     #[tokio::test]
@@ -1145,7 +1145,7 @@ mod integration_tests {
             .verify_file_blake3("logs/boundary_test", "boundary.log", &v1_content)
             .await
             .unwrap();
-        println!("✓ Exactly 1 block (16384 bytes): blake3 correct");
+        log::info!("✓ Exactly 1 block (16384 bytes): blake3 correct");
 
         // Append exactly 16KB more (now 2 full blocks)
         let v2_append: Vec<u8> = vec![b'B'; 16 * 1024];
@@ -1158,7 +1158,7 @@ mod integration_tests {
             .verify_file_blake3("logs/boundary_test", "boundary.log", &v2_cumulative)
             .await
             .unwrap();
-        println!("✓ Exactly 2 blocks (32768 bytes): cumulative blake3 correct");
+        log::info!("✓ Exactly 2 blocks (32768 bytes): cumulative blake3 correct");
 
         // Append 1 byte (partial 3rd block)
         let v3_append: Vec<u8> = vec![b'C'; 1];
@@ -1171,7 +1171,7 @@ mod integration_tests {
             .verify_file_blake3("logs/boundary_test", "boundary.log", &v3_cumulative)
             .await
             .unwrap();
-        println!("✓ 2 blocks + 1 byte (32769 bytes): cumulative blake3 correct");
+        log::info!("✓ 2 blocks + 1 byte (32769 bytes): cumulative blake3 correct");
 
         // Fill to exactly 3 blocks
         let v4_append: Vec<u8> = vec![b'D'; 16 * 1024 - 1];
@@ -1184,9 +1184,9 @@ mod integration_tests {
             .verify_file_blake3("logs/boundary_test", "boundary.log", &v4_cumulative)
             .await
             .unwrap();
-        println!("✓ Exactly 3 blocks (49152 bytes): cumulative blake3 correct");
+        log::info!("✓ Exactly 3 blocks (49152 bytes): cumulative blake3 correct");
 
-        println!("\n✓ All block boundary blake3 validation tests passed!");
+        log::info!("\n✓ All block boundary blake3 validation tests passed!");
     }
 
     // =========================================================================
@@ -1266,7 +1266,7 @@ mod integration_tests {
                 HostAction::AppendToActive(content) => {
                     self.active_content.extend_from_slice(content);
                     fs::write(&self.active_path, &self.active_content).await?;
-                    println!(
+                    log::info!(
                         "  → Appended {} bytes to active (total: {} bytes)",
                         content.len(),
                         self.active_content.len()
@@ -1285,7 +1285,7 @@ mod integration_tests {
                     self.active_content = Vec::new();
                     fs::write(&self.active_path, b"").await?;
 
-                    println!(
+                    log::info!(
                         "  → Rotated: active ({} bytes) -> {}",
                         self.archived_files[archived_name].len(),
                         archived_name
@@ -1293,7 +1293,7 @@ mod integration_tests {
                 }
                 HostAction::Snapshot => {
                     self.pond.execute_factory(&self.config).await?;
-                    println!("  → Snapshot taken");
+                    log::info!("  → Snapshot taken");
                 }
             }
             Ok(())
@@ -1302,7 +1302,7 @@ mod integration_tests {
         /// Execute a sequence of actions
         async fn run_scenario(&mut self, actions: &[HostAction]) -> std::io::Result<()> {
             for (i, action) in actions.iter().enumerate() {
-                println!("Step {}: {:?}", i + 1, action);
+                log::info!("Step {}: {:?}", i + 1, action);
                 self.execute_action(action).await?;
             }
             Ok(())
@@ -1340,10 +1340,10 @@ mod integration_tests {
         /// INDEPENDENTLY verify that pond matches host filesystem
         /// This reads actual bytes and computes fresh checksums - does NOT trust metadata
         async fn verify_final_state(&self) -> std::io::Result<()> {
-            println!("\n=== INDEPENDENT VERIFICATION ===");
+            log::info!("\n=== INDEPENDENT VERIFICATION ===");
 
             let expected_states = self.expected_host_state();
-            println!("Expected {} files in pond", expected_states.len());
+            log::info!("Expected {} files in pond", expected_states.len());
 
             let mut persistence =
                 crate::persistence::OpLogPersistence::open(self.pond.store_path())
@@ -1502,7 +1502,7 @@ mod integration_tests {
                     }
                 }
 
-                println!(
+                log::info!(
                     "  ✓ {} ({} bytes, blake3={}...)",
                     expected.filename,
                     expected.content.len(),
@@ -1544,7 +1544,7 @@ mod integration_tests {
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-            println!("=== VERIFICATION PASSED ===\n");
+            log::info!("=== VERIFICATION PASSED ===\n");
             Ok(())
         }
     }
@@ -1562,9 +1562,9 @@ mod integration_tests {
         // Method 2: Direct blake3::hash (standard)
         let direct_hash = blake3::hash(content).to_hex().to_string();
 
-        println!("Content: {:?} ({} bytes)", content, content.len());
-        println!("IncrementalHashState: {}", incremental_hash);
-        println!("blake3::hash:         {}", direct_hash);
+        log::info!("Content: {:?} ({} bytes)", content, content.len());
+        log::info!("IncrementalHashState: {}", incremental_hash);
+        log::info!("blake3::hash:         {}", direct_hash);
 
         // For small content (< 16KB), these should be identical
         assert_eq!(
@@ -1600,7 +1600,7 @@ mod integration_tests {
             .unwrap();
 
         runner.verify_final_state().await.unwrap();
-        println!("✓ Scenario: simple growth passed");
+        log::info!("✓ Scenario: simple growth passed");
     }
 
     #[tokio::test]
@@ -1628,7 +1628,7 @@ mod integration_tests {
             .unwrap();
 
         runner.verify_final_state().await.unwrap();
-        println!("✓ Scenario: rotation fully captured passed");
+        log::info!("✓ Scenario: rotation fully captured passed");
     }
 
     #[tokio::test]
@@ -1662,7 +1662,7 @@ mod integration_tests {
             .unwrap();
 
         runner.verify_final_state().await.unwrap();
-        println!("✓ Scenario: rotation with missed bytes passed");
+        log::info!("✓ Scenario: rotation with missed bytes passed");
     }
 
     #[tokio::test]
@@ -1697,7 +1697,7 @@ mod integration_tests {
             .unwrap();
 
         runner.verify_final_state().await.unwrap();
-        println!("✓ Scenario: multiple rotations passed");
+        log::info!("✓ Scenario: multiple rotations passed");
     }
 
     #[tokio::test]
@@ -1737,7 +1737,7 @@ mod integration_tests {
             .unwrap();
 
         runner.verify_final_state().await.unwrap();
-        println!("✓ Scenario: large file rotation passed");
+        log::info!("✓ Scenario: large file rotation passed");
     }
 
     #[tokio::test]
@@ -1768,6 +1768,6 @@ mod integration_tests {
             .unwrap();
 
         runner.verify_final_state().await.unwrap();
-        println!("✓ Scenario: block boundary rotation passed");
+        log::info!("✓ Scenario: block boundary rotation passed");
     }
 }

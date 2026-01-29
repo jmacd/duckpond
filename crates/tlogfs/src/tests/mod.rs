@@ -2174,7 +2174,7 @@ async fn test_file_physical_series_csv_provider_sql() {
             .expect("Failed to begin read transaction");
 
         // Get the FS via Deref (TransactionGuard derefs to FS)
-        let fs: &tinyfs::FS = &*tx;
+        let fs: &tinyfs::FS = &tx;
 
         // Open the file using csv:// URL
         let url = Url::parse(&format!("csv:///{}", file_path)).expect("Failed to parse URL");

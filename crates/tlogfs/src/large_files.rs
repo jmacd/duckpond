@@ -44,6 +44,7 @@ impl LargeFileOptions {
     /// - No compression (so we can corrupt specific bytes)
     /// - 1 row per row group (so each chunk is isolated)
     #[cfg(test)]
+    #[must_use]
     pub fn uncompressed() -> Self {
         Self {
             compression: Compression::UNCOMPRESSED,
