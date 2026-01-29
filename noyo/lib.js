@@ -1,5 +1,11 @@
-import * as Inputs from "npm:@observablehq/inputs";
+// Noyo Harbor - Shared JavaScript Library
+import * as Plot from "https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6/+esm";
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28/+esm";
 
+// Re-export Plot for use in pages
+export { Plot };
+
+// Time range options
 export const timelist = [
   ["1 Week", 7],
   ["2 Weeks", 14],
@@ -11,43 +17,143 @@ export const timelist = [
   ["18 Months", 550],
 ];
 
-export async function timepicker() {
-  return Inputs.radio(
-    new Map(timelist),
-    {
-                value: 30, 
-                label: "Time range", 
-    }
-  )
+// Simple reactive state
+class State {
+  constructor(initial) {
+    this.value = initial;
+    this.subs = new Set();
+  }
+  
+  set(v) {
+    this.value = v;
+    this.subs.forEach(fn => fn(v));
+  }
+  
+  subscribe(fn) {
+    this.subs.add(fn);
+    fn(this.value); // Call immediately with current value
+    return () => this.subs.delete(fn);
+  }
 }
 
-export function timerange(pick) {
-    var res;
-    if (pick <= 30) {
-        res = "1h";
-    } else if (pick <= 60) {
-        res = "2h";
-    } else if (pick <= 90) {
-        res = "4h";
-    } else if (pick <= 180) {
-        res = "12h";
-    } else {
-        res = "24h";
-    }
-    console.log("RES", res)
-    return res;
+// Global time range state
+export const timeState = new State(30);
+
+// Create time picker UI
+export function createTimePicker(container) {
+  const picker = document.createElement("div");
+  picker.className = "time-picker";
+  picker.innerHTML = `
+    <label>Time Range</label>
+    <div class="time-picker-options">
+      ${timelist.map(([label, days]) => 
+        `<button data-days="${days}"${days === timeState.value ? ' class="active"' : ''}>${label}</button>`
+      ).join("")}
+    </div>
+  `;
+  
+  picker.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      picker.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      timeState.set(parseInt(btn.dataset.days));
+    });
+  });
+  
+  container.appendChild(picker);
+  return picker;
 }
 
+// Get resolution based on time range
+export function timerange(days) {
+  if (days <= 30) return "1h";
+  if (days <= 60) return "2h";
+  if (days <= 90) return "4h";
+  if (days <= 180) return "12h";
+  return "24h";
+}
+
+// DuckDB singleton
+let duckInstance = null;
+
+export async function getDuckDB() {
+  if (!duckInstance) {
+    const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+    const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+    const worker_url = URL.createObjectURL(
+      new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
+    );
+    const worker = new Worker(worker_url);
+    const logger = new duckdb.ConsoleLogger();
+    const db = new duckdb.AsyncDuckDB(logger, worker);
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    duckInstance = await db.connect();
+  }
+  return duckInstance;
+}
+
+// Query parquet files for a time range
+export async function queryData(datafiles, days) {
+  const res = timerange(days);
+  const now = Date.now();
+  const begin = now - days * 24 * 3600 * 1000;
+  
+  const files = datafiles[`res=${res}`] || [];
+  const urls = files
+    .filter(f => f.start_time * 1000 <= now && f.end_time * 1000 >= begin)
+    .map(f => f.file);
+  
+  if (urls.length === 0) return [];
+  
+  const duck = await getDuckDB();
+  const result = await duck.query(`
+    SELECT epoch_us(timestamp)/1000.0::DOUBLE as timestamp, * EXCLUDE timestamp 
+    FROM read_parquet(${JSON.stringify(urls)}) 
+    WHERE timestamp >= epoch_ms(${begin}) 
+    ORDER BY timestamp ASC
+  `);
+  
+  return result.toArray();
+}
+
+// Helper functions
 export function legendName(i, n, u) {
-    // Note: n = name, is in the plot title
-    //       u = unit, is on the y-axis
-    //       i = instrument, this has <location>.<model> and we only use location
-    return i.split(".").join(" ")
+  return i.split(".").join(" ");
 }
 
 export function plotName(n) {
-    if (n == "DO") {
-	return "Disolved Oxygen";
+  if (n === "DO") return "Dissolved Oxygen";
+  return n;
+}
+
+// Create a chart that updates on time change
+export function createChart(container, datafiles, chartConfig) {
+  const chartDiv = document.createElement("div");
+  chartDiv.className = "chart";
+  container.appendChild(chartDiv);
+  
+  async function render(days) {
+    const data = await queryData(datafiles, days);
+    chartDiv.innerHTML = "";
+    
+    if (data.length === 0) {
+      chartDiv.innerHTML = `<div class="empty-state">No data for selected time range</div>`;
+      return;
     }
-    return n;
+    
+    const now = Date.now();
+    const begin = now - days * 24 * 3600 * 1000;
+    const width = chartDiv.clientWidth - 32;
+    
+    const plot = Plot.plot({
+      width,
+      ...chartConfig,
+      x: { grid: true, type: "time", label: "Date", domain: [begin, now] },
+    });
+    
+    chartDiv.appendChild(plot);
+  }
+  
+  timeState.subscribe(render);
+  return chartDiv;
 }

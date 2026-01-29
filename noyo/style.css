@@ -1,20 +1,230 @@
+/* Noyo Harbor Water Quality Dashboard - Shared Styles */
+
+:root {
+  --sidebar-width: 240px;
+  --max-width: 960px;
+  --accent-color: #667eea;
+  
+  /* Color scheme - dark theme */
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-content: #0f0f1a;
+  --fg-primary: #e4e4e7;
+  --fg-secondary: #a1a1aa;
+  --fg-muted: #71717a;
+  --border-color: rgba(255,255,255,0.1);
+  
+  /* Typography */
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Spline Sans Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font: 16px/1.5 var(--font-sans);
+  background: var(--bg-content);
+  color: var(--fg-primary);
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: var(--sidebar-width);
+  height: 100vh;
+  background: var(--bg-primary);
+  padding: 1.5rem 0;
+  overflow-y: auto;
+  z-index: 100;
+  border-right: 1px solid var(--border-color);
+}
+
+.sidebar-header {
+  padding: 0 1rem 1rem;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 1rem;
+}
+
+.sidebar-header h1 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 0;
+  color: var(--fg-primary);
+}
+
+.sidebar-section {
+  margin-bottom: 1.5rem;
+}
+
+.sidebar-section-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  padding: 0 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.sidebar a {
+  display: block;
+  padding: 0.4rem 1rem;
+  color: var(--fg-secondary);
+  text-decoration: none;
+  font-size: 0.875rem;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar a:hover {
+  background: rgba(255,255,255,0.05);
+  color: var(--fg-primary);
+}
+
+.sidebar a.active {
+  background: rgba(102, 126, 234, 0.1);
+  color: var(--accent-color);
+  border-left: 3px solid var(--accent-color);
+  padding-left: calc(1rem - 3px);
+}
+
+/* Main content */
+main {
+  margin-left: var(--sidebar-width);
+  flex: 1;
+  min-width: 0;
+  padding: 2rem;
+  max-width: calc(var(--max-width) + var(--sidebar-width) + 4rem);
+}
+
+/* Page header */
+.page-header {
+  margin-bottom: 2rem;
+}
+
+.page-header h1 {
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--accent-color);
+}
+
+.page-header .breadcrumb {
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.page-header .breadcrumb a {
+  color: var(--accent-color);
+  text-decoration: none;
+}
+
+.page-header .breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+/* Time picker */
+.time-picker {
+  margin-bottom: 2rem;
+  padding: 1rem;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+}
+
+.time-picker label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin-bottom: 0.75rem;
+}
+
+.time-picker-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.time-picker-options button {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--fg-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: all 0.15s;
+}
+
+.time-picker-options button:hover {
+  background: rgba(255,255,255,0.05);
+  color: var(--fg-primary);
+}
+
+.time-picker-options button.active {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: white;
+}
+
+/* Charts */
+.chart {
+  margin-bottom: 2rem;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.chart-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 1rem 0;
+  color: var(--fg-primary);
+}
+
+.chart svg {
+  width: 100%;
+  height: auto;
+}
+
+/* Empty state */
+.empty-state {
+  padding: 2rem;
+  text-align: center;
+  background: #fef3c7;
+  border-radius: 8px;
+  margin: 1rem 0;
+  color: #92400e;
+}
+
+/* Hero (for index page) */
 .hero {
   display: flex;
   flex-direction: column;
   align-items: center;
-  font-family: var(--sans-serif);
-  margin: 4rem 0 8rem;
-  text-wrap: balance;
+  margin: 4rem 0;
   text-align: center;
 }
 
 .hero h1 {
   margin: 2rem 0;
-  max-width: none;
-  font-size: 14vw;
+  font-size: clamp(3rem, 10vw, 5rem);
   font-weight: 900;
   line-height: 1;
-  background: linear-gradient(30deg, var(--theme-foreground-focus), currentColor);
+  background: linear-gradient(30deg, var(--accent-color), var(--fg-primary));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -23,16 +233,57 @@
 .hero h2 {
   margin: 0;
   max-width: 34em;
-  font-size: 20px;
-  font-style: initial;
+  font-size: 1.25rem;
   font-weight: 500;
   line-height: 1.5;
-  color: var(--theme-foreground-muted);
+  color: var(--fg-muted);
 }
 
-@media (min-width: 640px) {
-  .hero h1 {
-    font-size: 90px;
+/* Map */
+#map {
+  height: 400px;
+  border-radius: 8px;
+  margin: 2rem 0;
+}
+
+/* Leaflet tiles fix */
+.leaflet-tile-pane img {
+  max-width: none !important;
+}
+
+/* About section */
+.about-section {
+  max-width: 800px;
+  margin: 3rem 0;
+  line-height: 1.7;
+}
+
+.about-section h2 {
+  color: var(--accent-color);
+  border-bottom: 2px solid var(--accent-color);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.about-section ul {
+  padding-left: 1.5rem;
+}
+
+.about-section li {
+  margin-bottom: 0.5rem;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.3s;
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+  main {
+    margin-left: 0;
   }
 }
 

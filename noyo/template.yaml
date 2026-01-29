@@ -17,9 +17,9 @@ entries:
       in_pattern: "/reduced/single_*/**/*.series"
       out_pattern: "index.html"
       template_file: "/etc/index.html.tmpl"
-  - name: "nav"
+  - name: "page"
     factory: "template"
     config:
       in_pattern: "/reduced/single_*/**/*.series"
-      out_pattern: "nav.html"
-      template_file: "/etc/nav.html.tmpl"
+      out_pattern: "page.html"
+      template_file: "/etc/page.html.tmpl"

@@ -19,7 +19,7 @@ ${EXE} mkdir -p /etc
 
 ${EXE} copy host://${NOYO}/data.html.tmpl /etc
 ${EXE} copy host://${NOYO}/index.html.tmpl /etc
-${EXE} copy host://${NOYO}/nav.html.tmpl /etc
+${EXE} copy host://${NOYO}/page.html.tmpl /etc
 
 ${EXE} mkdir -p /laketech
 

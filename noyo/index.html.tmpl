@@ -1,188 +1,54 @@
 <!doctype html>
-<notebook theme="slate">
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Noyo Harbor Blue Economy</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+</head>
+<body>
+  {{ insert_from_path(path="/templates/page/page.html") }}
   
-  <script type="text/html">
-    <style>
-      :root {
-        --sidebar-width: 240px;
-        --accent-color: #667eea;
-        --accent-light: rgba(102, 126, 234, 0.1);
-      }
-      
-      /* Sidebar layout */
-      body {
-        display: flex;
-        min-height: 100vh;
-        margin: 0;
-      }
-      
-      .sidebar {
-        position: fixed;
-        left: 0;
-        top: 0;
-        width: var(--sidebar-width);
-        height: 100vh;
-        background: #1a1a2e;
-        color: #fff;
-        padding: 1.5rem 0;
-        overflow-y: auto;
-        z-index: 100;
-        box-shadow: 2px 0 8px rgba(0,0,0,0.2);
-      }
-      
-      .sidebar-header {
-        padding: 0 1rem 1rem;
-        border-bottom: 1px solid rgba(255,255,255,0.1);
-        margin-bottom: 1rem;
-      }
-      
-      .sidebar-header h1 {
-        font-size: 1.2rem;
-        margin: 0;
-        font-weight: 600;
-      }
-      
-      .sidebar-section {
-        margin-bottom: 1.5rem;
-      }
-      
-      .sidebar-section-title {
-        font-size: 0.75rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        color: rgba(255,255,255,0.5);
-        padding: 0 1rem;
-        margin-bottom: 0.5rem;
-      }
-      
-      .sidebar a {
-        display: block;
-        padding: 0.5rem 1rem;
-        color: rgba(255,255,255,0.8);
-        text-decoration: none;
-        font-size: 0.9rem;
-        transition: all 0.15s;
-      }
-      
-      .sidebar a:hover {
-        background: rgba(255,255,255,0.1);
-        color: #fff;
-      }
-      
-      .sidebar a.active {
-        background: var(--accent-light);
-        color: var(--accent-color);
-        border-left: 3px solid var(--accent-color);
-      }
-      
-      /* Main content area */
-      .main-content {
-        margin-left: var(--sidebar-width);
-        flex: 1;
-        min-width: 0;
-      }
-      
-      /* Hero section */
-      .hero {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        font-family: var(--sans-serif);
-        margin: 4rem 2rem;
-        text-wrap: balance;
-        text-align: center;
-      }
-
-      .hero h1 {
-        margin: 1rem 0;
-        max-width: none;
-        font-size: clamp(2rem, 8vw, 4rem);
-        font-weight: 900;
-        line-height: 1.1;
-        background: linear-gradient(30deg, var(--accent-color), #a855f7);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-      }
-
-      .hero h2 {
-        margin: 0;
-        max-width: 34em;
-        font-size: 1.1rem;
-        font-weight: 400;
-        line-height: 1.5;
-        color: var(--theme-foreground-muted);
-      }
-      
-      /* Map container */
-      .map-container {
-        margin: 2rem;
-        border-radius: 8px;
-        overflow: hidden;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-      }
-      
-      /* About section */
-      .about-section {
-        max-width: 800px;
-        margin: 3rem auto;
-        padding: 0 2rem;
-        line-height: 1.7;
-      }
-      
-      .about-section h2 {
-        color: var(--accent-color);
-        border-bottom: 2px solid var(--accent-color);
-        padding-bottom: 0.5rem;
-        margin-bottom: 1rem;
-      }
-      
-      /* Responsive */
-      @media (max-width: 768px) {
-        .sidebar {
-          transform: translateX(-100%);
-          transition: transform 0.3s;
-        }
-        .sidebar.open {
-          transform: translateX(0);
-        }
-        .main-content {
-          margin-left: 0;
-        }
-      }
-    </style>
-    
-    <!-- Sidebar Navigation -->
-    {{ insert_from_path(path="/templates/nav/nav.html") }}
-    
-    <div class="main-content">
-  </script>
-  
-  <script type="text/html">
+  <main>
     <div class="hero">
       <h1>Noyo Harbor Blue Economy</h1>
       <h2>Water Quality Monitoring Dashboard</h2>
     </div>
-  </script>
+    
+    <div id="map"></div>
+    
+    <div class="about-section">
+      <h2>About This Project</h2>
+      <p>
+        The Noyo Harbor Blue Economy project monitors water quality at key locations 
+        throughout Noyo Harbor in Fort Bragg, California. Real-time sensors measure:
+      </p>
+      <ul>
+        <li><strong>Dissolved Oxygen (DO)</strong> - Critical for marine life health</li>
+        <li><strong>Salinity</strong> - Indicates freshwater/seawater mixing</li>
+        <li><strong>Temperature</strong> - Affects oxygen levels and species habitat</li>
+      </ul>
+      <p>
+        Use the navigation on the left to explore data by parameter (comparing all sites) 
+        or by site (viewing all parameters at one location).
+      </p>
+    </div>
+  </main>
   
   <script type="module">
-    import * as L from "npm:leaflet";
+    import * as L from "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/+esm";
     
     const latitude = 39.425200984011916;
     const longitude = -123.80366719309244;
-
-    const div = display(document.createElement("div"));
-    div.className = "map-container";
-    div.style.height = "400px";
-
-    const map = L.map(div, { scrollWheelZoom: false })
+    
+    const map = L.map("map", { scrollWheelZoom: false })
       .setView([latitude, longitude], 16);
-
+    
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
     }).addTo(map);
-
+    
     // Monitoring sites
     L.circle([39.42768783218275, -123.80584629151588], {radius: 20, color: '#667eea'})
       .bindPopup("<strong>Princess Seafood</strong>")
@@ -197,20 +63,5 @@
       .bindPopup("<strong>B-Dock</strong>")
       .addTo(map);
   </script>
-  
-  <script type="text/markdown">
-## About This Project
-
-The Noyo Harbor Blue Economy project monitors water quality at key locations throughout Noyo Harbor in Fort Bragg, California. Real-time sensors measure:
-
-- **Dissolved Oxygen (DO)** - Critical for marine life health
-- **Salinity** - Indicates freshwater/seawater mixing
-- **Temperature** - Affects oxygen levels and species habitat
-
-Use the navigation on the left to explore data by parameter (comparing all sites) or by site (viewing all parameters at one location).
-  </script>
-  
-  <script type="text/html">
-    </div><!-- end main-content -->
-  </script>
-</notebook>
+</body>
+</html>

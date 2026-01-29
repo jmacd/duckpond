@@ -17,7 +17,7 @@ cargo build --release --bin pond
 
 ${EXE} copy host://${NOYO}/data.html.tmpl /etc
 ${EXE} copy host://${NOYO}/index.html.tmpl /etc
-${EXE} copy host://${NOYO}/nav.html.tmpl /etc
+${EXE} copy host://${NOYO}/page.html.tmpl /etc
 
 ${EXE} mknod dynamic-dir /templates --overwrite --config-path ${NOYO}/template.yaml
 

@@ -28,3 +28,6 @@ ${EXE} export --pattern '/reduced/single_site/*/*.series' --pattern '/templates/
 
 # Index page
 ${EXE} export --pattern '/templates/index/*' --dir ${OUTDIR}
+
+# Page template (for notebook-kit --template)
+${EXE} export --pattern '/templates/page/*' --dir ${OUTDIR}

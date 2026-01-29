@@ -1,201 +1,97 @@
 <!doctype html>
-<notebook theme="slate">
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ args[0] }} - Water Quality</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  {{ insert_from_path(path="/templates/page/page.html") }}
   
-  <script type="text/html">
-    <style>
-      :root {
-        --sidebar-width: 240px;
-        --accent-color: #667eea;
-        --accent-light: rgba(102, 126, 234, 0.1);
-      }
-      
-      body {
-        display: flex;
-        min-height: 100vh;
-        margin: 0;
-      }
-      
-      .sidebar {
-        position: fixed;
-        left: 0;
-        top: 0;
-        width: var(--sidebar-width);
-        height: 100vh;
-        background: #1a1a2e;
-        color: #fff;
-        padding: 1.5rem 0;
-        overflow-y: auto;
-        z-index: 100;
-        box-shadow: 2px 0 8px rgba(0,0,0,0.2);
-      }
-      
-      .sidebar-header {
-        padding: 0 1rem 1rem;
-        border-bottom: 1px solid rgba(255,255,255,0.1);
-        margin-bottom: 1rem;
-      }
-      
-      .sidebar-header h1 {
-        font-size: 1.2rem;
-        margin: 0;
-        font-weight: 600;
-      }
-      
-      .sidebar-section {
-        margin-bottom: 1.5rem;
-      }
-      
-      .sidebar-section-title {
-        font-size: 0.75rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        color: rgba(255,255,255,0.5);
-        padding: 0 1rem;
-        margin-bottom: 0.5rem;
-      }
-      
-      .sidebar a {
-        display: block;
-        padding: 0.5rem 1rem;
-        color: rgba(255,255,255,0.8);
-        text-decoration: none;
-        font-size: 0.9rem;
-        transition: all 0.15s;
-      }
-      
-      .sidebar a:hover {
-        background: rgba(255,255,255,0.1);
-        color: #fff;
-      }
-      
-      .sidebar a.active {
-        background: var(--accent-light);
-        color: var(--accent-color);
-        border-left: 3px solid var(--accent-color);
-      }
-      
-      .main-content {
-        margin-left: var(--sidebar-width);
-        flex: 1;
-        min-width: 0;
-        padding: 2rem;
-      }
-      
-      .page-header {
-        margin-bottom: 2rem;
-      }
-      
-      .page-header h1 {
-        margin: 0;
-        font-size: 2rem;
-        color: var(--accent-color);
-      }
-      
-      .page-header .breadcrumb {
-        color: var(--theme-foreground-muted);
-        font-size: 0.9rem;
-        margin-top: 0.5rem;
-      }
-      
-      .page-header .breadcrumb a {
-        color: var(--accent-color);
-        text-decoration: none;
-      }
-      
-      @media (max-width: 768px) {
-        .sidebar {
-          transform: translateX(-100%);
-        }
-        .main-content {
-          margin-left: 0;
-        }
-      }
-    </style>
-    
-    {{ insert_from_path(path="/templates/nav/nav.html") }}
-    
-    <div class="main-content">
-      <div class="page-header">
-        <h1>{{ args[0] }}</h1>
-        <div class="breadcrumb">
-          <a href="index.html">Home</a> › Water Quality Data
-        </div>
+  <main>
+    <div class="page-header">
+      <h1>{{ args[0] }}</h1>
+      <div class="breadcrumb">
+        <a href="index.html">Home</a> › Water Quality Data
       </div>
-  </script>
+    </div>
+    
+    <div id="time-picker"></div>
+    <div id="charts"></div>
+  </main>
   
   <script type="module">
-    import {timepicker, timerange, legendName, plotName} from "../lib.js";
-  </script>
-  
-  <script type="module">
-    const pick = view(await timepicker());
-  </script>
-  
-  <script type="module">
-    const res = timerange(pick);
-
-    // Timestamps are in milliseconds
-    const now = new Date().getTime();
-          
-    // 24 days, 3600 secs/hour, 1000 ms/sec
-    const begin = now - pick * 24 * 3600 * 1000;
-
+    import { createTimePicker, timeState, queryData, Plot, plotName, legendName, timerange } from "./lib.js";
+    
+    // Data files from template
     const datafiles = {
     {%- for k2, v2 in export[args[0]] %}
       "{{ k2 }}": [
       {%- for v3 in v2.files %}
-        {
-          start_time: {{ v3.start_time }},
-          end_time: {{ v3.end_time }},
-          file: FileAttachment("{{ v3.file }}"),
-        },
+        { start_time: {{ v3.start_time }}, end_time: {{ v3.end_time }}, file: "{{ v3.file }}" },
       {%- endfor %}
       ],
     {%- endfor %}
     };
-
-    const duck = await DuckDBClient.of({});
     
-    const these = datafiles[`res=${res}`]
-        .filter((f) => f.start_time*1000 <= now && f.end_time*1000 >= begin)
-        .map((f) => f.file.href);
-    
-    const all = these.length > 0 
-      ? await duck.query(`select epoch_us(timestamp)/1000.0::DOUBLE as timestamp, * EXCLUDE timestamp from read_parquet(${JSON.stringify(these)}) where timestamp >= epoch_ms(${begin}) ORDER BY timestamp ASC`)
-      : [];
-    
-    if (all.length === 0) {
-      display(html`<div style="padding: 2rem; text-align: center; background: #fef3c7; border-radius: 8px; margin: 1rem 0;">
-        <strong>No data available for the selected time range.</strong><br>
-        Try selecting a longer time period or a different time range.
-      </div>`);
-    } else {
-      // Display all charts
-      {% for key, fields in group(by="name",in=export[args[0]][args[1]].schema.fields) %}
-      display(Plot.plot({
+    // Chart configurations from template
+    const chartConfigs = [
+    {% for key, fields in group(by="name",in=export[args[0]][args[1]].schema.fields) %}
+      {
+        name: "{{ key }}",
         title: plotName("{{ key }}"),
-        width,
-        x: {grid: true, type: "time", label: "Date", domain: [begin, now]},
-        y: {grid: true, label: "{{ fields[0].unit }}", zero: true},
-        color: {legend: true},
-        marks: [
+        unit: "{{ fields[0].unit }}",
+        marks: (data, begin, now) => [
         {%- for inst, ifields in group(by="instrument",in=fields) -%}
           {%- set field = ifields[0] -%}
-          {% if ifields | length == 1 -%}
-          Plot.lineY(all, {x: "timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
-          {% else -%}
-          Plot.lineY(all, {x: "timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
-          Plot.areaY(all, {x: "timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: (d) => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
+          Plot.lineY(data, {x: "timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: () => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
+          {% if ifields | length > 1 -%}
+          Plot.areaY(data, {x: "timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: () => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
           {% endif -%}
         {%- endfor -%}
         ]
-      }));
-      {% endfor %}
-    }
+      },
+    {% endfor %}
+    ];
+    
+    // Initialize
+    const pickerContainer = document.getElementById("time-picker");
+    const chartsContainer = document.getElementById("charts");
+    
+    createTimePicker(pickerContainer);
+    
+    // Render charts on time change
+    timeState.subscribe(async (days) => {
+      const data = await queryData(datafiles, days);
+      chartsContainer.innerHTML = "";
+      
+      if (data.length === 0) {
+        chartsContainer.innerHTML = `<div class="empty-state">No data for selected time range</div>`;
+        return;
+      }
+      
+      const now = Date.now();
+      const begin = now - days * 24 * 3600 * 1000;
+      const width = chartsContainer.clientWidth - 32;
+      
+      for (const config of chartConfigs) {
+        const chartDiv = document.createElement("div");
+        chartDiv.className = "chart";
+        
+        const plot = Plot.plot({
+          title: config.title,
+          width,
+          x: { grid: true, type: "time", label: "Date", domain: [begin, now] },
+          y: { grid: true, label: config.unit, zero: true },
+          color: { legend: true },
+          marks: config.marks(data, begin, now)
+        });
+        
+        chartDiv.appendChild(plot);
+        chartsContainer.appendChild(chartDiv);
+      }
+    });
   </script>
-  
-  <script type="text/html">
-    </div><!-- end main-content -->
-  </script>
-</notebook>
+</body>
+</html>
