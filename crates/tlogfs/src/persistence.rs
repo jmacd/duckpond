@@ -40,6 +40,8 @@ pub struct OpLogPersistence {
     pub(crate) last_txn_seq: i64, // Track last committed transaction sequence for validation
     /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
     pub(crate) txn_state: Arc<TinyFsTransactionState>,
+    /// Options for large file storage (compression, etc.)
+    large_file_options: crate::large_files::LargeFileOptions,
 }
 
 /// In-memory directory state during a transaction
@@ -86,6 +88,8 @@ pub struct InnerState {
     poisoned: bool,
     session_context: Arc<SessionContext>,
     txn_seq: i64,
+    /// Options for large file storage (compression, etc.)
+    large_file_options: crate::large_files::LargeFileOptions,
 }
 
 #[derive(Clone)]
@@ -105,6 +109,8 @@ pub struct State {
     >,
     /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
     txn_state: Arc<TinyFsTransactionState>,
+    /// Options for large file storage (compression, etc.)
+    large_file_options: crate::large_files::LargeFileOptions,
 }
 
 // Re-export TableProviderKey from provider for backward compatibility
@@ -146,6 +152,19 @@ impl OpLogPersistence {
         .await
     }
 
+    /// Test-only helper: Create a new pond with uncompressed large file storage.
+    /// Used for corruption testing where we need to modify raw bytes in parquet files.
+    #[cfg(test)]
+    pub async fn create_test_uncompressed(path: &str) -> Result<Self, TLogFSError> {
+        let mut persistence = Self::create(
+            path,
+            PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
+        )
+        .await?;
+        persistence.large_file_options = crate::large_files::LargeFileOptions::uncompressed();
+        Ok(persistence)
+    }
+
     /// Test-only helper: Begin a transaction with automatic sequence numbering.
     #[cfg(test)]
     pub async fn begin_test(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
@@ -176,7 +195,7 @@ impl OpLogPersistence {
         // Create the Delta table structure
         let config: HashMap<String, Option<String>> = vec![(
             "delta.dataSkippingStatsColumns".to_string(),
-            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,sha256,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
         )]
         .into_iter()
         .collect();
@@ -204,6 +223,7 @@ impl OpLogPersistence {
             state: None,
             last_txn_seq: 0, // No transactions yet - bundles will provide them
             txn_state: Arc::new(TinyFsTransactionState::new()),
+            large_file_options: Default::default(),
         })
     }
 
@@ -250,7 +270,7 @@ impl OpLogPersistence {
                 let config: HashMap<String, Option<String>> = vec![(
                     "delta.dataSkippingStatsColumns".to_string(),
 		    // @@@ Awful
-                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,sha256,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
                 )]
                 .into_iter()
                 .collect();
@@ -281,6 +301,7 @@ impl OpLogPersistence {
             state: None,
             last_txn_seq: 0, // Will be updated below
             txn_state: Arc::new(TinyFsTransactionState::new()),
+            large_file_options: Default::default(),
         };
 
         // Initialize root directory ONLY when creating a new pond
@@ -443,8 +464,13 @@ impl OpLogPersistence {
             panic!("🚨 INTERNAL ERROR: state/fs is Some at begin_impl start");
         }
 
-        let inner_state =
-            InnerState::new(self.path.clone(), self.table.clone(), metadata.txn_seq).await?;
+        let inner_state = InnerState::new(
+            self.path.clone(),
+            self.table.clone(),
+            metadata.txn_seq,
+            self.large_file_options.clone(),
+        )
+        .await?;
         let session_context = inner_state.session_context.clone();
 
         let state = State {
@@ -454,6 +480,7 @@ impl OpLogPersistence {
             template_variables: Arc::new(std::sync::Mutex::new(HashMap::new())),
             table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             txn_state: self.txn_state.clone(),
+            large_file_options: self.large_file_options.clone(),
         };
 
         // Complete SessionContext setup with ObjectStore registration
@@ -658,6 +685,12 @@ impl State {
         self.inner.lock().await.path.clone()
     }
 
+    /// Get the large file storage options (compression settings, etc.)
+    #[must_use]
+    pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
+        &self.large_file_options
+    }
+
     /// Get template variables for CLI variable expansion
     #[must_use]
     pub fn get_template_variables(&self) -> Arc<HashMap<String, serde_json::Value>> {
@@ -719,6 +752,23 @@ impl State {
     pub async fn add_oplog_entry(&self, entry: OplogEntry) -> Result<(), TLogFSError> {
         self.inner.lock().await.records.push(entry);
         Ok(())
+    }
+
+    /// Get count of pending operations (records + modified directories)
+    ///
+    /// This is used for diagnostics when a transaction is dropped without commit.
+    /// Returns (pending_records, modified_directories) counts.
+    #[must_use]
+    pub fn pending_operation_counts(&self) -> (usize, usize) {
+        // Use try_lock to avoid blocking in Drop - if locked, return (0,0) as unknown
+        match self.inner.try_lock() {
+            Ok(guard) => {
+                let record_count = guard.records.len();
+                let modified_dirs = guard.directories.values().filter(|d| d.modified).count();
+                (record_count, modified_dirs)
+            }
+            Err(_) => (0, 0), // Can't get counts if lock is held
+        }
     }
 
     /// Get the factory name for a specific node from the oplog
@@ -935,11 +985,18 @@ impl State {
         content_ref: crate::file_writer::ContentRef,
         metadata: crate::file_writer::FileMetadata,
         pre_allocated_version: Option<i64>,
+        bao_outboard: Option<Vec<u8>>,
     ) -> Result<(), TLogFSError> {
         self.inner
             .lock()
             .await
-            .store_file_content_ref(id, content_ref, metadata, pre_allocated_version)
+            .store_file_content_ref(
+                id,
+                content_ref,
+                metadata,
+                pre_allocated_version,
+                bao_outboard,
+            )
             .await
     }
 
@@ -955,6 +1012,17 @@ impl State {
             .lock()
             .await
             .insert_directory_entry(dir_id, entry)
+    }
+
+    /// Remove a directory entry by name
+    /// Returns the removed entry if it existed, None if not found
+    /// Marks directory as modified
+    pub async fn remove_directory_entry(
+        &self,
+        dir_id: FileID,
+        name: &str,
+    ) -> Result<Option<tinyfs::DirectoryEntry>, TLogFSError> {
+        self.inner.lock().await.remove_directory_entry(dir_id, name)
     }
 
     /// Get the shared DataFusion SessionContext
@@ -1127,6 +1195,7 @@ impl InnerState {
         path: P,
         table: DeltaTable,
         txn_seq: i64,
+        large_file_options: crate::large_files::LargeFileOptions,
     ) -> Result<Self, TLogFSError> {
         // Create the SessionContext with caching enabled (64MiB limit)
         use datafusion::execution::{
@@ -1186,6 +1255,7 @@ impl InnerState {
             poisoned: false,
             session_context: ctx,
             txn_seq,
+            large_file_options,
         })
     }
 
@@ -1298,6 +1368,33 @@ impl InnerState {
         Ok(())
     }
 
+    /// Remove a directory entry from in-memory state
+    /// Directory must be loaded first via ensure_directory_loaded
+    /// Returns the removed entry if found, marks directory as modified
+    fn remove_directory_entry(
+        &mut self,
+        dir_id: FileID,
+        name: &str,
+    ) -> Result<Option<tinyfs::DirectoryEntry>, TLogFSError> {
+        let dir_state = self
+            .directories
+            .get_mut(&dir_id)
+            .ok_or_else(|| TLogFSError::Internal(format!("Directory {} not loaded", dir_id)))?;
+
+        // Remove entry if it exists
+        let removed = dir_state.mapping.remove(name);
+
+        if removed.is_some() {
+            dir_state.modified = true;
+            debug!(
+                "Removed entry '{}' from directory {}, marked as modified",
+                name, dir_id
+            );
+        }
+
+        Ok(removed)
+    }
+
     /// Begin a new transaction
     async fn begin_impl(&mut self) -> Result<(), TLogFSError> {
         // Clear any stale state (should be clean already, but just in case)
@@ -1310,7 +1407,10 @@ impl InnerState {
 
     /// Create a hybrid writer for streaming file content
     async fn create_hybrid_writer(&self) -> crate::large_files::HybridWriter {
-        crate::large_files::HybridWriter::new(self.path.clone())
+        crate::large_files::HybridWriter::with_options(
+            self.path.clone(),
+            self.large_file_options.clone(),
+        )
     }
 
     /// Store file content from hybrid writer result
@@ -1326,13 +1426,13 @@ impl InnerState {
             let now = Utc::now().timestamp_micros();
             OplogEntry::new_small_file(id, now, version, result.content, self.txn_seq)
         } else {
-            // Large file: content already stored, just create OplogEntry with SHA256
+            // Large file: content already stored, just create OplogEntry with BLAKE3
             let size = result.size;
             debug!("Storing large file: {size} bytes");
             let now = Utc::now().timestamp_micros();
 
             match id.entry_type() {
-                EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+                EntryType::TablePhysicalSeries | EntryType::TableDynamic => {
                     // For FileSeries, extract temporal metadata from Parquet content
                     use super::schema::{
                         ExtendedAttributes, detect_timestamp_column,
@@ -1407,7 +1507,7 @@ impl InnerState {
                         id,
                         now,
                         version,
-                        result.sha256,
+                        result.blake3,
                         result.size as i64, // Cast to i64 to match Delta Lake protocol
                         global_min,
                         global_max,
@@ -1421,7 +1521,7 @@ impl InnerState {
                         id,
                         now,
                         version,
-                        result.sha256,
+                        result.blake3,
                         result.size as i64, // Cast to i64 to match Delta Lake protocol
                         self.txn_seq,
                     )
@@ -1504,12 +1604,12 @@ impl InnerState {
                         1
                     }
                 } else {
-                    // This is an existing node - find max version from both records and allocated
+                    // This is an existing node Find max version from both records and allocated.
                     let max_record_version = records
                         .iter()
                         .map(|r| r.version)
                         .max()
-                        .expect("records is non-empty, so max() should succeed");
+                        .expect("records is non-empty");
 
                     let max_allocated = self
                         .allocated_versions
@@ -1641,11 +1741,11 @@ impl InnerState {
             let result = writer.finalize().await?;
 
             // Extract hybrid writer result data
-            let sha256 = result.sha256.clone();
+            let sha256 = result.blake3.clone();
             let size = result.size as i64;
             let now = Utc::now().timestamp_micros();
 
-            debug!("Stored large FileSeries via HybridWriter: {size} bytes, SHA256: {sha256}");
+            debug!("Stored large FileSeries via HybridWriter: {size} bytes, BLAKE3: {sha256}");
 
             let entry = OplogEntry::new_large_file_series(
                 id,
@@ -1699,6 +1799,13 @@ impl InnerState {
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         let records = self.query_records(id).await?;
 
+        // Check if this is a FilePhysicalSeries - concatenate all versions oldest-to-newest
+        if let Some(first_record) = records.first()
+            && first_record.file_type == EntryType::FilePhysicalSeries
+        {
+            return self.async_file_reader_series(&records).await;
+        }
+
         // Find the latest record with actual content (skip empty temporal override versions)
         let record = records
             .iter()
@@ -1711,8 +1818,8 @@ impl InnerState {
             // Changed condition to always enter this block
             if record.is_large_file() {
                 // Large file: create async file reader
-                let sha256 = record.sha256.as_ref().ok_or_else(|| {
-                    TLogFSError::ArrowMessage("Large file entry missing SHA256".to_string())
+                let sha256 = record.blake3.as_ref().ok_or_else(|| {
+                    TLogFSError::ArrowMessage("Large file entry missing BLAKE3".to_string())
                 })?;
 
                 // Find the file in either flat or hierarchical structure
@@ -1722,29 +1829,33 @@ impl InnerState {
                         TLogFSError::ArrowMessage(format!("Error searching for large file: {}", e))
                     })?
                     .ok_or_else(|| TLogFSError::LargeFileNotFound {
-                        sha256: sha256.clone(),
-                        path: format!("_large_files/sha256={}", sha256),
+                        blake3: sha256.clone(),
+                        path: format!("_large_files/blake3={}", sha256),
                         source: std::io::Error::new(
                             std::io::ErrorKind::NotFound,
                             "Large file not found in any location",
                         ),
                     })?;
 
-                // Open file for async reading
-                let file = tokio::fs::File::open(&large_file_path).await.map_err(|e| {
-                    TLogFSError::LargeFileNotFound {
-                        sha256: sha256.clone(),
+                // Read parquet file using streaming verified reader
+                debug!("Reading large file from parquet: {:?}", large_file_path);
+
+                // Use ParquetFileReader for streaming verified access
+                let reader = crate::large_files::ParquetFileReader::new(large_file_path.clone())
+                    .await
+                    .map_err(|e| TLogFSError::LargeFileNotFound {
+                        blake3: sha256.clone(),
                         path: large_file_path.display().to_string(),
                         source: e,
-                    }
-                })?;
+                    })?;
 
-                Ok(Box::pin(file))
+                debug!("Created streaming verified reader for large file");
+
+                Ok(Box::pin(reader))
             } else {
-                // Small file: create cursor from inline content
-                let content = record.content.clone().ok_or_else(|| {
-                    TLogFSError::ArrowMessage("Small file entry missing content".to_string())
-                })?;
+                // Small file: use verified content accessor which checks BLAKE3 hash
+                let content = record.verified_content_required()?.to_vec();
+                debug!("Verified small file ({} bytes)", content.len());
 
                 Ok(Box::pin(std::io::Cursor::new(content)))
             }
@@ -1753,6 +1864,81 @@ impl InnerState {
                 path: PathBuf::from(format!("File {id} not found")),
             })
         }
+    }
+
+    /// Create an async reader for a FilePhysicalSeries that concatenates all versions
+    ///
+    /// FilePhysicalSeries entries have "all-version" semantics where each version
+    /// appends data. When reading, all versions are concatenated in oldest-to-newest order.
+    async fn async_file_reader_series(
+        &self,
+        records: &[OplogEntry],
+    ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
+        use tinyfs::chained_reader::ChainedReader;
+
+        // Filter for non-empty versions and reverse to get oldest-first order
+        // (query_records returns newest-first)
+        let mut valid_records: Vec<&OplogEntry> =
+            records.iter().filter(|r| r.size.unwrap_or(0) > 0).collect();
+        valid_records.reverse(); // Now oldest-first
+
+        if valid_records.is_empty() {
+            // Return empty reader for empty series
+            return Ok(Box::pin(ChainedReader::from_bytes(vec![])));
+        }
+
+        // Collect readers and sizes for each version
+        let mut readers: Vec<Pin<Box<dyn tokio::io::AsyncRead + Send>>> =
+            Vec::with_capacity(valid_records.len());
+        let mut sizes: Vec<u64> = Vec::with_capacity(valid_records.len());
+
+        for record in valid_records {
+            if record.is_large_file() {
+                // Large file: create async file reader
+                let sha256 = record.blake3.as_ref().ok_or_else(|| {
+                    TLogFSError::ArrowMessage("Large file entry missing BLAKE3".to_string())
+                })?;
+
+                // Find the file in either flat or hierarchical structure
+                let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256)
+                    .await
+                    .map_err(|e| {
+                        TLogFSError::ArrowMessage(format!("Error searching for large file: {}", e))
+                    })?
+                    .ok_or_else(|| TLogFSError::LargeFileNotFound {
+                        blake3: sha256.clone(),
+                        path: format!("_large_files/blake3={}", sha256),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "Large file not found in any location",
+                        ),
+                    })?;
+
+                let reader = crate::large_files::ParquetFileReader::new(large_file_path.clone())
+                    .await
+                    .map_err(|e| TLogFSError::LargeFileNotFound {
+                        blake3: sha256.clone(),
+                        path: large_file_path.display().to_string(),
+                        source: e,
+                    })?;
+
+                sizes.push(record.size.unwrap_or(0) as u64);
+                readers.push(Box::pin(reader));
+            } else {
+                // Small file: use verified content accessor
+                let content = record.verified_content_required()?.to_vec();
+                sizes.push(content.len() as u64);
+                readers.push(Box::pin(std::io::Cursor::new(content)));
+            }
+        }
+
+        debug!(
+            "Created ChainedReader for FilePhysicalSeries with {} versions, total {} bytes",
+            readers.len(),
+            sizes.iter().sum::<u64>()
+        );
+
+        Ok(Box::pin(ChainedReader::new(readers, sizes)))
     }
 
     /// Commit pending records to Delta Lake
@@ -1899,6 +2085,7 @@ impl InnerState {
         content_ref: crate::file_writer::ContentRef,
         metadata: crate::file_writer::FileMetadata,
         pre_allocated_version: Option<i64>,
+        bao_outboard: Option<Vec<u8>>,
     ) -> Result<(), TLogFSError> {
         debug!("store_file_content_ref_transactional called for node_id={id}");
 
@@ -1933,7 +2120,7 @@ impl InnerState {
             crate::file_writer::ContentRef::Small(content) => {
                 // Small file: store content inline
                 match id.entry_type() {
-                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+                    EntryType::TablePhysicalSeries | EntryType::TableDynamic => {
                         // FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series {
@@ -1975,7 +2162,7 @@ impl InnerState {
             crate::file_writer::ContentRef::Large(sha256, size) => {
                 // Large file: store reference
                 match id.entry_type() {
-                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
+                    EntryType::TablePhysicalSeries | EntryType::TableDynamic => {
                         // Large FileSeries needs temporal metadata
                         match metadata {
                             crate::file_writer::FileMetadata::Series {
@@ -2031,6 +2218,12 @@ impl InnerState {
 
         // Remove from pending_files since it now has actual content
         _ = self.pending_files.remove(&id);
+
+        // Set bao_outboard if provided
+        let mut entry = entry;
+        if let Some(outboard) = bao_outboard {
+            entry.set_bao_outboard(outboard);
+        }
 
         self.records.push(entry);
 
@@ -2248,10 +2441,10 @@ impl InnerState {
         // by post-commit discovery or explicit FactoryRegistry calls.
         //
         // Note: OpLog entry created above contains:
-        // - FileDataDynamic: config in content field
+        // - FileDynamic: config in content field
         // - DirectoryDynamic: config in extended_attributes, empty content for directory entries
         let node = match id.entry_type() {
-            EntryType::FileDataDynamic => {
+            EntryType::FileDynamic => {
                 // Create as regular file node - factory metadata in OpLog
                 node_factory::create_file_node(id, state)
             }
@@ -2327,8 +2520,8 @@ impl InnerState {
                         continue;
                     }
                 } else {
-                    // For files, use content field
-                    record.content.clone().unwrap_or_default()
+                    // For files, use verified content field
+                    record.verified_content_required()?.to_vec()
                 };
 
                 return Ok(Some((factory_type.clone(), config_content)));
@@ -2371,8 +2564,8 @@ impl InnerState {
                     return Ok(None);
                 }
             } else {
-                // For files, use content field
-                record.content.clone().unwrap_or_default()
+                // For files, use verified content field
+                record.verified_content_required()?.to_vec()
             };
 
             Ok(Some((factory_type.clone(), config_content)))
@@ -2738,10 +2931,10 @@ impl InnerState {
 
         if let Some(record) = records.first() {
             if record.file_type == EntryType::Symlink {
-                let content = record.content.clone().ok_or_else(|| {
-                    tinyfs::Error::Other("Symlink content is missing".to_string())
-                })?;
-                let target_str = String::from_utf8(content).map_err(|e| {
+                let content = record
+                    .verified_content_required()
+                    .map_err(error_utils::to_tinyfs_error)?;
+                let target_str = String::from_utf8(content.to_vec()).map_err(|e| {
                     tinyfs::Error::Other(format!("Invalid UTF-8 in symlink target: {}", e))
                 })?;
                 Ok(PathBuf::from(target_str))
@@ -2804,8 +2997,9 @@ impl InnerState {
             return Ok(NodeMetadata {
                 entry_type,
                 size: Some(0),
-                sha256: None,
-                version: 0, // No version yet - will be 1 when first written
+                blake3: None,
+                bao_outboard: None, // No bao-tree data yet
+                version: 0,         // No version yet - will be 1 when first written
                 timestamp: Utc::now().timestamp_micros(),
             });
         }
@@ -2865,6 +3059,9 @@ impl InnerState {
                 // Use the actual database version number, not a re-enumerated logical version
                 let version = record.version as u64;
 
+                // For large files, size represents the ORIGINAL content size (before chunking)
+                // The actual parquet file on disk will be different due to compression
+                // but DataFusion needs to know the reconstructed size
                 let size = if record.is_large_file() {
                     record.size.unwrap_or(0)
                 } else {
@@ -2892,7 +3089,7 @@ impl InnerState {
                     version,
                     timestamp: record.timestamp,
                     size: size as u64, // Cast back to u64 for tinyfs interface
-                    sha256: record.sha256.clone(),
+                    blake3: record.blake3.clone(),
                     entry_type: record.file_type,
                     extended_metadata,
                 }
@@ -2961,8 +3158,8 @@ impl InnerState {
         // Load content based on file type
         if target_record.is_large_file() {
             // Large file: read from external storage
-            let sha256 = target_record.sha256.as_ref().ok_or_else(|| {
-                tinyfs::Error::Other("Large file entry missing SHA256".to_string())
+            let sha256 = target_record.blake3.as_ref().ok_or_else(|| {
+                tinyfs::Error::Other("Large file entry missing BLAKE3".to_string())
             })?;
 
             let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256)
@@ -2972,14 +3169,26 @@ impl InnerState {
                 })?
                 .ok_or_else(|| {
                     tinyfs::Error::NotFound(PathBuf::from(format!(
-                        "Large file with SHA256 {} not found",
+                        "Large file with BLAKE3 {} not found",
                         sha256
                     )))
                 })?;
 
-            tokio::fs::read(&large_file_path)
+            // Large files are stored as chunked parquet - use ParquetFileReader to reconstruct
+            use tokio::io::AsyncReadExt;
+            let mut reader = crate::large_files::ParquetFileReader::new(large_file_path)
                 .await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to read large file: {}", e)))
+                .map_err(|e| {
+                    tinyfs::Error::Other(format!("Failed to open large file reader: {}", e))
+                })?;
+
+            let mut content = Vec::new();
+            let _ = reader
+                .read_to_end(&mut content)
+                .await
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to read large file: {}", e)))?;
+
+            Ok(content)
         } else {
             // Small file: content stored inline
             target_record
@@ -3256,10 +3465,7 @@ mod node_factory {
     ) -> Result<Node, tinyfs::Error> {
         // Handle static nodes (traditional TLogFS nodes)
         match oplog_entry.file_type {
-            EntryType::DirectoryDynamic
-            | EntryType::FileDataDynamic
-            | EntryType::FileTableDynamic
-            | EntryType::FileSeriesDynamic => {
+            EntryType::DirectoryDynamic | EntryType::FileDynamic | EntryType::TableDynamic => {
                 assert!(id.entry_type().is_dynamic());
                 assert!(oplog_entry.factory.is_some());
 
@@ -3267,9 +3473,10 @@ mod node_factory {
                 return create_dynamic_node_from_oplog_entry(oplog_entry, id, state, factory_type)
                     .await;
             }
-            EntryType::FileDataPhysical
-            | EntryType::FileTablePhysical
-            | EntryType::FileSeriesPhysical => {
+            EntryType::FilePhysicalVersion
+            | EntryType::FilePhysicalSeries
+            | EntryType::TablePhysicalVersion
+            | EntryType::TablePhysicalSeries => {
                 let oplog_file = crate::file::OpLogFile::new(id, state);
                 let file_handle = crate::file::OpLogFile::create_handle(oplog_file);
                 Ok(Node::new(id, NodeType::File(file_handle)))
@@ -3299,14 +3506,11 @@ mod node_factory {
         // Note: Node caching is now handled by CachingPersistence decorator in tinyfs
         // No need for manual caching here
 
-        // Get configuration from the oplog entry
+        // Get verified configuration from the oplog entry
         // For ALL dynamic nodes, config is stored as-is in content field (original YAML bytes)
-        let config_content = oplog_entry.content.as_ref().ok_or_else(|| {
-            tinyfs::Error::Other(format!(
-                "Dynamic node missing configuration for factory '{}'",
-                factory_type
-            ))
-        })?;
+        let config_content = oplog_entry
+            .verified_content_required()
+            .map_err(error_utils::to_tinyfs_error)?;
 
         // Create context with all template variables (vars, export, and any other keys)
         let context = FactoryContext {
@@ -3342,7 +3546,7 @@ mod node_factory {
                 debug!("✅ FactoryRegistry::create_directory succeeded");
                 NodeType::Directory(dir_handle)
             }
-            EntryType::FileDataDynamic => {
+            EntryType::FileDynamic => {
                 // Check if this is an executable factory
                 if let Some(factory) = FactoryRegistry::get_factory(factory_type) {
                     if factory.create_file.is_some() {
@@ -3369,7 +3573,7 @@ mod node_factory {
                             "🔍 Executable factory '{}' - using config as file content",
                             factory_type
                         );
-                        let config_file = provider::ConfigFile::new(config_content.clone());
+                        let config_file = provider::ConfigFile::new(config_content.to_vec());
                         NodeType::File(config_file.create_handle())
                     }
                 } else {
@@ -3381,7 +3585,7 @@ mod node_factory {
             }
             _ => {
                 // Unknown entry type - shouldn't happen
-                let config_file = provider::ConfigFile::new(config_content.clone());
+                let config_file = provider::ConfigFile::new(config_content.to_vec());
                 let file_handle = config_file.create_handle();
                 NodeType::File(file_handle)
             }

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Noyo Harbor Blue Economy</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+/* Noyo Harbor Water Quality Dashboard */
+:root {
+  --sidebar-width: 240px;
+  --max-width: 960px;
+  --accent-color: #667eea;
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-content: #0f0f1a;
+  --fg-primary: #e4e4e7;
+  --fg-secondary: #a1a1aa;
+  --fg-muted: #71717a;
+  --border-color: rgba(255,255,255,0.1);
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+html { font: 16px/1.5 var(--font-sans); background: var(--bg-content); color: var(--fg-primary); margin: 0; padding: 0; }
+body { margin: 0; display: flex; min-height: 100vh; }
+.sidebar { position: fixed; left: 0; top: 0; width: var(--sidebar-width); height: 100vh; background: var(--bg-primary); padding: 1.5rem 0; overflow-y: auto; z-index: 100; border-right: 1px solid var(--border-color); }
+.sidebar-header { padding: 0 1rem 1rem; border-bottom: 1px solid var(--border-color); margin-bottom: 1rem; }
+.sidebar-header h1 { font-size: 1.2rem; font-weight: 700; margin: 0; color: var(--fg-primary); }
+.sidebar-section { margin-bottom: 1.5rem; }
+.sidebar-section-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-muted); padding: 0 1rem; margin-bottom: 0.5rem; }
+.sidebar a { display: block; padding: 0.4rem 1rem; color: var(--fg-secondary); text-decoration: none; font-size: 0.875rem; transition: background 0.15s, color 0.15s; }
+.sidebar a:hover { background: rgba(255,255,255,0.05); color: var(--fg-primary); }
+.sidebar a.active { background: rgba(102, 126, 234, 0.1); color: var(--accent-color); border-left: 3px solid var(--accent-color); padding-left: calc(1rem - 3px); }
+main { margin-left: var(--sidebar-width); flex: 1; min-width: 0; padding: 2rem; max-width: calc(var(--max-width) + var(--sidebar-width) + 4rem); }
+.hero { display: flex; flex-direction: column; align-items: center; margin: 4rem 0; text-align: center; }
+.hero h1 { margin: 2rem 0; font-size: clamp(3rem, 10vw, 5rem); font-weight: 900; line-height: 1; background: linear-gradient(30deg, var(--accent-color), var(--fg-primary)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.hero h2 { margin: 0; max-width: 34em; font-size: 1.25rem; font-weight: 500; line-height: 1.5; color: var(--fg-muted); }
+#map { height: 400px; border-radius: 8px; margin: 2rem 0; }
+.leaflet-tile-pane img { max-width: none !important; }
+.about-section { max-width: 800px; margin: 3rem 0; line-height: 1.7; }
+.about-section h2 { color: var(--accent-color); border-bottom: 2px solid var(--accent-color); padding-bottom: 0.5rem; margin-bottom: 1rem; }
+.about-section ul { padding-left: 1.5rem; }
+.about-section li { margin-bottom: 0.5rem; }
+@media (max-width: 768px) { .sidebar { transform: translateX(-100%); } main { margin-left: 0; } }
+  </style>
+</head>
+<body>
+  {{ insert_from_path(path="/templates/page/page.html") }}
+  
+  <main>
+    <div class="hero">
+      <h1>Noyo Harbor Blue Economy</h1>
+      <h2>Water Quality Monitoring Dashboard</h2>
+    </div>
+    
+    <div id="map"></div>
+    
+    <div class="about-section">
+      <h2>About This Project</h2>
+      <p>
+        The Noyo Harbor Blue Economy project monitors water quality at key locations 
+        throughout Noyo Harbor in Fort Bragg, California. Real-time sensors measure:
+      </p>
+      <ul>
+        <li><strong>Dissolved Oxygen (DO)</strong> - Critical for marine life health</li>
+        <li><strong>Salinity</strong> - Indicates freshwater/seawater mixing</li>
+        <li><strong>Temperature</strong> - Affects oxygen levels and species habitat</li>
+      </ul>
+      <p>
+        Use the navigation on the left to explore data by parameter (comparing all sites) 
+        or by site (viewing all parameters at one location).
+      </p>
+    </div>
+  </main>
+  
+  <script type="module">
+    import * as L from "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/+esm";
+    
+    const latitude = 39.425200984011916;
+    const longitude = -123.80366719309244;
+    
+    const map = L.map("map", { scrollWheelZoom: false })
+      .setView([latitude, longitude], 16);
+    
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+    
+    // Monitoring sites
+    L.circle([39.42768783218275, -123.80584629151588], {radius: 20, color: '#667eea'})
+      .bindPopup("<strong>Princess Seafood</strong>")
+      .addTo(map);
+    L.circle([39.42630383307301, -123.80507914592623], {radius: 20, color: '#667eea'})
+      .bindPopup("<strong>The Wharf</strong>")
+      .addTo(map);
+    L.circle([39.42359794726219, -123.80380240755608], {radius: 20, color: '#667eea'})
+      .bindPopup("<strong>Field Station</strong>")
+      .addTo(map);
+    L.circle([39.42398791346205, -123.80214663996874], {radius: 20, color: '#667eea'})
+      .bindPopup("<strong>B-Dock</strong>")
+      .addTo(map);
+  </script>
+</body>
+</html>

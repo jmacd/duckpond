@@ -285,11 +285,11 @@ config:
 #### `remote` - Backup & Replication System
 **Purpose**: Streaming backup to S3-compatible storage with replica support
 
-**Bundle Architecture**:
-- One bundle per transaction: `txn_{seq:05}.bundle.tar.zst`
-- Streaming tar+zstd compression (no temp files)
-- Metadata JSON sidecar with file manifest and transaction info
-- Content-addressed by transaction sequence
+**Chunked Parquet Architecture**:
+- One Delta Lake partition per backup: `bundle_id=<uuid>/`
+- ~16MB chunks with BLAKE3 Merkle verification (SeriesOutboard)
+- Transaction metadata stored in same partition
+- Content-addressed by bundle_id (UUID per backup)
 
 **Object Store Support**:
 - AWS S3 (with region and credentials)
@@ -578,18 +578,20 @@ config:
 ```
 
 **Architecture**:
-- Streaming tar+zstd compression (no temp files)
-- Direct upload to object_store (local or S3)
-- Bundle metadata with file manifests
+- Chunked parquet format (~16MB chunks) with BLAKE3 Merkle verification
+- Direct upload to Delta Lake (local or object_store)
+- SeriesOutboard for streaming validation
 - Pond identity preservation for replicas
 - Factory mode determines execution (push vs pull)
 
-**Bundle Format**:
+**Chunked Parquet Schema**:
 ```
-txn_00005.bundle.tar.zst
-  ├── metadata.json          # Transaction info, file list, pond identity
-  ├── part_id=abc/node_id=def/version=1/file.parquet
-  └── part_id=xyz/node_id=uvw/version=2/file.parquet
+bundle_id=<uuid>/part-00000.parquet
+  ├── chunk_id: Int64           # 0, 1, 2, ... ordering
+  ├── chunk_hash: String        # Cumulative BLAKE3 bao-root
+  ├── chunk_outboard: Binary    # SeriesOutboard for verification
+  ├── chunk_data: Binary        # ~16MB chunk
+  └── root_hash: String         # Final file BLAKE3
 ```
 
 #### 9. **hydrovu** Factory (Executable)
@@ -1285,43 +1287,36 @@ pond run /etc/system.d/10-remote verify
 
 ### Bundle Format
 
-**Structure**:
+**Structure** (Chunked Parquet in Delta Lake):
 ```
-txn_00005.bundle.tar.zst
-  ├── metadata.json          # Transaction metadata
-  ├── part_id=abc123/node_id=def456/version=1/file.parquet
-  ├── part_id=abc123/node_id=xyz789/version=1/file.parquet
-  └── ...
+bundle_id=550e8400-e29b-41d4-a716-446655440000/
+  └── part-00000.parquet       # All chunks for this backup
+      ├── chunk_id: 0, 1, 2...   # Ordering within file
+      ├── chunk_hash: String     # Cumulative BLAKE3 bao-root
+      ├── chunk_outboard: Binary # SeriesOutboard for verification
+      ├── chunk_data: Binary     # ~16MB chunks
+      ├── original_path: String  # Source path in pond
+      └── root_hash: String      # Final file BLAKE3
 ```
 
-**metadata.json**:
+**Transaction Metadata** (stored as file_type="metadata"):
 ```json
 {
-  "txn_seq": 5,
-  "txn_id": "01234567-89ab-cdef-0123-456789abcdef",
-  "based_on_seq": 4,
-  "timestamp": 1703980800000000,
-  "cli_args": ["pond", "copy", "data.csv", "/sensors/"],
-  "pond_metadata": {
-    "pond_id": "01234567-89ab-cdef-0123-456789abcdef",
-    "birth_timestamp": 1703894400000000,
-    "birth_hostname": "primary-server",
-    "birth_username": "admin"
-  },
-  "files": [
+  \"pond_txn_id\": 5,
+  \"files\": [
     {
-      "path": "part_id=abc123/node_id=def456/version=1/file.parquet",
-      "sha256": "abc123...",
-      "size": 1024000
+      \"path\": \"part_id=abc123/node_id=def456/version=1/file.parquet\",
+      \"root_hash\": \"abc123...\",
+      \"size\": 1024000
     }
   ]
 }
 ```
 
 **Properties**:
-- Streaming tar+zstd compression (no temp files)
-- One bundle per transaction (incremental)
-- Named by transaction sequence: `txn_{seq:05}.bundle.tar.zst`
+- Chunked parquet format (~16MB chunks) with BLAKE3 Merkle verification
+- One Delta Lake partition per transaction (incremental)
+- Partitioned by bundle_id (UUID per backup)
 - Self-contained with all transaction data
 - Includes pond identity for verification
 
@@ -1710,7 +1705,7 @@ let filter = TemporalFilter {
 - **Factory**: Plugin that creates dynamic filesystem objects (SQL views, aggregations, executables)
 - **OpLog**: Operation log stored in Delta Lake (all filesystem operations as Arrow records)
 - **Control Table**: Transaction audit log in separate Delta Lake table (lifecycle, metadata, errors)
-- **Bundle**: Compressed backup archive (tar+zstd) of pond data for single transaction
+- **Bundle**: Chunked parquet backup of pond data for single transaction (stored in Delta Lake)
 - **Temporal Bounds**: Explicit time range metadata for files (min_event_time, max_event_time)
 - **EntryType**: Classification of filesystem entries (FileParquet, FileCsv, DirectoryDynamic, etc.)
 - **FileSeries**: Versioned time-series file with multiple versions

@@ -153,9 +153,20 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
 
     info!("Starting restore from backup...");
 
-    // Open the remote table
-    let remote_url = &config.url;
-    let remote_table = remote::RemoteTable::open(remote_url)
+    // Register S3-compatible storage handlers for R2/S3
+    remote::register_s3_handlers();
+
+    // Build the remote table URL with pond_id and get storage options with credentials
+    let remote_url = config.build_table_url(&pond_metadata_for_restore.pond_id.to_string());
+    let storage_options = config.to_storage_options();
+    log::debug!(
+        "Opening remote table at {} with storage_options keys: {:?}",
+        remote_url,
+        storage_options.keys().collect::<Vec<_>>()
+    );
+
+    // Open the remote table with S3 credentials from config
+    let remote_table = remote::RemoteTable::open_with_storage_options(&remote_url, storage_options)
         .await
         .map_err(|e| anyhow!("Failed to open remote table: {}", e))?;
 

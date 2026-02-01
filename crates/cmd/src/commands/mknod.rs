@@ -121,7 +121,7 @@ async fn mknod_impl(
         // 1. Has explicit create_file function (template factory)
         // 2. Is executable factory (config bytes ARE the file content via ConfigFile wrapper)
         // 3. Is table transform factory (config stored for use by other factories)
-        tinyfs::EntryType::FileDataDynamic
+        tinyfs::EntryType::FileDynamic
     } else {
         return Err(anyhow!(
             "Factory '{}' does not support creating directories or files",

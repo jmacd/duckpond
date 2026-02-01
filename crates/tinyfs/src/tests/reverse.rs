@@ -57,6 +57,10 @@ impl Directory for ReverseDirectory {
         Err(error::Error::immutable(name))
     }
 
+    async fn remove(&mut self, name: &str) -> error::Result<Option<Node>> {
+        Err(error::Error::immutable(name))
+    }
+
     async fn entries(
         &self,
     ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<DirectoryEntry>> + Send>>> {
@@ -79,7 +83,7 @@ impl Directory for ReverseDirectory {
         for np in sub {
             let entry_type = match &np.node.node_type {
                 NodeType::Directory(_) => crate::EntryType::DirectoryPhysical,
-                NodeType::File(_) => crate::EntryType::FileDataPhysical,
+                NodeType::File(_) => crate::EntryType::FilePhysicalVersion,
                 NodeType::Symlink(_) => crate::EntryType::Symlink,
             };
             let dir_entry = DirectoryEntry::new(
@@ -101,7 +105,8 @@ impl crate::Metadata for ReverseDirectory {
         Ok(crate::NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
+            bao_outboard: None,
             entry_type: crate::EntryType::DirectoryDynamic,
             timestamp: 0, // TODO
         })

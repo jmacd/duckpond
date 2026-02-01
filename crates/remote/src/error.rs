@@ -33,7 +33,7 @@ pub enum RemoteError {
     FileNotFound(String),
 
     #[error(
-        "Chunk integrity check failed for bundle_id={bundle_id} chunk_id={chunk_id}: expected CRC32={expected:08x}, got {actual:08x}"
+        "Chunk integrity check failed for bundle_id={bundle_id} chunk_id={chunk_id}: expected BLAKE3={expected:016x}, got {actual:016x}"
     )]
     ChunkIntegrityFailed {
         bundle_id: String,
@@ -43,7 +43,7 @@ pub enum RemoteError {
     },
 
     #[error(
-        "File integrity check failed for bundle_id={bundle_id}: expected SHA256={expected}, got {actual}"
+        "File integrity check failed for bundle_id={bundle_id}: expected root_hash={expected}, got {actual}"
     )]
     FileIntegrityFailed {
         bundle_id: String,
@@ -82,5 +82,11 @@ impl From<clap::Error> for RemoteError {
 impl From<String> for RemoteError {
     fn from(s: String) -> Self {
         RemoteError::Configuration(s)
+    }
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for RemoteError {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        RemoteError::Configuration(e.to_string())
     }
 }

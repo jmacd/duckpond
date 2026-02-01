@@ -39,13 +39,14 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 uuid7 = { workspace = true }
-sha2 = { workspace = true }
-crc32fast = "1.4"
+bao-tree = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true }
 tlogfs = { workspace = true }
 steward = { workspace = true }
 provider = { workspace = true }
 tinyfs = { workspace = true }
+utilities = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }

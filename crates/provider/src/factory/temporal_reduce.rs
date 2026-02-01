@@ -449,9 +449,10 @@ impl tinyfs::Metadata for TemporalReduceSqlFile {
         Ok(NodeMetadata {
             version: 1,
             size: None,   // Unknown until SQL is generated and data computed
-            sha256: None, // Unknown until SQL is generated and data computed
-            entry_type: EntryType::FileSeriesDynamic, // Temporal reduce always creates series files
-            timestamp: 0, // Use epoch time for dynamic content
+            blake3: None, // Unknown until SQL is generated and data computed
+            bao_outboard: None,
+            entry_type: EntryType::TableDynamic, // Temporal reduce always creates series files
+            timestamp: 0,                        // Use epoch time for dynamic content
         })
     }
 }
@@ -808,6 +809,12 @@ impl Directory for TemporalReduceDirectory {
         ))
     }
 
+    async fn remove(&mut self, _name: &str) -> TinyFSResult<Option<Node>> {
+        Err(tinyfs::Error::Other(
+            "temporal-reduce directory is read-only".to_string(),
+        ))
+    }
+
     async fn entries(
         &self,
     ) -> TinyFSResult<Pin<Box<dyn Stream<Item = TinyFSResult<tinyfs::DirectoryEntry>> + Send>>>
@@ -851,7 +858,8 @@ impl tinyfs::Metadata for TemporalReduceDirectory {
         Ok(NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
@@ -934,16 +942,13 @@ impl Directory for TemporalReduceSiteDirectory {
             id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
             // Use this temporal reduce site directory's NodeID as the PartID for children
             let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-            let file_id = tinyfs::FileID::from_content(
-                parent_part_id,
-                EntryType::FileSeriesDynamic,
-                &id_bytes,
-            );
+            let file_id =
+                tinyfs::FileID::from_content(parent_part_id, EntryType::TableDynamic, &id_bytes);
 
             let dir_entry = tinyfs::DirectoryEntry::new(
                 filename.clone(),
                 file_id.node_id(),
-                EntryType::FileSeriesDynamic,
+                EntryType::TableDynamic,
                 0,
             );
             entries.push(Ok(dir_entry));
@@ -971,7 +976,7 @@ impl Directory for TemporalReduceSiteDirectory {
                 let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
                 let file_id = tinyfs::FileID::from_content(
                     parent_part_id,
-                    EntryType::FileSeriesDynamic,
+                    EntryType::TableDynamic,
                     &id_bytes,
                 );
 
@@ -988,6 +993,13 @@ impl Directory for TemporalReduceSiteDirectory {
             "Temporal reduce site directories are read-only".to_string(),
         ))
     }
+
+    async fn remove(&mut self, _name: &str) -> TinyFSResult<Option<Node>> {
+        // Temporal reduce site directories are read-only
+        Err(tinyfs::Error::Other(
+            "Temporal reduce site directories are read-only".to_string(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -996,7 +1008,8 @@ impl tinyfs::Metadata for TemporalReduceSiteDirectory {
         Ok(NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })
@@ -1092,7 +1105,6 @@ mod tests {
     /// Helper to create a parquet file in both FS and persistence
     async fn create_parquet_file(
         fs: &FS,
-        persistence: &MemoryPersistence,
         path: &str,
         parquet_data: Vec<u8>,
         entry_type: EntryType,
@@ -1108,11 +1120,7 @@ mod tests {
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
 
-        // Store in persistence (version 1 for MemoryPersistence)
-        persistence
-            .store_file_version(file_id, 1, parquet_data)
-            .await?;
-
+        // async_writer already stores the version in persistence, no need to duplicate
         Ok(file_id)
     }
 
@@ -1129,14 +1137,6 @@ mod tests {
         let _ = env_logger::try_init();
 
         let (fs, provider_context) = create_test_environment().await;
-
-        // Get persistence for create_parquet_file helper
-        // We know it's MemoryPersistence from create_test_environment
-        let persistence = Arc::clone(&provider_context.persistence);
-        let persistence = persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Should be MemoryPersistence");
 
         // Create source series files with 3 days of hourly data
         {
@@ -1198,15 +1198,9 @@ mod tests {
                     let _ = writer.close().unwrap();
                 }
 
-                let _ = create_parquet_file(
-                    &fs,
-                    persistence,
-                    &filename,
-                    buf,
-                    EntryType::FileSeriesPhysical,
-                )
-                .await
-                .unwrap();
+                let _ = create_parquet_file(&fs, &filename, buf, EntryType::TablePhysicalSeries)
+                    .await
+                    .unwrap();
             }
         }
 

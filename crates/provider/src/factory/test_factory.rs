@@ -285,8 +285,9 @@ impl tinyfs::Metadata for InfiniteCsvFile {
         Ok(tinyfs::NodeMetadata {
             version: 1,
             size: Some(total_size as u64),
-            sha256: None,
-            entry_type: tinyfs::EntryType::FileDataDynamic,
+            blake3: None,
+            bao_outboard: None,
+            entry_type: tinyfs::EntryType::FileDynamic,
             timestamp: 0,
         })
     }

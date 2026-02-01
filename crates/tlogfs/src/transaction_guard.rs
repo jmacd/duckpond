@@ -138,11 +138,8 @@ impl<'a> TransactionGuard<'a> {
     /// **Should only be used in test code.**
     #[cfg(test)]
     pub async fn commit_test(self) -> TinyFSResult<()> {
-        let metadata = PondTxnMetadata::new(
-            2,
-            PondUserMetadata::new(vec!["test".to_string(), "transaction".to_string()]),
-        );
-        let result = self.persistence.commit(metadata).await;
+        // Use the transaction's actual sequence number from begin_test()
+        let result = self.persistence.commit(self.metadata.clone()).await;
 
         result
             .map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
@@ -185,11 +182,27 @@ impl<'a> Drop for TransactionGuard<'a> {
     ///
     /// The embedded tinyfs::TransactionGuard will handle clearing the TransactionState.
     fn drop(&mut self) {
-        if self.persistence.state.is_some() {
-            debug!(
-                "Transaction {} dropped without explicit commit - cleaning up state",
-                self.metadata.txn_seq
-            );
+        if let Some(ref state) = self.persistence.state {
+            let (pending_records, modified_dirs) = state.pending_operation_counts();
+            let total_pending = pending_records + modified_dirs;
+
+            if total_pending > 0 {
+                // This is a write transaction being dropped - potential data loss!
+                log::warn!(
+                    "Transaction {} dropped without commit - {} pending operations LOST \
+                     ({} records, {} modified directories)",
+                    self.metadata.txn_seq,
+                    total_pending,
+                    pending_records,
+                    modified_dirs
+                );
+            } else {
+                // Read-only transaction or couldn't get counts - just debug log
+                debug!(
+                    "Transaction {} dropped without explicit commit - cleaning up state",
+                    self.metadata.txn_seq
+                );
+            }
             self.persistence.state = None;
             self.persistence.fs = None;
             // tinyfs::TransactionGuard drop will clear the txn_state

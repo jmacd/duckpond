@@ -127,7 +127,7 @@ impl DynamicDirDirectory {
             tinyfs::NodeType::Directory(_) => EntryType::DirectoryDynamic,
             tinyfs::NodeType::File(file_handle) => {
                 // Query the file's metadata to get the correct EntryType
-                // This allows factories like timeseries-join to specify FileSeriesDynamic
+                // This allows factories like timeseries-join to specify TableDynamic
                 let metadata = file_handle.metadata().await?;
                 metadata.entry_type
             }
@@ -190,6 +190,13 @@ impl Directory for DynamicDirDirectory {
         ))
     }
 
+    async fn remove(&mut self, _name: &str) -> tinyfs::Result<Option<Node>> {
+        debug!("DynamicDirDirectory::remove - mutation not permitted on dynamic directory");
+        Err(tinyfs::Error::Other(
+            "Dynamic directory is read-only".to_string(),
+        ))
+    }
+
     async fn entries(
         &self,
     ) -> tinyfs::Result<
@@ -244,7 +251,8 @@ impl Metadata for DynamicDirDirectory {
         Ok(NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
+            bao_outboard: None,
             entry_type: EntryType::DirectoryDynamic,
             timestamp: 0,
         })

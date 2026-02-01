@@ -4,14 +4,15 @@
 
 pub mod arrow;
 pub mod async_helpers;
+pub mod bao_validating_reader;
 pub mod caching_persistence;
+pub mod chained_reader;
 pub mod context;
 mod dir;
 mod entry_type;
 mod error;
 mod file;
 mod fs;
-mod glob;
 pub mod memory;
 mod metadata;
 mod node;

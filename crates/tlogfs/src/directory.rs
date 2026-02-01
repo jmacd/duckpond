@@ -112,6 +112,39 @@ impl Directory for OpLogDirectory {
         Ok(())
     }
 
+    async fn remove(&mut self, name: &str) -> tinyfs::Result<Option<Node>> {
+        debug!("OpLogDirectory::remove('{name}')");
+
+        // Ensure directory is loaded in memory
+        self.state
+            .ensure_directory_loaded(self.id)
+            .await
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
+
+        // Remove from in-memory state
+        let removed_entry = self
+            .state
+            .remove_directory_entry(self.id, name)
+            .await
+            .map_err(|e| {
+                tinyfs::Error::Other(format!("Failed to remove directory entry: {}", e))
+            })?;
+
+        // If entry existed, load and return the node
+        match removed_entry {
+            Some(entry) => {
+                let child_file_id = if entry.entry_type == tinyfs::EntryType::DirectoryPhysical {
+                    FileID::from_physical_dir_node_id(entry.child_node_id)
+                } else {
+                    FileID::new_from_ids(self.id.part_id(), entry.child_node_id)
+                };
+                let child_node = self.state.load_node(child_file_id).await?;
+                Ok(Some(child_node))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn entries(
         &self,
     ) -> tinyfs::Result<Pin<Box<dyn Stream<Item = tinyfs::Result<tinyfs::DirectoryEntry>> + Send>>>

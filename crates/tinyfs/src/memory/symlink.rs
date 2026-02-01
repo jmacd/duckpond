@@ -21,9 +21,10 @@ pub struct MemorySymlink {
 impl Metadata for MemorySymlink {
     async fn metadata(&self) -> error::Result<NodeMetadata> {
         Ok(NodeMetadata {
-            version: 1,   // Memory symlinks don't track versions
-            size: None,   // Symlinks don't have sizes
-            sha256: None, // Symlinks don't have checksums
+            version: 1,         // Memory symlinks don't track versions
+            size: None,         // Symlinks don't have sizes
+            blake3: None,       // Symlinks don't have checksums
+            bao_outboard: None, // Symlinks don't have bao-tree data
             entry_type: EntryType::Symlink,
             timestamp: 0, // TODO
         })

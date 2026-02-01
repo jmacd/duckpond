@@ -529,7 +529,7 @@ mod tests {
                         root.create_table_from_batch(
                             &filename,
                             &batch,
-                            tinyfs::EntryType::FileTablePhysical,
+                            tinyfs::EntryType::TablePhysicalVersion,
                         )
                         .await
                         .map_err(|e| {

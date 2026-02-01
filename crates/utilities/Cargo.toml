@@ -18,9 +18,21 @@ description.workspace = true
 [dependencies]
 chrono.workspace = true
 arrow.workspace = true
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
 parquet.workspace = true
 thiserror.workspace = true
 log.workspace = true
+bao-tree = { workspace = true }
+blake3 = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+futures = { workspace = true }
+deltalake = { workspace = true }
+datafusion = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util"] }
 
 [lints]
 workspace = true

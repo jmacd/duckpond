@@ -5,7 +5,7 @@
 //! HydroVu executable factory
 //!
 //! This factory creates run configuration nodes for HydroVu data collection.
-//! Configuration is stored as a file:data:dynamic node that can be:
+//! Configuration is stored as a file:dynamic node that can be:
 //! - Read with `pond cat /path/to/config`
 //! - Executed with `pond run /path/to/config`
 

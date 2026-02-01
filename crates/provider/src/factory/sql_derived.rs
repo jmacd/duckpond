@@ -425,8 +425,8 @@ impl SqlDerivedFile {
         // Validate scheme matches entry_type
         let scheme = url.scheme();
         let expected_scheme = match entry_type {
-            EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => "series",
-            EntryType::FileTablePhysical | EntryType::FileTableDynamic => "table",
+            EntryType::TablePhysicalSeries | EntryType::TableDynamic => "series",
+            EntryType::TablePhysicalVersion => "table",
             _ => {
                 return Err(tinyfs::Error::Other(format!(
                     "Unsupported entry_type {:?} for URL pattern",
@@ -444,14 +444,13 @@ impl SqlDerivedFile {
             )));
         }
 
-        // For format providers, look for FileDataPhysical/Dynamic instead of the requested entry_type
+        // For format providers, look for FilePhysicalVersion/Dynamic instead of the requested entry_type
         // The format provider will convert them to the appropriate type
         let lookup_entry_type = if is_format_provider {
             match entry_type {
-                EntryType::FileSeriesPhysical => EntryType::FileDataPhysical,
-                EntryType::FileSeriesDynamic => EntryType::FileDataDynamic,
-                EntryType::FileTablePhysical => EntryType::FileDataPhysical,
-                EntryType::FileTableDynamic => EntryType::FileDataDynamic,
+                EntryType::TablePhysicalSeries => EntryType::FilePhysicalVersion,
+                EntryType::TableDynamic => EntryType::FileDynamic,
+                EntryType::TablePhysicalVersion => EntryType::FilePhysicalVersion,
                 _ => entry_type,
             }
         } else {
@@ -555,7 +554,7 @@ impl SqlDerivedFile {
             if actual_entry_type == lookup_entry_type {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
-                    EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => file_id,
+                    EntryType::TablePhysicalSeries | EntryType::TableDynamic => file_id,
                     _ => FileID::new_from_ids(file_id.part_id(), file_id.node_id()),
                 };
                 if seen.insert(dedup_key) {
@@ -619,19 +618,12 @@ impl File for SqlDerivedFile {
 #[async_trait]
 impl Metadata for SqlDerivedFile {
     async fn metadata(&self) -> TinyFSResult<NodeMetadata> {
-        // Metadata should be lightweight - don't compute the actual data
-        // The entry type can be determined from mode without expensive computation
-        let entry_type = match self.mode {
-            SqlDerivedMode::Table => EntryType::FileTableDynamic,
-            SqlDerivedMode::Series => EntryType::FileSeriesDynamic,
-        };
-
-        // Return lightweight metadata - size and hash will be computed on actual data access
         Ok(NodeMetadata {
             version: 1,
-            size: None,   // Unknown until data is actually computed
-            sha256: None, // Unknown until data is actually computed
-            entry_type,
+            size: None,   // Unknown
+            blake3: None, // Unknown
+            bao_outboard: None,
+            entry_type: EntryType::TableDynamic,
             timestamp: 0,
         })
     }
@@ -842,10 +834,12 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
             // since source files can be created by factories (Dynamic) or direct uploads (Physical)
             let entry_types = match self.get_mode() {
                 SqlDerivedMode::Table => {
-                    vec![EntryType::FileTablePhysical, EntryType::FileTableDynamic]
+                    // Table mode looks for physical table sources only
+                    // (dynamic table files don't exist - all dynamic files use TableDynamic)
+                    vec![EntryType::TablePhysicalVersion]
                 }
                 SqlDerivedMode::Series => {
-                    vec![EntryType::FileSeriesPhysical, EntryType::FileSeriesDynamic]
+                    vec![EntryType::TablePhysicalSeries, EntryType::TableDynamic]
                 }
             };
             debug!(
@@ -1430,7 +1424,6 @@ mod tests {
     /// 2. The content is in persistence (so TinyFsObjectStore can read it)
     async fn create_parquet_file(
         fs: &FS,
-        persistence: &MemoryPersistence,
         path: &str,
         parquet_data: Vec<u8>,
         entry_type: EntryType,
@@ -1446,13 +1439,7 @@ mod tests {
         let node_path = root.get_node_path(path).await?;
         let file_id = node_path.id();
 
-        // ALSO store in persistence so TinyFsObjectStore can read it
-        // This is the key: MemoryFile stores content internally, but TinyFsObjectStore
-        // reads from persistence.read_file_version(), so we need both
-        persistence
-            .store_file_version(file_id, 1, parquet_data)
-            .await?;
-
+        // async_writer already stores the version in persistence, no need to duplicate
         Ok(file_id)
     }
 
@@ -1460,7 +1447,6 @@ mod tests {
     /// Converts the batch to parquet format and stores it using create_parquet_file
     async fn create_parquet_from_batch(
         fs: &FS,
-        persistence: &MemoryPersistence,
         path: &str,
         batch: &RecordBatch,
         entry_type: EntryType,
@@ -1473,7 +1459,7 @@ mod tests {
             _ = writer.close()?;
         }
 
-        create_parquet_file(fs, persistence, path, parquet_buffer, entry_type).await
+        create_parquet_file(fs, path, parquet_buffer, entry_type).await
     }
 
     /// Helper function to get a string array from any column, handling different Arrow string types
@@ -1606,11 +1592,6 @@ query: ""
     async fn test_sql_derived_pattern_matching() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create sensor_data1.parquet
         let batch1 = record_batch!(
@@ -1622,10 +1603,9 @@ query: ""
 
         _ = create_parquet_from_batch(
             &fs,
-            persistence,
             "/sensor_data1.parquet",
             &batch1,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1640,10 +1620,9 @@ query: ""
 
         _ = create_parquet_from_batch(
             &fs,
-            persistence,
             "/sensor_data2.parquet",
             &batch2,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1693,11 +1672,6 @@ query: ""
     async fn test_sql_derived_recursive_pattern_matching() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Set up FileSeries files in different directories
@@ -1715,10 +1689,9 @@ query: ""
         _ = root.create_dir_path("/sensors/building_a").await.unwrap();
         _ = create_parquet_from_batch(
             &fs,
-            persistence,
             "/sensors/building_a/data.parquet",
             &batch_a,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1734,10 +1707,9 @@ query: ""
         _ = root.create_dir_path("/sensors/building_b").await.unwrap();
         _ = create_parquet_from_batch(
             &fs,
-            persistence,
             "/sensors/building_b/data.parquet",
             &batch_b,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1802,11 +1774,6 @@ query: ""
     async fn test_sql_derived_multiple_patterns() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Set up FileSeries files in different locations matching different patterns
@@ -1823,10 +1790,9 @@ query: ""
         _ = root.create_dir_path("/metrics").await.unwrap();
         _ = create_parquet_from_batch(
             &fs,
-            persistence,
             "/metrics/data.parquet",
             &batch_metrics,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1843,10 +1809,9 @@ query: ""
         _ = root.create_dir_path("/logs").await.unwrap();
         _ = create_parquet_from_batch(
             &fs,
-            persistence,
             "/logs/info.parquet",
             &batch_logs,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1914,11 +1879,6 @@ query: ""
     async fn test_sql_derived_default_query() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create test Parquet data
         let batch = record_batch!(
@@ -1940,10 +1900,9 @@ query: ""
 
         _ = create_parquet_from_batch(
             &fs,
-            persistence,
             "/sensor_data.parquet",
             &batch,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -1991,11 +1950,6 @@ query: ""
     async fn test_sql_derived_file_series_single_version() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create test Parquet data
         let batch = record_batch!(
@@ -2017,10 +1971,9 @@ query: ""
 
         _ = create_parquet_from_batch(
             &fs,
-            persistence,
             "/sensor_data.parquet",
             &batch,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2070,11 +2023,6 @@ query: ""
     async fn test_sql_derived_file_series_two_versions() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Set up FileSeries test data with 2 versions
 
@@ -2106,15 +2054,9 @@ query: ""
             .unwrap();
 
             let filename = format!("/multi_sensor_data_v{}.parquet", version);
-            _ = create_parquet_from_batch(
-                &fs,
-                persistence,
-                &filename,
-                &batch,
-                EntryType::FileTablePhysical,
-            )
-            .await
-            .unwrap();
+            _ = create_parquet_from_batch(&fs, &filename, &batch, EntryType::TablePhysicalVersion)
+                .await
+                .unwrap();
         }
 
         // Create the SQL-derived file with multi-version FileSeries source
@@ -2162,11 +2104,6 @@ query: ""
     async fn test_sql_derived_file_series_three_versions() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Set up FileSeries test data with 3 versions
         for version in 1..=3 {
@@ -2197,15 +2134,9 @@ query: ""
             .unwrap();
 
             let filename = format!("/multi_sensor_data_v{}.parquet", version);
-            _ = create_parquet_from_batch(
-                &fs,
-                persistence,
-                &filename,
-                &batch,
-                EntryType::FileTablePhysical,
-            )
-            .await
-            .unwrap();
+            _ = create_parquet_from_batch(&fs, &filename, &batch, EntryType::TablePhysicalVersion)
+                .await
+                .unwrap();
         }
 
         // Create the SQL-derived file that should union all 3 versions
@@ -2277,11 +2208,6 @@ query: ""
     async fn test_sql_derived_factory_creation() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create test Parquet data
         let batch = record_batch!(
@@ -2302,10 +2228,9 @@ query: ""
 
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/data.parquet",
             parquet_buffer,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2374,11 +2299,6 @@ query: ""
     async fn test_sql_derived_chain() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
 
         // Create test Parquet data
         let batch = record_batch!(
@@ -2399,10 +2319,9 @@ query: ""
 
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/data.parquet",
             parquet_buffer,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2413,7 +2332,7 @@ query: ""
         let first_query = "SELECT name, value + 50 as adjusted_value FROM data WHERE value >= 200 ORDER BY adjusted_value";
         let first_file_id = FileID::from_content(
             PartID::root(),
-            EntryType::FileTableDynamic,
+            EntryType::TableDynamic,
             first_query.as_bytes(),
         );
         let context = test_context(&provider_context, first_file_id);
@@ -2449,10 +2368,9 @@ query: ""
         // Store the first result as an intermediate Parquet file
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/intermediate.parquet",
             first_result_data,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -2463,7 +2381,7 @@ query: ""
             let second_query = "SELECT name, adjusted_value * 2 as final_value FROM intermediate WHERE adjusted_value > 250 ORDER BY final_value DESC";
             let second_file_id = FileID::from_content(
                 PartID::root(),
-                EntryType::FileTableDynamic,
+                EntryType::TableDynamic,
                 second_query.as_bytes(),
             );
             let context = test_context(&provider_context, second_file_id);
@@ -2548,15 +2466,10 @@ query: ""
     async fn test_sql_derived_factory_multi_version_wildcard_pattern() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Create File A v1: timestamps 1,2,3 with columns: timestamp, temperature
-        let file_id_a = {
+        let _file_id_a = {
             let schema = Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",
@@ -2591,10 +2504,9 @@ query: ""
                 .unwrap();
             create_parquet_file(
                 &fs,
-                persistence,
                 "/hydrovu/devices/station_a/SensorA_v1.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap()
@@ -2630,11 +2542,14 @@ query: ""
                 _ = writer.close().unwrap();
             }
 
-            // Write new version to same path - store as version 2 using same FileID
-            persistence
-                .store_file_version(file_id_a, 2, parquet_buffer)
+            // Write new version to same path using async_writer (version 2)
+            let mut file_writer = root
+                .async_writer_path("/hydrovu/devices/station_a/SensorA_v1.series")
                 .await
                 .unwrap();
+            use tokio::io::AsyncWriteExt;
+            file_writer.write_all(&parquet_buffer).await.unwrap();
+            file_writer.shutdown().await.unwrap();
         }
 
         // Create File B: timestamps 1-6 with columns: timestamp, pressure
@@ -2673,10 +2588,9 @@ query: ""
                 .unwrap();
             _ = create_parquet_file(
                 &fs,
-                persistence,
                 "/hydrovu/devices/station_b/PressureB.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -2819,11 +2733,6 @@ query: ""
 
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days
@@ -2885,10 +2794,9 @@ query: ""
 
             _ = create_parquet_file(
                 &fs,
-                persistence,
                 "/sensors/stations/all_data.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -3074,7 +2982,7 @@ query: ""
             root.create_table_from_batch(
                 "/test_data.parquet",
                 &batch,
-                EntryType::FileTablePhysical,
+                EntryType::TablePhysicalVersion,
             )
             .await
             .unwrap();
@@ -3135,11 +3043,6 @@ query: ""
 
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Step 1: Create base parquet data with hourly sensor readings over 3 days using proper TinyFS Arrow integration
@@ -3199,10 +3102,9 @@ query: ""
 
             _ = create_parquet_file(
                 &fs,
-                persistence,
                 "/sensors/wildcard_test/base_data.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -3456,11 +3358,6 @@ query: ""
     async fn test_pattern_matching_finds_physical_and_dynamic_types() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Create two files with the same schema but different EntryTypes
@@ -3496,10 +3393,9 @@ query: ""
 
             _ = create_parquet_file(
                 &fs,
-                persistence,
                 "/test/physical.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -3535,10 +3431,9 @@ query: ""
 
             _ = create_parquet_file(
                 &fs,
-                persistence,
                 "/test/physical2.series",
                 parquet_buffer,
-                EntryType::FileSeriesPhysical,
+                EntryType::TablePhysicalSeries,
             )
             .await
             .unwrap();
@@ -3576,11 +3471,6 @@ query: ""
     async fn test_table_names_are_lowercase() {
         // Create memory filesystem with shared persistence
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .expect("Expected MemoryPersistence");
         let root = fs.root().await.unwrap();
 
         // Create a file with uppercase in the path
@@ -3614,10 +3504,9 @@ query: ""
 
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/Sensors/Temperature.series",
             parquet_buffer,
-            EntryType::FileSeriesPhysical,
+            EntryType::TablePhysicalSeries,
         )
         .await
         .unwrap();
@@ -4045,11 +3934,6 @@ query: ""
     async fn test_sql_derived_with_column_rename_transform() {
         // Create test environment
         let (fs, provider_context) = create_test_environment().await;
-        let persistence = provider_context
-            .persistence
-            .as_any()
-            .downcast_ref::<MemoryPersistence>()
-            .unwrap();
 
         // Create test data with column "old_col" that we'll rename to "new_col"
         let batch = record_batch!(
@@ -4069,10 +3953,9 @@ query: ""
 
         _ = create_parquet_file(
             &fs,
-            persistence,
             "/input.parquet",
             parquet_buffer,
-            EntryType::FileTablePhysical,
+            EntryType::TablePhysicalVersion,
         )
         .await
         .unwrap();
@@ -4094,7 +3977,7 @@ rules:
         _ = root
             .create_dynamic_path(
                 "/etc/test_rename",
-                EntryType::FileDataDynamic,
+                EntryType::FileDynamic,
                 "column-rename",
                 rename_config.as_bytes().to_vec(),
             )

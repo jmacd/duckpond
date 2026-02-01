@@ -219,8 +219,9 @@ impl tinyfs::Metadata for TimeseriesPivotFile {
         Ok(NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
-            entry_type: EntryType::FileSeriesDynamic,
+            blake3: None,
+            bao_outboard: None,
+            entry_type: EntryType::TableDynamic,
             timestamp: 0,
         })
     }

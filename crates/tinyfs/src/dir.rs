@@ -53,6 +53,11 @@ pub trait Directory: Metadata + Send + Sync {
 
     async fn insert(&mut self, name: String, id: Node) -> Result<()>;
 
+    /// Remove a directory entry by name.
+    /// Returns the removed node if it existed, None if not found.
+    /// Does NOT delete the underlying node - only removes the directory link.
+    async fn remove(&mut self, name: &str) -> Result<Option<Node>>;
+
     /// Returns a stream of directory entries (lightweight metadata) without loading full nodes.
     /// Callers should use batch loading to load multiple nodes efficiently.
     /// Returns DirectoryEntry which contains the name, so no tuple needed.
@@ -102,6 +107,12 @@ impl Handle {
             result_display = result_display
         );
         result
+    }
+
+    pub async fn remove(&self, name: &str) -> Result<Option<Node>> {
+        log::debug!("Handle::remove() - forwarding to Directory trait: {name}");
+        let mut dir = self.0.lock().await;
+        dir.remove(name).await
     }
 
     pub async fn entries(

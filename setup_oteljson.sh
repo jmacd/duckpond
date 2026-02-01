@@ -21,8 +21,13 @@ rm -rf ${SAMPLE_OUT}
 
 # Create remote backup configuration
 cat > ${REMOTE_CONFIG} <<EOF
-compression_level: 3
-url: "file:///tmp/pond-backups"
+compression_level: 6
+region: "auto"
+url: "s3://casparwater-dev"
+
+endpoint: "{{ env(name='R2_ENDPOINT') }}"
+access_key: "{{ env(name='R2_KEY') }}"
+secret_key: "{{ env(name='R2_SECRET') }}"
 EOF
 
 ${EXE} init

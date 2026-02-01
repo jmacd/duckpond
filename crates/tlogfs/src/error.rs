@@ -52,9 +52,9 @@ pub enum TLogFSError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_arrow::Error),
 
-    #[error("Large file not found: {sha256} at path {path}")]
+    #[error("Large file not found: {blake3} at path {path}")]
     LargeFileNotFound {
-        sha256: String,
+        blake3: String,
         path: String,
         #[source]
         source: std::io::Error,
@@ -62,6 +62,12 @@ pub enum TLogFSError {
 
     #[error("Large file integrity check failed: expected {expected}, got {actual}")]
     LargeFileIntegrityError { expected: String, actual: String },
+
+    #[error("Content integrity check failed: expected {expected}, got {actual}")]
+    ContentIntegrityError { expected: String, actual: String },
+
+    #[error("Content missing BLAKE3 hash for verification")]
+    ContentMissingHash,
 
     #[error("Internal error: {0}")]
     Internal(String),

@@ -20,8 +20,8 @@ pub struct FileVersionInfo {
     pub timestamp: i64,
     /// Size of the file content in bytes
     pub size: u64,
-    /// SHA256 hash of the content (for integrity checking)
-    pub sha256: Option<String>,
+    /// BLAKE3 hash of the content (for integrity checking)
+    pub blake3: Option<String>,
     /// Entry type for this version
     pub entry_type: EntryType,
     /// Extended metadata for this version

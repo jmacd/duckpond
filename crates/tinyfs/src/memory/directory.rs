@@ -24,9 +24,10 @@ pub struct MemoryDirectory {
 impl Metadata for MemoryDirectory {
     async fn metadata(&self) -> Result<NodeMetadata> {
         Ok(NodeMetadata {
-            version: 1,   // Memory directories don't track versions
-            size: None,   // Directories don't have sizes
-            sha256: None, // Directories don't have checksums
+            version: 1,         // Memory directories don't track versions
+            size: None,         // Directories don't have sizes
+            blake3: None,       // Directories don't have checksums
+            bao_outboard: None, // Directories don't have bao-tree data
             entry_type: EntryType::DirectoryPhysical,
             timestamp: 0, // TODO
         })
@@ -45,6 +46,10 @@ impl Directory for MemoryDirectory {
             return Err(Error::already_exists(&name));
         }
         Ok(())
+    }
+
+    async fn remove(&mut self, name: &str) -> Result<Option<Node>> {
+        Ok(self.entries.remove(name))
     }
 
     async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {

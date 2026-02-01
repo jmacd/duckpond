@@ -592,7 +592,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
                                 let cache_key = clean_path.clone();
                                 let cached_meta = CachedVersionMeta {
                                     size: version_info.size,
-                                    sha256: version_info.sha256.clone(),
+                                    sha256: version_info.blake3.clone(),
                                 };
 
                                 // Insert into cache (lock briefly, then release)

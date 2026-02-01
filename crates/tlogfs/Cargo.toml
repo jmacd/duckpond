@@ -27,7 +27,9 @@ arrow-schema = { workspace = true }
 async-compression = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+bao-tree = { workspace = true }
 base64 = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -49,13 +51,11 @@ serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-sha2 = { workspace = true }
 tempfile = { workspace = true }
 tera = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tokio = { workspace = true }
-tokio-tar = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
 utilities = { workspace = true }

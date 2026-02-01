@@ -35,20 +35,39 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       
-      - name: Run clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
-      
       - name: Run tests
         run: cargo test --workspace
+      
+      - name: Run clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
 
-  build-pond-cli:
-    name: Build & Publish Container
+  build-container:
+    name: Build & Publish Container (${{ matrix.arch }})
     needs: check
-    runs-on: ubuntu-latest
+    # Run on main/tags always, on PRs only with 'build-container' label
+    if: |
+      (success() || failure()) && (
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'build-container')
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Note: PRs from forks won't have write access to packages, so the push step will be skipped for them
     permissions:
       contents: read
       packages: write
       id-token: write  # For Sigstore signing
+    
+    outputs:
+      image_id: ${{ steps.meta.outputs.image_id }}
+      version: ${{ steps.meta.outputs.version }}
     
     steps:
       - name: Checkout repository
@@ -63,11 +82,9 @@ jobs:
         uses: sigstore/cosign-installer@v3.6.0
       
       - name: Log in to Container Registry (Podman)
-        if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       
       - name: Log in to Container Registry (Cosign)
-        if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       
       - name: Extract metadata
@@ -75,25 +92,75 @@ jobs:
         run: |
           IMAGE_ID=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
-          [ "$VERSION" == "main" ] && VERSION=latest
+          
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            VERSION=nightly
+          else
+            VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
+            [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+            [ "$VERSION" == "main" ] && VERSION=latest
+          fi
+          
           echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       
+      - name: Free up disk space before build
+        run: |
+          df -h
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -a -f || true
+          df -h
+      
       - name: Build container image
         run: |
-          podman build -f Dockerfile -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }} .
+          podman build \
+            -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }} \
+            -f Dockerfile .
       
       - name: Push container image
-        if: github.event_name != 'pull_request'
         id: push
         run: |
-          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}
-          DIGEST=$(podman inspect --format='{{.Digest}}' ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }})
+          podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }}
+          DIGEST=$(podman inspect ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }} --format '{{.Digest}}')
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
       
       - name: Sign container image with Sigstore
-        if: github.event_name != 'pull_request'
         run: |
-          cosign sign --yes ${{ steps.meta.outputs.image_id }}@${{ steps.push.outputs.digest }}
+          cosign sign --yes ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }}
+
+  comment-pr:
+    name: Comment PR with Image Tags
+    needs: build-container
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Comment PR with image tags
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const imageId = '${{ needs.build-container.outputs.image_id }}';
+            const version = '${{ needs.build-container.outputs.version }}';
+            
+            const body = `🐳 **Container images built and pushed!**
+            
+            **AMD64:**
+            \`\`\`bash
+            podman pull ${imageId}:${version}-amd64
+            \`\`\`
+            
+            **ARM64:**
+            \`\`\`bash
+            podman pull ${imageId}:${version}-arm64
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

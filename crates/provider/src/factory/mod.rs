@@ -4,6 +4,7 @@
 
 pub mod column_rename;
 pub mod dynamic_dir;
+pub mod logfile_ingest;
 pub mod sql_derived;
 pub mod template;
 pub mod temporal_reduce;

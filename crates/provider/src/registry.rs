@@ -75,6 +75,12 @@ impl ExecutionContext {
     pub fn mode(&self) -> ExecutionMode {
         self.mode
     }
+
+    /// Get the command arguments
+    #[must_use]
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
 }
 
 /// Trait for factory commands that can be executed
@@ -580,8 +586,9 @@ impl Metadata for ConfigFile {
         Ok(NodeMetadata {
             version: 1,
             size: Some(self.config_yaml.len() as u64),
-            sha256: None,
-            entry_type: EntryType::FileDataDynamic,
+            blake3: None,
+            bao_outboard: None,
+            entry_type: EntryType::FileDynamic,
             timestamp: 0,
         })
     }

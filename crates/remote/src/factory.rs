@@ -93,6 +93,49 @@ pub struct RemoteConfig {
     pub endpoint: String,
 }
 
+impl RemoteConfig {
+    /// Build storage options HashMap for S3/R2 configuration
+    ///
+    /// Returns a HashMap suitable for passing to Delta Lake storage options.
+    /// Only includes non-empty configuration values.
+    #[must_use]
+    pub fn to_storage_options(&self) -> std::collections::HashMap<String, String> {
+        let mut storage_options = std::collections::HashMap::new();
+        if self.url.starts_with("s3://") {
+            if !self.region.is_empty() {
+                storage_options.insert("region".to_string(), self.region.clone());
+            }
+            if !self.access_key.is_empty() {
+                storage_options.insert("access_key_id".to_string(), self.access_key.clone());
+            }
+            if !self.secret_key.is_empty() {
+                storage_options.insert("secret_access_key".to_string(), self.secret_key.clone());
+            }
+            if !self.endpoint.is_empty() {
+                storage_options.insert("endpoint".to_string(), self.endpoint.clone());
+                // R2-specific settings - use virtual_hosted_style_request = false for path-style access
+                storage_options.insert(
+                    "virtual_hosted_style_request".to_string(),
+                    "false".to_string(),
+                );
+            }
+        }
+        storage_options
+    }
+
+    /// Build the full remote table URL with pond_id appended if needed
+    ///
+    /// For S3 URLs with just bucket (e.g., s3://bucket), appends pond-{pond_id}
+    #[must_use]
+    pub fn build_table_url(&self, pond_id: &str) -> String {
+        if self.url.starts_with("s3://") && self.url.matches('/').count() == 2 {
+            format!("{}/pond-{}", self.url, pond_id)
+        } else {
+            self.url.clone()
+        }
+    }
+}
+
 /// Replication configuration for creating replica ponds
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationConfig {
@@ -176,30 +219,11 @@ async fn execute_remote(
     };
 
     // Build storage options for S3/R2 configuration
-    let mut storage_options = std::collections::HashMap::new();
-    if path.starts_with("s3://") {
-        if !config.region.is_empty() {
-            storage_options.insert("region".to_string(), config.region.clone());
-        }
-        if !config.access_key.is_empty() {
-            storage_options.insert("access_key_id".to_string(), config.access_key.clone());
-        }
-        if !config.secret_key.is_empty() {
-            storage_options.insert("secret_access_key".to_string(), config.secret_key.clone());
-        }
-        if !config.endpoint.is_empty() {
-            storage_options.insert("endpoint".to_string(), config.endpoint.clone());
-            // R2-specific settings - use virtual_hosted_style_request = false for path-style access
-            storage_options.insert(
-                "virtual_hosted_style_request".to_string(),
-                "false".to_string(),
-            );
-        }
-        log::debug!(
-            "   Final storage_options keys: {:?}",
-            storage_options.keys().collect::<Vec<_>>()
-        );
-    }
+    let storage_options = config.to_storage_options();
+    log::debug!(
+        "   Final storage_options keys: {:?}",
+        storage_options.keys().collect::<Vec<_>>()
+    );
 
     let remote_table =
         RemoteTable::open_or_create_with_storage_options(&path, true, storage_options).await?;
@@ -316,13 +340,7 @@ async fn execute_push(
 
             let reader = std::io::Cursor::new(bytes.to_vec());
             remote_table
-                .write_file_with_bundle_id(
-                    &transaction_bundle_id,
-                    version,
-                    path,
-                    reader,
-                    vec!["push".to_string()],
-                )
+                .write_file_with_bundle_id(&transaction_bundle_id, version, path, reader)
                 .await?;
         }
 
@@ -343,7 +361,6 @@ async fn execute_push(
                         version,
                         &commit_log_path,
                         reader,
-                        vec!["push".to_string()],
                     )
                     .await?;
             }
@@ -409,12 +426,7 @@ async fn execute_push(
             let reader = std::io::Cursor::new(file_data);
             // Use the relative path with _large_files/ prefix so restore knows where to put it
             remote_table
-                .write_file(
-                    current_version,
-                    relative_path,
-                    reader,
-                    vec!["push".to_string()],
-                )
+                .write_file(current_version, relative_path, reader)
                 .await?;
         }
 

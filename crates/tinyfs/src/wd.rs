@@ -6,7 +6,6 @@ use crate::EntryType;
 use crate::dir::*;
 use crate::error::*;
 use crate::fs::FS;
-use crate::glob::*;
 use crate::node::*;
 use crate::symlink::*;
 use async_trait::async_trait;
@@ -20,6 +19,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use tokio::io::AsyncRead;
+use utilities::glob::{WildcardComponent, parse_glob};
 
 /// Context for operations within a specific directory
 #[derive(Clone)]
@@ -176,7 +176,7 @@ impl WD {
         &self,
         path: P,
     ) -> Result<(NodePath, Pin<Box<dyn crate::file::FileMetadataWriter>>)> {
-        self.create_file_path_streaming_with_type(path, EntryType::FileDataPhysical)
+        self.create_file_path_streaming_with_type(path, EntryType::FilePhysicalVersion)
             .await
     }
 
@@ -275,7 +275,8 @@ impl WD {
         .await
     }
 
-    /// Creates a directory at the specified path
+    /// Creates a directory at the specified path.
+    /// The parent directory must already exist; use `create_dir_all` for mkdir -p semantics.
     pub async fn create_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
         let path_clone = path.as_ref().to_path_buf();
 
@@ -297,6 +298,124 @@ impl WD {
             .await?;
 
         self.fs.wd(&node).await
+    }
+
+    /// Creates a directory and all parent directories as needed (mkdir -p semantics).
+    /// If the directory already exists, returns Ok with a WD to that directory.
+    /// Note: Parent directory references (..) in the path are not supported and will error.
+    pub async fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
+        let path = path.as_ref();
+        let mut current_wd = self.clone();
+
+        // Split the path into components and create each one if it doesn't exist
+        for component in path.components() {
+            match component {
+                Component::RootDir => {
+                    // Skip root - we start from self which may or may not be root
+                    continue;
+                }
+                Component::CurDir => {
+                    // Skip current dir references
+                    continue;
+                }
+                Component::ParentDir => {
+                    // Parent dir references are not supported in create_dir_all
+                    return Err(Error::Other(
+                        "Parent directory references (..) not supported in create_dir_all"
+                            .to_string(),
+                    ));
+                }
+                Component::Prefix(_) => {
+                    return Err(Error::prefix_not_supported(path));
+                }
+                Component::Normal(name) => {
+                    let name_str = name.to_string_lossy().to_string();
+
+                    // Try to get the entry - if it exists, navigate into it
+                    let ddir = current_wd.dref.clone();
+                    match ddir.get(&name_str).await {
+                        Ok(Some(child)) => {
+                            // Entry exists - make sure it's a directory and navigate into it
+                            match &child.node.node_type {
+                                NodeType::Directory(_) => {
+                                    current_wd = current_wd
+                                        .fs
+                                        .wd(&NodePath::new(
+                                            child.node.clone(),
+                                            ddir.path().join(&name_str),
+                                        ))
+                                        .await?;
+                                }
+                                _ => {
+                                    return Err(Error::not_a_directory(path));
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            // Entry doesn't exist - create the directory
+                            let id = FileID::new_physical_dir_id();
+                            let node = current_wd.fs.persistence.create_directory_node(id).await?;
+                            current_wd.fs.persistence.store_node(&node).await?;
+                            current_wd
+                                .dref
+                                .insert(name_str.clone(), node.clone())
+                                .await?;
+                            current_wd = current_wd
+                                .fs
+                                .wd(&NodePath::new(node, ddir.path().join(&name_str)))
+                                .await?;
+                        }
+                        Err(e) => {
+                            return Err(Error::Other(format!(
+                                "Failed to access '{}' in path {}: {}",
+                                name_str,
+                                path.display(),
+                                e
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(current_wd)
+    }
+
+    /// Rename an entry in this directory.
+    /// This is a compound operation: remove the old name + insert with new name.
+    /// The underlying node's FileID and version history are preserved.
+    ///
+    /// # Arguments
+    /// * `old_name` - Current name of the entry
+    /// * `new_name` - New name for the entry
+    ///
+    /// # Returns
+    /// * `Ok(())` if rename succeeded
+    /// * `Err(NotFound)` if old_name doesn't exist
+    /// * `Err(AlreadyExists)` if new_name already exists
+    pub async fn rename_entry(&self, old_name: &str, new_name: &str) -> Result<()> {
+        // Check if new name already exists
+        if self.dref.get(new_name).await?.is_some() {
+            return Err(Error::already_exists(new_name));
+        }
+
+        // Remove old entry (returns the node)
+        let node = self
+            .dref
+            .handle
+            .remove(old_name)
+            .await?
+            .ok_or_else(|| Error::not_found(old_name))?;
+
+        // Insert with new name
+        self.dref.insert(new_name.to_string(), node).await?;
+
+        debug!(
+            "Renamed entry '{}' -> '{}' in directory",
+            old_name, new_name
+        );
+
+        Ok(())
     }
 
     /// Get metadata for a file at the specified path
@@ -360,7 +479,7 @@ impl WD {
         &self,
         path: P,
     ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
-        self.async_writer_path_with_type(path, EntryType::FileDataPhysical)
+        self.async_writer_path_with_type(path, EntryType::FilePhysicalVersion)
             .await
     }
 

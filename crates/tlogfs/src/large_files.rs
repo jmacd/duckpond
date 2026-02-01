@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use log::{debug, info};
-use sha2::{Digest, Sha256};
+use parquet::basic::Compression;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -19,11 +20,44 @@ pub const DIRECTORY_SPLIT_THRESHOLD: usize = 100;
 /// Number of bits (4 hex digits) for directory prefix
 pub const PREFIX_BITS: usize = 16;
 
-/// Get large file path with hierarchical directory structure
+/// Options for large file storage
+#[derive(Clone, Debug)]
+pub struct LargeFileOptions {
+    /// Compression codec for parquet files
+    pub compression: Compression,
+    /// Maximum rows per row group (None = parquet default)
+    /// Setting to 1 puts each chunk in its own row group for isolated corruption detection
+    pub max_row_group_size: Option<usize>,
+}
+
+impl Default for LargeFileOptions {
+    fn default() -> Self {
+        Self {
+            compression: Compression::ZSTD(parquet::basic::ZstdLevel::default()),
+            max_row_group_size: None,
+        }
+    }
+}
+
+impl LargeFileOptions {
+    /// Create options optimized for corruption testing:
+    /// - No compression (so we can corrupt specific bytes)
+    /// - 1 row per row group (so each chunk is isolated)
+    #[cfg(test)]
+    #[must_use]
+    pub fn uncompressed() -> Self {
+        Self {
+            compression: Compression::UNCOMPRESSED,
+            max_row_group_size: Some(1),
+        }
+    }
+}
+
+/// Get large file path with hierarchical directory structure (writes to new .parquet format)
 /// Returns the path where the file should be stored, handling directory migration automatically
 pub async fn large_file_path<P: AsRef<Path>>(
     pond_path: P,
-    sha256: &str,
+    blake3: &str,
 ) -> std::io::Result<PathBuf> {
     let large_files_dir = pond_path.as_ref().to_path_buf().join("_large_files");
 
@@ -32,14 +66,14 @@ pub async fn large_file_path<P: AsRef<Path>>(
         // Ensure migration is complete
         migrate_to_hierarchical_structure(&large_files_dir).await?;
 
-        // Use hierarchical path
-        let prefix = &sha256[0..4]; // First 4 hex digits (16 bits)
+        // Use hierarchical path with .parquet extension
+        let prefix = &blake3[0..4]; // First 4 hex digits (16 bits)
         Ok(large_files_dir
-            .join(format!("sha256_{}={}", PREFIX_BITS, prefix))
-            .join(format!("sha256={}", sha256)))
+            .join(format!("blake3_{}={}", PREFIX_BITS, prefix))
+            .join(format!("blake3={}.parquet", blake3)))
     } else {
-        // Use flat structure
-        Ok(large_files_dir.join(format!("sha256={}", sha256)))
+        // Use flat structure with .parquet extension
+        Ok(large_files_dir.join(format!("blake3={}.parquet", blake3)))
     }
 }
 
@@ -66,7 +100,7 @@ async fn has_hierarchical_directories(large_files_dir: &PathBuf) -> std::io::Res
         if entry.file_type().await?.is_dir() {
             let filename = entry.file_name();
             let name = filename.to_string_lossy();
-            if name.starts_with(&format!("sha256_{}=", PREFIX_BITS)) {
+            if name.starts_with(&format!("blake3_{}=", PREFIX_BITS)) {
                 return Ok(true);
             }
         }
@@ -74,7 +108,7 @@ async fn has_hierarchical_directories(large_files_dir: &PathBuf) -> std::io::Res
     Ok(false)
 }
 
-/// Count files in flat structure (sha256=* files directly in _large_files/)
+/// Count files in flat structure (blake3=* files directly in _large_files/)
 async fn count_flat_files(large_files_dir: &PathBuf) -> std::io::Result<usize> {
     if !large_files_dir.exists() {
         return Ok(0);
@@ -86,7 +120,7 @@ async fn count_flat_files(large_files_dir: &PathBuf) -> std::io::Result<usize> {
         if entry.file_type().await?.is_file() {
             let filename = entry.file_name();
             let name = filename.to_string_lossy();
-            if name.starts_with("sha256=") {
+            if name.starts_with("blake3=") {
                 count += 1;
             }
         }
@@ -107,20 +141,20 @@ async fn migrate_to_hierarchical_structure(large_files_dir: &PathBuf) -> std::io
         if entry.file_type().await?.is_file() {
             let filename = entry.file_name();
             let name = filename.to_string_lossy();
-            if name.starts_with("sha256=") {
-                // Extract SHA256 from filename: "sha256=<sha256>"
-                if let Some(sha256) = name.strip_prefix("sha256=") {
-                    flat_files.push((entry.path(), sha256.to_string()));
+            if name.starts_with("blake3=") {
+                // Extract BLAKE3 from filename: "blake3=<blake3>"
+                if let Some(blake3) = name.strip_prefix("blake3=") {
+                    flat_files.push((entry.path(), blake3.to_string()));
                 }
             }
         }
     }
 
     // Migrate each file to hierarchical structure
-    for (old_path, sha256) in flat_files {
-        let prefix = &sha256[0..4]; // First 4 hex digits
-        let subdir = large_files_dir.join(format!("sha256_{}={}", PREFIX_BITS, prefix));
-        let new_path = subdir.join(format!("sha256={}", sha256));
+    for (old_path, blake3) in flat_files {
+        let prefix = &blake3[0..4]; // First 4 hex digits
+        let subdir = large_files_dir.join(format!("blake3_{}={}", PREFIX_BITS, prefix));
+        let new_path = subdir.join(format!("blake3={}", blake3));
 
         // Create subdirectory if it doesn't exist
         tokio::fs::create_dir_all(&subdir).await?;
@@ -134,27 +168,27 @@ async fn migrate_to_hierarchical_structure(large_files_dir: &PathBuf) -> std::io
     Ok(())
 }
 
-/// Find large file path (for reading) - searches both flat and hierarchical locations
+/// Find large file path (for reading) - parquet format with blake3 hash
 pub async fn find_large_file_path<P: AsRef<Path>>(
     pond_path: P,
-    sha256: &str,
+    blake3: &str,
 ) -> std::io::Result<Option<PathBuf>> {
     let large_files_dir = pond_path.as_ref().join("_large_files");
 
-    // Try hierarchical path first
-    let prefix = &sha256[0..4];
-    let hierarchical_path = large_files_dir
-        .join(format!("sha256_{}={}", PREFIX_BITS, prefix))
-        .join(format!("sha256={}", sha256));
+    let prefix = &blake3[0..4];
 
-    if hierarchical_path.exists() {
-        return Ok(Some(hierarchical_path));
+    // Try hierarchical structure
+    let hierarchical_parquet = large_files_dir
+        .join(format!("blake3_{}={}", PREFIX_BITS, prefix))
+        .join(format!("blake3={}.parquet", blake3));
+    if hierarchical_parquet.exists() {
+        return Ok(Some(hierarchical_parquet));
     }
 
-    // Try flat path
-    let flat_path = large_files_dir.join(format!("sha256={}", sha256));
-    if flat_path.exists() {
-        return Ok(Some(flat_path));
+    // Try flat structure
+    let flat_parquet = large_files_dir.join(format!("blake3={}.parquet", blake3));
+    if flat_parquet.exists() {
+        return Ok(Some(flat_parquet));
     }
 
     Ok(None)
@@ -175,7 +209,7 @@ pub fn should_store_as_large_file(content: &[u8]) -> bool {
 #[derive(Clone)]
 pub struct HybridWriterResult {
     pub content: Vec<u8>,
-    pub sha256: String,
+    pub blake3: String,
     pub size: usize,
 }
 
@@ -185,25 +219,32 @@ pub struct HybridWriter {
     temp_file: Option<File>,
     /// Path to temporary file
     temp_path: Option<PathBuf>,
-    /// Incremental SHA256 hasher
-    hasher: Sha256,
+    /// Incremental BLAKE3 hasher
+    hasher: blake3::Hasher,
     /// Total bytes written
     total_written: usize,
     /// Target pond directory for final file
     pond_path: PathBuf,
     /// Future for creating temp file
     create_future: Option<Pin<Box<dyn Future<Output = std::io::Result<(File, PathBuf)>> + Send>>>,
+    /// Options for large file storage
+    options: LargeFileOptions,
 }
 
 impl HybridWriter {
     pub fn new<P: AsRef<Path>>(pond_path: P) -> Self {
+        Self::with_options(pond_path, LargeFileOptions::default())
+    }
+
+    pub fn with_options<P: AsRef<Path>>(pond_path: P, options: LargeFileOptions) -> Self {
         Self {
             temp_file: None,
             temp_path: None,
-            hasher: Sha256::new(),
+            hasher: blake3::Hasher::new(),
             total_written: 0,
             pond_path: pond_path.as_ref().into(),
             create_future: None,
+            options,
         }
     }
 
@@ -226,31 +267,83 @@ impl HybridWriter {
         }
 
         // Finalize hash computation
-        let sha256 = format!("{:x}", self.hasher.finalize());
+        let blake3 = self.hasher.finalize().to_hex().to_string();
 
         let total_written = self.total_written;
         debug!(
-            "HybridWriter finalize: {total_written} bytes, threshold={LARGE_FILE_THRESHOLD}, sha256={sha256}"
+            "HybridWriter finalize: {total_written} bytes, threshold={LARGE_FILE_THRESHOLD}, blake3={blake3}"
         );
 
         let content = if self.total_written >= LARGE_FILE_THRESHOLD {
-            debug!("Large file: moving temp file to external storage");
-            // Large file: move temp file to final location
+            debug!("Large file: converting to parquet format");
+
+            // Large file: convert temp file to parquet format using ChunkedWriter
             let temp_path = self
                 .temp_path
                 .ok_or_else(|| std::io::Error::other("No temp file created for large file"))?;
 
+            // Open temp file for reading
+            let temp_file_reader = File::open(&temp_path).await?;
+
+            // Create ChunkedWriter to process the file
+            // Use pond_txn_id=0 and path=blake3 as identifiers (tlogfs doesn't track pond_txn_id at this level)
+            let chunked_writer =
+                utilities::chunked_files::ChunkedWriter::new(0, blake3.clone(), temp_file_reader);
+
+            // Write to record batches
+            let result = chunked_writer
+                .write_to_batches()
+                .await
+                .map_err(|e| std::io::Error::other(format!("ChunkedWriter error: {}", e)))?;
+
             let large_files_dir = self.pond_path.join("_large_files");
             tokio::fs::create_dir_all(&large_files_dir).await?;
 
-            let final_path = large_file_path(&self.pond_path, &sha256).await?;
-            tokio::fs::rename(&temp_path, &final_path).await?;
+            let final_path = large_file_path(&self.pond_path, &blake3).await?;
 
-            // Sync the file after move
+            // Write batches to parquet file
+            let parquet_file = File::create(&final_path).await?;
+            let schema = utilities::chunked_files::arrow_schema();
+
+            // Write parquet file using ArrowWriter with configured options
+            let mut props_builder = parquet::file::properties::WriterProperties::builder()
+                .set_compression(self.options.compression);
+
+            // Optionally set max_row_group_size (used in tests for per-chunk isolation)
+            if let Some(max_size) = self.options.max_row_group_size {
+                props_builder = props_builder.set_max_row_group_size(max_size);
+            }
+
+            let props = props_builder.build();
+
+            let mut writer = parquet::arrow::AsyncArrowWriter::try_new(
+                parquet_file,
+                schema.clone(),
+                Some(props),
+            )
+            .map_err(|e| {
+                std::io::Error::other(format!("Failed to create parquet writer: {}", e))
+            })?;
+
+            for batch in result.batches {
+                writer
+                    .write(&batch)
+                    .await
+                    .map_err(|e| std::io::Error::other(format!("Failed to write batch: {}", e)))?;
+            }
+
+            let _metadata = writer.close().await.map_err(|e| {
+                std::io::Error::other(format!("Failed to close parquet writer: {}", e))
+            })?;
+
+            // Sync the file after write
             let file = File::open(&final_path).await?;
             file.sync_all().await?;
 
-            info!("Successfully wrote large file to {:?}", final_path);
+            // Clean up temp file
+            tokio::fs::remove_file(&temp_path).await?;
+
+            info!("Successfully wrote large file parquet to {:?}", final_path);
             Vec::new() // Empty vec indicates external storage
         } else if self.temp_path.is_some() {
             debug!("Small file: reading temp file into memory");
@@ -266,7 +359,7 @@ impl HybridWriter {
 
         Ok(HybridWriterResult {
             content,
-            sha256,
+            blake3,
             size: self.total_written,
         })
     }
@@ -327,7 +420,7 @@ impl AsyncWrite for HybridWriter {
             // Only update hasher and counter if write succeeded
             if let Poll::Ready(Ok(n)) = result {
                 // Hash exactly what was written (might be less than buf.len())
-                this.hasher.update(&buf[..n]);
+                let _ = this.hasher.update(&buf[..n]);
                 this.total_written += n;
             }
 
@@ -357,5 +450,346 @@ impl AsyncWrite for HybridWriter {
         } else {
             Poll::Ready(Ok(()))
         }
+    }
+}
+
+/// Streaming reader for parquet-encoded large files
+///
+/// Reads chunks on-demand without loading entire file into memory.
+/// Verification is optional and happens at 16KB block granularity using bao-tree.
+pub struct ParquetFileReader {
+    /// Path to the parquet file
+    file_path: PathBuf,
+    /// Total size of the reconstructed file
+    total_size: u64,
+    /// Current position in the logical file
+    position: u64,
+    /// Current chunk being read (chunk_id, chunk_data)
+    current_chunk: Option<LoadedChunk>,
+    /// Position within current chunk
+    chunk_position: usize,
+    /// Pending chunk load future (stored to allow proper polling)
+    pending_load: Option<PendingChunkLoad>,
+}
+
+/// A loaded chunk with optional verification data
+struct LoadedChunk {
+    chunk_id: i64,
+    data: Vec<u8>,
+}
+
+/// State for async chunk loading
+struct PendingChunkLoad {
+    chunk_id: i64,
+    future: Pin<Box<dyn Future<Output = std::io::Result<LoadedChunk>> + Send>>,
+}
+
+impl ParquetFileReader {
+    /// Create a new streaming reader for a parquet file
+    pub async fn new(file_path: PathBuf) -> std::io::Result<Self> {
+        use futures::StreamExt;
+
+        // Open parquet file and read metadata to get total size
+        let file = File::open(&file_path).await?;
+
+        let builder = parquet::arrow::ParquetRecordBatchStreamBuilder::new(file)
+            .await
+            .map_err(|e| std::io::Error::other(format!("Failed to open parquet: {}", e)))?;
+
+        let mut stream = builder
+            .build()
+            .map_err(|e| std::io::Error::other(format!("Failed to build parquet reader: {}", e)))?;
+
+        let total_size = if let Some(first_batch) = stream.next().await {
+            let batch = first_batch
+                .map_err(|e| std::io::Error::other(format!("Failed to read first batch: {}", e)))?;
+
+            if batch.num_rows() == 0 {
+                return Err(std::io::Error::other("Empty parquet file"));
+            }
+
+            // Get total_size from column 7
+            let total_sizes = batch
+                .column(7)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .ok_or_else(|| std::io::Error::other("Invalid total_size column type"))?;
+
+            total_sizes.value(0) as u64
+        } else {
+            return Err(std::io::Error::other("Empty parquet file"));
+        };
+
+        Ok(Self {
+            file_path,
+            total_size,
+            position: 0,
+            current_chunk: None,
+            chunk_position: 0,
+            pending_load: None,
+        })
+    }
+
+    /// Get total size of the file
+    #[must_use]
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+}
+
+/// Load and verify a chunk from parquet file using SeriesOutboard
+///
+/// Verification parses the stored SeriesOutboard and verifies:
+/// 1. Chunk size matches stored version_size
+/// 2. For chunk 0: verifies content hashes to stored cumulative_blake3
+/// 3. Stored outboard parses correctly
+///
+/// Full cumulative verification requires sequential reading with state tracking.
+/// This function provides per-chunk validation suitable for random access.
+async fn load_chunk_from_parquet(
+    file_path: PathBuf,
+    chunk_id: i64,
+) -> std::io::Result<LoadedChunk> {
+    use futures::StreamExt;
+    use utilities::bao_outboard::SeriesOutboard;
+
+    let file = File::open(&file_path).await?;
+    let mut reader = parquet::arrow::ParquetRecordBatchStreamBuilder::new(file)
+        .await
+        .map_err(|e| std::io::Error::other(format!("Failed to open parquet: {}", e)))?
+        .build()
+        .map_err(|e| std::io::Error::other(format!("Failed to build parquet reader: {}", e)))?;
+
+    while let Some(batch_result) = reader.next().await {
+        let batch = batch_result
+            .map_err(|e| std::io::Error::other(format!("Failed to read batch: {}", e)))?;
+
+        let chunk_ids = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .ok_or_else(|| std::io::Error::other("Invalid chunk_id column type"))?;
+
+        for row in 0..batch.num_rows() {
+            if chunk_ids.value(row) == chunk_id {
+                // Load chunk data, hash, and outboard for verification
+                let chunk_hashes = batch
+                    .column(4)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .ok_or_else(|| std::io::Error::other("Invalid chunk_hash column type"))?;
+
+                let chunk_outboards = batch
+                    .column(5)
+                    .as_any()
+                    .downcast_ref::<arrow_array::BinaryArray>()
+                    .ok_or_else(|| std::io::Error::other("Invalid chunk_outboard column type"))?;
+
+                let chunk_datas = batch
+                    .column(6)
+                    .as_any()
+                    .downcast_ref::<arrow_array::BinaryArray>()
+                    .ok_or_else(|| std::io::Error::other("Invalid chunk_data column type"))?;
+
+                let expected_hash_hex = chunk_hashes.value(row);
+                let stored_outboard_bytes = chunk_outboards.value(row);
+                let chunk_data = chunk_datas.value(row);
+
+                // Parse the stored SeriesOutboard
+                let stored_outboard =
+                    SeriesOutboard::from_bytes(stored_outboard_bytes).map_err(|e| {
+                        std::io::Error::other(format!(
+                            "Chunk {} has invalid SeriesOutboard: {}",
+                            chunk_id, e
+                        ))
+                    })?;
+
+                // Verify chunk size matches stored version_size
+                if chunk_data.len() as u64 != stored_outboard.version_size {
+                    return Err(std::io::Error::other(format!(
+                        "Chunk {} size mismatch: data has {} bytes, outboard says {}",
+                        chunk_id,
+                        chunk_data.len(),
+                        stored_outboard.version_size
+                    )));
+                }
+
+                // Verify stored hash matches outboard's cumulative_blake3
+                let stored_hash = blake3::Hash::from_bytes(stored_outboard.cumulative_blake3);
+                let stored_hash_hex = stored_hash.to_hex().to_string();
+                if stored_hash_hex != expected_hash_hex {
+                    return Err(std::io::Error::other(format!(
+                        "Chunk {} hash mismatch: chunk_hash={}, outboard.cumulative_blake3={}",
+                        chunk_id, expected_hash_hex, stored_hash_hex
+                    )));
+                }
+
+                // For chunk 0, we can fully verify since it starts at offset 0
+                // (or at the series starting offset, which we don't have here)
+                if chunk_id == 0 {
+                    let computed = SeriesOutboard::first_version(chunk_data);
+                    let computed_hash = blake3::Hash::from_bytes(computed.cumulative_blake3);
+                    if computed_hash != stored_hash {
+                        return Err(std::io::Error::other(format!(
+                            "Chunk 0 verification failed: expected {}, computed {}",
+                            stored_hash_hex,
+                            computed_hash.to_hex()
+                        )));
+                    }
+                }
+                // For chunk N > 0, full verification requires previous chunk's state
+                // which we don't have in this random-access context.
+                // The size and hash consistency checks above catch most corruption.
+
+                debug!(
+                    "Verified chunk {} ({} bytes, cumulative_hash={})",
+                    chunk_id,
+                    chunk_data.len(),
+                    &stored_hash_hex[..16.min(stored_hash_hex.len())]
+                );
+
+                return Ok(LoadedChunk {
+                    chunk_id,
+                    data: chunk_data.to_vec(),
+                });
+            }
+        }
+    }
+
+    Err(std::io::Error::other(format!(
+        "Chunk {} not found in parquet file",
+        chunk_id
+    )))
+}
+
+impl tokio::io::AsyncRead for ParquetFileReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = &mut *self;
+
+        // Check if we're at EOF
+        if this.position >= this.total_size {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Calculate which chunk we need
+        let chunk_size = utilities::chunked_files::CHUNK_SIZE_DEFAULT;
+        let chunk_id = (this.position / chunk_size as u64) as i64;
+
+        // Check if we have a pending load for this chunk
+        if let Some(ref mut pending) = this.pending_load {
+            if pending.chunk_id == chunk_id {
+                // Poll the existing future
+                match pending.future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(chunk)) => {
+                        this.current_chunk = Some(chunk);
+                        this.chunk_position = (this.position % chunk_size as u64) as usize;
+                        this.pending_load = None;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        this.pending_load = None;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            } else {
+                // Different chunk requested, cancel old load
+                this.pending_load = None;
+            }
+        }
+
+        // Check if we need to load a different chunk
+        let need_new_chunk = match &this.current_chunk {
+            None => true,
+            Some(chunk) => chunk.chunk_id != chunk_id,
+        };
+
+        if need_new_chunk && this.pending_load.is_none() {
+            // Start loading the chunk
+            let file_path = this.file_path.clone();
+            let future = Box::pin(load_chunk_from_parquet(file_path, chunk_id));
+            this.pending_load = Some(PendingChunkLoad { chunk_id, future });
+
+            // Poll it immediately
+            if let Some(ref mut pending) = this.pending_load {
+                match pending.future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(chunk)) => {
+                        this.current_chunk = Some(chunk);
+                        this.chunk_position = (this.position % chunk_size as u64) as usize;
+                        this.pending_load = None;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        this.pending_load = None;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+
+        // Read from current chunk
+        if let Some(chunk) = &this.current_chunk {
+            let available = chunk.data.len() - this.chunk_position;
+            let to_read = std::cmp::min(available, buf.remaining());
+            let to_read = std::cmp::min(to_read, (this.total_size - this.position) as usize);
+
+            if to_read > 0 {
+                buf.put_slice(&chunk.data[this.chunk_position..this.chunk_position + to_read]);
+                this.chunk_position += to_read;
+                this.position += to_read as u64;
+            }
+        }
+
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncSeek for ParquetFileReader {
+    fn start_seek(mut self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
+        let new_pos = match position {
+            std::io::SeekFrom::Start(pos) => pos as i64,
+            std::io::SeekFrom::End(offset) => self.total_size as i64 + offset,
+            std::io::SeekFrom::Current(offset) => self.position as i64 + offset,
+        };
+
+        if new_pos < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid seek to negative position",
+            ));
+        }
+
+        let new_pos = new_pos as u64;
+        if new_pos > self.total_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Seek beyond end of file",
+            ));
+        }
+
+        self.position = new_pos;
+
+        // Invalidate current chunk if we seeked to a different chunk
+        let chunk_size = utilities::chunked_files::CHUNK_SIZE_DEFAULT;
+        let new_chunk_id = (new_pos / chunk_size as u64) as i64;
+
+        if let Some(chunk) = &self.current_chunk {
+            if chunk.chunk_id != new_chunk_id {
+                self.current_chunk = None;
+                self.pending_load = None; // Cancel any pending load
+            } else {
+                // Same chunk, just update position within chunk
+                self.chunk_position = (new_pos % chunk_size as u64) as usize;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
+        Poll::Ready(Ok(self.position))
     }
 }

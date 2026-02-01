@@ -785,7 +785,7 @@ pub async fn set_extended_attributes_command(
     // Use TinyFS async writer to either add a new version to existing file or create new FileSeries
     // This handles both cases automatically: existing file gets new version, missing file gets created
     let mut writer = tinyfs_root
-        .async_writer_path_with_type(&target_path, tinyfs::EntryType::FileSeriesPhysical)
+        .async_writer_path_with_type(&target_path, tinyfs::EntryType::TablePhysicalSeries)
         .await
         .map_err(|e| anyhow!("Failed to get FileSeries writer: {}", e))?;
 

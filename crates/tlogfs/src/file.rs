@@ -193,8 +193,9 @@ impl OpLogFileWriter {
         store_path: std::path::PathBuf,
         allocated_version: i64,
     ) -> Self {
+        let options = state.large_file_options().clone();
         Self {
-            storage: crate::large_files::HybridWriter::new(store_path),
+            storage: crate::large_files::HybridWriter::with_options(store_path, options),
             state,
             file_id,
             transaction_state,
@@ -350,7 +351,10 @@ impl AsyncWrite for OpLogFileWriter {
             // Take ownership of storage to finalize it
             let storage = std::mem::replace(
                 &mut this.storage,
-                crate::large_files::HybridWriter::new(std::path::PathBuf::new()),
+                crate::large_files::HybridWriter::with_options(
+                    std::path::PathBuf::new(),
+                    Default::default(),
+                ),
             );
             let state = this.state.clone();
             let file_id = this.file_id;
@@ -367,27 +371,131 @@ impl AsyncWrite for OpLogFileWriter {
 
                     let content = hybrid_result.content;
                     let content_len = hybrid_result.size;
-                    let sha256 = hybrid_result.sha256;
+                    let blake3 = hybrid_result.blake3;
 
                     debug!(
-                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, sha256={}, is_large={}",
+                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, blake3={}, is_large={}",
                         content_len,
-                        sha256,
+                        blake3,
                         content.is_empty() && content_len > 0
                     );
 
                     // Determine ContentRef based on whether content is empty (large file external)
                     let content_ref = if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
                         // Large file - stored externally
-                        crate::file_writer::ContentRef::Large(sha256, content_len as u64)
+                        crate::file_writer::ContentRef::Large(blake3, content_len as u64)
                     } else {
                         // Small file - content in memory
                         crate::file_writer::ContentRef::Small(content.clone())
                     };
 
+                    // Compute bao_outboard automatically based on entry_type
+                    let bao_outboard = match entry_type {
+                        tinyfs::EntryType::FilePhysicalSeries => {
+                            // For series files, compute incremental bao_outboard
+                            // Get previous version's bao_outboard (if any)
+                            let prev_version = if allocated_version > 1 {
+                                allocated_version - 1
+                            } else {
+                                0
+                            };
+
+                            let prev_bao = if prev_version > 0 {
+                                // Get bao_outboard from metadata instead of separate method
+                                state.metadata(file_id).await.ok().and_then(|meta| meta.bao_outboard)
+                            } else {
+                                None
+                            };
+
+                            let series_outboard = if let Some(prev_bao_bytes) = prev_bao {
+                                // Deserialize previous SeriesOutboard
+                                let prev_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
+                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize previous bao_outboard: {}", e)))?;
+
+                                // Calculate pending bytes needed from previous content
+                                // pending_size = tail of cumulative content that doesn't form a complete block
+                                let pending_size = (prev_outboard.cumulative_size % utilities::bao_outboard::BLOCK_SIZE as u64) as usize;
+
+                                // Efficiently read only the pending bytes we need
+                                // Read versions from newest to oldest until we have enough bytes
+                                let pending_bytes = if pending_size > 0 {
+                                    let versions = state.list_file_versions(file_id).await
+                                        .map_err(|e| tinyfs::Error::Other(format!("Failed to list versions: {}", e)))?;
+
+                                    // Collect bytes from tail, reading only necessary versions
+                                    let mut tail_bytes = Vec::with_capacity(pending_size);
+
+                                    // Iterate versions in reverse (newest first)
+                                    for v in versions.iter().rev() {
+                                        if tail_bytes.len() >= pending_size {
+                                            break;
+                                        }
+
+                                        let bytes_still_needed = pending_size - tail_bytes.len();
+
+                                        let version_content = state.read_file_version(file_id, v.version).await
+                                            .unwrap_or_default();
+
+                                        if version_content.len() >= bytes_still_needed {
+                                            // This version has enough bytes - take only the tail we need
+                                            let start = version_content.len().saturating_sub(bytes_still_needed);
+                                            // Prepend to tail_bytes (since we're going backwards)
+                                            let mut new_tail = version_content[start..].to_vec();
+                                            new_tail.append(&mut tail_bytes);
+                                            tail_bytes = new_tail;
+                                        } else {
+                                            // Need entire version - prepend it
+                                            let mut new_tail = version_content;
+                                            new_tail.append(&mut tail_bytes);
+                                            tail_bytes = new_tail;
+                                        }
+                                    }
+
+                                    // Trim to exact pending size (safety check)
+                                    if tail_bytes.len() > pending_size {
+                                        tail_bytes = tail_bytes[tail_bytes.len() - pending_size..].to_vec();
+                                    }
+
+                                    tail_bytes
+                                } else {
+                                    Vec::new()
+                                };
+
+                                // Append new version
+                                if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
+                                    // Large file
+                                    utilities::bao_outboard::SeriesOutboard::append_version_large(&prev_outboard, &pending_bytes, &content)
+                                } else {
+                                    // Inline file
+                                    utilities::bao_outboard::SeriesOutboard::append_version_inline(&prev_outboard, &pending_bytes, &content)
+                                }
+                            } else {
+                                // First version
+                                if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
+                                    // Large file
+                                    utilities::bao_outboard::SeriesOutboard::first_version_large(&content)
+                                } else {
+                                    // Inline file
+                                    utilities::bao_outboard::SeriesOutboard::first_version_inline(&content)
+                                }
+                            };
+
+                            Some(series_outboard.to_bytes())
+                        }
+                        tinyfs::EntryType::FilePhysicalVersion => {
+                            // For version files, compute standalone VersionOutboard
+                            let version_outboard = utilities::bao_outboard::VersionOutboard::new(&content);
+                            Some(version_outboard.to_bytes())
+                        }
+                        _ => {
+                            // Other entry types don't use bao_outboard
+                            None
+                        }
+                    };
+
                     // Extract metadata based on file type
                     let metadata = match entry_type {
-                        tinyfs::EntryType::FileSeriesPhysical => {
+                        tinyfs::EntryType::TablePhysicalSeries => {
                             // Series files should have precomputed metadata from the parquet writer
                             // Exception: empty writes (for extended attributes only) are allowed without metadata
                             if let Some(precomputed) = precomputed_metadata {
@@ -401,11 +509,11 @@ impl AsyncWrite for OpLogFileWriter {
                                 }
                             } else {
                                 return Err(tinyfs::Error::Other(
-                                    "FileSeriesPhysical written without temporal metadata - caller must use FileMetadataWriter::set_temporal_metadata() or infer_temporal_bounds()".to_string()
+                                    "TablePhysicalSeries written without temporal metadata - caller must use FileMetadataWriter::set_temporal_metadata() or infer_temporal_bounds()".to_string()
                                 ));
                             }
                         }
-                        tinyfs::EntryType::FileTablePhysical => {
+                        tinyfs::EntryType::TablePhysicalVersion => {
                             if let Some(precomputed) = precomputed_metadata {
                                 precomputed
                             } else if content.is_empty() {
@@ -430,7 +538,7 @@ impl AsyncWrite for OpLogFileWriter {
                         _ => crate::file_writer::FileMetadata::Data,
                     };
 
-                    state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version)).await
+                    state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version), bao_outboard).await
                         .map_err(|e| tinyfs::Error::Other(format!("Failed to store file: {}", e)))
                 }.await;
 

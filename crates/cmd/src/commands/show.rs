@@ -974,7 +974,7 @@ mod tests {
 
         // 3. Should show the file we created
         assert!(
-            captured_output.contains("file:data"),
+            captured_output.contains("file:physical"),
             "Should show the file we created"
         );
 

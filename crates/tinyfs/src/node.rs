@@ -197,20 +197,31 @@ impl FileID {
     ///   - Use PartID::root()
     #[must_use]
     pub fn from_content(parent_part_id: PartID, entry_type: EntryType, content: &[u8]) -> Self {
-        use sha2::{Digest, Sha256};
-
-        // Create SHA-256 hash of content
-        let mut hasher = Sha256::new();
-        hasher.update(content);
-        let hash = hasher.finalize();
+        // Create BLAKE3 hash of content
+        let hash = blake3::hash(content);
+        let hash_bytes = hash.as_bytes();
 
         // Use a fixed timestamp for deterministic IDs
         let timestamp = 1u64;
 
         // Extract bits for the random part
         let bits = u128::from_be_bytes([
-            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7], hash[8],
-            hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+            hash_bytes[0],
+            hash_bytes[1],
+            hash_bytes[2],
+            hash_bytes[3],
+            hash_bytes[4],
+            hash_bytes[5],
+            hash_bytes[6],
+            hash_bytes[7],
+            hash_bytes[8],
+            hash_bytes[9],
+            hash_bytes[10],
+            hash_bytes[11],
+            hash_bytes[12],
+            hash_bytes[13],
+            hash_bytes[14],
+            hash_bytes[15],
         ]);
         let rand_a = ((bits >> 66) & 0xFFF) as u16; // 12 bits
         let rand_b = ((bits >> 4) & 0x3FFF_FFFF_FFFF_FFFF) as u64; // 62 bits

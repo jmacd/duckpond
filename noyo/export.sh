@@ -21,8 +21,10 @@ cargo build
 rm -rf ${OUTDIR}
 
 # Parameters
-#samply record
-${EXE} export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/param=*' --dir ${OUTDIR} --temporal "year,month"
+${EXE} export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/*' --dir ${OUTDIR} --temporal "year,month"
 
 # Site detail
-${EXE} export --pattern '/reduced/single_site/*/*.series' --pattern '/templates/sites/site=*' --dir ${OUTDIR} --temporal "year,month"
+${EXE} export --pattern '/reduced/single_site/*/*.series' --pattern '/templates/sites/*' --dir ${OUTDIR} --temporal "year,month"
+
+# Index page
+${EXE} export --pattern '/templates/index/*' --dir ${OUTDIR}

@@ -10,7 +10,6 @@ use deltalake::kernel::{
 };
 use log::debug;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tinyfs::{EntryType, FileID, NodeID, PartID};
@@ -158,12 +157,10 @@ pub fn detect_timestamp_column(
     ))
 }
 
-/// Compute SHA256 for any content (small or large files)
+/// Compute BLAKE3 hash for any content (small or large files)
 #[must_use]
-pub fn compute_sha256(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    format!("{:x}", hasher.finalize())
+pub fn compute_blake3(content: &[u8]) -> String {
+    blake3::hash(content).to_hex().to_string()
 }
 
 /// Storage format for OplogEntry content
@@ -229,9 +226,24 @@ pub struct OplogEntry {
     /// - For symlinks: target path
     /// - For directories: Arrow IPC encoded VersionedDirectoryEntry records
     pub content: Option<Vec<u8>>,
-    /// SHA256 checksum for large files (> threshold)
-    /// Some() for large files stored externally, None for small files stored inline
-    pub sha256: Option<String>,
+    /// BLAKE3 hash - semantics vary by entry type:
+    ///
+    /// | Entry Type            | blake3 contains                                      |
+    /// |-----------------------|------------------------------------------------------|
+    /// | FilePhysicalVersion   | `blake3(this_version_content)` - verifiable per-version |
+    /// | FilePhysicalSeries    | `bao_root(v1||v2||...||vN)` - **CUMULATIVE**, set by `set_bao_outboard()` |
+    /// | TablePhysicalVersion  | `blake3(this_version_content)` - verifiable per-version |
+    /// | TablePhysicalSeries   | `blake3(this_version_content)` - per-version (parquet can't concat) |
+    /// | DirectoryPhysical     | None - directories don't store blake3               |
+    /// | Symlink               | None - symlinks don't store blake3                  |
+    ///
+    /// **CRITICAL for FilePhysicalSeries**: The blake3 field is the cumulative bao-tree
+    /// root hash through ALL versions, NOT just this version's content. This means:
+    /// - You CANNOT verify individual version content against this hash
+    /// - Verification happens when reading concatenated series via bao-tree
+    /// - The cumulative hash is extracted from `SeriesOutboard.cumulative_blake3`
+    ///   when `set_bao_outboard()` is called
+    pub blake3: Option<String>,
     /// File size in bytes (Some() for all files, None for directories/symlinks)
     /// NOTE: Uses i64 instead of u64 to match Delta Lake protocol (Java ecosystem legacy)
     pub size: Option<i64>,
@@ -264,6 +276,38 @@ pub struct OplogEntry {
     /// Transaction sequence number from Steward
     /// This links OpLog records to transaction sequences for chronological ordering
     pub txn_seq: i64,
+
+    /// Bao-tree outboard data for blake3 verified streaming
+    ///
+    /// ALWAYS non-null for FilePhysicalVersion and FilePhysicalSeries entries.
+    /// Content varies based on file type and storage mode.
+    ///
+    /// ## Storage Format
+    /// Binary array of (left_hash, right_hash) pairs in post-order traversal.
+    /// Format: Raw concatenated hash pairs, 64 bytes each (32 + 32)
+    /// Size: (blocks - 1) * 64 bytes for complete file, less for partial
+    /// Block size: 16KB (BlockSize::from_chunk_log(4))
+    ///
+    /// ## For FilePhysicalVersion
+    /// Complete outboard for the version's content (VersionOutboard struct).
+    /// Enables verified streaming of the individual version.
+    ///
+    /// ## For FilePhysicalSeries (Inline Content)
+    /// Only cumulative outboard is stored (SeriesOutboard with empty version_outboard):
+    /// - blake3 hash in OplogEntry is sufficient for individual version verification
+    /// - Cumulative outboard enables prefix verification when appending
+    ///
+    /// ## For FilePhysicalSeries (Large Files)
+    /// Both outboards stored (SeriesOutboard):
+    /// 1. **Version-independent outboard** (offset=0): For verified streaming of
+    ///    this individual version's content in isolation.
+    /// 2. **Cumulative outboard**: The bao-tree state for concatenated content
+    ///    from version 1 through this version.
+    ///
+    /// The cumulative outboard enables prefix verification when appending:
+    /// new versions can verify the existing concatenated content matches
+    /// the stored state before adding new data.
+    pub bao_outboard: Option<Vec<u8>>,
 }
 
 impl ForArrow for OplogEntry {
@@ -279,7 +323,7 @@ impl ForArrow for OplogEntry {
             )),
             Arc::new(Field::new("version", DataType::Int64, false)),
             Arc::new(Field::new("content", DataType::Binary, true)), // Now nullable for large files
-            Arc::new(Field::new("sha256", DataType::Utf8, true)), // New field for large file checksums
+            Arc::new(Field::new("blake3", DataType::Utf8, true)), // BLAKE3 hash for large file checksums
             Arc::new(Field::new("size", DataType::Int64, true)), // File size in bytes (Int64 to match Delta Lake protocol)
             // NEW: Temporal metadata fields for FileSeries support
             Arc::new(Field::new("min_event_time", DataType::Int64, true)), // Min timestamp from data for fast queries
@@ -290,6 +334,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
             Arc::new(Field::new("format", DataType::Utf8, false)), // Storage format - required field
             Arc::new(Field::new("txn_seq", DataType::Int64, false)), // Transaction sequence number from Steward (required)
+            Arc::new(Field::new("bao_outboard", DataType::Binary, true)), // Bao-tree outboard for verified streaming
         ]
     }
 }
@@ -325,7 +370,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(content.clone()),
-            sha256: Some(compute_sha256(&content)), // NEW: Always compute SHA256
+            blake3: Some(compute_blake3(&content)), // NEW: Always compute SHA256
             size: Some(size as i64),                // Cast to i64 to match Delta Lake protocol
             // Temporal metadata - None for non-series files
             min_event_time: None,
@@ -336,6 +381,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Small files use inline storage
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -346,7 +392,7 @@ impl OplogEntry {
         id: FileID,
         timestamp: i64,
         version: i64,
-        sha256: String,
+        blake3_hash: String,
         size: i64,
         txn_seq: i64,
     ) -> Self {
@@ -364,7 +410,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: None,
-            sha256: Some(sha256),
+            blake3: Some(blake3_hash),
             size: Some(size), // NEW: Store size explicitly
             // Temporal metadata - None for non-series files
             min_event_time: None,
@@ -375,6 +421,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Large files use inline format (content is external)
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -401,7 +448,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(content),
-            sha256: None,
+            blake3: None,
             size: None, // None for directories and symlinks
             // Temporal metadata - None for directories and symlinks
             min_event_time: None,
@@ -412,6 +459,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Symlinks and small metadata use inline storage
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -456,7 +504,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(content.clone()),
-            sha256: Some(compute_sha256(&content)),
+            blake3: Some(compute_blake3(&content)),
             size: Some(size as i64), // Cast to i64 to match Delta Lake protocol
             // Temporal metadata for efficient DataFusion queries
             min_event_time: Some(min_event_time),
@@ -467,6 +515,7 @@ impl OplogEntry {
             factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Small FileSeries use inline storage
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -477,7 +526,7 @@ impl OplogEntry {
         id: FileID,
         timestamp: i64,
         version: i64,
-        sha256: String,
+        blake3_hash: String,
         size: i64, // Changed from u64 to i64 to match Delta Lake protocol
         min_event_time: i64,
         max_event_time: i64,
@@ -490,16 +539,16 @@ impl OplogEntry {
             "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
             id.entry_type()
         );
-        assert_eq!(EntryType::FileSeriesPhysical, id.entry_type());
+        assert_eq!(EntryType::TablePhysicalSeries, id.entry_type());
 
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
-            file_type: EntryType::FileSeriesPhysical,
+            file_type: EntryType::TablePhysicalSeries,
             timestamp,
             version,
             content: None,
-            sha256: Some(sha256),
+            blake3: Some(blake3_hash),
             size: Some(size),
             // Temporal metadata for efficient DataFusion queries
             min_event_time: Some(min_event_time),
@@ -510,6 +559,7 @@ impl OplogEntry {
             factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Large FileSeries use inline format (content is external)
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -575,7 +625,8 @@ impl OplogEntry {
         tinyfs::NodeMetadata {
             version: self.version as u64,
             size: self.size.map(|s| s as u64), // Cast i64 back to u64 for tinyfs interface
-            sha256: self.sha256.clone(),
+            blake3: self.blake3.clone(),
+            bao_outboard: self.bao_outboard.clone(),
             entry_type: self.file_type,
             timestamp: self.timestamp,
         }
@@ -602,7 +653,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(config_content),
-            sha256: None,
+            blake3: None,
             size: None,
             min_event_time: None,
             max_event_time: None,
@@ -612,6 +663,7 @@ impl OplogEntry {
             factory: Some(factory_type.to_string()), // Factory type identifier
             format: StorageFormat::Inline,           // Config is always inline
             txn_seq,
+            bao_outboard: None,
         }
     }
 
@@ -627,14 +679,161 @@ impl OplogEntry {
         self.factory.as_deref()
     }
 
-    /// Get factory configuration content if this is a dynamic node
-    #[must_use]
-    pub fn factory_config(&self) -> Option<&[u8]> {
+    /// Get factory configuration content if this is a dynamic node (verified)
+    /// This verifies the BLAKE3 hash before returning.
+    ///
+    /// # Errors
+    /// Returns `ContentIntegrityError` if the hash doesn't match.
+    /// Returns `ContentMissingHash` if content exists but blake3 is None.
+    pub fn factory_config(&self) -> Result<Option<&[u8]>, crate::TLogFSError> {
         if self.is_dynamic() {
-            self.content.as_deref()
+            self.verified_content()
         } else {
-            None
+            Ok(None)
         }
+    }
+
+    /// Get the bao-tree outboard data if present
+    #[must_use]
+    pub fn get_bao_outboard(&self) -> Option<&[u8]> {
+        self.bao_outboard.as_deref()
+    }
+
+    /// Set the bao-tree outboard data.
+    ///
+    /// # FilePhysicalSeries: Updates blake3 to Cumulative Hash
+    ///
+    /// For `FilePhysicalSeries`, this method performs a **critical side effect**:
+    /// it extracts `cumulative_blake3` from the `SeriesOutboard` and overwrites
+    /// the `blake3` field.
+    ///
+    /// **Why?** The `blake3` field for series types must be the cumulative
+    /// bao-tree root hash: `bao_root(v1 || v2 || ... || vN)`. This hash cannot
+    /// be computed from individual version hashes - it requires the cumulative
+    /// outboard computation done during version append.
+    ///
+    /// The `SeriesOutboard.cumulative_blake3` field contains exactly this value,
+    /// computed incrementally as versions are appended. By extracting it here,
+    /// we ensure the OplogEntry's blake3 always reflects the cumulative state.
+    ///
+    /// **Design Decision**: We could have required callers to set blake3 separately,
+    /// but that would be error-prone. Coupling the outboard storage with blake3
+    /// update ensures consistency.
+    pub fn set_bao_outboard(&mut self, outboard: Vec<u8>) {
+        // For FilePhysicalSeries, the blake3 field MUST be the cumulative hash.
+        // Extract it from SeriesOutboard.cumulative_blake3 to maintain this invariant.
+        // See bao-tree-design.md for the full explanation of cumulative vs per-version hashing.
+        if self.file_type == EntryType::FilePhysicalSeries
+            && let Ok(series_outboard) =
+                utilities::bao_outboard::SeriesOutboard::from_bytes(&outboard)
+        {
+            let hash = blake3::Hash::from_bytes(series_outboard.cumulative_blake3);
+            self.blake3 = Some(hash.to_hex().to_string());
+        }
+        self.bao_outboard = Some(outboard);
+    }
+
+    /// Check if this entry has bao-tree outboard data
+    #[must_use]
+    pub fn has_bao_outboard(&self) -> bool {
+        self.bao_outboard.is_some()
+    }
+
+    /// Create a new small file entry with bao-tree outboard
+    /// This is the preferred constructor for FilePhysicalSeries entries
+    #[must_use]
+    pub fn new_small_file_with_outboard(
+        id: FileID,
+        timestamp: i64,
+        version: i64,
+        content: Vec<u8>,
+        txn_seq: i64,
+        bao_outboard: Vec<u8>,
+    ) -> Self {
+        let mut entry = Self::new_small_file(id, timestamp, version, content, txn_seq);
+        entry.bao_outboard = Some(bao_outboard);
+        entry
+    }
+
+    /// Get verified content bytes, checking BLAKE3 hash if available.
+    ///
+    /// For content that has a blake3 hash stored, this verifies integrity before returning.
+    /// For content without a hash (e.g., directory snapshots), returns content directly.
+    ///
+    /// # Entry Type Verification Behavior
+    ///
+    /// | Entry Type            | Verification                                     |
+    /// |-----------------------|--------------------------------------------------|
+    /// | FilePhysicalVersion   | `blake3(content) == stored_blake3` ✓            |
+    /// | FilePhysicalSeries    | **SKIPPED** - see below                          |
+    /// | TablePhysicalVersion  | `blake3(content) == stored_blake3` ✓            |
+    /// | TablePhysicalSeries   | `blake3(content) == stored_blake3` ✓            |
+    /// | DirectoryPhysical     | None stored - returns content directly           |
+    /// | Symlink               | None stored - returns content directly           |
+    ///
+    /// # Why FilePhysicalSeries Skips Verification
+    ///
+    /// For `FilePhysicalSeries`, the `blake3` field contains the **cumulative**
+    /// bao-tree root hash: `bao_root(v1 || v2 || ... || vN)`. This is fundamentally
+    /// different from `blake3(this_version_content)`.
+    ///
+    /// You **cannot** verify individual version content against a cumulative hash.
+    /// The math doesn't work: `blake3(v2) != bao_root(v1 || v2)`.
+    ///
+    /// Instead, integrity verification for series content happens:
+    /// 1. At write time: Content is hashed into the cumulative outboard
+    /// 2. At read time: BaoValidatingReader validates concatenated content against cumulative hash
+    ///
+    /// # Errors
+    /// Returns `ContentIntegrityError` if the hash doesn't match.
+    /// Returns `ContentMissingHash` if content exists but blake3 is None for types that require it.
+    pub fn verified_content(&self) -> Result<Option<&[u8]>, crate::TLogFSError> {
+        let Some(content) = self.content.as_deref() else {
+            return Ok(None);
+        };
+
+        // Directories and symlinks don't store blake3 - return content directly
+        if matches!(
+            self.file_type,
+            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic | EntryType::Symlink
+        ) {
+            return Ok(Some(content));
+        }
+
+        // FilePhysicalSeries: blake3 is CUMULATIVE (bao_root of all versions concatenated).
+        // Individual version content CANNOT be verified against cumulative hash.
+        // Verification happens via bao-tree when reading the concatenated series.
+        // See bao-tree-design.md "Unified blake3 Field Semantics" for details.
+        if self.file_type == EntryType::FilePhysicalSeries {
+            return Ok(Some(content));
+        }
+
+        // For files and symlinks with content, verify blake3 if present
+        if let Some(expected_hash) = &self.blake3 {
+            let actual_hash = blake3::hash(content).to_hex().to_string();
+            if actual_hash != *expected_hash {
+                return Err(crate::TLogFSError::ContentIntegrityError {
+                    expected: expected_hash.clone(),
+                    actual: actual_hash,
+                });
+            }
+        }
+        // Note: Small files in the old format might not have blake3 hashes
+        // In that case, we return the content without verification
+        // New writes always compute blake3 via new_small_file()
+
+        Ok(Some(content))
+    }
+
+    /// Get verified content bytes, requiring content to be present.
+    /// This is a convenience wrapper around `verified_content()` that returns an error
+    /// if content is None.
+    ///
+    /// # Errors
+    /// Returns `ContentIntegrityError` if the hash doesn't match.
+    /// Returns `Missing` if content is None.
+    pub fn verified_content_required(&self) -> Result<&[u8], crate::TLogFSError> {
+        self.verified_content()?.ok_or(crate::TLogFSError::Missing)
     }
 
     /// Create entry for directory full snapshot (new storage format)
@@ -654,7 +853,7 @@ impl OplogEntry {
             timestamp,
             version,
             content: Some(content),
-            sha256: None,
+            blake3: None,
             size: None,
             min_event_time: None,
             max_event_time: None,
@@ -664,51 +863,9 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::FullDir, // Full directory snapshot
             txn_seq,
+            bao_outboard: None,
         }
     }
-
-    // /// Get comprehensive EntryType that includes physical/dynamic distinction
-    // /// This is the authoritative method for determining the complete entry type
-    // /// including whether the node is factory-based or not.
-    // #[must_use]
-    // pub fn comprehensive_entry_type(&self) -> EntryType {
-    //     let is_dynamic = self.is_dynamic();
-
-    //     match self.file_type {
-    //         EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => {
-    //             // Directory: check factory field to determine physical vs dynamic
-    //             if is_dynamic {
-    //                 EntryType::DirectoryDynamic
-    //             } else {
-    //                 EntryType::DirectoryPhysical
-    //             }
-    //         }
-    //         EntryType::Symlink => EntryType::Symlink,
-
-    //         // Files: check factory field and preserve base format
-    //         EntryType::FileDataPhysical | EntryType::FileDataDynamic => {
-    //             if is_dynamic {
-    //                 EntryType::FileDataDynamic
-    //             } else {
-    //                 EntryType::FileDataPhysical
-    //             }
-    //         }
-    //         EntryType::FileTablePhysical | EntryType::FileTableDynamic => {
-    //             if is_dynamic {
-    //                 EntryType::FileTableDynamic
-    //             } else {
-    //                 EntryType::FileTablePhysical
-    //             }
-    //         }
-    //         EntryType::FileSeriesPhysical | EntryType::FileSeriesDynamic => {
-    //             if is_dynamic {
-    //                 EntryType::FileSeriesDynamic
-    //             } else {
-    //                 EntryType::FileSeriesPhysical
-    //             }
-    //         }
-    //     }
-    // }
 }
 
 /// Type alias - use tinyfs::DirectoryEntry as the canonical type

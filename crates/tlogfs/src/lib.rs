@@ -14,14 +14,17 @@
 /// Core schema and data structures
 pub mod schema;
 
-/// Delta Lake integration
-pub mod delta;
+/// Factory implementations
+pub mod factories;
 
 /// Large file storage utilities
 pub mod large_files;
 
 /// Persistence layer implementation
 pub mod persistence;
+
+// Re-export bao_outboard from utilities for backwards compatibility
+pub use utilities::bao_outboard;
 
 // Transaction guard implementation
 pub mod transaction_guard;

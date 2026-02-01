@@ -146,6 +146,10 @@ impl Directory for VisitDirectory {
         Err(error::Error::immutable(name))
     }
 
+    async fn remove(&mut self, name: &str) -> error::Result<Option<Node>> {
+        Err(error::Error::immutable(name))
+    }
+
     async fn entries(
         &self,
     ) -> error::Result<Pin<Box<dyn Stream<Item = error::Result<DirectoryEntry>> + Send>>> {
@@ -164,13 +168,13 @@ impl Directory for VisitDirectory {
                 // Use a deterministic FileID for testing (part_id=root for test simplicity)
                 let file_id = crate::FileID::from_content(
                     crate::PartID::root(),
-                    crate::EntryType::FileDataDynamic,
+                    crate::EntryType::FileDynamic,
                     format!("visit:{}", name).as_bytes(),
                 );
                 let dir_entry = DirectoryEntry::new(
                     name.clone(),
                     file_id.node_id(),
-                    crate::EntryType::FileDataDynamic,
+                    crate::EntryType::FileDynamic,
                     0,
                 );
                 Ok(dir_entry)
@@ -186,7 +190,8 @@ impl crate::Metadata for VisitDirectory {
         Ok(crate::NodeMetadata {
             version: 1,
             size: None,
-            sha256: None,
+            blake3: None,
+            bao_outboard: None,
             entry_type: crate::EntryType::DirectoryDynamic,
             timestamp: 0, // TODO
         })

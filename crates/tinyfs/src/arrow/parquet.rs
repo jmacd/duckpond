@@ -417,7 +417,7 @@ impl ParquetExt for WD {
 
         // Write to TinyFS with temporal metadata
         let (_, mut writer) = self
-            .create_file_path_streaming_with_type(&path, EntryType::FileSeriesPhysical)
+            .create_file_path_streaming_with_type(&path, EntryType::TablePhysicalSeries)
             .await?;
 
         writer
@@ -472,7 +472,7 @@ impl ParquetExt for WD {
 
         // Use async_writer_path_with_type: handles both create AND append cases
         let mut writer = self
-            .async_writer_path_with_type(&path, EntryType::FileSeriesPhysical)
+            .async_writer_path_with_type(&path, EntryType::TablePhysicalSeries)
             .await?;
 
         writer
@@ -568,7 +568,7 @@ mod tests {
         ];
 
         let test_path = "test_records.parquet";
-        wd.create_table_from_items(test_path, &test_data, EntryType::FileTablePhysical)
+        wd.create_table_from_items(test_path, &test_data, EntryType::TablePhysicalVersion)
             .await?;
         let read_data: Vec<TestRecord> = wd.read_table_as_items(test_path).await?;
 
@@ -593,7 +593,7 @@ mod tests {
         )?;
 
         let test_path = "products.parquet";
-        wd.create_table_from_batch(test_path, &batch, EntryType::FileTablePhysical)
+        wd.create_table_from_batch(test_path, &batch, EntryType::TablePhysicalVersion)
             .await?;
         let read_batch = wd.read_table_as_batch(test_path).await?;
 
@@ -649,7 +649,7 @@ mod tests {
             .collect();
 
         let test_path = "large_dataset.parquet";
-        wd.create_table_from_items(test_path, &large_data, EntryType::FileTablePhysical)
+        wd.create_table_from_items(test_path, &large_data, EntryType::TablePhysicalVersion)
             .await?;
         let read_data: Vec<TestRecord> = wd.read_table_as_items(test_path).await?;
 
@@ -682,12 +682,12 @@ mod tests {
 
         // Test with FileTable entry type
         let table_path = "table_entries.parquet";
-        wd.create_table_from_items(table_path, &test_data, EntryType::FileTablePhysical)
+        wd.create_table_from_items(table_path, &test_data, EntryType::TablePhysicalVersion)
             .await?;
 
         // Test with FileData entry type
         let data_path = "data_entries.parquet";
-        wd.create_table_from_items(data_path, &test_data, EntryType::FileDataPhysical)
+        wd.create_table_from_items(data_path, &test_data, EntryType::FilePhysicalVersion)
             .await?;
 
         let table_data: Vec<TestRecord> = wd.read_table_as_items(table_path).await?;

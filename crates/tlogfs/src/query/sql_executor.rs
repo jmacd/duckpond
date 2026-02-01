@@ -50,10 +50,9 @@ pub async fn execute_sql_on_file<'a>(
             //let metadata = file_handle.metadata().await.map_err(TLogFSError::TinyFS)?;
 
             match node_path.id().entry_type() {
-                tinyfs::EntryType::FileTablePhysical
-                | tinyfs::EntryType::FileTableDynamic
-                | tinyfs::EntryType::FileSeriesPhysical
-                | tinyfs::EntryType::FileSeriesDynamic => {
+                tinyfs::EntryType::TablePhysicalVersion
+                | tinyfs::EntryType::TablePhysicalSeries
+                | tinyfs::EntryType::TableDynamic => {
                     // Use trait dispatch instead of type checking - follows anti-duplication principles
 
                     //let file_arc = file_handle.handle.get_file().await;
@@ -164,10 +163,9 @@ pub async fn get_file_schema(
             let file_handle = node_path.as_file().await.map_err(TLogFSError::TinyFS)?;
 
             match node_path.entry_type() {
-                tinyfs::EntryType::FileTablePhysical
-                | tinyfs::EntryType::FileTableDynamic
-                | tinyfs::EntryType::FileSeriesPhysical
-                | tinyfs::EntryType::FileSeriesDynamic => {
+                tinyfs::EntryType::TablePhysicalVersion
+                | tinyfs::EntryType::TablePhysicalSeries
+                | tinyfs::EntryType::TableDynamic => {
                     let file_arc = file_handle.handle.get_file().await;
                     let file_guard = file_arc.lock().await;
 

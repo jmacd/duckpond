@@ -417,7 +417,7 @@ async fn test_create_dynamic_file_path() {
     let dynamic_node = root
         .create_dynamic_path(
             "/config/test.yaml",
-            crate::EntryType::FileDataDynamic,
+            crate::EntryType::FileDynamic,
             "test-factory",
             config_content.to_vec(),
         )
@@ -427,17 +427,14 @@ async fn test_create_dynamic_file_path() {
     // Verify the node was created
     assert_eq!(
         dynamic_node.id().entry_type(),
-        crate::EntryType::FileDataDynamic
+        crate::EntryType::FileDynamic
     );
 
     // Verify we can resolve it
     let (_, lookup) = root.resolve_path("/config/test.yaml").await.unwrap();
     match lookup {
         crate::Lookup::Found(node_path) => {
-            assert_eq!(
-                node_path.id().entry_type(),
-                crate::EntryType::FileDataDynamic
-            );
+            assert_eq!(node_path.id().entry_type(), crate::EntryType::FileDynamic);
             assert_eq!(node_path.path(), std::path::Path::new("/config/test.yaml"));
         }
         _ => panic!("Expected to find the dynamic file"),
@@ -479,6 +476,158 @@ async fn test_create_dynamic_directory_path() {
             assert_eq!(node_path.path(), std::path::Path::new("/virtual_data"));
         }
         _ => panic!("Expected to find the dynamic directory"),
+    }
+}
+
+/// Test FilePhysicalSeries version concatenation at the MemoryFile level
+/// This verifies that when entry_type is FilePhysicalSeries, async_reader()
+/// returns a ChainedReader that concatenates all versions oldest-to-newest.
+#[tokio::test]
+async fn test_memory_file_physical_series_version_concatenation() {
+    use crate::EntryType;
+    use crate::file::File;
+    use crate::memory::{MemoryFile, MemoryPersistence};
+    use crate::node::{FileID, PartID};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Create persistence layer
+    let persistence = MemoryPersistence::default();
+    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalSeries);
+
+    // Create MemoryFile with FilePhysicalSeries entry type
+    let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalSeries);
+
+    // Write multiple versions using async_writer - these represent appended data
+    {
+        let mut writer = memory_file.async_writer().await.unwrap();
+        writer.write_all(b"First line\n").await.unwrap();
+        writer.shutdown().await.unwrap();
+    }
+    {
+        let mut writer = memory_file.async_writer().await.unwrap();
+        writer.write_all(b"Second line\n").await.unwrap();
+        writer.shutdown().await.unwrap();
+    }
+    {
+        let mut writer = memory_file.async_writer().await.unwrap();
+        writer.write_all(b"Third line\n").await.unwrap();
+        writer.shutdown().await.unwrap();
+    }
+
+    // Read via async_reader - should concatenate all versions
+    let mut reader = memory_file.async_reader().await.unwrap();
+    let mut content = String::new();
+    let _ = reader.read_to_string(&mut content).await.unwrap();
+
+    // Verify versions are concatenated oldest-to-newest
+    assert_eq!(content, "First line\nSecond line\nThird line\n");
+}
+
+/// Test that FilePhysicalVersion entry type reads only current content (not versions)
+#[tokio::test]
+async fn test_memory_file_physical_version_single_content() {
+    use crate::EntryType;
+    use crate::file::File;
+    use crate::memory::{MemoryFile, MemoryPersistence};
+    use crate::node::{FileID, PartID};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Create persistence layer
+    let persistence = MemoryPersistence::default();
+    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalVersion);
+
+    // Create MemoryFile with FilePhysicalVersion entry type
+    let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalVersion);
+
+    // Write two versions using async_writer
+    {
+        let mut writer = memory_file.async_writer().await.unwrap();
+        writer.write_all(b"Version 1").await.unwrap();
+        writer.shutdown().await.unwrap();
+    }
+    {
+        let mut writer = memory_file.async_writer().await.unwrap();
+        writer.write_all(b"Version 2").await.unwrap();
+        writer.shutdown().await.unwrap();
+    }
+
+    // Read via async_reader - FilePhysicalVersion returns latest content (not concatenated)
+    let mut reader = memory_file.async_reader().await.unwrap();
+    let mut content = Vec::new();
+    let _ = reader.read_to_end(&mut content).await.unwrap();
+
+    // FilePhysicalVersion reads latest version's content
+    assert_eq!(content, b"Version 2");
+}
+
+/// Test FilePhysicalSeries using high-level async_writer API with automatic version allocation
+#[tokio::test]
+async fn test_memory_file_series_async_writer_with_versions() {
+    use crate::EntryType;
+    use crate::FS;
+    use crate::memory::MemoryPersistence;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Create filesystem with memory persistence
+    let persistence = MemoryPersistence::default();
+    let fs = FS::new(persistence.clone()).await.unwrap();
+    let root = fs.root().await.unwrap();
+
+    // Write 3 versions using proper tinyfs API (async_writer_path_with_type)
+    // This API creates the file on first call and adds versions on subsequent calls
+    let file_path = "test.series";
+
+    // Write first version
+    {
+        let mut writer = root
+            .async_writer_path_with_type(file_path, EntryType::FilePhysicalSeries)
+            .await
+            .unwrap();
+        writer.write_all(b"First line\n").await.unwrap();
+        writer.shutdown().await.unwrap();
+    }
+
+    // Write second version
+    {
+        let mut writer = root
+            .async_writer_path_with_type(file_path, EntryType::FilePhysicalSeries)
+            .await
+            .unwrap();
+        writer.write_all(b"Second line\n").await.unwrap();
+        writer.shutdown().await.unwrap();
+    }
+
+    // Write third version
+    {
+        let mut writer = root
+            .async_writer_path_with_type(file_path, EntryType::FilePhysicalSeries)
+            .await
+            .unwrap();
+        writer.write_all(b"Third line\n").await.unwrap();
+        writer.shutdown().await.unwrap();
+    }
+
+    // Read via async_reader - should concatenate all versions
+    let mut reader = root.async_reader_path(file_path).await.unwrap();
+    let mut content = String::new();
+    let _ = reader.read_to_string(&mut content).await.unwrap();
+
+    // Verify versions are concatenated oldest-to-newest
+    assert_eq!(content, "First line\nSecond line\nThird line\n");
+
+    // Verify bao_outboard was computed and is available in metadata
+    let (_, lookup) = root.resolve_path(file_path).await.unwrap();
+    match lookup {
+        crate::Lookup::Found(node_path) => {
+            let file_node = node_path.into_file().await.unwrap();
+            let metadata = file_node.handle.metadata().await.unwrap();
+            assert!(
+                metadata.bao_outboard.is_some(),
+                "Latest version should have bao_outboard"
+            );
+            assert_eq!(metadata.version, 3, "Should be at version 3");
+        }
+        _ => panic!("File should exist"),
     }
 }
 

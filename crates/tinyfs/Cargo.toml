@@ -19,6 +19,7 @@ description.workspace = true
 doctest = false
 
 [dependencies]
+blake3.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
@@ -29,7 +30,6 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
-sha2.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 arrow.workspace = true
@@ -39,9 +39,12 @@ deltalake.workspace = true
 tokio-util.workspace = true
 serde_arrow.workspace = true
 bytes.workspace = true
+utilities.workspace = true
+bao-tree.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
