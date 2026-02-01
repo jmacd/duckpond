@@ -98,12 +98,23 @@ export async function queryData(datafiles, days) {
   const now = Date.now();
   const begin = now - days * 24 * 3600 * 1000;
   
-  const files = datafiles[`res=${res}`] || [];
-  const urls = files
-    .filter(f => f.start_time * 1000 <= now && f.end_time * 1000 >= begin)
-    .map(f => f.file);
+  console.log(`queryData: days=${days}, res=${res}, now=${now}, begin=${begin}`);
+  console.log(`Available resolutions:`, Object.keys(datafiles));
   
-  if (urls.length === 0) return [];
+  const files = datafiles[`res=${res}`] || [];
+  console.log(`Files for res=${res}:`, files.length);
+  
+  const filtered = files.filter(f => f.start_time * 1000 <= now && f.end_time * 1000 >= begin);
+  console.log(`After time filter:`, filtered.length);
+  
+  const urls = filtered.map(f => f.file);
+  
+  if (urls.length === 0) {
+    console.log('No files match time range');
+    return [];
+  }
+  
+  console.log(`Loading ${urls.length} files:`, urls.slice(0, 3));
   
   const duck = await getDuckDB();
   const result = await duck.query(`
@@ -113,7 +124,9 @@ export async function queryData(datafiles, days) {
     ORDER BY timestamp ASC
   `);
   
-  return result.toArray();
+  const arr = result.toArray();
+  console.log(`Query returned ${arr.length} rows`);
+  return arr;
 }
 
 // Helper functions

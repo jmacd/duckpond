@@ -4,7 +4,48 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ args[0] }} - Water Quality</title>
-  <link rel="stylesheet" href="style.css">
+  <style>
+/* Noyo Harbor Water Quality Dashboard */
+:root {
+  --sidebar-width: 240px;
+  --max-width: 960px;
+  --accent-color: #667eea;
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-content: #0f0f1a;
+  --fg-primary: #e4e4e7;
+  --fg-secondary: #a1a1aa;
+  --fg-muted: #71717a;
+  --border-color: rgba(255,255,255,0.1);
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+html { font: 16px/1.5 var(--font-sans); background: var(--bg-content); color: var(--fg-primary); margin: 0; padding: 0; }
+body { margin: 0; display: flex; min-height: 100vh; }
+.sidebar { position: fixed; left: 0; top: 0; width: var(--sidebar-width); height: 100vh; background: var(--bg-primary); padding: 1.5rem 0; overflow-y: auto; z-index: 100; border-right: 1px solid var(--border-color); }
+.sidebar-header { padding: 0 1rem 1rem; border-bottom: 1px solid var(--border-color); margin-bottom: 1rem; }
+.sidebar-header h1 { font-size: 1.2rem; font-weight: 700; margin: 0; color: var(--fg-primary); }
+.sidebar-section { margin-bottom: 1.5rem; }
+.sidebar-section-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-muted); padding: 0 1rem; margin-bottom: 0.5rem; }
+.sidebar a { display: block; padding: 0.4rem 1rem; color: var(--fg-secondary); text-decoration: none; font-size: 0.875rem; transition: background 0.15s, color 0.15s; }
+.sidebar a:hover { background: rgba(255,255,255,0.05); color: var(--fg-primary); }
+.sidebar a.active { background: rgba(102, 126, 234, 0.1); color: var(--accent-color); border-left: 3px solid var(--accent-color); padding-left: calc(1rem - 3px); }
+main { margin-left: var(--sidebar-width); flex: 1; min-width: 0; padding: 2rem; max-width: calc(var(--max-width) + var(--sidebar-width) + 4rem); }
+.page-header { margin-bottom: 2rem; }
+.page-header h1 { margin: 0; font-size: 2rem; font-weight: 700; color: var(--accent-color); }
+.page-header .breadcrumb { color: var(--fg-muted); font-size: 0.9rem; margin-top: 0.5rem; }
+.page-header .breadcrumb a { color: var(--accent-color); text-decoration: none; }
+.time-picker { margin-bottom: 2rem; padding: 1rem; background: var(--bg-secondary); border-radius: 8px; }
+.time-picker label { display: block; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; color: var(--fg-muted); margin-bottom: 0.75rem; }
+.time-picker-options { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.time-picker-options button { padding: 0.5rem 1rem; border: 1px solid var(--border-color); background: transparent; color: var(--fg-secondary); border-radius: 4px; cursor: pointer; font-size: 0.875rem; transition: all 0.15s; }
+.time-picker-options button:hover { background: rgba(255,255,255,0.05); color: var(--fg-primary); }
+.time-picker-options button.active { background: var(--accent-color); border-color: var(--accent-color); color: white; }
+.chart { margin-bottom: 2rem; background: var(--bg-secondary); border-radius: 8px; padding: 1rem; }
+.chart svg { width: 100%; height: auto; }
+.empty-state { padding: 2rem; text-align: center; background: #fef3c7; border-radius: 8px; margin: 1rem 0; color: #92400e; }
+@media (max-width: 768px) { .sidebar { transform: translateX(-100%); } main { margin-left: 0; } }
+  </style>
 </head>
 <body>
   {{ insert_from_path(path="/templates/page/page.html") }}
@@ -22,8 +63,63 @@
   </main>
   
   <script type="module">
-    import { createTimePicker, timeState, queryData, Plot, plotName, legendName, timerange } from "./lib.js";
+    import * as Plot from "https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6/+esm";
+    import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28/+esm";
     
+    // Time options
+    const timelist = [["1 Week", 7], ["2 Weeks", 14], ["1 Month", 30], ["2 Months", 60], ["3 Months", 90], ["6 Months", 180], ["12 Months", 365], ["18 Months", 550]];
+    
+    // Reactive state
+    class State {
+      constructor(v) { this.value = v; this.subs = new Set(); }
+      set(v) { this.value = v; this.subs.forEach(fn => fn(v)); }
+      subscribe(fn) { this.subs.add(fn); fn(this.value); return () => this.subs.delete(fn); }
+    }
+    const timeState = new State(30);
+    
+    // Time picker
+    function createTimePicker(container) {
+      const picker = document.createElement("div");
+      picker.className = "time-picker";
+      picker.innerHTML = `<label>Time Range</label><div class="time-picker-options">${timelist.map(([l, d]) => `<button data-days="${d}"${d === timeState.value ? ' class="active"' : ''}>${l}</button>`).join("")}</div>`;
+      picker.querySelectorAll("button").forEach(btn => btn.addEventListener("click", () => { picker.querySelectorAll("button").forEach(b => b.classList.remove("active")); btn.classList.add("active"); timeState.set(parseInt(btn.dataset.days)); }));
+      container.appendChild(picker);
+    }
+    
+    // Resolution based on time range
+    function timerange(days) { if (days <= 30) return "1h"; if (days <= 60) return "2h"; if (days <= 90) return "4h"; if (days <= 180) return "12h"; return "24h"; }
+    
+    // DuckDB singleton
+    let duck = null;
+    async function getDuckDB() {
+      if (!duck) {
+        const BUNDLES = duckdb.getJsDelivrBundles();
+        const bundle = await duckdb.selectBundle(BUNDLES);
+        const worker = new Worker(URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })));
+        const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
+        await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+        duck = await db.connect();
+      }
+      return duck;
+    }
+    
+    // Query parquet files
+    async function queryData(datafiles, days) {
+      const res = timerange(days);
+      const now = Date.now();
+      const begin = now - days * 24 * 3600 * 1000;
+      const files = datafiles[`res=${res}`] || [];
+      const filtered = files.filter(f => f.start_time * 1000 <= now && f.end_time * 1000 >= begin);
+      const urls = filtered.map(f => new URL(f.file, location.href).href);
+      if (urls.length === 0) return [];
+      const db = await getDuckDB();
+      const result = await db.query(`SELECT epoch_us(timestamp)/1000.0::DOUBLE as timestamp, * EXCLUDE timestamp FROM read_parquet(${JSON.stringify(urls)}) WHERE timestamp >= epoch_ms(${begin}) ORDER BY timestamp ASC`);
+      return result.toArray();
+    }
+
+    function legendName(i, n, u) { return i.split(".").join(" "); }
+    function plotName(n) { return n === "DO" ? "Dissolved Oxygen" : n; }
+
     // Data files from template
     const datafiles = {
     {%- for k2, v2 in export[args[0]] %}
