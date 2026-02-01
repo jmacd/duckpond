@@ -43,7 +43,7 @@ async fn test_large_file_content_reconstruction() -> Result<(), Box<dyn std::err
     // Use a pattern that's easily verifiable but somewhat compressible
     let content_size = LARGE_FILE_THRESHOLD + 10000; // ~74KB
     let mut original_content = Vec::with_capacity(content_size);
-    
+
     // Pattern: repeating sequence that's recognizable but compressible
     for i in 0..content_size {
         original_content.push((i % 256) as u8);
@@ -70,30 +70,32 @@ async fn test_large_file_content_reconstruction() -> Result<(), Box<dyn std::err
     let tx2 = persistence.begin_test().await?;
     let wd2 = tx2.root().await?;
     let reconstructed_content = wd2.read_file_path_to_vec("/large_test.dat").await?;
-    
-    debug!("Reconstructed content size: {} bytes", reconstructed_content.len());
-    
+
+    debug!(
+        "Reconstructed content size: {} bytes",
+        reconstructed_content.len()
+    );
+
     // CRITICAL: The file read must return the ORIGINAL content
     assert_eq!(
         reconstructed_content.len(),
         original_content.len(),
         "read_file_path_to_vec() must reconstruct original content, not return raw parquet"
     );
-    
+
     // Verify content matches byte-for-byte
     assert_eq!(
-        reconstructed_content,
-        original_content,
+        reconstructed_content, original_content,
         "Reconstructed content must match original exactly"
     );
-    
+
     debug!("✅ Content reconstruction successful!");
     debug!("   Original: {} bytes", original_content.len());
     debug!("   Reconstructed: {} bytes", reconstructed_content.len());
     debug!("   Content verified: identical");
 
     tx2.commit_test().await?;
-    
+
     Ok(())
 }
 
@@ -132,10 +134,10 @@ async fn test_large_file_size_consistency() -> Result<(), Box<dyn std::error::Er
     // Read file back through TinyFS API
     let tx2 = persistence.begin_test().await?;
     let wd2 = tx2.root().await?;
-    
+
     let read_content = wd2.read_file_path_to_vec("/consistency_test.dat").await?;
     let actual_size = read_content.len();
-    
+
     debug!("Original size: {}", original_content.len());
     debug!("Read back size: {}", actual_size);
 
@@ -208,7 +210,11 @@ async fn test_large_file_multiple_reads() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(read3, original_content);
 
     debug!("✅ Multiple reads successful and consistent!");
-    debug!("   All {} reads returned {} bytes", 3, original_content.len());
+    debug!(
+        "   All {} reads returned {} bytes",
+        3,
+        original_content.len()
+    );
 
     tx2.commit_test().await?;
     Ok(())

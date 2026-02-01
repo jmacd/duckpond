@@ -47,10 +47,7 @@ pub struct TemplateDirectory {
 impl TemplateDirectory {
     #[must_use]
     pub fn new(config: TemplateSpec, context: FactoryContext) -> Self {
-        Self {
-            config,
-            context,
-        }
+        Self { config, context }
     }
 
     /// Discover template files using the in_pattern
@@ -220,13 +217,16 @@ impl Directory for TemplateDirectory {
                     entries.push(Ok(dir_entry));
                 }
                 Ok(None) => {
-                    let error_msg = format!("Failed to create literal template file '{}'", literal_name);
+                    let error_msg =
+                        format!("Failed to create literal template file '{}'", literal_name);
                     error!("TemplateDirectory::entries - {error_msg}");
                     entries.push(Err(tinyfs::Error::Other(error_msg)));
                 }
                 Err(e) => {
-                    let error_msg =
-                        format!("Failed to create literal template file '{}': {}", literal_name, e);
+                    let error_msg = format!(
+                        "Failed to create literal template file '{}': {}",
+                        literal_name, e
+                    );
                     error!("TemplateDirectory::entries - {error_msg}");
                     entries.push(Err(tinyfs::Error::Other(error_msg)));
                 }
@@ -269,12 +269,8 @@ impl TemplateDirectory {
 
         // Create template file that will render content
         // Pass the full export context so templates can access all matches
-        let template_file = TemplateFile::new(
-            template_content,
-            self.context.clone(),
-            args,
-            matches_export,
-        );
+        let template_file =
+            TemplateFile::new(template_content, self.context.clone(), args, matches_export);
 
         // Generate deterministic FileID for this template file
         let mut id_bytes = Vec::new();
@@ -297,10 +293,7 @@ impl TemplateDirectory {
 
     /// Build hierarchical export structure from pattern matches
     /// Groups matches by their capture structure (e.g., param/site → name → resolution)
-    fn build_matches_export(
-        &self,
-        matches: &[(PathBuf, Vec<String>)],
-    ) -> Value {
+    fn build_matches_export(&self, matches: &[(PathBuf, Vec<String>)]) -> Value {
         use serde_json::Map;
 
         // Build nested structure from captures
@@ -445,7 +438,7 @@ impl TemplateFile {
         let args = self.args.clone();
         let matches_export = self.matches_export.clone();
         let persistence = self.context.context.persistence.clone();
-        
+
         // Get fresh template variables before entering blocking context
         let fresh_template_variables = self
             .context
@@ -463,21 +456,24 @@ impl TemplateFile {
         tokio::task::spawn_blocking(move || {
             // Get handle to current runtime for block_on calls inside Tera functions
             let handle = tokio::runtime::Handle::current();
-            
+
             // Create Tera context and register built-in functions
             let mut tera = Tera::default();
 
             tera.register_function("group", tmpl_group);
             tera.register_filter("to_json", tmpl_to_json);
             tera.register_filter("keys", tmpl_keys);
-            
+
             // Register insert_from_path function with access to persistence
             let persistence_for_fn = persistence.clone();
             let handle_for_fn = handle.clone();
-            tera.register_function("insert_from_path", move |fn_args: &HashMap<String, Value>| {
-                tmpl_insert_from_path(fn_args, &persistence_for_fn, &handle_for_fn)
-            });
-            
+            tera.register_function(
+                "insert_from_path",
+                move |fn_args: &HashMap<String, Value>| {
+                    tmpl_insert_from_path(fn_args, &persistence_for_fn, &handle_for_fn)
+                },
+            );
+
             debug!("Template functions registered successfully");
 
             let mut context = TeraContext::new();
@@ -507,9 +503,7 @@ impl TemplateFile {
             if args.is_empty() && !matches_export.is_null() {
                 // Literal templates use their own pattern-matched context
                 context.insert("export", &matches_export);
-                info!(
-                    "🎨 RENDER: Added 'export' from in_pattern matches (literal template)"
-                );
+                info!("🎨 RENDER: Added 'export' from in_pattern matches (literal template)");
             } else if !context.contains_key("export") && !matches_export.is_null() {
                 // Fallback: use matches_export if pipeline didn't provide export
                 context.insert("export", &matches_export);
@@ -529,24 +523,24 @@ impl TemplateFile {
             debug!("Template context has export data available");
 
             // Render template with built-in functions and variables available
-            let rendered = tera
-                .render_str(&template_content, &context)
-                .map_err(|e| {
-                    error!("=== TEMPLATE RENDER ERROR ===");
-                    error!("Template content: {}", template_content);
-                    info!("Template variables available in context: {:?}", context);
+            let rendered = tera.render_str(&template_content, &context).map_err(|e| {
+                error!("=== TEMPLATE RENDER ERROR ===");
+                error!("Template content: {}", template_content);
+                info!("Template variables available in context: {:?}", context);
 
-                    // Print complete error chain with proper traversal
-                    error!("Error chain ({} levels):", count_error_chain_levels(&e));
-                    print_error_chain(&e);
+                // Print complete error chain with proper traversal
+                error!("Error chain ({} levels):", count_error_chain_levels(&e));
+                print_error_chain(&e);
 
-                    error!("=== END TEMPLATE ERROR ===");
-                    tinyfs::Error::Other(format!("Template render error: {}", e))
-                })?;
+                error!("=== END TEMPLATE ERROR ===");
+                tinyfs::Error::Other(format!("Template render error: {}", e))
+            })?;
 
             debug!("Rendered template result: {}", rendered);
             Ok(rendered)
-        }).await.map_err(|e| tinyfs::Error::Other(format!("spawn_blocking failed: {}", e)))?
+        })
+        .await
+        .map_err(|e| tinyfs::Error::Other(format!("spawn_blocking failed: {}", e)))?
     }
 }
 
@@ -641,7 +635,7 @@ crate::register_dynamic_factory!(
 
 /// Insert content from a pond path
 /// Usage: {{ insert_from_path(path="/templates/nav/nav.html") }}
-/// 
+///
 /// This function reads a file from the pond filesystem and returns its content.
 /// The file at the path can be a dynamic template file, which will be rendered
 /// before its content is returned.
@@ -661,28 +655,39 @@ fn tmpl_insert_from_path(
     let persistence = persistence.clone();
     let path = path.to_string();
     let path_for_debug = path.clone();
-    
+
     let content = handle.block_on(async move {
         use tokio::io::AsyncReadExt;
-        
+
         let fs = FS::from_arc(persistence);
-        let root = fs.root().await.map_err(|e| {
-            Error::msg(format!("insert_from_path: failed to get root: {}", e))
-        })?;
-        
+        let root = fs
+            .root()
+            .await
+            .map_err(|e| Error::msg(format!("insert_from_path: failed to get root: {}", e)))?;
+
         let mut reader = root.async_reader_path(&path).await.map_err(|e| {
-            Error::msg(format!("insert_from_path: failed to open '{}': {}", path, e))
+            Error::msg(format!(
+                "insert_from_path: failed to open '{}': {}",
+                path, e
+            ))
         })?;
-        
+
         let mut content = String::new();
         let _ = reader.read_to_string(&mut content).await.map_err(|e| {
-            Error::msg(format!("insert_from_path: failed to read '{}': {}", path, e))
+            Error::msg(format!(
+                "insert_from_path: failed to read '{}': {}",
+                path, e
+            ))
         })?;
-        
+
         Ok::<String, Error>(content)
     })?;
 
-    debug!("insert_from_path: read {} bytes from '{}'", content.len(), path_for_debug);
+    debug!(
+        "insert_from_path: read {} bytes from '{}'",
+        content.len(),
+        path_for_debug
+    );
     Ok(Value::String(content))
 }
 

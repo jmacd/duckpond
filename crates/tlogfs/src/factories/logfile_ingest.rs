@@ -363,8 +363,8 @@ mod integration_tests {
             &blake3_v1,
             logfile.content(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         log::info!("✓ Initial snapshot successful");
 
@@ -404,8 +404,8 @@ mod integration_tests {
             &blake3_v2,
             logfile.content(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         log::info!("✓ Incremental append successful");
 
@@ -449,8 +449,8 @@ mod integration_tests {
             &blake3_v3,
             logfile.content(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         log::info!("✓ Second incremental append successful");
         log::info!("✓ All snapshots and verifications passed!");
@@ -497,7 +497,9 @@ mod integration_tests {
             .await
             .unwrap();
 
-        log::info!("✓ Idempotency test passed - multiple ingestions without changes work correctly");
+        log::info!(
+            "✓ Idempotency test passed - multiple ingestions without changes work correctly"
+        );
     }
 
     #[tokio::test]

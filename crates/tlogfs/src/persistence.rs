@@ -1605,7 +1605,11 @@ impl InnerState {
                     }
                 } else {
                     // This is an existing node Find max version from both records and allocated.
-                    let max_record_version = records.iter().map(|r| r.version).max().expect("records is non-empty");
+                    let max_record_version = records
+                        .iter()
+                        .map(|r| r.version)
+                        .max()
+                        .expect("records is non-empty");
 
                     let max_allocated = self
                         .allocated_versions
@@ -3174,14 +3178,16 @@ impl InnerState {
             use tokio::io::AsyncReadExt;
             let mut reader = crate::large_files::ParquetFileReader::new(large_file_path)
                 .await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to open large file reader: {}", e)))?;
-            
+                .map_err(|e| {
+                    tinyfs::Error::Other(format!("Failed to open large file reader: {}", e))
+                })?;
+
             let mut content = Vec::new();
             let _ = reader
                 .read_to_end(&mut content)
                 .await
                 .map_err(|e| tinyfs::Error::Other(format!("Failed to read large file: {}", e)))?;
-            
+
             Ok(content)
         } else {
             // Small file: content stored inline

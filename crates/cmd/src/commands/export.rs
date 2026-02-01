@@ -1016,7 +1016,7 @@ fn validate_export_inputs(patterns: &[String], output_dir: &str, temporal: &str)
         log::debug!("  {} patterns to process", patterns.len());
         return Ok(());
     }
-    
+
     let valid_temporal_parts = ["year", "month", "day", "hour", "minute", "second"];
     let temporal_parts: Vec<&str> = temporal.split(',').collect();
 
