@@ -689,7 +689,7 @@ impl RemoteTable {
             RemoteError::TableOperation(format!("Failed to get Delta snapshot: {}", e))
         })?;
 
-        log::info!(
+        log::debug!(
             "Querying Delta files (table version: {:?})",
             self.table.version()
         );
@@ -699,12 +699,12 @@ impl RemoteTable {
             let path_str = add.path();
             // Only include paths with FILE-META partition
             if path_str.starts_with("bundle_id=FILE-META-") {
-                log::info!("Found Delta file: {}", path_str);
+                log::debug!("Found Delta file: {}", path_str);
                 paths.push(path_str.to_string());
             }
         }
 
-        log::info!("Found {} FILE-META files in Delta", paths.len());
+        log::debug!("Found {} FILE-META files in Delta", paths.len());
 
         // Extract unique partition directories from file paths
         let mut partition_dirs = std::collections::HashSet::new();
@@ -737,7 +737,7 @@ impl RemoteTable {
             .collect();
 
         txn_numbers.sort_unstable();
-        log::info!(
+        log::debug!(
             "Found {} transaction numbers: {:?}",
             txn_numbers.len(),
             txn_numbers
