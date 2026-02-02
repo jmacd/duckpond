@@ -7,7 +7,6 @@ use anyhow::{Context, Result, anyhow};
 use log::debug;
 use oauth2::{
     AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl, basic::BasicClient,
-    reqwest::async_http_client,
 };
 use std::time::Duration;
 
@@ -24,18 +23,18 @@ pub struct Client {
 impl Client {
     /// Create a new client with OAuth2 authentication
     pub async fn new(client_id: String, client_secret: String) -> Result<Self> {
-        let oauth_client = BasicClient::new(
-            ClientId::new(client_id),
-            Some(ClientSecret::new(client_secret)),
-            AuthUrl::new(Self::auth_url()).with_context(|| "Failed to create authorization URL")?,
-            Some(TokenUrl::new(Self::token_url()).with_context(|| "Failed to create token URL")?),
-        );
+        let oauth_client = BasicClient::new(ClientId::new(client_id))
+            .set_client_secret(ClientSecret::new(client_secret))
+            .set_auth_uri(AuthUrl::new(Self::auth_url()).with_context(|| "Failed to create authorization URL")?)
+            .set_token_uri(TokenUrl::new(Self::token_url()).with_context(|| "Failed to create token URL")?);
 
+        let http_client = reqwest::Client::new();
+        
         let token_result = oauth_client
             .exchange_client_credentials()
             .add_scope(Scope::new("read:locations".to_string()))
             .add_scope(Scope::new("read:data".to_string()))
-            .request_async(async_http_client)
+            .request_async(&http_client)
             .await;
 
         let token = match token_result {

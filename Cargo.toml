@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 authors = ["DuckPond Contributors"]
 homepage = "https://github.com/duckpond"
@@ -58,7 +58,7 @@ datafusion-common = "50"
 datafusion-common-runtime = "50"
 datafusion-expr = "50"
 datafusion-functions-json = "0.50"
-deltalake = { version = "0.29", features = ["datafusion"] }
+deltalake = { version = "0.29", default-features = false, features = ["datafusion", "rustls"] }
 duckdb = { version = "1.3", features = ["bundled"] }
 env_logger = "0.11.3"
 file-rotate = "0.8"
@@ -67,9 +67,9 @@ hex = "0.4.3"
 humantime = "2.1"
 linkme = "0.3"
 log = "0.4.17"
-oauth2 = { version = "4.4.2", features = ["reqwest"] }
+oauth2 = { version = "5.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 object_store = { version = "0.12", features = ["aws"] }
-opentelemetry-proto = { version = "0.31.0", features = ["gen-tonic-messages", "metrics", "with-serde"] }
+opentelemetry-proto = { version = "0.27.0", features = ["gen-tonic-messages", "metrics", "with-serde"] }
 parquet = { version = "56", features = ["async", "arrow"] }
 parse_duration = "2.1.1"
 paste = "1.0"
@@ -77,7 +77,7 @@ peak_alloc = "0.3.0"
 pin-project = "1.0"
 rand = "0.8.5"
 regex = "1.11.1"
-reqwest = { version = "0.12.4", features = ["blocking", "gzip", "cookies", "json"] }
+reqwest = { version = "0.12.4", default-features = false, features = ["blocking", "gzip", "cookies", "json", "rustls-tls"] }
 sea-query = { version = "0", features = ["with-chrono"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 serde_arrow = { version = "0.13", features = ["arrow-56"] }

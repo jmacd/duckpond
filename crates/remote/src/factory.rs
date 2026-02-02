@@ -187,7 +187,6 @@ async fn execute_remote(
 
     let config: RemoteConfig = serde_json::from_value(config)?;
 
-    log::info!("🌐 REMOTE FACTORY (Chunked Parquet)");
     log::info!("   Remote URL: {}", config.url);
     log::debug!("   Config region: '{}'", config.region);
     log::debug!("   Config access_key length: {}", config.access_key.len());
@@ -461,7 +460,7 @@ async fn execute_pull(
         return Ok(());
     }
 
-    log::info!("   Remote has {} files", remote_files.len());
+    log::debug!("   Remote has {} files", remote_files.len());
 
     // Get local Delta table and pond path
     let state = extract_tlogfs_state(context)?;
@@ -482,7 +481,7 @@ async fn execute_pull(
                 continue;
             }
 
-            log::info!("   Pulling large file: {}", original_path);
+            log::debug!("   Pulling large file: {}", original_path);
 
             // Download using ChunkedReader
             let mut output = Vec::new();
@@ -512,7 +511,7 @@ async fn execute_pull(
                     ))
                 })?;
 
-            log::info!(
+            log::debug!(
                 "      ✓ Pulled {} bytes to {}",
                 byte_len,
                 large_file_fs_path.display()
@@ -527,7 +526,7 @@ async fn execute_pull(
                 continue;
             }
 
-            log::info!("   Pulling: {}", original_path);
+            log::debug!("   Pulling: {}", original_path);
 
             // Download using ChunkedReader
             let mut output = Vec::new();
@@ -545,7 +544,7 @@ async fn execute_pull(
                     RemoteError::TableOperation(format!("Failed to write {}: {}", original_path, e))
                 })?;
 
-            log::info!("      ✓ Pulled {} bytes", byte_len);
+            log::debug!("      ✓ Pulled {} bytes", byte_len);
         }
     }
 
@@ -584,20 +583,20 @@ async fn execute_list_files(
     remote_table: RemoteTable,
     txn_id: Option<i64>,
 ) -> Result<(), RemoteError> {
-    log::info!("📋 LIST FILES");
+    log::debug!("📋 LIST FILES");
 
     // List all files - we don't filter by txn_id anymore
     let _ = txn_id; // Unused now
     let files = remote_table.list_files("").await?;
 
     if files.is_empty() {
-        log::info!("   No files found");
+        log::debug!("   No files found");
         return Ok(());
     }
 
-    log::info!("   Found {} files:", files.len());
+    log::debug!("   Found {} files:", files.len());
     for (bundle_id, original_path, pond_txn_id, size) in files {
-        log::info!(
+        log::debug!(
             "   - {} | txn {} | {} | {} bytes",
             &bundle_id[..16.min(bundle_id.len())],
             pond_txn_id,
@@ -614,11 +613,11 @@ async fn execute_verify(
     remote_table: RemoteTable,
     bundle_id: Option<String>,
 ) -> Result<(), RemoteError> {
-    log::info!("✓ VERIFY: Checking backup integrity");
+    log::debug!("✓ VERIFY: Checking backup integrity");
 
     if let Some(id) = bundle_id {
         // Verify specific bundle - need to find files with this bundle_id
-        log::info!("   Verifying bundle: {}", &id[..16.min(id.len())]);
+        log::debug!("   Verifying bundle: {}", &id[..16.min(id.len())]);
 
         // Query to find all files with this bundle_id
         let files = remote_table.list_files("").await?;
@@ -636,7 +635,7 @@ async fn execute_verify(
             remote_table
                 .read_file(&bundle_id, &file_path, pond_txn_id, &mut output)
                 .await?;
-            log::info!("   ✓ {} OK ({} bytes)", file_path, output.len());
+            log::debug!("   ✓ {} OK ({} bytes)", file_path, output.len());
         }
     } else {
         // Verify all bundles
@@ -644,7 +643,7 @@ async fn execute_verify(
 
         let files = remote_table.list_files("").await?;
         let total_files = files.len();
-        log::info!("   Found {} files to verify", total_files);
+        log::debug!("   Found {} files to verify", total_files);
 
         let mut verified = 0;
         for (bundle_id, file_path, pond_txn_id, _size) in files {
@@ -662,7 +661,7 @@ async fn execute_verify(
             }
         }
 
-        log::info!("   ✓ Verified {}/{} bundles", verified, total_files);
+        log::debug!("   ✓ Verified {}/{} bundles", verified, total_files);
     }
 
     Ok(())
@@ -734,7 +733,7 @@ pub async fn scan_remote_versions(
     match max_txn {
         Some(max) => {
             let transactions: Vec<i64> = (1..=max).collect();
-            log::info!(
+            log::debug!(
                 "Found {} transactions in remote backup (1..={})",
                 transactions.len(),
                 max
@@ -749,7 +748,7 @@ pub async fn scan_remote_versions(
                 let transactions = remote_table
                     .list_transactions_from_metadata(&pond_id.to_string())
                     .await?;
-                log::info!(
+                log::debug!(
                     "Found {} transactions using metadata approach",
                     transactions.len()
                 );
@@ -828,7 +827,7 @@ pub async fn apply_parquet_files_from_remote(
         return Ok(());
     }
 
-    log::info!("Found {} files to restore in transaction", files.len());
+    log::debug!("Found {} files to restore in transaction", files.len());
 
     // Get the object store from the local table
     let object_store = local_table.object_store();
@@ -933,7 +932,7 @@ pub async fn restore_large_files_from_remote(
     remote_table: &crate::RemoteTable,
     pond_path: &std::path::Path,
 ) -> Result<usize, RemoteError> {
-    log::info!("Scanning for large files in remote backup...");
+    log::debug!("Scanning for large files in remote backup...");
 
     // List all files in remote
     let all_files = remote_table.list_files("").await?;
@@ -949,7 +948,7 @@ pub async fn restore_large_files_from_remote(
         return Ok(0);
     }
 
-    log::info!("   Found {} large files to restore", large_files.len());
+    log::debug!("   Found {} large files to restore", large_files.len());
 
     // Large files are stored within the 'data' subdirectory of the pond
     let data_path = pond_path.join("data");
@@ -964,7 +963,7 @@ pub async fn restore_large_files_from_remote(
             continue;
         }
 
-        log::info!("   Restoring: {}", path);
+        log::debug!("   Restoring: {}", path);
 
         // Download file from remote
         let mut buffer = Vec::new();
@@ -994,11 +993,11 @@ pub async fn restore_large_files_from_remote(
                 ))
             })?;
 
-        log::info!("      ✓ Restored {} bytes", byte_len);
+        log::debug!("      ✓ Restored {} bytes", byte_len);
         restored += 1;
     }
 
-    log::info!("   ✓ Restored {} large files", restored);
+    log::debug!("   ✓ Restored {} large files", restored);
     Ok(restored)
 }
 
