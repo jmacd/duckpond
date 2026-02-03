@@ -514,38 +514,71 @@ async fn process_batch<W: tokio::io::AsyncWrite + Unpin>(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::AsyncWriteExt;
 
+    // CRITICAL: Use column names, not indices, for Delta Lake compatibility.
+    //
+    // When bundle_id is a partition column, Delta Lake stores its value in the
+    // directory path (e.g., /bundle_id=value/file.parquet), not in the Parquet file.
+    // DataFusion may reconstruct partition columns at different positions than
+    // the schema definition, or exclude them entirely.
+    //
+    // Example: Schema defines [bundle_id(0), pond_txn_id(1), path(2), chunk_id(3), ...]
+    // But SELECT * may return [pond_txn_id(0), path(1), chunk_id(2), ...] if bundle_id
+    // is excluded, causing batch.column(3) to be chunk_hash instead of chunk_id.
+    //
+    // See: docs/duckpond-system-patterns.md "Delta Lake Partition Column Ordering"
+    let schema = batch.schema();
+
+    let chunk_id_idx = schema
+        .index_of("chunk_id")
+        .map_err(|_| "Column chunk_id not found")?;
+    let chunk_hash_idx = schema
+        .index_of("chunk_hash")
+        .map_err(|_| "Column chunk_hash not found")?;
+    let chunk_outboard_idx = schema
+        .index_of("chunk_outboard")
+        .map_err(|_| "Column chunk_outboard not found")?;
+    let chunk_data_idx = schema
+        .index_of("chunk_data")
+        .map_err(|_| "Column chunk_data not found")?;
+    let total_size_idx = schema
+        .index_of("total_size")
+        .map_err(|_| "Column total_size not found")?;
+    let root_hash_idx = schema
+        .index_of("root_hash")
+        .map_err(|_| "Column root_hash not found")?;
+
     let chunk_ids = batch
-        .column(3)
+        .column(chunk_id_idx)
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or("Invalid column type for chunk_id")?;
 
     let chunk_hashes_arr = batch
-        .column(4)
+        .column(chunk_hash_idx)
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or("Invalid column type for chunk_hash")?;
 
     let chunk_outboards = batch
-        .column(5)
+        .column(chunk_outboard_idx)
         .as_any()
         .downcast_ref::<BinaryArray>()
         .ok_or("Invalid column type for chunk_outboard")?;
 
     let chunk_datas = batch
-        .column(6)
+        .column(chunk_data_idx)
         .as_any()
         .downcast_ref::<BinaryArray>()
         .ok_or("Invalid column type for chunk_data")?;
 
     let total_sizes = batch
-        .column(7)
+        .column(total_size_idx)
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or("Invalid column type for total_size")?;
 
     let root_hashes_arr = batch
-        .column(8)
+        .column(root_hash_idx)
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or("Invalid column type for root_hash")?;

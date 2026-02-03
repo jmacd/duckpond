@@ -606,6 +606,35 @@ The NodeID/PartID relationship is fundamental to DeltaLake's partitioning scheme
 // Wrong relationships cause full table scans instead of partition filtering
 ```
 
+### Critical Pattern: Delta Lake Partition Column Ordering in Queries
+
+**BUG DISCOVERED**: When querying Delta Lake tables with partition columns, `SELECT *` may NOT return columns in schema definition order. Partition columns are stored in directory structure, not in Parquet files, and DataFusion may relocate or exclude them.
+
+```rust
+// Given this schema with bundle_id as partition column:
+// 0: bundle_id    (Utf8)   <-- PARTITION COLUMN
+// 1: pond_txn_id  (Int64)
+// 2: path         (Utf8)
+// 3: chunk_id     (Int64)
+// ...
+
+// ❌ WRONG - Hardcoded column indices assume schema order
+let chunk_ids = batch.column(3).downcast_ref::<Int64Array>()?;
+// BUG: If bundle_id is excluded/relocated, column(3) is chunk_hash (Utf8), not chunk_id!
+
+// ✅ CORRECT - Use column names for robustness
+let schema = batch.schema();
+let chunk_id_idx = schema.index_of("chunk_id")?;
+let chunk_ids = batch.column(chunk_id_idx).downcast_ref::<Int64Array>()?;
+```
+
+**Why This Happens**: Delta Lake stores partition column values in the directory path (`/bundle_id=value/file.parquet`), not in the Parquet file itself. When DataFusion reconstructs the full row, the partition column may appear:
+- At a different position than the schema definition
+- Excluded entirely (if not explicitly requested)
+- After all non-partition columns
+
+**Rule**: Always use `schema.index_of("column_name")` when reading from Delta Lake, never hardcoded indices.
+
 ### The TinyFS resolve_path() Pattern
 
 **This is the established pattern throughout the codebase for getting correct part_id:**
@@ -1553,7 +1582,8 @@ Err(e) => {
 7. **Violating TableProvider ownership chains** (creates duplicate providers, breaks resource management)
 8. **Using UNION hacks instead of multi-URL ListingTable** (breaks ownership, creates temporary registrations)
 9. **Violating NodeID/PartID relationships** (breaks partition pruning)
-10. **Violating single-instance patterns** (context isolation, version conflicts)
+10. **Using hardcoded column indices with Delta Lake queries** (partition columns may be relocated)
+11. **Violating single-instance patterns** (context isolation, version conflicts)
 11. **Operating at the wrong architectural layer** (pattern matching at file level, etc.)
 12. **Repeated table registration within same transaction** ("table already exists" errors)
 13. **Not failing fast on architectural constraint violations** (allows bugs to compound)
@@ -1590,6 +1620,7 @@ Err(e) => {
 18. **Maintain TableProvider ownership chains** - every provider must trace back to FS root through cache
 19. **Use multi-URL ListingTable instead of UNION** - DataFusion handles multiple files natively
 20. **Monitor TableProvider creation with logging** - track cache hits/misses and ownership compliance
+21. **Use column names, not indices, when reading Delta Lake** - partition columns may not appear in schema order
 
 **NodeID/PartID Patterns:**
 21. **Never use `node_id` as `part_id` for files** - always resolve parent directory

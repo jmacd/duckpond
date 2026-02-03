@@ -69,9 +69,10 @@ Tests waiting to be run:
 
 1. [ ] `400-dual-pond-observability.sh` - Multi-pond with log ingestion
 2. [ ] `500-s3-replication-minio.sh` - S3 backup/restore cycle
-3. [ ] Factory node creation (`sql-derived-table`)
-4. [ ] Control table queries
-5. [ ] Time-series operations
+3. [ ] `510-synth-logs-replication-cycle.sh` - **NEW** Full pipeline: synth-logs → logfile-ingest → S3 → replicate → verify (multi-round)
+4. [ ] Factory node creation (`sql-derived-table`)
+5. [ ] Control table queries
+6. [ ] Time-series operations
 
 ---
 
