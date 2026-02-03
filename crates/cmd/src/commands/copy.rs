@@ -141,11 +141,6 @@ async fn copy_single_file_to_directory_with_name(
             .map_err(|e| format!("Failed to read magic bytes from '{}': {}", file_path, e))?;
 
         if &magic != b"PAR1" {
-            let format_name = if entry_type == tinyfs::EntryType::TablePhysicalSeries {
-                "series"
-            } else {
-                "table"
-            };
             return Err(format!(
                 "File '{}' is not a valid parquet file (missing PAR1 magic bytes). \
                 Use --format=data for non-parquet files like CSV. \
@@ -1087,29 +1082,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_copy_single_csv_as_table() -> Result<()> {
+    async fn test_copy_single_csv_as_data() -> Result<()> {
         let setup = TestSetup::new().await?;
 
         // Create host CSV file
         let host_file = setup.create_host_csv_file("test.csv").await?;
 
-        // Copy to pond as table file
+        // Copy to pond as data file (CSV is raw data, not a parquet table)
         let (ship_context, sources, dest, format) = setup.copy_context(
             vec![host_file.to_string_lossy().to_string()],
-            "copied_table.csv".to_string(),
-            "table".to_string(),
+            "copied_data.csv".to_string(),
+            "data".to_string(),
         );
 
         copy_command(&ship_context, &sources, &dest, &format).await?;
 
         // Verify file exists
         assert!(
-            setup.verify_file_exists("copied_table.csv").await?,
+            setup.verify_file_exists("copied_data.csv").await?,
             "File should exist in pond"
         );
 
         // Verify content is preserved
-        let pond_content = setup.read_pond_file_content("copied_table.csv").await?;
+        let pond_content = setup.read_pond_file_content("copied_data.csv").await?;
         let expected_content = "timestamp,value,doubled_value\n2024-01-01T00:00:00Z,42.0,84.0\n2024-01-01T01:00:00Z,43.5,87.0\n";
         assert_eq!(
             String::from_utf8(pond_content)?,
@@ -1171,24 +1166,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_copy_with_format_override() -> Result<()> {
+    async fn test_copy_csv_with_data_format() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        // Create CSV file but copy as table format
+        // Create CSV file and copy as data format (not table, since CSV isn't parquet)
         let host_file = setup.create_host_csv_file("test.csv").await?;
 
-        // Copy with table format (should override file extension)
+        // Copy with data format (CSV files should use data format)
         let (ship_context, sources, dest, format) = setup.copy_context(
             vec![host_file.to_string_lossy().to_string()],
-            "formatted_as_table.csv".to_string(),
-            "table".to_string(),
+            "formatted_as_data.csv".to_string(),
+            "data".to_string(),
         );
 
         copy_command(&ship_context, &sources, &dest, &format).await?;
 
-        // Verify it was stored successfully (format is handled by the copy command)
+        // Verify it was stored successfully
         assert!(
-            setup.verify_file_exists("formatted_as_table.csv").await?,
+            setup.verify_file_exists("formatted_as_data.csv").await?,
             "File should exist in pond"
         );
 

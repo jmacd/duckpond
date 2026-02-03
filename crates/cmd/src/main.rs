@@ -167,7 +167,7 @@ enum Commands {
     },
     /// Create node (factory objects like CSV, SQL views, etc.)
     Mknod {
-        /// Factory type to create [possible values: csv, sql, hostmount]
+        /// Factory type to create (use 'list-factories' to see all available types)
         factory_type: String,
         /// Path where the node will be created
         path: String,

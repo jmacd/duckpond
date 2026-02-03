@@ -38,6 +38,8 @@ RUN apt-get update && \
         netcat-openbsd \
         # For log generation testing
         rsyslog \
+        # Process tools (pgrep, ps, etc)
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Install MinIO client (mc) for S3 testing

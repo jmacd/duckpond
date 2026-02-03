@@ -1,10 +1,10 @@
-# DuckPond Experiment Framework
+# DuckPond Test Framework
 
-A containerized test harness for safe experimentation with the `pond` CLI.
+A containerized test harness for safe testation with the `pond` CLI.
 
 ## Purpose
 
-This framework enables iterative experimentation with duckpond:
+This framework enables iterative testation with duckpond:
 - **Safe sandbox**: Mistakes are harmless - everything runs in disposable containers
 - **Fast feedback**: Failures produce actionable output for development or documentation
 - **Agent-friendly**: Structured workflow for AI-assisted testing
@@ -12,42 +12,42 @@ This framework enables iterative experimentation with duckpond:
 ## Directory Structure
 
 ```
-experiments/
+testsuite/
 ├── README.md                   # This file
-├── AGENT_INSTRUCTIONS.md       # Instructions for AI agents running experiments
-├── run-experiment.sh           # Main experiment runner
-├── Dockerfile.experiment       # Container image for experiments
-├── templates/                  # Experiment script templates
+├── AGENT_INSTRUCTIONS.md       # Instructions for AI agents running tests
+├── run-test.sh           # Main test runner
+├── Dockerfile.test       # Container image for tests
+├── templates/                  # Test script templates
 │   └── basic.sh.tmpl
-├── active/                     # Currently running experiment
-│   └── experiment.sh           # Generated experiment script
-├── results/                    # Experiment outcomes
+├── tests/                     # Currently running test
+│   └── test.sh           # Generated test script
+├── results/                    # Test outcomes
 │   ├── YYYYMMDD-HHMMSS-success.md
 │   └── YYYYMMDD-HHMMSS-failure.md
-└── library/                    # Saved experiments that work
+└── tests/                    # Saved tests that work
     └── *.sh
 ```
 
 ## Quick Start
 
-### 1. Build the experiment container
+### 1. Build the test container
 
 ```bash
-cd experiments
+cd tests
 ./build-image.sh
 ```
 
-### 2. Run an experiment
+### 2. Run an test
 
 ```bash
 # Interactive mode - enter commands manually
-./run-experiment.sh --interactive
+./run-test.sh --interactive
 
 # Run a script
-./run-experiment.sh ./library/basic-init-copy.sh
+./run-test.sh ./tests/basic-init-copy.sh
 
 # Run from inline script
-./run-experiment.sh --inline '
+./run-test.sh --inline '
 pond init
 pond mkdir /data
 pond list /
@@ -57,7 +57,7 @@ pond list /
 ### 3. Review results
 
 Results are saved in `results/` with timestamps and categorized as:
-- `*-success.md` - Experiment worked as expected
+- `*-success.md` - Test worked as expected
 - `*-failure.md` - Technical failure (code bug, unexpected error)
 - `*-confusion.md` - Usage confusion (documentation gap)
 
@@ -69,8 +69,8 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for the full agent workflow.
 
 1. User describes test → Read the description
 2. Review `docs/duckpond-overview.md` for relevant commands
-3. Write experiment script in `active/experiment.sh`
-4. Run: `./run-experiment.sh active/experiment.sh`
+3. Write test script in `tests/test.sh`
+4. Run: `./run-test.sh tests/test.sh`
 5. Analyze output → Categorize as success/failure/confusion
 6. If failure: Create issue description for development
 7. If confusion: Update documentation
@@ -78,13 +78,13 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for the full agent workflow.
 
 ## Container Environment
 
-The experiment container provides:
+The test container provides:
 - The compiled `pond` binary at `/usr/local/bin/pond`
 - A fresh `/pond` directory for each run (initialized or not, as needed)
 - Standard Unix tools for inspection
 - `POND=/pond` environment variable preset
 
-## Example Experiments
+## Example Tests
 
 ### Basic: Initialize and list
 

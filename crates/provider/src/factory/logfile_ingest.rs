@@ -211,53 +211,60 @@ pub async fn execute(
 
         if let Some(pond_active) = pond_files.get(active_filename) {
             // Check if rotation might have occurred:
-            // 1. File shrunk (classic case)
-            // 2. File same size or larger, but content doesn't match prefix
+            // 1. File shrunk (classic case) → definitely rotated
+            // 2. File same size but content differs → rotated to same-size file (rare)
+            // 3. File grew → normal append, NO prefix check needed here (verified in ingest_append)
             let might_be_rotated = if host_active.size < pond_active.cumulative_size {
                 info!(
                     "Active file {} shrunk from {} to {} bytes - checking for rotation",
                     active_filename, pond_active.cumulative_size, host_active.size
                 );
                 true
-            } else if pond_active.cumulative_size > 0 {
-                // Content mismatch detection: compute blake3 of prefix and compare
-                // Read prefix from host file (first cumulative_size bytes)
-                let prefix_len = pond_active.cumulative_size as usize;
-                if host_active.size >= pond_active.cumulative_size {
-                    let mut prefix_file = std::fs::File::open(&host_active.path)
-                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                    let mut prefix_content = vec![0u8; prefix_len];
-                    use std::io::Read;
-                    prefix_file
-                        .read_exact(&mut prefix_content)
-                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+            } else if host_active.size == pond_active.cumulative_size
+                && pond_active.cumulative_size > 0
+            {
+                // Same size: could be unchanged OR rotated to a same-size file
+                // Must check content to distinguish
+                let mut prefix_file = std::fs::File::open(&host_active.path)
+                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                let mut prefix_content = vec![0u8; pond_active.cumulative_size as usize];
+                use std::io::Read;
+                prefix_file
+                    .read_exact(&mut prefix_content)
+                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
-                    // Compute blake3 of prefix using same method as tinyfs (bao-tree root)
-                    let mut hasher = IncrementalHashState::new();
-                    hasher.ingest(&prefix_content);
-                    let prefix_blake3 = hasher.root_hash().to_hex().to_string();
+                let mut hasher = IncrementalHashState::new();
+                hasher.ingest(&prefix_content);
+                let host_blake3 = hasher.root_hash().to_hex().to_string();
 
-                    // Compare to pond's stored blake3
-                    if prefix_blake3 == pond_active.blake3 {
-                        debug!(
-                            "Active file {} prefix matches - no rotation",
-                            active_filename
-                        );
-                        false
-                    } else {
-                        info!(
-                            "Active file {} content mismatch (prefix blake3 {} != pond blake3 {}) - checking for rotation",
-                            active_filename,
-                            &prefix_blake3[..16],
-                            &pond_active.blake3[..16]
-                        );
-                        true
-                    }
+                if host_blake3 == pond_active.blake3 {
+                    debug!(
+                        "Active file {} unchanged ({} bytes)",
+                        active_filename, host_active.size
+                    );
+                    false
                 } else {
-                    // File smaller than what we tracked - definitely rotated
+                    debug!(
+                        "Active file {} same size ({} bytes) but hash differs: host={}, pond={}",
+                        active_filename,
+                        host_active.size,
+                        &host_blake3[..16],
+                        &pond_active.blake3[..16]
+                    );
+                    info!(
+                        "Active file {} same size ({} bytes) but content differs - checking for rotation",
+                        active_filename, host_active.size
+                    );
                     true
                 }
             } else {
+                // host_active.size > pond_active.cumulative_size
+                // Normal append case - no rotation check needed
+                // Prefix verification happens later in ingest_append
+                debug!(
+                    "Active file {} grew from {} to {} bytes - will process as append",
+                    active_filename, pond_active.cumulative_size, host_active.size
+                );
                 false
             };
 
@@ -373,8 +380,7 @@ pub async fn execute(
     } else if stats.unchanged.0 > 0 {
         info!(
             "Logfile ingestion complete: no changes ({} files, {} bytes total)",
-            stats.unchanged.0,
-            stats.unchanged.1
+            stats.unchanged.0, stats.unchanged.1
         );
     } else {
         info!("Logfile ingestion complete: no files to process");
@@ -547,7 +553,9 @@ async fn read_pond_state(
                 Err(e) => {
                     warn!(
                         "File {} has bao_outboard but failed to parse: {:?}, falling back to size={}",
-                        filename, e, metadata.size.unwrap_or(0)
+                        filename,
+                        e,
+                        metadata.size.unwrap_or(0)
                     );
                     metadata.size.unwrap_or(0)
                 }
@@ -595,7 +603,10 @@ async fn process_active_file(
     match pond_file {
         None => {
             // New file: ingest completely
-            info!("Ingesting new file: {} ({} bytes)", filename, host_file.size);
+            info!(
+                "Ingesting new file: {} ({} bytes)",
+                filename, host_file.size
+            );
             ingest_new_file(context, config, host_file).await?;
             stats.new_files.0 += 1;
             stats.new_files.1 += host_file.size;
@@ -648,7 +659,10 @@ async fn process_archived_file(
     match pond_file {
         None => {
             // New archived file
-            info!("Ingesting new archived file: {} ({} bytes)", filename, host_file.size);
+            info!(
+                "Ingesting new archived file: {} ({} bytes)",
+                filename, host_file.size
+            );
             ingest_new_file(context, config, host_file).await?;
             stats.new_files.0 += 1;
             stats.new_files.1 += host_file.size;
@@ -755,7 +769,13 @@ async fn ingest_append(
     let fs = context.context.filesystem();
     let root = fs.root().await?;
 
-    // Read only the new bytes from host file
+    // IMPORTANT: Use the snapshot size from host_file.size (captured at start of run)
+    // Do NOT re-read file size - the file may have grown since we started.
+    // We'll catch any new bytes on the next run.
+    let snapshot_size = host_file.size;
+    let bytes_to_read = (snapshot_size - pond_state.cumulative_size) as usize;
+
+    // Read only the new bytes from host file (up to snapshot, not current size)
     let mut file =
         std::fs::File::open(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
     use std::io::{Read, Seek, SeekFrom};
@@ -763,19 +783,20 @@ async fn ingest_append(
         .seek(SeekFrom::Start(pond_state.cumulative_size))
         .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
-    let mut new_content = Vec::new();
-    let _ = file
-        .read_to_end(&mut new_content)
+    // Read exactly the bytes we expect (not read_to_end which could get more)
+    let mut new_content = vec![0u8; bytes_to_read];
+    file.read_exact(&mut new_content)
         .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
     info!(
         "Ingesting append to {}: {} new bytes (total will be {})",
         filename,
         new_content.len(),
-        pond_state.cumulative_size + new_content.len() as u64
+        snapshot_size
     );
 
-    // Verify prefix hasn't changed before appending (using simple blake3 comparison)
+    // Verify prefix hasn't changed before appending
+    // This ensures the file wasn't rotated between when we checked size and now
     {
         // Read the prefix from host file
         let mut prefix_file = std::fs::File::open(&host_file.path)
@@ -793,7 +814,8 @@ async fn ingest_append(
         // Compare to pond's stored blake3
         if prefix_blake3 != pond_state.blake3 {
             return Err(tinyfs::Error::Other(format!(
-                "Prefix verification failed for {}: expected blake3={}, got blake3={}",
+                "Prefix verification failed for {}: expected blake3={}, got blake3={}. \
+                 File may have been rotated during ingestion.",
                 filename, pond_state.blake3, prefix_blake3
             )));
         }

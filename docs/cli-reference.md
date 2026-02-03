@@ -316,6 +316,46 @@ pond run /etc/system.d/10-logs b3sum
 
 **Important:** Files >64KB are stored externally in parquet (not inline in oplog). See `docs/large-file-storage-implementation.md`.
 
+**For Linux system logs (/var/log/syslog):**
+
+Configure logrotate with `nocompress` to keep archived logs readable:
+
+```
+# /etc/logrotate.d/syslog-nocompress
+/var/log/syslog
+/var/log/messages
+{
+    rotate 4
+    weekly
+    missingok
+    notifempty
+    nocompress          # Required for logfile-ingest
+    create 644 root adm
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate 2>/dev/null || true
+    endscript
+}
+```
+
+Example configuration for syslog:
+```yaml
+archived_pattern: /var/log/syslog.*
+active_pattern: /var/log/syslog
+pond_path: /logs/system
+```
+
+**Container testing notes:**
+
+When testing in Docker containers, rsyslog needs kernel logging disabled:
+```bash
+# Disable imklog module (not available in containers)
+sed -i 's/module(load="imklog")/#module(load="imklog")/' /etc/rsyslog.conf
+rsyslogd
+
+# Generate log entries with logger command
+logger -t myapp "Test message"
+```
+
 ---
 
 ## Glob Patterns
@@ -357,5 +397,5 @@ Error: Failed to list files matching '/' from data filesystem: EmptyPath
 
 ## See Also
 
-- [experiments/](../experiments/) - Runnable test scripts
+- [testsuite/](../testsuite/) - Runnable test scripts
 - [duckpond-overview.md](duckpond-overview.md) - Architecture overview

@@ -1,4 +1,4 @@
-# Experiment Backlog
+# Test Backlog
 
 > Priority: P0 (blocking) → P1 (high) → P2 (medium) → P3 (low)
 > Status: 🔴 Open | 🟡 In Progress | 🟢 Done | ⚪ Deferred
@@ -28,7 +28,7 @@
 ### P3-001: Document factory configuration examples
 - **Type**: DOCS
 - **Description**: Factory YAML configs need more complete examples
-- **Next Step**: Run factory experiments to discover actual syntax
+- **Next Step**: Run factory tests to discover actual syntax
 
 ---
 
@@ -44,7 +44,7 @@
 
 ### ✅ D-003: Fix `--sql` → `--query` in docs
 - **Completed**: 2026-02-02
-- **Resolution**: Updated cli-reference.md and experiments
+- **Resolution**: Updated cli-reference.md and tests
 
 ### ✅ D-004: `--format=table` corrupts CSV files (P0 BUG)
 - **Completed**: 2026-02-02
@@ -63,9 +63,9 @@
 
 ---
 
-## Experiment Queue
+## Test Queue
 
-Experiments waiting to be run:
+Tests waiting to be run:
 
 1. [ ] `400-dual-pond-observability.sh` - Multi-pond with log ingestion
 2. [ ] `500-s3-replication-minio.sh` - S3 backup/restore cycle
@@ -78,12 +78,12 @@ Experiments waiting to be run:
 ## Quick Commands
 
 ```bash
-# Run next experiment
-cd /Volumes/sourcecode/src/duckpond/experiments
-./run-experiment.sh --save-result library/XXX.sh
+# Run next test
+cd /Volumes/sourcecode/src/duckpond/tests
+./run-test.sh --save-result tests/XXX.sh
 
 # Interactive exploration
-./run-experiment.sh --interactive
+./run-test.sh --interactive
 
 # With S3/MinIO
 docker-compose up -d minio

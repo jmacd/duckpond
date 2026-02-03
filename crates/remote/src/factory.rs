@@ -216,8 +216,14 @@ async fn execute_remote(
                 // Push/Pull require ControlWriter mode but were called with PondReadWriter
                 // This happens when 'pond run' is used manually - the push/pull already
                 // runs automatically as a post-commit factory
-                log::info!("ℹ️  Remote {} runs automatically after each commit.", 
-                    if matches!(cmd, RemoteCommand::Push) { "push" } else { "pull" });
+                log::info!(
+                    "ℹ️  Remote {} runs automatically after each commit.",
+                    if matches!(cmd, RemoteCommand::Push) {
+                        "push"
+                    } else {
+                        "pull"
+                    }
+                );
                 log::info!("   No manual execution needed - your data is already synchronized.");
                 log::info!("   To check backup status, use: pond run <path> list-files");
                 return Ok(());

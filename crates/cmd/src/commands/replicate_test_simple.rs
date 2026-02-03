@@ -450,15 +450,39 @@ async fn test_query_transaction_records() -> Result<()> {
 async fn test_pond_structural_statistics() -> Result<()> {
     use crate::commands::copy_command;
     use crate::commands::mkdir_command;
+    use arrow_array::{Int32Array, RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
     use std::fs;
+    use std::fs::File;
+    use std::sync::Arc;
 
     let test = SimpleReplicationTest::new()?;
     test.init_source().await?;
 
-    // Create a temp file to copy into the pond
+    // Create a temp file to copy into the pond as data file
     let temp_file = tempfile::NamedTempFile::new()?;
     fs::write(temp_file.path(), b"test data content")?;
     let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+    // Create a temp parquet file to copy as table
+    let temp_parquet = tempfile::NamedTempFile::with_suffix(".parquet")?;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+        ],
+    )?;
+    let file = File::create(temp_parquet.path())?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    let _ = writer.close()?;
+    let parquet_path = temp_parquet.path().to_str().unwrap().to_string();
 
     let ship_context = ShipContext::new(Some(test.source_pond.clone()), vec!["pond".to_string()]);
 
@@ -468,7 +492,7 @@ async fn test_pond_structural_statistics() -> Result<()> {
 
     // Copy files of different types
     let sources1 = vec![temp_path.clone()];
-    let sources2 = vec![temp_path.clone()];
+    let sources2 = vec![parquet_path.clone()];
     copy_command(&ship_context, &sources1, "/data/file1.txt", "data").await?;
     copy_command(&ship_context, &sources2, "/tables/table1.parquet", "table").await?;
 

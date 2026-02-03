@@ -1,8 +1,8 @@
-# Agent Instructions: DuckPond Experiment Workflow
+# Agent Instructions: DuckPond Test Workflow
 
 ## 🎯 Purpose
 
-You are helping test and document DuckPond through controlled experiments in a containerized sandbox. Your goals:
+You are helping test and document DuckPond through controlled tests in a containerized sandbox. Your goals:
 
 1. **Validate behavior**: Does the CLI do what the docs say?
 2. **Surface bugs**: Find and document technical failures
@@ -15,11 +15,11 @@ The **living documentation** for the CLI is `docs/cli-reference.md`. This is the
 - All factory types and their configuration
 - Common patterns and troubleshooting
 
-**After every successful experiment involving a command or factory**, verify that `docs/cli-reference.md` accurately documents what you tested. If not, update it.
+**After every successful test involving a command or factory**, verify that `docs/cli-reference.md` accurately documents what you tested. If not, update it.
 
 ## 📋 Workflow Checklist
 
-For each experiment cycle:
+For each test cycle:
 
 ### Step 1: Understand the Test Request
 
@@ -29,15 +29,15 @@ For each experiment cycle:
 
 ### Step 2: Research DuckPond Usage
 
-**MANDATORY** - Before writing ANY experiment script:
+**MANDATORY** - Before writing ANY test script:
 
 - [ ] Read `docs/duckpond-overview.md` for command reference
 - [ ] Check if any factory types are involved → read factory section
 - [ ] If SQL queries involved → understand DataFusion patterns
 
-### Step 3: Write the Experiment Script
+### Step 3: Write the Test Script
 
-Create `experiments/active/experiment.sh`:
+Create `testsuite/tests/test.sh`:
 
 ```bash
 #!/bin/bash
@@ -57,23 +57,23 @@ echo "=== VERIFICATION ==="
 pond list /path/to/check
 ```
 
-### Step 4: Run the Experiment
+### Step 4: Run the Test
 
 ```bash
-cd experiments
+cd tests
 
-# By number (searches active/ then library/)
-./run-experiment.sh 032
+# By number (searches tests/ then tests/)
+./run-test.sh 032
 
 # By relative path
-./run-experiment.sh active/032-my-experiment.sh
-./run-experiment.sh library/001-basic-init.sh
+./run-test.sh tests/032-my-test.sh
+./run-test.sh tests/001-basic-init.sh
 
 # By full path
-./run-experiment.sh /path/to/experiment.sh
+./run-test.sh /path/to/test.sh
 ```
 
-**Numeric shorthand**: Just use the experiment number (e.g., `32` or `032`). The script will find `032-*.sh` in `active/` first, then `library/`.
+**Numeric shorthand**: Just use the test number (e.g., `32` or `032`). The script will find `032-*.sh` in `tests/` first, then `tests/`.
 
 ### Step 5: Analyze Output
 
@@ -81,7 +81,7 @@ The output will be one of:
 
 | Outcome | Meaning | Action |
 |---------|---------|--------|
-| ✅ Success | Worked as expected | Save to `library/`, report to user |
+| ✅ Success | Worked as expected | Save to `tests/`, report to user |
 | ❌ Failure | Technical error/bug | Create failure report |
 | ❓ Confusion | Docs unclear/wrong | Create confusion report, fix docs |
 
@@ -91,7 +91,7 @@ The output will be one of:
 ```markdown
 # Failure Report
 
-## Experiment
+## Test
 [Brief description]
 
 ## Command That Failed
@@ -134,7 +134,7 @@ Then:
 
 ### Step 7: Update Documentation (MANDATORY for Success)
 
-After a successful experiment, **always** check `docs/cli-reference.md`:
+After a successful test, **always** check `docs/cli-reference.md`:
 
 1. **Is the command/factory documented?** If not, add it.
 2. **Is the documentation accurate?** Does it match what you just tested?
@@ -146,7 +146,7 @@ After a successful experiment, **always** check `docs/cli-reference.md`:
 - [ ] Usage examples (`pond mknod`, `pond run`)
 - [ ] Behavioral notes (what to expect)
 
-This is how documentation stays alive - experiments validate it, and discoveries improve it.
+This is how documentation stays alive - tests validate it, and discoveries improve it.
 
 ## 🚫 Anti-Patterns to Avoid
 
@@ -180,15 +180,15 @@ set -e
 pond something  # Will stop if it fails
 ```
 
-### Don't: Create overly complex experiments
+### Don't: Create overly complex tests
 ```bash
 # ❌ WRONG - testing too many things at once
 pond init && pond mkdir /a && pond mkdir /b && pond copy ... && pond mknod ...
 
-# ✅ RIGHT - one concept per experiment
-# Experiment 1: just test mkdir
-# Experiment 2: just test copy
-# Experiment 3: test mkdir + copy together
+# ✅ RIGHT - one concept per test
+# Test 1: just test mkdir
+# Test 2: just test copy
+# Test 3: test mkdir + copy together
 ```
 
 ## 📚 Reference: Key Documentation
@@ -204,7 +204,7 @@ pond init && pond mkdir /a && pond mkdir /b && pond copy ... && pond mknod ...
 
 ## 🔄 Iteration Mindset
 
-Each experiment is cheap. Don't aim for perfection:
+Each test is cheap. Don't aim for perfection:
 
 1. **Try something** → See what happens
 2. **Observe failure** → Understand why
@@ -213,11 +213,11 @@ Each experiment is cheap. Don't aim for perfection:
 
 The container resets completely between runs. There's no state to corrupt, no cleanup needed. Be bold!
 
-## 🏗️ Complex Experiment Patterns
+## 🏗️ Complex Test Patterns
 
-### Multi-Pond Experiments
+### Multi-Pond Tests
 
-For experiments with multiple pond instances:
+For tests with multiple pond instances:
 
 ```bash
 #!/bin/bash
@@ -236,17 +236,17 @@ POND=/pond1 pond mkdir /data
 POND=/pond2 pond mkdir /replica
 ```
 
-### S3/MinIO Experiments
+### S3/MinIO Tests
 
 For replication testing, start with docker-compose:
 
 ```bash
 # Terminal 1: Start MinIO
-cd experiments
+cd tests
 docker-compose up -d minio
 
-# Terminal 2: Run experiment with S3 access
-docker-compose run --rm duckpond ./library/500-s3-replication-minio.sh
+# Terminal 2: Run test with S3 access
+docker-compose run --rm duckpond ./tests/500-s3-replication-minio.sh
 ```
 
 Environment variables available in container:
@@ -254,15 +254,15 @@ Environment variables available in container:
 - `MINIO_ROOT_USER=minioadmin`
 - `MINIO_ROOT_PASSWORD=minioadmin`
 
-### Cron/Scheduled Experiments
+### Cron/Scheduled Tests
 
 For testing periodic operations:
 
 ```bash
 #!/bin/bash
 # Setup cron job in container
-echo "* * * * * root POND=/pond1 pond run /etc/system.d/20-logs ingest" > /etc/cron.d/experiment
-chmod 0644 /etc/cron.d/experiment
+echo "* * * * * root POND=/pond1 pond run /etc/system.d/20-logs ingest" > /etc/cron.d/test
+chmod 0644 /etc/cron.d/test
 cron
 
 # Run for a few minutes and observe
@@ -270,12 +270,12 @@ sleep 180
 POND=/pond1 pond control recent --limit 10
 ```
 
-## 🏷️ Experiment Naming
+## 🏷️ Test Naming
 
-When saving successful experiments to `library/`:
+When saving successful tests to `tests/`:
 
 ```
-library/
+tests/
 ├── 001-basic-init.sh           # Numbered for ordering
 ├── 002-mkdir-nested.sh
 ├── 010-copy-csv.sh

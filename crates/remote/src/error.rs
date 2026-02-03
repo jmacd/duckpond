@@ -60,7 +60,9 @@ pub enum RemoteError {
     #[error("Invalid bundle_id format: {0}")]
     InvalidBundleId(String),
 
-    #[error("Execution mode mismatch: command requires {required:?} but was called with {actual:?}. {hint}")]
+    #[error(
+        "Execution mode mismatch: command requires {required:?} but was called with {actual:?}. {hint}"
+    )]
     ExecutionMismatch {
         required: String,
         actual: String,

@@ -1,4 +1,4 @@
-# DuckPond Experiment Iteration Workflow
+# DuckPond Test Iteration Workflow
 
 ## ⛔ CRITICAL: NO "SIMPLE FIXES"
 
@@ -61,7 +61,7 @@ When you encounter a problem:
 ┌─────────────────────────────────────────────────────────────┐
 │  5. IMPLEMENT (if approved)                                 │
 │     - Make the change (code/docs/interface)                 │
-│     - Re-run experiment to verify                           │
+│     - Re-run test to verify                           │
 │     - Update backlog                                        │
 └─────────────────────┬───────────────────────────────────────┘
                       │

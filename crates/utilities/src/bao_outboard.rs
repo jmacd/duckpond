@@ -576,7 +576,8 @@ impl SeriesOutboard {
     ///
     /// # Arguments
     /// * `prev` - The previous version's SeriesOutboard
-    /// * `bao_state` - The IncrementalHashState computed during write of the NEW content only
+    /// * `bao_state` - The IncrementalHashState computed during write. Should be RESUMED from
+    ///   prev's frontier for correct cumulative hash computation.
     /// * `version_size` - The size of this version's content
     #[must_use]
     pub fn from_incremental_state(
@@ -584,33 +585,37 @@ impl SeriesOutboard {
         bao_state: &IncrementalHashState,
         version_size: u64,
     ) -> Self {
-        // The bao_state only has the new version's content hashed.
-        // We need to resume from previous state and continue with new content.
-        // Since bao_state was computed fresh (not resumed from prev), we need to
-        // reconstruct the cumulative hash properly.
+        // The bao_state should have been resumed from prev's frontier before writing.
+        // If resumed correctly, bao_state.total_size = prev.cumulative_size + version_size
+        // and bao_state.root_hash() is the true cumulative hash.
         //
-        // For now, we use the simpler approach: the new cumulative_size is
-        // prev.cumulative_size + version_size, and we compute a new root hash
-        // from the bao_state (which only covers the new content).
-        //
-        // TODO: For full incremental verification, we should resume from prev's
-        // frontier and continue with new content. This would require HybridWriter
-        // to take the previous SeriesOutboard and resume from it.
+        // If bao_state was NOT resumed (legacy path), cumulative_blake3 will be wrong
+        // but cumulative_size will still be correct.
 
-        let new_cumulative_size = prev.cumulative_size + version_size;
+        // Get the new cumulative state from bao_state
+        // (should equal prev.cumulative_size + version_size if resumed correctly)
+        let new_cumulative_size = bao_state.total_size;
 
-        // Use bao_state's tree structure for this version
+        // Use bao_state's tree structure - if resumed, block numbers are correct
         let frontier = bao_state.to_frontier();
         let new_stable_subtrees: Vec<(u32, [u8; 32])> = frontier
             .iter()
             .map(|(level, hash, _start)| (*level, *hash))
             .collect();
 
-        // For cumulative_blake3, we should ideally compute the hash of the concatenated
-        // content. Since we don't have access to previous content, we use the new
-        // content's root hash. This is not cryptographically correct for verification
-        // of the full series, but cumulative_size (which logfile-ingest needs) is correct.
+        // If bao_state was resumed from prev, this is the correct cumulative hash.
+        // If not resumed (legacy), this will be wrong but we can't fix it without content.
         let cumulative_blake3 = *bao_state.root_hash().as_bytes();
+
+        // Validate: if resumed correctly, sizes should match
+        let expected_cumulative = prev.cumulative_size + version_size;
+        if new_cumulative_size != expected_cumulative {
+            debug!(
+                "from_incremental_state: bao_state.total_size ({}) != prev.cumulative_size ({}) + version_size ({}). \
+                 Was bao_state resumed from prev's frontier?",
+                new_cumulative_size, prev.cumulative_size, version_size
+            );
+        }
 
         Self {
             incremental: IncrementalOutboard {
@@ -619,7 +624,7 @@ impl SeriesOutboard {
             },
             cumulative_blake3,
             version_size,
-            cumulative_size: new_cumulative_size,
+            cumulative_size: expected_cumulative, // Use expected to maintain correctness
         }
     }
 
@@ -806,7 +811,7 @@ impl SeriesOutboard {
         })
     }
 
-    /// Parse v3 format (incremental with cumulative_blake3)
+    /// Parse v3 format (incremental with cumulative_blake3, no pending_bytes)
     fn from_bytes_v3(bytes: &[u8]) -> Result<Self, BaoOutboardError> {
         if bytes.len() < 48 {
             // 8 + 8 + 32 minimum

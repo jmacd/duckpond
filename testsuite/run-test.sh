@@ -1,16 +1,16 @@
 #!/bin/bash
-# Run a DuckPond experiment in a fresh container
+# Run a DuckPond test in a fresh container
 #
 # Usage:
-#   ./run-experiment.sh                           # Interactive mode
-#   ./run-experiment.sh script.sh                 # Run a script file
-#   ./run-experiment.sh --inline 'pond init'      # Run inline commands
-#   ./run-experiment.sh --save-result script.sh   # Run and save result to results/
+#   ./run-test.sh                           # Interactive mode
+#   ./run-test.sh script.sh                 # Run a script file
+#   ./run-test.sh --inline 'pond init'      # Run inline commands
+#   ./run-test.sh --save-result script.sh   # Run and save result to results/
 #
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE_NAME="duckpond-experiment:latest"
+IMAGE_NAME="duckpond-test:latest"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 # Parse arguments
@@ -56,9 +56,9 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Examples:"
             echo "  $0 --interactive"
-            echo "  $0 library/001-basic-init.sh"
+            echo "  $0 tests/001-basic-init.sh"
             echo "  $0 --inline 'pond init && pond list /'"
-            echo "  $0 --save-result active/experiment.sh"
+            echo "  $0 --save-result tests/test.sh"
             exit 0
             ;;
         *)
@@ -81,7 +81,7 @@ fi
 
 # Create results directory
 mkdir -p "${SCRIPT_DIR}/results"
-mkdir -p "${SCRIPT_DIR}/active"
+mkdir -p "${SCRIPT_DIR}/tests"
 
 # Helper to save results
 save_result() {
@@ -100,7 +100,7 @@ save_result() {
     result_type_upper=$(echo "${result_type}" | tr '[:lower:]' '[:upper:]')
     
     cat > "${result_file}" << EOF
-# Experiment Result: ${result_type_upper}
+# Test Result: ${result_type_upper}
 
 **Timestamp**: ${TIMESTAMP}
 **Exit Code**: ${exit_code}
@@ -123,7 +123,7 @@ EOF
 
 # Run mode: Interactive
 if [[ "${INTERACTIVE}" == "true" ]]; then
-    echo "=== Interactive Experiment Mode ==="
+    echo "=== Interactive Test Mode ==="
     echo "Container: ${IMAGE_NAME}"
     echo "POND=/pond (fresh for each run)"
     echo ""
@@ -142,7 +142,7 @@ fi
 
 # Run mode: Inline script
 if [[ -n "${INLINE_SCRIPT}" ]]; then
-    echo "=== Running Inline Experiment ==="
+    echo "=== Running Inline Test ==="
     
     TEMP_OUTPUT=$(mktemp)
     
@@ -156,7 +156,7 @@ if [[ -n "${INLINE_SCRIPT}" ]]; then
     set -e
     
     echo ""
-    echo "=== Experiment ${EXIT_CODE:-0 == 0 ? 'SUCCEEDED' : 'FAILED'} (exit: ${EXIT_CODE}) ==="
+    echo "=== Test ${EXIT_CODE:-0 == 0 ? 'SUCCEEDED' : 'FAILED'} (exit: ${EXIT_CODE}) ==="
     
     if [[ "${SAVE_RESULT}" == "true" ]]; then
         save_result "${EXIT_CODE}" "${TEMP_OUTPUT}"
@@ -168,23 +168,20 @@ fi
 
 # Run mode: Script file
 if [[ -n "${SCRIPT_FILE}" ]]; then
-    # Support numeric shorthand: 032 -> active/032-*.sh or library/032-*.sh
+    # Support numeric shorthand: 032 -> tests/032-*.sh
     if [[ "${SCRIPT_FILE}" =~ ^[0-9]+$ ]]; then
         PATTERN="${SCRIPT_FILE}"
         # Zero-pad to 3 digits
         while [[ ${#PATTERN} -lt 3 ]]; do
             PATTERN="0${PATTERN}"
         done
-        # Look in active/ first, then library/
-        FOUND=$(find "${SCRIPT_DIR}/active" -maxdepth 1 -name "${PATTERN}-*.sh" 2>/dev/null | head -1)
-        if [[ -z "${FOUND}" ]]; then
-            FOUND=$(find "${SCRIPT_DIR}/library" -maxdepth 1 -name "${PATTERN}-*.sh" 2>/dev/null | head -1)
-        fi
+        # Look in tests/
+        FOUND=$(find "${SCRIPT_DIR}/tests" -maxdepth 1 -name "${PATTERN}-*.sh" 2>/dev/null | head -1)
         if [[ -n "${FOUND}" ]]; then
             SCRIPT_FILE="${FOUND}"
             echo "Resolved ${PATTERN} -> $(basename "${SCRIPT_FILE}")"
         else
-            echo "ERROR: No experiment found matching ${PATTERN}-*.sh in active/ or library/"
+            echo "ERROR: No test found matching ${PATTERN}-*.sh in tests/"
             exit 1
         fi
     fi
@@ -204,7 +201,7 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     fi
     
     SCRIPT_NAME=$(basename "${SCRIPT_FILE}")
-    echo "=== Running Experiment: ${SCRIPT_NAME} ==="
+    echo "=== Running Test: ${SCRIPT_NAME} ==="
     
     TEMP_OUTPUT=$(mktemp)
     
@@ -213,17 +210,17 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     docker run --rm \
         -e POND=/pond \
         -e RUST_LOG=info \
-        -v "${SCRIPT_FILE}:/experiment/run.sh:ro" \
+        -v "${SCRIPT_FILE}:/test/run.sh:ro" \
         "${IMAGE_NAME}" \
-        -c "/bin/bash /experiment/run.sh" 2>&1 | tee "${TEMP_OUTPUT}"
+        -c "/bin/bash /test/run.sh" 2>&1 | tee "${TEMP_OUTPUT}"
     EXIT_CODE=${PIPESTATUS[0]}
     set -e
     
     echo ""
     if [[ ${EXIT_CODE} -eq 0 ]]; then
-        echo "=== Experiment SUCCEEDED ==="
+        echo "=== Test SUCCEEDED ==="
     else
-        echo "=== Experiment FAILED (exit: ${EXIT_CODE}) ==="
+        echo "=== Test FAILED (exit: ${EXIT_CODE}) ==="
     fi
     
     if [[ "${SAVE_RESULT}" == "true" ]]; then

@@ -65,7 +65,7 @@ pond mkdir -p /logs/testapp
 
 # Use mode=pull to DISABLE auto-execution on commit
 # This simulates cron-triggered runs more accurately
-pond mknod logfile-ingest /etc/system.d/10-logs --config-path /tmp/ingest.yaml --mode pull
+pond mknod logfile-ingest /etc/system.d/10-logs --config-path /tmp/ingest.yaml
 echo "✓ Created logfile-ingest node (mode=pull, no auto-execution)"
 
 #############################

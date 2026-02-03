@@ -255,6 +255,60 @@ impl HybridWriter {
         }
     }
 
+    /// Create a HybridWriter that resumes bao-tree computation from a previous SeriesOutboard
+    ///
+    /// This is used when appending to a FilePhysicalSeries. The bao_hasher is initialized
+    /// from the previous frontier and verified pending bytes, so the resulting bao_state will
+    /// have the correct cumulative hash for the entire series (prev content + new content).
+    ///
+    /// # Arguments
+    /// * `pond_path` - Path to the pond directory
+    /// * `prev` - The previous version's SeriesOutboard
+    /// * `verified_pending` - The tail bytes from previous content that form the pending block.
+    ///   Must be exactly `prev.cumulative_size % BLOCK_SIZE` bytes, read from previous versions.
+    ///
+    /// # Errors
+    /// Returns an error if the previous state is invalid or pending bytes length is wrong.
+    pub fn resume_from<P: AsRef<Path>>(
+        pond_path: P,
+        prev: &utilities::bao_outboard::SeriesOutboard,
+        verified_pending: &[u8],
+    ) -> std::io::Result<Self> {
+        Self::resume_from_with_options(
+            pond_path,
+            prev,
+            verified_pending,
+            LargeFileOptions::default(),
+        )
+    }
+
+    /// Create a HybridWriter that resumes from previous state with custom options
+    pub fn resume_from_with_options<P: AsRef<Path>>(
+        pond_path: P,
+        prev: &utilities::bao_outboard::SeriesOutboard,
+        verified_pending: &[u8],
+        options: LargeFileOptions,
+    ) -> std::io::Result<Self> {
+        // Resume bao_hasher from previous frontier and verified pending bytes
+        let bao_hasher = utilities::bao_outboard::IncrementalHashState::resume(
+            &prev.incremental.frontier,
+            prev.cumulative_size,
+            verified_pending,
+        )
+        .map_err(|e| std::io::Error::other(format!("Failed to resume bao state: {}", e)))?;
+
+        Ok(Self {
+            temp_file: None,
+            temp_path: None,
+            hasher: blake3::Hasher::new(),
+            bao_hasher,
+            total_written: 0,
+            pond_path: pond_path.as_ref().into(),
+            create_future: None,
+            options,
+        })
+    }
+
     pub fn total_written(&self) -> usize {
         self.total_written
     }

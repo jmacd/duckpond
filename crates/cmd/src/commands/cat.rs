@@ -719,7 +719,7 @@ mod tests {
             "cat".to_string(),
             "test_table.parquet".to_string(),
             "--sql".to_string(),
-            "SELECT timestamp, value * 2 as doubled_value FROM series WHERE value > 42".to_string(),
+            "SELECT timestamp, value * 2 as doubled_value FROM source WHERE value > 42".to_string(),
         ];
         let cat_context = ShipContext::new(Some(setup.pond_path.clone()), cat_args);
         let mut output_buffer = String::new();
@@ -731,7 +731,7 @@ mod tests {
             Some(&mut output_buffer),
             None,
             None,
-            Some("SELECT timestamp, value * 2 as doubled_value FROM series WHERE value > 42"),
+            Some("SELECT timestamp, value * 2 as doubled_value FROM source WHERE value > 42"),
         )
         .await?;
 
@@ -1173,7 +1173,7 @@ mod tests {
             Some(&mut output_buffer),
             None,
             None,
-            Some("SELECT timestamp, value * 2 as doubled_value FROM series WHERE value > 40"),
+            Some("SELECT timestamp, value * 2 as doubled_value FROM source WHERE value > 40"),
         )
         .await?;
 

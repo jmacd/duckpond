@@ -123,8 +123,8 @@ chmod +x "${SCRIPT_DIR}/helpers/"* 2>/dev/null || true
 ln -sf pond1 "${SCRIPT_DIR}/helpers/pond2" 2>/dev/null || true
 
 docker build \
-    -f Dockerfile.experiment \
-    -t duckpond-experiment:latest \
+    -f Dockerfile \
+    -t duckpond-test:latest \
     .
 
 # Clean up copied binary
@@ -132,10 +132,10 @@ rm -f "${SCRIPT_DIR}/pond"
 
 echo ""
 echo "=== Build complete ==="
-echo "Image: duckpond-experiment:latest"
+echo "Image: duckpond-test:latest"
 echo ""
 echo "Test with:"
-echo "  docker run --rm -it duckpond-experiment:latest"
+echo "  docker run --rm -it duckpond-test:latest"
 echo "  pond --help"
 echo ""
 echo "For S3 experiments:"

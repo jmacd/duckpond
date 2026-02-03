@@ -414,19 +414,46 @@ impl AsyncWrite for OpLogFileWriter {
                                 let prev_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
                                     .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize previous bao_outboard: {}", e)))?;
 
-                                // Append new version using bao_state from HybridWriter
-                                // The bao_state was computed incrementally during write, so it has
-                                // the correct cumulative_size even for large files.
-                                //
-                                // NOTE: For full incremental verification, we would need to resume
-                                // from prev_outboard's frontier and merge with the new version's tree.
-                                // Currently we just use bao_state's tree structure, which correctly
-                                // captures cumulative_size but doesn't enable full series verification.
-                                utilities::bao_outboard::SeriesOutboard::from_incremental_state(
-                                    &prev_outboard,
-                                    &bao_state,
-                                    content_len as u64,
-                                )
+                                // Determine if we can efficiently read pending bytes
+                                // For small cumulative sizes, read all previous content to get pending bytes
+                                // For large cumulative sizes, fall back to from_incremental_state (cumulative_blake3 will be wrong)
+                                let can_read_pending = prev_outboard.cumulative_size < 10 * 1024 * 1024; // 10MB threshold
+
+                                if can_read_pending && !content.is_empty() {
+                                    // SMALL CUMULATIVE: Read previous content to compute proper cumulative hash
+                                    let pending_len = (prev_outboard.cumulative_size % utilities::bao_outboard::BLOCK_SIZE as u64) as usize;
+                                    let verified_pending = if pending_len > 0 {
+                                        // Read all previous content and take the last pending_len bytes
+                                        let mut reader = state.async_file_reader(file_id).await
+                                            .map_err(|e| tinyfs::Error::Other(format!("Failed to read previous content: {}", e)))?;
+                                        use tokio::io::AsyncReadExt;
+                                        let mut all_content = Vec::with_capacity(prev_outboard.cumulative_size as usize);
+                                        let _ = reader.read_to_end(&mut all_content).await
+                                            .map_err(|e| tinyfs::Error::Other(format!("Failed to read previous content: {}", e)))?;
+                                        // Take the last pending_len bytes
+                                        let pending_start = all_content.len().saturating_sub(pending_len);
+                                        all_content[pending_start..].to_vec()
+                                    } else {
+                                        Vec::new()
+                                    };
+
+                                    // Use append_version with proper cumulative hash
+                                    utilities::bao_outboard::SeriesOutboard::append_version(
+                                        &prev_outboard,
+                                        &verified_pending,
+                                        &content,
+                                    )
+                                } else {
+                                    // LARGE FILE: Content is stored externally, use from_incremental_state
+                                    // NOTE: The cumulative_blake3 will be incorrect for large file appends
+                                    // because we can't efficiently resume without the pending bytes.
+                                    // cumulative_size is still correct.
+                                    utilities::bao_outboard::SeriesOutboard::from_incremental_state(
+                                        &prev_outboard,
+                                        &bao_state,
+                                        content_len as u64,
+                                    )
+                                }
                             } else {
                                 // First version - use bao_state from HybridWriter
                                 // This correctly handles large files where content is empty but
