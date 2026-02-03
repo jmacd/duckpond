@@ -8,6 +8,15 @@ You are helping test and document DuckPond through controlled experiments in a c
 2. **Surface bugs**: Find and document technical failures
 3. **Improve docs**: Identify and fix documentation gaps
 
+### Primary Documentation Target
+
+The **living documentation** for the CLI is `docs/cli-reference.md`. This is the source of truth for:
+- All commands (`pond init`, `pond copy`, `pond mknod`, etc.)
+- All factory types and their configuration
+- Common patterns and troubleshooting
+
+**After every successful experiment involving a command or factory**, verify that `docs/cli-reference.md` accurately documents what you tested. If not, update it.
+
 ## 📋 Workflow Checklist
 
 For each experiment cycle:
@@ -122,6 +131,22 @@ The output will be one of:
 Then:
 - For failures → report to user for development
 - For confusion → update the relevant doc file immediately
+
+### Step 7: Update Documentation (MANDATORY for Success)
+
+After a successful experiment, **always** check `docs/cli-reference.md`:
+
+1. **Is the command/factory documented?** If not, add it.
+2. **Is the documentation accurate?** Does it match what you just tested?
+3. **Are there edge cases or tips worth noting?** Add them to Troubleshooting.
+
+**Factory checklist** - If you tested a factory, verify cli-reference.md has:
+- [ ] Factory name in the Factory Types section
+- [ ] Example YAML configuration
+- [ ] Usage examples (`pond mknod`, `pond run`)
+- [ ] Behavioral notes (what to expect)
+
+This is how documentation stays alive - experiments validate it, and discoveries improve it.
 
 ## 🚫 Anti-Patterns to Avoid
 

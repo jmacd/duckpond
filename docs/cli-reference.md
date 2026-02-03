@@ -283,6 +283,39 @@ devices:
     scope: "StationA"
 ```
 
+### logfile-ingest
+
+Mirror rotating log files from the host filesystem into the pond. Tracks files with bao-tree blake3 digests for efficient append detection.
+
+```yaml
+# Pattern for archived (immutable) log files
+archived_pattern: /var/log/app/app.log.*
+# Pattern for the active (append-only) log file
+active_pattern: /var/log/app/app.log
+# Destination path within the pond
+pond_path: /logs/app
+```
+
+**Usage:**
+```bash
+# Create the factory node
+pond mknod logfile-ingest /etc/system.d/10-logs --config-path ingest.yaml
+
+# Run ingestion (push mode)
+pond run /etc/system.d/10-logs
+pond run /etc/system.d/10-logs push   # explicit
+
+# Verify checksums (b3sum format)
+pond run /etc/system.d/10-logs b3sum
+```
+
+**Behavior:**
+- **Archived files** (matching `archived_pattern`): Immutable - ingested once, verified unchanged
+- **Active file** (matching `active_pattern`): Append-only - detects new bytes via cumulative bao-tree hash
+- **Rotation detection**: When active file shrinks or content prefix changes, searches for matching archived file
+
+**Important:** Files >64KB are stored externally in parquet (not inline in oplog). See `docs/large-file-storage-implementation.md`.
+
 ---
 
 ## Glob Patterns

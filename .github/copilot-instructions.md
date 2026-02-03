@@ -11,6 +11,7 @@
 | error handling, fallback, unwrap_or, default, .or_else() | `docs/fallback-antipattern-philosophy.md` | Fail fast, no silent fallbacks |
 | debug, test, grep, tail, head, output, logs | `docs/large-output-debugging.md` | Redirect to file, don't truncate |
 | node_id, part_id, TableProvider, QueryableFile | `docs/duckpond-system-patterns.md` | NodeID/PartID relationships |
+| large file, 64KB, hybrid writer, external parquet, bao_outboard | `docs/large-file-storage-implementation.md` | Files >64KB stored externally in parquet |
 
 ### Critical Rules (Inline - No Excuses)
 
@@ -65,5 +66,11 @@ Before ANY code suggestion involving transactions/State/errors/debugging:
 
 - Read `docs/duckpond-overview.md` for architecture understanding
 - Read `docs/duckpond-system-patterns.md` for detailed patterns
+
+### Key Constants
+
+- **LARGE_FILE_THRESHOLD = 64KB**: Files >64KB are stored externally in parquet (not inline in oplog).
+  When testing file operations, ensure test files trigger the correct code path.
+  See `crates/tlogfs/src/large_files.rs` for implementation.
 
 VIOLATION = WASTED TIME. Check triggers FIRST.
