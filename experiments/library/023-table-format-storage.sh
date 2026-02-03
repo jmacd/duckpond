@@ -1,6 +1,7 @@
 #!/bin/bash
-# EXPERIMENT: Investigate table format storage
-# DESCRIPTION: Check if --format=table converts CSV to Parquet or just changes metadata
+# EXPERIMENT: Table format requires Parquet files
+# DESCRIPTION: Verify --format=table rejects CSV with helpful error message
+# EXPECTED: CSV with --format=table fails with message about PAR1 magic bytes
 #
 set -e
 
@@ -17,26 +18,38 @@ EOF
 
 pond mkdir /data
 
-echo "=== Test 1: Copy CSV as --format=data (raw) ==="
+echo "=== Test 1: Copy CSV as --format=data (raw) - should succeed ==="
 pond copy host:///tmp/data.csv /data/raw.csv --format=data
-pond describe /data/raw.csv
-echo "Size after data format:"
 pond list '/data/raw.csv'
+echo "✓ CSV with --format=data succeeded"
 
 echo ""
-echo "=== Test 2: Copy CSV as --format=table ==="
-pond copy host:///tmp/data.csv /data/table.csv --format=table
-pond describe /data/table.csv
-echo "Size after table format:"
-pond list '/data/table.csv'
+echo "=== Test 2: Copy CSV as --format=table - should fail with helpful error ==="
+ERROR_OUTPUT=$(pond copy host:///tmp/data.csv /data/table.csv --format=table 2>&1 || true)
+echo "$ERROR_OUTPUT"
 
-echo ""
-echo "=== Test 3: Check if sizes differ (Parquet would be different size) ==="
-pond list '/data/*'
+# Verify the error message is helpful
+if echo "$ERROR_OUTPUT" | grep -q "not a valid parquet file"; then
+    echo "✓ Error mentions 'not a valid parquet file'"
+else
+    echo "✗ Missing expected error about parquet validation"
+    exit 1
+fi
 
-echo ""
-echo "=== Test 4: Try to cat the table file raw ==="
-pond cat /data/table.csv 2>&1 || echo "Failed to cat table format"
+if echo "$ERROR_OUTPUT" | grep -q "PAR1 magic bytes"; then
+    echo "✓ Error mentions 'PAR1 magic bytes'"
+else
+    echo "✗ Missing expected error about PAR1 magic bytes"
+    exit 1
+fi
+
+if echo "$ERROR_OUTPUT" | grep -q "Use --format=data"; then
+    echo "✓ Error suggests using --format=data"
+else
+    echo "✗ Missing suggestion to use --format=data"
+    exit 1
+fi
 
 echo ""
 echo "=== Experiment Complete ==="
+echo "VERIFIED: --format=table correctly rejects non-Parquet files with helpful error"
