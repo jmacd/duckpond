@@ -7,15 +7,6 @@
 
 ## 🔴 Open Items
 
-### P2-002: Better error for `pond list /`
-- **Type**: UX  
-- **Found**: 2026-02-02
-- **Description**: `pond list /` returns cryptic "EmptyPath" error
-- **Proposal**: Change error to suggest `/*` or `**/*`
-- **Workaround**: Documented in cli-reference.md
-
----
-
 ### P3-001: Document factory configuration examples
 - **Type**: DOCS
 - **Description**: Factory YAML configs need more complete examples
@@ -24,6 +15,11 @@
 ---
 
 ## 🟢 Done
+
+### ✅ D-007: Improved `pond list /` behavior (P2-002)
+- **Completed**: 2026-02-03
+- **Resolution**: `/` now lists root entries, trailing slash lists directory contents, updated cli-reference.md
+- **Test**: `003-list-patterns.sh` - comprehensive pattern behavior verification
 
 ### ✅ D-006: Add `--sql` alias for `--query`
 - **Completed**: 2026-02-03

@@ -43,21 +43,36 @@ Creates the pond directory structure with Delta Lake metadata.
 List files and directories matching a glob pattern.
 
 ```bash
-# List everything
-pond list              # defaults to '**/*'
-pond list '**/*'       # explicit
+# List everything (default behavior)
+pond list              # defaults to '**/*' - all files recursively
+
+# List root directory entries
+pond list /            # top-level files and directories only
 
 # List specific directory contents  
-pond list '/data/*'    # files in /data
-pond list '/data/**/*' # recursive
+pond list /data/       # trailing slash lists contents of /data
+pond list '/data/*'    # equivalent to above
+pond list '/data/**/*' # recursive under /data
+
+# Match specific entry (file or directory)
+pond list /data        # shows the /data entry itself (not contents)
 
 # Pattern matching
 pond list '**/*.csv'   # all CSV files
 pond list '/sensors/*/readings.series'
 ```
 
-⚠️ **Common Mistake**: `pond list /` returns "EmptyPath" error.  
-Use `pond list '/*'` or `pond list` instead.
+**Pattern Behavior Summary**:
+
+| Pattern | Meaning |
+|---------|---------|
+| (none) | All files recursively (`**/*`) |
+| `/` | Root directory entries only |
+| `/dir/` | Contents of /dir (trailing slash = `/dir/*`) |
+| `/dir` | Entry named 'dir' exactly |
+| `**/*.ext` | All files with extension recursively |
+
+💡 **Tip**: Use trailing slash to list directory contents: `pond list /data/`
 
 ---
 
@@ -378,15 +393,6 @@ Examples:
 ---
 
 ## Troubleshooting
-
-### "EmptyPath" error
-
-```
-Error: Failed to list files matching '/' from data filesystem: EmptyPath
-```
-
-**Cause**: `/` alone is not a valid glob pattern.  
-**Fix**: Use `pond list '/*'` or `pond list` (uses default `**/*`).
 
 ### "No matching files" when files exist
 
