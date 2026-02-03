@@ -7,15 +7,6 @@
 
 ## 🔴 Open Items
 
-### P2-001: Rename `--query` to `--sql`
-- **Type**: UX
-- **Found**: 2026-02-02
-- **Description**: Users expect `--sql` when writing SQL queries. Existing docs showed `--sql`, causing confusion.
-- **Proposal**: Add `--sql` as alias for `--query`
-- **File**: `crates/cmd/src/commands/cat.rs` (likely)
-
----
-
 ### P2-002: Better error for `pond list /`
 - **Type**: UX  
 - **Found**: 2026-02-02
@@ -33,6 +24,10 @@
 ---
 
 ## 🟢 Done
+
+### ✅ D-006: Add `--sql` alias for `--query`
+- **Completed**: 2026-02-03
+- **Resolution**: Added `--sql` as primary flag with `--query` as visible alias, updated cli-reference.md
 
 ### ✅ D-001: Document glob patterns for `pond list`
 - **Completed**: 2026-02-02

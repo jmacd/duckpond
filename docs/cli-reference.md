@@ -122,10 +122,10 @@ Read and optionally transform file contents.
 pond cat /data/readings.csv
 
 # Query CSV files with SQL (use csv:// prefix)
-pond cat csv:///data/readings.csv --query "SELECT * FROM source WHERE temp > 20"
+pond cat csv:///data/readings.csv --sql "SELECT * FROM source WHERE temp > 20"
 
 # Query Parquet files (stored with --format=table)
-pond cat /data/readings.parquet --query "SELECT AVG(temperature) as avg_temp FROM source"
+pond cat /data/readings.parquet --sql "SELECT AVG(temperature) as avg_temp FROM source"
 ```
 
 The table is always named `source` in SQL queries.
@@ -134,14 +134,14 @@ The table is always named `source` in SQL queries.
 
 | Scheme | Purpose | Example |
 |--------|---------|--------|
-| `csv://` | Parse file as CSV | `pond cat csv:///data/file.csv --query "..."` |
+| `csv://` | Parse file as CSV | `pond cat csv:///data/file.csv --sql "..."` |
 | `file://` | Raw bytes or Parquet | `pond cat file:///data/file.parquet` |
 | (none) | Auto-detect | `pond cat /data/file.csv` |
 
-⚠️ **Important**: The `--query` flag only works when the file can be parsed as a table:
+⚠️ **Important**: The `--sql` flag (or `--query` alias) only works when the file can be parsed as a table:
 - Parquet files (stored with `--format=table` or `--format=series`)
 - CSV files when using `csv://` prefix
-- Raw data files without a scheme will output raw bytes, ignoring `--query`
+- Raw data files without a scheme will output raw bytes, ignoring `--sql`
 
 ---
 

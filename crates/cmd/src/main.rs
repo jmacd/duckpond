@@ -140,7 +140,7 @@ enum Commands {
         #[arg(long)]
         time_end: Option<i64>,
         /// SQL query to execute on the file:series data
-        #[arg(long)]
+        #[arg(long = "sql", visible_alias = "query")]
         query: Option<String>,
     },
     /// Copy files into or out of the pond
