@@ -123,9 +123,11 @@ async fn copy_single_file_to_directory_with_name(
         "copy_single_file_to_directory source_path: {file_path}, dest_filename: {filename}, format: {format}, entry_type: {entry_type_str}"
     );
 
-    // For series files, we need to validate it's actually a parquet file
-    // then stream it to the pond and infer temporal bounds after writing
-    if entry_type == tinyfs::EntryType::TablePhysicalSeries {
+    // For table and series files, we need to validate it's actually a parquet file
+    // Table files: store as-is, Series files: also infer temporal bounds after writing
+    if entry_type == tinyfs::EntryType::TablePhysicalSeries
+        || entry_type == tinyfs::EntryType::TablePhysicalVersion
+    {
         // Check if this is actually a parquet file by reading just the magic bytes
         let mut file = File::open(file_path)
             .await
@@ -139,9 +141,15 @@ async fn copy_single_file_to_directory_with_name(
             .map_err(|e| format!("Failed to read magic bytes from '{}': {}", file_path, e))?;
 
         if &magic != b"PAR1" {
+            let format_name = if entry_type == tinyfs::EntryType::TablePhysicalSeries {
+                "series"
+            } else {
+                "table"
+            };
             return Err(format!(
                 "File '{}' is not a valid parquet file (missing PAR1 magic bytes). \
-                Series files must be parquet format.",
+                Use --format=data for non-parquet files like CSV. \
+                To query CSV files, use 'pond cat csv:///path' with the csv:// URL scheme.",
                 file_path
             )
             .into());
@@ -165,20 +173,27 @@ async fn copy_single_file_to_directory_with_name(
             .await
             .map_err(|e| format!("Failed to stream file content: {}", e))?;
 
-        // Now infer temporal bounds from the written file (reads only footer)
+        // For series files, infer temporal bounds (reads only footer)
         // This also calls shutdown() internally
-        let (min_time, max_time, ts_col) = dest_writer
-            .infer_temporal_bounds()
-            .await
-            .map_err(|e| format!("Failed to infer temporal bounds: {}", e))?;
+        if entry_type == tinyfs::EntryType::TablePhysicalSeries {
+            let (min_time, max_time, ts_col) = dest_writer
+                .infer_temporal_bounds()
+                .await
+                .map_err(|e| format!("Failed to infer temporal bounds: {}", e))?;
 
-        log::debug!(
-            "Inferred temporal bounds for {}: min={}, max={}, ts_column={}",
-            filename,
-            min_time,
-            max_time,
-            ts_col
-        );
+            log::debug!(
+                "Inferred temporal bounds for {}: min={}, max={}, ts_column={}",
+                filename,
+                min_time,
+                max_time,
+                ts_col
+            );
+        } else {
+            dest_writer
+                .shutdown()
+                .await
+                .map_err(|e| format!("Failed to complete file write: {}", e))?;
+        }
     } else {
         // Non-series files: unified streaming copy
         let mut source_file = File::open(file_path)

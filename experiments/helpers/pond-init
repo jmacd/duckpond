@@ -1,0 +1,16 @@
+#!/bin/bash
+# Helper to initialize a specific pond instance
+# Usage: pond-init [1|2] or POND=/path pond-init
+set -e
+
+if [[ -n "$1" ]]; then
+    case "$1" in
+        1) export POND=/pond1 ;;
+        2) export POND=/pond2 ;;
+        *) export POND="$1" ;;
+    esac
+fi
+
+echo "Initializing pond at POND=${POND}"
+pond init
+echo "✓ Initialized ${POND}"

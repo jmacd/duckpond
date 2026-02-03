@@ -1,0 +1,24 @@
+#!/bin/bash
+# Generate sample log entries for testing logfile-ingest
+# Usage: generate-logs [count] [output_file]
+set -e
+
+COUNT=${1:-100}
+OUTPUT=${2:-/var/log/duckpond/app.json}
+
+echo "Generating ${COUNT} log entries to ${OUTPUT}"
+
+mkdir -p "$(dirname "${OUTPUT}")"
+
+for i in $(seq 1 ${COUNT}); do
+    TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
+    LEVEL=$(shuf -n1 -e INFO WARN ERROR DEBUG)
+    MSG="Log message ${i}: $(uuidgen)"
+    
+    echo "{\"timestamp\":\"${TIMESTAMP}\",\"level\":\"${LEVEL}\",\"message\":\"${MSG}\"}" >> "${OUTPUT}"
+    
+    # Small delay to spread timestamps
+    sleep 0.01
+done
+
+echo "✓ Generated ${COUNT} log entries"

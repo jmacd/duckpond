@@ -313,9 +313,9 @@ async fn cat_impl(
         std::sync::Arc::new(mem_table) as std::sync::Arc<dyn datafusion::catalog::TableProvider>
     };
 
-    let _ = ctx.register_table("series", unified_table_provider)?;
+    let _ = ctx.register_table("source", unified_table_provider)?;
 
-    let effective_sql_query = sql_query.unwrap_or("SELECT * FROM series ORDER BY timestamp");
+    let effective_sql_query = sql_query.unwrap_or("SELECT * FROM source ORDER BY timestamp");
     debug!("Executing SQL query: {}", effective_sql_query);
 
     let df = ctx.sql(effective_sql_query).await.map_err(|e| {

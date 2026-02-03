@@ -1,0 +1,78 @@
+# DuckPond Experiment Container
+# 
+# A sandbox environment for testing pond CLI operations safely.
+# Built with the pre-compiled pond binary for fast iteration.
+#
+# Supports:
+# - Multi-pond setups (POND1, POND2, etc.)
+# - Cron scheduling for periodic tasks
+# - Local S3 via MinIO for replication testing
+# - Systemd-like supervision (using supervisord)
+
+FROM debian:bookworm-slim
+
+# Install runtime dependencies and useful debugging tools
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libssl3 \
+        ca-certificates \
+        # Debugging tools
+        less \
+        tree \
+        jq \
+        file \
+        xxd \
+        # Text processing
+        grep \
+        sed \
+        gawk \
+        # For generating test data
+        uuid-runtime \
+        # Process supervision (systemd-like)
+        supervisor \
+        # Cron for scheduled tasks
+        cron \
+        # Network tools
+        curl \
+        wget \
+        netcat-openbsd \
+        # For log generation testing
+        rsyslog \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install MinIO client (mc) for S3 testing
+RUN curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc
+
+# Set up multi-pond environment
+# POND is the default, POND1/POND2 for multi-pond experiments
+ENV POND=/pond
+ENV POND1=/pond1
+ENV POND2=/pond2
+
+# Create all pond directories
+RUN mkdir -p /pond /pond1 /pond2
+
+# Create log directories for testing
+RUN mkdir -p /var/log/duckpond /var/log/experiment
+
+# Copy the pond binary (built separately)
+COPY pond /usr/local/bin/pond
+RUN chmod +x /usr/local/bin/pond
+
+# Create experiment workspace
+RUN mkdir -p /experiment /results /etc/supervisor/conf.d
+
+# Supervisor configuration for multi-service experiments
+COPY supervisord.conf /etc/supervisor/supervisord.conf
+
+# Default crontab template (empty, experiments add entries)
+RUN touch /etc/cron.d/experiment && chmod 0644 /etc/cron.d/experiment
+
+# Helper scripts
+COPY helpers/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/*
+
+# Default to bash for interactive experiments
+WORKDIR /experiment
+ENTRYPOINT ["/bin/bash"]
