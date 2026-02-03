@@ -37,6 +37,18 @@ enum LogfileSubcommand {
     /// Use: pond run /config b3sum > checksums.txt
     /// Then: cd /host_dir && b3sum --check checksums.txt
     B3sum,
+
+    /// Sync files from host to pond (automatic mode trigger)
+    ///
+    /// This is invoked automatically when the factory mode is 'push'.
+    /// Same as running with no subcommand.
+    Push,
+
+    /// Pull mode (no-op for logfile-ingest)
+    ///
+    /// Logfile-ingest only ingests files from host to pond.
+    /// Pull mode is accepted for compatibility but does nothing.
+    Pull,
 }
 
 /// Parse command-line arguments into LogfileCommand
@@ -122,6 +134,17 @@ struct PondFileState {
     cumulative_size: u64,
 }
 
+/// Summary of ingestion activity for logging
+#[derive(Debug, Default)]
+struct IngestionStats {
+    /// New files ingested (count, total bytes)
+    new_files: (usize, u64),
+    /// Files with appends (count, bytes appended)
+    appended: (usize, u64),
+    /// Files unchanged (count, total bytes)
+    unchanged: (usize, u64),
+}
+
 /// Initialize factory (called once per dynamic node creation)
 async fn initialize(_config: Value, _context: FactoryContext) -> Result<(), tinyfs::Error> {
     // No initialization needed for executable factory
@@ -145,8 +168,13 @@ pub async fn execute(
         Some(LogfileSubcommand::B3sum) => {
             return execute_b3sum(&context, &config).await;
         }
-        None => {
-            // Default: sync operation
+        Some(LogfileSubcommand::Pull) => {
+            // Pull mode doesn't make sense for logfile-ingest - we only push from host to pond
+            info!("logfile-ingest: 'pull' mode is a no-op (files only flow from host to pond)");
+            return Ok(());
+        }
+        Some(LogfileSubcommand::Push) | None => {
+            // Push mode or default: sync operation
         }
     }
 
@@ -313,6 +341,7 @@ pub async fn execute(
     let pond_files = read_pond_state(&context, &config.pond_path).await?;
 
     // Step 4: Process all files (with updated pond state after any rotation handling)
+    let mut stats = IngestionStats::default();
     for host_file in &host_files {
         let filename = host_file
             .path
@@ -324,14 +353,32 @@ pub async fn execute(
 
         if host_file.is_active {
             // Active file: detect appends or ingest new after rotation
-            process_active_file(&context, &config, host_file, pond_file).await?;
+            process_active_file(&context, &config, host_file, pond_file, &mut stats).await?;
         } else {
             // Archived file: detect new or changed
-            process_archived_file(&context, &config, host_file, pond_file).await?;
+            process_archived_file(&context, &config, host_file, pond_file, &mut stats).await?;
         }
     }
 
-    info!("Logfile ingestion completed successfully");
+    // Log summary at INFO level
+    if stats.new_files.0 > 0 || stats.appended.0 > 0 {
+        info!(
+            "Logfile ingestion complete: {} new ({} bytes), {} appended (+{} bytes), {} unchanged",
+            stats.new_files.0,
+            stats.new_files.1,
+            stats.appended.0,
+            stats.appended.1,
+            stats.unchanged.0
+        );
+    } else if stats.unchanged.0 > 0 {
+        info!(
+            "Logfile ingestion complete: no changes ({} files, {} bytes total)",
+            stats.unchanged.0,
+            stats.unchanged.1
+        );
+    } else {
+        info!("Logfile ingestion complete: no files to process");
+    }
     Ok(())
 }
 
@@ -490,10 +537,26 @@ async fn read_pond_state(
         // NOTE: We use SeriesOutboard ONLY to get cumulative_size, not for verification
         let cumulative_size = if let Some(bao_outboard) = &metadata.bao_outboard {
             match utilities::bao_outboard::SeriesOutboard::from_bytes(bao_outboard) {
-                Ok(series) => series.cumulative_size,
-                Err(_) => metadata.size.unwrap_or(0),
+                Ok(series) => {
+                    debug!(
+                        "File {} has bao_outboard with cumulative_size={}",
+                        filename, series.cumulative_size
+                    );
+                    series.cumulative_size
+                }
+                Err(e) => {
+                    warn!(
+                        "File {} has bao_outboard but failed to parse: {:?}, falling back to size={}",
+                        filename, e, metadata.size.unwrap_or(0)
+                    );
+                    metadata.size.unwrap_or(0)
+                }
             }
         } else {
+            warn!(
+                "File {} has NO bao_outboard, falling back to size={:?}",
+                filename, metadata.size
+            );
             metadata.size.unwrap_or(0)
         };
 
@@ -521,6 +584,7 @@ async fn process_active_file(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
     pond_file: Option<&PondFileState>,
+    stats: &mut IngestionStats,
 ) -> Result<(), tinyfs::Error> {
     let filename = host_file
         .path
@@ -531,19 +595,23 @@ async fn process_active_file(
     match pond_file {
         None => {
             // New file: ingest completely
-            info!("New active file detected: {}", filename);
+            info!("Ingesting new file: {} ({} bytes)", filename, host_file.size);
             ingest_new_file(context, config, host_file).await?;
+            stats.new_files.0 += 1;
+            stats.new_files.1 += host_file.size;
         }
         Some(pond_state) => {
             // Existing file: detect append
             if host_file.size > pond_state.cumulative_size {
                 let new_bytes = host_file.size - pond_state.cumulative_size;
                 info!(
-                    "Active file {} grew by {} bytes (was {}, now {})",
+                    "Appending to {}: +{} bytes ({} -> {} bytes)",
                     filename, new_bytes, pond_state.cumulative_size, host_file.size
                 );
 
                 ingest_append(context, config, host_file, pond_state).await?;
+                stats.appended.0 += 1;
+                stats.appended.1 += new_bytes;
             } else if host_file.size < pond_state.cumulative_size {
                 warn!(
                     "Active file {} SHRUNK from {} to {} bytes - unexpected!",
@@ -554,6 +622,8 @@ async fn process_active_file(
                     "Active file {} unchanged ({} bytes)",
                     filename, host_file.size
                 );
+                stats.unchanged.0 += 1;
+                stats.unchanged.1 += host_file.size;
             }
         }
     }
@@ -567,6 +637,7 @@ async fn process_archived_file(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
     pond_file: Option<&PondFileState>,
+    stats: &mut IngestionStats,
 ) -> Result<(), tinyfs::Error> {
     let filename = host_file
         .path
@@ -577,8 +648,10 @@ async fn process_archived_file(
     match pond_file {
         None => {
             // New archived file
-            info!("New archived file detected: {}", filename);
+            info!("Ingesting new archived file: {} ({} bytes)", filename, host_file.size);
             ingest_new_file(context, config, host_file).await?;
+            stats.new_files.0 += 1;
+            stats.new_files.1 += host_file.size;
         }
         Some(pond_state) => {
             // Verify archived file hasn't changed (should be immutable)
@@ -600,6 +673,8 @@ async fn process_archived_file(
                 )));
             } else {
                 debug!("Archived file {} unchanged", filename);
+                stats.unchanged.0 += 1;
+                stats.unchanged.1 += host_file.size;
             }
         }
     }

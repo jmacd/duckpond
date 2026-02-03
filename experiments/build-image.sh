@@ -5,10 +5,33 @@
 # 1. Cross-compiles pond for linux (matching host arch)
 # 2. Builds the experiment Docker image
 #
+# Options:
+#   --release    Build in release mode (default: debug)
+#   --quiet      Suppress build output
+#
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Parse arguments
+BUILD_MODE="debug"
+QUIET=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --release)
+            BUILD_MODE="release"
+            shift
+            ;;
+        --quiet|-q)
+            QUIET=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
 
 echo "=== DuckPond Experiment Image Builder ==="
 echo "Repository: ${REPO_ROOT}"
@@ -29,8 +52,14 @@ else
     DOCKER_PLATFORM="linux/amd64"
 fi
 
-BINARY_PATH="${REPO_ROOT}/target/${CONTAINER_TARGET}/release/pond"
-echo "Target: ${CONTAINER_TARGET} (Docker: ${DOCKER_PLATFORM})"
+if [[ "${BUILD_MODE}" == "release" ]]; then
+    BINARY_PATH="${REPO_ROOT}/target/${CONTAINER_TARGET}/release/pond"
+    CARGO_PROFILE="--release"
+else
+    BINARY_PATH="${REPO_ROOT}/target/${CONTAINER_TARGET}/debug/pond"
+    CARGO_PROFILE=""
+fi
+echo "Target: ${CONTAINER_TARGET} (Docker: ${DOCKER_PLATFORM}, mode: ${BUILD_MODE})"
 
 if [[ "${HOST_OS}" == "Darwin" ]]; then
     echo ""
@@ -41,9 +70,13 @@ if [[ "${HOST_OS}" == "Darwin" ]]; then
     
     # Try zigbuild if available (works best for cross-compilation)
     if command -v cargo-zigbuild &> /dev/null; then
-        echo "Using cargo-zigbuild..."
+        echo "Using cargo-zigbuild (${BUILD_MODE})..."
         cd "${REPO_ROOT}"
-        cargo zigbuild --release --bin pond --target ${CONTAINER_TARGET}
+        if [[ "${QUIET}" == "true" ]]; then
+            cargo zigbuild ${CARGO_PROFILE} --bin pond --target ${CONTAINER_TARGET} 2>&1 | tail -5
+        else
+            cargo zigbuild ${CARGO_PROFILE} --bin pond --target ${CONTAINER_TARGET}
+        fi
     else
         echo "ERROR: cargo-zigbuild not found."
         echo "Install with: cargo install cargo-zigbuild"
@@ -51,10 +84,18 @@ if [[ "${HOST_OS}" == "Darwin" ]]; then
     fi
 else
     echo ""
-    echo "=== Building for native Linux ==="
+    echo "=== Building for native Linux (${BUILD_MODE}) ==="
     cd "${REPO_ROOT}"
-    cargo build --release --bin pond
-    BINARY_PATH="${REPO_ROOT}/target/release/pond"
+    if [[ "${QUIET}" == "true" ]]; then
+        cargo build ${CARGO_PROFILE} --bin pond 2>&1 | tail -5
+    else
+        cargo build ${CARGO_PROFILE} --bin pond
+    fi
+    if [[ "${BUILD_MODE}" == "release" ]]; then
+        BINARY_PATH="${REPO_ROOT}/target/release/pond"
+    else
+        BINARY_PATH="${REPO_ROOT}/target/debug/pond"
+    fi
 fi
 
 # Verify binary exists

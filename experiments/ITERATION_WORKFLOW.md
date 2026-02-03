@@ -1,5 +1,23 @@
 # DuckPond Experiment Iteration Workflow
 
+## ⛔ CRITICAL: NO "SIMPLE FIXES"
+
+**NEVER propose or implement "the simplest fix" or "a quick patch."**
+
+When you encounter a problem:
+- ❌ DO NOT take shortcuts
+- ❌ DO NOT apply band-aids
+- ❌ DO NOT say "the simplest approach would be..."
+- ❌ DO NOT hack around the issue
+- ✅ DO understand the root cause fully
+- ✅ DO design a proper solution that fits the architecture
+- ✅ DO consider how similar problems should be handled consistently
+- ✅ DO implement it correctly the first time
+
+"Simple" fixes create technical debt, hide real problems, and waste everyone's time when they inevitably need to be redone properly. Take the time to do it right.
+
+---
+
 ## The Loop
 
 ```

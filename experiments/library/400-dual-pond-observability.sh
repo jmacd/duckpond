@@ -137,15 +137,15 @@ echo "=== Verification ==="
 
 echo ""
 echo "--- Pond1 Structure ---"
-POND=/pond1 pond list /
+POND=/pond1 pond list '/*'
 
 echo ""
 echo "--- Pond1 Logs ---"
-POND=/pond1 pond list /logs/ 2>/dev/null || echo "(logs directory may be empty)"
+POND=/pond1 pond list '/logs/*' 2>/dev/null || echo "(logs directory may be empty)"
 
 echo ""
 echo "--- Pond2 Structure ---"
-POND=/pond2 pond list /
+POND=/pond2 pond list '/*'
 
 echo ""
 echo "--- Pond2 Observations ---"

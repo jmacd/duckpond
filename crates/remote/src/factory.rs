@@ -193,7 +193,45 @@ async fn execute_remote(
     log::debug!("   Config secret_key length: {}", config.secret_key.len());
     log::debug!("   Config endpoint: '{}'", config.endpoint);
 
-    let cmd: RemoteCommand = ctx.to_command::<RemoteCommand, RemoteError>()?;
+    // Parse the command first, without mode check
+    let args_with_prog_name: Vec<String> = if ctx.args().is_empty() {
+        vec!["factory".to_string()]
+    } else {
+        std::iter::once("factory".to_string())
+            .chain(ctx.args().iter().cloned())
+            .collect()
+    };
+
+    let cmd = RemoteCommand::try_parse_from(&args_with_prog_name).map_err(|e| {
+        eprintln!("{}", e);
+        RemoteError::CommandParsing(e.to_string())
+    })?;
+
+    // Check execution mode - if mismatch for push/pull, provide helpful message
+    let required_mode = cmd.allowed();
+    let actual_mode = ctx.mode();
+    if required_mode != actual_mode {
+        match &cmd {
+            RemoteCommand::Push | RemoteCommand::Pull => {
+                // Push/Pull require ControlWriter mode but were called with PondReadWriter
+                // This happens when 'pond run' is used manually - the push/pull already
+                // runs automatically as a post-commit factory
+                log::info!("ℹ️  Remote {} runs automatically after each commit.", 
+                    if matches!(cmd, RemoteCommand::Push) { "push" } else { "pull" });
+                log::info!("   No manual execution needed - your data is already synchronized.");
+                log::info!("   To check backup status, use: pond run <path> list-files");
+                return Ok(());
+            }
+            _ => {
+                return Err(RemoteError::ExecutionMismatch {
+                    required: format!("{:?}", required_mode),
+                    actual: format!("{:?}", actual_mode),
+                    hint: "This command cannot be run in the current context.".to_string(),
+                });
+            }
+        }
+    }
+
     log::info!("   Command: {:?}", cmd);
 
     // Get pond UUID for path prefix

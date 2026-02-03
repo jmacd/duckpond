@@ -184,7 +184,7 @@ echo "=== Verification ==="
 
 echo ""
 echo "--- Pond1 (Primary) Structure ---"
-POND=/pond1 pond list /
+POND=/pond1 pond list '/*'
 
 echo ""
 echo "--- Pond1 Data ---"
@@ -192,7 +192,7 @@ POND=/pond1 pond cat /data/measurements.csv
 
 echo ""
 echo "--- Pond2 (Replica) Structure ---"
-POND=/pond2 pond list /
+POND=/pond2 pond list '/*'
 
 echo ""
 echo "--- Pond2 Data (should match Pond1) ---"

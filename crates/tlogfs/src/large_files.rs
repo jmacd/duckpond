@@ -211,6 +211,10 @@ pub struct HybridWriterResult {
     pub content: Vec<u8>,
     pub blake3: String,
     pub size: usize,
+    /// Bao-tree incremental hash state for FilePhysicalSeries
+    /// This captures the full bao-tree state computed incrementally during write,
+    /// enabling correct cumulative_size for large files where content is stored externally.
+    pub bao_state: utilities::bao_outboard::IncrementalHashState,
 }
 
 /// Hybrid writer that implements AsyncWrite with incremental hashing and spillover
@@ -221,6 +225,8 @@ pub struct HybridWriter {
     temp_path: Option<PathBuf>,
     /// Incremental BLAKE3 hasher
     hasher: blake3::Hasher,
+    /// Incremental bao-tree hasher for FilePhysicalSeries cumulative checksums
+    bao_hasher: utilities::bao_outboard::IncrementalHashState,
     /// Total bytes written
     total_written: usize,
     /// Target pond directory for final file
@@ -241,6 +247,7 @@ impl HybridWriter {
             temp_file: None,
             temp_path: None,
             hasher: blake3::Hasher::new(),
+            bao_hasher: utilities::bao_outboard::IncrementalHashState::new(),
             total_written: 0,
             pond_path: pond_path.as_ref().into(),
             create_future: None,
@@ -361,6 +368,7 @@ impl HybridWriter {
             content,
             blake3,
             size: self.total_written,
+            bao_state: self.bao_hasher,
         })
     }
 }
@@ -417,10 +425,13 @@ impl AsyncWrite for HybridWriter {
             // Write to file first
             let result = Pin::new(temp_file).poll_write(cx, buf);
 
-            // Only update hasher and counter if write succeeded
+            // Only update hashers and counter if write succeeded
             if let Poll::Ready(Ok(n)) = result {
                 // Hash exactly what was written (might be less than buf.len())
-                let _ = this.hasher.update(&buf[..n]);
+                let written_bytes = &buf[..n];
+                let _ = this.hasher.update(written_bytes);
+                // Also feed into bao-tree hasher for FilePhysicalSeries cumulative checksums
+                this.bao_hasher.ingest(written_bytes);
                 this.total_written += n;
             }
 

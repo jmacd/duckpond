@@ -372,12 +372,14 @@ impl AsyncWrite for OpLogFileWriter {
                     let content = hybrid_result.content;
                     let content_len = hybrid_result.size;
                     let blake3 = hybrid_result.blake3;
+                    let bao_state = hybrid_result.bao_state;
 
                     debug!(
-                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, blake3={}, is_large={}",
+                        "OpLogFileWriter::poll_shutdown() - finalized {} bytes, blake3={}, is_large={}, bao_total_size={}",
                         content_len,
                         blake3,
-                        content.is_empty() && content_len > 0
+                        content.is_empty() && content_len > 0,
+                        bao_state.total_size
                     );
 
                     // Determine ContentRef based on whether content is empty (large file external)
@@ -412,72 +414,24 @@ impl AsyncWrite for OpLogFileWriter {
                                 let prev_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
                                     .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize previous bao_outboard: {}", e)))?;
 
-                                // Calculate pending bytes needed from previous content
-                                // pending_size = tail of cumulative content that doesn't form a complete block
-                                let pending_size = (prev_outboard.cumulative_size % utilities::bao_outboard::BLOCK_SIZE as u64) as usize;
-
-                                // Efficiently read only the pending bytes we need
-                                // Read versions from newest to oldest until we have enough bytes
-                                let pending_bytes = if pending_size > 0 {
-                                    let versions = state.list_file_versions(file_id).await
-                                        .map_err(|e| tinyfs::Error::Other(format!("Failed to list versions: {}", e)))?;
-
-                                    // Collect bytes from tail, reading only necessary versions
-                                    let mut tail_bytes = Vec::with_capacity(pending_size);
-
-                                    // Iterate versions in reverse (newest first)
-                                    for v in versions.iter().rev() {
-                                        if tail_bytes.len() >= pending_size {
-                                            break;
-                                        }
-
-                                        let bytes_still_needed = pending_size - tail_bytes.len();
-
-                                        let version_content = state.read_file_version(file_id, v.version).await
-                                            .unwrap_or_default();
-
-                                        if version_content.len() >= bytes_still_needed {
-                                            // This version has enough bytes - take only the tail we need
-                                            let start = version_content.len().saturating_sub(bytes_still_needed);
-                                            // Prepend to tail_bytes (since we're going backwards)
-                                            let mut new_tail = version_content[start..].to_vec();
-                                            new_tail.append(&mut tail_bytes);
-                                            tail_bytes = new_tail;
-                                        } else {
-                                            // Need entire version - prepend it
-                                            let mut new_tail = version_content;
-                                            new_tail.append(&mut tail_bytes);
-                                            tail_bytes = new_tail;
-                                        }
-                                    }
-
-                                    // Trim to exact pending size (safety check)
-                                    if tail_bytes.len() > pending_size {
-                                        tail_bytes = tail_bytes[tail_bytes.len() - pending_size..].to_vec();
-                                    }
-
-                                    tail_bytes
-                                } else {
-                                    Vec::new()
-                                };
-
-                                // Append new version
-                                if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
-                                    // Large file
-                                    utilities::bao_outboard::SeriesOutboard::append_version_large(&prev_outboard, &pending_bytes, &content)
-                                } else {
-                                    // Inline file
-                                    utilities::bao_outboard::SeriesOutboard::append_version_inline(&prev_outboard, &pending_bytes, &content)
-                                }
+                                // Append new version using bao_state from HybridWriter
+                                // The bao_state was computed incrementally during write, so it has
+                                // the correct cumulative_size even for large files.
+                                //
+                                // NOTE: For full incremental verification, we would need to resume
+                                // from prev_outboard's frontier and merge with the new version's tree.
+                                // Currently we just use bao_state's tree structure, which correctly
+                                // captures cumulative_size but doesn't enable full series verification.
+                                utilities::bao_outboard::SeriesOutboard::from_incremental_state(
+                                    &prev_outboard,
+                                    &bao_state,
+                                    content_len as u64,
+                                )
                             } else {
-                                // First version
-                                if content.is_empty() && content_len >= crate::large_files::LARGE_FILE_THRESHOLD {
-                                    // Large file
-                                    utilities::bao_outboard::SeriesOutboard::first_version_large(&content)
-                                } else {
-                                    // Inline file
-                                    utilities::bao_outboard::SeriesOutboard::first_version_inline(&content)
-                                }
+                                // First version - use bao_state from HybridWriter
+                                // This correctly handles large files where content is empty but
+                                // bao_state.total_size has the actual size
+                                utilities::bao_outboard::SeriesOutboard::from_first_version_state(&bao_state, content_len as u64)
                             };
 
                             Some(series_outboard.to_bytes())

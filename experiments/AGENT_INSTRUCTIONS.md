@@ -52,8 +52,19 @@ pond list /path/to/check
 
 ```bash
 cd experiments
-./run-experiment.sh active/experiment.sh
+
+# By number (searches active/ then library/)
+./run-experiment.sh 032
+
+# By relative path
+./run-experiment.sh active/032-my-experiment.sh
+./run-experiment.sh library/001-basic-init.sh
+
+# By full path
+./run-experiment.sh /path/to/experiment.sh
 ```
+
+**Numeric shorthand**: Just use the experiment number (e.g., `32` or `032`). The script will find `032-*.sh` in `active/` first, then `library/`.
 
 ### Step 5: Analyze Output
 

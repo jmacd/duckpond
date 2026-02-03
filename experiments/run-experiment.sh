@@ -19,6 +19,7 @@ INLINE_SCRIPT=""
 SAVE_RESULT=false
 SCRIPT_FILE=""
 VERBOSE=false
+NO_REBUILD=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -38,6 +39,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --no-rebuild|-n)
+            NO_REBUILD=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [options] [script.sh]"
             echo ""
@@ -46,6 +51,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --inline 'cmd'       Run inline shell commands"
             echo "  --save-result, -s    Save output to results/ directory"
             echo "  --verbose, -v        Show container output in real-time"
+            echo "  --no-rebuild, -n     Skip automatic rebuild (use existing image)"
             echo "  --help, -h           Show this help"
             echo ""
             echo "Examples:"
@@ -62,10 +68,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Check if image exists
-if ! docker image inspect "${IMAGE_NAME}" &>/dev/null; then
+# Auto-rebuild unless --no-rebuild specified
+if [[ "${NO_REBUILD}" == "false" ]]; then
+    echo "=== Auto-rebuilding pond (debug mode) ==="
+    "${SCRIPT_DIR}/build-image.sh" --quiet
+    echo ""
+elif ! docker image inspect "${IMAGE_NAME}" &>/dev/null; then
     echo "ERROR: Image ${IMAGE_NAME} not found."
-    echo "Run: ./build-image.sh"
+    echo "Run: ./build-image.sh (or remove --no-rebuild)"
     exit 1
 fi
 
@@ -158,6 +168,27 @@ fi
 
 # Run mode: Script file
 if [[ -n "${SCRIPT_FILE}" ]]; then
+    # Support numeric shorthand: 032 -> active/032-*.sh or library/032-*.sh
+    if [[ "${SCRIPT_FILE}" =~ ^[0-9]+$ ]]; then
+        PATTERN="${SCRIPT_FILE}"
+        # Zero-pad to 3 digits
+        while [[ ${#PATTERN} -lt 3 ]]; do
+            PATTERN="0${PATTERN}"
+        done
+        # Look in active/ first, then library/
+        FOUND=$(find "${SCRIPT_DIR}/active" -maxdepth 1 -name "${PATTERN}-*.sh" 2>/dev/null | head -1)
+        if [[ -z "${FOUND}" ]]; then
+            FOUND=$(find "${SCRIPT_DIR}/library" -maxdepth 1 -name "${PATTERN}-*.sh" 2>/dev/null | head -1)
+        fi
+        if [[ -n "${FOUND}" ]]; then
+            SCRIPT_FILE="${FOUND}"
+            echo "Resolved ${PATTERN} -> $(basename "${SCRIPT_FILE}")"
+        else
+            echo "ERROR: No experiment found matching ${PATTERN}-*.sh in active/ or library/"
+            exit 1
+        fi
+    fi
+    
     # Resolve script path
     if [[ ! "${SCRIPT_FILE}" = /* ]]; then
         if [[ -f "${SCRIPT_DIR}/${SCRIPT_FILE}" ]]; then
