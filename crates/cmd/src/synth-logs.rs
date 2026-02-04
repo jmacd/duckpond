@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Synthetic Log File Generator
 //!
 //! Generates deterministic CSV log files with rotation for testing logfile_ingest.

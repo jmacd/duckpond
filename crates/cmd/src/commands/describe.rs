@@ -690,20 +690,75 @@ mod tests {
             Ok(host_file)
         }
 
-        async fn create_csv_file(&self, filename: &str, csv_data: &str) -> Result<PathBuf> {
-            self.create_host_file(filename, csv_data).await
-        }
-
-        /// Create a sample Parquet file by copying CSV and letting it convert
+        /// Create a sample Parquet table file by writing directly to pond
         async fn create_parquet_table(&self, pond_path: &str, csv_data: &str) -> Result<()> {
-            let host_file = self.create_csv_file("temp.csv", csv_data).await?;
-            copy_command(
-                &self.ship_context,
-                &[host_file.to_string_lossy().to_string()],
-                pond_path,
-                "table",
+            use arrow_array::{RecordBatch, StringArray};
+            use arrow_schema::{DataType, Field, Schema};
+            use std::sync::Arc;
+            use tinyfs::arrow::ParquetExt;
+
+            // Parse CSV data - handle generic columns
+            let lines: Vec<&str> = csv_data.lines().collect();
+            let headers: Vec<&str> = lines
+                .first()
+                .map(|h| h.split(',').collect())
+                .unwrap_or_default();
+            let num_cols = headers.len();
+
+            // For simplicity, store all values as strings
+            let mut columns: Vec<Vec<String>> = vec![Vec::new(); num_cols];
+
+            for line in lines.iter().skip(1) {
+                let values: Vec<&str> = line.split(',').collect();
+                for (i, col) in columns.iter_mut().enumerate() {
+                    col.push(values.get(i).unwrap_or(&"").to_string());
+                }
+            }
+
+            // Create schema with all string columns
+            let fields: Vec<Field> = headers
+                .iter()
+                .map(|h| Field::new(*h, DataType::Utf8, true))
+                .collect();
+            let schema = Arc::new(Schema::new(fields));
+
+            // Create string arrays for each column
+            let arrays: Vec<Arc<dyn arrow_array::Array>> = columns
+                .iter()
+                .map(|col| Arc::new(StringArray::from(col.clone())) as Arc<dyn arrow_array::Array>)
+                .collect();
+
+            let batch = RecordBatch::try_new(schema, arrays)?;
+
+            // Write directly to pond using transact
+            let pond_path = pond_path.to_string();
+            let mut ship = self.ship_context.open_pond().await?;
+            ship.transact(
+                &steward::PondUserMetadata::new(vec!["test".to_string()]),
+                |_tx, fs| {
+                    let batch = batch.clone();
+                    let pond_path = pond_path.clone();
+                    Box::pin(async move {
+                        let root = fs.root().await.map_err(|e| {
+                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                        })?;
+
+                        root.create_table_from_batch(
+                            &pond_path,
+                            &batch,
+                            tinyfs::EntryType::TablePhysicalVersion,
+                        )
+                        .await
+                        .map_err(|e| {
+                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                        })?;
+
+                        Ok(())
+                    })
+                },
             )
             .await?;
+
             Ok(())
         }
 

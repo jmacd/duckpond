@@ -50,8 +50,7 @@ impl<'a> ChunkedReader<'a> {
 
         let df = ctx
             .sql(&format!(
-                "SELECT chunk_id, chunk_hash, chunk_outboard, chunk_data, total_size, root_hash 
-                 FROM remote_files 
+                "SELECT * FROM remote_files 
                  WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {} 
                  ORDER BY chunk_id",
                 self.bundle_id, self.path, self.pond_txn_id

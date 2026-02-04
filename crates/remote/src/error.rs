@@ -54,11 +54,20 @@ pub enum RemoteError {
     #[error("Invalid chunk sequence: expected chunk_id={expected}, got {actual}")]
     InvalidChunkSequence { expected: i64, actual: i64 },
 
-    #[error("Invalid bundle_id format: {0}")]
+    #[error("Configuration error: {0}")]
     Configuration(String),
 
     #[error("Invalid bundle_id format: {0}")]
     InvalidBundleId(String),
+
+    #[error(
+        "Execution mode mismatch: command requires {required:?} but was called with {actual:?}. {hint}"
+    )]
+    ExecutionMismatch {
+        required: String,
+        actual: String,
+        hint: String,
+    },
 
     #[error("Table operation error: {0}")]
     TableOperation(String),

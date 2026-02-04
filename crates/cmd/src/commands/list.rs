@@ -5,6 +5,27 @@
 use crate::common::{FileInfoVisitor, ShipContext};
 use anyhow::Result;
 
+/// Normalize a pattern for the list command.
+///
+/// Handles common user expectations:
+/// - "/" becomes "/*" (list root directory entries)
+/// - "/path/to/dir/" (trailing slash) becomes "/path/to/dir/*" (list directory contents)
+fn normalize_pattern(pattern: &str) -> String {
+    let trimmed = pattern.trim();
+
+    // "/" alone should list root directory entries
+    if trimmed == "/" {
+        return "/*".to_string();
+    }
+
+    // Trailing slash means "list contents of this directory"
+    if trimmed.ends_with('/') {
+        return format!("{}*", trimmed);
+    }
+
+    trimmed.to_string()
+}
+
 /// List files with a closure for handling output
 pub async fn list_command<F>(
     ship_context: &ShipContext,
@@ -15,13 +36,14 @@ pub async fn list_command<F>(
 where
     F: FnMut(&str),
 {
+    let normalized_pattern = normalize_pattern(pattern);
     let mut ship = ship_context.open_pond().await?;
 
     // Use transaction for consistent filesystem access
     let tx = ship
         .begin_read(&steward::PondUserMetadata::new(vec![
             "list".to_string(),
-            pattern.to_string(),
+            normalized_pattern.clone(),
         ]))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
@@ -32,12 +54,12 @@ where
 
         // Use FileInfoVisitor to collect file information - always allow all files at visitor level
         let mut visitor = FileInfoVisitor::new(true); // Always allow all at visitor level
-        root.visit_with_visitor(pattern, &mut visitor)
+        root.visit_with_visitor(&normalized_pattern, &mut visitor)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to list files matching '{}' from data filesystem: {}",
-                    pattern,
+                    normalized_pattern,
                     e
                 )
             })
@@ -401,5 +423,112 @@ mod tests {
         .expect("List command failed");
 
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_normalize_pattern() {
+        // "/" should become "/*" (list root contents)
+        assert_eq!(normalize_pattern("/"), "/*");
+
+        // Trailing slash should append "*"
+        assert_eq!(normalize_pattern("/data/"), "/data/*");
+        assert_eq!(normalize_pattern("subdir/"), "subdir/*");
+
+        // Normal patterns should be unchanged
+        assert_eq!(normalize_pattern("*"), "*");
+        assert_eq!(normalize_pattern("**/*"), "**/*");
+        assert_eq!(normalize_pattern("/data/*.csv"), "/data/*.csv");
+        assert_eq!(normalize_pattern("file.txt"), "file.txt");
+
+        // Whitespace should be trimmed
+        assert_eq!(normalize_pattern("  /  "), "/*");
+        assert_eq!(normalize_pattern(" /data/ "), "/data/*");
+    }
+
+    #[tokio::test]
+    async fn test_list_root_with_slash() {
+        let setup = TestSetup::new().await.expect("Failed to create test setup");
+
+        // Create files and directories at root level
+        setup
+            .create_pond_file(
+                "rootfile.txt",
+                "content",
+                tinyfs::EntryType::FilePhysicalVersion,
+            )
+            .await
+            .expect("Failed to create root file");
+
+        setup
+            .create_pond_directory("mydir")
+            .await
+            .expect("Failed to create directory");
+
+        setup
+            .create_pond_file(
+                "mydir/nested.txt",
+                "nested content",
+                tinyfs::EntryType::FilePhysicalVersion,
+            )
+            .await
+            .expect("Failed to create nested file");
+
+        // Test "pond list /" - should list root entries only (not recurse)
+        let mut results = Vec::new();
+        list_command(&setup.ship_context, "/", false, |output| {
+            results.push(output.to_string())
+        })
+        .await
+        .expect("List with '/' should succeed");
+
+        debug!("Results for '/': {:?}", results);
+
+        // Should see root file and directory, but NOT nested file
+        assert!(results.iter().any(|r| r.contains("rootfile.txt")));
+        assert!(results.iter().any(|r| r.contains("mydir")));
+        assert!(!results.iter().any(|r| r.contains("nested.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_list_trailing_slash() {
+        let setup = TestSetup::new().await.expect("Failed to create test setup");
+
+        // Create directory structure
+        setup
+            .create_pond_directory("data")
+            .await
+            .expect("Failed to create directory");
+
+        setup
+            .create_pond_file(
+                "data/file1.csv",
+                "content1",
+                tinyfs::EntryType::FilePhysicalVersion,
+            )
+            .await
+            .expect("Failed to create file");
+
+        setup
+            .create_pond_file(
+                "data/file2.csv",
+                "content2",
+                tinyfs::EntryType::FilePhysicalVersion,
+            )
+            .await
+            .expect("Failed to create file");
+
+        // Test "pond list /data/" - should list directory contents
+        let mut results = Vec::new();
+        list_command(&setup.ship_context, "/data/", false, |output| {
+            results.push(output.to_string())
+        })
+        .await
+        .expect("List with trailing slash should succeed");
+
+        debug!("Results for '/data/': {:?}", results);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|r| r.contains("file1.csv")));
+        assert!(results.iter().any(|r| r.contains("file2.csv")));
     }
 }

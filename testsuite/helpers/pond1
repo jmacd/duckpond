@@ -1,0 +1,19 @@
+#!/bin/bash
+# Helper to run pond commands on a specific pond instance
+# Usage: pond1 <command> or pond2 <command>
+#
+# This script is symlinked as pond1 and pond2
+set -e
+
+SCRIPT_NAME=$(basename "$0")
+
+case "${SCRIPT_NAME}" in
+    pond1) export POND=/pond1 ;;
+    pond2) export POND=/pond2 ;;
+    *) 
+        echo "Usage: pond1 <command> or pond2 <command>"
+        exit 1
+        ;;
+esac
+
+exec pond "$@"

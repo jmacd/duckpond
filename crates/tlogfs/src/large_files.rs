@@ -211,6 +211,10 @@ pub struct HybridWriterResult {
     pub content: Vec<u8>,
     pub blake3: String,
     pub size: usize,
+    /// Bao-tree incremental hash state for FilePhysicalSeries
+    /// This captures the full bao-tree state computed incrementally during write,
+    /// enabling correct cumulative_size for large files where content is stored externally.
+    pub bao_state: utilities::bao_outboard::IncrementalHashState,
 }
 
 /// Hybrid writer that implements AsyncWrite with incremental hashing and spillover
@@ -221,6 +225,8 @@ pub struct HybridWriter {
     temp_path: Option<PathBuf>,
     /// Incremental BLAKE3 hasher
     hasher: blake3::Hasher,
+    /// Incremental bao-tree hasher for FilePhysicalSeries cumulative checksums
+    bao_hasher: utilities::bao_outboard::IncrementalHashState,
     /// Total bytes written
     total_written: usize,
     /// Target pond directory for final file
@@ -241,11 +247,66 @@ impl HybridWriter {
             temp_file: None,
             temp_path: None,
             hasher: blake3::Hasher::new(),
+            bao_hasher: utilities::bao_outboard::IncrementalHashState::new(),
             total_written: 0,
             pond_path: pond_path.as_ref().into(),
             create_future: None,
             options,
         }
+    }
+
+    /// Create a HybridWriter that resumes bao-tree computation from a previous SeriesOutboard
+    ///
+    /// This is used when appending to a FilePhysicalSeries. The bao_hasher is initialized
+    /// from the previous frontier and verified pending bytes, so the resulting bao_state will
+    /// have the correct cumulative hash for the entire series (prev content + new content).
+    ///
+    /// # Arguments
+    /// * `pond_path` - Path to the pond directory
+    /// * `prev` - The previous version's SeriesOutboard
+    /// * `verified_pending` - The tail bytes from previous content that form the pending block.
+    ///   Must be exactly `prev.cumulative_size % BLOCK_SIZE` bytes, read from previous versions.
+    ///
+    /// # Errors
+    /// Returns an error if the previous state is invalid or pending bytes length is wrong.
+    pub fn resume_from<P: AsRef<Path>>(
+        pond_path: P,
+        prev: &utilities::bao_outboard::SeriesOutboard,
+        verified_pending: &[u8],
+    ) -> std::io::Result<Self> {
+        Self::resume_from_with_options(
+            pond_path,
+            prev,
+            verified_pending,
+            LargeFileOptions::default(),
+        )
+    }
+
+    /// Create a HybridWriter that resumes from previous state with custom options
+    pub fn resume_from_with_options<P: AsRef<Path>>(
+        pond_path: P,
+        prev: &utilities::bao_outboard::SeriesOutboard,
+        verified_pending: &[u8],
+        options: LargeFileOptions,
+    ) -> std::io::Result<Self> {
+        // Resume bao_hasher from previous frontier and verified pending bytes
+        let bao_hasher = utilities::bao_outboard::IncrementalHashState::resume(
+            &prev.incremental.frontier,
+            prev.cumulative_size,
+            verified_pending,
+        )
+        .map_err(|e| std::io::Error::other(format!("Failed to resume bao state: {}", e)))?;
+
+        Ok(Self {
+            temp_file: None,
+            temp_path: None,
+            hasher: blake3::Hasher::new(),
+            bao_hasher,
+            total_written: 0,
+            pond_path: pond_path.as_ref().into(),
+            create_future: None,
+            options,
+        })
     }
 
     pub fn total_written(&self) -> usize {
@@ -361,6 +422,7 @@ impl HybridWriter {
             content,
             blake3,
             size: self.total_written,
+            bao_state: self.bao_hasher,
         })
     }
 }
@@ -417,10 +479,13 @@ impl AsyncWrite for HybridWriter {
             // Write to file first
             let result = Pin::new(temp_file).poll_write(cx, buf);
 
-            // Only update hasher and counter if write succeeded
+            // Only update hashers and counter if write succeeded
             if let Poll::Ready(Ok(n)) = result {
                 // Hash exactly what was written (might be less than buf.len())
-                let _ = this.hasher.update(&buf[..n]);
+                let written_bytes = &buf[..n];
+                let _ = this.hasher.update(written_bytes);
+                // Also feed into bao-tree hasher for FilePhysicalSeries cumulative checksums
+                this.bao_hasher.ingest(written_bytes);
                 this.total_written += n;
             }
 

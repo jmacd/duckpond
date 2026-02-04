@@ -1,0 +1,22 @@
+#!/bin/bash
+# Wait for a condition with timeout
+# Usage: wait-for <command> [timeout_seconds] [message]
+#
+# Example: wait-for "curl -s localhost:9000" 30 "MinIO to start"
+
+COMMAND="$1"
+TIMEOUT="${2:-30}"
+MESSAGE="${3:-condition}"
+
+echo "Waiting for ${MESSAGE}..."
+
+for i in $(seq 1 ${TIMEOUT}); do
+    if eval "${COMMAND}" &>/dev/null; then
+        echo "✓ ${MESSAGE} ready after ${i}s"
+        exit 0
+    fi
+    sleep 1
+done
+
+echo "✗ Timeout waiting for ${MESSAGE}"
+exit 1

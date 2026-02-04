@@ -1,0 +1,36 @@
+#!/bin/bash
+# EXPERIMENT: {{TITLE}}
+# DESCRIPTION: {{DESCRIPTION}}
+# EXPECTED: {{EXPECTED}}
+#
+# Generated: {{TIMESTAMP}}
+#
+set -e  # Stop on first error
+
+echo "=== Experiment: {{TITLE}} ==="
+echo ""
+
+#############################
+# SETUP
+#############################
+
+# Initialize the pond
+pond init
+
+#############################
+# TEST STEPS
+#############################
+
+{{TEST_STEPS}}
+
+#############################
+# VERIFICATION
+#############################
+
+echo ""
+echo "=== VERIFICATION ==="
+
+{{VERIFICATION}}
+
+echo ""
+echo "=== Experiment Complete ==="

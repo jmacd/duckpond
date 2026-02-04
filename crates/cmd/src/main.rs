@@ -140,7 +140,7 @@ enum Commands {
         #[arg(long)]
         time_end: Option<i64>,
         /// SQL query to execute on the file:series data
-        #[arg(long)]
+        #[arg(long = "sql", visible_alias = "query")]
         query: Option<String>,
     },
     /// Copy files into or out of the pond
@@ -167,7 +167,7 @@ enum Commands {
     },
     /// Create node (factory objects like CSV, SQL views, etc.)
     Mknod {
-        /// Factory type to create [possible values: csv, sql, hostmount]
+        /// Factory type to create (use 'list-factories' to see all available types)
         factory_type: String,
         /// Path where the node will be created
         path: String,

@@ -56,6 +56,20 @@ enum RemoteCommand {
         #[arg(long)]
         bundle_id: Option<String>,
     },
+
+    /// Show storage details and generate verification script
+    ///
+    /// Lists files matching the pattern and shows how to verify them
+    /// using external tools (duckdb, b3sum) without using pond.
+    Show {
+        /// Path or glob pattern to match files (e.g., "/*" or "/data/*.csv")
+        #[arg(default_value = "/*")]
+        pattern: String,
+
+        /// Show full verification script (default: summary only)
+        #[arg(long, short)]
+        script: bool,
+    },
 }
 
 impl FactoryCommand for RemoteCommand {
@@ -66,6 +80,7 @@ impl FactoryCommand for RemoteCommand {
             Self::Replicate => ExecutionMode::PondReadWriter,
             Self::ListFiles { .. } => ExecutionMode::PondReadWriter,
             Self::Verify { .. } => ExecutionMode::PondReadWriter,
+            Self::Show { .. } => ExecutionMode::PondReadWriter,
         }
     }
 }
@@ -187,14 +202,57 @@ async fn execute_remote(
 
     let config: RemoteConfig = serde_json::from_value(config)?;
 
-    log::info!("🌐 REMOTE FACTORY (Chunked Parquet)");
     log::info!("   Remote URL: {}", config.url);
     log::debug!("   Config region: '{}'", config.region);
     log::debug!("   Config access_key length: {}", config.access_key.len());
     log::debug!("   Config secret_key length: {}", config.secret_key.len());
     log::debug!("   Config endpoint: '{}'", config.endpoint);
 
-    let cmd: RemoteCommand = ctx.to_command::<RemoteCommand, RemoteError>()?;
+    // Parse the command first, without mode check
+    let args_with_prog_name: Vec<String> = if ctx.args().is_empty() {
+        vec!["factory".to_string()]
+    } else {
+        std::iter::once("factory".to_string())
+            .chain(ctx.args().iter().cloned())
+            .collect()
+    };
+
+    let cmd = RemoteCommand::try_parse_from(&args_with_prog_name).map_err(|e| {
+        eprintln!("{}", e);
+        RemoteError::CommandParsing(e.to_string())
+    })?;
+
+    // Check execution mode - if mismatch for push/pull, provide helpful message
+    let required_mode = cmd.allowed();
+    let actual_mode = ctx.mode();
+    if required_mode != actual_mode {
+        match &cmd {
+            RemoteCommand::Push | RemoteCommand::Pull => {
+                // Push/Pull require ControlWriter mode but were called with PondReadWriter
+                // This happens when 'pond run' is used manually - the push/pull already
+                // runs automatically as a post-commit factory
+                log::info!(
+                    "ℹ️  Remote {} runs automatically after each commit.",
+                    if matches!(cmd, RemoteCommand::Push) {
+                        "push"
+                    } else {
+                        "pull"
+                    }
+                );
+                log::info!("   No manual execution needed - your data is already synchronized.");
+                log::info!("   To check backup status, use: pond run <path> list-files");
+                return Ok(());
+            }
+            _ => {
+                return Err(RemoteError::ExecutionMismatch {
+                    required: format!("{:?}", required_mode),
+                    actual: format!("{:?}", actual_mode),
+                    hint: "This command cannot be run in the current context.".to_string(),
+                });
+            }
+        }
+    }
+
     log::info!("   Command: {:?}", cmd);
 
     // Get pond UUID for path prefix
@@ -226,7 +284,8 @@ async fn execute_remote(
     );
 
     let remote_table =
-        RemoteTable::open_or_create_with_storage_options(&path, true, storage_options).await?;
+        RemoteTable::open_or_create_with_storage_options(&path, true, storage_options.clone())
+            .await?;
 
     match cmd {
         RemoteCommand::Push => execute_push(remote_table, &context).await,
@@ -234,6 +293,17 @@ async fn execute_remote(
         RemoteCommand::Replicate => execute_replicate(config, &context).await,
         RemoteCommand::ListFiles { txn_id } => execute_list_files(remote_table, txn_id).await,
         RemoteCommand::Verify { bundle_id } => execute_verify(remote_table, bundle_id).await,
+        RemoteCommand::Show { pattern, script } => {
+            execute_show(
+                remote_table,
+                &config,
+                &path,
+                storage_options,
+                &pattern,
+                script,
+            )
+            .await
+        }
     }
 }
 
@@ -461,7 +531,7 @@ async fn execute_pull(
         return Ok(());
     }
 
-    log::info!("   Remote has {} files", remote_files.len());
+    log::debug!("   Remote has {} files", remote_files.len());
 
     // Get local Delta table and pond path
     let state = extract_tlogfs_state(context)?;
@@ -482,7 +552,7 @@ async fn execute_pull(
                 continue;
             }
 
-            log::info!("   Pulling large file: {}", original_path);
+            log::debug!("   Pulling large file: {}", original_path);
 
             // Download using ChunkedReader
             let mut output = Vec::new();
@@ -512,7 +582,7 @@ async fn execute_pull(
                     ))
                 })?;
 
-            log::info!(
+            log::debug!(
                 "      ✓ Pulled {} bytes to {}",
                 byte_len,
                 large_file_fs_path.display()
@@ -527,7 +597,7 @@ async fn execute_pull(
                 continue;
             }
 
-            log::info!("   Pulling: {}", original_path);
+            log::debug!("   Pulling: {}", original_path);
 
             // Download using ChunkedReader
             let mut output = Vec::new();
@@ -545,7 +615,7 @@ async fn execute_pull(
                     RemoteError::TableOperation(format!("Failed to write {}: {}", original_path, e))
                 })?;
 
-            log::info!("      ✓ Pulled {} bytes", byte_len);
+            log::debug!("      ✓ Pulled {} bytes", byte_len);
         }
     }
 
@@ -584,20 +654,20 @@ async fn execute_list_files(
     remote_table: RemoteTable,
     txn_id: Option<i64>,
 ) -> Result<(), RemoteError> {
-    log::info!("📋 LIST FILES");
+    log::debug!("📋 LIST FILES");
 
     // List all files - we don't filter by txn_id anymore
     let _ = txn_id; // Unused now
     let files = remote_table.list_files("").await?;
 
     if files.is_empty() {
-        log::info!("   No files found");
+        log::debug!("   No files found");
         return Ok(());
     }
 
-    log::info!("   Found {} files:", files.len());
+    log::debug!("   Found {} files:", files.len());
     for (bundle_id, original_path, pond_txn_id, size) in files {
-        log::info!(
+        log::debug!(
             "   - {} | txn {} | {} | {} bytes",
             &bundle_id[..16.min(bundle_id.len())],
             pond_txn_id,
@@ -614,11 +684,11 @@ async fn execute_verify(
     remote_table: RemoteTable,
     bundle_id: Option<String>,
 ) -> Result<(), RemoteError> {
-    log::info!("✓ VERIFY: Checking backup integrity");
+    log::debug!("✓ VERIFY: Checking backup integrity");
 
     if let Some(id) = bundle_id {
         // Verify specific bundle - need to find files with this bundle_id
-        log::info!("   Verifying bundle: {}", &id[..16.min(id.len())]);
+        log::debug!("   Verifying bundle: {}", &id[..16.min(id.len())]);
 
         // Query to find all files with this bundle_id
         let files = remote_table.list_files("").await?;
@@ -636,7 +706,7 @@ async fn execute_verify(
             remote_table
                 .read_file(&bundle_id, &file_path, pond_txn_id, &mut output)
                 .await?;
-            log::info!("   ✓ {} OK ({} bytes)", file_path, output.len());
+            log::debug!("   ✓ {} OK ({} bytes)", file_path, output.len());
         }
     } else {
         // Verify all bundles
@@ -644,7 +714,7 @@ async fn execute_verify(
 
         let files = remote_table.list_files("").await?;
         let total_files = files.len();
-        log::info!("   Found {} files to verify", total_files);
+        log::debug!("   Found {} files to verify", total_files);
 
         let mut verified = 0;
         for (bundle_id, file_path, pond_txn_id, _size) in files {
@@ -662,10 +732,470 @@ async fn execute_verify(
             }
         }
 
-        log::info!("   ✓ Verified {}/{} bundles", verified, total_files);
+        log::debug!("   ✓ Verified {}/{} bundles", verified, total_files);
     }
 
     Ok(())
+}
+
+/// Show storage details and generate verification script
+///
+/// Lists files in remote backup matching the pattern and generates a shell script
+/// that can be used to verify the files using external tools (duckdb, b3sum).
+/// This provides confidence that backup data is accessible and verifiable without
+/// using pond software.
+#[allow(clippy::print_stdout)]
+async fn execute_show(
+    remote_table: RemoteTable,
+    config: &RemoteConfig,
+    table_path: &str,
+    storage_options: std::collections::HashMap<String, String>,
+    pattern: &str,
+    show_script: bool,
+) -> Result<(), RemoteError> {
+    log::info!("📋 SHOW: Storage details for pattern '{}'", pattern);
+
+    // List all files from remote
+    let files = remote_table.list_files("").await?;
+
+    if files.is_empty() {
+        println!("No files found in remote backup.");
+        return Ok(());
+    }
+
+    // Filter files by pattern (simple glob matching on path)
+    let matching_files: Vec<_> = files
+        .into_iter()
+        .filter(|(_, path, _, _)| path_matches_pattern(path, pattern))
+        .collect();
+
+    if matching_files.is_empty() {
+        println!("No files match pattern: {}", pattern);
+        return Ok(());
+    }
+
+    println!("\n=== Files in Remote Backup ===\n");
+    println!("{:<50} {:>10}  {:>6}  BUNDLE_ID", "PATH", "SIZE", "TXN",);
+    println!("{}", "-".repeat(100));
+
+    for (bundle_id, path, pond_txn_id, size) in &matching_files {
+        let bundle_short = if bundle_id.len() > 20 {
+            format!("{}...", &bundle_id[..20])
+        } else {
+            bundle_id.clone()
+        };
+        println!(
+            "{:<50} {:>10}  {:>6}  {}",
+            path,
+            format_size(*size),
+            pond_txn_id,
+            bundle_short
+        );
+    }
+
+    println!("\nTotal: {} files\n", matching_files.len());
+
+    if show_script {
+        // Generate verification script
+        println!("=== Verification Script ===\n");
+        println!("# This script verifies backup data using external tools only.");
+        println!("# Requirements: duckdb, b3sum (optional), jq (optional)\n");
+
+        generate_verification_script(&matching_files, config, table_path, &storage_options);
+    } else {
+        println!("Tip: Use --script to generate a verification script for external tools.\n");
+    }
+
+    Ok(())
+}
+
+/// Check if a path matches a simple glob pattern
+fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+    // Handle common patterns
+    if pattern == "/*" || pattern == "*" {
+        return true;
+    }
+
+    // Simple prefix matching for "/data/*" style patterns
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return path.starts_with(prefix) || path.starts_with(&prefix[1..]); // Handle with or without leading /
+    }
+
+    if let Some(prefix) = pattern.strip_suffix("*") {
+        return path.starts_with(prefix) || path.starts_with(&prefix[1..]);
+    }
+
+    // Exact match
+    path == pattern || path == &pattern[1..] // Handle with or without leading /
+}
+
+/// Format file size for display
+fn format_size(bytes: i64) -> String {
+    const KB: i64 = 1024;
+    const MB: i64 = KB * 1024;
+    const GB: i64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1}GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
+/// Generate verification script for external tools
+#[allow(clippy::print_stdout)]
+fn generate_verification_script(
+    files: &[(String, String, i64, i64)],
+    config: &RemoteConfig,
+    table_path: &str,
+    storage_options: &std::collections::HashMap<String, String>,
+) {
+    // Redact sensitive values for display
+    let redacted_access_key = if config.access_key.is_empty() {
+        String::new()
+    } else {
+        "<REDACTED_ACCESS_KEY>".to_string()
+    };
+    let redacted_secret_key = if config.secret_key.is_empty() {
+        String::new()
+    } else {
+        "<REDACTED_SECRET_KEY>".to_string()
+    };
+
+    let is_s3 = config.url.starts_with("s3://");
+    let local_path = config.url.strip_prefix("file://").unwrap_or(&config.url);
+    let duckdb_table_ref = if is_s3 {
+        format!("delta_scan('{}')", table_path)
+    } else {
+        format!("delta_scan('{}')", local_path)
+    };
+
+    println!("╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║  BACKUP VERIFICATION SCRIPTS                                                   ║");
+    println!("║  Each section below is a standalone, copy-pastable script.                     ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 1: Environment Setup
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 1. ENVIRONMENT SETUP (run first)                                              │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    if is_s3 {
+        println!("# Set these environment variables for S3/MinIO access:");
+        println!("# (Replace <REDACTED_*> with your actual credentials)");
+        println!();
+        println!("```bash");
+        if !config.endpoint.is_empty() {
+            println!("export AWS_ENDPOINT_URL=\"{}\"", config.endpoint);
+        }
+        println!(
+            "export AWS_REGION=\"{}\"",
+            if config.region.is_empty() {
+                "us-east-1"
+            } else {
+                &config.region
+            }
+        );
+        if !config.access_key.is_empty() {
+            println!("export AWS_ACCESS_KEY_ID=\"{}\"", redacted_access_key);
+        }
+        if !config.secret_key.is_empty() {
+            println!("export AWS_SECRET_ACCESS_KEY=\"{}\"", redacted_secret_key);
+        }
+        println!("```");
+    } else {
+        println!("# Local filesystem - no credentials needed");
+        println!("# Table path: {}", local_path);
+        println!();
+        println!("```bash");
+        println!("# Verify the backup directory exists:");
+        println!("ls -la {}", local_path);
+        println!("```");
+    }
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 2: List all files with DuckDB
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 2. LIST ALL BACKED UP FILES (DuckDB)                                          │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+    println!("```bash");
+    println!("duckdb -c \"");
+    println!("INSTALL delta; LOAD delta;");
+    if is_s3 {
+        print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+    }
+    println!("SELECT path, total_size, root_hash");
+    println!("FROM {}", duckdb_table_ref);
+    println!("GROUP BY path, total_size, root_hash");
+    println!("ORDER BY path;");
+    println!("\"");
+    println!("```");
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 3: Extract and verify specific files
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 3. EXTRACT FILES FROM BACKUP                                                  │");
+    println!("│    Reassembles chunked data from storage to local filesystem                  │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    // Show examples for first few files
+    let example_files: Vec<_> = files.iter().take(3).collect();
+
+    for (bundle_id, path, pond_txn_id, size) in &example_files {
+        let safe_filename = path.replace(['/', '='], "_");
+        let output_path = format!("/tmp/extracted_{}", safe_filename);
+
+        println!("# ── File: {} ({}) ──", path, format_size(*size));
+        println!();
+        println!("```bash");
+        println!("# Extract to: {}", output_path);
+        println!("duckdb -c \"");
+        println!("INSTALL delta; LOAD delta;");
+        if is_s3 {
+            print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+        }
+        println!("COPY (");
+        println!("  SELECT chunk_data");
+        println!("  FROM {}", duckdb_table_ref);
+        println!("  WHERE bundle_id = '{}'", bundle_id);
+        println!("    AND path = '{}'", path);
+        println!("    AND pond_txn_id = {}", pond_txn_id);
+        println!("  ORDER BY chunk_id");
+        println!(") TO '{}' (FORMAT 'parquet');", output_path);
+        println!("\"");
+        println!("```");
+        println!();
+    }
+
+    if files.len() > 3 {
+        println!(
+            "# ... and {} more files (adjust bundle_id/path/pond_txn_id as needed)",
+            files.len() - 3
+        );
+        println!();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 4: Verify with BLAKE3
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 4. VERIFY BLAKE3 CHECKSUMS                                                    │");
+    println!("│    Compare extracted file hash against stored root_hash                       │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    for (bundle_id, path, pond_txn_id, _size) in &example_files {
+        let safe_filename = path.replace(['/', '='], "_");
+        let output_path = format!("/tmp/extracted_{}", safe_filename);
+
+        println!("# ── Verify: {} ──", path);
+        println!();
+        println!("```bash");
+        println!("# Step 1: Get the expected root_hash from backup");
+        println!("EXPECTED_HASH=$(duckdb -noheader -csv -c \"");
+        println!("INSTALL delta; LOAD delta;");
+        if is_s3 {
+            print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+        }
+        println!("SELECT DISTINCT root_hash FROM {}", duckdb_table_ref);
+        println!(
+            "WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {};",
+            bundle_id, path, pond_txn_id
+        );
+        println!("\")");
+        println!();
+        println!("# Step 2: Extract the raw binary data and compute BLAKE3");
+        println!("duckdb -c \"");
+        println!("INSTALL delta; LOAD delta;");
+        if is_s3 {
+            print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+        }
+        println!("COPY (");
+        println!("  SELECT chunk_data FROM {}", duckdb_table_ref);
+        println!(
+            "  WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {}",
+            bundle_id, path, pond_txn_id
+        );
+        println!("  ORDER BY chunk_id");
+        println!(") TO '{}' WITH (FORMAT 'binary');", output_path);
+        println!("\"");
+        println!();
+        println!("# Step 3: Compute BLAKE3 of extracted file");
+        println!("ACTUAL_HASH=$(b3sum {} | cut -d' ' -f1)", output_path);
+        println!();
+        println!("# Step 4: Compare");
+        println!("echo \"Expected: $EXPECTED_HASH\"");
+        println!("echo \"Actual:   $ACTUAL_HASH\"");
+        println!("if [ \"$EXPECTED_HASH\" = \"$ACTUAL_HASH\" ]; then");
+        println!("  echo \"✓ BLAKE3 MATCH - File verified!\"");
+        println!("else");
+        println!("  echo \"✗ BLAKE3 MISMATCH - File may be corrupted!\"");
+        println!("  exit 1");
+        println!("fi");
+        println!("```");
+        println!();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 5: Alternative verification with SHA256
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 5. ALTERNATIVE: VERIFY WITH SHA256 (if b3sum not available)                   │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    if let Some((_, path, _, _)) = example_files.first() {
+        let safe_filename = path.replace(['/', '='], "_");
+        let output_path = format!("/tmp/extracted_{}", safe_filename);
+
+        println!("```bash");
+        println!(
+            "# SHA256 verification (note: DuckPond uses BLAKE3, so this is for general integrity)"
+        );
+        println!("shasum -a 256 {}", output_path);
+        println!();
+        println!("# Or with openssl:");
+        println!("openssl dgst -sha256 {}", output_path);
+        println!("```");
+        println!();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 6: Full extraction script
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 6. EXTRACT ALL FILES (complete script)                                        │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+    println!("```bash");
+    println!("#!/bin/bash");
+    println!("# Extract all {} files from backup", files.len());
+    println!("set -e");
+    println!();
+    println!("OUTPUT_DIR=\"/tmp/pond_backup_extract\"");
+    println!("mkdir -p \"$OUTPUT_DIR\"");
+    println!();
+
+    if is_s3 {
+        println!("# S3/MinIO credentials (replace <REDACTED_*> values)");
+        if !config.endpoint.is_empty() {
+            println!("export AWS_ENDPOINT_URL=\"{}\"", config.endpoint);
+        }
+        println!(
+            "export AWS_REGION=\"{}\"",
+            if config.region.is_empty() {
+                "us-east-1"
+            } else {
+                &config.region
+            }
+        );
+        println!("export AWS_ACCESS_KEY_ID=\"{}\"", redacted_access_key);
+        println!("export AWS_SECRET_ACCESS_KEY=\"{}\"", redacted_secret_key);
+        println!();
+    }
+
+    println!("# Get list of all files");
+    println!("echo \"Extracting files from backup...\"");
+    println!();
+
+    // Generate extraction command for each file
+    for (bundle_id, path, pond_txn_id, _size) in files.iter().take(5) {
+        let safe_filename = path.replace(['/', '='], "_");
+        println!("# {}", path);
+        println!("duckdb -c \"");
+        println!("INSTALL delta; LOAD delta;");
+        if is_s3 {
+            print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+        }
+        println!(
+            "COPY (SELECT list_reduce(list(chunk_data ORDER BY chunk_id), (a, b) -> a || b) AS data FROM {} WHERE bundle_id='{}' AND path='{}' AND pond_txn_id={}) TO '$OUTPUT_DIR/{}' (FORMAT BLOB);",
+            duckdb_table_ref, bundle_id, path, pond_txn_id, safe_filename
+        );
+        println!("\"");
+        println!();
+    }
+
+    if files.len() > 5 {
+        println!("# ... repeat for remaining {} files", files.len() - 5);
+    }
+
+    println!("echo \"Extraction complete. Files in $OUTPUT_DIR\"");
+    println!("ls -la \"$OUTPUT_DIR\"");
+    println!("```");
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 7: Tool installation
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 7. TOOL INSTALLATION                                                          │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+    println!("```bash");
+    println!("# Install DuckDB");
+    println!("# macOS:");
+    println!("brew install duckdb");
+    println!();
+    println!("# Linux:");
+    println!(
+        "curl -LO https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip"
+    );
+    println!("unzip duckdb_cli-linux-amd64.zip");
+    println!("chmod +x duckdb && sudo mv duckdb /usr/local/bin/");
+    println!();
+    println!("# Install b3sum (BLAKE3)");
+    println!("# macOS:");
+    println!("brew install b3sum");
+    println!();
+    println!("# Linux (via cargo):");
+    println!("cargo install b3sum");
+    println!("```");
+}
+
+/// Helper to print DuckDB S3 configuration
+#[allow(clippy::print_stdout)]
+fn print_duckdb_s3_config(
+    storage_options: &std::collections::HashMap<String, String>,
+    redacted_access_key: &str,
+    redacted_secret_key: &str,
+) {
+    println!("INSTALL httpfs; LOAD httpfs;");
+    println!(
+        "SET s3_region='{}';",
+        storage_options
+            .get("region")
+            .unwrap_or(&"us-east-1".to_string())
+    );
+    if let Some(endpoint) = storage_options.get("endpoint") {
+        let clean_endpoint = endpoint
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        println!("SET s3_endpoint='{}';", clean_endpoint);
+        println!("SET s3_url_style='path';");
+        if endpoint.starts_with("http://") {
+            println!("SET s3_use_ssl=false;");
+        }
+    }
+    if storage_options.contains_key("access_key_id") {
+        println!("SET s3_access_key_id='{}';", redacted_access_key);
+    }
+    if storage_options.contains_key("secret_access_key") {
+        println!("SET s3_secret_access_key='{}';", redacted_secret_key);
+    }
 }
 
 // Public API for restore/replication
@@ -734,7 +1264,7 @@ pub async fn scan_remote_versions(
     match max_txn {
         Some(max) => {
             let transactions: Vec<i64> = (1..=max).collect();
-            log::info!(
+            log::debug!(
                 "Found {} transactions in remote backup (1..={})",
                 transactions.len(),
                 max
@@ -749,7 +1279,7 @@ pub async fn scan_remote_versions(
                 let transactions = remote_table
                     .list_transactions_from_metadata(&pond_id.to_string())
                     .await?;
-                log::info!(
+                log::debug!(
                     "Found {} transactions using metadata approach",
                     transactions.len()
                 );
@@ -828,7 +1358,7 @@ pub async fn apply_parquet_files_from_remote(
         return Ok(());
     }
 
-    log::info!("Found {} files to restore in transaction", files.len());
+    log::debug!("Found {} files to restore in transaction", files.len());
 
     // Get the object store from the local table
     let object_store = local_table.object_store();
@@ -933,7 +1463,7 @@ pub async fn restore_large_files_from_remote(
     remote_table: &crate::RemoteTable,
     pond_path: &std::path::Path,
 ) -> Result<usize, RemoteError> {
-    log::info!("Scanning for large files in remote backup...");
+    log::debug!("Scanning for large files in remote backup...");
 
     // List all files in remote
     let all_files = remote_table.list_files("").await?;
@@ -949,7 +1479,7 @@ pub async fn restore_large_files_from_remote(
         return Ok(0);
     }
 
-    log::info!("   Found {} large files to restore", large_files.len());
+    log::debug!("   Found {} large files to restore", large_files.len());
 
     // Large files are stored within the 'data' subdirectory of the pond
     let data_path = pond_path.join("data");
@@ -964,7 +1494,7 @@ pub async fn restore_large_files_from_remote(
             continue;
         }
 
-        log::info!("   Restoring: {}", path);
+        log::debug!("   Restoring: {}", path);
 
         // Download file from remote
         let mut buffer = Vec::new();
@@ -994,11 +1524,11 @@ pub async fn restore_large_files_from_remote(
                 ))
             })?;
 
-        log::info!("      ✓ Restored {} bytes", byte_len);
+        log::debug!("      ✓ Restored {} bytes", byte_len);
         restored += 1;
     }
 
-    log::info!("   ✓ Restored {} large files", restored);
+    log::debug!("   ✓ Restored {} large files", restored);
     Ok(restored)
 }
 

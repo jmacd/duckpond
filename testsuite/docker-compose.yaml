@@ -1,0 +1,78 @@
+# Docker Compose for complex DuckPond experiments
+#
+# Provides:
+# - duckpond: The experiment container with pond CLI
+# - minio: S3-compatible storage for replication testing
+#
+# Usage:
+#   docker-compose up -d minio        # Start MinIO only
+#   docker-compose run --rm duckpond  # Run interactive experiment
+#   docker-compose run --rm duckpond /experiment/run.sh  # Run script
+#
+version: '3.8'
+
+services:
+  # MinIO - S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # DuckPond experiment container
+  duckpond:
+    image: duckpond-experiment:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.experiment
+    environment:
+      POND: /pond
+      POND1: /pond1
+      POND2: /pond2
+      RUST_LOG: info
+      # MinIO connection (for S3 experiments)
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      # Mount experiment scripts
+      - ./library:/experiment/library:ro
+      - ./active:/experiment/active:ro
+      - ./results:/results
+      # Shared data between ponds and MinIO
+      - shared-data:/data
+    depends_on:
+      minio:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+
+  # Standalone duckpond (no MinIO dependency)
+  duckpond-standalone:
+    image: duckpond-experiment:latest
+    environment:
+      POND: /pond
+      POND1: /pond1
+      POND2: /pond2
+      RUST_LOG: info
+    volumes:
+      - ./library:/experiment/library:ro
+      - ./active:/experiment/active:ro
+      - ./results:/results
+    stdin_open: true
+    tty: true
+
+volumes:
+  minio-data:
+  shared-data:

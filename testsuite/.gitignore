@@ -1,0 +1,13 @@
+# Experiment framework ignores
+
+# Temporary binary copied for Docker build
+pond
+
+# Active experiment (work in progress)
+active/
+
+# Results (may contain sensitive test output)
+results/
+
+# Keep library tracked
+!library/

@@ -1,15 +1,16 @@
 #!/bin/sh
+set -x
+set -e
 
-ROOT=/Volumes/sourcecode/src/duckpond
-SEPTIC=${ROOT}/septic
-POND=${SEPTIC}/pond
-EXE=${ROOT}/target/release/pond
-OUTDIR=./export
+HOST=debian@septicplaystation.local
+REMOTE_CONFIG=/home/debian/config
 
-export POND
+SCRIPTS=$(cd "$(dirname "$0")" && pwd)
+EXE=${SCRIPTS}/pond.sh
 
-cargo build --release
+# Copy updated config files to remote host
+scp backup.yaml ingest.yaml ${HOST}:${REMOTE_CONFIG}/
 
-${EXE} mknod remote /etc/system.d/1-backup --overwrite --config-path ${SEPTIC}/backup.yaml
+${EXE} mknod remote /etc/system.d/1-backup --overwrite --config-path ${REMOTE_CONFIG}/backup.yaml
 
-${EXE} mknod logfile-ingest /etc/ingest --overwrite --config-path ${SEPTIC}/ingest.yaml
+${EXE} mknod logfile-ingest /etc/ingest --overwrite --config-path ${REMOTE_CONFIG}/ingest.yaml

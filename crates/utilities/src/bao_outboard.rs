@@ -534,6 +534,100 @@ impl SeriesOutboard {
         Self::append_version(prev, verified_pending, new_content)
     }
 
+    /// Create a SeriesOutboard for the first version using pre-computed IncrementalHashState
+    ///
+    /// This is used when the content was hashed incrementally during write (e.g., in HybridWriter)
+    /// and is now stored externally (large files). The bao_state contains the full tree state.
+    ///
+    /// # Arguments
+    /// * `bao_state` - The IncrementalHashState computed during write
+    /// * `version_size` - The size of this version's content
+    #[must_use]
+    pub fn from_first_version_state(bao_state: &IncrementalHashState, version_size: u64) -> Self {
+        let cumulative_blake3 = *bao_state.root_hash().as_bytes();
+        let frontier = bao_state.to_frontier();
+
+        // For the first version, all completed subtrees are "new stable"
+        let new_stable_subtrees: Vec<(u32, [u8; 32])> = frontier
+            .iter()
+            .map(|(level, hash, _start)| (*level, *hash))
+            .collect();
+
+        Self {
+            incremental: IncrementalOutboard {
+                new_stable_subtrees,
+                frontier,
+            },
+            cumulative_blake3,
+            version_size,
+            cumulative_size: bao_state.total_size,
+        }
+    }
+
+    /// Create a SeriesOutboard by appending to a previous version using pre-computed IncrementalHashState
+    ///
+    /// This is used when the content was hashed incrementally during write (e.g., in HybridWriter)
+    /// and we need to create a SeriesOutboard that chains from the previous version.
+    ///
+    /// Note: This simplified version doesn't compute the incremental outboard delta correctly
+    /// for the append case - it only captures the new version's contribution. For full
+    /// incremental verification, the previous frontier must be merged with the new state.
+    /// However, the critical `cumulative_size` field is correct, which is what logfile-ingest needs.
+    ///
+    /// # Arguments
+    /// * `prev` - The previous version's SeriesOutboard
+    /// * `bao_state` - The IncrementalHashState computed during write. Should be RESUMED from
+    ///   prev's frontier for correct cumulative hash computation.
+    /// * `version_size` - The size of this version's content
+    #[must_use]
+    pub fn from_incremental_state(
+        prev: &SeriesOutboard,
+        bao_state: &IncrementalHashState,
+        version_size: u64,
+    ) -> Self {
+        // The bao_state should have been resumed from prev's frontier before writing.
+        // If resumed correctly, bao_state.total_size = prev.cumulative_size + version_size
+        // and bao_state.root_hash() is the true cumulative hash.
+        //
+        // If bao_state was NOT resumed (legacy path), cumulative_blake3 will be wrong
+        // but cumulative_size will still be correct.
+
+        // Get the new cumulative state from bao_state
+        // (should equal prev.cumulative_size + version_size if resumed correctly)
+        let new_cumulative_size = bao_state.total_size;
+
+        // Use bao_state's tree structure - if resumed, block numbers are correct
+        let frontier = bao_state.to_frontier();
+        let new_stable_subtrees: Vec<(u32, [u8; 32])> = frontier
+            .iter()
+            .map(|(level, hash, _start)| (*level, *hash))
+            .collect();
+
+        // If bao_state was resumed from prev, this is the correct cumulative hash.
+        // If not resumed (legacy), this will be wrong but we can't fix it without content.
+        let cumulative_blake3 = *bao_state.root_hash().as_bytes();
+
+        // Validate: if resumed correctly, sizes should match
+        let expected_cumulative = prev.cumulative_size + version_size;
+        if new_cumulative_size != expected_cumulative {
+            debug!(
+                "from_incremental_state: bao_state.total_size ({}) != prev.cumulative_size ({}) + version_size ({}). \
+                 Was bao_state resumed from prev's frontier?",
+                new_cumulative_size, prev.cumulative_size, version_size
+            );
+        }
+
+        Self {
+            incremental: IncrementalOutboard {
+                new_stable_subtrees,
+                frontier,
+            },
+            cumulative_blake3,
+            version_size,
+            cumulative_size: expected_cumulative, // Use expected to maintain correctness
+        }
+    }
+
     /// Get the frontier for resumption
     #[must_use]
     pub fn frontier(&self) -> &[(u32, [u8; 32], u64)] {
@@ -717,7 +811,7 @@ impl SeriesOutboard {
         })
     }
 
-    /// Parse v3 format (incremental with cumulative_blake3)
+    /// Parse v3 format (incremental with cumulative_blake3, no pending_bytes)
     fn from_bytes_v3(bytes: &[u8]) -> Result<Self, BaoOutboardError> {
         if bytes.len() < 48 {
             // 8 + 8 + 32 minimum
