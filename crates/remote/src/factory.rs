@@ -284,7 +284,8 @@ async fn execute_remote(
     );
 
     let remote_table =
-        RemoteTable::open_or_create_with_storage_options(&path, true, storage_options.clone()).await?;
+        RemoteTable::open_or_create_with_storage_options(&path, true, storage_options.clone())
+            .await?;
 
     match cmd {
         RemoteCommand::Push => execute_push(remote_table, &context).await,
@@ -293,7 +294,15 @@ async fn execute_remote(
         RemoteCommand::ListFiles { txn_id } => execute_list_files(remote_table, txn_id).await,
         RemoteCommand::Verify { bundle_id } => execute_verify(remote_table, bundle_id).await,
         RemoteCommand::Show { pattern, script } => {
-            execute_show(remote_table, &config, &path, storage_options, &pattern, script).await
+            execute_show(
+                remote_table,
+                &config,
+                &path,
+                storage_options,
+                &pattern,
+                script,
+            )
+            .await
         }
     }
 }
@@ -766,10 +775,7 @@ async fn execute_show(
     }
 
     println!("\n=== Files in Remote Backup ===\n");
-    println!(
-        "{:<50} {:>10}  {:>6}  BUNDLE_ID",
-        "PATH", "SIZE", "TXN",
-    );
+    println!("{:<50} {:>10}  {:>6}  BUNDLE_ID", "PATH", "SIZE", "TXN",);
     println!("{}", "-".repeat(100));
 
     for (bundle_id, path, pond_txn_id, size) in &matching_files {
@@ -795,12 +801,7 @@ async fn execute_show(
         println!("# This script verifies backup data using external tools only.");
         println!("# Requirements: duckdb, b3sum (optional), jq (optional)\n");
 
-        generate_verification_script(
-            &matching_files,
-            config,
-            table_path,
-            &storage_options,
-        );
+        generate_verification_script(&matching_files, config, table_path, &storage_options);
     } else {
         println!("Tip: Use --script to generate a verification script for external tools.\n");
     }
@@ -895,7 +896,14 @@ fn generate_verification_script(
         if !config.endpoint.is_empty() {
             println!("export AWS_ENDPOINT_URL=\"{}\"", config.endpoint);
         }
-        println!("export AWS_REGION=\"{}\"", if config.region.is_empty() { "us-east-1" } else { &config.region });
+        println!(
+            "export AWS_REGION=\"{}\"",
+            if config.region.is_empty() {
+                "us-east-1"
+            } else {
+                &config.region
+            }
+        );
         if !config.access_key.is_empty() {
             println!("export AWS_ACCESS_KEY_ID=\"{}\"", redacted_access_key);
         }
@@ -928,7 +936,7 @@ fn generate_verification_script(
         print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
     }
     println!("SELECT path, total_size, root_hash");
-    println!("FROM {}",duckdb_table_ref);
+    println!("FROM {}", duckdb_table_ref);
     println!("GROUP BY path, total_size, root_hash");
     println!("ORDER BY path;");
     println!("\"");
@@ -974,7 +982,10 @@ fn generate_verification_script(
     }
 
     if files.len() > 3 {
-        println!("# ... and {} more files (adjust bundle_id/path/pond_txn_id as needed)", files.len() - 3);
+        println!(
+            "# ... and {} more files (adjust bundle_id/path/pond_txn_id as needed)",
+            files.len() - 3
+        );
         println!();
     }
 
@@ -1001,8 +1012,10 @@ fn generate_verification_script(
             print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
         }
         println!("SELECT DISTINCT root_hash FROM {}", duckdb_table_ref);
-        println!("WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {};",
-            bundle_id, path, pond_txn_id);
+        println!(
+            "WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {};",
+            bundle_id, path, pond_txn_id
+        );
         println!("\")");
         println!();
         println!("# Step 2: Extract the raw binary data and compute BLAKE3");
@@ -1013,8 +1026,10 @@ fn generate_verification_script(
         }
         println!("COPY (");
         println!("  SELECT chunk_data FROM {}", duckdb_table_ref);
-        println!("  WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {}",
-            bundle_id, path, pond_txn_id);
+        println!(
+            "  WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {}",
+            bundle_id, path, pond_txn_id
+        );
         println!("  ORDER BY chunk_id");
         println!(") TO '{}' WITH (FORMAT 'binary');", output_path);
         println!("\"");
@@ -1048,7 +1063,9 @@ fn generate_verification_script(
         let output_path = format!("/tmp/extracted_{}", safe_filename);
 
         println!("```bash");
-        println!("# SHA256 verification (note: DuckPond uses BLAKE3, so this is for general integrity)");
+        println!(
+            "# SHA256 verification (note: DuckPond uses BLAKE3, so this is for general integrity)"
+        );
         println!("shasum -a 256 {}", output_path);
         println!();
         println!("# Or with openssl:");
@@ -1078,7 +1095,14 @@ fn generate_verification_script(
         if !config.endpoint.is_empty() {
             println!("export AWS_ENDPOINT_URL=\"{}\"", config.endpoint);
         }
-        println!("export AWS_REGION=\"{}\"", if config.region.is_empty() { "us-east-1" } else { &config.region });
+        println!(
+            "export AWS_REGION=\"{}\"",
+            if config.region.is_empty() {
+                "us-east-1"
+            } else {
+                &config.region
+            }
+        );
         println!("export AWS_ACCESS_KEY_ID=\"{}\"", redacted_access_key);
         println!("export AWS_SECRET_ACCESS_KEY=\"{}\"", redacted_secret_key);
         println!();
@@ -1097,8 +1121,10 @@ fn generate_verification_script(
         if is_s3 {
             print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
         }
-        println!("COPY (SELECT list_reduce(list(chunk_data ORDER BY chunk_id), (a, b) -> a || b) AS data FROM {} WHERE bundle_id='{}' AND path='{}' AND pond_txn_id={}) TO '$OUTPUT_DIR/{}' (FORMAT BLOB);",
-            duckdb_table_ref, bundle_id, path, pond_txn_id, safe_filename);
+        println!(
+            "COPY (SELECT list_reduce(list(chunk_data ORDER BY chunk_id), (a, b) -> a || b) AS data FROM {} WHERE bundle_id='{}' AND path='{}' AND pond_txn_id={}) TO '$OUTPUT_DIR/{}' (FORMAT BLOB);",
+            duckdb_table_ref, bundle_id, path, pond_txn_id, safe_filename
+        );
         println!("\"");
         println!();
     }
@@ -1125,7 +1151,9 @@ fn generate_verification_script(
     println!("brew install duckdb");
     println!();
     println!("# Linux:");
-    println!("curl -LO https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip");
+    println!(
+        "curl -LO https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip"
+    );
     println!("unzip duckdb_cli-linux-amd64.zip");
     println!("chmod +x duckdb && sudo mv duckdb /usr/local/bin/");
     println!();
@@ -1146,9 +1174,16 @@ fn print_duckdb_s3_config(
     redacted_secret_key: &str,
 ) {
     println!("INSTALL httpfs; LOAD httpfs;");
-    println!("SET s3_region='{}';", storage_options.get("region").unwrap_or(&"us-east-1".to_string()));
+    println!(
+        "SET s3_region='{}';",
+        storage_options
+            .get("region")
+            .unwrap_or(&"us-east-1".to_string())
+    );
     if let Some(endpoint) = storage_options.get("endpoint") {
-        let clean_endpoint = endpoint.trim_start_matches("http://").trim_start_matches("https://");
+        let clean_endpoint = endpoint
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
         println!("SET s3_endpoint='{}';", clean_endpoint);
         println!("SET s3_url_style='path';");
         if endpoint.starts_with("http://") {
@@ -1162,7 +1197,6 @@ fn print_duckdb_s3_config(
         println!("SET s3_secret_access_key='{}';", redacted_secret_key);
     }
 }
-
 
 // Public API for restore/replication
 

@@ -743,16 +743,15 @@ mod tests {
                             steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
                         })?;
 
-                        root
-                            .create_table_from_batch(
-                                &pond_path,
-                                &batch,
-                                tinyfs::EntryType::TablePhysicalVersion,
-                            )
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                        root.create_table_from_batch(
+                            &pond_path,
+                            &batch,
+                            tinyfs::EntryType::TablePhysicalVersion,
+                        )
+                        .await
+                        .map_err(|e| {
+                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
+                        })?;
 
                         Ok(())
                     })
