@@ -767,8 +767,8 @@ async fn execute_show(
 
     println!("\n=== Files in Remote Backup ===\n");
     println!(
-        "{:<50} {:>10}  {:>6}  {}",
-        "PATH", "SIZE", "TXN", "BUNDLE_ID"
+        "{:<50} {:>10}  {:>6}  BUNDLE_ID",
+        "PATH", "SIZE", "TXN",
     );
     println!("{}", "-".repeat(100));
 
@@ -948,7 +948,7 @@ fn generate_verification_script(
     let example_files: Vec<_> = files.iter().take(3).collect();
 
     for (bundle_id, path, pond_txn_id, size) in &example_files {
-        let safe_filename = path.replace('/', "_").replace('=', "_");
+        let safe_filename = path.replace(['/', '='], "_");
         let output_path = format!("/tmp/extracted_{}", safe_filename);
 
         println!("# ── File: {} ({}) ──", path, format_size(*size));
@@ -988,7 +988,7 @@ fn generate_verification_script(
     println!();
 
     for (bundle_id, path, pond_txn_id, _size) in &example_files {
-        let safe_filename = path.replace('/', "_").replace('=', "_");
+        let safe_filename = path.replace(['/', '='], "_");
         let output_path = format!("/tmp/extracted_{}", safe_filename);
 
         println!("# ── Verify: {} ──", path);
@@ -1044,7 +1044,7 @@ fn generate_verification_script(
     println!();
 
     if let Some((_, path, _, _)) = example_files.first() {
-        let safe_filename = path.replace('/', "_").replace('=', "_");
+        let safe_filename = path.replace(['/', '='], "_");
         let output_path = format!("/tmp/extracted_{}", safe_filename);
 
         println!("```bash");
@@ -1090,7 +1090,7 @@ fn generate_verification_script(
 
     // Generate extraction command for each file
     for (bundle_id, path, pond_txn_id, _size) in files.iter().take(5) {
-        let safe_filename = path.replace('/', "_").replace('=', "_");
+        let safe_filename = path.replace(['/', '='], "_");
         println!("# {}", path);
         println!("duckdb -c \"");
         println!("INSTALL delta; LOAD delta;");
