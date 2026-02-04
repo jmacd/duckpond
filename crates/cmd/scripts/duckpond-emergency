@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Caspar Water Company
+#
 # duckpond-emergency - Emergency file extraction from DuckPond backups
 #
 # This script extracts files from DuckPond Delta Lake backups using only

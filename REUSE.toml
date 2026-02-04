@@ -1,0 +1,40 @@
+version = 1
+SPDX-PackageName = "duckpond"
+SPDX-PackageSupplier = "Caspar Water Company"
+SPDX-PackageDownloadLocation = "https://github.com/jmacd/duckpond"
+
+[[annotations]]
+path = ["crates/**/**.rs", "original/**/**.rs"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Caspar Water Company"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["**.toml", "**.lock", "**.md", "**.yml", "**.yaml", "**.sh", "**.txt", "**.tmpl", "Dockerfile", "Makefile"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Caspar Water Company"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["**/**.toml", "**/**.lock", "**/**.md", "**/**.yml", "**/**.yaml", "**/**.sh", "**/**.txt", "**/**.tmpl"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Caspar Water Company"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["noyo/**", "original/src/config/**/**", "pond/**", "export/**", "inbox/**", "history/**", "sample-**/**", "testsuite/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Caspar Water Company"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["**.jpg", "**.png", "**.parquet", "OUT**", "CLIPPY", "DIFF", "ORIG", "WHATIS", ".dockerignore", ".gitignore"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Caspar Water Company"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = ["target/**", ".git/**", "arrow-rs/**", "datafusion-rs/**", "delta-rs/**", "linkme-rs/**", "object_store-rs/**", "opentelemetry-rs/**", "oxidizer-rs/**", "peak_alloc-rs/**", "serde_arrow-rs/**", "tera-rs/**", "tokio-tar-rs/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "None"
+SPDX-License-Identifier = "CC0-1.0"

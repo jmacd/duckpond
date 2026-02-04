@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Register S3-compatible storage (like R2) with Delta Lake without AWS SDK dependencies
 
 use deltalake::logstore::{
