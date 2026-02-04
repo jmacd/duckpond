@@ -40,11 +40,30 @@ RUN apt-get update && \
         rsyslog \
         # Process tools (pgrep, ps, etc)
         procps \
+        # For extracting archives
+        unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install MinIO client (mc) for S3 testing
 RUN curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && \
     chmod +x /usr/local/bin/mc
+
+# Install DuckDB for backup verification and emergency recovery
+# Detect architecture and download appropriate version
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
+        DUCKDB_ARCH="aarch64"; \
+    else \
+        DUCKDB_ARCH="amd64"; \
+    fi && \
+    curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-${DUCKDB_ARCH}.zip" -o /tmp/duckdb.zip && \
+    unzip -o /tmp/duckdb.zip -d /usr/local/bin/ && \
+    chmod +x /usr/local/bin/duckdb && \
+    rm /tmp/duckdb.zip
+
+# Install b3sum (BLAKE3) for checksum verification
+RUN curl -fsSL https://github.com/BLAKE3-team/BLAKE3/releases/download/1.5.0/b3sum_linux_x64_bin -o /usr/local/bin/b3sum && \
+    chmod +x /usr/local/bin/b3sum
 
 # Set up multi-pond environment
 # POND is the default, POND1/POND2 for multi-pond experiments
@@ -61,6 +80,10 @@ RUN mkdir -p /var/log/duckpond /var/log/experiment
 # Copy the pond binary (built separately)
 COPY pond /usr/local/bin/pond
 RUN chmod +x /usr/local/bin/pond
+
+# Copy the emergency recovery script (from crates/cmd/scripts/)
+COPY duckpond-emergency /usr/local/bin/duckpond-emergency
+RUN chmod +x /usr/local/bin/duckpond-emergency
 
 # Create experiment workspace
 RUN mkdir -p /experiment /results /etc/supervisor/conf.d

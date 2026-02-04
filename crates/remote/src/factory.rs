@@ -56,6 +56,20 @@ enum RemoteCommand {
         #[arg(long)]
         bundle_id: Option<String>,
     },
+
+    /// Show storage details and generate verification script
+    ///
+    /// Lists files matching the pattern and shows how to verify them
+    /// using external tools (duckdb, b3sum) without using pond.
+    Show {
+        /// Path or glob pattern to match files (e.g., "/*" or "/data/*.csv")
+        #[arg(default_value = "/*")]
+        pattern: String,
+
+        /// Show full verification script (default: summary only)
+        #[arg(long, short)]
+        script: bool,
+    },
 }
 
 impl FactoryCommand for RemoteCommand {
@@ -66,6 +80,7 @@ impl FactoryCommand for RemoteCommand {
             Self::Replicate => ExecutionMode::PondReadWriter,
             Self::ListFiles { .. } => ExecutionMode::PondReadWriter,
             Self::Verify { .. } => ExecutionMode::PondReadWriter,
+            Self::Show { .. } => ExecutionMode::PondReadWriter,
         }
     }
 }
@@ -269,7 +284,7 @@ async fn execute_remote(
     );
 
     let remote_table =
-        RemoteTable::open_or_create_with_storage_options(&path, true, storage_options).await?;
+        RemoteTable::open_or_create_with_storage_options(&path, true, storage_options.clone()).await?;
 
     match cmd {
         RemoteCommand::Push => execute_push(remote_table, &context).await,
@@ -277,6 +292,9 @@ async fn execute_remote(
         RemoteCommand::Replicate => execute_replicate(config, &context).await,
         RemoteCommand::ListFiles { txn_id } => execute_list_files(remote_table, txn_id).await,
         RemoteCommand::Verify { bundle_id } => execute_verify(remote_table, bundle_id).await,
+        RemoteCommand::Show { pattern, script } => {
+            execute_show(remote_table, &config, &path, storage_options, &pattern, script).await
+        }
     }
 }
 
@@ -710,6 +728,441 @@ async fn execute_verify(
 
     Ok(())
 }
+
+/// Show storage details and generate verification script
+///
+/// Lists files in remote backup matching the pattern and generates a shell script
+/// that can be used to verify the files using external tools (duckdb, b3sum).
+/// This provides confidence that backup data is accessible and verifiable without
+/// using pond software.
+#[allow(clippy::print_stdout)]
+async fn execute_show(
+    remote_table: RemoteTable,
+    config: &RemoteConfig,
+    table_path: &str,
+    storage_options: std::collections::HashMap<String, String>,
+    pattern: &str,
+    show_script: bool,
+) -> Result<(), RemoteError> {
+    log::info!("📋 SHOW: Storage details for pattern '{}'", pattern);
+
+    // List all files from remote
+    let files = remote_table.list_files("").await?;
+
+    if files.is_empty() {
+        println!("No files found in remote backup.");
+        return Ok(());
+    }
+
+    // Filter files by pattern (simple glob matching on path)
+    let matching_files: Vec<_> = files
+        .into_iter()
+        .filter(|(_, path, _, _)| path_matches_pattern(path, pattern))
+        .collect();
+
+    if matching_files.is_empty() {
+        println!("No files match pattern: {}", pattern);
+        return Ok(());
+    }
+
+    println!("\n=== Files in Remote Backup ===\n");
+    println!(
+        "{:<50} {:>10}  {:>6}  {}",
+        "PATH", "SIZE", "TXN", "BUNDLE_ID"
+    );
+    println!("{}", "-".repeat(100));
+
+    for (bundle_id, path, pond_txn_id, size) in &matching_files {
+        let bundle_short = if bundle_id.len() > 20 {
+            format!("{}...", &bundle_id[..20])
+        } else {
+            bundle_id.clone()
+        };
+        println!(
+            "{:<50} {:>10}  {:>6}  {}",
+            path,
+            format_size(*size),
+            pond_txn_id,
+            bundle_short
+        );
+    }
+
+    println!("\nTotal: {} files\n", matching_files.len());
+
+    if show_script {
+        // Generate verification script
+        println!("=== Verification Script ===\n");
+        println!("# This script verifies backup data using external tools only.");
+        println!("# Requirements: duckdb, b3sum (optional), jq (optional)\n");
+
+        generate_verification_script(
+            &matching_files,
+            config,
+            table_path,
+            &storage_options,
+        );
+    } else {
+        println!("Tip: Use --script to generate a verification script for external tools.\n");
+    }
+
+    Ok(())
+}
+
+/// Check if a path matches a simple glob pattern
+fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+    // Handle common patterns
+    if pattern == "/*" || pattern == "*" {
+        return true;
+    }
+
+    // Simple prefix matching for "/data/*" style patterns
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return path.starts_with(prefix) || path.starts_with(&prefix[1..]); // Handle with or without leading /
+    }
+
+    if let Some(prefix) = pattern.strip_suffix("*") {
+        return path.starts_with(prefix) || path.starts_with(&prefix[1..]);
+    }
+
+    // Exact match
+    path == pattern || path == &pattern[1..] // Handle with or without leading /
+}
+
+/// Format file size for display
+fn format_size(bytes: i64) -> String {
+    const KB: i64 = 1024;
+    const MB: i64 = KB * 1024;
+    const GB: i64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1}GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
+/// Generate verification script for external tools
+#[allow(clippy::print_stdout)]
+fn generate_verification_script(
+    files: &[(String, String, i64, i64)],
+    config: &RemoteConfig,
+    table_path: &str,
+    storage_options: &std::collections::HashMap<String, String>,
+) {
+    // Redact sensitive values for display
+    let redacted_access_key = if config.access_key.is_empty() {
+        String::new()
+    } else {
+        "<REDACTED_ACCESS_KEY>".to_string()
+    };
+    let redacted_secret_key = if config.secret_key.is_empty() {
+        String::new()
+    } else {
+        "<REDACTED_SECRET_KEY>".to_string()
+    };
+
+    let is_s3 = config.url.starts_with("s3://");
+    let local_path = config.url.strip_prefix("file://").unwrap_or(&config.url);
+    let duckdb_table_ref = if is_s3 {
+        format!("delta_scan('{}')", table_path)
+    } else {
+        format!("delta_scan('{}')", local_path)
+    };
+
+    println!("╔════════════════════════════════════════════════════════════════════════════════╗");
+    println!("║  BACKUP VERIFICATION SCRIPTS                                                   ║");
+    println!("║  Each section below is a standalone, copy-pastable script.                     ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 1: Environment Setup
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 1. ENVIRONMENT SETUP (run first)                                              │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    if is_s3 {
+        println!("# Set these environment variables for S3/MinIO access:");
+        println!("# (Replace <REDACTED_*> with your actual credentials)");
+        println!();
+        println!("```bash");
+        if !config.endpoint.is_empty() {
+            println!("export AWS_ENDPOINT_URL=\"{}\"", config.endpoint);
+        }
+        println!("export AWS_REGION=\"{}\"", if config.region.is_empty() { "us-east-1" } else { &config.region });
+        if !config.access_key.is_empty() {
+            println!("export AWS_ACCESS_KEY_ID=\"{}\"", redacted_access_key);
+        }
+        if !config.secret_key.is_empty() {
+            println!("export AWS_SECRET_ACCESS_KEY=\"{}\"", redacted_secret_key);
+        }
+        println!("```");
+    } else {
+        println!("# Local filesystem - no credentials needed");
+        println!("# Table path: {}", local_path);
+        println!();
+        println!("```bash");
+        println!("# Verify the backup directory exists:");
+        println!("ls -la {}", local_path);
+        println!("```");
+    }
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 2: List all files with DuckDB
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 2. LIST ALL BACKED UP FILES (DuckDB)                                          │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+    println!("```bash");
+    println!("duckdb -c \"");
+    println!("INSTALL delta; LOAD delta;");
+    if is_s3 {
+        print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+    }
+    println!("SELECT path, total_size, root_hash");
+    println!("FROM {}",duckdb_table_ref);
+    println!("GROUP BY path, total_size, root_hash");
+    println!("ORDER BY path;");
+    println!("\"");
+    println!("```");
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 3: Extract and verify specific files
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 3. EXTRACT FILES FROM BACKUP                                                  │");
+    println!("│    Reassembles chunked data from storage to local filesystem                  │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    // Show examples for first few files
+    let example_files: Vec<_> = files.iter().take(3).collect();
+
+    for (bundle_id, path, pond_txn_id, size) in &example_files {
+        let safe_filename = path.replace('/', "_").replace('=', "_");
+        let output_path = format!("/tmp/extracted_{}", safe_filename);
+
+        println!("# ── File: {} ({}) ──", path, format_size(*size));
+        println!();
+        println!("```bash");
+        println!("# Extract to: {}", output_path);
+        println!("duckdb -c \"");
+        println!("INSTALL delta; LOAD delta;");
+        if is_s3 {
+            print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+        }
+        println!("COPY (");
+        println!("  SELECT chunk_data");
+        println!("  FROM {}", duckdb_table_ref);
+        println!("  WHERE bundle_id = '{}'", bundle_id);
+        println!("    AND path = '{}'", path);
+        println!("    AND pond_txn_id = {}", pond_txn_id);
+        println!("  ORDER BY chunk_id");
+        println!(") TO '{}' (FORMAT 'parquet');", output_path);
+        println!("\"");
+        println!("```");
+        println!();
+    }
+
+    if files.len() > 3 {
+        println!("# ... and {} more files (adjust bundle_id/path/pond_txn_id as needed)", files.len() - 3);
+        println!();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 4: Verify with BLAKE3
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 4. VERIFY BLAKE3 CHECKSUMS                                                    │");
+    println!("│    Compare extracted file hash against stored root_hash                       │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    for (bundle_id, path, pond_txn_id, _size) in &example_files {
+        let safe_filename = path.replace('/', "_").replace('=', "_");
+        let output_path = format!("/tmp/extracted_{}", safe_filename);
+
+        println!("# ── Verify: {} ──", path);
+        println!();
+        println!("```bash");
+        println!("# Step 1: Get the expected root_hash from backup");
+        println!("EXPECTED_HASH=$(duckdb -noheader -csv -c \"");
+        println!("INSTALL delta; LOAD delta;");
+        if is_s3 {
+            print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+        }
+        println!("SELECT DISTINCT root_hash FROM {}", duckdb_table_ref);
+        println!("WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {};",
+            bundle_id, path, pond_txn_id);
+        println!("\")");
+        println!();
+        println!("# Step 2: Extract the raw binary data and compute BLAKE3");
+        println!("duckdb -c \"");
+        println!("INSTALL delta; LOAD delta;");
+        if is_s3 {
+            print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+        }
+        println!("COPY (");
+        println!("  SELECT chunk_data FROM {}", duckdb_table_ref);
+        println!("  WHERE bundle_id = '{}' AND path = '{}' AND pond_txn_id = {}",
+            bundle_id, path, pond_txn_id);
+        println!("  ORDER BY chunk_id");
+        println!(") TO '{}' WITH (FORMAT 'binary');", output_path);
+        println!("\"");
+        println!();
+        println!("# Step 3: Compute BLAKE3 of extracted file");
+        println!("ACTUAL_HASH=$(b3sum {} | cut -d' ' -f1)", output_path);
+        println!();
+        println!("# Step 4: Compare");
+        println!("echo \"Expected: $EXPECTED_HASH\"");
+        println!("echo \"Actual:   $ACTUAL_HASH\"");
+        println!("if [ \"$EXPECTED_HASH\" = \"$ACTUAL_HASH\" ]; then");
+        println!("  echo \"✓ BLAKE3 MATCH - File verified!\"");
+        println!("else");
+        println!("  echo \"✗ BLAKE3 MISMATCH - File may be corrupted!\"");
+        println!("  exit 1");
+        println!("fi");
+        println!("```");
+        println!();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 5: Alternative verification with SHA256
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 5. ALTERNATIVE: VERIFY WITH SHA256 (if b3sum not available)                   │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    if let Some((_, path, _, _)) = example_files.first() {
+        let safe_filename = path.replace('/', "_").replace('=', "_");
+        let output_path = format!("/tmp/extracted_{}", safe_filename);
+
+        println!("```bash");
+        println!("# SHA256 verification (note: DuckPond uses BLAKE3, so this is for general integrity)");
+        println!("shasum -a 256 {}", output_path);
+        println!();
+        println!("# Or with openssl:");
+        println!("openssl dgst -sha256 {}", output_path);
+        println!("```");
+        println!();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 6: Full extraction script
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 6. EXTRACT ALL FILES (complete script)                                        │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+    println!("```bash");
+    println!("#!/bin/bash");
+    println!("# Extract all {} files from backup", files.len());
+    println!("set -e");
+    println!();
+    println!("OUTPUT_DIR=\"/tmp/pond_backup_extract\"");
+    println!("mkdir -p \"$OUTPUT_DIR\"");
+    println!();
+
+    if is_s3 {
+        println!("# S3/MinIO credentials (replace <REDACTED_*> values)");
+        if !config.endpoint.is_empty() {
+            println!("export AWS_ENDPOINT_URL=\"{}\"", config.endpoint);
+        }
+        println!("export AWS_REGION=\"{}\"", if config.region.is_empty() { "us-east-1" } else { &config.region });
+        println!("export AWS_ACCESS_KEY_ID=\"{}\"", redacted_access_key);
+        println!("export AWS_SECRET_ACCESS_KEY=\"{}\"", redacted_secret_key);
+        println!();
+    }
+
+    println!("# Get list of all files");
+    println!("echo \"Extracting files from backup...\"");
+    println!();
+
+    // Generate extraction command for each file
+    for (bundle_id, path, pond_txn_id, _size) in files.iter().take(5) {
+        let safe_filename = path.replace('/', "_").replace('=', "_");
+        println!("# {}", path);
+        println!("duckdb -c \"");
+        println!("INSTALL delta; LOAD delta;");
+        if is_s3 {
+            print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
+        }
+        println!("COPY (SELECT chunk_data FROM {} WHERE bundle_id='{}' AND path='{}' AND pond_txn_id={} ORDER BY chunk_id) TO '$OUTPUT_DIR/{}' WITH (FORMAT 'binary');",
+            duckdb_table_ref, bundle_id, path, pond_txn_id, safe_filename);
+        println!("\"");
+        println!();
+    }
+
+    if files.len() > 5 {
+        println!("# ... repeat for remaining {} files", files.len() - 5);
+    }
+
+    println!("echo \"Extraction complete. Files in $OUTPUT_DIR\"");
+    println!("ls -la \"$OUTPUT_DIR\"");
+    println!("```");
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // SECTION 7: Tool installation
+    // ═══════════════════════════════════════════════════════════════════════════════
+    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
+    println!("│ 7. TOOL INSTALLATION                                                          │");
+    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    println!();
+    println!("```bash");
+    println!("# Install DuckDB");
+    println!("# macOS:");
+    println!("brew install duckdb");
+    println!();
+    println!("# Linux:");
+    println!("curl -LO https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip");
+    println!("unzip duckdb_cli-linux-amd64.zip");
+    println!("chmod +x duckdb && sudo mv duckdb /usr/local/bin/");
+    println!();
+    println!("# Install b3sum (BLAKE3)");
+    println!("# macOS:");
+    println!("brew install b3sum");
+    println!();
+    println!("# Linux (via cargo):");
+    println!("cargo install b3sum");
+    println!("```");
+}
+
+/// Helper to print DuckDB S3 configuration
+#[allow(clippy::print_stdout)]
+fn print_duckdb_s3_config(
+    storage_options: &std::collections::HashMap<String, String>,
+    redacted_access_key: &str,
+    redacted_secret_key: &str,
+) {
+    println!("INSTALL httpfs; LOAD httpfs;");
+    println!("SET s3_region='{}';", storage_options.get("region").unwrap_or(&"us-east-1".to_string()));
+    if let Some(endpoint) = storage_options.get("endpoint") {
+        let clean_endpoint = endpoint.trim_start_matches("http://").trim_start_matches("https://");
+        println!("SET s3_endpoint='{}';", clean_endpoint);
+        println!("SET s3_url_style='path';");
+        if endpoint.starts_with("http://") {
+            println!("SET s3_use_ssl=false;");
+        }
+    }
+    if storage_options.contains_key("access_key_id") {
+        println!("SET s3_access_key_id='{}';", redacted_access_key);
+    }
+    if storage_options.contains_key("secret_access_key") {
+        println!("SET s3_secret_access_key='{}';", redacted_secret_key);
+    }
+}
+
 
 // Public API for restore/replication
 

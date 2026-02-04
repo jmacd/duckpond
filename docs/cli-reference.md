@@ -285,6 +285,64 @@ secret_access_key: "..."
 allow_http: true  # Required for non-HTTPS endpoints
 ```
 
+**Commands:**
+```bash
+# Push local pond to remote backup
+pond run /etc/system.d/10-remote push
+
+# Pull from remote (restore)
+pond run /etc/system.d/10-remote pull
+
+# Verify backup integrity
+pond run /etc/system.d/10-remote verify
+
+# List files in remote storage
+pond run /etc/system.d/10-remote list-files
+
+# Show files with verification script (for external tool validation)
+pond run /etc/system.d/10-remote show           # All files
+pond run /etc/system.d/10-remote show "/data/*" # Pattern match
+pond run /etc/system.d/10-remote show --script  # Generate copy-pastable scripts
+```
+
+#### Emergency Recovery (duckpond-emergency)
+
+A standalone shell script for disaster recovery when the pond binary is unavailable.
+Uses only DuckDB to read backup data directly from parquet files.
+
+**Location:** `crates/cmd/scripts/duckpond-emergency`
+
+**Requirements:**
+- DuckDB CLI
+- b3sum (optional, for BLAKE3 verification)
+
+**Usage:**
+```bash
+# List all files in backup
+duckpond-emergency /path/to/backup list
+
+# Show backup metadata
+duckpond-emergency /path/to/backup info
+
+# Extract files matching pattern (SQL LIKE syntax: % = wildcard)
+duckpond-emergency /path/to/backup extract "_delta_log%" ./delta_logs/
+
+# Verify BLAKE3 checksums
+duckpond-emergency /path/to/backup verify
+
+# Export all files
+duckpond-emergency /path/to/backup export-all ./full_restore/
+```
+
+**S3/MinIO:**
+```bash
+export AWS_ENDPOINT_URL="http://localhost:9000"
+export AWS_REGION="us-east-1"
+export AWS_ACCESS_KEY_ID="minioadmin"
+export AWS_SECRET_ACCESS_KEY="minioadmin"
+duckpond-emergency s3://bucket/backup list
+```
+
 ### hydrovu
 
 HydroVu API data collection.
