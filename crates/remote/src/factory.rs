@@ -1097,7 +1097,7 @@ fn generate_verification_script(
         if is_s3 {
             print_duckdb_s3_config(storage_options, &redacted_access_key, &redacted_secret_key);
         }
-        println!("COPY (SELECT chunk_data FROM {} WHERE bundle_id='{}' AND path='{}' AND pond_txn_id={} ORDER BY chunk_id) TO '$OUTPUT_DIR/{}' WITH (FORMAT 'binary');",
+        println!("COPY (SELECT list_reduce(list(chunk_data ORDER BY chunk_id), (a, b) -> a || b) AS data FROM {} WHERE bundle_id='{}' AND path='{}' AND pond_txn_id={}) TO '$OUTPUT_DIR/{}' (FORMAT BLOB);",
             duckdb_table_ref, bundle_id, path, pond_txn_id, safe_filename);
         println!("\"");
         println!();

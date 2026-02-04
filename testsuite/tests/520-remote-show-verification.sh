@@ -168,23 +168,27 @@ echo "... (script continues)"
 #############################
 
 echo ""
-echo "=== Verifying with DuckDB (if available) ==="
+echo "=== Verifying with DuckDB ==="
 
-if command -v duckdb &>/dev/null; then
-    echo "DuckDB found, running verification..."
+# DuckDB should be pre-installed in container via Dockerfile
+if ! command -v duckdb &>/dev/null; then
+    echo "✗ DuckDB not available - this should be installed in the Dockerfile"
+    exit 1
+fi
+echo "✓ DuckDB available: $(duckdb --version 2>&1 | head -1)"
+
+# Determine table path
+if [[ "$USE_S3" == "true" ]]; then
+    # For S3, we need the full path including pond-id
+    POND_ID=$(pond control show-config 2>/dev/null | grep 'pond_id' | awk '{print $2}' || echo "")
+    if [[ -n "$POND_ID" ]]; then
+        TABLE_PATH="s3://${BUCKET_NAME}/pond-${POND_ID}"
+    else
+        TABLE_PATH="s3://${BUCKET_NAME}"
+    fi
     
-    # Determine table path
-    if [[ "$USE_S3" == "true" ]]; then
-        # For S3, we need the full path including pond-id
-        POND_ID=$(pond control show-config 2>/dev/null | grep 'pond_id' | awk '{print $2}' || echo "")
-        if [[ -n "$POND_ID" ]]; then
-            TABLE_PATH="s3://${BUCKET_NAME}/pond-${POND_ID}"
-        else
-            TABLE_PATH="s3://${BUCKET_NAME}"
-        fi
-        
-        echo "Testing Delta table at: ${TABLE_PATH}"
-        duckdb -c "
+    echo "Testing Delta table at: ${TABLE_PATH}"
+    duckdb -c "
 INSTALL delta;
 LOAD delta;
 INSTALL httpfs;
@@ -198,32 +202,28 @@ SET s3_access_key_id='${MINIO_ROOT_USER}';
 SET s3_secret_access_key='${MINIO_ROOT_PASSWORD}';
 SELECT COUNT(*) as total_chunks, COUNT(DISTINCT path) as unique_files FROM delta_scan('${TABLE_PATH}');
 " 2>&1 || echo "S3 access may require additional configuration"
-    else
-        TABLE_PATH="/data/backup-verify"
-        echo "Testing Delta table at: ${TABLE_PATH}"
-        
-        duckdb -c "
+else
+    TABLE_PATH="/data/backup-verify"
+    echo "Testing Delta table at: ${TABLE_PATH}"
+    
+    duckdb -c "
 INSTALL delta;
 LOAD delta;
 SELECT COUNT(*) as total_chunks, COUNT(DISTINCT path) as unique_files FROM delta_scan('${TABLE_PATH}');
 "
-    fi
-    
-    echo ""
-    echo "Listing files in backup:"
-    if [[ "$USE_S3" != "true" ]]; then
-        duckdb -c "
+fi
+
+echo ""
+echo "Listing files in backup:"
+if [[ "$USE_S3" != "true" ]]; then
+    duckdb -c "
 INSTALL delta;
 LOAD delta;
 SELECT DISTINCT path, total_size, root_hash FROM delta_scan('${TABLE_PATH}') ORDER BY path;
 "
-    fi
-    
-    echo "✓ DuckDB verification successful"
-else
-    echo "DuckDB not installed, skipping direct verification"
-    echo "(Install with: pip install duckdb or brew install duckdb)"
 fi
+
+echo "✓ DuckDB verification successful"
 
 #############################
 # VERIFY BACKUP INTEGRITY

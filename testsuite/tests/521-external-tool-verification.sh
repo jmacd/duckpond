@@ -27,33 +27,20 @@ echo ""
 
 echo "=== Checking prerequisites ==="
 
-# Check for duckdb
-if ! command -v duckdb &>/dev/null; then
-    echo "⚠ DuckDB not installed - installing..."
-    # Try to install duckdb
-    if command -v apt-get &>/dev/null; then
-        curl -LO https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-aarch64.zip 2>/dev/null || \
-        curl -LO https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip 2>/dev/null
-        unzip -o duckdb_cli-linux-*.zip 2>/dev/null || true
-        chmod +x duckdb 2>/dev/null || true
-        mv duckdb /usr/local/bin/ 2>/dev/null || true
-        rm -f duckdb_cli-linux-*.zip
-    fi
-fi
-
+# Check for duckdb (should be pre-installed in container via Dockerfile)
 if command -v duckdb &>/dev/null; then
     echo "✓ DuckDB available: $(duckdb --version 2>&1 | head -1)"
 else
-    echo "✗ DuckDB not available - skipping extraction tests"
-    SKIP_DUCKDB=true
+    echo "✗ DuckDB not available - this should be installed in the Dockerfile"
+    exit 1
 fi
 
-# Check for b3sum
+# Check for b3sum (should be pre-installed in container via Dockerfile)
 if command -v b3sum &>/dev/null; then
     echo "✓ b3sum available"
 else
-    echo "⚠ b3sum not available - will skip BLAKE3 verification"
-    SKIP_B3SUM=true
+    echo "✗ b3sum not available - this should be installed in the Dockerfile"
+    exit 1
 fi
 
 #############################
@@ -79,11 +66,8 @@ Line 4 with special chars: @#$%^&*()
 End of test file."
 
 echo "$TEST_CONTENT" > /tmp/testfile.txt
-ORIGINAL_B3SUM=""
-if [ -z "$SKIP_B3SUM" ]; then
-    ORIGINAL_B3SUM=$(b3sum /tmp/testfile.txt | cut -d' ' -f1)
-    echo "✓ Original file BLAKE3: $ORIGINAL_B3SUM"
-fi
+ORIGINAL_B3SUM=$(b3sum /tmp/testfile.txt | cut -d' ' -f1)
+echo "✓ Original file BLAKE3: $ORIGINAL_B3SUM"
 
 pond copy /tmp/testfile.txt /data/testfile.txt
 echo "✓ Test file copied to pond"
@@ -142,39 +126,38 @@ echo "  Script size: $(wc -c < /tmp/verify-script.txt) bytes"
 # VERIFY WITH DUCKDB
 #############################
 
-if [ -z "$SKIP_DUCKDB" ]; then
-    echo ""
-    echo "=== Verifying with DuckDB ==="
-    
-    # Install delta extension
-    echo "Installing DuckDB extensions..."
-    duckdb -c "INSTALL delta; LOAD delta;" 2>&1 || echo "(extensions may already be installed)"
-    
-    # Query the backup table
-    echo ""
-    echo "--- Querying backup table ---"
-    duckdb -c "
+echo ""
+echo "=== Verifying with DuckDB ==="
+
+# Install delta extension
+echo "Installing DuckDB extensions..."
+duckdb -c "INSTALL delta; LOAD delta;" 2>&1 || echo "(extensions may already be installed)"
+
+# Query the backup table
+echo ""
+echo "--- Querying backup table ---"
+duckdb -c "
 INSTALL delta;
 LOAD delta;
 SELECT COUNT(*) as total_rows FROM delta_scan('${BACKUP_PATH}');
 "
-    
-    echo ""
-    echo "--- Listing files in backup ---"
-    duckdb -c "
+
+echo ""
+echo "--- Listing files in backup ---"
+duckdb -c "
 INSTALL delta;
 LOAD delta;
 SELECT DISTINCT path, total_size, root_hash 
 FROM delta_scan('${BACKUP_PATH}')
 ORDER BY path;
 "
-    
-    # Extract a file
-    echo ""
-    echo "--- Extracting files from backup ---"
-    
-    # Get the first delta log file info
-    FIRST_FILE=$(duckdb -noheader -csv -c "
+
+# Extract a file
+echo ""
+echo "--- Extracting files from backup ---"
+
+# Get the first delta log file info
+FIRST_FILE=$(duckdb -noheader -csv -c "
 INSTALL delta;
 LOAD delta;
 SELECT bundle_id, path, pond_txn_id
@@ -182,50 +165,49 @@ FROM delta_scan('${BACKUP_PATH}')
 WHERE path LIKE '_delta_log/%'
 LIMIT 1;
 " 2>/dev/null)
+
+if [ -n "$FIRST_FILE" ]; then
+    BUNDLE_ID=$(echo "$FIRST_FILE" | cut -d',' -f1)
+    FILE_PATH=$(echo "$FIRST_FILE" | cut -d',' -f2)
+    TXN_ID=$(echo "$FIRST_FILE" | cut -d',' -f3)
     
-    if [ -n "$FIRST_FILE" ]; then
-        BUNDLE_ID=$(echo "$FIRST_FILE" | cut -d',' -f1)
-        FILE_PATH=$(echo "$FIRST_FILE" | cut -d',' -f2)
-        TXN_ID=$(echo "$FIRST_FILE" | cut -d',' -f3)
-        
-        echo "Extracting: $FILE_PATH"
-        echo "  Bundle: $BUNDLE_ID"
-        echo "  TXN: $TXN_ID"
-        
-        # Extract using DuckDB - export as raw binary
-        EXTRACT_PATH="/tmp/extracted_file.bin"
-        duckdb -c "
+    echo "Extracting: $FILE_PATH"
+    echo "  Bundle: $BUNDLE_ID"
+    echo "  TXN: $TXN_ID"
+    
+    # Extract using DuckDB - export as raw binary (requires DuckDB v1.4+)
+    EXTRACT_PATH="/tmp/extracted_file.bin"
+    duckdb -c "
 INSTALL delta;
 LOAD delta;
 COPY (
-    SELECT chunk_data 
+    SELECT list_reduce(list(chunk_data ORDER BY chunk_id), (a, b) -> a || b) AS data
     FROM delta_scan('${BACKUP_PATH}')
     WHERE bundle_id = '${BUNDLE_ID}' 
       AND path = '${FILE_PATH}'
       AND pond_txn_id = ${TXN_ID}
-    ORDER BY chunk_id
-) TO '${EXTRACT_PATH}' WITH (FORMAT 'binary');
+) TO '${EXTRACT_PATH}' (FORMAT BLOB);
 " 2>&1
-        
-        if [ -f "$EXTRACT_PATH" ]; then
-            echo "✓ File extracted to $EXTRACT_PATH"
-            echo "  Extracted size: $(wc -c < "$EXTRACT_PATH") bytes"
-            
-            # Show first few bytes
-            echo "  First 100 bytes:"
-            head -c 100 "$EXTRACT_PATH" | cat -v
-            echo ""
-        else
-            echo "⚠ Extraction produced no output"
-        fi
-    else
-        echo "⚠ No files found to extract"
-    fi
     
-    # Get stored root_hash for comparison
-    echo ""
-    echo "--- Checking stored hashes ---"
-    duckdb -c "
+    if [ -f "$EXTRACT_PATH" ]; then
+        echo "✓ File extracted to $EXTRACT_PATH"
+        echo "  Extracted size: $(wc -c < "$EXTRACT_PATH") bytes"
+        
+        # Show first few bytes
+        echo "  First 100 bytes:"
+        head -c 100 "$EXTRACT_PATH" | cat -v
+        echo ""
+    else
+        echo "⚠ Extraction produced no output"
+    fi
+else
+    echo "⚠ No files found to extract"
+fi
+
+# Get stored root_hash for comparison
+echo ""
+echo "--- Checking stored hashes ---"
+duckdb -c "
 INSTALL delta;
 LOAD delta;
 SELECT DISTINCT path, root_hash
@@ -234,11 +216,6 @@ WHERE path LIKE '_delta_log/%'
 ORDER BY path
 LIMIT 5;
 "
-    
-else
-    echo ""
-    echo "=== Skipping DuckDB verification (not installed) ==="
-fi
 
 #############################
 # VERIFY BUILT-IN COMMAND
@@ -284,10 +261,8 @@ echo "✓ Pond created with test files"
 echo "✓ Backup pushed to local storage"
 echo "✓ 'show' command displays file listing"
 echo "✓ 'show --script' generates verification script"
-if [ -z "$SKIP_DUCKDB" ]; then
-    echo "✓ DuckDB can query the Delta Lake backup"
-    echo "✓ Files can be extracted using DuckDB"
-fi
+echo "✓ DuckDB can query the Delta Lake backup"
+echo "✓ Files can be extracted using DuckDB"
 echo "✓ Built-in verify command confirms integrity"
 echo "✓ Generated script has all expected sections"
 echo ""

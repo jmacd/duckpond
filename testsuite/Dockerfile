@@ -45,25 +45,44 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install MinIO client (mc) for S3 testing
-RUN curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && \
+# Detect architecture for proper binary
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
+        MC_ARCH="arm64"; \
+    else \
+        MC_ARCH="amd64"; \
+    fi && \
+    curl -fsSL "https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc" -o /usr/local/bin/mc && \
     chmod +x /usr/local/bin/mc
 
 # Install DuckDB for backup verification and emergency recovery
 # Detect architecture and download appropriate version
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
-        DUCKDB_ARCH="aarch64"; \
+        DUCKDB_ARCH="arm64"; \
     else \
         DUCKDB_ARCH="amd64"; \
     fi && \
-    curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-${DUCKDB_ARCH}.zip" -o /tmp/duckdb.zip && \
+    curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v1.4.4/duckdb_cli-linux-${DUCKDB_ARCH}.zip" -o /tmp/duckdb.zip && \
     unzip -o /tmp/duckdb.zip -d /usr/local/bin/ && \
     chmod +x /usr/local/bin/duckdb && \
     rm /tmp/duckdb.zip
 
 # Install b3sum (BLAKE3) for checksum verification
-RUN curl -fsSL https://github.com/BLAKE3-team/BLAKE3/releases/download/1.5.0/b3sum_linux_x64_bin -o /usr/local/bin/b3sum && \
-    chmod +x /usr/local/bin/b3sum
+# Note: Pre-built binaries only available for x64, ARM64 needs cargo build
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends build-essential && \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && \
+        . /root/.cargo/env && \
+        cargo install b3sum && \
+        cp /root/.cargo/bin/b3sum /usr/local/bin/b3sum && \
+        rm -rf /root/.cargo /root/.rustup && \
+        apt-get remove -y build-essential && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*; \
+    else \
+        curl -fsSL https://github.com/BLAKE3-team/BLAKE3/releases/download/1.5.0/b3sum_linux_x64_bin -o /usr/local/bin/b3sum && \
+        chmod +x /usr/local/bin/b3sum; \
+    fi
 
 # Set up multi-pond environment
 # POND is the default, POND1/POND2 for multi-pond experiments
