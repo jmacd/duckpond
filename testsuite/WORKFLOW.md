@@ -70,59 +70,20 @@ When you encounter a problem:
 
 ## Priority Levels
 
-| Priority | Meaning | Examples |
-|----------|---------|----------|
-| P0 | Blocking | Can't proceed with testing, crashes |
-| P1 | High | Common operation fails, very confusing |
-| P2 | Medium | Works but confusing, needs docs |
-| P3 | Low | Nice-to-have improvements |
-
-## Session Format
-
-Each iteration round:
-
-### 🔍 Current Focus
-What we're investigating this round.
-
-### 📊 Result
-What happened when we ran it.
-
-### 🏷️ Classification
-- **Type**: BUG / DOCS / UX / DESIGN
-- **Priority**: P0-P3
-- **Rationale**: Why this classification
-
-### 💡 Proposal
-Suggested fix or action.
-
-### ❓ Decision Needed
-- [ ] Approve proposal
-- [ ] Defer (add to backlog)
-- [ ] Alternative approach: ___
-
-### 📝 Notes
-Any additional context or related issues discovered.
+| Priority | Meaning |
+|----------|---------|
+| P0 | Blocking - can't proceed |
+| P1 | High - common operation fails |
+| P2 | Medium - works but confusing |
+| P3 | Low - nice-to-have |
 
 ---
 
-## Starting the Loop
+## Session Commands
 
-To begin an iteration session:
-
-```
-Let's iterate. Show me the current backlog and pick the highest priority item.
-```
-
-To continue after a decision:
-
-```
-Approved. Implement and continue.
-```
-or
-```
-Defer. Move to next item.
-```
-or
-```
-Let's discuss: [your thoughts]
-```
+| To do this | Say |
+|------------|-----|
+| Start session | "Let's iterate" or "Show me the backlog" |
+| Approve | "Approved. Implement and continue." |
+| Defer | "Defer. Move to next." |
+| Discuss | "Let's discuss: [thoughts]" |

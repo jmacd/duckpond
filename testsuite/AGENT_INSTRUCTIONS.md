@@ -1,295 +1,124 @@
 # Agent Instructions: DuckPond Test Workflow
 
-## 🎯 Purpose
+## 🎯 The Goal
 
-You are helping test and document DuckPond through controlled tests in a containerized sandbox. Your goals:
+Test DuckPond → Classify results → Fix the right layer → Save passing tests
 
-1. **Validate behavior**: Does the CLI do what the docs say?
-2. **Surface bugs**: Find and document technical failures
-3. **Improve docs**: Identify and fix documentation gaps
+**Living documentation**: `docs/cli-reference.md` is THE source of truth. Update it when you learn something.
 
-### Primary Documentation Target
+---
 
-The **living documentation** for the CLI is `docs/cli-reference.md`. This is the source of truth for:
-- All commands (`pond init`, `pond copy`, `pond mknod`, etc.)
-- All factory types and their configuration
-- Common patterns and troubleshooting
+## ⚡ THE LOOP
 
-**After every successful test involving a command or factory**, verify that `docs/cli-reference.md` accurately documents what you tested. If not, update it.
+```
+1. RUN TEST        → ./run-test.sh 032  (or --interactive)
+2. CLASSIFY        → ✅ Success | ❌ Bug | ❓ Docs | 🤷 UX | 💀 Design
+3. DISCUSS         → Present result to user, propose action
+4. FIX             → Code for bugs, docs for confusion
+5. SAVE            → Add passing test to tests/NNN-name.sh
+```
 
-## 📋 Workflow Checklist
+---
 
-For each test cycle:
+## 🏃 Running Tests
 
-### Step 1: Understand the Test Request
+```bash
+cd testsuite
+./run-test.sh 032              # Run by number
+./run-test.sh --interactive    # Explore manually
+```
 
-- [ ] Read the user's test description carefully
-- [ ] Identify which pond commands are involved
-- [ ] Note what behavior is expected
-
-### Step 2: Research DuckPond Usage
-
-**MANDATORY** - Before writing ANY test script:
-
-- [ ] Read `docs/duckpond-overview.md` for command reference
-- [ ] Check if any factory types are involved → read factory section
-- [ ] If SQL queries involved → understand DataFusion patterns
-
-### Step 3: Write the Test Script
-
-Create `testsuite/tests/test.sh`:
+### Test Template
 
 ```bash
 #!/bin/bash
-# EXPERIMENT: [Brief title]
-# DESCRIPTION: [What we're testing]
-# EXPECTED: [What should happen]
-set -e  # Stop on first error
+# EXPERIMENT: [Title]
+# EXPECTED: [Outcome]
+set -e
 
-# Setup
 pond init
+# ... test steps ...
 
-# Test steps
-...
-
-# Verification
 echo "=== VERIFICATION ==="
-pond list /path/to/check
+pond list /  # ALWAYS verify
 ```
 
-### Step 4: Run the Test
+---
 
-```bash
-cd tests
+## 🏷️ Classification
 
-# By number (searches tests/ then tests/)
-./run-test.sh 032
+| Result | Meaning | Action |
+|--------|---------|--------|
+| ✅ **Success** | Works as documented | Save test, verify docs accurate |
+| ❌ **BUG** | Code error | Report to user, propose proper fix |
+| ❓ **DOCS** | Docs wrong/missing | Fix `docs/cli-reference.md` NOW |
+| 🤷 **UX** | Works but confusing | Discuss before changing |
+| 💀 **DESIGN** | Fundamental issue | Full discussion needed |
 
-# By relative path
-./run-test.sh tests/032-my-test.sh
-./run-test.sh tests/001-basic-init.sh
+---
 
-# By full path
-./run-test.sh /path/to/test.sh
-```
+## 📝 Report Format
 
-**Numeric shorthand**: Just use the test number (e.g., `32` or `032`). The script will find `032-*.sh` in `tests/` first, then `tests/`.
-
-### Step 5: Analyze Output
-
-The output will be one of:
-
-| Outcome | Meaning | Action |
-|---------|---------|--------|
-| ✅ Success | Worked as expected | Save to `tests/`, report to user |
-| ❌ Failure | Technical error/bug | Create failure report |
-| ❓ Confusion | Docs unclear/wrong | Create confusion report, fix docs |
-
-### Step 6: Document and Iterate
-
-**For Failures** - Create `results/TIMESTAMP-failure.md`:
 ```markdown
-# Failure Report
-
-## Test
-[Brief description]
-
-## Command That Failed
-```
-[exact command]
+### 🔍 Test: [name/number]
+**Result**: [✅/❌/❓/🤷/💀]
+**What Happened**: [brief]
+**Classification**: [type] - [why]
+**Proposed Action**: [specific]
+**Decision Needed**: Approve / Defer / Discuss?
 ```
 
-## Error Output
+---
+
+## 🚫 Anti-Patterns
+
+| ❌ NEVER | ✅ INSTEAD |
+|----------|-----------|
+| Guess CLI syntax | Read `docs/cli-reference.md` first |
+| Skip verification | Always `pond list` / `pond cat` |
+| Suppress errors | Use `set -e` |
+| Test multiple things | One concept per test |
+| Quick patch | Fix root cause properly |
+
+---
+
+## 📚 Reference Docs
+
+- **CLI syntax**: `docs/cli-reference.md` (always check first)
+- **Architecture**: `docs/duckpond-overview.md`
+- **Transactions**: `docs/duckpond-system-patterns.md`
+
+---
+
+## 📂 Test Numbering
+
 ```
-[exact error message]
+001-0xx: Basic (init, mkdir, list)
+010-0xx: Copy
+020-0xx: Cat/query
+030-0xx: Log ingestion
+100-1xx: Factories
+200-2xx: HydroVu
+300-3xx: Remote/backup
+400-4xx: Multi-pond
+500-5xx: S3/replication
 ```
 
-## Analysis
-[What went wrong - code bug, missing feature, etc.]
+---
 
-## Suggested Fix
-[If apparent, what needs to change in the code]
-```
+## 🔧 Advanced Patterns
 
-**For Confusion** - Create `results/TIMESTAMP-confusion.md`:
-```markdown
-# Documentation Confusion Report
-
-## What I Tried
-[The command or pattern I attempted]
-
-## What I Expected (Based on Docs)
-[Quote from docs that led to this expectation]
-
-## What Actually Happened
-[Actual behavior]
-
-## Documentation Fix Needed
-[Specific doc change to clarify]
-```
-
-Then:
-- For failures → report to user for development
-- For confusion → update the relevant doc file immediately
-
-### Step 7: Update Documentation (MANDATORY for Success)
-
-After a successful test, **always** check `docs/cli-reference.md`:
-
-1. **Is the command/factory documented?** If not, add it.
-2. **Is the documentation accurate?** Does it match what you just tested?
-3. **Are there edge cases or tips worth noting?** Add them to Troubleshooting.
-
-**Factory checklist** - If you tested a factory, verify cli-reference.md has:
-- [ ] Factory name in the Factory Types section
-- [ ] Example YAML configuration
-- [ ] Usage examples (`pond mknod`, `pond run`)
-- [ ] Behavioral notes (what to expect)
-
-This is how documentation stays alive - tests validate it, and discoveries improve it.
-
-## 🚫 Anti-Patterns to Avoid
-
-### Don't: Guess at command syntax
+### Multi-Pond
 ```bash
-# ❌ WRONG - guessing
-pond create-table /path  # Does this command exist?
-
-# ✅ RIGHT - verify first
-# Check docs/duckpond-overview.md for actual command
-```
-
-### Don't: Skip verification
-```bash
-# ❌ WRONG - no verification
-pond copy file.csv /dest.csv
-
-# ✅ RIGHT - verify the result
-pond copy file.csv /dest.csv
-pond list /dest.csv  # Did it work?
-pond cat /dest.csv   # Is content correct?
-```
-
-### Don't: Ignore errors silently
-```bash
-# ❌ WRONG - suppressing errors
-pond something 2>/dev/null || true
-
-# ✅ RIGHT - let errors surface
-set -e
-pond something  # Will stop if it fails
-```
-
-### Don't: Create overly complex tests
-```bash
-# ❌ WRONG - testing too many things at once
-pond init && pond mkdir /a && pond mkdir /b && pond copy ... && pond mknod ...
-
-# ✅ RIGHT - one concept per test
-# Test 1: just test mkdir
-# Test 2: just test copy
-# Test 3: test mkdir + copy together
-```
-
-## 📚 Reference: Key Documentation
-
-| Doc | When to Read |
-|-----|--------------|
-| `docs/duckpond-overview.md` | ALWAYS - command reference |
-| `docs/duckpond-system-patterns.md` | Transaction/state issues |
-| `docs/logfile-ingestion-factory-design.md` | Log ingestion scenarios |
-| `docs/remote-backup-chunked-parquet-design.md` | S3/replication scenarios |
-| `docs/fallback-antipattern-philosophy.md` | Error handling confusion |
-| `docs/large-output-debugging.md` | When output is truncated |
-
-## 🔄 Iteration Mindset
-
-Each test is cheap. Don't aim for perfection:
-
-1. **Try something** → See what happens
-2. **Observe failure** → Understand why
-3. **Fix or document** → Make progress
-4. **Repeat** → Knowledge accumulates
-
-The container resets completely between runs. There's no state to corrupt, no cleanup needed. Be bold!
-
-## 🏗️ Complex Test Patterns
-
-### Multi-Pond Tests
-
-For tests with multiple pond instances:
-
-```bash
-#!/bin/bash
-set -e
-
-# Initialize both ponds
 POND=/pond1 pond init
 POND=/pond2 pond init
-
-# Or use helpers
-pond-init 1
-pond-init 2
-
-# Run commands on specific ponds
 POND=/pond1 pond mkdir /data
-POND=/pond2 pond mkdir /replica
 ```
 
-### S3/MinIO Tests
-
-For replication testing, start with docker-compose:
-
+### S3/MinIO
 ```bash
-# Terminal 1: Start MinIO
-cd tests
 docker-compose up -d minio
-
-# Terminal 2: Run test with S3 access
-docker-compose run --rm duckpond ./tests/500-s3-replication-minio.sh
+docker-compose run --rm duckpond ./tests/500-*.sh
 ```
 
-Environment variables available in container:
-- `MINIO_ENDPOINT=http://minio:9000`
-- `MINIO_ROOT_USER=minioadmin`
-- `MINIO_ROOT_PASSWORD=minioadmin`
-
-### Cron/Scheduled Tests
-
-For testing periodic operations:
-
-```bash
-#!/bin/bash
-# Setup cron job in container
-echo "* * * * * root POND=/pond1 pond run /etc/system.d/20-logs ingest" > /etc/cron.d/test
-chmod 0644 /etc/cron.d/test
-cron
-
-# Run for a few minutes and observe
-sleep 180
-POND=/pond1 pond control recent --limit 10
-```
-
-## 🏷️ Test Naming
-
-When saving successful tests to `tests/`:
-
-```
-tests/
-├── 001-basic-init.sh           # Numbered for ordering
-├── 002-mkdir-nested.sh
-├── 010-copy-csv.sh
-├── 011-copy-parquet.sh
-├── 020-cat-with-sql.sh
-├── 100-factory-sql-derived.sh
-├── 200-hydrovu-config.sh
-└── 300-remote-backup.sh
-```
-
-Categories:
-- `001-0xx`: Basic operations (init, mkdir, list)
-- `010-0xx`: Copy operations
-- `020-0xx`: Cat/query operations
-- `100-1xx`: Factory nodes
-- `200-2xx`: HydroVu integration
-- `300-3xx`: Remote/backup operations
+Environment: `MINIO_ENDPOINT=http://minio:9000`, user/pass: `minioadmin`
