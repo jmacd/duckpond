@@ -510,7 +510,7 @@ config:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `pattern` | yes | URL pattern with a `*` wildcard. The captured segment becomes the scope prefix for that input's columns. Supported schemes: `series`, `csv`, `excelhtml`, `file`, `data`, `table`. |
+| `pattern` | yes | URL pattern with a `*` wildcard. The captured segment becomes the scope prefix for that input's columns. Supported schemes: `series`, `csv`, `excelhtml`, `file`, `data`, `table`, `oteljson`. |
 | `columns` | yes | List of column names to select from each matched input. At least one column required. |
 | `time_column` | no | Name of the time column. Default: `"timestamp"`. |
 | `transforms` | no | List of paths to table-transform factories applied to each input. |
@@ -563,17 +563,94 @@ pond cat /pivot/DO --sql "SELECT * FROM source ORDER BY timestamp LIMIT 20"
 
 ### temporal-reduce
 
-Time-bucketed aggregations at multiple resolutions.
+Creates time-bucketed aggregations of source time-series at one or more
+resolutions. The factory produces a **directory** (not a file) with this
+structure:
+
+```
+/reduce/<site>/res=1h.series
+/reduce/<site>/res=6h.series
+/reduce/<site>/res=1d.series
+```
+
+The source pattern can match multiple files; each match becomes a
+separate site subdirectory named by `out_pattern` substitution.
 
 ```yaml
 factory: "temporal-reduce"
 config:
-  in_pattern: "series:///sensors/*"
+  in_pattern: "series:///sources/*"   # glob — captured group is $0
+  out_pattern: "$0"                   # output site name from captured group
   time_column: "timestamp"
-  resolutions: [1h, 6h, 1d]
+  resolutions: ["1h", "6h", "1d"]
   aggregations:
     - type: "avg"
       columns: ["temperature", "pressure"]
+    - type: "min"
+      columns: ["temperature"]
+    - type: "max"
+      columns: ["temperature"]
+    - type: "count"
+      columns: ["*"]                  # count of rows per bucket
+```
+
+**Config fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `in_pattern` | yes | URL pattern to match source series. Glob wildcards (`*`, `**`) supported. Captured groups become `$0`, `$1`, … for `out_pattern`. |
+| `out_pattern` | yes | Output site name using captured groups (e.g. `"$0"`). |
+| `time_column` | yes | Name of the timestamp column in the source. |
+| `resolutions` | yes | List of time bucket sizes. Parsed with humantime: `"1h"`, `"6h"`, `"1d"`, `"30m"`, etc. |
+| `aggregations` | yes | List of aggregation operations (see below). |
+| `transforms` | no | List of paths to table-transform factories applied to each input before aggregation. |
+
+**Aggregation operations:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | yes | One of `avg`, `min`, `max`, `sum`, `count`. |
+| `columns` | no | List of column names to aggregate. Supports single-`*` glob patterns (e.g. `"Vulink*.Temperature.C"`). If omitted, applies to all numeric columns discovered from the source schema. Use `["*"]` with `count` for row count. |
+
+Output column names are `original_column.agg_type` — e.g.
+`temperature.avg`, `temperature.min`, `pressure.avg`.
+
+**Behaviour:**
+
+- Uses `DATE_TRUNC` for time bucketing, so buckets align to calendar
+  boundaries (hour 0, midnight, etc.).
+- Source schema is discovered dynamically on first query — column names
+  in `columns` are matched against actual schema at runtime.
+- Each resolution file (`res=1h.series`, etc.) is an independent
+  `TableDynamic` node backed by `SqlDerivedFile`.
+- The directory structure is **read-only**.
+
+**Usage:**
+
+```bash
+# Create the source data
+pond mkdir /sources
+pond mknod synthetic-timeseries /sources/weather --config-path weather.yaml
+
+# Create the temporal-reduce factory
+pond mknod temporal-reduce /reduce --config-path reduce.yaml
+
+# Browse the directory structure
+pond list /reduce                        # → /reduce/weather
+pond list /reduce/weather                # → res=1h.series, res=6h.series, ...
+
+# Query the hourly aggregation
+pond cat /reduce/weather/res=1h.series --sql "
+  SELECT timestamp,
+         ROUND(\"temperature.avg\", 2) AS temp_avg,
+         ROUND(\"temperature.min\", 2) AS temp_min,
+         ROUND(\"temperature.max\", 2) AS temp_max
+  FROM source
+  ORDER BY timestamp
+"
+
+# Check schema
+pond describe /reduce/weather/res=1h.series
 ```
 
 ### remote
