@@ -20,9 +20,14 @@ SAVE_RESULT=false
 SCRIPT_FILE=""
 VERBOSE=false
 NO_REBUILD=false
+OUTPUT_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --output|-o)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
         --interactive|-i)
             INTERACTIVE=true
             shift
@@ -52,6 +57,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --save-result, -s    Save output to results/ directory"
             echo "  --verbose, -v        Show container output in real-time"
             echo "  --no-rebuild, -n     Skip automatic rebuild (use existing image)"
+            echo "  --output, -o DIR     Mount DIR as /output in the container (for capturing results)"
             echo "  --help, -h           Show this help"
             echo ""
             echo "Examples:"
@@ -205,12 +211,20 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     
     TEMP_OUTPUT=$(mktemp)
     
+    # Build optional volume mounts
+    OUTPUT_MOUNT=()
+    if [[ -n "${OUTPUT_DIR}" ]]; then
+        mkdir -p "${OUTPUT_DIR}"
+        OUTPUT_MOUNT=(-v "${OUTPUT_DIR}:/output")
+    fi
+
     # Run the script in the container
     set +e
     docker run --rm \
         -e POND=/pond \
         -e RUST_LOG=info \
         -v "${SCRIPT_FILE}:/test/run.sh:ro" \
+        "${OUTPUT_MOUNT[@]}" \
         "${IMAGE_NAME}" \
         -c "/bin/bash /test/run.sh" 2>&1 | tee "${TEMP_OUTPUT}"
     EXIT_CODE=${PIPESTATUS[0]}

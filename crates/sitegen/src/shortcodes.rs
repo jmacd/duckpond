@@ -94,13 +94,13 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
         });
     }
 
-    // {{ nav_list collection="params" path="/params" }} — link list for a collection
+    // {{ nav_list collection="params" base="/params" /}} — link list for a collection
     {
         let c = ctx.clone();
         shortcodes.register("nav_list", move |args: &ShortcodeArgs, _| {
             let collection = args.get_str("collection").unwrap_or("");
-            let path = args.get_str("path").unwrap_or("");
-            render_nav_list(&c, collection, path)
+            let base = args.get_str("base").or_else(|| args.get_str("path")).unwrap_or("");
+            render_nav_list(&c, collection, base)
         });
     }
 
@@ -143,10 +143,10 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
 /// Also rewrites the YAML frontmatter variable references.
 pub fn preprocess_variables(content: &str) -> String {
     content
-        .replace("{{ $0 }}", "{{ cap0 }}")
-        .replace("{{ $1 }}", "{{ cap1 }}")
-        .replace("{{ $2 }}", "{{ cap2 }}")
-        .replace("{{ $3 }}", "{{ cap3 }}")
+        .replace("{{ $0 }}", "{{ cap0 /}}")
+        .replace("{{ $1 }}", "{{ cap1 /}}")
+        .replace("{{ $2 }}", "{{ cap2 /}}")
+        .replace("{{ $3 }}", "{{ cap3 /}}")
         .replace("nav-list", "nav_list")
         .replace("time-picker", "time_picker")
         .replace("site-title", "site_title")
@@ -284,12 +284,12 @@ mod tests {
 
     #[test]
     fn test_preprocess_variables() {
-        let input = "# {{ $0 }}\n\n{{ breadcrumb }}\n\n{{ time-picker }}\n\n{{ chart }}";
+        let input = "# {{ $0 }}\n\n{{ breadcrumb /}}\n\n{{ time-picker /}}\n\n{{ chart /}}";
         let output = preprocess_variables(input);
-        assert!(output.contains("{{ cap0 }}"));
-        assert!(output.contains("{{ time_picker }}"));
-        assert!(output.contains("{{ chart }}"));
-        assert!(output.contains("{{ breadcrumb }}"));
+        assert!(output.contains("{{ cap0 /}}"));
+        assert!(output.contains("{{ time_picker /}}"));
+        assert!(output.contains("{{ chart /}}"));
+        assert!(output.contains("{{ breadcrumb /}}"));
     }
 
     #[test]
@@ -320,7 +320,10 @@ mod tests {
         });
 
         let shortcodes = register_shortcodes(ctx);
-        assert!(!shortcodes.is_empty());
+        // Verify shortcodes work by running a known shortcode through preprocess
+        use maudit::content::markdown::shortcodes::preprocess_shortcodes;
+        let result = preprocess_shortcodes("{{ cap0 /}}", &shortcodes, None, None);
+        assert_eq!(result.unwrap(), "Temperature");
     }
 
     #[test]

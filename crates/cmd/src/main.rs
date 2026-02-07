@@ -16,6 +16,7 @@ mod template_utils;
 
 // External modules
 use hydrovu as _;
+use sitegen as _;
 
 #[global_allocator]
 static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);

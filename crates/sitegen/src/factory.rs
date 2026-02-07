@@ -85,28 +85,175 @@ async fn execute(
         SitegenSubcommand::Build { output_dir } => {
             let output_path = std::path::PathBuf::from(&output_dir);
 
-            // TODO: Run export stages using pond export infrastructure.
-            // For now, exports is empty — the factory will wire this up
-            // once we integrate with the existing export system.
-            let exports: BTreeMap<String, ExportContext> = BTreeMap::new();
+            // Run export stages: glob-match pond files, extract captures & temporal partitions
+            let exports = run_export_stages(&config, &context).await?;
 
-            // Build a closure that reads files from the pond
+            // Pre-read all files from the pond into a map.
+            // We cannot use block_on inside this async context, so we collect
+            // everything we need up front.
+            let fs = context.context.filesystem();
+            let root = fs.root().await?;
+
+            let mut file_cache: BTreeMap<String, String> = BTreeMap::new();
+
+            // Collect all page paths from route expansion
+            let jobs = routes::expand_routes(&config, &exports);
+            for job in &jobs {
+                if !file_cache.contains_key(&job.page_source) {
+                    let data = root
+                        .read_file_path_to_vec(&job.page_source)
+                        .await
+                        .map_err(|e| {
+                            tinyfs::Error::Other(format!(
+                                "Cannot read page '{}': {}",
+                                job.page_source, e
+                            ))
+                        })?;
+                    let text = String::from_utf8(data).map_err(|e| {
+                        tinyfs::Error::Other(format!(
+                            "Non-UTF8 page '{}': {}",
+                            job.page_source, e
+                        ))
+                    })?;
+                    file_cache.insert(job.page_source.clone(), text);
+                }
+            }
+
+            // Collect partials
+            for path in config.partials.values() {
+                if !file_cache.contains_key(path) {
+                    match root.read_file_path_to_vec(path).await {
+                        Ok(data) => {
+                            if let Ok(text) = String::from_utf8(data) {
+                                file_cache.insert(path.clone(), text);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Cannot read partial '{}': {}", path, e);
+                        }
+                    }
+                }
+            }
+
+            // Collect static assets
+            for asset in &config.static_assets {
+                if !file_cache.contains_key(&asset.pattern) {
+                    match root.read_file_path_to_vec(&asset.pattern).await {
+                        Ok(data) => {
+                            if let Ok(text) = String::from_utf8(data) {
+                                file_cache.insert(asset.pattern.clone(), text);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Cannot read static asset '{}': {}", asset.pattern, e);
+                        }
+                    }
+                }
+            }
+
+            // Simple lookup closure — no async needed
             let read_pond_file = |path: &str| -> Result<String, String> {
-                let fs = context.context.filesystem();
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
-                    let root = fs.root().await.map_err(|e| e.to_string())?;
-                    let data = root.read_file_path_to_vec(path).await.map_err(|e| e.to_string())?;
-                    String::from_utf8(data).map_err(|e| e.to_string())
-                })
+                file_cache
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| format!("File not in cache: {}", path))
             };
 
             generate_site(&config, &exports, &read_pond_file, &output_path)
                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
+            // Copy static assets
+            copy_static_assets(&config, &read_pond_file, &output_path)?;
+
             Ok(())
         }
     }
+}
+
+/// Run export stages: glob-match pond files, extract captures & temporal partitions.
+async fn run_export_stages(
+    config: &SiteConfig,
+    context: &FactoryContext,
+) -> Result<BTreeMap<String, ExportContext>, tinyfs::Error> {
+    let fs = context.context.filesystem();
+    let root = fs.root().await?;
+    let mut exports = BTreeMap::new();
+
+    for stage in &config.exports {
+        let matches = root.collect_matches(&stage.pattern).await?;
+        info!("Export stage '{}': {} matches for '{}'", stage.name, matches.len(), stage.pattern);
+
+        let mut by_key: BTreeMap<String, Vec<shortcodes::ExportedFile>> = BTreeMap::new();
+
+        for (node_path, captures) in &matches {
+            let path_str = node_path.path.to_string_lossy().to_string();
+            let key = captures.first().cloned().unwrap_or_default();
+
+            // Extract temporal partitions from Hive-style path components (year=2025, month=01)
+            let mut temporal = BTreeMap::new();
+            for component in node_path.path.components() {
+                let s = component.as_os_str().to_string_lossy();
+                if let Some((k, v)) = s.split_once('=') {
+                    if stage.temporal.contains(&k.to_string()) {
+                        temporal.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+
+            by_key.entry(key).or_default().push(shortcodes::ExportedFile {
+                path: path_str,
+                captures: captures.clone(),
+                temporal,
+                start_time: 0,
+                end_time: 0,
+            });
+        }
+
+        exports.insert(
+            stage.name.clone(),
+            ExportContext {
+                name: stage.name.clone(),
+                by_key,
+            },
+        );
+    }
+
+    Ok(exports)
+}
+
+/// Copy static assets from pond to output directory.
+fn copy_static_assets(
+    config: &SiteConfig,
+    read_pond_file: &dyn Fn(&str) -> Result<String, String>,
+    output_dir: &Path,
+) -> Result<(), tinyfs::Error> {
+    for asset in &config.static_assets {
+        // For static assets, read from pond and write to output
+        // The pattern is a literal path like "/etc/static/style.css"
+        match read_pond_file(&asset.pattern) {
+            Ok(content) => {
+                // Strip leading /etc/static/ to get relative output path
+                let rel = asset
+                    .pattern
+                    .strip_prefix("/etc/static/")
+                    .unwrap_or(&asset.pattern);
+                let out_path = output_dir.join(rel);
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e))
+                    })?;
+                }
+                std::fs::write(&out_path, content.as_bytes()).map_err(|e| {
+                    tinyfs::Error::Other(format!("write {:?}: {}", out_path, e))
+                })?;
+                debug!("copied static asset: {}", rel);
+            }
+            Err(e) => {
+                warn!("Cannot read static asset '{}': {}", asset.pattern, e);
+            }
+        }
+    }
+    Ok(())
 }
 
 register_executable_factory!(
@@ -149,7 +296,7 @@ fn generate_site(
     let collections = routes::build_collections(exports);
 
     // Render sidebar partial if configured
-    let sidebar_html = render_partial(config, "sidebar", read_pond_file);
+    let sidebar_html = render_partial(config, "sidebar", read_pond_file, &collections);
 
     // Render each page
     for job in &jobs {
@@ -233,10 +380,27 @@ fn render_partial(
     config: &SiteConfig,
     name: &str,
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
+    collections: &BTreeMap<String, Vec<String>>,
 ) -> Option<String> {
     let path = config.partials.get(name)?;
     match read_pond_file(path) {
-        Ok(md) => Some(render_markdown(&md, None, None, None)),
+        Ok(md) => {
+            // Build a shortcode context for the partial (no captures/datafiles,
+            // but collections are needed for nav_list).
+            let sc_ctx = Arc::new(ShortcodeContext {
+                captures: vec![],
+                datafiles: vec![],
+                collections: collections.clone(),
+                site_title: config.site.title.clone(),
+                current_path: String::new(),
+                breadcrumbs: vec![],
+            });
+            let preprocessed = shortcodes::preprocess_variables(&md);
+            let sc = shortcodes::register_shortcodes(sc_ctx);
+            let expanded = preprocess_shortcodes(&preprocessed, &sc, None, Some(path))
+                .unwrap_or(preprocessed);
+            Some(render_markdown(&expanded, None, None, None))
+        }
         Err(e) => {
             warn!("Cannot read partial '{}' from '{}': {}", name, path, e);
             None
