@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2025 Caspar Water Company
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "sitegen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[dependencies]
+provider.workspace = true
+tinyfs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+log.workspace = true
+linkme.workspace = true
+paste.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+maudit = { version = "0.10.0", default-features = false, features = ["maud"] }
+maud = "0.27.0"

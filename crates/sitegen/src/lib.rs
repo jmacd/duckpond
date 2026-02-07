@@ -1,0 +1,22 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//! # Sitegen — Static site generator for DuckPond
+//!
+//! Replaces the Tera-based TemplateFactory with a Markdown + Maud pipeline
+//! powered by [Maudit](https://maudit.org) as a library.
+//!
+//! ## Usage
+//!
+//! ```bash
+//! pond run /etc/site.yaml build ./dist
+//! ```
+
+mod config;
+mod factory;
+mod layouts;
+mod routes;
+mod shortcodes;
+
+pub use config::SiteConfig;

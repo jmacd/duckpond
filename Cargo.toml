@@ -9,6 +9,7 @@ members = [
 "crates/utilities",
 "crates/provider",
 "crates/remote",
+"crates/sitegen",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ hydrovu = { path = "crates/hydrovu" }
 provider = { path = "crates/provider" }
 utilities = { path = "crates/utilities" }
 remote = { path = "crates/remote" }
+sitegen = { path = "crates/sitegen" }
 
 anyhow = "1.0.82"
 arrow = { version = "56", default-features = false, features = ["prettyprint", "ipc"] }
