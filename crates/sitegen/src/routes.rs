@@ -215,6 +215,7 @@ mod tests {
             "Temperature".to_string(),
             vec![ExportedFile {
                 path: "params/Temperature/data.parquet".to_string(),
+                file: "data/Temperature/data.parquet".to_string(),
                 captures: vec!["Temperature".to_string()],
                 temporal: BTreeMap::new(),
                 start_time: 0,
@@ -225,6 +226,7 @@ mod tests {
             "DO".to_string(),
             vec![ExportedFile {
                 path: "params/DO/data.parquet".to_string(),
+                file: "data/DO/data.parquet".to_string(),
                 captures: vec!["DO".to_string()],
                 temporal: BTreeMap::new(),
                 start_time: 0,

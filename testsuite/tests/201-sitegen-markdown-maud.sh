@@ -385,7 +385,7 @@ check_file() {
 }
 
 check_contains() {
-  if grep -q "$3" "$1" 2>/dev/null; then
+  if grep -qF "$3" "$1" 2>/dev/null; then
     echo "  ✓ $2 contains '$3'"
     PASS=$((PASS + 1))
   else
@@ -401,6 +401,8 @@ check_file "${OUTDIR}/params/Temperature.html" "params/Temperature.html"
 check_file "${OUTDIR}/params/DO.html" "params/DO.html"
 check_file "${OUTDIR}/sites/NorthDock.html" "sites/NorthDock.html"
 check_file "${OUTDIR}/sites/SouthDock.html" "sites/SouthDock.html"
+check_file "${OUTDIR}/style.css" "style.css"
+check_file "${OUTDIR}/chart.js" "chart.js"
 
 echo ""
 echo "--- Content checks ---"
@@ -409,7 +411,26 @@ check_contains "${OUTDIR}/index.html" "index.html" "</html>"
 check_contains "${OUTDIR}/params/Temperature.html" "params/Temperature.html" "Temperature"
 check_contains "${OUTDIR}/params/Temperature.html" "params/Temperature.html" "chart-container"
 check_contains "${OUTDIR}/sites/NorthDock.html" "sites/NorthDock.html" "NorthDock"
-check_contains "${OUTDIR}/sites/NorthDock.html" "sites/NorthDock.html" "duckdb-wasm"
+check_contains "${OUTDIR}/sites/NorthDock.html" "sites/NorthDock.html" 'type="module"'
+
+echo ""
+echo "--- Asset checks ---"
+check_contains "${OUTDIR}/style.css" "style.css" "sidebar-width"
+check_contains "${OUTDIR}/style.css" "style.css" ".chart-container"
+check_contains "${OUTDIR}/chart.js" "chart.js" "chart-data"
+
+echo ""
+echo "--- Data export checks ---"
+check_file "${OUTDIR}/data/single_param/Temperature/res=1h.parquet" "data/Temperature parquet"
+check_file "${OUTDIR}/data/single_param/DO/res=1h.parquet" "data/DO parquet"
+check_file "${OUTDIR}/data/single_site/NorthDock/res=1h.parquet" "data/NorthDock parquet"
+check_file "${OUTDIR}/data/single_site/SouthDock/res=1h.parquet" "data/SouthDock parquet"
+check_contains "${OUTDIR}/params/Temperature.html" "Temperature manifest" '/data/single_param/Temperature/res=1h.parquet'
+
+echo ""
+echo "--- Navigation checks ---"
+check_contains "${OUTDIR}/index.html" "index.html sidebar" 'href="/params/Temperature.html"'
+check_contains "${OUTDIR}/index.html" "index.html sidebar" 'href="/sites/NorthDock.html"'
 
 echo ""
 echo "--- Layout checks ---"

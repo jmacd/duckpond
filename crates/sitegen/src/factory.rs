@@ -162,8 +162,14 @@ async fn execute(
             generate_site(&config, &exports, &read_pond_file, &output_path)
                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
-            // Copy static assets
+            // Export data files as .parquet alongside the HTML
+            export_data_files(&exports, &root, &context.context, &output_path).await?;
+
+            // Copy static assets from pond
             copy_static_assets(&config, &read_pond_file, &output_path)?;
+
+            // Write built-in assets (style.css, chart.js)
+            write_builtin_assets(&output_path)?;
 
             Ok(())
         }
@@ -201,7 +207,8 @@ async fn run_export_stages(
             }
 
             by_key.entry(key).or_default().push(shortcodes::ExportedFile {
-                path: path_str,
+                path: path_str.clone(),
+                file: pond_path_to_data_url(&path_str),
                 captures: captures.clone(),
                 temporal,
                 start_time: 0,
@@ -253,6 +260,73 @@ fn copy_static_assets(
             }
         }
     }
+    Ok(())
+}
+
+/// Write built-in assets (style.css, chart.js) to the output directory.
+///
+/// These are compiled into the binary via `include_str!` so sitegen always
+/// produces a self-contained site without requiring files in the pond.
+fn write_builtin_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
+    static STYLE_CSS: &str = include_str!("../assets/style.css");
+    static CHART_JS: &str = include_str!("../assets/chart.js");
+
+    for (name, content) in [("style.css", STYLE_CSS), ("chart.js", CHART_JS)] {
+        let path = output_dir.join(name);
+        std::fs::write(&path, content.as_bytes())
+            .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", path, e)))?;
+        debug!("wrote built-in asset: {}", name);
+    }
+    Ok(())
+}
+
+/// Convert a pond path to a relative URL for the exported parquet file.
+///
+/// e.g. "/reduced/single_param/Temperature/res=1h.series" → "data/single_param/Temperature/res=1h.parquet"
+fn pond_path_to_data_url(pond_path: &str) -> String {
+    // Strip leading /reduced/ (or whatever the first two components are)
+    let stripped = pond_path.trim_start_matches('/');
+    let parts: Vec<&str> = stripped.splitn(2, '/').collect();
+    let rel = if parts.len() > 1 { parts[1] } else { stripped };
+
+    // Replace .series extension with .parquet
+    // Leading / makes this an absolute URL so it resolves correctly
+    // regardless of which subdirectory the HTML page lives in.
+    let without_ext = rel.strip_suffix(".series").unwrap_or(rel);
+    format!("/data/{}.parquet", without_ext)
+}
+
+/// Export matched data files as .parquet to the output directory.
+///
+/// Uses WD::copy_to_parquet to materialize series data as parquet files
+/// alongside the HTML so chart.js can load them with DuckDB-WASM.
+async fn export_data_files(
+    exports: &BTreeMap<String, ExportContext>,
+    root: &tinyfs::WD,
+    provider_ctx: &tinyfs::ProviderContext,
+    output_dir: &Path,
+) -> Result<(), tinyfs::Error> {
+    let mut count = 0;
+    for export_ctx in exports.values() {
+        for files in export_ctx.by_key.values() {
+            for f in files {
+                // f.file is an absolute URL like "/data/foo/bar.parquet".
+                // Strip the leading '/' so Path::join treats it as relative.
+                let rel = f.file.strip_prefix('/').unwrap_or(&f.file);
+                let out_path = output_dir.join(rel);
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e))
+                    })?;
+                }
+
+                root.copy_to_parquet(&f.path, &out_path, provider_ctx).await?;
+                debug!("exported data: {} → {}", f.path, f.file);
+                count += 1;
+            }
+        }
+    }
+    info!("Exported {} data files as parquet", count);
     Ok(())
 }
 

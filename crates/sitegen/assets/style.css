@@ -1,0 +1,250 @@
+/* DuckPond sitegen — default styles */
+
+:root {
+  --sidebar-width: 240px;
+  --max-width: 960px;
+  --accent-color: #667eea;
+
+  /* Dark theme */
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-content: #0f0f1a;
+  --fg-primary: #e4e4e7;
+  --fg-secondary: #a1a1aa;
+  --fg-muted: #71717a;
+  --border-color: rgba(255,255,255,0.1);
+
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Spline Sans Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  font: 16px/1.5 var(--font-sans);
+  background: var(--bg-content);
+  color: var(--fg-primary);
+  margin: 0; padding: 0;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ── Sidebar ────────────────────────────────────────────────── */
+
+.sidebar {
+  position: fixed;
+  left: 0; top: 0;
+  width: var(--sidebar-width);
+  height: 100vh;
+  background: var(--bg-primary);
+  padding: 1.5rem 0;
+  overflow-y: auto;
+  z-index: 100;
+  border-right: 1px solid var(--border-color);
+}
+
+.sidebar h2 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  padding: 0 1rem;
+  margin: 0 0 1rem 0;
+  color: var(--fg-primary);
+}
+
+.sidebar h3 {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  padding: 0 1rem;
+  margin: 1rem 0 0.5rem 0;
+}
+
+.sidebar ul {
+  list-style: none;
+  margin: 0; padding: 0;
+}
+
+.sidebar a {
+  display: block;
+  padding: 0.35rem 1rem;
+  color: var(--fg-secondary);
+  text-decoration: none;
+  font-size: 0.875rem;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar a:hover {
+  background: rgba(255,255,255,0.05);
+  color: var(--fg-primary);
+}
+
+.sidebar a.active {
+  background: rgba(102,126,234,0.1);
+  color: var(--accent-color);
+  border-left: 3px solid var(--accent-color);
+  padding-left: calc(1rem - 3px);
+}
+
+.nav-list {
+  list-style: none;
+  margin: 0; padding: 0;
+}
+
+/* ── Main content ───────────────────────────────────────────── */
+
+main {
+  margin-left: var(--sidebar-width);
+  flex: 1;
+  min-width: 0;
+  padding: 2rem;
+  max-width: calc(var(--max-width) + var(--sidebar-width) + 4rem);
+}
+
+main h1 {
+  margin: 0 0 0.5rem 0;
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--accent-color);
+}
+
+/* ── Breadcrumb ─────────────────────────────────────────────── */
+
+.breadcrumb ol {
+  list-style: none;
+  display: flex;
+  gap: 0.25rem;
+  padding: 0; margin: 0 0 1.5rem 0;
+  font-size: 0.9rem;
+  color: var(--fg-muted);
+}
+
+.breadcrumb li + li::before {
+  content: "›";
+  margin-right: 0.25rem;
+}
+
+.breadcrumb a {
+  color: var(--accent-color);
+  text-decoration: none;
+}
+
+.breadcrumb a:hover { text-decoration: underline; }
+
+.breadcrumb .active {
+  color: var(--fg-primary);
+}
+
+/* ── Time picker ────────────────────────────────────────────── */
+
+.time-picker {
+  margin-bottom: 2rem;
+  padding: 1rem;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+}
+
+.time-picker label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin-bottom: 0.75rem;
+}
+
+.time-picker-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.time-picker-options button {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--fg-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: all 0.15s;
+}
+
+.time-picker-options button:hover {
+  background: rgba(255,255,255,0.05);
+  color: var(--fg-primary);
+}
+
+.time-picker-options button.active {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: white;
+}
+
+/* ── Charts ─────────────────────────────────────────────────── */
+
+.chart-container {
+  margin-bottom: 2rem;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  padding: 1rem;
+  min-height: 200px;
+}
+
+.chart-container svg {
+  width: 100%;
+  height: auto;
+}
+
+.empty-state {
+  padding: 2rem;
+  text-align: center;
+  background: rgba(254,243,199,0.1);
+  border-radius: 8px;
+  margin: 1rem 0;
+  color: var(--fg-muted);
+}
+
+/* ── Hero (index page) ──────────────────────────────────────── */
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.hero h1 {
+  font-size: clamp(2rem, 6vw, 3rem);
+  font-weight: 900;
+  line-height: 1.1;
+  background: linear-gradient(30deg, var(--accent-color), var(--fg-primary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero h2 {
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+
+.hero ul {
+  color: var(--fg-secondary);
+}
+
+/* ── Responsive ─────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.3s;
+  }
+  .sidebar.open { transform: translateX(0); }
+  main { margin-left: 0; }
+}

@@ -22,8 +22,10 @@ use std::sync::Arc;
 /// serialization boundary between export and rendering.
 #[derive(Debug, Clone)]
 pub struct ExportedFile {
-    /// Relative path to exported file (e.g., "params/Temperature/res=1h/year=2025/month=01/data.parquet")
+    /// Pond path to the data file
     pub path: String,
+    /// Relative URL to exported .parquet file (e.g., "data/Temperature/res=1h.parquet")
+    pub file: String,
     /// Capture groups from pattern matching ($0, $1, ...)
     pub captures: Vec<String>,
     /// Temporal partition values (e.g., {"year": "2025", "month": "01"})
@@ -170,6 +172,7 @@ fn render_chart(datafiles: &[ExportedFile]) -> String {
         .map(|f| {
             serde_json::json!({
                 "path": f.path,
+                "file": f.file,
                 "captures": f.captures,
                 "temporal": f.temporal,
                 "start_time": f.start_time,
@@ -298,6 +301,7 @@ mod tests {
             captures: vec!["Temperature".to_string()],
             datafiles: vec![ExportedFile {
                 path: "params/Temperature/data.parquet".to_string(),
+                file: "data/Temperature/data.parquet".to_string(),
                 captures: vec!["Temperature".to_string()],
                 temporal: BTreeMap::from([
                     ("year".to_string(), "2025".to_string()),
@@ -336,6 +340,7 @@ mod tests {
     fn test_render_chart_with_files() {
         let files = vec![ExportedFile {
             path: "data.parquet".to_string(),
+            file: "data/data.parquet".to_string(),
             captures: vec!["Temp".to_string()],
             temporal: BTreeMap::from([("year".to_string(), "2025".to_string())]),
             start_time: 100,

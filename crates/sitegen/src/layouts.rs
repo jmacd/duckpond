@@ -53,10 +53,6 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (ctx.title) " — " (ctx.site_title) }
                 link rel="stylesheet" href={(ctx.base_url) "style.css"};
-                // DuckDB-WASM for querying parquet files in the browser
-                script src="https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/dist/duckdb-browser-blocking.js" {}
-                // Observable Plot for charting
-                script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6/+esm" type="module" {}
             }
             body {
                 @if let Some(sidebar_html) = ctx.sidebar {
@@ -67,8 +63,8 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 main class="data-page" {
                     (PreEscaped(ctx.content))
                 }
-                // Our glue code — static copy from /etc/static/chart.js
-                script src={(ctx.base_url) "chart.js"} {}
+                // Our glue code — loads DuckDB-WASM + Observable Plot dynamically
+                script src={(ctx.base_url) "chart.js"} type="module" {}
             }
         }
     }
@@ -131,8 +127,8 @@ mod tests {
             sidebar: Some("<ul><li>Nav</li></ul>"),
         };
         let html = apply_layout("data", &ctx);
-        assert!(html.contains("duckdb")); // CDN scripts present
         assert!(html.contains("chart.js")); // Glue code present
+        assert!(html.contains("type=\"module\"")); // Module script
         assert!(html.contains("class=\"sidebar\""));
         assert!(html.contains("<ul><li>Nav</li></ul>"));
         assert!(html.contains("data-page"));
