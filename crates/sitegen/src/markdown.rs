@@ -24,15 +24,72 @@ use std::collections::HashMap;
 /// Uses pulldown-cmark with GFM extensions (tables, strikethrough, task lists).
 /// Raw HTML blocks (`<script>`, `<style>`, `<div>`, etc.) pass through
 /// unchanged per the CommonMark spec.
+///
+/// ## Script block extraction
+///
+/// `<script>…</script>` blocks are extracted before markdown parsing and
+/// re-inserted afterwards.  This works around a CommonMark spec interaction
+/// where a preceding type-6 HTML block (e.g. `<link>`) absorbs a `<script>`
+/// tag on the next line; the first blank line inside the script then ends
+/// the type-6 block and the remaining JS is parsed as regular markdown.
 pub fn render_markdown(content: &str) -> String {
-    let options = Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_TABLES;
+    // Extract <script>…</script> blocks before markdown parsing.
+    let (processed, scripts) = extract_scripts(content);
 
-    let parser = Parser::new_ext(content, options);
+    let options =
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
+
+    let parser = Parser::new_ext(&processed, options);
     let mut html = String::with_capacity(content.len() * 2);
     push_html(&mut html, parser);
+
+    // Restore extracted script blocks.
+    restore_scripts(&mut html, &scripts);
     html
+}
+
+/// Pull out every `<script …>…</script>` span, replacing each with an
+/// HTML-comment placeholder that pulldown-cmark passes through untouched
+/// (CommonMark type-2 HTML block).
+fn extract_scripts(content: &str) -> (String, Vec<String>) {
+    let mut result = String::with_capacity(content.len());
+    let mut scripts: Vec<String> = Vec::new();
+    let mut remaining = content;
+
+    while let Some(start) = remaining.find("<script") {
+        // Verify the char after "<script" is whitespace, '>', or '/' to
+        // avoid matching e.g. "<scripting>".
+        let after = &remaining[start + 7..];
+        let next_ch = after.chars().next().unwrap_or('>');
+        if !matches!(next_ch, ' ' | '\t' | '\n' | '\r' | '>' | '/') {
+            result.push_str(&remaining[..start + 7]);
+            remaining = after;
+            continue;
+        }
+
+        if let Some(end_rel) = remaining[start..].find("</script>") {
+            let end = start + end_rel + "</script>".len();
+            result.push_str(&remaining[..start]);
+            result.push_str(&format!("<!-- SITEGEN_SCRIPT_{} -->", scripts.len()));
+            scripts.push(remaining[start..end].to_string());
+            remaining = &remaining[end..];
+        } else {
+            // No closing tag — pass rest through as-is.
+            break;
+        }
+    }
+    result.push_str(remaining);
+    (result, scripts)
+}
+
+/// Replace comment placeholders with the original script blocks.
+fn restore_scripts(html: &mut String, scripts: &[String]) {
+    for (i, script) in scripts.iter().enumerate() {
+        let placeholder = format!("<!-- SITEGEN_SCRIPT_{} -->", i);
+        if let Some(pos) = html.find(&placeholder) {
+            html.replace_range(pos..pos + placeholder.len(), script);
+        }
+    }
 }
 
 // ─── Shortcodes ──────────────────────────────────────────────────────────────
@@ -159,8 +216,7 @@ pub fn preprocess_shortcodes(
                     close_spaced.len()
                 };
 
-                let body =
-                    preprocess_shortcodes(&after_tag[..pos], shortcodes, markdown_path)?;
+                let body = preprocess_shortcodes(&after_tag[..pos], shortcodes, markdown_path)?;
                 let mut block_args = args;
                 block_args.insert("body".to_string(), body);
 
@@ -216,12 +272,12 @@ fn parse_args(input: &str) -> Result<HashMap<String, String>, String> {
         match ch {
             '=' if in_key && !in_quotes => {
                 in_key = false;
-                if let Some(&q) = chars.peek() {
-                    if q == '"' || q == '\'' {
-                        quote_char = q;
-                        in_quotes = true;
-                        chars.next();
-                    }
+                if let Some(&q) = chars.peek()
+                    && (q == '"' || q == '\'')
+                {
+                    quote_char = q;
+                    in_quotes = true;
+                    chars.next();
                 }
             }
             c if !in_key && in_quotes && c == quote_char => {
@@ -307,6 +363,91 @@ items.forEach(i => {
         assert!(html.contains("items.forEach(i =>"));
         assert!(!html.contains("<p>items"));
         assert!(!html.contains("<code>"));
+    }
+
+    /// The actual bug: `<link>` before `<script>` creates a CommonMark type-6
+    /// block that absorbs the script.  Blank line inside the script then ends
+    /// the type-6 block and the rest is parsed as markdown.
+    #[test]
+    fn test_render_markdown_link_then_script() {
+        let input = r#"# Title
+
+<link rel="stylesheet" href="https://example.com/test.css">
+<script type="module">
+const el = document.getElementById("test-container");
+const items = [1, 2, 3];
+
+items.forEach(i => {
+  const div = document.createElement("div");
+  div.textContent = `Item ${i}`;
+  el.appendChild(div);
+});
+
+console.log("Script loaded successfully");
+</script>
+"#;
+        let html = render_markdown(input);
+        // Script content must survive intact
+        assert!(html.contains("items.forEach(i =>"), "forEach missing");
+        assert!(!html.contains("<p>items"), "forEach wrapped in <p>");
+        assert!(!html.contains("<code>"), "backtick became <code>");
+        assert!(!html.contains("=&gt;"), "arrow was entity-encoded");
+        // Link tag preserved
+        assert!(html.contains("<link rel=\"stylesheet\""), "link missing");
+    }
+
+    /// Inline `<script>` inside a `<div>` (chart shortcode pattern).
+    #[test]
+    fn test_render_markdown_inline_script_in_div() {
+        let input = r#"# Chart
+
+<div class="chart"><script type="application/json">{"data":1}</script></div>
+"#;
+        let html = render_markdown(input);
+        assert!(html.contains(r#"<script type="application/json">{"data":1}</script>"#));
+    }
+
+    #[test]
+    fn test_extract_scripts_no_false_match() {
+        // "<scripting>" should NOT be extracted
+        let input = "<scripting>test</scripting>\n<script>real</script>\n";
+        let html = render_markdown(input);
+        assert!(html.contains("<scripting>"));
+        assert!(html.contains("<script>real</script>"));
+    }
+
+    /// Noyo index.md pattern: markdown → div → markdown → link + script (no
+    /// blank lines in the script body).
+    #[test]
+    fn test_render_markdown_noyo_index() {
+        let input = r#"# Noyo Harbor
+
+Dashboard text.
+
+<div id="map" style="height:400px;"></div>
+
+## About
+
+Some paragraph text.
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script type="module">
+import * as L from "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/+esm";
+const map = L.map("map", { scrollWheelZoom: false }).setView([39.42, -123.80], 16);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: '&copy; OSM' }).addTo(map);
+</script>
+"#;
+        let html = render_markdown(input);
+        assert!(
+            html.contains(r#"<script type="module">"#),
+            "script tag missing"
+        );
+        assert!(html.contains("import * as L"), "import missing");
+        assert!(html.contains("L.map("), "L.map missing");
+        assert!(html.contains("L.tileLayer("), "tileLayer missing");
+        assert!(!html.contains("<p>const"), "JS wrapped in <p>");
+        assert!(!html.contains("<p>L."), "JS wrapped in <p>");
+        assert!(html.contains("<link rel="), "link tag missing");
     }
 
     #[test]

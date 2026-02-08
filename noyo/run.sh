@@ -3,11 +3,11 @@
 ROOT=/Volumes/sourcecode/src/duckpond
 NOYO=${ROOT}/noyo
 POND=${NOYO}/pond
-EXE=${ROOT}/target/release/pond
+EXE=${ROOT}/target/debug/pond
 
 export RUST_LOG=info
 export POND
 
-cargo build --release
+cargo build
 
 ${EXE} run /etc/hydrovu collect

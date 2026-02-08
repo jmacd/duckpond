@@ -7,11 +7,11 @@ NOYO=${ROOT}/noyo
 POND=${NOYO}/pond
 REPLICA=${NOYO}/replica
 
-EXE=${ROOT}/target/release/pond
+EXE=${ROOT}/target/debug/pond
 
 export POND
 
-cargo build --release
+cargo build
 
 ${EXE} init
 
