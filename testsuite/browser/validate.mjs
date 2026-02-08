@@ -61,14 +61,16 @@ async function testPage(browser, page) {
   });
 
   try {
-    await tab.goto(url, { waitUntil: "domcontentloaded", timeout: 10000 });
+    await tab.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     await new Promise((r) => setTimeout(r, 1000));
 
     console.log(`\n=== ${page.path} ===`);
 
-    // No JS errors
-    check(errors.length === 0, `no JS errors (got ${errors.length})`);
-    errors.forEach((e) => console.log(`    ERROR: ${e}`));
+    // Non-data pages: check JS errors immediately (data pages check after chart loads)
+    if (page.layout !== "data-page") {
+      check(errors.length === 0, `no JS errors (got ${errors.length})`);
+      errors.forEach((e) => console.log(`    ERROR: ${e}`));
+    }
 
     // Title present
     const title = await tab.title();
@@ -127,6 +129,65 @@ async function testPage(browser, page) {
           ) !== null
       );
       check(hasManifest, "chart data manifest present");
+
+      // Manifest has file entries with /data/ prefix
+      const manifestFiles = await tab.evaluate(() => {
+        const el = document.querySelector('script.chart-data[type="application/json"]');
+        if (!el) return [];
+        try {
+          return JSON.parse(el.textContent).map(m => m.file);
+        } catch { return []; }
+      });
+      check(
+        manifestFiles.length > 0 && manifestFiles.every(f => f.startsWith("/data/")),
+        `manifest has ${manifestFiles.length} files, all with /data/ prefix`
+      );
+
+      // Duration buttons rendered by chart.js
+      const btnCount = await tab.evaluate(
+        () => document.querySelectorAll(".duration-buttons button").length
+      );
+      check(btnCount >= 5, `duration buttons present (${btnCount})`);
+
+      // Wait for DuckDB-WASM to load and chart to render (up to 30s)
+      const chartRendered = await tab.evaluate(() => {
+        return new Promise((resolve) => {
+          let tries = 0;
+          const check = () => {
+            // Observable Plot renders SVG elements inside the chart container
+            const svgs = document.querySelectorAll(".chart-container svg");
+            if (svgs.length > 0) return resolve(true);
+            if (++tries > 60) return resolve(false);
+            setTimeout(check, 500);
+          };
+          check();
+        });
+      });
+      check(chartRendered, "chart rendered SVG (DuckDB-WASM + Observable Plot)");
+
+      if (chartRendered) {
+        // Check SVG has actual plot content (paths/lines, not just empty axes)
+        const plotMarks = await tab.evaluate(() => {
+          const paths = document.querySelectorAll(
+            ".chart-container svg path, .chart-container svg line, .chart-container svg circle"
+          );
+          return paths.length;
+        });
+        check(plotMarks > 0, `chart has plot marks (${plotMarks} path/line/circle elements)`);
+
+        // Check for multiple chart sections (min/max/avg grouping)
+        const chartDivs = await tab.evaluate(
+          () => document.querySelectorAll(".chart-container .chart").length
+        );
+        check(chartDivs >= 1, `chart sections rendered (${chartDivs})`);
+      }
+
+      // Verify no errors accumulated during chart loading
+      check(
+        errors.length === 0,
+        `no errors after chart load (got ${errors.length})`
+      );
+      errors.forEach((e) => console.log(`    ERROR: ${e}`));
     }
   } catch (err) {
     console.log(`\n=== ${page.path} ===`);

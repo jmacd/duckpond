@@ -7,6 +7,4 @@ layout: data
 
 {{ breadcrumb /}}
 
-{{ time_picker /}}
-
 {{ chart /}}

@@ -181,7 +181,7 @@ entries:
       in_pattern: "/combined/*"
       out_pattern: "$0"
       time_column: "timestamp"
-      resolutions: ["1h"]
+      resolutions: ["1h", "2h", "4h", "12h", "24h"]
       aggregations:
         - type: "avg"
           columns: ["*"]
@@ -196,7 +196,7 @@ entries:
       in_pattern: "/singled/*"
       out_pattern: "$0"
       time_column: "timestamp"
-      resolutions: ["1h"]
+      resolutions: ["1h", "2h", "4h", "12h", "24h"]
       aggregations:
         - type: "avg"
           columns: ["*"]
@@ -260,8 +260,6 @@ layout: data
 # {{ $0 }}
 
 {{ breadcrumb /}}
-
-{{ time_picker /}}
 
 {{ chart /}}
 MD
@@ -420,17 +418,53 @@ check_contains "${OUTDIR}/style.css" "style.css" ".chart-container"
 check_contains "${OUTDIR}/chart.js" "chart.js" "chart-data"
 
 echo ""
-echo "--- Data export checks ---"
-check_file "${OUTDIR}/data/single_param/Temperature/res=1h.parquet" "data/Temperature parquet"
-check_file "${OUTDIR}/data/single_param/DO/res=1h.parquet" "data/DO parquet"
-check_file "${OUTDIR}/data/single_site/NorthDock/res=1h.parquet" "data/NorthDock parquet"
-check_file "${OUTDIR}/data/single_site/SouthDock/res=1h.parquet" "data/SouthDock parquet"
-check_contains "${OUTDIR}/params/Temperature.html" "Temperature manifest" '/data/single_param/Temperature/res=1h.parquet'
+echo "--- Data export checks (Hive-partitioned) ---"
+
+# With temporal: ["year", "month"], data is exported as Hive-partitioned parquet:
+# data/<group>/<param>/res=<R>/year=<Y>/month=<M>/<file>.parquet
+# We check that partitioned directories exist and contain .parquet files.
+
+check_has_parquet_in() {
+  local dir="$1"
+  local label="$2"
+  local count
+  count=$(find "$dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$count" -gt 0 ]; then
+    echo "  ✓ ${label} (${count} parquet files)"
+    PASS=$((PASS + 1))
+  else
+    echo "  ✗ MISSING parquet in: ${label}"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+for res in 1h 2h 4h 12h 24h; do
+  check_has_parquet_in "${OUTDIR}/data/single_param/Temperature/res=${res}" "data/Temperature res=${res}"
+  check_has_parquet_in "${OUTDIR}/data/single_param/DO/res=${res}" "data/DO res=${res}"
+  check_has_parquet_in "${OUTDIR}/data/single_site/NorthDock/res=${res}" "data/NorthDock res=${res}"
+  check_has_parquet_in "${OUTDIR}/data/single_site/SouthDock/res=${res}" "data/SouthDock res=${res}"
+done
+
+# Manifest URLs should reference partitioned paths (contain year=)
+check_contains "${OUTDIR}/params/Temperature.html" "Temperature manifest has partitioned 1h" 'single_param/Temperature/res=1h/'
+check_contains "${OUTDIR}/params/Temperature.html" "Temperature manifest has partitioned 24h" 'single_param/Temperature/res=24h/'
 
 echo ""
 echo "--- Navigation checks ---"
 check_contains "${OUTDIR}/index.html" "index.html sidebar" 'href="/params/Temperature.html"'
 check_contains "${OUTDIR}/index.html" "index.html sidebar" 'href="/sites/NorthDock.html"'
+
+echo ""
+echo "--- Temporal bounds checks ---"
+# start_time/end_time should be non-zero in the chart manifest
+# The manifest contains JSON with "start_time": <epoch_seconds>
+if grep -oP '"start_time":\s*\d+' "${OUTDIR}/params/Temperature.html" | grep -v '"start_time": *0' | head -1 > /dev/null 2>&1; then
+  echo "  ✓ Temperature manifest has non-zero start_time"
+  PASS=$((PASS + 1))
+else
+  echo "  ✗ Temperature manifest start_time is 0 or missing"
+  FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "--- Layout checks ---"

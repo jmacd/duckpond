@@ -5777,6 +5777,7 @@ dependencies = [
 name = "provider"
 version = "0.21.0"
 dependencies = [
+ "anyhow",
  "arrow",
  "arrow-array",
  "arrow-cast",
@@ -6840,6 +6841,7 @@ checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
 name = "sitegen"
 version = "0.21.0"
 dependencies = [
+ "chrono",
  "clap",
  "linkme",
  "log",

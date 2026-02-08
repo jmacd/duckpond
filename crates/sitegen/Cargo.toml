@@ -27,6 +27,7 @@ paste.workspace = true
 clap.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+chrono.workspace = true
 
 maudit = { version = "0.10.0", default-features = false, features = ["maud"] }
 maud = "0.27.0"

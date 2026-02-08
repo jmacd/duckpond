@@ -114,14 +114,6 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
         });
     }
 
-    // {{ time_picker }} — time range selector from datafile temporal partitions
-    {
-        let c = ctx.clone();
-        shortcodes.register("time_picker", move |_args: &ShortcodeArgs, _| {
-            render_time_picker(&c.datafiles)
-        });
-    }
-
     // {{ site_title }} — site title from config
     {
         let c = ctx.clone();
@@ -139,7 +131,6 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
 /// - `{{ $0 }}` → `{{ cap0 }}`
 /// - `{{ $1 }}` → `{{ cap1 }}`
 /// - `{{ nav-list ... }}` → `{{ nav_list ... }}`
-/// - `{{ time-picker }}` → `{{ time_picker }}`
 /// - `{{ site-title }}` → `{{ site_title }}`
 ///
 /// Also rewrites the YAML frontmatter variable references.
@@ -150,7 +141,6 @@ pub fn preprocess_variables(content: &str) -> String {
         .replace("{{ $2 }}", "{{ cap2 /}}")
         .replace("{{ $3 }}", "{{ cap3 /}}")
         .replace("nav-list", "nav_list")
-        .replace("time-picker", "time_picker")
         .replace("site-title", "site_title")
 }
 
@@ -238,48 +228,7 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
     html
 }
 
-/// Render a time-range picker from available datafile temporal partitions.
-fn render_time_picker(datafiles: &[ExportedFile]) -> String {
-    if datafiles.is_empty() {
-        return "<!-- time-picker: no datafiles -->".to_string();
-    }
 
-    // Collect unique years and months
-    let mut years: Vec<&str> = datafiles
-        .iter()
-        .filter_map(|f| f.temporal.get("year").map(|s| s.as_str()))
-        .collect();
-    years.sort();
-    years.dedup();
-
-    let mut months: Vec<&str> = datafiles
-        .iter()
-        .filter_map(|f| f.temporal.get("month").map(|s| s.as_str()))
-        .collect();
-    months.sort();
-    months.dedup();
-
-    let mut html = String::from("<div class=\"time-picker\">\n");
-
-    if !years.is_empty() {
-        html.push_str("  <label>Year: <select class=\"time-picker-year\">\n");
-        for y in &years {
-            html.push_str(&format!("    <option value=\"{}\">{}</option>\n", y, y));
-        }
-        html.push_str("  </select></label>\n");
-    }
-
-    if !months.is_empty() {
-        html.push_str("  <label>Month: <select class=\"time-picker-month\">\n");
-        for m in &months {
-            html.push_str(&format!("    <option value=\"{}\">{}</option>\n", m, m));
-        }
-        html.push_str("  </select></label>\n");
-    }
-
-    html.push_str("</div>");
-    html
-}
 
 #[cfg(test)]
 mod tests {
@@ -287,10 +236,9 @@ mod tests {
 
     #[test]
     fn test_preprocess_variables() {
-        let input = "# {{ $0 }}\n\n{{ breadcrumb /}}\n\n{{ time-picker /}}\n\n{{ chart /}}";
+        let input = "# {{ $0 }}\n\n{{ breadcrumb /}}\n\n{{ chart /}}";
         let output = preprocess_variables(input);
         assert!(output.contains("{{ cap0 /}}"));
-        assert!(output.contains("{{ time_picker /}}"));
         assert!(output.contains("{{ chart /}}"));
         assert!(output.contains("{{ breadcrumb /}}"));
     }

@@ -7,6 +7,7 @@
 pub mod factory;
 pub mod registry;
 pub mod transform;
+pub mod export;
 
 mod error;
 mod format;

@@ -140,31 +140,16 @@ main h1 {
   color: var(--fg-primary);
 }
 
-/* ── Time picker ────────────────────────────────────────────── */
+/* ── Duration buttons ───────────────────────────────────────── */
 
-.time-picker {
-  margin-bottom: 2rem;
-  padding: 1rem;
-  background: var(--bg-secondary);
-  border-radius: 8px;
-}
-
-.time-picker label {
-  display: block;
-  font-size: 0.8rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: var(--fg-muted);
-  margin-bottom: 0.75rem;
-}
-
-.time-picker-options {
+.duration-buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+  margin-bottom: 1rem;
 }
 
-.time-picker-options button {
+.duration-buttons button {
   padding: 0.5rem 1rem;
   border: 1px solid var(--border-color);
   background: transparent;
@@ -175,12 +160,12 @@ main h1 {
   transition: all 0.15s;
 }
 
-.time-picker-options button:hover {
+.duration-buttons button:hover {
   background: rgba(255,255,255,0.05);
   color: var(--fg-primary);
 }
 
-.time-picker-options button.active {
+.duration-buttons button.active {
   background: var(--accent-color);
   border-color: var(--accent-color);
   color: white;

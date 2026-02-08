@@ -85,8 +85,9 @@ async fn execute(
         SitegenSubcommand::Build { output_dir } => {
             let output_path = std::path::PathBuf::from(&output_dir);
 
-            // Run export stages: glob-match pond files, extract captures & temporal partitions
-            let exports = run_export_stages(&config, &context).await?;
+            // Run export stages: glob-match pond files, export as Hive-partitioned
+            // parquet, scan output for real files with start_time/end_time.
+            let exports = run_export_stages(&config, &context, &output_path).await?;
 
             // Pre-read all files from the pond into a map.
             // We cannot use block_on inside this async context, so we collect
@@ -162,9 +163,6 @@ async fn execute(
             generate_site(&config, &exports, &read_pond_file, &output_path)
                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
-            // Export data files as .parquet alongside the HTML
-            export_data_files(&exports, &root, &context.context, &output_path).await?;
-
             // Copy static assets from pond
             copy_static_assets(&config, &read_pond_file, &output_path)?;
 
@@ -176,13 +174,20 @@ async fn execute(
     }
 }
 
-/// Run export stages: glob-match pond files, extract captures & temporal partitions.
+/// Run export stages: glob-match pond files, export as Hive-partitioned parquet,
+/// scan output for real files with start_time/end_time.
+///
+/// Uses `provider::export::export_series_to_parquet` — the same DataFusion
+/// `COPY TO ... PARTITIONED BY` pipeline used by `pond export`.
 async fn run_export_stages(
     config: &SiteConfig,
     context: &FactoryContext,
+    output_dir: &std::path::Path,
 ) -> Result<BTreeMap<String, ExportContext>, tinyfs::Error> {
     let fs = context.context.filesystem();
     let root = fs.root().await?;
+    let provider_ctx = &context.context;
+    let data_dir = output_dir.join("data");
     let mut exports = BTreeMap::new();
 
     for stage in &config.exports {
@@ -195,25 +200,58 @@ async fn run_export_stages(
             let path_str = node_path.path.to_string_lossy().to_string();
             let key = captures.first().cloned().unwrap_or_default();
 
-            // Extract temporal partitions from Hive-style path components (year=2025, month=01)
-            let mut temporal = BTreeMap::new();
-            for component in node_path.path.components() {
-                let s = component.as_os_str().to_string_lossy();
-                if let Some((k, v)) = s.split_once('=') {
-                    if stage.temporal.contains(&k.to_string()) {
-                        temporal.insert(k.to_string(), v.to_string());
+            // Build the export directory for this series.
+            // e.g., /reduced/single_param/Temperature/res=1h.series
+            //     → <output>/data/single_param/Temperature/res=1h/
+            let rel = series_path_to_data_rel(&path_str);
+            let export_dir = data_dir.join(&rel);
+
+            // Export with temporal partitioning using the SAME path as pond export
+            let (export_outputs, _schema) = provider::export::export_series_to_parquet(
+                &root,
+                &path_str,
+                &export_dir,
+                &stage.temporal,
+                captures,
+                &data_dir,
+                &provider_ctx,
+            )
+            .await
+            .map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "export_series_to_parquet '{}': {}",
+                    path_str, e
+                ))
+            })?;
+
+            // Build ExportedFile entries from the real output files
+            for (_caps, export_output) in &export_outputs {
+                // Build temporal BTreeMap from Hive partition path components
+                let mut temporal = BTreeMap::new();
+                for component in export_output.file.components() {
+                    let s = component.as_os_str().to_string_lossy();
+                    if let Some((k, v)) = s.split_once('=') {
+                        if stage.temporal.contains(&k.to_string()) {
+                            temporal.insert(k.to_string(), v.to_string());
+                        }
                     }
                 }
+
+                by_key.entry(key.clone()).or_default().push(shortcodes::ExportedFile {
+                    path: path_str.clone(),
+                    file: format!("/data/{}", export_output.file.to_string_lossy()),
+                    captures: captures.clone(),
+                    temporal,
+                    start_time: export_output.start_time.unwrap_or(0),
+                    end_time: export_output.end_time.unwrap_or(0),
+                });
             }
 
-            by_key.entry(key).or_default().push(shortcodes::ExportedFile {
-                path: path_str.clone(),
-                file: pond_path_to_data_url(&path_str),
-                captures: captures.clone(),
-                temporal,
-                start_time: 0,
-                end_time: 0,
-            });
+            info!(
+                "  {} → {} partitioned files",
+                path_str,
+                export_outputs.len()
+            );
         }
 
         exports.insert(
@@ -280,55 +318,22 @@ fn write_builtin_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
     Ok(())
 }
 
-/// Convert a pond path to a relative URL for the exported parquet file.
+/// Convert a pond series path to a relative directory path for export.
 ///
-/// e.g. "/reduced/single_param/Temperature/res=1h.series" → "data/single_param/Temperature/res=1h.parquet"
-fn pond_path_to_data_url(pond_path: &str) -> String {
-    // Strip leading /reduced/ (or whatever the first two components are)
+/// e.g. "/reduced/single_param/Temperature/res=1h.series"
+///    → "single_param/Temperature/res=1h"
+///
+/// The first path component (e.g. "reduced") is stripped, and the
+/// `.series` extension is removed. The result is used as a subdirectory
+/// under the `data/` output directory.
+fn series_path_to_data_rel(pond_path: &str) -> String {
     let stripped = pond_path.trim_start_matches('/');
     let parts: Vec<&str> = stripped.splitn(2, '/').collect();
     let rel = if parts.len() > 1 { parts[1] } else { stripped };
-
-    // Replace .series extension with .parquet
-    // Leading / makes this an absolute URL so it resolves correctly
-    // regardless of which subdirectory the HTML page lives in.
-    let without_ext = rel.strip_suffix(".series").unwrap_or(rel);
-    format!("/data/{}.parquet", without_ext)
+    rel.strip_suffix(".series").unwrap_or(rel).to_string()
 }
 
-/// Export matched data files as .parquet to the output directory.
-///
-/// Uses WD::copy_to_parquet to materialize series data as parquet files
-/// alongside the HTML so chart.js can load them with DuckDB-WASM.
-async fn export_data_files(
-    exports: &BTreeMap<String, ExportContext>,
-    root: &tinyfs::WD,
-    provider_ctx: &tinyfs::ProviderContext,
-    output_dir: &Path,
-) -> Result<(), tinyfs::Error> {
-    let mut count = 0;
-    for export_ctx in exports.values() {
-        for files in export_ctx.by_key.values() {
-            for f in files {
-                // f.file is an absolute URL like "/data/foo/bar.parquet".
-                // Strip the leading '/' so Path::join treats it as relative.
-                let rel = f.file.strip_prefix('/').unwrap_or(&f.file);
-                let out_path = output_dir.join(rel);
-                if let Some(parent) = out_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e))
-                    })?;
-                }
 
-                root.copy_to_parquet(&f.path, &out_path, provider_ctx).await?;
-                debug!("exported data: {} → {}", f.path, f.file);
-                count += 1;
-            }
-        }
-    }
-    info!("Exported {} data files as parquet", count);
-    Ok(())
-}
 
 register_executable_factory!(
     name: "sitegen",

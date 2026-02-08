@@ -21,12 +21,14 @@ SCRIPT_FILE=""
 VERBOSE=false
 NO_REBUILD=false
 OUTPUT_DIR=""
+USER_OUTPUT_DIR=""
 INSPECT=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --output|-o)
             OUTPUT_DIR="$2"
+            USER_OUTPUT_DIR="$2"
             shift 2
             ;;
         --inspect)
@@ -265,8 +267,8 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         save_result "${EXIT_CODE}" "${LOG_FILE}"
     fi
 
-    # On failure or --inspect, print how to inspect the output
-    if [[ ${EXIT_CODE} -ne 0 ]] || [[ "${INSPECT}" == "true" ]]; then
+    # On failure, --inspect, or explicit --output, print how to inspect the output
+    if [[ ${EXIT_CODE} -ne 0 ]] || [[ "${INSPECT}" == "true" ]] || [[ -n "${USER_OUTPUT_DIR}" ]]; then
         echo ""
         echo "Full log: ${LOG_FILE}  ($(wc -l < "${LOG_FILE}") lines)"
         echo "Output:   ${OUTPUT_DIR}"
@@ -275,7 +277,7 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         if [[ -f "${OUTPUT_DIR}/index.html" ]]; then
             echo ""
             echo "To inspect the site in a browser:"
-            echo "  cd ${SCRIPT_DIR}/browser && SITE_ROOT=${OUTPUT_DIR} npx vite --port 4174 --open"
+            echo "  (cd ${SCRIPT_DIR}/browser && SITE_ROOT=${OUTPUT_DIR} npx vite --port 4174 --open)"
         fi
     fi
 
