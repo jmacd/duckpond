@@ -15,10 +15,8 @@ cargo build
 
 ${EXE} init
 
-${EXE} mkdir -p /etc
-
-# Sitegen markdown pages
 ${EXE} mkdir -p /etc/site
+
 ${EXE} copy host://${NOYO}/site/index.md /etc/site/index.md
 ${EXE} copy host://${NOYO}/site/data.md /etc/site/data.md
 ${EXE} copy host://${NOYO}/site/sidebar.md /etc/site/sidebar.md
@@ -27,14 +25,7 @@ ${EXE} mkdir -p /laketech
 
 ${EXE} copy host://${NOYO}/laketech /laketech/data
 
-# Disable backup
 ${EXE} mkdir /etc/system.d
-#${EXE} mknod remote /etc/test_backup --config-path ${NOYO}/backup.yaml
-#RUST_LOG=tlogfs=debug,remote=debug
-${EXE} mknod remote /etc/system.d/1-backup --config-path ${NOYO}/backup.yaml
-
-# HydroVu collector
-${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
 
 # Import archived instrument data (if any exported Parquet files exist)
 # Archive Parquet lives in noyo/hydrovu/ — same pattern as noyo/laketech/
@@ -42,7 +33,9 @@ if [ -d "${NOYO}/hydrovu" ]; then
   ${EXE} copy host://${NOYO}/hydrovu /hydrovu
 fi
 
-# Configure export pipeline
+${EXE} mknod remote /etc/system.d/1-backup --config-path ${NOYO}/backup.yaml
+
+${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
 
 ${EXE} mknod dynamic-dir /combined --config-path ${NOYO}/combine.yaml
 

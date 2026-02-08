@@ -175,7 +175,7 @@ async fn execute_hydrovu(
     let hydrovu_config: HydroVuConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
 
-    log::info!(
+    log::debug!(
         "Executing HydroVu collection with config: {:?}",
         hydrovu_config
     );
