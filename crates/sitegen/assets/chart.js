@@ -1,6 +1,7 @@
 // DuckPond sitegen — chart.js
 // Reads the chart-data JSON manifest, loads .parquet files via DuckDB-WASM,
 // renders time-series line charts with Observable Plot.
+// Supports duration buttons (1W … 1Y) and click-drag brush-to-zoom.
 
 (async function () {
   "use strict";
@@ -19,18 +20,28 @@
   }
   if (!manifest || manifest.length === 0) return;
 
+  // ── State ──────────────────────────────────────────────────────────────────
+
   // Time range options (label, days)
   const ranges = [
     ["1W", 7], ["2W", 14], ["1M", 30], ["3M", 90],
-    ["6M", 180], ["1Y", 365], ["All", 9999],
+    ["6M", 180], ["1Y", 365],
   ];
-  let activeDays = 9999;  // Default: show all data
+  let activeDays = 90;  // Default: 3 months
 
-  // Duration button bar — Noyo-style: window = now minus display width.
-  // Built directly inside the chart container, no server-rendered element needed.
+  // Custom zoom range (set by brush, cleared by Reset or duration button)
+  // When non-null, overrides the duration-button window.
+  let zoomDomain = null;  // [beginMs, endMs] or null
+
+  // ── Duration button bar ────────────────────────────────────────────────────
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "chart-toolbar";
+  container.before(toolbar);
+
   const btnBar = document.createElement("div");
   btnBar.className = "duration-buttons";
-  container.before(btnBar);
+  toolbar.appendChild(btnBar);
 
   ranges.forEach(([text, days]) => {
     const btn = document.createElement("button");
@@ -38,6 +49,8 @@
     btn.dataset.days = days;
     if (days === activeDays) btn.classList.add("active");
     btn.onclick = () => {
+      zoomDomain = null;
+      hideResetBtn();
       btnBar.querySelectorAll("button").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       activeDays = days;
@@ -46,10 +59,30 @@
     btnBar.appendChild(btn);
   });
 
+  // Reset-zoom button (hidden until a brush selection is made)
+  const resetBtn = document.createElement("button");
+  resetBtn.className = "reset-zoom";
+  resetBtn.textContent = "Reset zoom";
+  resetBtn.style.display = "none";
+  resetBtn.onclick = () => {
+    zoomDomain = null;
+    hideResetBtn();
+    // Re-activate the current duration button
+    btnBar.querySelectorAll("button").forEach(b => {
+      b.classList.toggle("active", parseInt(b.dataset.days) === activeDays);
+    });
+    renderChart();
+  };
+  toolbar.appendChild(resetBtn);
+
+  function showResetBtn() { resetBtn.style.display = ""; }
+  function hideResetBtn() { resetBtn.style.display = "none"; }
+
   // Status message while loading
   container.innerHTML = '<div class="empty-state">Loading chart data…</div>';
 
-  // Initialize DuckDB-WASM
+  // ── DuckDB-WASM init ──────────────────────────────────────────────────────
+
   let db, conn;
   try {
     const duckdb = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm");
@@ -87,7 +120,6 @@
   }
 
   // Group manifest entries by resolution (captures[1], e.g. "res=1h").
-  // Each entry carries its DuckDB file name and time bounds for filtering.
   const byResolution = new Map();
   for (const m of manifest) {
     const res = (m.captures && m.captures[1]) || "res=1h";
@@ -95,54 +127,44 @@
     const name = m.file.replace(/[^a-zA-Z0-9]/g, "_") + ".parquet";
     byResolution.get(res).push({
       name,
-      start_time: m.start_time || 0,  // epoch seconds
+      start_time: m.start_time || 0,
       end_time: m.end_time || 0,
     });
   }
 
   // Pick resolution based on the time window (fewer points for wider windows).
-  // Matches the DuckPond temporal-reduce output resolutions.
   function pickResolution(days) {
     const available = [...byResolution.keys()];
     const prefer = [
       [30, "res=1h"], [60, "res=2h"], [90, "res=4h"],
-      [180, "res=12h"], [9999, "res=24h"],
+      [180, "res=12h"], [Infinity, "res=24h"],
     ];
     for (const [maxDays, res] of prefer) {
       if (days <= maxDays && available.includes(res)) return res;
     }
-    // Fall back to coarsest available, then finest
     return available[available.length - 1] || available[0];
   }
 
-  // Compute the latest data timestamp from the manifest (epoch ms).
-  // Duration windows anchor to this, not Date.now(), so historical data works.
-  let dataEndMs = 0;
-  for (const entries of byResolution.values()) {
-    for (const f of entries) {
-      if (f.end_time > 0) dataEndMs = Math.max(dataEndMs, f.end_time * 1000);
-    }
-  }
-  if (dataEndMs === 0) dataEndMs = Date.now();
+  // ── Data query ─────────────────────────────────────────────────────────────
 
-  async function queryData(days) {
-    const end = dataEndMs;
-    const begin = days >= 9999 ? 0 : end - days * 86400000;
-    const res = pickResolution(days);
+  // For monitoring: the time axis always extends to now.
+  const nowMs = Date.now();
+
+  // Query data for a time window [beginMs, endMs].
+  // Resolution is chosen automatically based on window width.
+  async function queryData(beginMs, endMs) {
+    const windowDays = (endMs - beginMs) / 86400000;
+    const res = pickResolution(windowDays);
     const entries = byResolution.get(res) || [];
 
-    // Filter to files whose time range overlaps the requested window.
-    // start_time/end_time are epoch seconds; end/begin are epoch milliseconds.
     const filtered = entries.filter(f =>
-      f.start_time === 0 || (f.start_time * 1000 <= end && f.end_time * 1000 >= begin)
+      f.start_time === 0 || (f.start_time * 1000 <= endMs && f.end_time * 1000 >= beginMs)
     );
     const tableNames = filtered.map(f => f.name);
     if (tableNames.length === 0) return [];
 
     const parts = tableNames.map(t =>
-      begin > 0
-        ? `SELECT * FROM read_parquet('${t}') WHERE epoch_ms(timestamp) >= ${begin}`
-        : `SELECT * FROM read_parquet('${t}')`
+      `SELECT * FROM read_parquet('${t}') WHERE epoch_ms(timestamp) >= ${beginMs} AND epoch_ms(timestamp) <= ${endMs}`
     );
     const sql = parts.join(" UNION ALL BY NAME ") + " ORDER BY timestamp ASC";
 
@@ -155,37 +177,23 @@
     }
   }
 
-  // Import Observable Plot
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
   const Plot = await import("https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6/+esm");
 
-  // Convert a timestamp value (possibly BigInt nanoseconds) to a JS Date.
   function toDate(v) {
     return typeof v === "bigint" ? new Date(Number(v / 1000000n)) : new Date(v);
   }
 
-  // Pretty-print a column base name: "NorthDock.TempProbe.temperature.C" → "NorthDock TempProbe"
   function legendLabel(base) {
-    // The base is "instrument.probe.param.unit" — show the first two parts.
     const parts = base.split(".");
     return parts.length >= 2 ? parts.slice(0, 2).join(" ") : base;
   }
 
-  // Columns injected by Hive partitioning — skip these when grouping.
   const PARTITION_COLS = new Set(["year", "month", "day", "hour", "minute"]);
 
-  // Group columns by measurement.
-  //
-  // Temporal-reduce outputs columns like:
-  //   NorthDock.TempProbe.temperature.C.avg
-  //   NorthDock.TempProbe.temperature.C.min
-  //   NorthDock.TempProbe.temperature.C.max
-  //
-  // We group by the base name (everything before the last ".avg"/".min"/".max")
-  // and collect the stat suffixes present for each base. Then we group bases
-  // that share the same parameter+unit into one chart (e.g., all Temperature.C
-  // instruments on one chart).
   function groupColumns(row) {
-    const stats = new Map(); // base → { avg?, min?, max? }
+    const stats = new Map();
     for (const col of Object.keys(row)) {
       if (col === "timestamp" || PARTITION_COLS.has(col)) continue;
       if (typeof row[col] !== "number" && typeof row[col] !== "bigint") continue;
@@ -197,15 +205,12 @@
           break;
         }
       }
-      // Columns without a stat suffix get their own entry
       if (![".avg", ".min", ".max"].some(s => col.endsWith(s))) {
         stats.set(col, { avg: col });
       }
     }
 
-    // Group bases by param+unit (last two dot-separated parts of the base).
-    // e.g., "NorthDock.TempProbe.temperature.C" → key "temperature.C"
-    const charts = new Map(); // chartKey → [{ base, avg, min, max }]
+    const charts = new Map();
     for (const [base, s] of stats) {
       const parts = base.split(".");
       const chartKey = parts.length >= 2 ? parts.slice(-2).join(".") : base;
@@ -215,14 +220,87 @@
     return charts;
   }
 
-  // Palette for multiple series on one chart.
   const palette = [
     "var(--accent-color)", "#f472b6", "#34d399", "#fbbf24",
     "#a78bfa", "#fb923c", "#22d3ee", "#e879f9",
   ];
 
+  // ── Brush-to-zoom ─────────────────────────────────────────────────────────
+
+  // Attach a brush overlay to a chart wrapper.  The overlay sits on top of
+  // the Plot SVG and translates pixel drag → time domain → re-render.
+  //
+  // `domainBegin` / `domainEnd` are epoch-ms values that correspond to the
+  // left/right edges of the plot area (the SVG viewBox minus margins).
+  function attachBrush(wrapper, plotEl, domainBegin, domainEnd, marginLeft, plotWidth) {
+    const overlay = document.createElement("div");
+    overlay.className = "brush-overlay";
+    // Position over just the plot area (inside margins)
+    overlay.style.left = marginLeft + "px";
+    overlay.style.width = plotWidth + "px";
+    wrapper.style.position = "relative";
+    wrapper.appendChild(overlay);
+
+    const rect = document.createElement("div");
+    rect.className = "brush-rect";
+    overlay.appendChild(rect);
+
+    let startX = null;
+
+    overlay.addEventListener("mousedown", e => {
+      e.preventDefault();
+      startX = e.offsetX;
+      rect.style.left = startX + "px";
+      rect.style.width = "0";
+      rect.style.display = "block";
+    });
+
+    overlay.addEventListener("mousemove", e => {
+      if (startX === null) return;
+      const curX = Math.max(0, Math.min(e.offsetX, plotWidth));
+      const left = Math.min(startX, curX);
+      const width = Math.abs(curX - startX);
+      rect.style.left = left + "px";
+      rect.style.width = width + "px";
+    });
+
+    const finish = e => {
+      if (startX === null) return;
+      const endX = Math.max(0, Math.min(e.offsetX, plotWidth));
+      const left = Math.min(startX, endX);
+      const right = Math.max(startX, endX);
+      startX = null;
+      rect.style.display = "none";
+
+      // Ignore tiny drags (< 5 px)
+      if (right - left < 5) return;
+
+      // Map pixel range → time domain
+      const t0 = domainBegin + (left / plotWidth) * (domainEnd - domainBegin);
+      const t1 = domainBegin + (right / plotWidth) * (domainEnd - domainBegin);
+
+      zoomDomain = [t0, t1];
+      // Deactivate duration buttons, show reset
+      btnBar.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+      showResetBtn();
+      renderChart();
+    };
+
+    overlay.addEventListener("mouseup", finish);
+    overlay.addEventListener("mouseleave", e => {
+      if (startX !== null) finish(e);
+    });
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
   async function renderChart() {
-    const data = await queryData(activeDays);
+    // Determine the visible x-domain first — this drives both the query
+    // (resolution + time filter) and the chart axis.
+    const domainEnd = zoomDomain ? zoomDomain[1] : nowMs;
+    const domainBegin = zoomDomain ? zoomDomain[0] : (nowMs - activeDays * 86400000);
+
+    const data = await queryData(domainBegin, domainEnd);
 
     container.innerHTML = "";
 
@@ -233,21 +311,16 @@
 
     const charts = groupColumns(data[0]);
 
-    // Compute actual data time bounds (not Date.now — data may be historical).
-    const firstTs = toDate(data[0].timestamp).getTime();
-    const lastTs = toDate(data[data.length - 1].timestamp).getTime();
-    const dataEnd = lastTs;
-    const begin = activeDays >= 9999 ? undefined : dataEnd - activeDays * 86400000;
     const width = container.clientWidth - 32;
+    const marginLeft = 60;
+    const plotAreaWidth = width - marginLeft - 20; // 20 = right margin
 
     for (const [chartKey, series] of charts) {
-      // Build marks: for each series, area band (min–max) + avg line
       const marks = [];
       series.forEach((s, i) => {
         const color = palette[i % palette.length];
         const label = legendLabel(s.base);
 
-        // Min/max shaded band (if both present)
         if (s.min && s.max) {
           marks.push(
             Plot.areaY(data, {
@@ -260,7 +333,6 @@
           );
         }
 
-        // Avg line (or the only column if no stats)
         if (s.avg) {
           marks.push(
             Plot.line(data, {
@@ -274,13 +346,11 @@
         }
       });
 
-      // Chart title from the key, e.g. "temperature.C" → "Temperature (C)"
       const keyParts = chartKey.split(".");
       const title = keyParts.length >= 2
         ? `${keyParts[0].charAt(0).toUpperCase() + keyParts[0].slice(1)} (${keyParts[1]})`
         : chartKey;
 
-      // Legend entries
       const legendItems = series.map((s, i) => ({
         label: legendLabel(s.base),
         color: palette[i % palette.length],
@@ -297,13 +367,13 @@
       const plot = Plot.plot({
         width,
         height: 300,
-        marginLeft: 60,
+        marginLeft,
         style: { background: "transparent", color: "var(--fg-primary)" },
         x: {
           type: "time",
           label: "Date",
           grid: true,
-          domain: begin ? [begin, dataEnd] : undefined,
+          domain: [domainBegin, domainEnd],
         },
         y: { label: keyParts[keyParts.length - 1] || "", grid: true },
         marks,
@@ -314,6 +384,9 @@
       wrapper.appendChild(header);
       wrapper.appendChild(plot);
       container.appendChild(wrapper);
+
+      // Attach brush-to-zoom on the rendered SVG
+      attachBrush(wrapper, plot, domainBegin, domainEnd, marginLeft, plotAreaWidth);
     }
   }
 

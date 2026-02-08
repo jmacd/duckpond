@@ -142,11 +142,18 @@ main h1 {
 
 /* ── Duration buttons ───────────────────────────────────────── */
 
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
 .duration-buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-bottom: 1rem;
 }
 
 .duration-buttons button {
@@ -169,6 +176,43 @@ main h1 {
   background: var(--accent-color);
   border-color: var(--accent-color);
   color: white;
+}
+
+.reset-zoom {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--accent-color);
+  background: transparent;
+  color: var(--accent-color);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: all 0.15s;
+}
+
+.reset-zoom:hover {
+  background: var(--accent-color);
+  color: white;
+}
+
+/* ── Brush-to-zoom overlay ──────────────────────────────────── */
+
+.brush-overlay {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  cursor: crosshair;
+  z-index: 10;
+}
+
+.brush-rect {
+  display: none;
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: rgba(102, 126, 234, 0.2);
+  border-left: 1px solid var(--accent-color);
+  border-right: 1px solid var(--accent-color);
+  pointer-events: none;
 }
 
 /* ── Charts ─────────────────────────────────────────────────── */
