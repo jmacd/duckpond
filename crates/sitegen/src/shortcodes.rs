@@ -38,8 +38,6 @@ pub struct ExportedFile {
 /// All exported files for one export stage, grouped by $0 value.
 #[derive(Debug, Clone)]
 pub struct ExportContext {
-    /// Export stage name (e.g., "params")
-    pub name: String,
     /// Files grouped by the $0 capture value
     pub by_key: BTreeMap<String, Vec<ExportedFile>>,
 }
@@ -193,9 +191,17 @@ fn render_nav_list(ctx: &ShortcodeContext, collection: &str, path: &str) -> Stri
 
     let mut html = String::from("<ul class=\"nav-list\">\n");
     for item in items {
+        let href = format!("{}/{}.html", path, item);
+        let is_active = ctx.current_path == href;
+        let li_class = if is_active { " class=\"active\"" } else { "" };
+        let aria = if is_active {
+            " aria-current=\"page\""
+        } else {
+            ""
+        };
         html.push_str(&format!(
-            "  <li><a href=\"{}/{}.html\">{}</a></li>\n",
-            path, item, item
+            "  <li{}><a href=\"{}\"{}>{}</a></li>\n",
+            li_class, href, aria, item
         ));
     }
     html.push_str("</ul>");
@@ -320,11 +326,21 @@ mod tests {
                 vec!["Temperature".to_string(), "DO".to_string()],
             )]),
             site_title: String::new(),
-            current_path: String::new(),
+            current_path: "/params/Temperature.html".to_string(),
             breadcrumbs: vec![],
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
         assert!(html.contains("/params/DO.html"));
+        // Active item gets class and aria attribute
+        assert!(
+            html.contains(r#"<li class="active"><a href="/params/Temperature.html" aria-current="page">Temperature</a></li>"#),
+            "Expected active class on Temperature, got: {}", html
+        );
+        // Non-active item has no extra attributes
+        assert!(
+            html.contains("<li><a href=\"/params/DO.html\">DO</a></li>"),
+            "Expected plain li for DO, got: {}", html
+        );
     }
 }

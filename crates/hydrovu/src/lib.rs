@@ -73,17 +73,20 @@ pub fn get_key() -> Result<(String, String)> {
     Ok((key_id, key_val))
 }
 
-/// Archive active series files by renaming them to archive_YYYYMMDD.
+/// Archive active series files by compacting them to single-version archives.
 ///
-/// For each device, looks for `{Name}_active.series` (preferred) or
-/// legacy `{Name}.series` in the device directory and renames it to
-/// `{Name}_archive_YYYYMMDD.series`.
+/// For each device, finds the active multi-version series file, reads all versions
+/// through a DataFusion table provider (which merges them into a single logical
+/// table), streams the merged data through an ArrowWriter to produce a compact
+/// single-version parquet file, writes it as a new archive entry, and removes
+/// the old multi-version entry.
 ///
 /// Returns Vec of (new_pond_path, old_name) for the export script.
 pub async fn archive_devices(
     fs: &FS,
     config: &HydroVuConfig,
     device_filter: Option<&str>,
+    provider_ctx: &tinyfs::ProviderContext,
 ) -> Result<Vec<(String, String)>> {
     let root = fs.root().await?;
     let today = Utc::now().format("%Y%m%d").to_string();
@@ -91,10 +94,10 @@ pub async fn archive_devices(
 
     for device in &config.devices {
         // Apply device name filter if provided
-        if let Some(filter) = device_filter {
-            if device.name != filter {
-                continue;
-            }
+        if let Some(filter) = device_filter
+            && device.name != filter
+        {
+            continue;
         }
 
         let device_dir_path = format!("{}/devices/{}", config.hydrovu_path, device.id);
@@ -143,20 +146,148 @@ pub async fn archive_devices(
             continue;
         }
 
+        let old_path = format!("{}/{}", device_dir_path, old_name);
+        let new_path = format!("{}/{}", device_dir_path, new_name);
+
         log::info!(
-            "Archiving device {} ({}): {} → {}",
+            "Compacting device {} ({}): {} → {}",
             device.name,
             device.id,
             old_name,
-            new_name
+            new_name,
         );
-        device_dir.rename_entry(&old_name, &new_name).await?;
 
-        let new_path = format!("{}/{}", device_dir_path, new_name);
-        archived.push((new_path, old_name));
+        match compact_series(&root, &old_path, &new_path, provider_ctx).await? {
+            Some((min_time, max_time)) => {
+                log::info!("  Compacted: temporal bounds {} .. {}", min_time, max_time);
+
+                // Remove the old multi-version entry
+                device_dir
+                    .remove_entry(&old_name)
+                    .await
+                    .map_err(|e| anyhow!("Failed to remove old entry '{}': {}", old_name, e))?;
+
+                archived.push((new_path, old_name));
+            }
+            None => {
+                log::info!(
+                    "Skipping device {} ({}): series '{}' is empty",
+                    device.name,
+                    device.id,
+                    old_name
+                );
+            }
+        }
     }
 
     Ok(archived)
+}
+
+/// Compact a multi-version series into a single-version parquet file.
+///
+/// Resolves the source file, reads all versions merged through DataFusion,
+/// and writes the result as a new single-version series at `new_path`.
+///
+/// Returns `Ok(Some((min, max)))` on success, `Ok(None)` if the source is empty.
+async fn compact_series(
+    root: &tinyfs::WD,
+    old_path: &str,
+    new_path: &str,
+    provider_ctx: &tinyfs::ProviderContext,
+) -> Result<Option<(i64, i64)>> {
+    use tinyfs::Lookup;
+
+    // Resolve the source file to get a table provider
+    let (_, lookup) = root
+        .resolve_path(old_path)
+        .await
+        .map_err(|e| anyhow!("Failed to resolve '{}': {}", old_path, e))?;
+
+    let node_path = match lookup {
+        Lookup::Found(np) => np,
+        _ => return Err(anyhow!("Could not resolve series file '{}'", old_path)),
+    };
+
+    let file_handle = node_path
+        .as_file()
+        .await
+        .map_err(|e| anyhow!("Failed to open file '{}': {}", old_path, e))?;
+
+    let file_arc = file_handle.handle.get_file().await;
+    let file_guard = file_arc.lock().await;
+
+    let queryable = file_guard
+        .as_queryable()
+        .ok_or_else(|| anyhow!("File '{}' is not queryable", old_path))?;
+
+    let table_provider = queryable
+        .as_table_provider(node_path.id(), provider_ctx)
+        .await
+        .map_err(|e| anyhow!("Failed to get table provider for '{}': {}", old_path, e))?;
+
+    drop(file_guard);
+
+    // Register in DataFusion, execute query, always deregister on exit
+    let ctx = &provider_ctx.datafusion_session;
+    let table_ref = datafusion::sql::TableReference::bare("_compact");
+
+    _ = ctx
+        .register_table(table_ref.clone(), table_provider)
+        .map_err(|e| anyhow!("Failed to register table: {}", e))?;
+
+    let result = run_compaction_query(root, new_path, ctx).await;
+
+    // Always clean up the registration, even on error
+    let _ = ctx.deregister_table(table_ref);
+
+    result
+}
+
+/// Execute the compaction SQL and stream the result into a new series file.
+///
+/// Returns `Ok(None)` if the source produced no data.
+async fn run_compaction_query(
+    root: &tinyfs::WD,
+    new_path: &str,
+    ctx: &datafusion::execution::context::SessionContext,
+) -> Result<Option<(i64, i64)>> {
+    use futures::stream::StreamExt;
+    use tinyfs::arrow::ParquetExt;
+
+    let df = ctx
+        .sql("SELECT * FROM _compact ORDER BY timestamp")
+        .await
+        .map_err(|e| anyhow!("SQL error: {}", e))?;
+
+    let mut stream = df
+        .execute_stream()
+        .await
+        .map_err(|e| anyhow!("Stream error: {}", e))?;
+
+    // Peek first batch — return None for empty series
+    let first_batch = match stream.next().await {
+        Some(Ok(batch)) if batch.num_rows() > 0 => batch,
+        Some(Err(e)) => return Err(anyhow!("Read error: {}", e)),
+        _ => return Ok(None),
+    };
+
+    // Reconstruct a full stream with the peeked batch prepended
+    let schema = first_batch.schema();
+    let combined = futures::stream::once(async move {
+        Ok(first_batch) as std::result::Result<RecordBatch, datafusion::common::DataFusionError>
+    })
+    .chain(stream);
+    let combined_stream =
+        Box::pin(datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            schema, combined,
+        ));
+
+    let (min_time, max_time) = root
+        .create_series_from_stream(new_path, combined_stream, Some("timestamp"))
+        .await
+        .map_err(|e| anyhow!("Failed to write compacted series '{}': {}", new_path, e))?;
+
+    Ok(Some((min_time, max_time)))
 }
 
 impl HydroVuCollector {
@@ -369,21 +500,21 @@ impl HydroVuCollector {
                 })?;
 
             for (i, version_info) in version_infos.iter().enumerate() {
-                if let Some(metadata) = &version_info.extended_metadata {
-                    if let (Some(min_str), Some(max_str)) = (
+                if let Some(metadata) = &version_info.extended_metadata
+                    && let (Some(min_str), Some(max_str)) = (
                         metadata.get("min_event_time"),
                         metadata.get("max_event_time"),
-                    ) && let (Ok(min_time), Ok(max_time)) =
+                    )
+                    && let (Ok(min_time), Ok(max_time)) =
                         (min_str.parse::<i64>(), max_str.parse::<i64>())
-                    {
-                        debug!(
-                            "{} version {i}: temporal range {min_time}..{max_time}",
-                            series_path
-                        );
-                        max_timestamp = Some(
-                            max_timestamp.map_or(max_time, |current| current.max(max_time)),
-                        );
-                    }
+                {
+                    debug!(
+                        "{} version {i}: temporal range {min_time}..{max_time}",
+                        series_path
+                    );
+                    max_timestamp = Some(
+                        max_timestamp.map_or(max_time, |current| current.max(max_time)),
+                    );
                 }
             }
         }

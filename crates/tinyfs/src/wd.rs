@@ -418,6 +418,22 @@ impl WD {
         Ok(())
     }
 
+    /// Remove an entry from this directory by name.
+    ///
+    /// Returns `Ok(())` if the entry was found and removed, `Err(NotFound)` otherwise.
+    /// The removed node is dropped — this is a destructive unlink.
+    pub async fn remove_entry(&self, name: &str) -> Result<()> {
+        let _node = self
+            .dref
+            .handle
+            .remove(name)
+            .await?
+            .ok_or_else(|| Error::not_found(name))?;
+
+        debug!("Removed entry '{}' from directory", name);
+
+        Ok(())
+    }
     /// Get metadata for a file at the specified path
     pub async fn metadata_for_path<P: AsRef<Path>>(
         &self,

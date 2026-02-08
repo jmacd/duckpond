@@ -653,7 +653,7 @@ async fn describe_file_series_versions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::copy::copy_command;
+    use crate::commands::copy::{CopyOptions, copy_command};
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
     use anyhow::Result;
@@ -837,6 +837,7 @@ mod tests {
                 &[host_file.to_string_lossy().to_string()],
                 pond_path,
                 "data",
+                &CopyOptions::default(),
             )
             .await?;
             Ok(())

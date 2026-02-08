@@ -135,6 +135,97 @@ a running transaction. Pass `&mut tx` to helpers instead.
 - `pond cat --sql "..."` for ad-hoc queries
 - `pond control --sql "..."` for control table queries
 
+### TinyFS Data API (Parquet/Arrow Layer)
+
+TinyFS is **not just a filesystem** — it has a rich Parquet/Arrow data layer built in.
+Before writing new data-processing code, **check what already exists** in tinyfs.
+
+#### Key Principles
+
+1. **Arrow RecordBatch is the universal data type.** All reads and writes go through
+   RecordBatch. Never collect batches into a `Vec<RecordBatch>` when you can stream
+   them — `ArrowWriter::write(&batch)` accepts one batch at a time.
+
+2. **Parquet metadata is the source of temporal bounds.** After writing batches
+   through `ArrowWriter` and closing it, the parquet file contains column statistics
+   (min/max per row group). Use `extract_temporal_bounds_from_parquet_metadata()` to
+   read them — do NOT manually track min/max across batches.
+
+3. **Compose existing pieces, don't reinvent.** The common write pattern is:
+   - Stream batches → `ArrowWriter` → parquet bytes in `Vec<u8>`
+   - Extract temporal bounds from the parquet metadata
+   - Write bytes to tinyfs via `create_file_path_streaming_with_type`
+   - Set temporal metadata via `writer.set_temporal_metadata(min, max, ts_col)`
+   - `writer.shutdown()`
+   
+   The existing `create_series_from_batch` already does steps 2–5 for a single batch.
+   For streaming, reuse the same tail end.
+
+#### WD (Working Directory) — File Operations
+
+| Method | Creates? | Appends? | Purpose |
+|--------|----------|----------|---------|
+| `create_file_path_streaming_with_type(path, type)` | ✅ New only | ❌ | Create file, get writer |
+| `async_writer_path_with_type(path, type)` | ✅ If missing | ✅ If exists | Create-or-append |
+| `read_file_path_to_vec(path)` | | | Read raw bytes (loads all into memory) |
+| `async_reader_path(path)` | | | Streaming read |
+| `write_file_path_from_slice(path, &[u8])` | ✅ If missing | ✅ If exists | Write raw bytes |
+| `copy_to_parquet(pond_path, host_path, ctx)` | | | Export to host filesystem |
+
+#### WD — Directory Operations
+
+| Method | Behavior on exists |
+|--------|-------------------|
+| `create_dir_path(path)` | **Errors** `AlreadyExists` |
+| `create_dir_all(path)` | **Succeeds** (mkdir -p semantics) |
+| `open_dir_path(path)` | Returns `WD` for existing dir |
+| `rename_entry(old, new)` | Rename in-place (preserves version history) |
+| `remove(name)` | Unlinks name from directory (via `DirRef`) |
+
+**Rule:** Use `create_dir_all` for idempotent operations (factories, `--overwrite`).
+Use `create_dir_path` only when duplicate creation is a bug.
+
+#### ParquetExt Trait (on WD)
+
+| Method | Entry Type | Versioning |
+|--------|-----------|------------|
+| `create_table_from_batch(path, batch, type)` | Any | Single version |
+| `create_series_from_batch(path, batch, ts_col)` | `TablePhysicalSeries` | First version, with temporal bounds |
+| `write_series_from_batch(path, batch, ts_col)` | `TablePhysicalSeries` | Create **or** append version |
+| `read_table_as_batch(path)` | Any | Reads latest version |
+
+**Critical:** `write_series_from_batch` creates a new **version** — it does NOT merge
+with existing data. After N appends, a series has N versions. Reading via table provider
+merges all versions, but each version is stored separately. This is why **compaction**
+matters: archive a multi-version series by reading through DataFusion (which merges)
+and writing a single fresh version.
+
+#### Temporal Bounds
+
+Two extraction methods exist — use the right one:
+
+| Function | Input | When to use |
+|----------|-------|-------------|
+| `extract_temporal_bounds_from_batch(batch, ts_col)` | `&RecordBatch` | You have a single batch in memory |
+| `extract_temporal_bounds_from_parquet_metadata(meta, schema, ts_col)` | Parquet metadata | You have complete parquet bytes (post-`ArrowWriter::close()`) |
+
+Both normalize to **microseconds**. The parquet metadata approach is preferred when
+you've already written through `ArrowWriter` because the statistics are free.
+
+#### QueryableFile / Table Provider
+
+Files with entry types `table`, `table:series`, `table:dynamic` implement the
+`QueryableFile` trait. This gives access to a DataFusion `TableProvider`:
+
+```
+file_guard.as_queryable()?.as_table_provider(node_id, &provider_ctx) → Arc<dyn TableProvider>
+```
+
+For `table:series`, the table provider automatically **merges all versions** into a
+single logical table. This is the correct way to read the "current state" of a
+multi-version series — never read individual versions manually unless you specifically
+need version-level access.
+
 ---
 
 ## 📚 DOC MAP (Task-Oriented)
@@ -248,6 +339,11 @@ pond list /path/to/check  # ALWAYS verify results
 | `pond copy --format=table` works on CSV | Only Parquet input; CSV stays as `--format=data` |
 | `--format` controls export format | Export format is determined by source entry type |
 | `pond cat` dumps binary "because it's Parquet" | Behavior is driven by entry type, not file contents |
+| Collect batches into `Vec<RecordBatch>` then concat | Stream through `ArrowWriter` one batch at a time |
+| Track temporal min/max manually per batch | Parquet metadata has column statistics; use `extract_temporal_bounds_from_parquet_metadata` |
+| `create_dir_path` is safe for idempotent init | It errors on `AlreadyExists`; use `create_dir_all` for factories/`--overwrite` |
+| Need new tinyfs primitive for data transform | Compose existing pieces: table provider → stream → ArrowWriter → tinyfs write |
+| Rename compacts a multi-version series | Rename only changes the name; versions are preserved. Read via DataFusion + write fresh for compaction |
 
 ---
 

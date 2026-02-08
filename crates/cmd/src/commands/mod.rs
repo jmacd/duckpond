@@ -26,7 +26,7 @@ mod replicate_test_simple;
 
 pub use cat::cat_command;
 pub use control::control_command;
-pub use copy::copy_command;
+pub use copy::{CopyOptions, copy_command};
 pub use describe::describe_command;
 pub use export::export_command;
 pub use init::init_command;

@@ -157,6 +157,11 @@ enum Commands {
         /// Format for copying IN [possible values: data, table, series] (ignored for copy OUT)
         #[arg(long, default_value = "data")]
         format: String,
+        /// Strip a leading path prefix from pond paths when copying OUT.
+        /// e.g. --strip-prefix=/hydrovu copies /hydrovu/devices/123/foo.series
+        /// to <dest>/devices/123/foo.series instead of <dest>/hydrovu/devices/123/foo.series
+        #[arg(long)]
+        strip_prefix: Option<String>,
     },
     /// Create a directory in the pond
     Mkdir {
@@ -323,7 +328,13 @@ async fn main() -> Result<()> {
             sources,
             dest,
             format,
-        } => commands::copy_command(&ship_context, &sources, &dest, &format).await,
+            strip_prefix,
+        } => {
+            let options = commands::CopyOptions {
+                strip_prefix,
+            };
+            commands::copy_command(&ship_context, &sources, &dest, &format, &options).await
+        }
         Commands::Mkdir { path, parents } => {
             commands::mkdir_command(&ship_context, &path, parents).await
         }

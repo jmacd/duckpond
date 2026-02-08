@@ -126,6 +126,36 @@ pond copy host:///tmp/data.parquet /data/readings.parquet --format=table
 pond copy host:///tmp/data.csv /data/readings.csv --format=table
 ```
 
+#### Copy OUT (pond → host)
+
+Export files from the pond to the host filesystem. The destination must have the `host://` prefix.
+Glob patterns are supported for matching multiple files.
+
+```bash
+# Export all series files preserving directory structure
+pond copy '/hydrovu/devices/**/*.series' host:///tmp/export
+
+# Export a single file
+pond copy /data/readings.parquet host:///tmp/output
+```
+
+The `--format` flag is **ignored** when copying out — the export format is determined by the
+source entry type (table/series → Parquet via DataFusion, data → raw bytes).
+
+#### --strip-prefix
+
+When copying out, pond paths are preserved relative to the destination. This can produce
+unwanted nesting (e.g. exporting `/hydrovu/...` into a directory called `hydrovu/` creates
+`hydrovu/hydrovu/...`). Use `--strip-prefix` to remove a leading path prefix:
+
+```bash
+# Without --strip-prefix: creates output/hydrovu/devices/123/foo.series
+pond copy '/hydrovu/**/*.series' host:///tmp/output
+
+# With --strip-prefix: creates output/devices/123/foo.series
+pond copy '/hydrovu/**/*.series' host:///tmp/output --strip-prefix=/hydrovu
+```
+
 ---
 
 ### pond cat

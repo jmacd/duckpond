@@ -333,6 +333,23 @@ pub trait ParquetExt {
     where
         T: Serialize + ForArrow + Send + Sync,
         P: AsRef<Path> + Send + Sync;
+
+    /// Create a new FileSeries by streaming RecordBatches through ArrowWriter.
+    ///
+    /// This is the preferred method for compacting multi-version series: read all
+    /// versions through a DataFusion table provider (which merges them), then write
+    /// as a single fresh version via this method.
+    ///
+    /// Temporal bounds are extracted from the completed parquet metadata (column
+    /// statistics), so no manual min/max tracking is needed.
+    async fn create_series_from_stream<P>(
+        &self,
+        path: P,
+        stream: datafusion::physical_plan::SendableRecordBatchStream,
+        timestamp_column: Option<&str>,
+    ) -> Result<(i64, i64)>
+    where
+        P: AsRef<Path> + Send + Sync;
 }
 
 #[async_trait::async_trait]
@@ -506,6 +523,94 @@ impl ParquetExt for WD {
             .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
         self.write_series_from_batch(path, &batch, timestamp_column)
             .await
+    }
+
+    async fn create_series_from_stream<P>(
+        &self,
+        path: P,
+        mut stream: datafusion::physical_plan::SendableRecordBatchStream,
+        timestamp_column: Option<&str>,
+    ) -> Result<(i64, i64)>
+    where
+        P: AsRef<Path> + Send + Sync,
+    {
+        use futures::stream::StreamExt;
+
+        let ts_col = timestamp_column.unwrap_or("timestamp");
+
+        // Get first batch to determine schema
+        let first_batch = match stream.next().await {
+            Some(Ok(batch)) => batch,
+            Some(Err(e)) => {
+                return Err(crate::Error::Other(format!(
+                    "Failed to read first batch: {}",
+                    e
+                )))
+            }
+            None => {
+                return Err(crate::Error::Other(
+                    "Empty stream — no data to write".to_string(),
+                ))
+            }
+        };
+
+        let schema = first_batch.schema();
+
+        // Stream batches through ArrowWriter into an owned Vec<u8>
+        let cursor = Cursor::new(Vec::new());
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(cursor, schema, Some(props))
+            .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
+
+        writer
+            .write(&first_batch)
+            .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result
+                .map_err(|e| crate::Error::Other(format!("Read batch error: {}", e)))?;
+            writer
+                .write(&batch)
+                .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
+        }
+
+        // Finalize footer, then recover the buffer
+        let _file_metadata = writer
+            .finish()
+            .map_err(|e| crate::Error::Other(format!("Finish writer error: {}", e)))?;
+        let cursor = writer
+            .into_inner()
+            .map_err(|e| crate::Error::Other(format!("into_inner error: {}", e)))?;
+        let buffer = cursor.into_inner();
+
+        // Extract temporal bounds from the completed parquet metadata
+        let bytes = Bytes::from(buffer);
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
+            .map_err(|e| crate::Error::Other(format!("Parquet reader error: {}", e)))?;
+        let parquet_meta = reader_builder.metadata();
+        let arrow_schema = reader_builder.schema();
+
+        let (min_time, max_time) =
+            extract_temporal_bounds_from_parquet_metadata(parquet_meta, arrow_schema, ts_col)?;
+
+        // Write the compacted parquet bytes to TinyFS as a new series
+        let (_, mut tinyfs_writer) = self
+            .create_file_path_streaming_with_type(&path, EntryType::TablePhysicalSeries)
+            .await?;
+
+        tinyfs_writer
+            .write_all(&bytes)
+            .await
+            .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
+
+        tinyfs_writer.set_temporal_metadata(min_time, max_time, ts_col.to_string());
+
+        tinyfs_writer
+            .shutdown()
+            .await
+            .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
+
+        Ok((min_time, max_time))
     }
 }
 

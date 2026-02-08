@@ -19,10 +19,6 @@ pub struct PageJob {
     pub output_path: String,
     /// Pond path to the markdown template (e.g., "/etc/site/param.md")
     pub page_source: String,
-    /// Layout name from frontmatter (filled in later during rendering)
-    pub layout: String,
-    /// Page title (filled in later from frontmatter)
-    pub title: String,
     /// Capture group values ($0, $1, ...) — empty for static routes
     pub captures: Vec<String>,
     /// Exported data files for this page (empty for static routes)
@@ -85,8 +81,6 @@ fn expand_route(
                 jobs.push(PageJob {
                     output_path,
                     page_source: page.clone(),
-                    layout: String::new(), // filled from frontmatter
-                    title: String::new(),  // filled from frontmatter
                     captures: vec![],
                     datafiles: vec![],
                     breadcrumbs: breadcrumbs.clone(),
@@ -134,8 +128,6 @@ fn expand_route(
                     jobs.push(PageJob {
                         output_path,
                         page_source: page.clone(),
-                        layout: String::new(),
-                        title: String::new(),
                         captures,
                         datafiles: files.clone(),
                         breadcrumbs: breadcrumbs.clone(),
@@ -238,7 +230,6 @@ mod tests {
         exports.insert(
             "params".to_string(),
             ExportContext {
-                name: "params".to_string(),
                 by_key,
             },
         );

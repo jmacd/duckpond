@@ -258,7 +258,6 @@ async fn run_export_stages(
         exports.insert(
             stage.name.clone(),
             ExportContext {
-                name: stage.name.clone(),
                 by_key,
             },
         );
@@ -371,11 +370,12 @@ fn generate_site(
     // Build collections for navigation shortcodes
     let collections = routes::build_collections(exports);
 
-    // Render sidebar partial if configured
-    let sidebar_html = render_partial(config, "sidebar", read_pond_file, &collections);
-
     // Render each page
     for job in &jobs {
+        // Render sidebar per-page so nav_list can highlight the active link
+        let current_path = format!("/{}", job.output_path);
+        let sidebar_html =
+            render_partial(config, "sidebar", read_pond_file, &collections, &current_path);
         let raw_md = read_pond_file(&job.page_source)
             .map_err(|e| GenerateError(format!("Cannot read '{}': {}", job.page_source, e)))?;
 
@@ -400,7 +400,7 @@ fn generate_site(
             datafiles: job.datafiles.clone(),
             collections: collections.clone(),
             site_title: config.site.title.clone(),
-            current_path: format!("/{}", job.output_path),
+            current_path: current_path.clone(),
             breadcrumbs: job.breadcrumbs.clone(),
         });
 
@@ -458,18 +458,19 @@ fn render_partial(
     name: &str,
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
     collections: &BTreeMap<String, Vec<String>>,
+    current_path: &str,
 ) -> Option<String> {
     let path = config.partials.get(name)?;
     match read_pond_file(path) {
         Ok(md) => {
-            // Build a shortcode context for the partial (no captures/datafiles,
-            // but collections are needed for nav_list).
+            // Build a shortcode context for the partial — includes current_path
+            // so nav_list can highlight the active page link.
             let sc_ctx = Arc::new(ShortcodeContext {
                 captures: vec![],
                 datafiles: vec![],
                 collections: collections.clone(),
                 site_title: config.site.title.clone(),
-                current_path: String::new(),
+                current_path: current_path.to_string(),
                 breadcrumbs: vec![],
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
