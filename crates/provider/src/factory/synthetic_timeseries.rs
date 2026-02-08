@@ -402,9 +402,9 @@ fn validate_synthetic_timeseries_config(config: &[u8]) -> TinyFSResult<Value> {
 
     // Validate time range
     let start_ms = parse_rfc3339_to_millis(&cfg.start)
-        .map_err(|e| tinyfs::Error::Other(e))?;
+        .map_err(tinyfs::Error::Other)?;
     let end_ms = parse_rfc3339_to_millis(&cfg.end)
-        .map_err(|e| tinyfs::Error::Other(e))?;
+        .map_err(tinyfs::Error::Other)?;
     if end_ms <= start_ms {
         return Err(tinyfs::Error::Other(format!(
             "end ({}) must be after start ({})",

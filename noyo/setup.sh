@@ -17,11 +17,11 @@ ${EXE} init
 
 ${EXE} mkdir -p /etc
 
-${EXE} copy host://${NOYO}/data.html.tmpl /etc
-${EXE} copy host://${NOYO}/index.html.tmpl /etc
-${EXE} copy host://${NOYO}/page.html.tmpl /etc
-${EXE} copy host://${NOYO}/lib.js /etc
-${EXE} copy host://${NOYO}/style.css /etc
+# Sitegen markdown pages
+${EXE} mkdir -p /etc/site
+${EXE} copy host://${NOYO}/site/index.md /etc/site/index.md
+${EXE} copy host://${NOYO}/site/data.md /etc/site/data.md
+${EXE} copy host://${NOYO}/site/sidebar.md /etc/site/sidebar.md
 
 ${EXE} mkdir -p /laketech
 
@@ -53,6 +53,7 @@ ${EXE} mknod dynamic-dir /singled --config-path ${NOYO}/single.yaml
 
 ${EXE} mknod dynamic-dir /reduced --config-path ${NOYO}/reduce.yaml
 
-${EXE} mknod dynamic-dir /templates --config-path ${NOYO}/template.yaml
+# Sitegen factory (replaces old template factory + export.sh)
+${EXE} mknod sitegen /etc/site.yaml --config-path ${NOYO}/site.yaml
 
 ${EXE} mknod column-rename /etc/hydro_rename --config-path ${NOYO}/hrename.yaml

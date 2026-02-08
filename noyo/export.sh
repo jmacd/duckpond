@@ -19,12 +19,7 @@ cargo build
 #cargo build --release
 
 rm -rf ${OUTDIR}
+mkdir -p ${OUTDIR}
 
-# Parameters
-${EXE} export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/*' --dir ${OUTDIR} --temporal "year,month"
-
-# Site detail
-${EXE} export --pattern '/reduced/single_site/*/*.series' --pattern '/templates/sites/*' --dir ${OUTDIR} --temporal "year,month"
-
-# Index page
-${EXE} export --pattern '/templates/index/*' --dir ${OUTDIR}
+# Sitegen: exports data + renders HTML in one step
+${EXE} run /etc/site.yaml build ${OUTDIR}

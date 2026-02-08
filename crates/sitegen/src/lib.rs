@@ -4,8 +4,8 @@
 
 //! # Sitegen — Static site generator for DuckPond
 //!
-//! Replaces the Tera-based TemplateFactory with a Markdown + Maud pipeline
-//! powered by [Maudit](https://maudit.org) as a library.
+//! Replaces the Tera-based TemplateFactory with a Markdown + Maud pipeline.
+//! Uses pulldown-cmark for markdown rendering and Maud for HTML layouts.
 //!
 //! ## Usage
 //!
@@ -16,6 +16,7 @@
 mod config;
 mod factory;
 mod layouts;
+pub mod markdown;
 mod routes;
 mod shortcodes;
 

@@ -1,0 +1,42 @@
+factory: sitegen
+
+site:
+  title: "Noyo Harbor Blue Economy"
+  base_url: "/"
+
+exports:
+  - name: "params"
+    pattern: "/reduced/single_param/*/*.series"
+    temporal: ["year", "month"]
+  - name: "sites"
+    pattern: "/reduced/single_site/*/*.series"
+    temporal: ["year", "month"]
+
+routes:
+  - name: "home"
+    type: static
+    slug: ""
+    page: "/etc/site/index.md"
+  - name: "params"
+    type: static
+    slug: "params"
+    routes:
+      - name: "param-detail"
+        type: template
+        slug: "$0"
+        page: "/etc/site/data.md"
+        export: "params"
+  - name: "sites"
+    type: static
+    slug: "sites"
+    routes:
+      - name: "site-detail"
+        type: template
+        slug: "$0"
+        page: "/etc/site/data.md"
+        export: "sites"
+
+partials:
+  sidebar: "/etc/site/sidebar.md"
+
+static_assets: []

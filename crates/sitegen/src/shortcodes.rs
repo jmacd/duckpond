@@ -8,11 +8,10 @@
 //! to HTML at build time. They are the serialization boundary between typed
 //! Rust data (ExportedFile structs) and client-side HTML/JS.
 //!
-//! We use Maudit's `preprocess_shortcodes` for parsing/expansion, registering
-//! our own closures that capture an `Arc<ShortcodeContext>` with DuckPond data.
-//! No thread-locals needed — `Arc` is `Send + Sync`.
+//! Uses our own shortcode parser (in `crate::markdown`) with closures that
+//! capture an `Arc<ShortcodeContext>` with DuckPond data.
 
-use maudit::content::markdown::shortcodes::{MarkdownShortcodes, ShortcodeArgs};
+use crate::markdown::{ShortcodeArgs, Shortcodes};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -49,7 +48,7 @@ pub struct ExportContext {
 ///
 /// Each template page gets its own `ShortcodeContext`, wrapped in `Arc` and
 /// captured by the shortcode closures. This is the bridge between DuckPond's
-/// typed data and Maudit's shortcode API.
+/// typed data and the shortcode expansion engine.
 #[derive(Debug, Clone)]
 pub struct ShortcodeContext {
     /// Capture group values for this page ($0, $1, ...)
@@ -66,23 +65,23 @@ pub struct ShortcodeContext {
     pub breadcrumbs: Vec<(String, String)>,
 }
 
-/// Build a `MarkdownShortcodes` instance with all built-in shortcodes registered.
+/// Build a `Shortcodes` instance with all built-in shortcodes registered.
 ///
 /// Each closure captures `Arc<ShortcodeContext>` — no thread-locals, no RefCell.
 /// This function is called once per page, creating a fresh shortcodes set
 /// with the page's specific context.
-pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
-    let mut shortcodes = MarkdownShortcodes::new();
+pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
+    let mut shortcodes = Shortcodes::new();
 
     // {{ cap0 }}, {{ cap1 }}, ... — capture group values
     //
-    // Design doc uses `{{ $0 }}` syntax, but Maudit's shortcode name validation
+    // Design doc uses `{{ $0 }}` syntax, but shortcode name validation
     // requires ^[A-Za-z_][0-9A-Za-z_]+$. So templates use `{{ cap0 }}` and
     // `preprocess_variables()` rewrites `{{ $0 }}` → `{{ cap0 }}` before rendering.
     for i in 0..10usize {
         let c = ctx.clone();
         let name = format!("cap{}", i);
-        shortcodes.register(&name, move |_args: &ShortcodeArgs, _| {
+        shortcodes.register(&name, move |_args: &ShortcodeArgs| {
             c.captures.get(i).cloned().unwrap_or_default()
         });
     }
@@ -91,7 +90,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
     // Client-side chart.js reads the JSON to load parquet via DuckDB-WASM.
     {
         let c = ctx.clone();
-        shortcodes.register("chart", move |_args: &ShortcodeArgs, _| {
+        shortcodes.register("chart", move |_args: &ShortcodeArgs| {
             render_chart(&c.datafiles)
         });
     }
@@ -99,7 +98,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
     // {{ nav_list collection="params" base="/params" /}} — link list for a collection
     {
         let c = ctx.clone();
-        shortcodes.register("nav_list", move |args: &ShortcodeArgs, _| {
+        shortcodes.register("nav_list", move |args: &ShortcodeArgs| {
             let collection = args.get_str("collection").unwrap_or("");
             let base = args.get_str("base").or_else(|| args.get_str("path")).unwrap_or("");
             render_nav_list(&c, collection, base)
@@ -109,7 +108,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
     // {{ breadcrumb }} — breadcrumb trail
     {
         let c = ctx.clone();
-        shortcodes.register("breadcrumb", move |_args: &ShortcodeArgs, _| {
+        shortcodes.register("breadcrumb", move |_args: &ShortcodeArgs| {
             render_breadcrumb(&c.breadcrumbs)
         });
     }
@@ -117,7 +116,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> MarkdownShortcodes {
     // {{ site_title }} — site title from config
     {
         let c = ctx.clone();
-        shortcodes.register("site_title", move |_args: &ShortcodeArgs, _| {
+        shortcodes.register("site_title", move |_args: &ShortcodeArgs| {
             c.site_title.clone()
         });
     }
@@ -273,8 +272,8 @@ mod tests {
 
         let shortcodes = register_shortcodes(ctx);
         // Verify shortcodes work by running a known shortcode through preprocess
-        use maudit::content::markdown::shortcodes::preprocess_shortcodes;
-        let result = preprocess_shortcodes("{{ cap0 /}}", &shortcodes, None, None);
+        use crate::markdown::preprocess_shortcodes;
+        let result = preprocess_shortcodes("{{ cap0 /}}", &shortcodes, None);
         assert_eq!(result.unwrap(), "Temperature");
     }
 

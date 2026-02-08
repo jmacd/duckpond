@@ -20,9 +20,8 @@ use crate::layouts::{self, LayoutContext};
 use crate::routes;
 use crate::shortcodes::{self, ExportContext, ShortcodeContext};
 use log::{debug, info, warn};
-use maudit::content::markdown::shortcodes::preprocess_shortcodes;
-use maudit::content::render_markdown;
-use provider::{register_executable_factory, ExecutionContext, FactoryContext};
+use crate::markdown::{preprocess_shortcodes, render_markdown};
+use provider::{ExecutionContext, FactoryContext, register_executable_factory};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -78,8 +77,8 @@ async fn execute(
     let args: Vec<String> = std::iter::once("factory".to_string())
         .chain(ctx.args().iter().cloned())
         .collect();
-    let cmd = SitegenCommand::try_parse_from(args)
-        .map_err(|e| tinyfs::Error::Other(format!("{}", e)))?;
+    let cmd =
+        SitegenCommand::try_parse_from(args).map_err(|e| tinyfs::Error::Other(format!("{}", e)))?;
 
     match cmd.command {
         SitegenSubcommand::Build { output_dir } => {
@@ -111,10 +110,7 @@ async fn execute(
                             ))
                         })?;
                     let text = String::from_utf8(data).map_err(|e| {
-                        tinyfs::Error::Other(format!(
-                            "Non-UTF8 page '{}': {}",
-                            job.page_source, e
-                        ))
+                        tinyfs::Error::Other(format!("Non-UTF8 page '{}': {}", job.page_source, e))
                     })?;
                     file_cache.insert(job.page_source.clone(), text);
                 }
@@ -192,7 +188,12 @@ async fn run_export_stages(
 
     for stage in &config.exports {
         let matches = root.collect_matches(&stage.pattern).await?;
-        info!("Export stage '{}': {} matches for '{}'", stage.name, matches.len(), stage.pattern);
+        info!(
+            "Export stage '{}': {} matches for '{}'",
+            stage.name,
+            matches.len(),
+            stage.pattern
+        );
 
         let mut by_key: BTreeMap<String, Vec<shortcodes::ExportedFile>> = BTreeMap::new();
 
@@ -214,14 +215,11 @@ async fn run_export_stages(
                 &stage.temporal,
                 captures,
                 &data_dir,
-                &provider_ctx,
+                provider_ctx,
             )
             .await
             .map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "export_series_to_parquet '{}': {}",
-                    path_str, e
-                ))
+                tinyfs::Error::Other(format!("export_series_to_parquet '{}': {}", path_str, e))
             })?;
 
             // Build ExportedFile entries from the real output files
@@ -230,21 +228,24 @@ async fn run_export_stages(
                 let mut temporal = BTreeMap::new();
                 for component in export_output.file.components() {
                     let s = component.as_os_str().to_string_lossy();
-                    if let Some((k, v)) = s.split_once('=') {
-                        if stage.temporal.contains(&k.to_string()) {
-                            temporal.insert(k.to_string(), v.to_string());
-                        }
+                    if let Some((k, v)) = s.split_once('=')
+                        && stage.temporal.contains(&k.to_string())
+                    {
+                        temporal.insert(k.to_string(), v.to_string());
                     }
                 }
 
-                by_key.entry(key.clone()).or_default().push(shortcodes::ExportedFile {
-                    path: path_str.clone(),
-                    file: format!("/data/{}", export_output.file.to_string_lossy()),
-                    captures: captures.clone(),
-                    temporal,
-                    start_time: export_output.start_time.unwrap_or(0),
-                    end_time: export_output.end_time.unwrap_or(0),
-                });
+                by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .push(shortcodes::ExportedFile {
+                        path: path_str.clone(),
+                        file: format!("/data/{}", export_output.file.to_string_lossy()),
+                        captures: captures.clone(),
+                        temporal,
+                        start_time: export_output.start_time.unwrap_or(0),
+                        end_time: export_output.end_time.unwrap_or(0),
+                    });
             }
 
             info!(
@@ -284,13 +285,11 @@ fn copy_static_assets(
                     .unwrap_or(&asset.pattern);
                 let out_path = output_dir.join(rel);
                 if let Some(parent) = out_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e))
-                    })?;
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e)))?;
                 }
-                std::fs::write(&out_path, content.as_bytes()).map_err(|e| {
-                    tinyfs::Error::Other(format!("write {:?}: {}", out_path, e))
-                })?;
+                std::fs::write(&out_path, content.as_bytes())
+                    .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", out_path, e)))?;
                 debug!("copied static asset: {}", rel);
             }
             Err(e) => {
@@ -332,8 +331,6 @@ fn series_path_to_data_rel(pond_path: &str) -> String {
     let rel = if parts.len() > 1 { parts[1] } else { stripped };
     rel.strip_suffix(".series").unwrap_or(rel).to_string()
 }
-
-
 
 register_executable_factory!(
     name: "sitegen",
@@ -379,9 +376,8 @@ fn generate_site(
 
     // Render each page
     for job in &jobs {
-        let raw_md = read_pond_file(&job.page_source).map_err(|e| {
-            GenerateError(format!("Cannot read '{}': {}", job.page_source, e))
-        })?;
+        let raw_md = read_pond_file(&job.page_source)
+            .map_err(|e| GenerateError(format!("Cannot read '{}': {}", job.page_source, e)))?;
 
         let (fm_yaml, body) = split_frontmatter(&raw_md);
         let fm: Frontmatter = if fm_yaml.is_empty() {
@@ -413,13 +409,13 @@ fn generate_site(
 
         // Expand shortcodes
         let sc = shortcodes::register_shortcodes(sc_ctx);
-        let expanded = preprocess_shortcodes(&preprocessed, &sc, None, Some(&job.page_source))
+        let expanded = preprocess_shortcodes(&preprocessed, &sc, Some(&job.page_source))
             .map_err(|e| {
                 GenerateError(format!("Shortcode error in '{}': {}", job.page_source, e))
             })?;
 
         // Render markdown → HTML
-        let content_html = render_markdown(&expanded, None, None, None);
+        let content_html = render_markdown(&expanded);
 
         // Wrap in layout
         let full_html = layouts::apply_layout(
@@ -436,18 +432,20 @@ fn generate_site(
         // Write output file
         let out_path = output_dir.join(&job.output_path);
         if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                GenerateError(format!("mkdir {:?}: {}", parent, e))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| GenerateError(format!("mkdir {:?}: {}", parent, e)))?;
         }
-        std::fs::write(&out_path, full_html.as_bytes()).map_err(|e| {
-            GenerateError(format!("write {:?}: {}", out_path, e))
-        })?;
+        std::fs::write(&out_path, full_html.as_bytes())
+            .map_err(|e| GenerateError(format!("write {:?}: {}", out_path, e)))?;
 
         debug!("wrote {}", job.output_path);
     }
 
-    info!("Site generation complete: {} pages to {:?}", jobs.len(), output_dir);
+    info!(
+        "Site generation complete: {} pages to {:?}",
+        jobs.len(),
+        output_dir
+    );
     Ok(())
 }
 
@@ -476,9 +474,9 @@ fn render_partial(
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);
-            let expanded = preprocess_shortcodes(&preprocessed, &sc, None, Some(path))
-                .unwrap_or(preprocessed);
-            Some(render_markdown(&expanded, None, None, None))
+            let expanded =
+                preprocess_shortcodes(&preprocessed, &sc, Some(path)).unwrap_or(preprocessed);
+            Some(render_markdown(&expanded))
         }
         Err(e) => {
             warn!("Cannot read partial '{}' from '{}': {}", name, path, e);
@@ -502,7 +500,10 @@ fn split_frontmatter(content: &str) -> (String, String) {
     }
     let after = &trimmed[3..];
     if let Some(end) = after.find("\n---") {
-        (after[..end].trim().to_string(), after[end + 4..].to_string())
+        (
+            after[..end].trim().to_string(),
+            after[end + 4..].to_string(),
+        )
     } else {
         (String::new(), content.to_string())
     }

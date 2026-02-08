@@ -153,6 +153,7 @@ impl ExportSet {
 }
 
 /// Merge two ExportSets, preserving per-target schemas
+#[must_use]
 pub fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
     match (base, other) {
         (ExportSet::Empty, other) => other,
@@ -171,7 +172,7 @@ pub fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
                     .and_modify(|existing| {
                         let merged =
                             merge_export_sets(*existing.clone(), *other_set.clone());
-                        *existing = Box::new(merged);
+                        **existing = merged;
                     })
                     .or_insert(other_set);
             }
@@ -593,10 +594,8 @@ fn find_first_parquet_file(dir: &Path) -> Result<PathBuf> {
             let path = entry.path();
             if path.is_file() && path.extension().is_some_and(|ext| ext == "parquet") {
                 return Some(path);
-            } else if path.is_dir() {
-                if let Some(found) = find_recursive(&path) {
-                    return Some(found);
-                }
+            } else if path.is_dir() && let Some(found) = find_recursive(&path) {
+                return Some(found);
             }
         }
         None
@@ -662,6 +661,7 @@ pub fn parse_field_name(field_name: &str) -> Result<TemplateField> {
 }
 
 /// Count files in an ExportSet.
+#[must_use]
 pub fn count_export_set_files(export_set: &ExportSet) -> usize {
     match export_set {
         ExportSet::Empty => 0,
