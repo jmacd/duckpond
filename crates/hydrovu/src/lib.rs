@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow};
 use arrow_array::builder::{Float64Builder, TimestampSecondBuilder};
 use arrow_array::{Array, RecordBatch};
 use arrow_schema::{DataType, Field, TimeUnit};
-use chrono::{DateTime, SecondsFormat};
+use chrono::{DateTime, SecondsFormat, Utc};
 use log::debug;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -73,6 +73,92 @@ pub fn get_key() -> Result<(String, String)> {
     Ok((key_id, key_val))
 }
 
+/// Archive active series files by renaming them to archive_YYYYMMDD.
+///
+/// For each device, looks for `{Name}_active.series` (preferred) or
+/// legacy `{Name}.series` in the device directory and renames it to
+/// `{Name}_archive_YYYYMMDD.series`.
+///
+/// Returns Vec of (new_pond_path, old_name) for the export script.
+pub async fn archive_devices(
+    fs: &FS,
+    config: &HydroVuConfig,
+    device_filter: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let root = fs.root().await?;
+    let today = Utc::now().format("%Y%m%d").to_string();
+    let mut archived = Vec::new();
+
+    for device in &config.devices {
+        // Apply device name filter if provided
+        if let Some(filter) = device_filter {
+            if device.name != filter {
+                continue;
+            }
+        }
+
+        let device_dir_path = format!("{}/devices/{}", config.hydrovu_path, device.id);
+
+        // Navigate to the device directory
+        let device_dir = match root.open_dir_path(&device_dir_path).await {
+            Ok(dir) => dir,
+            Err(e) => {
+                log::warn!(
+                    "Skipping device {} ({}): directory not found: {}",
+                    device.name,
+                    device.id,
+                    e
+                );
+                continue;
+            }
+        };
+
+        // Try active-style name first, then legacy name
+        let active_name = format!("{}_active.series", device.name);
+        let legacy_name = format!("{}.series", device.name);
+
+        let old_name = if device_dir.get(&active_name).await?.is_some() {
+            active_name
+        } else if device_dir.get(&legacy_name).await?.is_some() {
+            legacy_name
+        } else {
+            log::info!(
+                "Skipping device {} ({}): no active or legacy series file found",
+                device.name,
+                device.id
+            );
+            continue;
+        };
+
+        let new_name = format!("{}_archive_{}.series", device.name, today);
+
+        // Check that the archive name doesn't already exist
+        if device_dir.get(&new_name).await?.is_some() {
+            log::warn!(
+                "Skipping device {} ({}): archive file {} already exists",
+                device.name,
+                device.id,
+                new_name
+            );
+            continue;
+        }
+
+        log::info!(
+            "Archiving device {} ({}): {} → {}",
+            device.name,
+            device.id,
+            old_name,
+            new_name
+        );
+        device_dir.rename_entry(&old_name, &new_name).await?;
+
+        let new_path = format!("{}/{}", device_dir_path, new_name);
+        archived.push((new_path, old_name));
+    }
+
+    Ok(archived)
+}
+
 impl HydroVuCollector {
     /// Create a new HydroVu collector
     pub async fn new(config: HydroVuConfig) -> Result<Self> {
@@ -117,6 +203,10 @@ impl HydroVuCollector {
         let mut device_summaries = Vec::new();
 
         for device in self.config.devices.clone() {
+            if !device.active {
+                debug!("Skipping inactive device '{}' (ID: {})", device.name, device.id);
+                continue;
+            }
             let result = self.collect_device(&device, state, fs).await?;
             total_records += result.records_collected;
 
@@ -206,91 +296,110 @@ impl HydroVuCollector {
         Ok(())
     }
 
-    /// Find the youngest (most recent) timestamp for a device using TinyFS metadata API
+    /// Find the youngest (most recent) timestamp for a device by scanning
+    /// ALL *.series files in the device directory. This includes both the
+    /// active file and any archive files, so that pre-loaded archive data
+    /// seamlessly sets the start point for the next API fetch.
     async fn find_youngest_timestamp(
         fs: &FS,
         hydrovu_path: &str,
         device_id: i64,
         device_name: &str,
     ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-        let device_path = format!(
-            "{}/devices/{}/{}.series",
-            hydrovu_path, device_id, device_name
-        );
+        let _ = device_name; // Reserved for future diagnostic use
+        let device_dir_path = format!("{}/devices/{}", hydrovu_path, device_id);
 
         let root_wd = fs
             .root()
             .await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        // Check if file exists before querying versions
-        match root_wd.resolve_path(&device_path).await {
-            Ok((_, lookup)) => match lookup {
-                tinyfs::Lookup::Found(_) => {
-                    debug!("Found existing FileSeries for device {device_id}");
-                }
-                _ => {
-                    debug!("FileSeries doesn't exist for device {device_id}: path not found");
-                    return Ok(0);
-                }
-            },
-            Err(e) => {
-                let err_str = format!("{:?}", e);
-                debug!("FileSeries doesn't exist for device {device_id}: {err_str}");
+        // Navigate to device directory
+        let device_dir = match root_wd.open_dir_path(&device_dir_path).await {
+            Ok(dir) => dir,
+            Err(_) => {
+                debug!("Device directory not found for device {device_id}, starting from epoch");
                 return Ok(0);
             }
         };
 
-        // Use TinyFS API for structured metadata access with temporal ranges
-        // FAIL-FAST: Propagate errors instead of silent fallback to epoch
-        let version_infos = root_wd
-            .list_file_versions(&device_path)
+        // List all entries and find *.series files
+        use futures::StreamExt;
+        let mut entries_stream = device_dir
+            .entries()
             .await
-            .map_err(|e| {
-                steward::StewardError::Dyn(
-                    format!(
-                        "Failed to query file versions for device {device_id}: {}",
-                        e
-                    )
-                    .into(),
-                )
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        let mut series_paths = Vec::new();
+        while let Some(entry) = entries_stream.next().await {
+            let entry = entry.map_err(|e| {
+                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
             })?;
+            if entry.name.ends_with(".series") && entry.entry_type.is_file() {
+                series_paths.push(format!("{}/{}", device_dir_path, entry.name));
+            }
+        }
 
-        let version_count = version_infos.len();
-        debug!("Found {version_count} file versions for device {device_id}");
+        if series_paths.is_empty() {
+            debug!("No .series files found for device {device_id}, starting from epoch");
+            return Ok(0);
+        }
 
-        // Find the maximum max_event_time across all versions using extended_metadata
+        debug!(
+            "Found {} .series files for device {device_id}: {:?}",
+            series_paths.len(),
+            series_paths
+        );
+
+        // Scan all versions of all series files for max timestamp
         let mut max_timestamp: Option<i64> = None;
-        for (i, version_info) in version_infos.iter().enumerate() {
-            if let Some(metadata) = &version_info.extended_metadata {
-                if let (Some(min_str), Some(max_str)) = (
-                    metadata.get("min_event_time"),
-                    metadata.get("max_event_time"),
-                ) && let (Ok(min_time), Ok(max_time)) =
-                    (min_str.parse::<i64>(), max_str.parse::<i64>())
-                {
-                    debug!("Version {i}: temporal range {min_time}..{max_time}");
-                    max_timestamp =
-                        Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
+
+        for series_path in &series_paths {
+            let version_infos = root_wd
+                .list_file_versions(series_path)
+                .await
+                .map_err(|e| {
+                    steward::StewardError::Dyn(
+                        format!(
+                            "Failed to query file versions for {}: {}",
+                            series_path, e
+                        )
+                        .into(),
+                    )
+                })?;
+
+            for (i, version_info) in version_infos.iter().enumerate() {
+                if let Some(metadata) = &version_info.extended_metadata {
+                    if let (Some(min_str), Some(max_str)) = (
+                        metadata.get("min_event_time"),
+                        metadata.get("max_event_time"),
+                    ) && let (Ok(min_time), Ok(max_time)) =
+                        (min_str.parse::<i64>(), max_str.parse::<i64>())
+                    {
+                        debug!(
+                            "{} version {i}: temporal range {min_time}..{max_time}",
+                            series_path
+                        );
+                        max_timestamp = Some(
+                            max_timestamp.map_or(max_time, |current| current.max(max_time)),
+                        );
+                    }
                 }
-            } else {
-                debug!("Record {i}: no temporal range");
             }
         }
 
         match max_timestamp {
             Some(timestamp) => {
                 // Add 1 second (1M microseconds) to avoid duplicate when API uses second resolution
-                // HydroVu API uses Unix seconds, so adding 1 microsecond would round down to same second
                 let next_timestamp = timestamp + 1_000_000;
                 debug!(
-                    "Found youngest timestamp {timestamp} for device {device_id}, will continue from {next_timestamp}"
+                    "Found youngest timestamp {timestamp} across all series for device {device_id}, will continue from {next_timestamp}"
                 );
                 Ok(next_timestamp)
             }
             None => {
                 debug!(
-                    "New device {device_id}: no existing temporal data found, starting fresh collection from epoch"
+                    "Device {device_id}: series files exist but no temporal data found, starting fresh"
                 );
                 Ok(0)
             }
@@ -404,7 +513,7 @@ impl HydroVuCollector {
 
         // Use TinyFS's clean API: pass RecordBatch, let TinyFS handle parquet conversion and metadata
         // write_series_from_batch handles both create (first run) and append (subsequent runs)
-        let device_path = format!("{hydrovu_path}/devices/{device_id}/{}.series", device.name);
+        let device_path = format!("{hydrovu_path}/devices/{device_id}/{}_active.series", device.name);
         use tinyfs::arrow::ParquetExt;
         let (_min_ts, _max_ts) = root_wd
             .write_series_from_batch(&device_path, &record_batch, Some("timestamp"))

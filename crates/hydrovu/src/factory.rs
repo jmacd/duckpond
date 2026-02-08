@@ -23,16 +23,31 @@ enum HydroVuCommand {
     /// Collect data from HydroVu API
     ///
     /// Fetches sensor data from configured devices and stores it in the pond.
-    /// This command requires a write transaction and cannot run post-commit.
+    /// Devices with `active: false` in the config are skipped.
     ///
     /// Example: pond run /etc/system.d/20-hydrovu collect
     Collect,
+
+    /// Archive active series data
+    ///
+    /// Renames each device's `{Name}_active.series` (or legacy `{Name}.series`)
+    /// to `{Name}_archive_YYYYMMDD.series`. Prints a `pond copy` script to
+    /// export the archived files to the host filesystem.
+    ///
+    /// Example: pond run /etc/hydrovu archive
+    /// Example: pond run /etc/hydrovu archive --device NoyoCenterVulink_1
+    Archive {
+        /// Only archive this device (by name). If omitted, archives all devices.
+        #[arg(long)]
+        device: Option<String>,
+    },
 }
 
 impl FactoryCommand for HydroVuCommand {
     fn allowed(&self) -> ExecutionMode {
         match self {
             Self::Collect => ExecutionMode::PondReadWriter,
+            Self::Archive { .. } => ExecutionMode::PondReadWriter,
         }
     }
 }
@@ -165,6 +180,9 @@ async fn execute_hydrovu(
     // Dispatch to command handler
     match cmd {
         HydroVuCommand::Collect => execute_collect(hydrovu_config, context).await,
+        HydroVuCommand::Archive { device } => {
+            execute_archive(hydrovu_config, context, device).await
+        }
     }
 }
 
@@ -224,6 +242,34 @@ async fn execute_collect(
         "HydroVu collection complete: {} total records collected",
         result.records_collected
     );
+
+    Ok(())
+}
+
+/// Execute the archive command - rename active series to archive files
+async fn execute_archive(
+    hydrovu_config: HydroVuConfig,
+    context: FactoryContext,
+    device_filter: Option<String>,
+) -> Result<(), TLogFSError> {
+    let state = tlogfs::extract_state(&context)?;
+    let fs = tinyfs::FS::new(state.clone())
+        .await
+        .map_err(TLogFSError::TinyFS)?;
+
+    let result = crate::archive_devices(&fs, &hydrovu_config, device_filter.as_deref()).await
+        .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+
+    // Print summary and export script
+    if result.is_empty() {
+        log::info!("No series files found to archive.");
+    } else {
+        log::info!("Archived {} series files.", result.len());
+        println!("# Export archived files with these commands:");
+        for (pond_path, _old_name) in &result {
+            println!("pond copy '{}' host://<dest>{}", pond_path, pond_path);
+        }
+    }
 
     Ok(())
 }
