@@ -53,7 +53,6 @@ ${EXE} mknod dynamic-dir /singled --config-path ${NOYO}/single.yaml
 
 ${EXE} mknod dynamic-dir /reduced --config-path ${NOYO}/reduce.yaml
 
-# Sitegen factory (replaces old template factory + export.sh)
 ${EXE} mknod sitegen /etc/site.yaml --config-path ${NOYO}/site.yaml
 
 ${EXE} mknod column-rename /etc/hydro_rename --config-path ${NOYO}/hrename.yaml

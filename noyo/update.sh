@@ -18,7 +18,7 @@ ${EXE} mknod dynamic-dir /singled --overwrite --config-path ${NOYO}/single.yaml
 
 ${EXE} mknod dynamic-dir /reduced --overwrite --config-path ${NOYO}/reduce.yaml
 
-${EXE} mknod dynamic-dir /templates --overwrite --config-path ${NOYO}/template.yaml
+${EXE} mknod sitegen /etc/site.yaml --overwrite --config-path ${NOYO}/site.yaml
 
 ${EXE} copy host://${NOYO}/data.html.tmpl /etc
 

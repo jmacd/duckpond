@@ -22,16 +22,29 @@
 
   // ── State ──────────────────────────────────────────────────────────────────
 
-  // Time range options (label, days)
+  // Time range options (label, days).
+  // Buttons are filtered at render time — only ranges that fit the actual
+  // data span are shown.
   const ranges = [
     ["1W", 7], ["2W", 14], ["1M", 30], ["3M", 90],
-    ["6M", 180], ["1Y", 365],
+    ["6M", 180], ["1Y", 365], ["2Y", 730], ["5Y", 1826],
   ];
   let activeDays = 90;  // Default: 3 months
 
   // Custom zoom range (set by brush, cleared by Reset or duration button)
   // When non-null, overrides the duration-button window.
   let zoomDomain = null;  // [beginMs, endMs] or null
+
+  // Compute the data time span from the manifest so we can hide buttons
+  // for ranges wider than the available data.
+  let dataStartMs = Infinity;
+  let dataEndMs = 0;
+  for (const m of manifest) {
+    if (m.start_time > 0) dataStartMs = Math.min(dataStartMs, m.start_time * 1000);
+    if (m.end_time > 0) dataEndMs = Math.max(dataEndMs, m.end_time * 1000);
+  }
+  if (dataStartMs === Infinity) dataStartMs = 0;
+  const dataSpanDays = dataEndMs > 0 ? (Date.now() - dataStartMs) / 86400000 : Infinity;
 
   // ── Duration button bar ────────────────────────────────────────────────────
 
@@ -43,7 +56,16 @@
   btnBar.className = "duration-buttons";
   toolbar.appendChild(btnBar);
 
-  ranges.forEach(([text, days]) => {
+  // Only show buttons whose window fits within the data span (with a small
+  // margin — show the button if data covers at least 50% of the window).
+  const visibleRanges = ranges.filter(([, days]) => days <= dataSpanDays * 2);
+
+  // If the current default doesn't appear in the visible set, pick the largest.
+  if (!visibleRanges.some(([, days]) => days === activeDays) && visibleRanges.length > 0) {
+    activeDays = visibleRanges[visibleRanges.length - 1][1];
+  }
+
+  visibleRanges.forEach(([text, days]) => {
     const btn = document.createElement("button");
     btn.textContent = text;
     btn.dataset.days = days;
