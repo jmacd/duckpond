@@ -35,7 +35,7 @@ EXE=${ROOT}/target/debug/pond
 
 export POND
 
-OUTDIR=${NOYO}/hydrovu
+OUTDIR=${NOYO}
 rm -rf ${OUTDIR}
 mkdir -p ${OUTDIR}
 

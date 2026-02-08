@@ -33,17 +33,14 @@ ${EXE} mkdir /etc/system.d
 #RUST_LOG=tlogfs=debug,remote=debug
 ${EXE} mknod remote /etc/system.d/1-backup --config-path ${NOYO}/backup.yaml
 
-# Disable hydrovu
+# HydroVu collector
 ${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
 
-# Copy-out hydrovu data
-#COPY=${NOYO}/copy
-#rm -rf ${COPY}
-#mkdir ${COPY}
-#POND=${REPLICA} ${EXE} copy '/hydrovu/**/*.series' host://${COPY}
-
-# Copy-in hydrovu data
-#${EXE} copy host://${COPY} /
+# Import archived instrument data (if any exported Parquet files exist)
+# Archive Parquet lives in noyo/hydrovu/ — same pattern as noyo/laketech/
+if [ -d "${NOYO}/hydrovu" ]; then
+  ${EXE} copy host://${NOYO}/hydrovu /hydrovu
+fi
 
 # Configure export pipeline
 
