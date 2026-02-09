@@ -128,9 +128,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
     // {{ base_url }} — base URL for use in markdown links: [Home]({{ base_url /}})
     {
         let c = ctx.clone();
-        shortcodes.register("base_url", move |_args: &ShortcodeArgs| {
-            c.base_url.clone()
-        });
+        shortcodes.register("base_url", move |_args: &ShortcodeArgs| c.base_url.clone());
     }
 
     shortcodes
@@ -353,7 +351,9 @@ mod tests {
             )]),
             site_title: String::new(),
             current_path: "/params/Temperature.html".to_string(),
-            breadcrumbs: vec![],            base_url: "/".to_string(),        };
+            breadcrumbs: vec![],
+            base_url: "/".to_string(),
+        };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
         assert!(html.contains("/params/DO.html"));
