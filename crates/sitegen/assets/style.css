@@ -239,6 +239,13 @@ main h1 {
   color: var(--fg-muted);
 }
 
+/* ── Map (Leaflet) ──────────────────────────────────────────── */
+
+#map {
+  width: 100%;
+  z-index: 0;  /* Leaflet tiles use z-index; keep map in normal flow */
+}
+
 /* ── Hero (index page) ──────────────────────────────────────── */
 
 .hero {

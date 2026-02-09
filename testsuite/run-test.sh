@@ -246,9 +246,9 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     # Print a short summary
     # Print a short summary — extract from the test's own results line
     RESULTS_LINE=$(grep -E '^=== Results:' "${LOG_FILE}" 2>/dev/null || true)
-    TOTAL=$(grep -cE '^  [✓✗]' "${LOG_FILE}" 2>/dev/null || echo 0)
-    PASSED=$(grep -c '^  ✓' "${LOG_FILE}" 2>/dev/null || echo 0)
-    FAILED_COUNT=$(grep -c '^  ✗' "${LOG_FILE}" 2>/dev/null || echo 0)
+    TOTAL=$(grep -cE '^  [✓✗]' "${LOG_FILE}" 2>/dev/null) || TOTAL=0
+    PASSED=$(grep -c '^  ✓' "${LOG_FILE}" 2>/dev/null) || PASSED=0
+    FAILED_COUNT=$(grep -c '^  ✗' "${LOG_FILE}" 2>/dev/null) || FAILED_COUNT=0
 
     if [[ ${EXIT_CODE} -eq 0 ]]; then
         echo "=== PASSED ${PASSED}/${TOTAL} checks ==="

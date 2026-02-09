@@ -3,25 +3,30 @@ title: "Noyo Harbor Blue Economy"
 layout: default
 ---
 
-# Noyo Harbor Blue Economy
+# Water Quality Monitoring
 
-Water Quality Monitoring Dashboard
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 
-<div id="map" style="height:400px; border-radius:8px; margin:2rem 0;"></div>
+<div id="map" style="height:400px; width:100%; border-radius:8px; margin:2rem 0;"></div>
 
 ## About This Project
 
-The Noyo Harbor Blue Economy project monitors water quality at key locations
-throughout Noyo Harbor in Fort Bragg, California. Real-time sensors measure:
+The [Noyo Harbor Blue Economy](https://noyooceancollective.org/bevri/)
+project in partnership with the City of Fort Bragg, the Noyo Harbor
+District in partnership with California Sea Grant and the Noyo Center
+for Marine Sciences have established water quality monitoring in Noyo
+Harbor.
+
+Real-time sensors measure:
 
 - **Dissolved Oxygen (DO)** — Critical for marine life health
 - **Salinity** — Indicates freshwater/seawater mixing
 - **Temperature** — Affects oxygen levels and species habitat
 
-Use the navigation on the left to explore data **by parameter** (comparing all
-sites) or **by site** (viewing all parameters at one location).
+Use the navigation on the left to explore data **by parameter**
+(comparing all sites) or **by site** (viewing all parameters at one
+location).
 
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script type="module">
 import * as L from "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/+esm";
 const map = L.map("map", { scrollWheelZoom: false }).setView([39.4252, -123.8037], 16);

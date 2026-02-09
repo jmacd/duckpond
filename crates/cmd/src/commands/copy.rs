@@ -439,13 +439,23 @@ async fn copy_in(
                                 ))
                         }
                         tinyfs::CopyDestination::ExistingFile => {
-                            // Destination is an existing file - not supported for copy operations
+                            // Destination is an existing file — overwrite it (Unix cp semantics).
+                            // For single-source, write a new version via async_writer_path_with_type;
+                            // reads always return the latest version, so the old content is superseded.
                             if sources.len() == 1 {
-                                Err(steward::StewardError::DataInit(
-                                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                                        format!("Destination '{}' exists but is not a directory (cannot copy to existing file)", &dest)
-                                    ))
-                                ))
+                                let source = &sources[0];
+                                let (_is_host, clean_source) = parse_host_path(source);
+                                // Extract filename from destination path
+                                let dest_filename = std::path::Path::new(dest.as_str())
+                                    .file_name()
+                                    .and_then(|f| f.to_str())
+                                    .unwrap_or(&dest);
+                                copy_single_file_to_directory_with_name(&clean_source, &dest_wd, dest_filename, &format).await
+                                    .map_err(|e| steward::StewardError::DataInit(
+                                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to overwrite file: {}", e)))
+                                    ))?;
+                                log::info!("Overwrote {}", &dest);
+                                Ok(())
                             } else {
                                 Err(steward::StewardError::DataInit(
                                     tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(

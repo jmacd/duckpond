@@ -214,11 +214,38 @@
 
   const PARTITION_COLS = new Set(["year", "month", "day", "hour", "minute"]);
 
-  function groupColumns(row) {
-    const stats = new Map();
-    for (const col of Object.keys(row)) {
+  function groupColumns(data) {
+    // Discover numeric columns across ALL rows.  UNION ALL BY NAME fills
+    // missing instruments with NULL; typeof null !== "number", so checking
+    // only the first row misses series whose data starts later.
+    const numericCols = new Set();
+    const candidates = new Set();
+
+    for (const col of Object.keys(data[0])) {
       if (col === "timestamp" || PARTITION_COLS.has(col)) continue;
-      if (typeof row[col] !== "number" && typeof row[col] !== "bigint") continue;
+      const v = data[0][col];
+      if (typeof v === "number" || typeof v === "bigint") {
+        numericCols.add(col);
+      } else if (v == null) {
+        candidates.add(col);  // null — may be numeric in later rows
+      }
+    }
+
+    // Resolve remaining candidates by scanning subsequent rows
+    for (let i = 1; i < data.length && candidates.size > 0; i++) {
+      for (const col of candidates) {
+        const v = data[i][col];
+        if (v != null) {
+          if (typeof v === "number" || typeof v === "bigint") {
+            numericCols.add(col);
+          }
+          candidates.delete(col);
+        }
+      }
+    }
+
+    const stats = new Map();
+    for (const col of numericCols) {
       for (const suffix of [".avg", ".min", ".max"]) {
         if (col.endsWith(suffix)) {
           const base = col.slice(0, -suffix.length);
@@ -331,7 +358,7 @@
       return;
     }
 
-    const charts = groupColumns(data[0]);
+    const charts = groupColumns(data);
 
     const width = container.clientWidth - 32;
     const marginLeft = 60;
@@ -347,8 +374,9 @@
           marks.push(
             Plot.areaY(data, {
               x: d => toDate(d.timestamp),
-              y1: d => Number(d[s.min]),
-              y2: d => Number(d[s.max]),
+              y1: d => d[s.min] != null ? Number(d[s.min]) : NaN,
+              y2: d => d[s.max] != null ? Number(d[s.max]) : NaN,
+              defined: d => d[s.min] != null && d[s.max] != null,
               fill: color,
               fillOpacity: 0.15,
             })
@@ -359,7 +387,8 @@
           marks.push(
             Plot.line(data, {
               x: d => toDate(d.timestamp),
-              y: d => Number(d[s.avg]),
+              y: d => d[s.avg] != null ? Number(d[s.avg]) : NaN,
+              defined: d => d[s.avg] != null,
               stroke: color,
               strokeWidth: 1.5,
               title: () => label,
