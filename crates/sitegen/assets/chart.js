@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // DuckPond sitegen — chart.js
 // Reads the chart-data JSON manifest, loads .parquet files via DuckDB-WASM,
 // renders time-series line charts with Observable Plot.
