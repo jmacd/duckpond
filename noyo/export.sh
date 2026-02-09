@@ -10,7 +10,6 @@ OUTDIR=./export
 
 export RUST_BACKTRACE=1
 export POND_MAX_ALLOC_MB=1000
-#export RUST_LOG=tlogfs=debug
 
 export POND
 
