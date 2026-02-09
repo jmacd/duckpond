@@ -29,4 +29,5 @@ entries:
       pattern: "/combined/*"
       columns:
         - "AT500_Surface.Depth.m"
+        - "AT500_Bottom.Depth.m"
         
