@@ -347,8 +347,14 @@ impl TemporalReduceSqlFile {
             // Create unique pattern name based on source path to avoid collisions
             // when multiple temporal reduce files are active in the same session
             // CRITICAL: Lowercase to match DataFusion's case-insensitive table name handling
-            let pattern_name =
-                format!("source_{}", self.source_path.replace(['/', '.'], "_")).to_lowercase();
+            // Replace ALL non-alphanumeric characters with underscore so the name is
+            // a valid unquoted SQL identifier (spaces, parens, slashes, etc.).
+            let sanitized: String = self
+                .source_path
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            let pattern_name = format!("source_{}", sanitized).to_lowercase();
 
             // Generate the SQL query with schema discovery, using the unique pattern name
             log::debug!(

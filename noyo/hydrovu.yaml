@@ -40,15 +40,15 @@ devices:
 
   - name:  NoyoCenterVulink_2
     id:    6582334615060480
-    active: false
+    #active: false
     comment: "Was SilverVulink1. Failed around May 30, 2024."
 
   - name:  NoyoCenterVulink_3
     id:    6417476404772864
-    active: false
+    #active: false
     comment: "Was SilverVulink2. Replaced Vulink_2 around July 23, 2024. Site decommissioned."
 
   - name:  NoyoCenterAT500_2
     id:    5859376846209024
-    active: false
+    #active: false
     comment: "Was SilverAT500. Site decommissioned."

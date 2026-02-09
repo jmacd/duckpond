@@ -1,6 +1,6 @@
 ## Noyo Center for Marine Sciences
 
-### Noyo Harbor in Fort Bragg, CA
+### Noyo Harbor
 
 - [Home](/)
 

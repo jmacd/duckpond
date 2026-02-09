@@ -49,10 +49,11 @@ struct DeviceCollectionResult {
     final_timestamp: Option<i64>,
 }
 
-/// Convert Unix timestamp (seconds since epoch) to RFC3339 date string
-pub fn utc2date(utc: i64) -> Result<String> {
-    Ok(DateTime::from_timestamp(utc, 0)
-        .ok_or_else(|| anyhow::anyhow!("cannot convert timestamp {} to date", utc))?
+/// Convert timestamp in **microseconds** (DuckPond canonical unit) to RFC3339 date string
+pub fn utc2date(utc_micros: i64) -> Result<String> {
+    let seconds = utc_micros / 1_000_000;
+    Ok(DateTime::from_timestamp(seconds, 0)
+        .ok_or_else(|| anyhow::anyhow!("cannot convert timestamp {} to date", utc_micros))?
         .to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
@@ -599,17 +600,17 @@ impl HydroVuCollector {
         let count = wide_records.len();
         debug!("Fetched {count} new records from API (client handled row limiting)");
 
-        // Track final timestamp if needed
+        // Track final timestamp if needed (in microseconds — DuckPond canonical unit)
         let mut final_timestamp = youngest_timestamp;
         if !wide_records.is_empty() {
             let oldest_timestamp = wide_records
                 .iter()
-                .map(|r| r.timestamp.timestamp())
+                .map(|r| r.timestamp.timestamp() * 1_000_000)
                 .min()
                 .unwrap_or(0);
             let newest_timestamp = wide_records
                 .iter()
-                .map(|r| r.timestamp.timestamp())
+                .map(|r| r.timestamp.timestamp() * 1_000_000)
                 .max()
                 .unwrap_or(0);
             let oldest_date =
@@ -655,7 +656,7 @@ impl HydroVuCollector {
 
         // Log completion with timestamp range for next run
         if !wide_records.is_empty() {
-            let next_start_timestamp = final_timestamp + 1;
+            let next_start_timestamp = final_timestamp + 1_000_000;
             let next_date =
                 utc2date(next_start_timestamp).unwrap_or_else(|_| "invalid date".to_string());
             debug!(

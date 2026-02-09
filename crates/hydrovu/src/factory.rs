@@ -231,13 +231,11 @@ async fn execute_collect(
             .unwrap_or_else(|_| format!("{}", summary.final_timestamp));
 
         log::info!(
-            "Device {} collected data from {} ({}) to {} ({}) ({} records)",
+            "Device {} collected {} records from {} to {}",
             summary.device_id,
-            summary.start_timestamp,
+            summary.records_collected,
             start_date,
-            summary.final_timestamp,
             final_date,
-            summary.records_collected
         );
     }
 
