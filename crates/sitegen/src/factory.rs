@@ -368,7 +368,12 @@ fn generate_site(
     // Render each page
     for job in &jobs {
         // Render sidebar per-page so nav_list can highlight the active link
-        let current_path = format!("/{}", job.output_path);
+        let base = config.site.base_url.trim_end_matches('/');
+        let current_path = if base.is_empty() || base == "/" {
+            format!("/{}", job.output_path)
+        } else {
+            format!("{}/{}", base, job.output_path)
+        };
         let sidebar_html = render_partial(
             config,
             "sidebar",
@@ -402,6 +407,7 @@ fn generate_site(
             site_title: config.site.title.clone(),
             current_path: current_path.clone(),
             breadcrumbs: job.breadcrumbs.clone(),
+            base_url: config.site.base_url.clone(),
         });
 
         // Rewrite {{ $0 }} → {{ cap0 }}, nav-list → nav_list, etc.
@@ -472,6 +478,7 @@ fn render_partial(
                 site_title: config.site.title.clone(),
                 current_path: current_path.to_string(),
                 breadcrumbs: vec![],
+                base_url: config.site.base_url.clone(),
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);

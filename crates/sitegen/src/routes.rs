@@ -36,10 +36,16 @@ pub fn expand_routes(
     exports: &BTreeMap<String, ExportContext>,
 ) -> Vec<PageJob> {
     let mut jobs = Vec::new();
-    let breadcrumbs = vec![("Home".to_string(), "/".to_string())];
+    let base = config.site.base_url.trim_end_matches('/').to_string();
+    let home_url = if base.is_empty() || base == "/" {
+        "/".to_string()
+    } else {
+        format!("{}/", base)
+    };
+    let breadcrumbs = vec![("Home".to_string(), home_url)];
 
     for route in &config.routes {
-        expand_route(route, "", &breadcrumbs, exports, &mut jobs);
+        expand_route(route, "", &breadcrumbs, &base, exports, &mut jobs);
     }
 
     jobs
@@ -50,6 +56,7 @@ fn expand_route(
     route: &RouteConfig,
     parent_path: &str,
     parent_breadcrumbs: &[(String, String)],
+    base_url: &str,
     exports: &BTreeMap<String, ExportContext>,
     jobs: &mut Vec<PageJob>,
 ) {
@@ -69,11 +76,12 @@ fn expand_route(
 
             let mut breadcrumbs = parent_breadcrumbs.to_vec();
             if !route.slug.is_empty() {
-                let url = if url_path.starts_with('/') {
+                let raw_url = if url_path.starts_with('/') {
                     url_path.clone()
                 } else {
                     format!("/{}", url_path)
                 };
+                let url = prefix_base(base_url, &raw_url);
                 breadcrumbs.push((route.name.clone(), url));
             }
 
@@ -89,7 +97,7 @@ fn expand_route(
 
             // Recurse into children
             for child in &route.routes {
-                expand_route(child, &url_path, &breadcrumbs, exports, jobs);
+                expand_route(child, &url_path, &breadcrumbs, base_url, exports, jobs);
             }
         }
 
@@ -115,11 +123,12 @@ fn expand_route(
                 let output_path = format!("{}.html", url_path.trim_start_matches('/'));
 
                 let mut breadcrumbs = parent_breadcrumbs.to_vec();
-                let url = if url_path.starts_with('/') {
+                let raw_url = if url_path.starts_with('/') {
                     url_path.clone()
                 } else {
                     format!("/{}", url_path)
                 };
+                let url = prefix_base(base_url, &raw_url);
                 breadcrumbs.push((key.clone(), url));
 
                 let captures = vec![key.clone()];
@@ -136,10 +145,21 @@ fn expand_route(
 
                 // Recurse into children (rare for template routes, but supported)
                 for child in &route.routes {
-                    expand_route(child, &url_path, &breadcrumbs, exports, jobs);
+                    expand_route(child, &url_path, &breadcrumbs, base_url, exports, jobs);
                 }
             }
         }
+    }
+}
+
+/// Prepend the base URL prefix to a path.
+///
+/// `base_url` is pre-trimmed of trailing `/` (empty string means root).
+fn prefix_base(base_url: &str, path: &str) -> String {
+    if base_url.is_empty() {
+        path.to_string()
+    } else {
+        format!("{}{}", base_url, path)
     }
 }
 
@@ -167,7 +187,7 @@ mod tests {
         SiteConfig {
             site: SiteMeta {
                 title: "Test".to_string(),
-                base_url: "/".to_string(),
+                base_url: "/test/".to_string(),
             },
             exports: vec![ExportStage {
                 name: "params".to_string(),

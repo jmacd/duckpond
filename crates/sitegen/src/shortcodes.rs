@@ -61,6 +61,8 @@ pub struct ShortcodeContext {
     pub current_path: String,
     /// Breadcrumb segments: (label, href)
     pub breadcrumbs: Vec<(String, String)>,
+    /// Base URL prefix for all generated links (e.g., "/noyo-harbor/")
+    pub base_url: String,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -102,7 +104,8 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
                 .get_str("base")
                 .or_else(|| args.get_str("path"))
                 .unwrap_or("");
-            render_nav_list(&c, collection, base)
+            let prefixed_base = prefix_with_base_url(&c.base_url, base);
+            render_nav_list(&c, collection, &prefixed_base)
         });
     }
 
@@ -120,6 +123,12 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         shortcodes.register("site_title", move |_args: &ShortcodeArgs| {
             c.site_title.clone()
         });
+    }
+
+    // {{ base_url }} — base URL for use in markdown links: [Home]({{ base_url /}})
+    {
+        let c = ctx.clone();
+        shortcodes.register("base_url", move |_args: &ShortcodeArgs| c.base_url.clone());
     }
 
     shortcodes
@@ -147,6 +156,22 @@ pub fn preprocess_variables(content: &str) -> String {
 // ---------------------------------------------------------------------------
 // Shortcode renderers
 // ---------------------------------------------------------------------------
+
+/// Prepend base_url to an absolute path.
+///
+/// If `base_url` is `/` (default), returns `path` unchanged.
+/// If `base_url` is `/noyo-harbor/`, returns `/noyo-harbor/params` for `/params`.
+fn prefix_with_base_url(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.is_empty() || base == "/" {
+        return path.to_string();
+    }
+    if path.starts_with('/') {
+        format!("{}{}", base, path)
+    } else {
+        format!("{}/{}", base, path)
+    }
+}
 
 /// Render a chart container with inline datafile manifest.
 ///
@@ -272,6 +297,7 @@ mod tests {
                 ("Params".to_string(), "/params".to_string()),
                 ("Temperature".to_string(), "/params/Temperature".to_string()),
             ],
+            base_url: "/".to_string(),
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -326,6 +352,7 @@ mod tests {
             site_title: String::new(),
             current_path: "/params/Temperature.html".to_string(),
             breadcrumbs: vec![],
+            base_url: "/".to_string(),
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));

@@ -15,11 +15,7 @@ cargo build
 
 ${EXE} init
 
-${EXE} mkdir -p /etc/site
-
-${EXE} copy host://${NOYO}/site/index.md /etc/site/index.md
-${EXE} copy host://${NOYO}/site/data.md /etc/site/data.md
-${EXE} copy host://${NOYO}/site/sidebar.md /etc/site/sidebar.md
+${EXE} copy host://${NOYO}/site /etc/site
 
 ${EXE} mkdir -p /laketech
 
