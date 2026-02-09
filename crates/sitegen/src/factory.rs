@@ -17,10 +17,10 @@
 
 use crate::config::SiteConfig;
 use crate::layouts::{self, LayoutContext};
+use crate::markdown::{preprocess_shortcodes, render_markdown};
 use crate::routes;
 use crate::shortcodes::{self, ExportContext, ShortcodeContext};
 use log::{debug, info, warn};
-use crate::markdown::{preprocess_shortcodes, render_markdown};
 use provider::{ExecutionContext, FactoryContext, register_executable_factory};
 use serde::Deserialize;
 use serde_json::Value;
@@ -255,12 +255,7 @@ async fn run_export_stages(
             );
         }
 
-        exports.insert(
-            stage.name.clone(),
-            ExportContext {
-                by_key,
-            },
-        );
+        exports.insert(stage.name.clone(), ExportContext { by_key });
     }
 
     Ok(exports)
@@ -374,8 +369,13 @@ fn generate_site(
     for job in &jobs {
         // Render sidebar per-page so nav_list can highlight the active link
         let current_path = format!("/{}", job.output_path);
-        let sidebar_html =
-            render_partial(config, "sidebar", read_pond_file, &collections, &current_path);
+        let sidebar_html = render_partial(
+            config,
+            "sidebar",
+            read_pond_file,
+            &collections,
+            &current_path,
+        );
         let raw_md = read_pond_file(&job.page_source)
             .map_err(|e| GenerateError(format!("Cannot read '{}': {}", job.page_source, e)))?;
 
@@ -409,8 +409,8 @@ fn generate_site(
 
         // Expand shortcodes
         let sc = shortcodes::register_shortcodes(sc_ctx);
-        let expanded = preprocess_shortcodes(&preprocessed, &sc, Some(&job.page_source))
-            .map_err(|e| {
+        let expanded =
+            preprocess_shortcodes(&preprocessed, &sc, Some(&job.page_source)).map_err(|e| {
                 GenerateError(format!("Shortcode error in '{}': {}", job.page_source, e))
             })?;
 

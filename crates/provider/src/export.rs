@@ -170,8 +170,7 @@ pub fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
                 _ = base_map
                     .entry(key)
                     .and_modify(|existing| {
-                        let merged =
-                            merge_export_sets(*existing.clone(), *other_set.clone());
+                        let merged = merge_export_sets(*existing.clone(), *other_set.clone());
                         **existing = merged;
                     })
                     .or_insert(other_set);
@@ -247,25 +246,27 @@ pub async fn export_series_to_parquet(
     std::fs::create_dir_all(export_dir)?;
 
     // Register the series as a DataFusion table
-    let (_, lookup) = root.resolve_path(pond_path).await.map_err(|e| {
-        anyhow::anyhow!("Failed to resolve path '{}': {}", pond_path, e)
-    })?;
+    let (_, lookup) = root
+        .resolve_path(pond_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to resolve path '{}': {}", pond_path, e))?;
 
     let node_path = match lookup {
         tinyfs::Lookup::Found(np) => np,
         _ => return Err(anyhow::anyhow!("Path not found: {}", pond_path)),
     };
 
-    let file_handle = node_path.as_file().await.map_err(|e| {
-        anyhow::anyhow!("'{}' is not a file: {}", pond_path, e)
-    })?;
+    let file_handle = node_path
+        .as_file()
+        .await
+        .map_err(|e| anyhow::anyhow!("'{}' is not a file: {}", pond_path, e))?;
 
     let file_arc = file_handle.handle.get_file().await;
     let file_guard = file_arc.lock().await;
 
-    let queryable = file_guard.as_queryable().ok_or_else(|| {
-        anyhow::anyhow!("'{}' is not a queryable file", pond_path)
-    })?;
+    let queryable = file_guard
+        .as_queryable()
+        .ok_or_else(|| anyhow::anyhow!("'{}' is not a queryable file", pond_path))?;
 
     let node_id = node_path.id();
     let table_provider = queryable
@@ -291,10 +292,7 @@ pub async fn export_series_to_parquet(
     );
 
     if !temporal_parts.is_empty() {
-        copy_sql.push_str(&format!(
-            " PARTITIONED BY ({})",
-            temporal_parts.join(", ")
-        ));
+        copy_sql.push_str(&format!(" PARTITIONED BY ({})", temporal_parts.join(", ")));
     }
 
     log::debug!("export SQL: {}", copy_sql);
@@ -327,10 +325,7 @@ pub async fn export_series_to_parquet(
         .collect();
 
     if results.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No files were exported for: {}",
-            pond_path
-        ));
+        return Err(anyhow::anyhow!("No files were exported for: {}", pond_path));
     }
 
     Ok((results, schema))
@@ -342,10 +337,7 @@ pub async fn export_series_to_parquet(
 
 /// Discover all parquet files in the export directory, returning relative paths
 /// from `base_path` with temporal bounds extracted from Hive partition dirs.
-pub fn discover_exported_files(
-    export_path: &Path,
-    base_path: &Path,
-) -> Result<Vec<ExportOutput>> {
+pub fn discover_exported_files(export_path: &Path, base_path: &Path) -> Result<Vec<ExportOutput>> {
     let mut files = Vec::new();
 
     fn collect_parquet_files(
@@ -404,9 +396,7 @@ pub fn discover_exported_files(
 ///
 /// e.g. `Temperature/res=1h/year=2025/month=7/data.parquet`
 /// → `(Some(1751328000), Some(1753920000))`  (2025-07-01 → 2025-08-01)
-pub fn extract_timestamps_from_path(
-    relative_path: &Path,
-) -> Result<(Option<i64>, Option<i64>)> {
+pub fn extract_timestamps_from_path(relative_path: &Path) -> Result<(Option<i64>, Option<i64>)> {
     let components = relative_path.components();
     let mut temporal_parts = HashMap::new();
     let mut parsed_parts = Vec::new();
@@ -511,7 +501,9 @@ pub fn build_utc_timestamp(parts: &HashMap<&str, i32>) -> Result<i64> {
 pub fn calculate_end_time(parts: &HashMap<&str, i32>, last_part: &str) -> Result<i64> {
     use chrono::{Datelike, TimeZone, Utc};
 
-    let year = *parts.get("year").ok_or_else(|| anyhow::anyhow!("Missing year"))?;
+    let year = *parts
+        .get("year")
+        .ok_or_else(|| anyhow::anyhow!("Missing year"))?;
     let month = *parts.get("month").unwrap_or(&1) as u32;
     let day = *parts.get("day").unwrap_or(&1) as u32;
     let hour = *parts.get("hour").unwrap_or(&0) as u32;
@@ -528,7 +520,12 @@ pub fn calculate_end_time(parts: &HashMap<&str, i32>, last_part: &str) -> Result
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "Invalid date: {}-{:02}-{:02} {:02}:{:02}:{:02}",
-                year, month, day, hour, minute, second
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second
             )
         })?;
 
@@ -568,19 +565,23 @@ pub fn read_parquet_schema(export_dir: &Path) -> Result<TemplateSchema> {
     let first_parquet = find_first_parquet_file(export_dir)?;
 
     let file = std::fs::File::open(&first_parquet).map_err(|e| {
-        anyhow::anyhow!("Failed to open parquet file {}: {}", first_parquet.display(), e)
+        anyhow::anyhow!(
+            "Failed to open parquet file {}: {}",
+            first_parquet.display(),
+            e
+        )
     })?;
 
-    let reader_builder =
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).map_err(
-            |e| {
-                anyhow::anyhow!(
-                    "Failed to read parquet schema from {}: {}",
-                    first_parquet.display(),
-                    e
-                )
-            },
-        )?;
+    let reader_builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        file,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read parquet schema from {}: {}",
+            first_parquet.display(),
+            e
+        )
+    })?;
 
     let arrow_schema = reader_builder.schema();
     transform_arrow_to_template_schema(arrow_schema)
@@ -594,16 +595,17 @@ fn find_first_parquet_file(dir: &Path) -> Result<PathBuf> {
             let path = entry.path();
             if path.is_file() && path.extension().is_some_and(|ext| ext == "parquet") {
                 return Some(path);
-            } else if path.is_dir() && let Some(found) = find_recursive(&path) {
+            } else if path.is_dir()
+                && let Some(found) = find_recursive(&path)
+            {
                 return Some(found);
             }
         }
         None
     }
 
-    find_recursive(dir).ok_or_else(|| {
-        anyhow::anyhow!("No parquet files found in {}", dir.display())
-    })
+    find_recursive(dir)
+        .ok_or_else(|| anyhow::anyhow!("No parquet files found in {}", dir.display()))
 }
 
 /// Transform Arrow schema to template schema format.

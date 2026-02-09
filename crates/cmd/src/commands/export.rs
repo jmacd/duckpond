@@ -14,9 +14,8 @@ use tinyfs::{EntryType, Error as TinyFsError, NodePath, Visitor};
 
 // Re-export shared export types from provider crate
 pub use provider::export::{
-    ExportOutput, ExportSet, TemplateSchema,
-    count_export_set_files, discover_exported_files, extract_timestamps_from_path,
-    merge_export_sets, print_export_set, read_parquet_schema,
+    ExportOutput, ExportSet, TemplateSchema, count_export_set_files, discover_exported_files,
+    extract_timestamps_from_path, merge_export_sets, print_export_set, read_parquet_schema,
 };
 
 // TODO: the timestamps are confusingly local and/or UTC. do not trust the
@@ -1065,4 +1064,3 @@ async fn export_raw_file(
         )),
     }
 }
-

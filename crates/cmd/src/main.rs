@@ -330,9 +330,7 @@ async fn main() -> Result<()> {
             format,
             strip_prefix,
         } => {
-            let options = commands::CopyOptions {
-                strip_prefix,
-            };
+            let options = commands::CopyOptions { strip_prefix };
             commands::copy_command(&ship_context, &sources, &dest, &format, &options).await
         }
         Commands::Mkdir { path, parents } => {

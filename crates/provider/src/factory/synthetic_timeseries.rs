@@ -111,7 +111,9 @@ impl WaveformComponent {
                 phase,
             } => {
                 let period_secs = parse_duration_secs(period);
-                offset + amplitude * (2.0 * std::f64::consts::PI * t_seconds / period_secs + phase).sin()
+                offset
+                    + amplitude
+                        * (2.0 * std::f64::consts::PI * t_seconds / period_secs + phase).sin()
             }
             WaveformComponent::Triangle {
                 amplitude,
@@ -120,7 +122,8 @@ impl WaveformComponent {
                 phase,
             } => {
                 let period_secs = parse_duration_secs(period);
-                let t_norm = (t_seconds / period_secs + phase / (2.0 * std::f64::consts::PI)).rem_euclid(1.0);
+                let t_norm = (t_seconds / period_secs + phase / (2.0 * std::f64::consts::PI))
+                    .rem_euclid(1.0);
                 // Triangle wave: rises from -1 to 1 in first half, falls from 1 to -1 in second half
                 let tri = if t_norm < 0.5 {
                     4.0 * t_norm - 1.0
@@ -187,10 +190,7 @@ fn parse_duration_secs(s: &str) -> f64 {
     match humantime::parse_duration(s) {
         Ok(d) => d.as_secs_f64(),
         Err(_) => {
-            log::warn!(
-                "Failed to parse duration '{}', defaulting to 3600s (1h)",
-                s
-            );
+            log::warn!("Failed to parse duration '{}', defaulting to 3600s (1h)", s);
             3600.0
         }
     }
@@ -250,11 +250,14 @@ fn generate_batches(
 
     let num_rows = timestamps.len();
     if num_rows == 0 {
-        return Err("interval is larger than the time range — no data points generated".to_string());
+        return Err(
+            "interval is larger than the time range — no data points generated".to_string(),
+        );
     }
 
     // Generate one column of values per point
-    let mut columns: Vec<Arc<dyn arrow::array::Array>> = Vec::with_capacity(1 + config.points.len());
+    let mut columns: Vec<Arc<dyn arrow::array::Array>> =
+        Vec::with_capacity(1 + config.points.len());
 
     // Timestamp column
     columns.push(Arc::new(
@@ -356,9 +359,8 @@ impl tinyfs::QueryableFile for SyntheticTimeseriesFile {
             tinyfs::Error::Other(format!("Failed to generate synthetic timeseries: {}", e))
         })?;
 
-        let mem_table = MemTable::try_new(schema, vec![batches]).map_err(|e| {
-            tinyfs::Error::Other(format!("Failed to create MemTable: {}", e))
-        })?;
+        let mem_table = MemTable::try_new(schema, vec![batches])
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable: {}", e)))?;
 
         Ok(Arc::new(mem_table))
     }
@@ -372,7 +374,12 @@ impl std::fmt::Debug for SyntheticTimeseriesFile {
             .field("interval", &self.config.interval)
             .field(
                 "points",
-                &self.config.points.iter().map(|p| &p.name).collect::<Vec<_>>(),
+                &self
+                    .config
+                    .points
+                    .iter()
+                    .map(|p| &p.name)
+                    .collect::<Vec<_>>(),
             )
             .finish()
     }
@@ -401,10 +408,8 @@ fn validate_synthetic_timeseries_config(config: &[u8]) -> TinyFSResult<Value> {
         .map_err(|e| tinyfs::Error::Other(format!("Invalid synthetic-timeseries config: {}", e)))?;
 
     // Validate time range
-    let start_ms = parse_rfc3339_to_millis(&cfg.start)
-        .map_err(tinyfs::Error::Other)?;
-    let end_ms = parse_rfc3339_to_millis(&cfg.end)
-        .map_err(tinyfs::Error::Other)?;
+    let start_ms = parse_rfc3339_to_millis(&cfg.start).map_err(tinyfs::Error::Other)?;
+    let end_ms = parse_rfc3339_to_millis(&cfg.end).map_err(tinyfs::Error::Other)?;
     if end_ms <= start_ms {
         return Err(tinyfs::Error::Other(format!(
             "end ({}) must be after start ({})",

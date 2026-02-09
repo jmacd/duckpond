@@ -278,10 +278,9 @@ async fn run_compaction_query(
         Ok(first_batch) as std::result::Result<RecordBatch, datafusion::common::DataFusionError>
     })
     .chain(stream);
-    let combined_stream =
-        Box::pin(datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-            schema, combined,
-        ));
+    let combined_stream = Box::pin(
+        datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(schema, combined),
+    );
 
     let (min_time, max_time) = root
         .create_series_from_stream(new_path, combined_stream, Some("timestamp"))
@@ -336,7 +335,10 @@ impl HydroVuCollector {
 
         for device in self.config.devices.clone() {
             if !device.active {
-                debug!("Skipping inactive device '{}' (ID: {})", device.name, device.id);
+                debug!(
+                    "Skipping inactive device '{}' (ID: {})",
+                    device.name, device.id
+                );
                 continue;
             }
             let result = self.collect_device(&device, state, fs).await?;
@@ -464,9 +466,8 @@ impl HydroVuCollector {
 
         let mut series_paths = Vec::new();
         while let Some(entry) = entries_stream.next().await {
-            let entry = entry.map_err(|e| {
-                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-            })?;
+            let entry = entry
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
             if entry.name.ends_with(".series") && entry.entry_type.is_file() {
                 series_paths.push(format!("{}/{}", device_dir_path, entry.name));
             }
@@ -487,18 +488,11 @@ impl HydroVuCollector {
         let mut max_timestamp: Option<i64> = None;
 
         for series_path in &series_paths {
-            let version_infos = root_wd
-                .list_file_versions(series_path)
-                .await
-                .map_err(|e| {
-                    steward::StewardError::Dyn(
-                        format!(
-                            "Failed to query file versions for {}: {}",
-                            series_path, e
-                        )
-                        .into(),
-                    )
-                })?;
+            let version_infos = root_wd.list_file_versions(series_path).await.map_err(|e| {
+                steward::StewardError::Dyn(
+                    format!("Failed to query file versions for {}: {}", series_path, e).into(),
+                )
+            })?;
 
             for (i, version_info) in version_infos.iter().enumerate() {
                 if let Some(metadata) = &version_info.extended_metadata
@@ -513,9 +507,8 @@ impl HydroVuCollector {
                         "{} version {i}: temporal range {min_time}..{max_time}",
                         series_path
                     );
-                    max_timestamp = Some(
-                        max_timestamp.map_or(max_time, |current| current.max(max_time)),
-                    );
+                    max_timestamp =
+                        Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
                 }
             }
         }
@@ -645,7 +638,10 @@ impl HydroVuCollector {
 
         // Use TinyFS's clean API: pass RecordBatch, let TinyFS handle parquet conversion and metadata
         // write_series_from_batch handles both create (first run) and append (subsequent runs)
-        let device_path = format!("{hydrovu_path}/devices/{device_id}/{}_active.series", device.name);
+        let device_path = format!(
+            "{hydrovu_path}/devices/{device_id}/{}_active.series",
+            device.name
+        );
         use tinyfs::arrow::ParquetExt;
         let (_min_ts, _max_ts) = root_wd
             .write_series_from_batch(&device_path, &record_batch, Some("timestamp"))

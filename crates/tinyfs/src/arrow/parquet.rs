@@ -545,12 +545,12 @@ impl ParquetExt for WD {
                 return Err(crate::Error::Other(format!(
                     "Failed to read first batch: {}",
                     e
-                )))
+                )));
             }
             None => {
                 return Err(crate::Error::Other(
                     "Empty stream — no data to write".to_string(),
-                ))
+                ));
             }
         };
 

@@ -918,12 +918,7 @@ mod tests {
         }
 
         /// Copy files into the pond with default options
-        async fn copy_in(
-            &self,
-            sources: Vec<String>,
-            dest: &str,
-            format: &str,
-        ) -> Result<()> {
+        async fn copy_in(&self, sources: Vec<String>, dest: &str, format: &str) -> Result<()> {
             copy_command(
                 &self.ship_context,
                 &sources,
@@ -935,11 +930,7 @@ mod tests {
         }
 
         /// Copy files out of the pond with default options
-        async fn copy_out_to(
-            &self,
-            patterns: Vec<String>,
-            host_dest: &str,
-        ) -> Result<()> {
+        async fn copy_out_to(&self, patterns: Vec<String>, host_dest: &str) -> Result<()> {
             copy_command(
                 &self.ship_context,
                 &patterns,
@@ -1331,8 +1322,7 @@ mod tests {
         );
 
         // Test copying with empty sources
-        let result =
-            copy_command(&setup.ship_context, &[], "should_fail.txt", "data", &opts).await;
+        let result = copy_command(&setup.ship_context, &[], "should_fail.txt", "data", &opts).await;
         assert!(result.is_err(), "Should fail with empty sources");
 
         // Test copying with invalid format
@@ -1422,10 +1412,7 @@ mod tests {
 
         // Copy out using pattern
         setup
-            .copy_out_to(
-                vec!["/data/**/*.series".to_string()],
-                &output_path,
-            )
+            .copy_out_to(vec!["/data/**/*.series".to_string()], &output_path)
             .await?;
 
         // Verify all files were exported with correct directory structure
@@ -1475,10 +1462,7 @@ mod tests {
 
         // Copy out single file
         setup
-            .copy_out_to(
-                vec!["/test_sensor.series".to_string()],
-                &output_path,
-            )
+            .copy_out_to(vec!["/test_sensor.series".to_string()], &output_path)
             .await?;
 
         // Verify file was exported
@@ -1580,10 +1564,7 @@ mod tests {
         let output_path = output_dir.path().to_string_lossy().to_string();
 
         setup1
-            .copy_out_to(
-                vec!["/data/**/*.series".to_string()],
-                &output_path,
-            )
+            .copy_out_to(vec!["/data/**/*.series".to_string()], &output_path)
             .await?;
 
         // Verify files were exported

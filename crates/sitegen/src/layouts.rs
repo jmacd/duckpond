@@ -7,7 +7,7 @@
 //! Layouts wrap rendered markdown content in a complete HTML document.
 //! Selected by frontmatter `layout: data|default` in each markdown page.
 
-use maud::{html, Markup, PreEscaped, DOCTYPE};
+use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 /// Context passed to layout functions.
 pub struct LayoutContext<'a> {

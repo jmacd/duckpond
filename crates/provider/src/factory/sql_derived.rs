@@ -462,7 +462,9 @@ impl SqlDerivedFile {
         // form for tinyfs path matching.
         let tinyfs_path_decoded = percent_encoding::percent_decode_str(url.path())
             .decode_utf8()
-            .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8 in URL path '{}': {}", url.path(), e)))?
+            .map_err(|e| {
+                tinyfs::Error::Other(format!("Invalid UTF-8 in URL path '{}': {}", url.path(), e))
+            })?
             .to_string();
         let tinyfs_path = tinyfs_path_decoded.as_str();
 

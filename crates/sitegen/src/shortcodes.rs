@@ -98,7 +98,10 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         let c = ctx.clone();
         shortcodes.register("nav_list", move |args: &ShortcodeArgs| {
             let collection = args.get_str("collection").unwrap_or("");
-            let base = args.get_str("base").or_else(|| args.get_str("path")).unwrap_or("");
+            let base = args
+                .get_str("base")
+                .or_else(|| args.get_str("path"))
+                .unwrap_or("");
             render_nav_list(&c, collection, base)
         });
     }
@@ -223,17 +226,12 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
                 label
             ));
         } else {
-            html.push_str(&format!(
-                "  <li><a href=\"{}\">{}</a></li>\n",
-                href, label
-            ));
+            html.push_str(&format!("  <li><a href=\"{}\">{}</a></li>\n", href, label));
         }
     }
     html.push_str("</ol></nav>");
     html
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -340,7 +338,8 @@ mod tests {
         // Non-active item has no extra attributes
         assert!(
             html.contains("<li><a href=\"/params/DO.html\">DO</a></li>"),
-            "Expected plain li for DO, got: {}", html
+            "Expected plain li for DO, got: {}",
+            html
         );
     }
 }

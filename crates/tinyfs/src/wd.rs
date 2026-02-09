@@ -1104,9 +1104,9 @@ impl WD {
         let file_arc = file_handle.handle.get_file().await;
         let file_guard = file_arc.lock().await;
 
-        let queryable = file_guard.as_queryable().ok_or_else(|| {
-            Error::Other(format!("'{}' is not a queryable file", pond_path))
-        })?;
+        let queryable = file_guard
+            .as_queryable()
+            .ok_or_else(|| Error::Other(format!("'{}' is not a queryable file", pond_path)))?;
 
         let table_provider = queryable
             .as_table_provider(node_path.id(), provider_ctx)
@@ -1123,11 +1123,12 @@ impl WD {
                 .unwrap_or("data")
         );
 
-        let _ = ctx.register_table(
-            datafusion::sql::TableReference::bare(table_name.as_str()),
-            table_provider,
-        )
-        .map_err(|e| Error::Other(format!("register table: {}", e)))?;
+        let _ = ctx
+            .register_table(
+                datafusion::sql::TableReference::bare(table_name.as_str()),
+                table_provider,
+            )
+            .map_err(|e| Error::Other(format!("register table: {}", e)))?;
 
         let copy_sql = format!(
             "COPY (SELECT * FROM \"{}\") TO '{}' STORED AS PARQUET",
@@ -1135,18 +1136,19 @@ impl WD {
             output_path.to_string_lossy()
         );
 
-        let df = ctx.sql(&copy_sql).await.map_err(|e| {
-            Error::Other(format!("COPY '{}': {}", pond_path, e))
-        })?;
-        let _ = df.collect().await.map_err(|e| {
-            Error::Other(format!("COPY '{}': {}", pond_path, e))
-        })?;
+        let df = ctx
+            .sql(&copy_sql)
+            .await
+            .map_err(|e| Error::Other(format!("COPY '{}': {}", pond_path, e)))?;
+        let _ = df
+            .collect()
+            .await
+            .map_err(|e| Error::Other(format!("COPY '{}': {}", pond_path, e)))?;
 
         // Deregister to keep the session clean
-        let _ = ctx.deregister_table(
-            datafusion::sql::TableReference::bare(table_name.as_str()),
-        )
-        .map_err(|e| Error::Other(format!("deregister table: {}", e)))?;
+        let _ = ctx
+            .deregister_table(datafusion::sql::TableReference::bare(table_name.as_str()))
+            .map_err(|e| Error::Other(format!("deregister table: {}", e)))?;
 
         Ok(())
     }
