@@ -4,10 +4,10 @@
 # REQUIRES: host
 #
 # This test delegates to testsuite/browser/test.sh which:
-#   1. Generates the site via test 201 (Docker)
-#   2. Serves it with Vite
-#   3. Validates with Puppeteer
-#   4. Cleans up
+#   1. Generates root site via test 201 (Docker)
+#   2. Serves at / with Vite, validates with Puppeteer
+#   3. Generates subdir site via test 205 (Docker)
+#   4. Serves at /myapp/ with Vite, validates with Puppeteer
 #
 # run-all.sh detects '# REQUIRES: host' and runs this directly (not in Docker).
 #

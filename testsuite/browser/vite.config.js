@@ -7,9 +7,14 @@ const siteRoot = process.env.SITE_ROOT
   ? realpathSync(process.env.SITE_ROOT)
   : ".";
 
+// BASE_PATH controls the URL prefix (e.g., "/" or "/myapp/").
+// Vite serves files at this path, simulating a subdir deployment.
+const basePath = process.env.BASE_PATH || "/";
+
 export default defineConfig({
   appType: "mpa",
   root: siteRoot,
+  base: basePath,
   // The site is fully static — no bundling, no transforms.
   build: { rollupOptions: { input: {} } },
 });

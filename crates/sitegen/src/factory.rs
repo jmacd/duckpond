@@ -235,12 +235,14 @@ async fn run_export_stages(
                     }
                 }
 
+                // Prefix data file URLs with base_url for subdir deployments.
+                let base = config.site.base_url.trim_end_matches('/');
                 by_key
                     .entry(key.clone())
                     .or_default()
                     .push(shortcodes::ExportedFile {
                         path: path_str.clone(),
-                        file: format!("/data/{}", export_output.file.to_string_lossy()),
+                        file: format!("{}/data/{}", base, export_output.file.to_string_lossy()),
                         captures: captures.clone(),
                         temporal,
                         start_time: export_output.start_time.unwrap_or(0),
@@ -429,7 +431,6 @@ fn generate_site(
             &LayoutContext {
                 title: &title,
                 site_title: &config.site.title,
-                base_url: &config.site.base_url,
                 content: &content_html,
                 sidebar: sidebar_html.as_deref(),
             },
