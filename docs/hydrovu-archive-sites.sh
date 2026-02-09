@@ -42,7 +42,7 @@ OUTDIR=${NOYO}/hydrovu
 mkdir -p ${OUTDIR}
 
 # Step 1: Archive — renames _active.series → _archive_YYYYMMDD.series in pond
-#${EXE} run /etc/hydrovu archive
+${EXE} run /etc/hydrovu archive
 
 # Step 2: Export archive files as Parquet to host filesystem
 # --strip-prefix=/hydrovu removes the leading /hydrovu/ from pond paths,
