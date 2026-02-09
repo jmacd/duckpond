@@ -2444,8 +2444,10 @@ impl InnerState {
         // - FileDynamic: config in content field
         // - DirectoryDynamic: config in extended_attributes, empty content for directory entries
         let node = match id.entry_type() {
-            EntryType::FileDynamic => {
+            EntryType::FileDynamic | EntryType::TableDynamic => {
                 // Create as regular file node - factory metadata in OpLog
+                // FileDynamic: non-queryable factory files (templates, configs)
+                // TableDynamic: SQL-queryable factory files (synthetic-timeseries, timeseries-join, etc.)
                 node_factory::create_file_node(id, state)
             }
             EntryType::DirectoryDynamic => {
@@ -3546,7 +3548,7 @@ mod node_factory {
                 debug!("✅ FactoryRegistry::create_directory succeeded");
                 NodeType::Directory(dir_handle)
             }
-            EntryType::FileDynamic => {
+            EntryType::FileDynamic | EntryType::TableDynamic => {
                 // Check if this is an executable factory
                 if let Some(factory) = FactoryRegistry::get_factory(factory_type) {
                     if factory.create_file.is_some() {

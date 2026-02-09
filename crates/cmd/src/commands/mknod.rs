@@ -121,7 +121,16 @@ async fn mknod_impl(
         // 1. Has explicit create_file function (template factory)
         // 2. Is executable factory (config bytes ARE the file content via ConfigFile wrapper)
         // 3. Is table transform factory (config stored for use by other factories)
-        tinyfs::EntryType::FileDynamic
+        //
+        // If the factory provides try_as_queryable, it creates SQL-queryable files
+        // and should be stored as TableDynamic so that series:// pattern resolution
+        // (SqlDerivedFile) can discover them. Without this, standalone mknod nodes
+        // would be invisible to timeseries-join, timeseries-pivot, temporal-reduce, etc.
+        if factory.try_as_queryable.is_some() {
+            tinyfs::EntryType::TableDynamic
+        } else {
+            tinyfs::EntryType::FileDynamic
+        }
     } else {
         return Err(anyhow!(
             "Factory '{}' does not support creating directories or files",

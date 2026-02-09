@@ -3,9 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ args[0] }} - Water Quality</title>
+  <title>{{ args[0] }} - Synthetic Example</title>
   <style>
-/* Noyo Harbor Water Quality Dashboard */
 :root {
   --sidebar-width: 240px;
   --max-width: 960px;
@@ -49,78 +48,102 @@ main { margin-left: var(--sidebar-width); flex: 1; min-width: 0; padding: 2rem; 
 </head>
 <body>
   {{ insert_from_path(path="/templates/page/page.html") }}
-  
+
   <main>
     <div class="page-header">
       <h1>{{ args[0] }}</h1>
       <div class="breadcrumb">
-        <a href="index.html">Home</a> › Water Quality Data
+        <a href="index.html">Home</a> › Data
       </div>
     </div>
-    
+
     <div id="time-picker"></div>
     <div id="charts"></div>
   </main>
-  
+
   <script type="module">
     import * as Plot from "https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6/+esm";
     import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28/+esm";
-    
-    // Time options
-    const timelist = [["1 Week", 7], ["2 Weeks", 14], ["1 Month", 30], ["2 Months", 60], ["3 Months", 90], ["6 Months", 180], ["12 Months", 365], ["18 Months", 550]];
-    
+
+    // Time range options (label, days)
+    const timelist = [
+      ["1 Month", 30], ["3 Months", 90], ["6 Months", 180], ["12 Months", 365]
+    ];
+
     // Reactive state
     class State {
       constructor(v) { this.value = v; this.subs = new Set(); }
       set(v) { this.value = v; this.subs.forEach(fn => fn(v)); }
       subscribe(fn) { this.subs.add(fn); fn(this.value); return () => this.subs.delete(fn); }
     }
-    const timeState = new State(30);
-    
-    // Time picker
+    const timeState = new State(90);
+
+    // Time picker UI
     function createTimePicker(container) {
       const picker = document.createElement("div");
       picker.className = "time-picker";
-      picker.innerHTML = `<label>Time Range</label><div class="time-picker-options">${timelist.map(([l, d]) => `<button data-days="${d}"${d === timeState.value ? ' class="active"' : ''}>${l}</button>`).join("")}</div>`;
-      picker.querySelectorAll("button").forEach(btn => btn.addEventListener("click", () => { picker.querySelectorAll("button").forEach(b => b.classList.remove("active")); btn.classList.add("active"); timeState.set(parseInt(btn.dataset.days)); }));
+      picker.innerHTML = `<label>Time Range</label><div class="time-picker-options">${
+        timelist.map(([l, d]) =>
+          `<button data-days="${d}"${d === timeState.value ? ' class="active"' : ''}>${l}</button>`
+        ).join("")
+      }</div>`;
+      picker.querySelectorAll("button").forEach(btn =>
+        btn.addEventListener("click", () => {
+          picker.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+          btn.classList.add("active");
+          timeState.set(parseInt(btn.dataset.days));
+        })
+      );
       container.appendChild(picker);
     }
-    
-    // Resolution based on time range
-    function timerange(days) { if (days <= 30) return "1h"; if (days <= 60) return "2h"; if (days <= 90) return "4h"; if (days <= 180) return "12h"; return "24h"; }
-    
+
+    // Resolution selector: only 1h in this example
+    function timerange(days) { return "1h"; }
+
     // DuckDB singleton
     let duck = null;
     async function getDuckDB() {
       if (!duck) {
         const BUNDLES = duckdb.getJsDelivrBundles();
         const bundle = await duckdb.selectBundle(BUNDLES);
-        const worker = new Worker(URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })));
+        const worker = new Worker(URL.createObjectURL(
+          new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })
+        ));
         const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
         await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
         duck = await db.connect();
       }
       return duck;
     }
-    
-    // Query parquet files
+
+    // Query parquet files for the selected time range
     async function queryData(datafiles, days) {
       const res = timerange(days);
-      const now = Date.now();
+      const now = new Date("2025-12-31T23:00:00Z").getTime(); // synthetic data ends here
       const begin = now - days * 24 * 3600 * 1000;
       const files = datafiles[`res=${res}`] || [];
-      const filtered = files.filter(f => f.start_time * 1000 <= now && f.end_time * 1000 >= begin);
+      const filtered = files.filter(f =>
+        f.start_time * 1000 <= now && f.end_time * 1000 >= begin
+      );
       const urls = filtered.map(f => new URL(f.file, location.href).href);
       if (urls.length === 0) return [];
       const db = await getDuckDB();
-      const result = await db.query(`SELECT epoch_us(timestamp)/1000.0::DOUBLE as timestamp, * EXCLUDE timestamp FROM read_parquet(${JSON.stringify(urls)}) WHERE timestamp >= epoch_ms(${begin}) ORDER BY timestamp ASC`);
+      const result = await db.query(`
+        SELECT epoch_us(timestamp)/1000.0::DOUBLE as timestamp,
+               * EXCLUDE timestamp
+        FROM read_parquet(${JSON.stringify(urls)})
+        WHERE timestamp >= epoch_ms(${begin})
+        ORDER BY timestamp ASC
+      `);
       return result.toArray();
     }
 
-    function legendName(i, n, u) { return i.split(".").join(" "); }
-    function plotName(n) { return n === "DO" ? "Dissolved Oxygen" : n; }
+    function legendName(col) {
+      // e.g. "combined.NorthDock.temperature" → "NorthDock temperature"
+      return col.split(".").slice(1).join(" ").replace(/\.(avg|min|max)$/, " ($1)");
+    }
 
-    // Data files from template
+    // Datafiles from template engine
     const datafiles = {
     {%- for k2, v2 in export[args[0]] %}
       "{{ k2 }}": [
@@ -130,51 +153,59 @@ main { margin-left: var(--sidebar-width); flex: 1; min-width: 0; padding: 2rem; 
       ],
     {%- endfor %}
     };
-    
-    // Chart configurations from template
+
+    // Chart configurations from schema
     const chartConfigs = [
     {% for key, fields in group(by="name",in=export[args[0]][args[1]].schema.fields) %}
       {
         name: "{{ key }}",
-        title: plotName("{{ key }}"),
+        title: "{{ key }}",
         unit: "{{ fields[0].unit }}",
         marks: (data, begin, now) => [
         {%- for inst, ifields in group(by="instrument",in=fields) -%}
           {%- set field = ifields[0] -%}
-          Plot.lineY(data, {x: "timestamp", y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg", stroke: () => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
+          Plot.lineY(data, {
+            x: "timestamp",
+            y: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.avg",
+            stroke: () => "{{ field.instrument }}"
+          }),
           {% if ifields | length > 1 -%}
-          Plot.areaY(data, {x: "timestamp", y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min", y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max", fillOpacity: 0.3, fill: () => legendName("{{ field.instrument }}", "{{ field.name }}", "{{ field.unit }}")}),
+          Plot.areaY(data, {
+            x: "timestamp",
+            y1: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.min",
+            y2: "{{ field.instrument }}.{{ field.name }}.{{ field.unit }}.max",
+            fillOpacity: 0.15,
+            fill: () => "{{ field.instrument }}"
+          }),
           {% endif -%}
         {%- endfor -%}
         ]
       },
     {% endfor %}
     ];
-    
+
     // Initialize
     const pickerContainer = document.getElementById("time-picker");
     const chartsContainer = document.getElementById("charts");
-    
     createTimePicker(pickerContainer);
-    
-    // Render charts on time change
+
     timeState.subscribe(async (days) => {
       const data = await queryData(datafiles, days);
       chartsContainer.innerHTML = "";
-      
+
       if (data.length === 0) {
         chartsContainer.innerHTML = `<div class="empty-state">No data for selected time range</div>`;
         return;
       }
-      
-      const now = Date.now();
+
+      const now = new Date("2025-12-31T23:00:00Z").getTime();
       const begin = now - days * 24 * 3600 * 1000;
       const width = chartsContainer.clientWidth - 32;
-      
+
       for (const config of chartConfigs) {
         const chartDiv = document.createElement("div");
         chartDiv.className = "chart";
-        
+
         const plot = Plot.plot({
           title: config.title,
           width,
@@ -183,7 +214,7 @@ main { margin-left: var(--sidebar-width); flex: 1; min-width: 0; padding: 2rem; 
           color: { legend: true },
           marks: config.marks(data, begin, now)
         });
-        
+
         chartDiv.appendChild(plot);
         chartsContainer.appendChild(chartDiv);
       }

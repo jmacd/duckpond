@@ -22,10 +22,6 @@ doctest = false
 name = "pond"
 path = "src/main.rs"
 
-[[bin]]
-name = "synth-logs"
-path = "src/synth-logs.rs"
-
 [dependencies]
 anyhow = { workspace = true }
 arrow = { workspace = true }
@@ -59,6 +55,7 @@ serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+sitegen = { workspace = true }
 steward = { workspace = true }
 tempfile = { workspace = true }
 tera = { workspace = true }

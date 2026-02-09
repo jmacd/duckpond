@@ -30,7 +30,14 @@ pub struct HydroVuConfig {
 pub struct HydroVuDevice {
     pub name: String,
     pub id: i64,
+    /// When false, device is skipped during `collect`. Default: true.
+    #[serde(default = "default_active")]
+    pub active: bool,
     pub comment: Option<String>,
+}
+
+fn default_active() -> bool {
+    true
 }
 
 /// Names mapping returned by the HydroVu API

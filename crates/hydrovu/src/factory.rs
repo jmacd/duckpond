@@ -23,16 +23,31 @@ enum HydroVuCommand {
     /// Collect data from HydroVu API
     ///
     /// Fetches sensor data from configured devices and stores it in the pond.
-    /// This command requires a write transaction and cannot run post-commit.
+    /// Devices with `active: false` in the config are skipped.
     ///
     /// Example: pond run /etc/system.d/20-hydrovu collect
     Collect,
+
+    /// Archive active series data
+    ///
+    /// Renames each device's `{Name}_active.series` (or legacy `{Name}.series`)
+    /// to `{Name}_archive_YYYYMMDD.series`. Prints a `pond copy` script to
+    /// export the archived files to the host filesystem.
+    ///
+    /// Example: pond run /etc/hydrovu archive
+    /// Example: pond run /etc/hydrovu archive --device NoyoCenterVulink_1
+    Archive {
+        /// Only archive this device (by name). If omitted, archives all devices.
+        #[arg(long)]
+        device: Option<String>,
+    },
 }
 
 impl FactoryCommand for HydroVuCommand {
     fn allowed(&self) -> ExecutionMode {
         match self {
             Self::Collect => ExecutionMode::PondReadWriter,
+            Self::Archive { .. } => ExecutionMode::PondReadWriter,
         }
     }
 }
@@ -98,7 +113,10 @@ async fn initialize_hydrovu(config: Value, context: FactoryContext) -> Result<()
     Ok(())
 }
 
-/// Create HydroVu directory structure
+/// Create HydroVu directory structure.
+///
+/// Uses `create_dir_all` (mkdir -p semantics) so this is safe to call on
+/// `mknod --overwrite` when directories already exist.
 async fn create_directory_structure(
     config: &HydroVuConfig,
     context: &FactoryContext,
@@ -116,12 +134,12 @@ async fn create_directory_structure(
     // Create base HydroVu directory
     let hydrovu_path = &config.hydrovu_path;
     log::debug!("Creating HydroVu base directory: {}", hydrovu_path);
-    _ = root.create_dir_path(hydrovu_path).await?;
+    _ = root.create_dir_all(hydrovu_path).await?;
 
     // Create devices directory
     let devices_path = format!("{}/devices", config.hydrovu_path);
     log::debug!("Creating devices directory: {}", devices_path);
-    _ = root.create_dir_path(&devices_path).await?;
+    _ = root.create_dir_all(&devices_path).await?;
 
     // Create directory for each configured device
     for device in &config.devices {
@@ -133,7 +151,7 @@ async fn create_directory_structure(
             device_path,
             device_name
         );
-        _ = root.create_dir_path(&device_path).await?;
+        _ = root.create_dir_all(&device_path).await?;
     }
 
     log::debug!("HydroVu directory structure created successfully");
@@ -157,7 +175,7 @@ async fn execute_hydrovu(
     let hydrovu_config: HydroVuConfig = serde_json::from_value(config)
         .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(format!("Invalid config: {}", e))))?;
 
-    log::info!(
+    log::debug!(
         "Executing HydroVu collection with config: {:?}",
         hydrovu_config
     );
@@ -165,6 +183,9 @@ async fn execute_hydrovu(
     // Dispatch to command handler
     match cmd {
         HydroVuCommand::Collect => execute_collect(hydrovu_config, context).await,
+        HydroVuCommand::Archive { device } => {
+            execute_archive(hydrovu_config, context, device).await
+        }
     }
 }
 
@@ -210,13 +231,11 @@ async fn execute_collect(
             .unwrap_or_else(|_| format!("{}", summary.final_timestamp));
 
         log::info!(
-            "Device {} collected data from {} ({}) to {} ({}) ({} records)",
+            "Device {} collected {} records from {} to {}",
             summary.device_id,
-            summary.start_timestamp,
+            summary.records_collected,
             start_date,
-            summary.final_timestamp,
             final_date,
-            summary.records_collected
         );
     }
 
@@ -224,6 +243,41 @@ async fn execute_collect(
         "HydroVu collection complete: {} total records collected",
         result.records_collected
     );
+
+    Ok(())
+}
+
+/// Execute the archive command - compact and archive active series files
+async fn execute_archive(
+    hydrovu_config: HydroVuConfig,
+    context: FactoryContext,
+    device_filter: Option<String>,
+) -> Result<(), TLogFSError> {
+    let state = tlogfs::extract_state(&context)?;
+    let provider_ctx = state.as_provider_context();
+    let fs = tinyfs::FS::new(state.clone())
+        .await
+        .map_err(TLogFSError::TinyFS)?;
+
+    let result = crate::archive_devices(
+        &fs,
+        &hydrovu_config,
+        device_filter.as_deref(),
+        &provider_ctx,
+    )
+    .await
+    .map_err(|e| TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?;
+
+    // Print summary and export script
+    if result.is_empty() {
+        log::info!("No series files found to archive.");
+    } else {
+        log::info!("Archived {} series files.", result.len());
+        log::info!("Export archived files with these commands:");
+        for (pond_path, _old_name) in &result {
+            log::info!("pond copy '{}' host://<dest>{}", pond_path, pond_path);
+        }
+    }
 
     Ok(())
 }

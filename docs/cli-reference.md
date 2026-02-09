@@ -126,6 +126,36 @@ pond copy host:///tmp/data.parquet /data/readings.parquet --format=table
 pond copy host:///tmp/data.csv /data/readings.csv --format=table
 ```
 
+#### Copy OUT (pond → host)
+
+Export files from the pond to the host filesystem. The destination must have the `host://` prefix.
+Glob patterns are supported for matching multiple files.
+
+```bash
+# Export all series files preserving directory structure
+pond copy '/hydrovu/devices/**/*.series' host:///tmp/export
+
+# Export a single file
+pond copy /data/readings.parquet host:///tmp/output
+```
+
+The `--format` flag is **ignored** when copying out — the export format is determined by the
+source entry type (table/series → Parquet via DataFusion, data → raw bytes).
+
+#### --strip-prefix
+
+When copying out, pond paths are preserved relative to the destination. This can produce
+unwanted nesting (e.g. exporting `/hydrovu/...` into a directory called `hydrovu/` creates
+`hydrovu/hydrovu/...`). Use `--strip-prefix` to remove a leading path prefix:
+
+```bash
+# Without --strip-prefix: creates output/hydrovu/devices/123/foo.series
+pond copy '/hydrovu/**/*.series' host:///tmp/output
+
+# With --strip-prefix: creates output/devices/123/foo.series
+pond copy '/hydrovu/**/*.series' host:///tmp/output --strip-prefix=/hydrovu
+```
+
 ---
 
 ### pond cat
@@ -252,19 +282,405 @@ config:
   query: "SELECT * FROM source WHERE temperature > 20"
 ```
 
+### synthetic-timeseries
+
+Generate synthetic timeseries with configurable waveforms. Produces Arrow
+RecordBatches in memory (no files on disk) — useful for testing, demos, and
+development with deterministic, visually distinct data.
+
+Each named **point** becomes a Float64 column. Its value at every timestamp is the
+**sum** of one or more waveform **components**, so you can layer signals to create
+complex but predictable shapes.
+
+```yaml
+start: "2024-01-01T00:00:00Z"
+end: "2024-01-02T00:00:00Z"
+interval: "15m"
+time_column: "timestamp"          # optional, default: "timestamp"
+points:
+  - name: "temperature"
+    components:
+      - type: sine
+        amplitude: 10.0
+        period: "24h"
+        offset: 20.0              # baseline value
+      - type: line
+        slope: 0.0002             # slow upward drift
+
+  - name: "pressure"
+    components:
+      - type: sine
+        amplitude: 5.0
+        period: "12h"
+        offset: 1013.0
+      - type: square
+        amplitude: 2.0
+        period: "6h"
+
+  - name: "humidity"
+    components:
+      - type: triangle
+        amplitude: 15.0
+        period: "8h"
+        offset: 60.0
+      - type: sine
+        amplitude: 3.0
+        period: "3h"
+        phase: 1.57               # phase offset in radians
+```
+
+**Component types:**
+
+| Type | Formula | Parameters |
+|------|---------|------------|
+| `sine` | `offset + amplitude × sin(2π·t/period + phase)` | `amplitude`, `period`, `offset`, `phase` |
+| `triangle` | `offset + amplitude × tri(t/period + phase)` | `amplitude`, `period`, `offset`, `phase` |
+| `square` | `offset + amplitude × sign(sin(2π·t/period + phase))` | `amplitude`, `period`, `offset`, `phase` |
+| `line` | `offset + slope × t` | `slope`, `offset` |
+
+- `t` is seconds elapsed since `start`.
+- `period` and `interval` accept human-readable durations: `30s`, `15m`, `1h`, `2d`, `1h30m`, etc.
+- All parameters default to `0.0` if omitted.
+
+**Usage:**
+
+```bash
+# Create the factory node
+pond mkdir /sensors
+pond mknod synthetic-timeseries /sensors/synth --config-path synth.yaml
+
+# Query with SQL (table is always named "source")
+pond cat /sensors/synth --sql "SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM source"
+pond cat /sensors/synth --sql "SELECT * FROM source ORDER BY timestamp LIMIT 10"
+
+# Check value ranges
+pond cat /sensors/synth --sql "
+  SELECT
+    MIN(temperature) AS temp_min, MAX(temperature) AS temp_max,
+    MIN(pressure)    AS pres_min, MAX(pressure)    AS pres_max
+  FROM source
+"
+```
+
+**Notes:**
+- Data is generated on every query from the config — there is no stored state.
+- The node appears as `TableDynamic` in `pond list` output.
+- The timestamp column is `Timestamp(Millisecond, UTC)`.
+- Point names must be unique; at least one point with at least one component is required.
+- Works with `pond describe`, `pond cat --sql`, and any downstream factory
+  that reads `series:///` or `file:///` patterns.
+
+---
+
+### dynamic-dir
+
+A virtual directory whose child entries are produced by other factories.
+Each entry specifies a `name`, a `factory` type, and a `config` block.
+`dynamic-dir` is the glue that lets you compose multiple factory outputs
+under a single path — for example, several `timeseries-join` or
+`synthetic-timeseries` nodes side-by-side.
+
+```yaml
+factory: "dynamic-dir"
+config:
+  entries:
+    - name: "station_a"
+      factory: "synthetic-timeseries"
+      config:
+        start: "2024-01-01T00:00:00Z"
+        end:   "2024-01-15T00:00:00Z"
+        interval: "1h"
+        points:
+          - name: "temperature"
+            components:
+              - type: sine
+                amplitude: 5.0
+                period: "24h"
+                offset: 20.0
+
+    - name: "combined"
+      factory: "timeseries-join"
+      config:
+        inputs:
+          - pattern: "series:///sensors/station_a"
+            scope: "A"
+          - pattern: "series:///sensors/station_b"
+            scope: "B"
+```
+
+- Nested factory configs are validated recursively at `mknod` time.
+- The directory is **read-only** — no `pond copy` into it.
+- Child entries appear with the `EntryType` reported by each factory's
+  metadata (e.g. `TableDynamic` for timeseries-join).
+- Each child gets a deterministic `FileID` derived from the parent's
+  `NodeID`, the entry name, factory, and config.
+
+**Usage:**
+
+```bash
+pond mkdir /sensors
+pond mknod dynamic-dir /sensors/all --config-path all.yaml
+
+# Browse the virtual directory
+pond list /sensors/all
+
+# Query a child entry directly
+pond cat /sensors/all/station_a --sql "SELECT COUNT(*) FROM source"
+```
+
+---
+
+### timeseries-join
+
+Combines two or more time-series inputs into a single wide table by
+FULL OUTER JOIN on the time column. Each input can have an optional
+**scope** prefix (column names become `Scope.OriginalColumn`), an
+optional **time range** filter, and optional **transforms**.
+
+Inputs that share the same `scope` are merged with `UNION BY NAME`
+first, then the distinct scope groups are joined. This lets you stitch
+together device replacements (same scope, non-overlapping ranges) while
+also combining data from different sensor types (different scopes).
+
+```yaml
+factory: "timeseries-join"
+config:
+  time_column: "timestamp"          # optional, default: "timestamp"
+  inputs:
+    - pattern: "series:///data/station_a"
+      scope: "A"
+    - pattern: "series:///data/station_b"
+      scope: "B"
+```
+
+**Input fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `pattern` | yes | URL pattern to match input files. Supported schemes: `series`, `csv`, `excelhtml`, `file`. Glob wildcards (`*`, `**`) are supported. |
+| `scope` | no | Prefix added to every non-timestamp column: `Scope.Column`. If omitted, columns keep their original names. |
+| `range.begin` | no | ISO 8601 start time — rows before this are excluded. |
+| `range.end` | no | ISO 8601 end time — rows after this are excluded. |
+| `transforms` | no | List of paths to table-transform factories applied to this input before joining (e.g. `["/etc/hydro_rename"]`). |
+
+**Behaviour:**
+
+- At least **two inputs** are required (use `sql-derived-series` for one).
+- The result is ordered by the time column.
+- Where one input has data and another does not, the missing columns are
+  `NULL` (FULL OUTER JOIN semantics).
+- The output time column is `COALESCE`-d across all scope groups so there
+  are no NULLs in the time column itself.
+- The node reports `EntryType::TableDynamic`.
+
+**Production example** (combine.yaml inside a `dynamic-dir`):
+
+```yaml
+entries:
+  - name: "Silver"
+    factory: "timeseries-join"
+    config:
+      inputs:
+        - pattern: "/hydrovu/devices/**/SilverVulink1.series"
+          scope: Vulink
+          range:
+            end: 2024-05-30T00:00:00Z
+        - pattern: "/hydrovu/devices/**/SilverVulink2.series"
+          scope: Vulink
+          range:
+            begin: 2024-05-30T00:00:00Z
+        - pattern: "/hydrovu/devices/**/SilverAT500.series"
+          scope: AT500_Surface
+```
+
+**Usage:**
+
+```bash
+pond mkdir /combined
+pond mknod dynamic-dir /combined --config-path combine.yaml
+
+# See all joined series
+pond list /combined
+
+# Query the combined data
+pond cat /combined/Silver --sql "SELECT * FROM source LIMIT 10"
+
+# Check the time span
+pond cat /combined/Silver --sql "
+  SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM source
+"
+```
+
+---
+
+### timeseries-pivot
+
+Selects specific columns from multiple inputs matched by a glob pattern,
+producing a wide table with one row per unique timestamp. Use it to pull
+a single measurement (e.g. dissolved oxygen) across all sites into one
+queryable view.
+
+Each matched input's columns are **scoped** with the captured wildcard
+segment as prefix (e.g. `Silver.DO.mg/L`, `BDock.DO.mg/L`). Missing
+columns are `NULL`-padded automatically.
+
+```yaml
+factory: "timeseries-pivot"
+config:
+  pattern: "series:///combined/*"     # wildcard captures the site name
+  columns:
+    - "AT500_Surface.DO.mg/L"
+    - "AT500_Bottom.DO.mg/L"
+  time_column: "timestamp"            # optional, default: "timestamp"
+  transforms:                         # optional
+    - "/etc/hydro_rename"
+```
+
+**Config fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `pattern` | yes | URL pattern with a `*` wildcard. The captured segment becomes the scope prefix for that input's columns. Supported schemes: `series`, `csv`, `excelhtml`, `file`, `data`, `table`, `oteljson`. |
+| `columns` | yes | List of column names to select from each matched input. At least one column required. |
+| `time_column` | no | Name of the time column. Default: `"timestamp"`. |
+| `transforms` | no | List of paths to table-transform factories applied to each input. |
+
+**Behaviour:**
+
+- The pattern `series:///combined/*` matching `/combined/Silver` and
+  `/combined/BDock` produces columns like:
+  `timestamp`, `Silver.AT500_Surface.DO.mg/L`, `BDock.AT500_Surface.DO.mg/L`, …
+- Uses LEFT JOIN on the time column (not FULL OUTER JOIN), from a CTE
+  of all unique timestamps across all inputs.
+- Columns that don't exist in a particular input are `NULL`-padded
+  (Float64) via the `null_padding` transform.
+- The node reports `EntryType::TableDynamic`.
+
+**Production example** (single.yaml inside a `dynamic-dir`):
+
+```yaml
+entries:
+  - name: "DO"
+    factory: "timeseries-pivot"
+    config:
+      pattern: "/combined/*"
+      columns:
+        - "AT500_Surface.DO.mg/L"
+        - "AT500_Bottom.DO.mg/L"
+
+  - name: "Temperature"
+    factory: "timeseries-pivot"
+    config:
+      pattern: "/combined/*"
+      columns:
+        - "AT500_Surface.Temperature.C"
+        - "AT500_Bottom.Temperature.C"
+```
+
+**Usage:**
+
+```bash
+pond mknod dynamic-dir /pivot --config-path single.yaml
+
+# See the pivoted views
+pond list /pivot
+
+# Query dissolved oxygen across all sites
+pond cat /pivot/DO --sql "SELECT * FROM source ORDER BY timestamp LIMIT 20"
+```
+
+---
+
 ### temporal-reduce
 
-Time-bucketed aggregations at multiple resolutions.
+Creates time-bucketed aggregations of source time-series at one or more
+resolutions. The factory produces a **directory** (not a file) with this
+structure:
+
+```
+/reduce/<site>/res=1h.series
+/reduce/<site>/res=6h.series
+/reduce/<site>/res=1d.series
+```
+
+The source pattern can match multiple files; each match becomes a
+separate site subdirectory named by `out_pattern` substitution.
 
 ```yaml
 factory: "temporal-reduce"
 config:
-  in_pattern: "series:///sensors/*"
+  in_pattern: "series:///sources/*"   # glob — captured group is $0
+  out_pattern: "$0"                   # output site name from captured group
   time_column: "timestamp"
-  resolutions: [1h, 6h, 1d]
+  resolutions: ["1h", "6h", "1d"]
   aggregations:
     - type: "avg"
       columns: ["temperature", "pressure"]
+    - type: "min"
+      columns: ["temperature"]
+    - type: "max"
+      columns: ["temperature"]
+    - type: "count"
+      columns: ["*"]                  # count of rows per bucket
+```
+
+**Config fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `in_pattern` | yes | URL pattern to match source series. Glob wildcards (`*`, `**`) supported. Captured groups become `$0`, `$1`, … for `out_pattern`. |
+| `out_pattern` | yes | Output site name using captured groups (e.g. `"$0"`). |
+| `time_column` | yes | Name of the timestamp column in the source. |
+| `resolutions` | yes | List of time bucket sizes. Parsed with humantime: `"1h"`, `"6h"`, `"1d"`, `"30m"`, etc. |
+| `aggregations` | yes | List of aggregation operations (see below). |
+| `transforms` | no | List of paths to table-transform factories applied to each input before aggregation. |
+
+**Aggregation operations:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | yes | One of `avg`, `min`, `max`, `sum`, `count`. |
+| `columns` | no | List of column names to aggregate. Supports single-`*` glob patterns (e.g. `"Vulink*.Temperature.C"`). If omitted, applies to all numeric columns discovered from the source schema. Use `["*"]` with `count` for row count. |
+
+Output column names are `original_column.agg_type` — e.g.
+`temperature.avg`, `temperature.min`, `pressure.avg`.
+
+**Behaviour:**
+
+- Uses `DATE_TRUNC` for time bucketing, so buckets align to calendar
+  boundaries (hour 0, midnight, etc.).
+- Source schema is discovered dynamically on first query — column names
+  in `columns` are matched against actual schema at runtime.
+- Each resolution file (`res=1h.series`, etc.) is an independent
+  `TableDynamic` node backed by `SqlDerivedFile`.
+- The directory structure is **read-only**.
+
+**Usage:**
+
+```bash
+# Create the source data
+pond mkdir /sources
+pond mknod synthetic-timeseries /sources/weather --config-path weather.yaml
+
+# Create the temporal-reduce factory
+pond mknod temporal-reduce /reduce --config-path reduce.yaml
+
+# Browse the directory structure
+pond list /reduce                        # → /reduce/weather
+pond list /reduce/weather                # → res=1h.series, res=6h.series, ...
+
+# Query the hourly aggregation
+pond cat /reduce/weather/res=1h.series --sql "
+  SELECT timestamp,
+         ROUND(\"temperature.avg\", 2) AS temp_avg,
+         ROUND(\"temperature.min\", 2) AS temp_min,
+         ROUND(\"temperature.max\", 2) AS temp_max
+  FROM source
+  ORDER BY timestamp
+"
+
+# Check schema
+pond describe /reduce/weather/res=1h.series
 ```
 
 ### remote

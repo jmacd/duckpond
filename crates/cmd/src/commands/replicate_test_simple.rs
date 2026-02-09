@@ -448,8 +448,8 @@ async fn test_query_transaction_records() -> Result<()> {
 
 #[tokio::test]
 async fn test_pond_structural_statistics() -> Result<()> {
-    use crate::commands::copy_command;
     use crate::commands::mkdir_command;
+    use crate::commands::{CopyOptions, copy_command};
     use arrow_array::{Int32Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
     use parquet::arrow::ArrowWriter;
@@ -493,8 +493,22 @@ async fn test_pond_structural_statistics() -> Result<()> {
     // Copy files of different types
     let sources1 = vec![temp_path.clone()];
     let sources2 = vec![parquet_path.clone()];
-    copy_command(&ship_context, &sources1, "/data/file1.txt", "data").await?;
-    copy_command(&ship_context, &sources2, "/tables/table1.parquet", "table").await?;
+    copy_command(
+        &ship_context,
+        &sources1,
+        "/data/file1.txt",
+        "data",
+        &CopyOptions::default(),
+    )
+    .await?;
+    copy_command(
+        &ship_context,
+        &sources2,
+        "/tables/table1.parquet",
+        "table",
+        &CopyOptions::default(),
+    )
+    .await?;
 
     // Get statistics about the pond structure
     let stats = SimpleReplicationTest::get_pond_stats(&test.source_pond).await?;

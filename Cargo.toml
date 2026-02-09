@@ -9,10 +9,11 @@ members = [
 "crates/utilities",
 "crates/provider",
 "crates/remote",
+"crates/sitegen",
 ]
 
 [workspace.package]
-version = "0.20.0"
+version = "0.21.0"
 edition = "2024"
 authors = ["DuckPond Contributors"]
 homepage = "https://github.com/duckpond"
@@ -31,6 +32,7 @@ hydrovu = { path = "crates/hydrovu" }
 provider = { path = "crates/provider" }
 utilities = { path = "crates/utilities" }
 remote = { path = "crates/remote" }
+sitegen = { path = "crates/sitegen" }
 
 anyhow = "1.0.82"
 arrow = { version = "56", default-features = false, features = ["prettyprint", "ipc"] }
@@ -92,7 +94,10 @@ tl = "0.7.8"
 tokio = { version = "1.32", features = ["io-util", "rt"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 url = "2.5"
+percent-encoding = "2.3"
 uuid7 = { version = "1.0", features = ["serde"] }
+pulldown-cmark = "0.12"
+maud = "0.27.0"
 
 [workspace.lints.rust]
 # General compatibility lints

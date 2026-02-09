@@ -439,13 +439,23 @@ async fn copy_in(
                                 ))
                         }
                         tinyfs::CopyDestination::ExistingFile => {
-                            // Destination is an existing file - not supported for copy operations
+                            // Destination is an existing file — overwrite it (Unix cp semantics).
+                            // For single-source, write a new version via async_writer_path_with_type;
+                            // reads always return the latest version, so the old content is superseded.
                             if sources.len() == 1 {
-                                Err(steward::StewardError::DataInit(
-                                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                                        format!("Destination '{}' exists but is not a directory (cannot copy to existing file)", &dest)
-                                    ))
-                                ))
+                                let source = &sources[0];
+                                let (_is_host, clean_source) = parse_host_path(source);
+                                // Extract filename from destination path
+                                let dest_filename = std::path::Path::new(dest.as_str())
+                                    .file_name()
+                                    .and_then(|f| f.to_str())
+                                    .unwrap_or(&dest);
+                                copy_single_file_to_directory_with_name(&clean_source, &dest_wd, dest_filename, &format).await
+                                    .map_err(|e| steward::StewardError::DataInit(
+                                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to overwrite file: {}", e)))
+                                    ))?;
+                                log::info!("Overwrote {}", &dest);
+                                Ok(())
                             } else {
                                 Err(steward::StewardError::DataInit(
                                     tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
@@ -516,7 +526,12 @@ async fn copy_in(
 /// Copy files OUT of the pond to host filesystem
 ///
 /// Supports glob patterns and maintains directory structure.
-async fn copy_out(ship_context: &ShipContext, sources: &[String], dest: &str) -> Result<()> {
+async fn copy_out(
+    ship_context: &ShipContext,
+    sources: &[String],
+    dest: &str,
+    options: &CopyOptions,
+) -> Result<()> {
     use crate::common::FileInfoVisitor;
     use tokio::fs;
 
@@ -577,8 +592,29 @@ async fn copy_out(ship_context: &ShipContext, sources: &[String], dest: &str) ->
 
         // Compute output path: dest/relative_path
         // Remove leading slash from pond path to make it relative
-        let relative_path = file_info.path.trim_start_matches('/');
-        let output_path = std::path::Path::new(&host_dest).join(relative_path);
+        let pond_path = &file_info.path;
+        let relative_path = if let Some(prefix) = &options.strip_prefix {
+            // Normalize prefix: ensure it starts with / and doesn't end with /
+            let prefix = if prefix.starts_with('/') {
+                prefix.to_string()
+            } else {
+                format!("/{}", prefix)
+            };
+            let prefix = prefix.trim_end_matches('/');
+            if let Some(stripped) = pond_path.strip_prefix(prefix) {
+                stripped.trim_start_matches('/').to_string()
+            } else {
+                log::warn!(
+                    "Path '{}' does not start with strip-prefix '{}', using full path",
+                    pond_path,
+                    prefix
+                );
+                pond_path.trim_start_matches('/').to_string()
+            }
+        } else {
+            pond_path.trim_start_matches('/').to_string()
+        };
+        let output_path = std::path::Path::new(&host_dest).join(&relative_path);
 
         // Create parent directories
         if let Some(parent) = output_path.parent() {
@@ -722,6 +758,18 @@ async fn export_raw_file(
     Ok(())
 }
 
+/// Options for copy operations.
+///
+/// Uses `Default` so callers only specify what they care about.
+/// New flags go here — existing callers never break.
+#[derive(Debug, Default)]
+pub struct CopyOptions {
+    /// Strip a leading path prefix from pond paths when copying OUT.
+    /// e.g. strip_prefix="/hydrovu" copies /hydrovu/devices/123/foo.series
+    /// to <dest>/devices/123/foo.series instead of <dest>/hydrovu/devices/123/foo.series
+    pub strip_prefix: Option<String>,
+}
+
 /// Main copy command dispatcher
 ///
 /// Determines copy direction and dispatches to appropriate handler:
@@ -732,6 +780,7 @@ pub async fn copy_command(
     sources: &[String],
     dest: &str,
     format: &str,
+    options: &CopyOptions,
 ) -> Result<()> {
     // Validate arguments
     if sources.is_empty() {
@@ -744,6 +793,9 @@ pub async fn copy_command(
     match direction {
         CopyDirection::In => {
             log::debug!("Copy direction: IN (host → pond)");
+            if options.strip_prefix.is_some() {
+                log::warn!("--strip-prefix is ignored when copying in (only applies to copy out)");
+            }
             copy_in(ship_context, sources, dest, format).await
         }
         CopyDirection::Out => {
@@ -753,14 +805,14 @@ pub async fn copy_command(
                     "--format flag is ignored when copying out (format determined by source file type)"
                 );
             }
-            copy_out(ship_context, sources, dest).await
+            copy_out(ship_context, sources, dest, options).await
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::copy_command;
+    use super::{CopyOptions, copy_command};
     use crate::commands::init::init_command;
     use crate::common::ShipContext;
     use anyhow::Result;
@@ -865,14 +917,28 @@ mod tests {
             Ok(file_path)
         }
 
-        /// Helper to get copy context
-        fn copy_context(
-            &self,
-            sources: Vec<String>,
-            dest: String,
-            format: String,
-        ) -> (ShipContext, Vec<String>, String, String) {
-            (self.ship_context.clone(), sources, dest, format)
+        /// Copy files into the pond with default options
+        async fn copy_in(&self, sources: Vec<String>, dest: &str, format: &str) -> Result<()> {
+            copy_command(
+                &self.ship_context,
+                &sources,
+                dest,
+                format,
+                &CopyOptions::default(),
+            )
+            .await
+        }
+
+        /// Copy files out of the pond with default options
+        async fn copy_out_to(&self, patterns: Vec<String>, host_dest: &str) -> Result<()> {
+            copy_command(
+                &self.ship_context,
+                &patterns,
+                &format!("host://{}", host_dest),
+                "data",
+                &CopyOptions::default(),
+            )
+            .await
         }
 
         /// Verify a file exists in the pond by trying to read it
@@ -948,13 +1014,13 @@ mod tests {
         let host_file = setup.create_host_text_file("test.txt", content).await?;
 
         // Copy to pond as data file
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec![host_file.to_string_lossy().to_string()],
-            "copied_test.txt".to_string(),
-            "data".to_string(),
-        );
-
-        copy_command(&ship_context, &sources, &dest, &format).await?;
+        setup
+            .copy_in(
+                vec![host_file.to_string_lossy().to_string()],
+                "copied_test.txt",
+                "data",
+            )
+            .await?;
 
         // Verify file exists and has correct content
         assert!(
@@ -987,13 +1053,13 @@ mod tests {
             .await?;
 
         // Copy to pond as series file
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec![host_file.to_string_lossy().to_string()],
-            "copied_series.parquet".to_string(),
-            "series".to_string(),
-        );
-
-        copy_command(&ship_context, &sources, &dest, &format).await?;
+        setup
+            .copy_in(
+                vec![host_file.to_string_lossy().to_string()],
+                "copied_series.parquet",
+                "series",
+            )
+            .await?;
 
         // Verify file exists in the pond
         assert!(
@@ -1089,13 +1155,13 @@ mod tests {
         let host_file = setup.create_host_csv_file("test.csv").await?;
 
         // Copy to pond as data file (CSV is raw data, not a parquet table)
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec![host_file.to_string_lossy().to_string()],
-            "copied_data.csv".to_string(),
-            "data".to_string(),
-        );
-
-        copy_command(&ship_context, &sources, &dest, &format).await?;
+        setup
+            .copy_in(
+                vec![host_file.to_string_lossy().to_string()],
+                "copied_data.csv",
+                "data",
+            )
+            .await?;
 
         // Verify file exists
         assert!(
@@ -1129,17 +1195,17 @@ mod tests {
         let file3 = setup.create_host_csv_file("data.csv").await?;
 
         // Copy all to a directory (use trailing slash to ensure directory creation)
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec![
-                file1.to_string_lossy().to_string(),
-                file2.to_string_lossy().to_string(),
-                file3.to_string_lossy().to_string(),
-            ],
-            "uploaded/".to_string(),
-            "data".to_string(),
-        );
-
-        copy_command(&ship_context, &sources, &dest, &format).await?;
+        setup
+            .copy_in(
+                vec![
+                    file1.to_string_lossy().to_string(),
+                    file2.to_string_lossy().to_string(),
+                    file3.to_string_lossy().to_string(),
+                ],
+                "uploaded/",
+                "data",
+            )
+            .await?;
 
         // Verify all files exist in the directory
         assert!(
@@ -1173,13 +1239,13 @@ mod tests {
         let host_file = setup.create_host_csv_file("test.csv").await?;
 
         // Copy with data format (CSV files should use data format)
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec![host_file.to_string_lossy().to_string()],
-            "formatted_as_data.csv".to_string(),
-            "data".to_string(),
-        );
-
-        copy_command(&ship_context, &sources, &dest, &format).await?;
+        setup
+            .copy_in(
+                vec![host_file.to_string_lossy().to_string()],
+                "formatted_as_data.csv",
+                "data",
+            )
+            .await?;
 
         // Verify it was stored successfully
         assert!(
@@ -1239,33 +1305,36 @@ mod tests {
     #[tokio::test]
     async fn test_copy_error_handling() -> Result<()> {
         let setup = TestSetup::new().await?;
+        let opts = CopyOptions::default();
 
         // Test copying non-existent file
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec!["/nonexistent/file.txt".to_string()],
-            "should_fail.txt".to_string(),
-            "data".to_string(),
-        );
-
-        let result = copy_command(&ship_context, &sources, &dest, &format).await;
+        let result = copy_command(
+            &setup.ship_context,
+            &["/nonexistent/file.txt".to_string()],
+            "should_fail.txt",
+            "data",
+            &opts,
+        )
+        .await;
         assert!(
             result.is_err(),
             "Should fail when copying non-existent file"
         );
 
         // Test copying with empty sources
-        let result = copy_command(&ship_context, &[], &dest, &format).await;
+        let result = copy_command(&setup.ship_context, &[], "should_fail.txt", "data", &opts).await;
         assert!(result.is_err(), "Should fail with empty sources");
 
         // Test copying with invalid format
         let host_file = setup.create_host_text_file("test.txt", "test").await?;
-        let (ship_context, sources, dest, _) = setup.copy_context(
-            vec![host_file.to_string_lossy().to_string()],
-            "test.txt".to_string(),
-            "invalid_format".to_string(),
-        );
-
-        let result = copy_command(&ship_context, &sources, &dest, "invalid_format").await;
+        let result = copy_command(
+            &setup.ship_context,
+            &[host_file.to_string_lossy().to_string()],
+            "test.txt",
+            "invalid_format",
+            &opts,
+        )
+        .await;
         assert!(result.is_err(), "Should fail with invalid format");
 
         Ok(())
@@ -1281,13 +1350,13 @@ mod tests {
             .await?;
 
         // Copy to new filename (not directory)
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec![host_file.to_string_lossy().to_string()],
-            "renamed_file.txt".to_string(),
-            "data".to_string(),
-        );
-
-        copy_command(&ship_context, &sources, &dest, &format).await?;
+        setup
+            .copy_in(
+                vec![host_file.to_string_lossy().to_string()],
+                "renamed_file.txt",
+                "data",
+            )
+            .await?;
 
         // Verify the file exists with the new name
         assert!(
@@ -1342,13 +1411,9 @@ mod tests {
         let output_path = output_dir.path().to_string_lossy().to_string();
 
         // Copy out using pattern
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec!["/data/**/*.series".to_string()],
-            format!("host://{}", output_path),
-            "data".to_string(), // Format flag should be ignored for copy out
-        );
-
-        copy_command(&ship_context, &sources, &dest, &format).await?;
+        setup
+            .copy_out_to(vec!["/data/**/*.series".to_string()], &output_path)
+            .await?;
 
         // Verify all files were exported with correct directory structure
         for series_path in &series_paths {
@@ -1396,13 +1461,9 @@ mod tests {
         let output_path = output_dir.path().to_string_lossy().to_string();
 
         // Copy out single file
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec!["/test_sensor.series".to_string()],
-            format!("host://{}", output_path),
-            "data".to_string(),
-        );
-
-        copy_command(&ship_context, &sources, &dest, &format).await?;
+        setup
+            .copy_out_to(vec!["/test_sensor.series".to_string()], &output_path)
+            .await?;
 
         // Verify file was exported
         let exported_file = output_dir.path().join("test_sensor.series");
@@ -1443,14 +1504,15 @@ mod tests {
         setup.create_parquet_series_in_pond("/test.series").await?;
 
         // Try to copy out WITHOUT host:// prefix - should fail or be treated as copy IN
-        let (ship_context, sources, dest, format) = setup.copy_context(
-            vec!["/test.series".to_string()],
-            "/tmp/output".to_string(), // Missing host:// prefix
-            "data".to_string(),
-        );
-
         // This should be treated as copy IN and fail because /test.series is not a host file
-        let result = copy_command(&ship_context, &sources, &dest, &format).await;
+        let result = copy_command(
+            &setup.ship_context,
+            &["/test.series".to_string()],
+            "/tmp/output",
+            "data",
+            &CopyOptions::default(),
+        )
+        .await;
         assert!(
             result.is_err(),
             "Should fail when copying pond path to pond path without host:// prefix"
@@ -1501,13 +1563,9 @@ mod tests {
         let output_dir = tempfile::tempdir()?;
         let output_path = output_dir.path().to_string_lossy().to_string();
 
-        let (ship_context1, sources, dest, format) = setup1.copy_context(
-            vec!["/data/**/*.series".to_string()],
-            format!("host://{}", output_path),
-            "data".to_string(),
-        );
-
-        copy_command(&ship_context1, &sources, &dest, &format).await?;
+        setup1
+            .copy_out_to(vec!["/data/**/*.series".to_string()], &output_path)
+            .await?;
 
         // Verify files were exported
         let exported_files: Vec<_> = test_files
@@ -1530,13 +1588,13 @@ mod tests {
         let setup2 = TestSetup::new().await?;
 
         // Copy the entire directory structure back into the new pond
-        let (ship_context2, sources2, dest2, format2) = setup2.copy_context(
-            vec![format!("host://{}/data", output_path)],
-            "/imported".to_string(),
-            "data".to_string(),
-        );
-
-        copy_command(&ship_context2, &sources2, &dest2, &format2).await?;
+        setup2
+            .copy_in(
+                vec![format!("host://{}/data", output_path)],
+                "/imported",
+                "data",
+            )
+            .await?;
 
         // Step 3: Verify all files exist in second pond with correct structure
         for original_path in &test_files {

@@ -52,8 +52,17 @@ echo ""
 for test in $TESTS; do
     name=$(basename "$test")
     echo "--- Running: $name ---"
-    
-    if "$SCRIPT_DIR/run-test.sh" "$test" > /tmp/test-output-$$.txt 2>&1; then
+
+    # Tests marked '# REQUIRES: host' run directly on the host (not in Docker).
+    # They need tools like Node.js/Puppeteer that aren't in the test container.
+    if head -25 "$test" | grep -q '# REQUIRES: host'; then
+        runner=(bash "$test")
+        echo "  (host-only test — running locally)"
+    else
+        runner=("$SCRIPT_DIR/run-test.sh" "$test")
+    fi
+
+    if "${runner[@]}" > /tmp/test-output-$$.txt 2>&1; then
         echo "✓ PASSED: $name"
         ((PASSED++))
     else

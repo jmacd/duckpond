@@ -347,8 +347,14 @@ impl TemporalReduceSqlFile {
             // Create unique pattern name based on source path to avoid collisions
             // when multiple temporal reduce files are active in the same session
             // CRITICAL: Lowercase to match DataFusion's case-insensitive table name handling
-            let pattern_name =
-                format!("source_{}", self.source_path.replace(['/', '.'], "_")).to_lowercase();
+            // Replace ALL non-alphanumeric characters with underscore so the name is
+            // a valid unquoted SQL identifier (spaces, parens, slashes, etc.).
+            let sanitized: String = self
+                .source_path
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            let pattern_name = format!("source_{}", sanitized).to_lowercase();
 
             // Generate the SQL query with schema discovery, using the unique pattern name
             log::debug!(
@@ -592,48 +598,37 @@ async fn generate_temporal_sql(
         }
     }
 
-    // Generate SQL with time bucketing and explicit non-nullable timestamp using COALESCE
-    // COALESCE forces DataFusion to infer non-nullable schema, even though the fallback is never used
+    // Generate SQL with time bucketing using date_bin() for arbitrary intervals.
+    //
+    // DATE_TRUNC only supports single calendar units (hour, day, etc.) and
+    // discards the multiplier — so DATE_TRUNC('hour', ts) is the same whether
+    // the config says 1h, 4h, or 12h. date_bin() properly handles multi-unit
+    // intervals like INTERVAL '4 HOUR' by binning from an epoch origin.
+    //
+    // COALESCE forces DataFusion to infer non-nullable schema, even though the
+    // fallback is never used.
     Ok(format!(
         r#"
         WITH time_buckets AS (
           SELECT 
-            DATE_TRUNC('{}', {}) AS time_bucket,
-            {}
-          FROM {}
-          WHERE {} IS NOT NULL
-          GROUP BY DATE_TRUNC('{}', {})
+            date_bin({interval}, {ts}, TIMESTAMP '1970-01-01T00:00:00') AS time_bucket,
+            {agg_exprs}
+          FROM {table}
+          WHERE {ts} IS NOT NULL
+          GROUP BY date_bin({interval}, {ts}, TIMESTAMP '1970-01-01T00:00:00')
         )
         SELECT 
-          COALESCE(CAST(time_bucket AS TIMESTAMP), CAST(0 AS TIMESTAMP)) AS {},
-          {}
+          COALESCE(CAST(time_bucket AS TIMESTAMP), CAST(0 AS TIMESTAMP)) AS {ts},
+          {select_exprs}
         FROM time_buckets
         ORDER BY time_bucket
         "#,
-        // Extract time unit from interval for DATE_TRUNC
-        extract_time_unit_from_interval(&interval),
-        config.time_column,
-        agg_exprs.join(",\n            "),
-        pattern_name,       // Use the unique pattern name instead of hardcoded "series"
-        config.time_column, // WHERE clause to filter out nulls
-        extract_time_unit_from_interval(&interval),
-        config.time_column,
-        config.time_column,
-        final_select_exprs.join(",\n          ")
+        interval = interval,
+        ts = config.time_column,
+        agg_exprs = agg_exprs.join(",\n            "),
+        table = pattern_name,
+        select_exprs = final_select_exprs.join(",\n          ")
     ))
-}
-
-/// Extract time unit from SQL interval for DATE_TRUNC
-fn extract_time_unit_from_interval(interval: &str) -> &str {
-    if interval.contains("DAY") {
-        "day"
-    } else if interval.contains("HOUR") {
-        "hour"
-    } else if interval.contains("MINUTE") {
-        "minute"
-    } else {
-        "second"
-    }
 }
 
 /// Dynamic directory for temporal reduce operations

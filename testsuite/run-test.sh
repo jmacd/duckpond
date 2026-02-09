@@ -2,10 +2,10 @@
 # Run a DuckPond test in a fresh container
 #
 # Usage:
-#   ./run-test.sh                           # Interactive mode
-#   ./run-test.sh script.sh                 # Run a script file
+#   ./run-test.sh 201                       # Run test, inspect on failure
+#   ./run-test.sh --inspect 201             # Run test, always open for inspection
+#   ./run-test.sh --interactive             # Interactive shell in container
 #   ./run-test.sh --inline 'pond init'      # Run inline commands
-#   ./run-test.sh --save-result script.sh   # Run and save result to results/
 #
 set -e
 
@@ -20,9 +20,21 @@ SAVE_RESULT=false
 SCRIPT_FILE=""
 VERBOSE=false
 NO_REBUILD=false
+OUTPUT_DIR=""
+USER_OUTPUT_DIR=""
+INSPECT=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --output|-o)
+            OUTPUT_DIR="$2"
+            USER_OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --inspect)
+            INSPECT=true
+            shift
+            ;;
         --interactive|-i)
             INTERACTIVE=true
             shift
@@ -52,13 +64,15 @@ while [[ $# -gt 0 ]]; do
             echo "  --save-result, -s    Save output to results/ directory"
             echo "  --verbose, -v        Show container output in real-time"
             echo "  --no-rebuild, -n     Skip automatic rebuild (use existing image)"
+            echo "  --output, -o DIR     Mount DIR as /output in the container (for capturing results)"
+            echo "  --inspect            Copy output for inspection (always; default on failure)"
             echo "  --help, -h           Show this help"
             echo ""
             echo "Examples:"
-            echo "  $0 --interactive"
-            echo "  $0 tests/001-basic-init.sh"
+            echo "  $0 201                           # Run test 201"
+            echo "  $0 --inspect 201                 # Run and open output for inspection"
+            echo "  $0 --interactive                  # Interactive shell"
             echo "  $0 --inline 'pond init && pond list /'"
-            echo "  $0 --save-result tests/test.sh"
             exit 0
             ;;
         *)
@@ -201,33 +215,72 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     fi
     
     SCRIPT_NAME=$(basename "${SCRIPT_FILE}")
+
+    # Always capture output to /tmp/test-output for inspection
+    # (--output overrides this if the user specifies a custom dir)
+    if [[ -z "${OUTPUT_DIR}" ]]; then
+        OUTPUT_DIR="/tmp/test-output"
+    fi
+    rm -rf "${OUTPUT_DIR}"
+    mkdir -p "${OUTPUT_DIR}"
+    OUTPUT_MOUNT=(-v "${OUTPUT_DIR}:/output")
+
+    # Full log always goes to a known file for post-hoc inspection
+    LOG_FILE="/tmp/test-${SCRIPT_NAME%.sh}.log"
+
     echo "=== Running Test: ${SCRIPT_NAME} ==="
-    
-    TEMP_OUTPUT=$(mktemp)
-    
-    # Run the script in the container
+    echo "Log: ${LOG_FILE}"
+
+    # Run the script in the container — all output to log file, NOT to stdout
     set +e
     docker run --rm \
         -e POND=/pond \
         -e RUST_LOG=info \
         -v "${SCRIPT_FILE}:/test/run.sh:ro" \
+        "${OUTPUT_MOUNT[@]}" \
         "${IMAGE_NAME}" \
-        -c "/bin/bash /test/run.sh" 2>&1 | tee "${TEMP_OUTPUT}"
-    EXIT_CODE=${PIPESTATUS[0]}
+        -c "/bin/bash /test/run.sh" > "${LOG_FILE}" 2>&1
+    EXIT_CODE=$?
     set -e
-    
-    echo ""
+
+    # Print a short summary
+    # Print a short summary — extract from the test's own results line
+    RESULTS_LINE=$(grep -E '^=== Results:' "${LOG_FILE}" 2>/dev/null || true)
+    TOTAL=$(grep -cE '^  [✓✗]' "${LOG_FILE}" 2>/dev/null) || TOTAL=0
+    PASSED=$(grep -c '^  ✓' "${LOG_FILE}" 2>/dev/null) || PASSED=0
+    FAILED_COUNT=$(grep -c '^  ✗' "${LOG_FILE}" 2>/dev/null) || FAILED_COUNT=0
+
     if [[ ${EXIT_CODE} -eq 0 ]]; then
-        echo "=== Test SUCCEEDED ==="
+        echo "=== PASSED ${PASSED}/${TOTAL} checks ==="
     else
-        echo "=== Test FAILED (exit: ${EXIT_CODE}) ==="
+        echo "=== FAILED (exit: ${EXIT_CODE}) — ${PASSED}/${TOTAL} checks passed ==="
+        # Show only the failing lines
+        grep '^  ✗' "${LOG_FILE}" 2>/dev/null | sed 's/^/  /'
+        # Show the last few lines for context on crashes/errors
+        if [[ ${FAILED_COUNT} -eq 0 ]]; then
+            echo "  (no check failures — last 10 lines of log:)"
+            tail -10 "${LOG_FILE}" | sed 's/^/  /'
+        fi
     fi
     
     if [[ "${SAVE_RESULT}" == "true" ]]; then
-        save_result "${EXIT_CODE}" "${TEMP_OUTPUT}"
+        save_result "${EXIT_CODE}" "${LOG_FILE}"
     fi
-    
-    rm -f "${TEMP_OUTPUT}"
+
+    # On failure, --inspect, or explicit --output, print how to inspect the output
+    if [[ ${EXIT_CODE} -ne 0 ]] || [[ "${INSPECT}" == "true" ]] || [[ -n "${USER_OUTPUT_DIR}" ]]; then
+        echo ""
+        echo "Full log: ${LOG_FILE}  ($(wc -l < "${LOG_FILE}") lines)"
+        echo "Output:   ${OUTPUT_DIR}"
+        ls "${OUTPUT_DIR}" 2>/dev/null | head -20 | sed 's/^/  /'
+        # If it looks like a sitegen site, print the serve command
+        if [[ -f "${OUTPUT_DIR}/index.html" ]]; then
+            echo ""
+            echo "To inspect the site in a browser:"
+            echo "  (cd ${SCRIPT_DIR}/browser && SITE_ROOT=${OUTPUT_DIR} npx vite --port 4174 --open)"
+        fi
+    fi
+
     exit ${EXIT_CODE}
 fi
 
