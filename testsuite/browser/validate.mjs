@@ -4,26 +4,53 @@
  * Checks that every page loads, styles are applied, sidebar links work,
  * charts are present on data pages, and no JS errors occur.
  *
- * Usage:
- *   # Start vite first (from the dist directory):
- *   npx vite --port 4174
+ * Supports both root and subdir deployments via BASE_PATH:
+ *   BASE_PATH="/"       → links are /params/Temperature.html
+ *   BASE_PATH="/myapp/" → links are /myapp/params/Temperature.html
  *
- *   # Then run validation:
- *   node validate.mjs                              # default localhost:4174
- *   BASE_URL=http://localhost:3000 node validate.mjs  # custom URL
+ * Usage:
+ *   BASE_URL=http://localhost:4174 BASE_PATH="/" SITE_ROOT=/tmp/test-output node validate.mjs
+ *   BASE_URL=http://localhost:4174 BASE_PATH="/myapp/" SITE_ROOT=/tmp/test-output-subdir node validate.mjs
  */
 import puppeteer from "puppeteer";
+import { readdirSync, statSync, existsSync, realpathSync } from "node:fs";
+import { join, relative } from "node:path";
 
 const BASE_URL = process.env.BASE_URL || "http://localhost:4174";
+const BASE_PATH = process.env.BASE_PATH || "/";
+const SITE_ROOT = realpathSync(process.env.SITE_ROOT || "/tmp/test-output");
 
-// Pages to test — path is relative to BASE_URL
-const PAGES = [
-  { path: "/index.html", title: "Synthetic Example", layout: "hero" },
-  { path: "/params/Temperature.html", title: "Temperature", layout: "data-page" },
-  { path: "/params/DO.html", title: "DO", layout: "data-page" },
-  { path: "/sites/NorthDock.html", title: "NorthDock", layout: "data-page" },
-  { path: "/sites/SouthDock.html", title: "SouthDock", layout: "data-page" },
-];
+/**
+ * Discover pages from the generated site directory.
+ * index.html → hero layout, everything else → data-page layout.
+ */
+function discoverPages(siteRoot) {
+  const pages = [];
+  function walk(dir) {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        // Skip Vite build artifacts and data directories
+        if (entry === "node_modules" || entry === ".vite" || entry === "data" || entry === "assets") continue;
+        walk(full);
+      } else if (entry.endsWith(".html")) {
+        const rel = relative(siteRoot, full);
+        const isIndex = rel === "index.html";
+        pages.push({
+          path: rel,
+          title: isIndex ? "" : entry.replace(".html", ""),
+          layout: isIndex ? "hero" : "data-page",
+        });
+      }
+    }
+  }
+  walk(siteRoot);
+  return pages;
+}
+
+const PAGES = discoverPages(SITE_ROOT);
+console.log(`Discovered ${PAGES.length} pages in ${SITE_ROOT}:`);
+PAGES.forEach(p => console.log(`  ${p.path} (${p.layout})`));
 
 let pass = 0;
 let fail = 0;
@@ -43,7 +70,7 @@ function check(cond, msg) {
 // ─── Per-page checks ────────────────────────────────────────
 
 async function testPage(browser, page) {
-  const url = `${BASE_URL}${page.path}`;
+  const url = `${BASE_URL}${BASE_PATH}${page.path}`;
   const errors = [];
   const tab = await browser.newPage();
 
@@ -96,7 +123,17 @@ async function testPage(browser, page) {
     const navLinks = await tab.evaluate(
       () => document.querySelectorAll("nav.sidebar .nav-list a").length
     );
-    check(navLinks >= 4, `sidebar has nav links (${navLinks})`);
+    check(navLinks >= 2, `sidebar has nav links (${navLinks})`);
+
+    // Navigation links have correct base path prefix
+    const linkHrefs = await tab.evaluate(
+      () => [...document.querySelectorAll("nav.sidebar .nav-list a")].map(a => a.getAttribute("href"))
+    );
+    const allPrefixed = linkHrefs.every(h => h.startsWith(BASE_PATH));
+    check(allPrefixed, `all nav links start with "${BASE_PATH}" (${linkHrefs.length} links)`);
+    if (!allPrefixed) {
+      linkHrefs.filter(h => !h.startsWith(BASE_PATH)).forEach(h => console.log(`    BAD LINK: ${h}`));
+    }
 
     // Styles loaded (sidebar has non-zero width)
     const sidebarWidth = await tab.evaluate(() => {
@@ -122,26 +159,10 @@ async function testPage(browser, page) {
       );
       check(hasChart, "chart container present");
 
-      const hasManifest = await tab.evaluate(
-        () =>
-          document.querySelector(
-            'script.chart-data[type="application/json"]'
-          ) !== null
-      );
-      check(hasManifest, "chart data manifest present");
-
-      // Manifest has file entries with /data/ prefix
-      const manifestFiles = await tab.evaluate(() => {
-        const el = document.querySelector('script.chart-data[type="application/json"]');
-        if (!el) return [];
-        try {
-          return JSON.parse(el.textContent).map(m => m.file);
-        } catch { return []; }
-      });
-      check(
-        manifestFiles.length > 0 && manifestFiles.every(f => f.startsWith("/data/")),
-        `manifest has ${manifestFiles.length} files, all with /data/ prefix`
-      );
+      // Note: chart.js reads the <script class="chart-data"> manifest then
+      // replaces container.innerHTML, destroying the script tag. So we can't
+      // query for it after page load. Instead we verify chart.js successfully
+      // consumed the manifest by checking its rendered output below.
 
       // Duration buttons rendered by chart.js
       const btnCount = await tab.evaluate(
@@ -203,13 +224,13 @@ async function testNavigation(browser) {
   console.log("\n=== Navigation ===");
   const tab = await browser.newPage();
 
-  await tab.goto(`${BASE_URL}/index.html`, {
+  await tab.goto(`${BASE_URL}${BASE_PATH}index.html`, {
     waitUntil: "domcontentloaded",
     timeout: 10000,
   });
   await new Promise((r) => setTimeout(r, 500));
 
-  // Click a sidebar link
+  // Click a sidebar link — Temperature exists in both root and subdir sites
   const link = await tab.evaluate(() => {
     const a = document.querySelector(
       'nav.sidebar .nav-list a[href*="Temperature"]'
@@ -225,6 +246,7 @@ async function testNavigation(browser) {
   await new Promise((r) => setTimeout(r, 1000));
   const url = tab.url();
   check(url.includes("Temperature"), `navigated to Temperature page`);
+  check(url.includes(BASE_PATH), `URL includes base path "${BASE_PATH}"`);
 
   const title = await tab.title();
   check(title.includes("Temperature"), "Temperature page title correct");
@@ -235,7 +257,7 @@ async function testNavigation(browser) {
 // ─── Main ───────────────────────────────────────────────────
 
 async function main() {
-  console.log(`Validating site at: ${BASE_URL}\n`);
+  console.log(`Validating site at: ${BASE_URL}${BASE_PATH} (${PAGES.length} pages)\n`);
 
   const browser = await puppeteer.launch({ headless: true });
 

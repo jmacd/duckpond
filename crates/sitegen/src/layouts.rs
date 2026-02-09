@@ -15,8 +15,6 @@ pub struct LayoutContext<'a> {
     pub title: &'a str,
     /// Site title (from site.yaml)
     pub site_title: &'a str,
-    /// Base URL for the site
-    pub base_url: &'a str,
     /// Rendered HTML content (from markdown + shortcodes)
     pub content: &'a str,
     /// Rendered sidebar HTML (from sidebar partial, if any)
@@ -52,7 +50,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (ctx.title) " — " (ctx.site_title) }
-                link rel="stylesheet" href={(ctx.base_url) "style.css"};
+                link rel="stylesheet" href="/style.css";
             }
             body {
                 @if let Some(sidebar_html) = ctx.sidebar {
@@ -64,7 +62,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                     (PreEscaped(ctx.content))
                 }
                 // Our glue code — loads DuckDB-WASM + Observable Plot dynamically
-                script src={(ctx.base_url) "chart.js"} type="module" {}
+                script src="/chart.js" type="module" {}
             }
         }
     }
@@ -81,7 +79,7 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (ctx.title) " — " (ctx.site_title) }
-                link rel="stylesheet" href={(ctx.base_url) "style.css"};
+                link rel="stylesheet" href="/style.css";
             }
             body {
                 @if let Some(sidebar_html) = ctx.sidebar {
@@ -106,7 +104,6 @@ mod tests {
         let ctx = LayoutContext {
             title: "Home",
             site_title: "Test Site",
-            base_url: "/",
             content: "<h1>Hello</h1>",
             sidebar: None,
         };
@@ -122,7 +119,6 @@ mod tests {
         let ctx = LayoutContext {
             title: "Temperature",
             site_title: "Noyo Harbor",
-            base_url: "/",
             content: "<p>Chart here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
         };
@@ -139,7 +135,6 @@ mod tests {
         let ctx = LayoutContext {
             title: "Page",
             site_title: "Site",
-            base_url: "/",
             content: "<p>Content</p>",
             sidebar: None,
         };
