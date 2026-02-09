@@ -574,10 +574,7 @@ impl ParquetExt for WD {
                 .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
         }
 
-        // Finalize footer, then recover the buffer
-        let _file_metadata = writer
-            .finish()
-            .map_err(|e| crate::Error::Other(format!("Finish writer error: {}", e)))?;
+        // Flush any buffered row group, finalize footer, and recover the buffer
         let cursor = writer
             .into_inner()
             .map_err(|e| crate::Error::Other(format!("into_inner error: {}", e)))?;

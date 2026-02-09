@@ -22,4 +22,3 @@ entries:
       columns:
         - "AT500_Surface.Temperature.C"
         - "AT500_Bottom.Temperature.C"
-    

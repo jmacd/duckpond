@@ -32,12 +32,3 @@ ${EXE} mknod column-rename /etc/hydro_rename --overwrite --config-path ${NOYO}/h
 ${EXE} set-temporal-bounds /hydrovu/devices/6582334615060480/NoyoCenterVulink_2_active.series \
   --min-time "2024-01-01 00:00:00" \
   --max-time "2024-05-30 23:59:59"
-
-# Re-export site (chart.js + style.css are baked into the binary via include_str!)
-rm -rf ${OUTDIR}
-mkdir -p ${OUTDIR}
-${EXE} run /etc/site.yaml build ${OUTDIR}
-
-echo "Now, run:"
-echo "npx vite ${OUTDIR} --port 4174 --open"
-
