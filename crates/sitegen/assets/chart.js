@@ -126,22 +126,30 @@
     return;
   }
 
-  // Register each parquet file
+  // Register each parquet file with DuckDB-WASM.
+  // Use simple indexed names (f0.parquet, f1.parquet, ...) to avoid issues
+  // with long or special-character paths in DuckDB's virtual filesystem.
   const fileUrls = manifest.map(m => m.file).filter(Boolean);
   if (fileUrls.length === 0) {
     container.innerHTML = '<div class="empty-state">No exported parquet files in manifest.</div>';
     return;
   }
 
+  // Map from manifest file URL → DuckDB registered name
+  const registeredNames = new Map();
+  let fileIdx = 0;
+
   for (const url of fileUrls) {
+    if (registeredNames.has(url)) continue; // deduplicate
+    const duckdbName = `f${fileIdx++}.parquet`;
     try {
       const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
       const buf = await resp.arrayBuffer();
-      const name = url.replace(/[^a-zA-Z0-9]/g, "_");
-      await db.registerFileBuffer(name + ".parquet", new Uint8Array(buf));
+      await db.registerFileBuffer(duckdbName, new Uint8Array(buf));
+      registeredNames.set(url, duckdbName);
     } catch (e) {
-      console.warn("Failed to load", url, e);
+      console.error("chart.js: failed to load parquet file", url, e);
     }
   }
 
@@ -150,7 +158,8 @@
   for (const m of manifest) {
     const res = (m.captures && m.captures[1]) || "res=1h";
     if (!byResolution.has(res)) byResolution.set(res, []);
-    const name = m.file.replace(/[^a-zA-Z0-9]/g, "_") + ".parquet";
+    const name = registeredNames.get(m.file);
+    if (!name) continue; // file failed to load
     byResolution.get(res).push({
       name,
       start_time: m.start_time || 0,

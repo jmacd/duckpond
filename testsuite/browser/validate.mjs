@@ -164,6 +164,11 @@ async function testPage(browser, page) {
       // query for it after page load. Instead we verify chart.js successfully
       // consumed the manifest by checking its rendered output below.
 
+      // Verify no parquet file fetch failures (HTTP 4xx/5xx on /data/ URLs)
+      const dataErrors = errors.filter(e => e.includes("/data/") && e.startsWith("HTTP"));
+      check(dataErrors.length === 0, `no parquet fetch errors (got ${dataErrors.length})`);
+      dataErrors.forEach(e => console.log(`    DATA ERROR: ${e}`));
+
       // Duration buttons rendered by chart.js
       const btnCount = await tab.evaluate(
         () => document.querySelectorAll(".duration-buttons button").length

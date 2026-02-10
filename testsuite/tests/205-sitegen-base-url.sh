@@ -307,6 +307,11 @@ echo "  Layout assets (should be / for Vite):"
 check_contains "${ROOT_DIR}/index.html" "root: style.css at /style.css" 'href="/style.css"'
 check_contains "${ROOT_DIR}/params/Temperature.html" "root: chart.js at /chart.js" 'src="/chart.js"'
 
+echo ""
+echo "  Chart data manifest paths (should be /data/...):"
+check_contains "${ROOT_DIR}/params/Temperature.html" "root: manifest files start with /data/" '"file":"/data/'
+check_not_contains "${ROOT_DIR}/params/Temperature.html" "root: manifest files have no double slash" '"file":"//data/'
+
 # ── Subdir site checks (base_url: "/myapp/") ────────────────
 
 echo ""
@@ -330,6 +335,12 @@ echo ""
 echo "  Layout assets (should still be / — Vite handles base):"
 check_contains "${SUB_DIR}/index.html" "subdir: style.css still at /style.css" 'href="/style.css"'
 check_contains "${SUB_DIR}/params/Temperature.html" "subdir: chart.js still at /chart.js" 'src="/chart.js"'
+
+echo ""
+echo "  Chart data manifest paths (should be /myapp/data/...):"
+check_contains "${SUB_DIR}/params/Temperature.html" "subdir: manifest files start with /myapp/data/" '"file":"/myapp/data/'
+check_not_contains "${SUB_DIR}/params/Temperature.html" "subdir: manifest files have no double slash" '"file":"/myapp//data/'
+check_not_contains "${SUB_DIR}/params/Temperature.html" "subdir: manifest files NOT bare /data/" '"file":"/data/'
 
 echo ""
 echo "  No double slashes:"
