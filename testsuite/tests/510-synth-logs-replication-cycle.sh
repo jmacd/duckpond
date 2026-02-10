@@ -350,11 +350,11 @@ fi
 # Verify data integrity by checking first and last rows
 echo ""
 echo "--- Data Integrity Check ---"
-POND1_FIRST=$(POND=/pond1 pond cat /data/metrics/metrics.log --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
-POND2_FIRST=$(POND=/pond2 pond cat /data/metrics/metrics.log --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
+POND1_FIRST=$(POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
+POND2_FIRST=$(POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
 
-POND1_LAST=$(POND=/pond1 pond cat /data/metrics/metrics.log --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
-POND2_LAST=$(POND=/pond2 pond cat /data/metrics/metrics.log --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
+POND1_LAST=$(POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
+POND2_LAST=$(POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
 
 echo "First row - Pond1: ${POND1_FIRST}"
 echo "First row - Pond2: ${POND2_FIRST}"
@@ -480,7 +480,7 @@ echo "=== Summary Queries ==="
 
 echo ""
 echo "--- Min/Max row numbers (Pond1) ---"
-POND=/pond1 pond cat /data/metrics/metrics.log --query "
+POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "
     SELECT 
         MIN(CAST(column0 AS INTEGER)) as min_row,
         MAX(CAST(column0 AS INTEGER)) as max_row,
@@ -490,7 +490,7 @@ POND=/pond1 pond cat /data/metrics/metrics.log --query "
 
 echo ""
 echo "--- Min/Max row numbers (Pond2) ---"
-POND=/pond2 pond cat /data/metrics/metrics.log --query "
+POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "
     SELECT 
         MIN(CAST(column0 AS INTEGER)) as min_row,
         MAX(CAST(column0 AS INTEGER)) as max_row,

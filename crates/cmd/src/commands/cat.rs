@@ -17,11 +17,11 @@ use log::debug;
 async fn handle_stream_output(
     mut stream: datafusion::physical_plan::SendableRecordBatchStream,
     display: &str,
-    sql_query: Option<&str>,
+    _sql_query: Option<&str>,
     output: Option<&mut String>,
     source_desc: &str, // For debug messages: "url" or "path"
 ) -> Result<()> {
-    let use_table_format = display == "table" || sql_query.is_some();
+    let use_table_format = display == "table";
 
     if use_table_format {
         // Collect batches for table formatting

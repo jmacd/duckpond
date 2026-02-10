@@ -77,7 +77,7 @@ pond list /sensors/
 # --- Verify station_a individually --------------------------------------------
 echo ""
 echo "=== Station A: row count & time range ==="
-pond cat /sensors/station_a --sql "
+pond cat /sensors/station_a --format=table --sql "
   SELECT
     COUNT(*)       AS rows,
     MIN(timestamp) AS first_ts,
@@ -90,7 +90,7 @@ pond cat /sensors/station_a --sql "
 # --- Verify station_b individually --------------------------------------------
 echo ""
 echo "=== Station B: row count & time range ==="
-pond cat /sensors/station_b --sql "
+pond cat /sensors/station_b --format=table --sql "
   SELECT
     COUNT(*)       AS rows,
     MIN(timestamp) AS first_ts,
@@ -103,7 +103,7 @@ pond cat /sensors/station_b --sql "
 # --- Verify the combined join -------------------------------------------------
 echo ""
 echo "=== Combined: row count & full time range ==="
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT
     COUNT(*)       AS rows,
     MIN(timestamp) AS first_ts,
@@ -114,7 +114,7 @@ pond cat /sensors/combined --sql "
 # --- Verify scoped column names exist -----------------------------------------
 echo ""
 echo "=== Combined: scoped value ranges ==="
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT
     MIN(\"StationA.temperature\") AS a_temp_min,
     MAX(\"StationA.temperature\") AS a_temp_max,
@@ -130,7 +130,7 @@ pond cat /sensors/combined --sql "
 # --- Verify overlap region (Jan 10–15) has both stations' data ----------------
 echo ""
 echo "=== Overlap region (Jan 10–15): both stations present ==="
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT COUNT(*) AS overlap_rows,
     COUNT(\"StationA.temperature\") AS a_present,
     COUNT(\"StationB.temperature\") AS b_present
@@ -142,7 +142,7 @@ pond cat /sensors/combined --sql "
 # --- Verify exclusive regions have NULLs for the absent station ---------------
 echo ""
 echo "=== Station A exclusive (Jan 1–9): B columns should be NULL ==="
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT COUNT(*) AS rows,
     COUNT(\"StationA.temperature\") AS a_present,
     COUNT(\"StationB.temperature\") AS b_present
@@ -152,7 +152,7 @@ pond cat /sensors/combined --sql "
 
 echo ""
 echo "=== Station B exclusive (Jan 16–25): A columns should be NULL ==="
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT COUNT(*) AS rows,
     COUNT(\"StationA.temperature\") AS a_present,
     COUNT(\"StationB.temperature\") AS b_present
@@ -163,7 +163,7 @@ pond cat /sensors/combined --sql "
 # --- Sample rows from each region --------------------------------------------
 echo ""
 echo "=== Sample: first 3 rows (Station A only) ==="
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT timestamp,
     \"StationA.temperature\",
     \"StationB.temperature\"
@@ -174,7 +174,7 @@ pond cat /sensors/combined --sql "
 
 echo ""
 echo "=== Sample: 3 rows from overlap (Jan 12 noon) ==="
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT timestamp,
     \"StationA.temperature\",
     \"StationB.temperature\"

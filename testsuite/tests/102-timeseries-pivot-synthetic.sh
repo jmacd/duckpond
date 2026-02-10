@@ -95,10 +95,10 @@ pond list /sensors
 echo ""
 echo "=== 2. Verify individual stations ==="
 echo "--- station_a row count ---"
-pond cat /sensors/station_a --sql "SELECT COUNT(*) AS cnt FROM source"
+pond cat /sensors/station_a --format=table --sql "SELECT COUNT(*) AS cnt FROM source"
 
 echo "--- station_b row count ---"
-pond cat /sensors/station_b --sql "SELECT COUNT(*) AS cnt FROM source"
+pond cat /sensors/station_b --format=table --sql "SELECT COUNT(*) AS cnt FROM source"
 
 echo ""
 echo "=== 3. Verify the combined join ==="
@@ -106,7 +106,7 @@ echo "--- combined schema ---"
 pond describe /sensors/combined
 
 echo "--- combined row count and time span ---"
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT COUNT(*) AS cnt,
          MIN(timestamp) AS t_min,
          MAX(timestamp) AS t_max
@@ -114,7 +114,7 @@ pond cat /sensors/combined --sql "
 "
 
 echo "--- combined: check scoped column names exist ---"
-pond cat /sensors/combined --sql "
+pond cat /sensors/combined --format=table --sql "
   SELECT
     \"station_a.temperature\",
     \"station_a.pressure\",
@@ -131,20 +131,20 @@ echo "--- pivot_temperature schema ---"
 pond describe /sensors/pivot_temperature
 
 echo "--- pivot_temperature row count ---"
-pond cat /sensors/pivot_temperature --sql "SELECT COUNT(*) AS cnt FROM source"
+pond cat /sensors/pivot_temperature --format=table --sql "SELECT COUNT(*) AS cnt FROM source"
 
 echo "--- pivot_temperature: first 5 rows ---"
-pond cat /sensors/pivot_temperature --sql "
+pond cat /sensors/pivot_temperature --format=table --sql "
   SELECT * FROM source ORDER BY timestamp LIMIT 5
 "
 
 echo "--- pivot_temperature: last 5 rows ---"
-pond cat /sensors/pivot_temperature --sql "
+pond cat /sensors/pivot_temperature --format=table --sql "
   SELECT * FROM source ORDER BY timestamp DESC LIMIT 5
 "
 
 echo "--- pivot_temperature: only station_a data (before Jan 5) ---"
-pond cat /sensors/pivot_temperature --sql "
+pond cat /sensors/pivot_temperature --format=table --sql "
   SELECT timestamp,
          \"combined.station_a.temperature\",
          \"combined.station_b.temperature\"
@@ -155,7 +155,7 @@ pond cat /sensors/pivot_temperature --sql "
 "
 
 echo "--- pivot_temperature: overlap region (both non-null) ---"
-pond cat /sensors/pivot_temperature --sql "
+pond cat /sensors/pivot_temperature --format=table --sql "
   SELECT COUNT(*) AS overlap_rows
   FROM source
   WHERE \"combined.station_a.temperature\" IS NOT NULL
@@ -163,7 +163,7 @@ pond cat /sensors/pivot_temperature --sql "
 "
 
 echo "--- pivot_temperature: only station_b data (after Jan 20) ---"
-pond cat /sensors/pivot_temperature --sql "
+pond cat /sensors/pivot_temperature --format=table --sql "
   SELECT timestamp,
          \"combined.station_a.temperature\",
          \"combined.station_b.temperature\"
@@ -179,10 +179,10 @@ echo "--- pivot_pressure schema ---"
 pond describe /sensors/pivot_pressure
 
 echo "--- pivot_pressure row count ---"
-pond cat /sensors/pivot_pressure --sql "SELECT COUNT(*) AS cnt FROM source"
+pond cat /sensors/pivot_pressure --format=table --sql "SELECT COUNT(*) AS cnt FROM source"
 
 echo "--- pivot_pressure: value ranges ---"
-pond cat /sensors/pivot_pressure --sql "
+pond cat /sensors/pivot_pressure --format=table --sql "
   SELECT
     MIN(\"combined.station_a.pressure\") AS a_min,
     MAX(\"combined.station_a.pressure\") AS a_max,
@@ -192,7 +192,7 @@ pond cat /sensors/pivot_pressure --sql "
 "
 
 echo "--- pivot_pressure: first 5 rows ---"
-pond cat /sensors/pivot_pressure --sql "
+pond cat /sensors/pivot_pressure --format=table --sql "
   SELECT * FROM source ORDER BY timestamp LIMIT 5
 "
 

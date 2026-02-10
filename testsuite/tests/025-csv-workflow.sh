@@ -47,11 +47,11 @@ echo "✓ CSV copied as raw data"
 echo ""
 echo "=== Test 3: Query CSV with csv:// scheme ==="
 echo "--- All rows (with SELECT *) ---"
-pond cat csv:///data/readings.csv --query "SELECT * FROM source"
+pond cat csv:///data/readings.csv --format=table --query "SELECT * FROM source"
 
 echo ""
 echo "--- With SQL filter (temp >= 25) ---"
-pond cat csv:///data/readings.csv --query "SELECT * FROM source WHERE temperature >= 25"
+pond cat csv:///data/readings.csv --format=table --query "SELECT * FROM source WHERE temperature >= 25"
 
 echo ""
 echo "=== Experiment Complete ==="

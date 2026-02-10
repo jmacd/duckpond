@@ -36,7 +36,7 @@ pond cat /data/readings.csv
 
 echo ""
 echo "--- With --query (should filter to temp >= 25) ---"
-pond cat /data/readings.csv --query "SELECT * FROM source WHERE temperature >= 25"
+pond cat /data/readings.csv --format=table --query "SELECT * FROM source WHERE temperature >= 25"
 
 #############################
 # TEST 2: Check file metadata via describe
@@ -50,7 +50,7 @@ pond describe /data/readings.csv || echo "(describe may not work on this file ty
 #############################
 echo ""
 echo "=== Test 3: Try 'series' as table name ==="
-pond cat /data/readings.csv --query "SELECT * FROM series WHERE temperature >= 25" 2>&1 || echo "(may fail)"
+pond cat /data/readings.csv --format=table --query "SELECT * FROM series WHERE temperature >= 25" 2>&1 || echo "(may fail)"
 
 #############################
 # TEST 4: Check control table for file type

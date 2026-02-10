@@ -169,6 +169,9 @@ pond cat /data/readings.csv
 # Query CSV files with SQL (use csv:// prefix)
 pond cat csv:///data/readings.csv --sql "SELECT * FROM source WHERE temp > 20"
 
+# Query OtelJSON Lines files (use oteljson:// prefix)
+pond cat oteljson:///logs/metrics.json --sql "SELECT * FROM source ORDER BY timestamp"
+
 # Query Parquet files (stored with --format=table)
 pond cat /data/readings.parquet --sql "SELECT AVG(temperature) as avg_temp FROM source"
 ```
@@ -180,12 +183,15 @@ The table is always named `source` in SQL queries.
 | Scheme | Purpose | Example |
 |--------|---------|--------|
 | `csv://` | Parse file as CSV | `pond cat csv:///data/file.csv --sql "..."` |
+| `oteljson://` | Parse file as OtelJSON Lines | `pond cat oteljson:///logs/metrics.json --sql "..."` |
+| `excelhtml://` | Parse file as Excel HTML | `pond cat excelhtml:///data/export.html --sql "..."` |
 | `file://` | Raw bytes or Parquet | `pond cat file:///data/file.parquet` |
 | (none) | Auto-detect | `pond cat /data/file.csv` |
 
 ⚠️ **Important**: The `--sql` flag (or `--query` alias) only works when the file can be parsed as a table:
 - Parquet files (stored with `--format=table` or `--format=series`)
 - CSV files when using `csv://` prefix
+- OtelJSON Lines files when using `oteljson://` prefix (two-pass: discovers all metric names as columns)
 - Raw data files without a scheme will output raw bytes, ignoring `--sql`
 
 ---
