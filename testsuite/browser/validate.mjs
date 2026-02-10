@@ -99,6 +99,15 @@ async function testPage(browser, page) {
       errors.forEach((e) => console.log(`    ERROR: ${e}`));
     }
 
+    // Version marker (meta generator tag)
+    const generator = await tab.evaluate(
+      () => document.querySelector('meta[name="generator"]')?.content || ""
+    );
+    check(
+      generator.startsWith("DuckPond v"),
+      `version marker present ("${generator}")`
+    );
+
     // Title present
     const title = await tab.title();
     check(

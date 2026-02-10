@@ -85,11 +85,11 @@
     btnBar.appendChild(btn);
   });
 
-  // Reset-zoom button (hidden until a brush selection is made)
+  // Reset-zoom button (disabled until a brush selection is made)
   const resetBtn = document.createElement("button");
   resetBtn.className = "reset-zoom";
   resetBtn.textContent = "Reset zoom";
-  resetBtn.style.display = "none";
+  resetBtn.disabled = true;
   resetBtn.onclick = () => {
     zoomDomain = null;
     hideResetBtn();
@@ -101,8 +101,8 @@
   };
   toolbar.appendChild(resetBtn);
 
-  function showResetBtn() { resetBtn.style.display = ""; }
-  function hideResetBtn() { resetBtn.style.display = "none"; }
+  function showResetBtn() { resetBtn.disabled = false; }
+  function hideResetBtn() { resetBtn.disabled = true; }
 
   // Status message while loading
   container.innerHTML = '<div class="empty-state">Loading chart data…</div>';

@@ -9,6 +9,9 @@
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
+/// DuckPond version baked into generated HTML as `<meta name="generator">`.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Context passed to layout functions.
 pub struct LayoutContext<'a> {
     /// Page title (from frontmatter)
@@ -49,6 +52,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="generator" content=(format!("DuckPond v{}", VERSION));
                 title { (ctx.title) " — " (ctx.site_title) }
                 link rel="stylesheet" href="/style.css";
             }
@@ -78,6 +82,7 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="generator" content=(format!("DuckPond v{}", VERSION));
                 title { (ctx.title) " — " (ctx.site_title) }
                 link rel="stylesheet" href="/style.css";
             }

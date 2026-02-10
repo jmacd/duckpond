@@ -289,6 +289,10 @@ echo ""
 echo "--- Root site (base_url: /) ---"
 
 echo ""
+echo "  Version marker:"
+check_contains "${ROOT_DIR}/index.html" "root: has version generator meta" 'name="generator" content="DuckPond v'
+
+echo ""
 echo "  Nav links:"
 check_contains "${ROOT_DIR}/index.html" "root: nav_list links are /params/..." 'href="/params/Temperature.html"'
 check_contains "${ROOT_DIR}/index.html" "root: nav_list DO link" 'href="/params/DO.html"'
