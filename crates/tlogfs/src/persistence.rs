@@ -1222,7 +1222,9 @@ impl InnerState {
                 TLogFSError::ArrowMessage(format!("Failed to create runtime environment: {}", e))
             })?;
 
-        let session_config = SessionConfig::default().with_target_partitions(2); // Limit parallelism to reduce memory pressure
+        let session_config = SessionConfig::default()
+            .with_target_partitions(2) // Limit parallelism to reduce memory pressure
+            .with_information_schema(true);
         let ctx = Arc::new(SessionContext::new_with_config_rt(
             session_config,
             runtime_env,

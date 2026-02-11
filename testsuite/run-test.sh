@@ -23,6 +23,7 @@ NO_REBUILD=false
 OUTPUT_DIR=""
 USER_OUTPUT_DIR=""
 INSPECT=false
+DATA_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -55,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             NO_REBUILD=true
             shift
             ;;
+        --data|-d)
+            DATA_DIR="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [options] [script.sh]"
             echo ""
@@ -65,6 +70,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --verbose, -v        Show container output in real-time"
             echo "  --no-rebuild, -n     Skip automatic rebuild (use existing image)"
             echo "  --output, -o DIR     Mount DIR as /output in the container (for capturing results)"
+            echo "  --data, -d DIR       Mount DIR as /data in the container (read-only test data)"
             echo "  --inspect            Copy output for inspection (always; default on failure)"
             echo "  --help, -h           Show this help"
             echo ""
@@ -225,6 +231,14 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     mkdir -p "${OUTPUT_DIR}"
     OUTPUT_MOUNT=(-v "${OUTPUT_DIR}:/output")
 
+    # Mount testdata directory if --data specified, or auto-detect testdata/
+    DATA_MOUNT=()
+    if [[ -n "${DATA_DIR}" ]]; then
+        DATA_MOUNT=(-v "${DATA_DIR}:/data:ro")
+    elif [[ -d "${SCRIPT_DIR}/testdata" ]]; then
+        DATA_MOUNT=(-v "${SCRIPT_DIR}/testdata:/data:ro")
+    fi
+
     # Full log always goes to a known file for post-hoc inspection
     LOG_FILE="/tmp/test-${SCRIPT_NAME%.sh}.log"
 
@@ -238,6 +252,7 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         -e RUST_LOG=info \
         -v "${SCRIPT_FILE}:/test/run.sh:ro" \
         "${OUTPUT_MOUNT[@]}" \
+        "${DATA_MOUNT[@]}" \
         "${IMAGE_NAME}" \
         -c "/bin/bash /test/run.sh" > "${LOG_FILE}" 2>&1
     EXIT_CODE=$?

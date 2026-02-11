@@ -178,6 +178,27 @@ pond cat /data/readings.parquet --sql "SELECT AVG(temperature) as avg_temp FROM 
 
 The table is always named `source` in SQL queries.
 
+#### Output Format (`--format`)
+
+| Flag | Output | When to use |
+|------|--------|-------------|
+| `--format=raw` (default) | Parquet bytes (binary) | Piping to files, downstream tools |
+| `--format=table` | Human-readable text table | Terminal display, debugging |
+
+The `--format` flag controls **output** format only. It is independent of `--sql`.
+`--sql` controls **what** data is queried; `--format` controls **how** it's displayed.
+
+```bash
+# Parquet bytes to file (default)
+pond cat oteljson:///ingest/data.json --sql "SELECT * FROM source" > output.parquet
+
+# Human-readable table to terminal
+pond cat oteljson:///ingest/data.json --format=table --sql "SELECT * FROM source LIMIT 5"
+
+# Human-readable table, no SQL (full SELECT * ORDER BY timestamp)
+pond cat oteljson:///ingest/data.json --format=table
+```
+
 #### URL Schemes for Querying
 
 | Scheme | Purpose | Example |
@@ -193,6 +214,24 @@ The table is always named `source` in SQL queries.
 - CSV files when using `csv://` prefix
 - OtelJSON Lines files when using `oteljson://` prefix (two-pass: discovers all metric names as columns)
 - Raw data files without a scheme will output raw bytes, ignoring `--sql`
+
+#### Schema Discovery with `information_schema`
+
+DataFusion's `information_schema` is enabled, so you can discover column names dynamically:
+
+```bash
+# List all columns in the source table
+pond cat oteljson:///ingest/data.json --format=table --sql "
+  SELECT column_name, data_type
+  FROM information_schema.columns
+  WHERE table_name = 'source'
+  ORDER BY column_name
+"
+```
+
+This is useful when exploring unfamiliar data — you don't need to know the column
+names in advance. `pond describe` also shows the schema, but `information_schema`
+lets you query metadata with SQL alongside your data queries.
 
 ---
 
