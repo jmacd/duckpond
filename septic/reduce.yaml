@@ -1,0 +1,56 @@
+# Two temporal-reduce groups: pump amps and BME280 environment.
+#
+# Early log entries had mangled column names from a misconfigured
+# otelcol; those rows produce NULLs and are naturally ignored.
+
+entries:
+  - name: "pumps"
+    factory: "temporal-reduce"
+    config:
+      in_pattern: "oteljson:///ingest/septicstation.json"
+      out_pattern: "data"
+      time_column: "timestamp"
+      resolutions: [1h, 6h, 1d]
+      aggregations:
+        - type: "avg"
+          columns:
+            - "orenco_RT_Pump1_Amps"
+            - "orenco_RT_Pump2_Amps"
+            - "orenco_DT_Pump3_Amps"
+            - "orenco_DT_Pump4_Amps"
+        - type: "min"
+          columns:
+            - "orenco_RT_Pump1_Amps"
+            - "orenco_RT_Pump2_Amps"
+            - "orenco_DT_Pump3_Amps"
+            - "orenco_DT_Pump4_Amps"
+        - type: "max"
+          columns:
+            - "orenco_RT_Pump1_Amps"
+            - "orenco_RT_Pump2_Amps"
+            - "orenco_DT_Pump3_Amps"
+            - "orenco_DT_Pump4_Amps"
+
+  - name: "environment"
+    factory: "temporal-reduce"
+    config:
+      in_pattern: "oteljson:///ingest/septicstation.json"
+      out_pattern: "data"
+      time_column: "timestamp"
+      resolutions: [1h, 6h, 1d]
+      aggregations:
+        - type: "avg"
+          columns:
+            - "septicstation_temperature"
+            - "septicstation_pressure"
+            - "septicstation_humidity"
+        - type: "min"
+          columns:
+            - "septicstation_temperature"
+            - "septicstation_pressure"
+            - "septicstation_humidity"
+        - type: "max"
+          columns:
+            - "septicstation_temperature"
+            - "septicstation_pressure"
+            - "septicstation_humidity"

@@ -728,6 +728,238 @@ pond cat /reduce/weather/res=1h.series --sql "
 pond describe /reduce/weather/res=1h.series
 ```
 
+### sitegen
+
+Static site generator using Maudit + Maud. Reads data from the pond,
+applies Markdown templates with shortcodes, and produces a complete
+static HTML site with interactive charts (DuckDB-WASM + Observable Plot).
+
+```yaml
+factory: sitegen
+
+site:
+  title: "My Dashboard"
+  base_url: "/"                       # Use "/subdir/" for non-root deploy
+
+exports:
+  - name: "params"
+    pattern: "/reduced/single_param/*/*.series"
+    temporal: ["year", "month"]       # Partition exported Parquet by year/month
+  - name: "sites"
+    pattern: "/reduced/single_site/*/*.series"
+    temporal: ["year", "month"]
+
+routes:
+  - name: "home"
+    type: static
+    slug: ""                          # Root: /index.html
+    page: "/etc/site/index.md"
+  - name: "params"
+    type: static
+    slug: "params"                    # /params/index.html (if page given)
+    routes:
+      - name: "param-detail"
+        type: template
+        slug: "$0"                    # /params/Temperature.html, etc.
+        page: "/etc/site/data.md"
+        export: "params"              # Links to export stage by name
+  - name: "sites"
+    type: static
+    slug: "sites"
+    routes:
+      - name: "site-detail"
+        type: template
+        slug: "$0"                    # /sites/NorthDock.html, etc.
+        page: "/etc/site/data.md"
+        export: "sites"
+
+partials:
+  sidebar: "/etc/site/sidebar.md"
+
+static_assets: []                     # Extra files to copy (optional)
+```
+
+**Config fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `site.title` | yes | Site title, used in HTML `<title>` and layout |
+| `site.base_url` | yes | Base URL path: `"/"` for root, `"/myapp/"` for subdirectory |
+| `exports` | yes | List of data export stages (see below) |
+| `routes` | yes | Hierarchical route tree |
+| `partials` | no | Named Markdown partials (e.g., sidebar) |
+| `static_assets` | no | List of patterns for static files to copy |
+
+**Export fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Name referenced by `export:` in routes |
+| `pattern` | yes | Glob pattern matching pond files. `*` captures become `$0`, `$1`, ... |
+| `temporal` | no | List of temporal partition keys (e.g., `["year", "month"]`) |
+
+**Route types:**
+
+| Type | Produces | Has `export`? | `slug` semantics |
+|------|----------|---------------|------------------|
+| `static` | One page at that path | No | Literal slug (empty = root) |
+| `template` | One page per unique `$0` value | Yes | `$0` expands from matched captures |
+
+**Behaviour:**
+
+- Routes are hierarchical — nested routes inherit the parent slug as prefix.
+- Template routes generate one HTML page per unique `$0` value from the linked export.
+- Export stages run first: match data files, extract temporal bounds, export Parquet with partitioning.
+- Each template page receives its matched `ExportedFile` structs as context for shortcodes.
+
+**Layouts** (set in Markdown frontmatter):
+
+| Layout | Purpose |
+|--------|---------|
+| `default` | Full-width content (home pages, text content) |
+| `data` | Sidebar + chart area with JS chart infrastructure |
+
+**Shortcodes** (used in Markdown templates):
+
+| Shortcode | Purpose | Example |
+|-----------|---------|---------|
+| `{{ $0 }}` | First capture group value | Page title from pattern match |
+| `{{ $1 }}` | Second capture group | Resolution name, etc. |
+| `{{ chart /}}` | Chart container + DuckDB-WASM chart renderer | Data pages |
+| `{{ breadcrumb /}}` | Breadcrumb navigation from route hierarchy | Data pages |
+| `{{ nav_list collection="name" base="/path" /}}` | Navigation list from export collection | Sidebar |
+
+⚠️ **Shortcode syntax**: Use self-closing `{{ name /}}` form. Attributes use
+`key="value"` syntax: `{{ nav_list collection="params" base="/params" /}}`.
+In the title frontmatter, `{{ $0 }}` does NOT need the closing `/}}`.
+
+**Markdown templates — example data page (`data.md`):**
+
+```markdown
+---
+title: "{{ $0 }}"
+layout: data
+---
+
+# {{ $0 }}
+
+{{ breadcrumb /}}
+
+{{ chart /}}
+```
+
+**Markdown templates — example sidebar (`sidebar.md`):**
+
+```markdown
+## My Dashboard
+
+- [Home](/)
+
+### By Parameter
+
+{{ nav_list collection="params" base="/params" /}}
+
+### By Site
+
+{{ nav_list collection="sites" base="/sites" /}}
+```
+
+**Build command:**
+
+```bash
+pond run /etc/site.yaml build ./dist
+```
+
+This single command: reads the site config → runs export stages (exports Parquet
+with temporal partitioning) → renders all routes (Markdown → HTML via Maud layouts)
+→ writes everything to `./dist`.
+
+**Serving locally:**
+
+```bash
+# Vite (live reload on re-build)
+npx vite ./dist --port 4174 --open
+
+# or plain HTTP
+python3 -m http.server 8000 -d ./dist
+```
+
+**Usage:**
+
+```bash
+# Store templates in the pond
+pond copy host:///path/to/site /etc/site
+
+# Create the sitegen factory node
+pond mknod sitegen /etc/site.yaml --config-path /path/to/site.yaml
+
+# Build the site
+pond run /etc/site.yaml build ./dist
+
+# Update templates without recreating the factory
+pond copy host:///path/to/site /etc/site --overwrite
+
+# Update factory config
+pond mknod sitegen /etc/site.yaml --overwrite --config-path /path/to/site.yaml
+```
+
+**Notes:**
+- The generated site uses DuckDB-WASM to load Parquet files client-side — no server needed.
+- Charts use Observable Plot for rendering.
+- Vendor JS is loaded from CDN — no Node.js build toolchain required.
+- All CSS and JS is bundled into the HTML layouts (Maud code in `crates/sitegen`).
+- The site is fully self-contained after build — deploy to any static host.
+
+---
+
+### column-rename
+
+Transform factory for renaming, casting, or dropping columns. Applied via
+the `transforms` field of other factories (timeseries-join, timeseries-pivot,
+temporal-reduce).
+
+```yaml
+rules:
+  - type: direct
+    from: "Date Time"
+    to: "timestamp"
+    cast: timestamp              # Optional: cast to type
+  - type: pattern
+    pattern: "^(.+) \\((.+)\\)$"
+    replacement: "$1.$2"         # Regex capture groups
+```
+
+**Rule types:**
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `direct` | `from`, `to`, optional `cast` | Rename one column exactly; optionally cast its type |
+| `pattern` | `pattern`, `replacement` | Regex match on column names; `$1`, `$2` for capture groups |
+
+**Usage:**
+
+```bash
+# Create the transform node
+pond mknod column-rename /etc/hydro_rename --config-path hrename.yaml
+
+# Reference it from other factories via transforms field
+```
+
+```yaml
+# In a timeseries-join config:
+inputs:
+  - pattern: "series:///data/readings"
+    scope: "Station"
+    transforms: ["/etc/hydro_rename"]
+```
+
+**Notes:**
+- The transform is applied at query time, not stored — it wraps the source TableProvider.
+- Multiple transforms are applied in order.
+- The `cast` field supports: `timestamp`, `float64`, `int64`, `utf8`.
+
+---
+
 ### remote
 
 Backup and replication to S3-compatible storage.
@@ -911,12 +1143,202 @@ Examples:
 
 ---
 
+## End-to-End Pipeline Examples
+
+DuckPond factories compose into data pipelines. Here are two real-world patterns.
+
+### Multi-Site / Multi-Parameter (Noyo)
+
+The Noyo Harbor example monitors water quality at multiple sites, each with multiple
+sensor parameters. The pipeline fans out then fans in:
+
+```
+hydrovu (collector)
+    → /hydrovu/devices/**/*.series       (raw per-device series)
+
+timeseries-join (/combined)
+    → /combined/NorthDock                (all params at one site, wide table)
+    → /combined/SouthDock
+
+timeseries-pivot (/singled)
+    → /singled/Temperature               (one param across all sites, wide table)
+    → /singled/DO
+
+temporal-reduce (/reduced)
+    → /reduced/single_site/NorthDock/res={1h,6h,1d}.series
+    → /reduced/single_param/Temperature/res={1h,6h,1d}.series
+
+sitegen (/etc/site.yaml)
+    → dist/ (HTML + Parquet, served as static site)
+```
+
+**Key configs:** `noyo/combine.yaml` (join), `noyo/single.yaml` (pivot),
+`noyo/reduce.yaml` (reduce), `noyo/site.yaml` (sitegen).
+
+**Setup pattern:**
+```bash
+pond init
+pond copy host:///path/to/site  /etc/site          # Markdown templates
+pond mknod dynamic-dir /combined --config-path combine.yaml
+pond mknod dynamic-dir /singled  --config-path single.yaml
+pond mknod dynamic-dir /reduced  --config-path reduce.yaml
+pond mknod sitegen /etc/site.yaml --config-path site.yaml
+pond mknod column-rename /etc/hydro_rename --config-path hrename.yaml
+pond run /etc/site.yaml build ./dist
+```
+
+### Single-Source (Septic)
+
+The septic station example has a single OTelJSON data source with ~40 metrics from two
+scopes (BME280 environment sensor + Orenco Modbus registers) at different sample rates.
+There's no need for join/pivot — the `oteljson://` URL scheme provides a single wide table.
+
+```
+logfile-ingest (/etc/ingest)
+    → /ingest/septicstation.json         (raw OTelJSON Lines file)
+
+temporal-reduce (/reduced)                using oteljson:// URL scheme
+    → /reduced/septic/res={1h,6h,1d}.series
+
+sitegen (/etc/site.yaml)
+    → dist/ (HTML + Parquet)
+```
+
+**Key difference from Noyo:** The `in_pattern` in `temporal-reduce` uses the
+`oteljson://` URL scheme directly, skipping the join/pivot stages:
+
+```yaml
+factory: "temporal-reduce"
+config:
+  in_pattern: "oteljson:///ingest/septicstation.json"
+  out_pattern: "septic"
+  time_column: "timestamp"
+  resolutions: [1h, 6h, 1d]
+  aggregations:
+    - type: "avg"
+      columns:
+        - "septicstation_temperature"
+        - "orenco_RT_Pump1_Amps"
+        # ... all gauge metrics
+```
+
+**Setup pattern:**
+```bash
+pond init
+pond mkdir -p /etc/system.d
+pond mkdir -p /ingest
+pond copy host:///path/to/site /etc/site
+pond mknod logfile-ingest /etc/ingest --config-path ingest.yaml
+pond mknod remote /etc/system.d/1-backup --config-path backup.yaml
+pond mknod temporal-reduce /reduced --config-path reduce.yaml
+pond mknod sitegen /etc/site.yaml --config-path site.yaml
+
+# Operational cycle:
+pond run /etc/ingest                        # ingest new log data
+pond run /etc/site.yaml build ./dist        # build site (reduce is dynamic)
+pond run /etc/system.d/1-backup push        # backup to S3
+```
+
+**Notes on single-source pipelines:**
+- `oteljson://` discovers all metric names as columns automatically (two-pass parser).
+- Different sample rates (e.g., 5min Modbus, 10min BME280) produce NULL-padded rows
+  in the merged table. `temporal-reduce` aggregations handle NULLs correctly — `avg`,
+  `min`, `max` skip NULLs per SQL semantics.
+- No glob in `in_pattern` means `out_pattern` is a literal name (not `$0`).
+- `temporal-reduce` is a dynamic factory — its output is computed on read. No
+  explicit `pond run /reduced update` step is needed; sitegen triggers computation
+  when it reads the export data during `build`.
+
+### Choosing a Pipeline Shape
+
+| Scenario | Pipeline | Why |
+|----------|----------|-----|
+| Multiple sites, multiple params | join → pivot → reduce → sitegen | Need cross-site and cross-param views |
+| Single source, many metrics | reduce → sitegen | oteljson:// or csv:// provides the wide table |
+| Single source, few metrics | reduce → sitegen | Same, but simpler reduce config |
+| Raw file archive only | logfile-ingest + remote | No analysis, just backup |
+
+---
+
+## Factory Type Quick Reference
+
+| Factory | Kind | Created By | Output Type |
+|---------|------|------------|-------------|
+| `synthetic-timeseries` | dynamic | `pond mknod` | `TableDynamic` |
+| `sql-derived-table` | dynamic | `pond mknod` | `TableDynamic` |
+| `sql-derived-series` | dynamic | `pond mknod` | `TableDynamic` |
+| `dynamic-dir` | dynamic | `pond mknod` | `DynamicDirectory` |
+| `timeseries-join` | dynamic | `pond mknod` | `TableDynamic` |
+| `timeseries-pivot` | dynamic | `pond mknod` | `TableDynamic` |
+| `temporal-reduce` | dynamic | `pond mknod` | `DynamicDirectory` of `TableDynamic` |
+| `column-rename` | transform | `pond mknod` | Wraps `TableProvider` |
+| `sitegen` | executable | `pond mknod` + `pond run ... build` | Static files on host |
+| `logfile-ingest` | executable | `pond mknod` + `pond run` | `data` entries in pond |
+| `hydrovu` | executable | `pond mknod` + `pond run ... collect` | `table:series` in pond |
+| `remote` | executable | `pond mknod` + `pond run ... push/pull` | Backup bundles on S3 |
+
+**Dynamic** factories compute on every read — no stored state.
+**Executable** factories have side effects — run explicitly with `pond run`.
+**Transform** factories are referenced via the `transforms` field of other factories.
+
+---
+
 ## Troubleshooting
 
 ### "No matching files" when files exist
 
-**Cause**: Pattern doesn't match actual paths.  
+**Cause**: Pattern doesn't match actual paths.
 **Fix**: Use `pond list '**/*'` first to see what exists, then refine pattern.
+
+### `pond cat` outputs binary garbage
+
+**Cause**: You're catting a table/series entry without `--format=table` or `--sql`.
+The default output format is Parquet bytes (binary).
+**Fix**: Add `--format=table` for human-readable output, or `--sql "SELECT * FROM source LIMIT 10"`.
+
+### `pond copy --format=table` errors on CSV
+
+**Cause**: `--format=table` validates PAR1 magic bytes — only Parquet input accepted.
+**Fix**: Use default `--format=data` for CSV. Query CSV with `pond cat csv:///path --sql "..."`.
+
+### Export pattern matches nothing in sitegen
+
+**Cause**: The export `pattern` in site.yaml doesn't match what temporal-reduce creates.
+**Fix**: Run `pond list '/reduced/**'` to see the actual directory structure. Common
+mismatch: the reduce output might be `/reduced/site/res=1h.series` but the export pattern
+expects `/reduced/site/*.series` or `/reduced/site/*/*.series`.
+
+### oteljson:// queries are slow
+
+**Cause**: The two-pass parser reads the entire file twice — once to discover columns,
+once to parse data. Large files (>100MB) can be slow.
+**Fix**: For repeated queries, consider ingesting into a table:series via SQL pipeline.
+For one-off exploration, use `--sql` with `LIMIT` to reduce output.
+
+### Dynamic factory shows stale data
+
+**Cause**: Dynamic factories are re-computed on every read, but they read from their
+source which may itself be cached or stale.
+**Fix**: For logfile-ingest sources, run `pond run /etc/ingest` first to ingest new data.
+The dynamic factory chain (temporal-reduce → sitegen) will then see the updated source.
+
+### temporal-reduce columns not found
+
+**Cause**: Column names in `aggregations.columns` don't match the source schema.
+Column names are matched against the actual schema at runtime.
+**Fix**: Discover column names first:
+```bash
+pond cat oteljson:///ingest/data.json --format=table --sql "
+  SELECT column_name FROM information_schema.columns
+  WHERE table_name = 'source' ORDER BY column_name
+"
+```
+
+### sitegen build fails with "unknown shortcode"
+
+**Cause**: Typo in Markdown template or using wrong shortcode syntax.
+**Fix**: Check shortcode names: `{{ $0 }}`, `{{ chart /}}`, `{{ breadcrumb /}}`,
+`{{ nav_list collection="..." base="..." /}}`. Note the self-closing `/}}` syntax.
 
 ---
 

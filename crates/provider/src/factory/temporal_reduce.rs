@@ -162,6 +162,33 @@ impl TemporalReduceSqlFile {
         }
     }
 
+    /// Build the full source URL string, preserving the in_pattern's URL scheme.
+    ///
+    /// For format providers (oteljson://, csv://, etc.) this returns the original URL.
+    /// For builtin schemes (series://, table://, file://) it re-applies the scheme to
+    /// the source_path. This ensures that schema discovery and SQL execution both use
+    /// the correct format provider for the source data.
+    fn source_url(&self) -> String {
+        let scheme = self.config.in_pattern.scheme();
+        let is_format_provider = matches!(scheme, "csv" | "excelhtml" | "oteljson");
+
+        if is_format_provider {
+            // Format providers: reconstruct URL with original scheme + source path
+            if self.source_path.starts_with('/') {
+                format!("{}://{}", scheme, self.source_path)
+            } else {
+                format!("{}:///{}", scheme, self.source_path)
+            }
+        } else {
+            // Builtin types: preserve original scheme (series, table, file)
+            if self.source_path.starts_with('/') {
+                format!("{}://{}", scheme, self.source_path)
+            } else {
+                format!("{}:///{}", scheme, self.source_path)
+            }
+        }
+    }
+
     /// Discover source columns by accessing the source node directly
     /// CACHED: Only performs discovery once per TemporalReduceSqlFile instance
     async fn discover_source_columns(&self) -> TinyFSResult<Vec<String>> {
@@ -177,63 +204,33 @@ impl TemporalReduceSqlFile {
             return Ok(cached_columns.clone());
         }
 
-        let file_id = self.source_node.id();
-
-        // Get the correct part_id (parent directory's node_id) using TinyFS resolve_path() pattern
-        // For files, part_id should be the parent directory's node_id, not the file's node_id
-        let fs = self.context.context.filesystem();
-        let tinyfs_root = fs.root().await?;
-
-        // Parse the source_path to get parent directory
-        let source_path_buf = std::path::PathBuf::from(&self.source_path);
-        let parent_path = source_path_buf.parent().ok_or_else(|| {
-            tinyfs::Error::Other("Source path has no parent directory".to_string())
-        })?;
-
-        let parent_node_path = tinyfs_root
-            .resolve_path(parent_path)
-            .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to resolve parent path: {}", e)))?;
-
-        let parent_id = match parent_node_path.1 {
-            tinyfs::Lookup::Found(parent_node) => parent_node.id(),
-            _ => {
-                return Err(tinyfs::Error::Other(format!(
-                    "Parent directory not found for {}",
-                    self.source_path,
-                )));
-            }
-        };
-
+        // Use the Provider API to create a table provider, respecting the in_pattern URL scheme.
+        // This is critical for format providers like oteljson://, csv://, excelhtml:// where the
+        // raw file bytes need format-specific parsing to produce a queryable table.
+        // Previously this went directly through as_queryable() on the raw file node, which
+        // assumes Parquet format and fails for non-Parquet data files.
+        let source_url = self.source_url();
         log::debug!(
-            "TemporalReduceFile: file_id={}, parent_id={}",
-            file_id,
-            parent_id
+            "TemporalReduceFile: discovering columns via Provider API with URL '{}'",
+            source_url
         );
 
-        // Get the file handle from the node - extract from node_type
-        let file_handle = match &self.source_node.node_type {
-            NodeType::File(handle) => handle.clone(),
-            _ => {
-                return Err(tinyfs::Error::Other(
-                    "Source node is not a file".to_string(),
-                ));
-            }
-        };
-        let file_arc = file_handle.get_file().await;
-        let file_guard = file_arc.lock().await;
+        let fs = self.context.context.filesystem();
+        let provider = crate::Provider::with_context(
+            Arc::new(fs),
+            Arc::new(self.context.context.clone()),
+        );
+        let datafusion_ctx = datafusion::prelude::SessionContext::new();
 
-        // In temporal reduce context, source files are always QueryableFile implementations
-        let table_provider = if let Some(queryable_file) = file_guard.as_queryable() {
-            queryable_file
-                .as_table_provider(file_id, &self.context.context)
-                .await
-                .map_err(|e| {
-                    tinyfs::Error::Other(format!("QueryableFile table provider error: {}", e))
-                })?
-        } else {
-            return Err(tinyfs::Error::Other("Source file does not implement QueryableFile - temporal reduce requires queryable sources".to_string()));
-        };
+        let table_provider = provider
+            .create_table_provider(&source_url, &datafusion_ctx)
+            .await
+            .map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Failed to create table provider for source '{}': {}",
+                    source_url, e
+                ))
+            })?;
 
         // Get schema and extract all column names, filtering out only the timestamp column
         // We include all columns (numeric and non-numeric) and let the aggregation functions
@@ -251,11 +248,9 @@ impl TemporalReduceSqlFile {
             return Err(tinyfs::Error::Other(format!(
                 "Schema discovery failed: no columns found in source file '{}'. \
                 Table provider returned schema with {} total fields. \
-                This indicates a problem with the table provider configuration or partition pruning. \
-                Check that the correct file_id ({}) is being used.",
+                This indicates a problem with the table provider configuration or the source URL scheme.",
                 self.source_path,
-                schema.fields().len(),
-                file_id
+                schema.fields().len()
             )));
         }
 
@@ -373,13 +368,11 @@ impl TemporalReduceSqlFile {
                 self.source_path
             );
 
-            // Convert source_path (filesystem path) to URL with series:// scheme
-            // Temporal-reduce works with series files
-            let source_url_str = if self.source_path.starts_with('/') {
-                format!("series://{}", self.source_path)
-            } else {
-                format!("series:///{}", self.source_path)
-            };
+            // Convert source_path to URL preserving the original in_pattern scheme.
+            // Previously this hardcoded series://, which broke format providers like
+            // oteljson://, csv://, excelhtml:// — the SqlDerivedFile needs the correct
+            // scheme to route through the format provider instead of assuming Parquet.
+            let source_url_str = self.source_url();
             let source_url = crate::Url::parse(&source_url_str).map_err(|e| {
                 tinyfs::Error::Other(format!(
                     "Invalid source path URL '{}': {}",
@@ -1399,5 +1392,272 @@ mod tests {
         let factory = factory.unwrap();
         assert_eq!(factory.name, "temporal-reduce");
         assert!(factory.description.contains("temporal downsampling"));
+    }
+
+    /// Test that source_url() preserves the URL scheme from in_pattern.
+    /// This is critical: format providers (oteljson://, csv://) must not be
+    /// silently rewritten to series:// or file://.
+    #[tokio::test]
+    async fn test_source_url_preserves_scheme() {
+        let (fs, provider_context) = create_test_environment().await;
+
+        // Create a dummy source node (we only need it for TemporalReduceSqlFile construction)
+        let root = fs.root().await.unwrap();
+        _ = root.create_dir_path("/ingest").await.unwrap();
+        use tokio::io::AsyncWriteExt;
+        let mut w = root
+            .async_writer_path_with_type("/ingest/test.json", EntryType::FilePhysicalVersion)
+            .await
+            .unwrap();
+        w.write_all(b"test").await.unwrap();
+        w.flush().await.unwrap();
+        w.shutdown().await.unwrap();
+        let node_path = root.get_node_path("/ingest/test.json").await.unwrap();
+
+        let make_file = |scheme: &str, path: &str| {
+            let in_pattern = crate::Url::parse(&format!("{}://{}", scheme, path)).unwrap();
+            let config = TemporalReduceConfig {
+                in_pattern,
+                out_pattern: "out".to_string(),
+                time_column: "timestamp".to_string(),
+                resolutions: vec!["1h".to_string()],
+                aggregations: vec![],
+                transforms: None,
+            };
+            TemporalReduceSqlFile::new(
+                config,
+                Duration::from_secs(3600),
+                node_path.node.clone(),
+                path.to_string(),
+                test_context(&provider_context, FileID::root()),
+            )
+        };
+
+        // Format providers must preserve their scheme
+        let oteljson_file = make_file("oteljson", "/ingest/test.json");
+        assert_eq!(
+            oteljson_file.source_url(),
+            "oteljson:///ingest/test.json",
+            "oteljson:// scheme must be preserved"
+        );
+
+        let csv_file = make_file("csv", "/data/metrics.csv");
+        assert_eq!(
+            csv_file.source_url(),
+            "csv:///data/metrics.csv",
+            "csv:// scheme must be preserved"
+        );
+
+        let excelhtml_file = make_file("excelhtml", "/data/report.html");
+        assert_eq!(
+            excelhtml_file.source_url(),
+            "excelhtml:///data/report.html",
+            "excelhtml:// scheme must be preserved"
+        );
+
+        // Builtin schemes must also be preserved
+        let series_file = make_file("series", "/combined/site1.series");
+        assert_eq!(
+            series_file.source_url(),
+            "series:///combined/site1.series",
+            "series:// scheme must be preserved"
+        );
+
+        let table_file = make_file("table", "/tables/lookup");
+        assert_eq!(
+            table_file.source_url(),
+            "table:///tables/lookup",
+            "table:// scheme must be preserved"
+        );
+
+        let file_file = make_file("file", "/raw/data.parquet");
+        assert_eq!(
+            file_file.source_url(),
+            "file:///raw/data.parquet",
+            "file:// scheme must be preserved"
+        );
+    }
+
+    /// Integration test: temporal-reduce with CSV format provider (non-Parquet source).
+    ///
+    /// This validates the fix for the bug where temporal-reduce hardcoded series://
+    /// in ensure_inner() and used direct as_queryable() in discover_source_columns(),
+    /// causing "Corrupt footer" errors when the source was a non-Parquet format like
+    /// CSV, OTelJSON, or ExcelHTML.
+    #[tokio::test]
+    async fn test_temporal_reduce_with_csv_format_provider() {
+        let _ = env_logger::try_init();
+
+        let (fs, provider_context) = create_test_environment().await;
+
+        // Create a raw CSV file (entry type = data, NOT table:series)
+        // This is exactly the scenario that broke: raw data files with a format provider URL
+        {
+            let root = fs.root().await.unwrap();
+            _ = root.create_dir_path("/ingest").await.unwrap();
+
+            // Generate CSV data: timestamp, temperature, humidity
+            // 48 rows: 2 days of hourly readings
+            // Use RFC3339 timestamps so CSV parser infers Timestamp type (not Int64)
+            // Use fractional values so CSV parser infers Float64 (not Int64)
+            let mut csv_data = String::from("timestamp,temperature,humidity\n");
+            for day in 0..2 {
+                for hour in 0..24 {
+                    let total_secs = day * 86400 + hour * 3600;
+                    let h = total_secs / 3600;
+                    let m = (total_secs % 3600) / 60;
+                    let s = total_secs % 60;
+                    // Format as ISO 8601: 1970-01-01T00:00:00 + offset
+                    let d = day + 1; // 1-indexed day
+                    let ts = format!("1970-01-{:02}T{:02}:{:02}:{:02}", d, h % 24, m, s);
+                    let temp = 20.5 + hour as f64;
+                    let humidity = 50.5 + hour as f64 * 0.5;
+                    csv_data.push_str(&format!("{},{},{}\n", ts, temp, humidity));
+                }
+            }
+
+            // Write as raw data file (FilePhysicalVersion, NOT TablePhysicalSeries)
+            use tokio::io::AsyncWriteExt;
+            let mut w = root
+                .async_writer_path_with_type(
+                    "/ingest/weather.csv",
+                    EntryType::FilePhysicalVersion,
+                )
+                .await
+                .unwrap();
+            w.write_all(csv_data.as_bytes()).await.unwrap();
+            w.flush().await.unwrap();
+            w.shutdown().await.unwrap();
+        }
+
+        // Create temporal-reduce with csv:// in_pattern
+        {
+            let config = TemporalReduceConfig {
+                in_pattern: crate::Url::parse("csv:///ingest/weather.csv").unwrap(),
+                out_pattern: "weather".to_string(),
+                time_column: "timestamp".to_string(),
+                resolutions: vec!["1d".to_string()],
+                aggregations: vec![
+                    AggregationConfig {
+                        agg_type: AggregationType::Avg,
+                        columns: Some(vec!["temperature".to_string(), "humidity".to_string()]),
+                    },
+                    AggregationConfig {
+                        agg_type: AggregationType::Min,
+                        columns: Some(vec!["temperature".to_string()]),
+                    },
+                    AggregationConfig {
+                        agg_type: AggregationType::Max,
+                        columns: Some(vec!["temperature".to_string()]),
+                    },
+                ],
+                transforms: None,
+            };
+
+            let context = test_context(&provider_context, FileID::root());
+            let temporal_dir = TemporalReduceDirectory::new(config, context).unwrap();
+            let temporal_handle = temporal_dir.create_handle();
+
+            // Verify directory structure: should have "weather" subdirectory
+            use futures::StreamExt;
+            let mut entries_stream = temporal_handle.entries().await.unwrap();
+            let mut site_names = Vec::new();
+            while let Some(entry_result) = entries_stream.next().await {
+                let entry = entry_result.unwrap();
+                site_names.push(entry.name.clone());
+            }
+            assert_eq!(
+                site_names,
+                vec!["weather"],
+                "Should create 'weather' site directory from out_pattern"
+            );
+
+            // Navigate to the site directory
+            let weather_node = temporal_handle.get("weather").await.unwrap().unwrap();
+            let weather_dir = match &weather_node.node_type {
+                NodeType::Directory(dir) => dir,
+                _ => panic!("Expected directory for 'weather'"),
+            };
+
+            // Get the daily aggregation file
+            let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
+            let file_id = daily_node.id;
+
+            // Query the aggregated data — this is where the bug manifested as "Corrupt footer"
+            if let NodeType::File(file_handle) = &daily_node.node_type {
+                let file_arc = file_handle.get_file().await;
+                let file_guard = file_arc.lock().await;
+
+                let queryable = file_guard
+                    .as_queryable()
+                    .expect("Should be queryable");
+
+                let table_provider = queryable
+                    .as_table_provider(file_id, &provider_context)
+                    .await
+                    .expect("Table provider creation should succeed with csv:// source");
+
+                // Query: verify results
+                let ctx = &provider_context.datafusion_session;
+                _ = ctx
+                    .register_table("csv_reduced", table_provider)
+                    .unwrap();
+                let df = ctx
+                    .sql("SELECT * FROM csv_reduced ORDER BY timestamp")
+                    .await
+                    .unwrap();
+                let batches = df.collect().await.unwrap();
+
+                let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                assert_eq!(total_rows, 2, "Should have 2 aggregated rows (2 days)");
+
+                // Debug: print schema and row count
+                log::info!("CSV reduced: {} rows, schema: {:?}", total_rows, batches[0].schema());
+
+                // Verify schema
+                let schema = &batches[0].schema();
+                assert!(schema.column_with_name("timestamp").is_some());
+                assert!(schema.column_with_name("temperature.avg").is_some());
+                assert!(schema.column_with_name("humidity.avg").is_some());
+                assert!(schema.column_with_name("temperature.min").is_some());
+                assert!(schema.column_with_name("temperature.max").is_some());
+
+                // Verify day 0 values: avg temp = 20.5 + avg(0..23) = 20.5 + 11.5 = 32.0
+                let temp_avg = batches[0]
+                    .column_by_name("temperature.avg")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert!(
+                    (temp_avg.value(0) - 32.0).abs() < 0.01,
+                    "Day 0 avg temperature: expected 32.0, got {}",
+                    temp_avg.value(0)
+                );
+
+                let temp_min = batches[0]
+                    .column_by_name("temperature.min")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(temp_min.value(0), 20.5, "Day 0 min temperature");
+
+                let temp_max = batches[0]
+                    .column_by_name("temperature.max")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(temp_max.value(0), 43.5, "Day 0 max temperature");
+
+                log::info!("✅ CSV format provider temporal-reduce test passed");
+                log::info!("   - Raw CSV data read via csv:// scheme (not Parquet)");
+                log::info!("   - 48 hourly rows aggregated to 2 daily rows");
+                log::info!("   - avg/min/max values verified correct");
+            } else {
+                panic!("Expected file node for weather/res=1d.series");
+            }
+        }
     }
 }

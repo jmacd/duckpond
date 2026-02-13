@@ -629,7 +629,11 @@ pub fn transform_arrow_to_template_schema(
 
 /// Parse field name into components.
 ///
-/// Expected format: `"instrument.name.unit.agg"` → `TemplateField`.
+/// Supported formats (most specific to least):
+///   4+ parts: `"instrument.name.unit.agg"` → full decomposition
+///   3 parts:  `"name.unit.agg"` → no instrument
+///   2 parts:  `"name.agg"` → no instrument, no unit
+///   1 part:   `"name"` → bare field name (no aggregation)
 pub fn parse_field_name(field_name: &str) -> Result<TemplateField> {
     if field_name == "timestamp.count" {
         return Ok(TemplateField {
@@ -642,24 +646,56 @@ pub fn parse_field_name(field_name: &str) -> Result<TemplateField> {
 
     let mut parts: Vec<&str> = field_name.split('.').collect();
 
-    if parts.len() < 4 {
-        return Err(anyhow::anyhow!(
-            "field name: unknown format: {}",
-            field_name
-        ));
+    match parts.len() {
+        0 => Err(anyhow::anyhow!(
+            "field name: empty field name"
+        )),
+        1 => {
+            // Bare field name, no aggregation
+            Ok(TemplateField {
+                instrument: String::new(),
+                name: parts[0].to_string(),
+                unit: String::new(),
+                agg: String::new(),
+            })
+        }
+        2 => {
+            // name.agg (e.g., "septicstation_temperature.avg")
+            let agg = parts.pop().expect("ok").to_string();
+            let name = parts.pop().expect("ok").to_string();
+            Ok(TemplateField {
+                instrument: String::new(),
+                name,
+                unit: String::new(),
+                agg,
+            })
+        }
+        3 => {
+            // name.unit.agg (e.g., "temperature.C.avg")
+            let agg = parts.pop().expect("ok").to_string();
+            let unit = parts.pop().expect("ok").to_string();
+            let name = parts.pop().expect("ok").to_string();
+            Ok(TemplateField {
+                instrument: String::new(),
+                name,
+                unit,
+                agg,
+            })
+        }
+        _ => {
+            // instrument.name.unit.agg (e.g., "TempProbe.temperature.C.avg")
+            let agg = parts.pop().expect("ok").to_string();
+            let unit = parts.pop().expect("ok").to_string();
+            let name = parts.pop().expect("ok").to_string();
+            let instrument = parts.join(".");
+            Ok(TemplateField {
+                instrument,
+                name,
+                unit,
+                agg,
+            })
+        }
     }
-
-    let agg = parts.pop().expect("ok").to_string();
-    let unit = parts.pop().expect("ok").to_string();
-    let name = parts.pop().expect("ok").to_string();
-    let instrument = parts.join(".");
-
-    Ok(TemplateField {
-        instrument,
-        name,
-        unit,
-        agg,
-    })
 }
 
 /// Count files in an ExportSet.

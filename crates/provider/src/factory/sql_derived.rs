@@ -444,17 +444,22 @@ impl SqlDerivedFile {
             )));
         }
 
-        // For format providers, look for FilePhysicalVersion/Dynamic instead of the requested entry_type
-        // The format provider will convert them to the appropriate type
-        let lookup_entry_type = if is_format_provider {
+        // For format providers, look for raw file types instead of the requested table types.
+        // The format provider will convert them to the appropriate queryable type.
+        // We may need to search multiple entry types: e.g., logfile-ingest creates
+        // FilePhysicalSeries, while `pond copy --format=data` creates FilePhysicalVersion.
+        let lookup_entry_types: Vec<EntryType> = if is_format_provider {
             match entry_type {
-                EntryType::TablePhysicalSeries => EntryType::FilePhysicalVersion,
-                EntryType::TableDynamic => EntryType::FileDynamic,
-                EntryType::TablePhysicalVersion => EntryType::FilePhysicalVersion,
-                _ => entry_type,
+                EntryType::TablePhysicalSeries => vec![
+                    EntryType::FilePhysicalVersion,
+                    EntryType::FilePhysicalSeries,
+                ],
+                EntryType::TableDynamic => vec![EntryType::FileDynamic],
+                EntryType::TablePhysicalVersion => vec![EntryType::FilePhysicalVersion],
+                _ => vec![entry_type],
             }
         } else {
-            entry_type
+            vec![entry_type]
         };
 
         // Extract TinyFS path from URL, percent-decoding so that URL-encoded
@@ -551,15 +556,15 @@ impl SqlDerivedFile {
             let actual_entry_type = file_id.entry_type();
 
             debug!(
-                "🔍 Checking file at path '{}': file_id={}, actual_entry_type={:?}, lookup_entry_type={:?}",
+                "🔍 Checking file at path '{}': file_id={}, actual_entry_type={:?}, lookup_entry_types={:?}",
                 node_path.path().display(),
                 file_id,
                 actual_entry_type,
-                lookup_entry_type
+                lookup_entry_types
             );
 
-            // Check if this node matches the lookup entry_type (what we're searching for)
-            if actual_entry_type == lookup_entry_type {
+            // Check if this node matches any of the lookup entry types
+            if lookup_entry_types.contains(&actual_entry_type) {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
                     EntryType::TablePhysicalSeries | EntryType::TableDynamic => file_id,

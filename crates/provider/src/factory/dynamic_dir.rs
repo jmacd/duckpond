@@ -73,6 +73,20 @@ impl DynamicDirDirectory {
         DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 
+    /// Create a FactoryContext for a child entry, preserving pond_metadata and txn_seq
+    fn create_child_context(&self, child_file_id: tinyfs::FileID) -> FactoryContext {
+        let ctx = if let Some(ref pm) = self.context.pond_metadata {
+            FactoryContext::with_metadata(
+                self.context.context.clone(),
+                child_file_id,
+                pm.clone(),
+            )
+        } else {
+            FactoryContext::new(self.context.context.clone(), child_file_id)
+        };
+        ctx.with_txn_seq(self.context.txn_seq)
+    }
+
     /// Create a node for a specific entry using its configured factory
     async fn create_entry_node(&self, entry: &DynamicDirEntry) -> TinyFSResult<Node> {
         debug!(
@@ -88,53 +102,65 @@ impl DynamicDirDirectory {
             ))
         })?;
 
+        // Deterministically generate FileID for entry node based on entry name, factory, and config.
+        // This MUST be computed before creating the factory so the factory receives its own
+        // identity, not the parent's. Without this, sibling entries in the same dynamic-dir
+        // would share the parent's file_id, causing their children to collide.
+        let mut id_bytes = Vec::new();
+        id_bytes.extend_from_slice(entry.name.as_bytes());
+        id_bytes.extend_from_slice(entry.factory.as_bytes());
+        id_bytes.extend_from_slice(&config_bytes);
+        let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
+
         // Determine whether this factory creates directories or files
         let creates_directory = FactoryRegistry::factory_creates_directory(&entry.factory)?;
 
-        // Create the appropriate node type based on the factory's capabilities
-        let node_type = if creates_directory {
+        // Create the appropriate node type based on the factory's capabilities.
+        // Each child gets a FactoryContext with its own file_id so that factories which
+        // derive child partition IDs from context.file_id (e.g., temporal-reduce) produce
+        // unique, non-colliding children.
+        let (node_type, entry_type) = if creates_directory {
+            let entry_type = EntryType::DirectoryDynamic;
+            let child_file_id =
+                tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes);
+            let child_context = self.create_child_context(child_file_id);
             let dir_handle = FactoryRegistry::create_directory(
                 &entry.factory,
                 &config_bytes,
-                self.context.clone(),
+                child_context,
             )?;
             debug!(
                 "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
                 entry.name
             );
-            tinyfs::NodeType::Directory(dir_handle)
+            (tinyfs::NodeType::Directory(dir_handle), entry_type)
         } else {
+            // For file entries, we need the created file's metadata to determine the exact
+            // entry_type. Pre-compute a file_id with TableDynamic (the common case for file
+            // factories like sql-derived-table/series), then verify after creation.
+            let preliminary_type = EntryType::TableDynamic;
+            let child_file_id =
+                tinyfs::FileID::from_content(parent_part_id, preliminary_type, &id_bytes);
+            let child_context = self.create_child_context(child_file_id);
             let file_handle =
-                FactoryRegistry::create_file(&entry.factory, &config_bytes, self.context.clone())
-                    .await?;
+                FactoryRegistry::create_file(&entry.factory, &config_bytes, child_context).await?;
+            // Query the file's metadata to get the correct EntryType
+            let metadata = file_handle.metadata().await?;
+            let actual_type = metadata.entry_type;
+            if actual_type != preliminary_type {
+                debug!(
+                    "DynamicDirDirectory::create_entry_node - entry '{}' actual type {:?} differs from preliminary {:?}; file_id will use actual type",
+                    entry.name, actual_type, preliminary_type
+                );
+            }
             debug!(
                 "DynamicDirDirectory::create_entry_node - created file for entry '{}'",
                 entry.name
             );
-            tinyfs::NodeType::File(file_handle)
+            (tinyfs::NodeType::File(file_handle), actual_type)
         };
 
-        // Deterministically generate FileID for entry node based on entry name, factory, and config
-        let mut id_bytes = Vec::new();
-        id_bytes.extend_from_slice(entry.name.as_bytes());
-        id_bytes.extend_from_slice(entry.factory.as_bytes());
-        id_bytes.extend_from_slice(&config_bytes);
-        // Use this dynamic directory's NodeID as the PartID for children
-        let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-        // Determine EntryType from the created node_type
-        // For files, query the file's metadata to get the correct EntryType
-        let entry_type = match &node_type {
-            tinyfs::NodeType::Directory(_) => EntryType::DirectoryDynamic,
-            tinyfs::NodeType::File(file_handle) => {
-                // Query the file's metadata to get the correct EntryType
-                // This allows factories like timeseries-join to specify TableDynamic
-                let metadata = file_handle.metadata().await?;
-                metadata.entry_type
-            }
-            tinyfs::NodeType::Symlink(_) => EntryType::Symlink,
-        };
         let file_id = tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes);
-
         let node_ref = Node::new(file_id, node_type);
 
         Ok(node_ref)
