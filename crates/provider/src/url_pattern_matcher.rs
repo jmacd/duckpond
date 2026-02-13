@@ -5,16 +5,16 @@
 //! URL-Based Pattern Matching for TinyFS Queryable Files
 //!
 //! This module provides a unified API for factories to match files using URL patterns
-//! that encode format, decompression, and TinyFS glob patterns.
+//! that encode format, compression, and TinyFS glob patterns.
 //!
 //! ## URL Structure
 //!
-//! `scheme://[compression]/path/pattern[?options]`
+//! `scheme[+compression]:///path/pattern[?options]`
 //!
 //! - **scheme**: Format type or builtin file type
 //!   - Builtin: `series`, `table`, `data` (maps to EntryType)
 //!   - Format: `csv`, `excelhtml` (requires FormatProvider)
-//! - **authority** (optional): Decompression (gzip, zstd, bzip2)
+//! - **+compression** (optional): Decompression (gzip, zstd, bzip2)
 //! - **path**: TinyFS glob pattern (e.g., `/data/**/*.csv`)
 //! - **query** (optional): Format-specific parameters
 //!
@@ -23,14 +23,14 @@
 //! ```ignore
 //! // Builtin FileSeries (Parquet files)
 //! "series:///data/sensors/*.series"
-//! "series://gzip/data/sensors/*.series.gz"
+//! "series+gzip:///data/sensors/*.series.gz"
 //!
 //! // Builtin FileTable
 //! "table:///locations/*.table"
 //!
 //! // CSV files with format conversion
 //! "csv:///exports/*.csv?delimiter=;"
-//! "csv://gzip/exports/*.csv.gz"
+//! "csv+gzip:///exports/*.csv.gz"
 //!
 //! // HydroVu HTML exports
 //! "excelhtml:///hydrovu/*.htm"
@@ -44,7 +44,7 @@ use tinyfs::{EntryType, NodePath, ProviderContext};
 ///
 /// Unpacks URL to determine:
 /// 1. File type (builtin EntryType or format provider)
-/// 2. Decompression requirements
+/// 2. Compression requirements (from scheme suffix, e.g., `+gzip`)
 /// 3. TinyFS glob pattern
 /// 4. Format-specific options
 pub struct UrlPatternMatcher {
@@ -261,7 +261,7 @@ mod tests {
         // Valid builtin patterns
         assert!(Url::parse("series:///data/*.series").is_ok());
         assert!(Url::parse("table:///locations/*.table").is_ok());
-        assert!(Url::parse("series://gzip/data/*.series.gz").is_ok());
+        assert!(Url::parse("series+gzip:///data/*.series.gz").is_ok());
 
         // Valid format provider patterns
         assert!(Url::parse("csv:///exports/*.csv").is_ok());

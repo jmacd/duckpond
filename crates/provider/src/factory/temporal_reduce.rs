@@ -131,7 +131,6 @@ pub struct TemporalReduceConfig {
 pub struct TemporalReduceSqlFile {
     config: TemporalReduceConfig,
     duration: Duration,
-    source_node: Node,
     source_path: String, // For SQL pattern reference
     context: crate::FactoryContext,
     // Lazy-initialized actual SQL file
@@ -147,14 +146,13 @@ impl TemporalReduceSqlFile {
     pub fn new(
         config: TemporalReduceConfig,
         duration: Duration,
-        source_node: Node,
+        _source_node: Node,
         source_path: String,
         context: crate::FactoryContext,
     ) -> Self {
         Self {
             config,
             duration,
-            source_node,
             source_path,
             context,
             inner: Arc::new(tokio::sync::Mutex::new(None)),

@@ -1,0 +1,41 @@
+# Docker Compose for running DuckPond tests that require MinIO
+#
+# Used by run-test.sh --compose (triggered by '# REQUIRES: compose' annotation).
+# Tests without this annotation run via plain 'docker run' for speed.
+#
+# The test container image (duckpond-test:latest) is built by build-image.sh,
+# NOT by docker compose build.  Run build-image.sh first.
+#
+# Volume mounts for the test script, testdata, and output directory are
+# passed as extra -v flags to 'docker compose run'.
+
+services:
+  # MinIO — S3-compatible storage for replication tests
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Test runner — same image as run-test.sh uses
+  test:
+    image: duckpond-test:latest
+    environment:
+      POND: /pond
+      POND1: /pond1
+      POND2: /pond2
+      RUST_LOG: info
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    depends_on:
+      minio:
+        condition: service_healthy
+    stdin_open: true
+    tty: true

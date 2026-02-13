@@ -95,17 +95,21 @@ pub struct RemoteConfig {
     #[serde(default)]
     pub region: String,
 
-    /// Access key
-    #[serde(default)]
+    /// Access key (YAML: access_key_id or access_key)
+    #[serde(default, alias = "access_key_id")]
     pub access_key: String,
 
-    /// Secret key
-    #[serde(default)]
+    /// Secret key (YAML: secret_access_key or secret_key)
+    #[serde(default, alias = "secret_access_key")]
     pub secret_key: String,
 
     /// Custom S3 endpoint (non-AWS)
     #[serde(default)]
     pub endpoint: String,
+
+    /// Allow HTTP (non-TLS) connections (required for MinIO and other local S3)
+    #[serde(default)]
+    pub allow_http: bool,
 }
 
 impl RemoteConfig {
@@ -133,6 +137,10 @@ impl RemoteConfig {
                     "virtual_hosted_style_request".to_string(),
                     "false".to_string(),
                 );
+            }
+            if self.allow_http {
+                storage_options
+                    .insert("allow_http".to_string(), "true".to_string());
             }
         }
         storage_options
@@ -1221,6 +1229,9 @@ pub fn build_object_store(
         }
         if !config.endpoint.is_empty() {
             builder = builder.with_endpoint(&config.endpoint);
+        }
+        if config.allow_http {
+            builder = builder.with_allow_http(true);
         }
 
         let store = builder

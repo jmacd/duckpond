@@ -30,7 +30,7 @@ pond describe /data/readings.csv
 
 echo ""
 echo "=== Test SQL query (should filter to temp >= 25) ==="
-pond cat /data/readings.csv --format=table --query "SELECT * FROM source WHERE temperature >= 25"
+pond cat 'csv:///data/readings.csv' --format=table --query "SELECT * FROM source WHERE temperature >= 25"
 
 echo ""
 echo "=== Expected: Only 2 rows (25.0 and 30.0), not all 3 ==="

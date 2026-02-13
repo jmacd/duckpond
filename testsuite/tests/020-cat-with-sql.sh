@@ -26,17 +26,17 @@ echo "✓ setup complete"
 # Query: Filter rows
 echo ""
 echo "=== Query: WHERE temperature > 23 ==="
-pond cat /sensors/readings.csv --format=table --query "SELECT * FROM source WHERE temperature > 23"
+pond cat 'csv:///sensors/readings.csv' --format=table --query "SELECT * FROM source WHERE temperature > 23"
 
 # Query: Aggregate
 echo ""
 echo "=== Query: AVG temperature ==="
-pond cat /sensors/readings.csv --format=table --query "SELECT AVG(temperature) as avg_temp, AVG(humidity) as avg_humidity FROM source"
+pond cat 'csv:///sensors/readings.csv' --format=table --query "SELECT AVG(temperature) as avg_temp, AVG(humidity) as avg_humidity FROM source"
 
 # Query: Transform
 echo ""
 echo "=== Query: Temperature in Fahrenheit ==="
-pond cat /sensors/readings.csv --format=table --query "SELECT timestamp, temperature * 9/5 + 32 as temp_f FROM source"
+pond cat 'csv:///sensors/readings.csv' --format=table --query "SELECT timestamp, temperature * 9/5 + 32 as temp_f FROM source"
 
 echo ""
 echo "=== Experiment Complete ==="

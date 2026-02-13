@@ -99,7 +99,7 @@ Factory configs and `pond cat` use URL schemes to control how files are interpre
 | `series:///path` | Multi-version Parquet series | Factory configs |
 | `table:///path` | Single Parquet table | Factory configs |
 | `csv:///path` | Parse raw data file as CSV | `pond cat`, factory configs |
-| `csv://gzip/path` | Gzipped CSV | Factory configs |
+| `csv+gzip:///path` | Gzipped CSV | Factory configs |
 | `excelhtml:///path` | HydroVu Excel HTML exports | Factory configs |
 | `file:///path` | Raw bytes or auto-detect | `pond cat` |
 | `host:///path` | Host filesystem (not in pond) | `pond copy` |

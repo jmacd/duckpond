@@ -24,6 +24,7 @@ OUTPUT_DIR=""
 USER_OUTPUT_DIR=""
 INSPECT=false
 DATA_DIR=""
+COMPOSE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -60,6 +61,10 @@ while [[ $# -gt 0 ]]; do
             DATA_DIR="$2"
             shift 2
             ;;
+        --compose|-c)
+            COMPOSE=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [options] [script.sh]"
             echo ""
@@ -71,6 +76,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-rebuild, -n     Skip automatic rebuild (use existing image)"
             echo "  --output, -o DIR     Mount DIR as /output in the container (for capturing results)"
             echo "  --data, -d DIR       Mount DIR as /data in the container (read-only test data)"
+            echo "  --compose, -c        Run with docker compose (starts MinIO for S3 tests)"
             echo "  --inspect            Copy output for inspection (always; default on failure)"
             echo "  --help, -h           Show this help"
             echo ""
@@ -247,15 +253,43 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
 
     # Run the script in the container — all output to log file, NOT to stdout
     set +e
-    docker run --rm \
-        -e POND=/pond \
-        -e RUST_LOG=info \
-        -v "${SCRIPT_FILE}:/test/run.sh:ro" \
-        "${OUTPUT_MOUNT[@]}" \
-        "${DATA_MOUNT[@]}" \
-        "${IMAGE_NAME}" \
-        -c "/bin/bash /test/run.sh" > "${LOG_FILE}" 2>&1
-    EXIT_CODE=$?
+    if [[ "${COMPOSE}" == "true" ]]; then
+        # Compose mode: start MinIO, run test via docker compose
+        COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.test.yaml"
+        COMPOSE_PROJECT="duckpond-test-$$"
+
+        compose_cleanup() {
+            docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" down --volumes --timeout 5 2>/dev/null || true
+        }
+        trap compose_cleanup EXIT
+
+        echo "  (compose test — starting MinIO)"
+
+        # Build volume args for docker compose run
+        COMPOSE_VOLUMES=(-v "${SCRIPT_FILE}:/test/run.sh:ro")
+        COMPOSE_VOLUMES+=("${OUTPUT_MOUNT[@]}")
+        COMPOSE_VOLUMES+=("${DATA_MOUNT[@]}")
+
+        docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" \
+            run --rm \
+            "${COMPOSE_VOLUMES[@]}" \
+            test \
+            -c "/bin/bash /test/run.sh" > "${LOG_FILE}" 2>&1
+        EXIT_CODE=$?
+
+        compose_cleanup
+        trap - EXIT
+    else
+        docker run --rm \
+            -e POND=/pond \
+            -e RUST_LOG=info \
+            -v "${SCRIPT_FILE}:/test/run.sh:ro" \
+            "${OUTPUT_MOUNT[@]}" \
+            "${DATA_MOUNT[@]}" \
+            "${IMAGE_NAME}" \
+            -c "/bin/bash /test/run.sh" > "${LOG_FILE}" 2>&1
+        EXIT_CODE=$?
+    fi
     set -e
 
     # Print a short summary

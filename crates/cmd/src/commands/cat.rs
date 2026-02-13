@@ -727,7 +727,7 @@ mod tests {
         cat_command(
             &cat_context,
             "test_table.parquet",
-            "raw",
+            "table",
             Some(&mut output_buffer),
             None,
             None,
@@ -1169,7 +1169,7 @@ mod tests {
         cat_command(
             &cat_context,
             "test_series_sql.parquet",
-            "raw", // raw mode, but SQL query should trigger DataFusion formatting
+            "table",
             Some(&mut output_buffer),
             None,
             None,

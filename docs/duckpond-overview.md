@@ -256,7 +256,7 @@ Provides unified data access and the factory plugin system:
 - `series:///pattern` - FileSeries (Parquet time series)
 - `table:///pattern` - FileTable (single files)
 - `csv:///pattern` - CSV files with format conversion
-- `csv://gzip/pattern` - Compressed CSV with automatic decompression
+- `csv+gzip:///pattern` - Compressed CSV with automatic decompression
 - `excelhtml:///pattern` - HydroVu Excel HTML exports
 
 **Factory Subdirectories**:

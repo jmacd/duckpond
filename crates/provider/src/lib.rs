@@ -47,25 +47,36 @@ use tokio::io::AsyncRead;
 
 /// URL for accessing files with format conversion and optional compression
 ///
-/// Format: `scheme://[compression]/path/pattern?query_params`
+/// Format: `scheme[+compression]:///path/pattern[?query_params]`
 ///
 /// - `scheme`: Format name (csv, oteljson, etc.) - indicates FormatProvider
-/// - `host`: Optional compression (zstd, gzip, bzip2)
+///   Compression is encoded as a `+suffix` on the scheme (e.g., `csv+gzip`)
+///   Supported compressions: zstd, gzip, bzip2
 /// - `path`: TinyFS path or glob pattern
 /// - `query`: Format-specific options (delimiter, batch_size, etc.)
 ///
+/// The URL host component is reserved and must be empty. Non-empty host
+/// values will produce an error.
+///
 /// Examples:
 /// - `csv:///data/file.csv?delimiter=;`
-/// - `oteljson://zstd/logs/**/*.json.zstd?batch_size=2048`
-/// - `csv://gzip/metrics/*.csv.gz?has_header=false`
+/// - `oteljson+zstd:///logs/**/*.json.zstd?batch_size=2048`
+/// - `csv+gzip:///metrics/*.csv.gz?has_header=false`
 #[derive(Debug, Clone)]
 pub struct Url {
     inner: url::Url,
+    /// The base format scheme (e.g., "csv", "oteljson"), without compression suffix
+    format_scheme: String,
+    /// Optional compression extracted from scheme suffix (e.g., "gzip", "zstd")
+    compression: Option<String>,
 }
 
 impl PartialEq for Url {
     fn eq(&self, other: &Self) -> bool {
-        self.inner.as_str() == other.inner.as_str()
+        self.format_scheme == other.format_scheme
+            && self.compression == other.compression
+            && self.inner.path() == other.inner.path()
+            && self.inner.query() == other.inner.query()
     }
 }
 
@@ -76,7 +87,7 @@ impl serde::Serialize for Url {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(self.inner.as_str())
+        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -92,16 +103,29 @@ impl<'de> serde::Deserialize<'de> for Url {
 
 impl std::fmt::Display for Url {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.inner.as_str())
+        // Reconstruct canonical form: scheme[+compression]:///path[?query]
+        write!(f, "{}://", self.full_scheme())?;
+        write!(f, "{}", self.inner.path())?;
+        if let Some(query) = self.inner.query() {
+            write!(f, "?{}", query)?;
+        }
+        Ok(())
     }
 }
 
 impl Url {
+    /// Known compression suffixes that can appear after `+` in the scheme
+    const KNOWN_COMPRESSIONS: &[&str] = &["zstd", "gzip", "bzip2"];
+
     /// Parse URL from string using standard url crate
-    /// Returns error if fragment, port, username, or password are present
     ///
-    /// If the string doesn't contain "://", defaults to "file://" scheme
-    /// The actual file type is determined by EntryType when the file is accessed
+    /// Compression is extracted from the scheme suffix: `csv+gzip:///path`
+    /// has format scheme `csv` and compression `gzip`.
+    ///
+    /// Returns error if fragment, port, username, password, or non-empty host are present.
+    ///
+    /// If the string doesn't contain "://", defaults to "file://" scheme.
+    /// The actual file type is determined by EntryType when the file is accessed.
     pub fn parse(url_str: &str) -> Result<Self> {
         // If no scheme is present, default to "file" scheme
         let normalized_url = if !url_str.contains("://") {
@@ -125,20 +149,62 @@ impl Url {
             return Err(Error::InvalidUrl("password not allowed".into()));
         }
 
-        Ok(Self { inner })
+        // Reject non-empty host — the host position is reserved
+        if let Some(host) = inner.host_str().filter(|h| !h.is_empty()) {
+            return Err(Error::InvalidUrl(format!(
+                "non-empty host '{}' is not allowed in provider URLs; \
+                 use scheme+compression syntax instead (e.g., csv+gzip:///path)",
+                host
+            )));
+        }
+
+        // Extract compression from scheme suffix (e.g., "csv+gzip" → ("csv", Some("gzip")))
+        let raw_scheme = inner.scheme().to_string();
+        let (format_scheme, compression) = if let Some(pos) = raw_scheme.rfind('+') {
+            let suffix = &raw_scheme[pos + 1..];
+            if Self::KNOWN_COMPRESSIONS.contains(&suffix) {
+                (raw_scheme[..pos].to_string(), Some(suffix.to_string()))
+            } else {
+                // Unknown suffix — treat the whole thing as the scheme
+                // (this leaves room for future `+host` etc.)
+                (raw_scheme, None)
+            }
+        } else {
+            (raw_scheme, None)
+        };
+
+        Ok(Self {
+            inner,
+            format_scheme,
+            compression,
+        })
     }
 
-    /// Get format scheme (e.g., "csv", "oteljson")
+    /// Get the base format scheme (e.g., "csv", "oteljson")
+    ///
+    /// This returns only the format portion, without any compression suffix.
+    /// For `csv+gzip:///path`, this returns `"csv"`.
     #[must_use]
     pub fn scheme(&self) -> &str {
+        &self.format_scheme
+    }
+
+    /// Get the full scheme including compression suffix (e.g., "csv+gzip")
+    ///
+    /// This is the raw scheme as it appears in the URL.
+    #[must_use]
+    pub fn full_scheme(&self) -> &str {
         self.inner.scheme()
     }
 
-    /// Get optional compression from host (e.g., "zstd", "gzip")
+    /// Get optional compression from scheme suffix (e.g., "gzip", "zstd")
+    ///
+    /// Compression is encoded as `+suffix` on the scheme:
+    /// - `csv+gzip:///path` → `Some("gzip")`
+    /// - `csv:///path` → `None`
     #[must_use]
     pub fn compression(&self) -> Option<&str> {
-        let host = self.inner.host_str()?;
-        if host.is_empty() { None } else { Some(host) }
+        self.compression.as_deref()
     }
 
     /// Get TinyFS path or pattern

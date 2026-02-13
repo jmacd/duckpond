@@ -1,4 +1,5 @@
 #!/bin/bash
+# REQUIRES: compose
 # EXPERIMENT: S3 Replication with MinIO
 # DESCRIPTION:
 #   - Start MinIO as local S3 server
@@ -19,10 +20,10 @@ set -e
 echo "=== Experiment: S3 Replication with MinIO ==="
 echo ""
 
-# MinIO configuration
-MINIO_ROOT_USER="minioadmin"
-MINIO_ROOT_PASSWORD="minioadmin"
-MINIO_ENDPOINT="http://localhost:9000"
+# MinIO configuration (env vars set by docker-compose.test.yaml)
+MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
+MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://localhost:9000}"
 BUCKET_NAME="duckpond-backup"
 
 #############################
@@ -36,10 +37,10 @@ if curl -s "${MINIO_ENDPOINT}/minio/health/live" &>/dev/null; then
     echo "✓ MinIO already running at ${MINIO_ENDPOINT}"
 elif command -v minio &>/dev/null; then
     echo "Starting MinIO server..."
-    mkdir -p /data/minio
+    mkdir -p /tmp/minio-data
     MINIO_ROOT_USER=${MINIO_ROOT_USER} \
     MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD} \
-    minio server /data/minio --console-address ":9001" &
+    minio server /tmp/minio-data --console-address ":9001" &
     MINIO_PID=$!
     echo "MinIO started with PID ${MINIO_PID}"
     
@@ -100,7 +101,7 @@ timestamp,sensor_id,temperature,humidity
 2024-01-01T04:00:00Z,sensor-002,20.5,52
 EOF
 
-pond copy /tmp/measurements.csv /data/measurements.csv
+pond copy host:///tmp/measurements.csv /data/measurements.csv
 echo "✓ Test data created"
 
 # Configure remote backup
@@ -117,9 +118,9 @@ allow_http: true
 EOF
 else
     # Fallback to file:// for local testing
-    mkdir -p /data/s3-backup
+    mkdir -p /tmp/s3-backup
     cat > /tmp/remote-config.yaml << 'EOF'
-url: "file:///data/s3-backup"
+url: "file:///tmp/s3-backup"
 compression_level: 3
 EOF
 fi
@@ -144,7 +145,7 @@ if [[ -n "${MINIO_ENDPOINT}" ]]; then
     mc ls "local/${BUCKET_NAME}/" 2>/dev/null || echo "Listing bucket contents..."
 else
     echo "Local backup contents:"
-    ls -la /data/s3-backup/ 2>/dev/null || echo "Backup directory contents not visible yet"
+    ls -la /tmp/s3-backup/ 2>/dev/null || echo "Backup directory contents not visible yet"
 fi
 
 #############################

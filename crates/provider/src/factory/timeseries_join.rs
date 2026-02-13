@@ -40,9 +40,9 @@ pub struct TimeseriesInput {
     ///
     /// Supported URL schemes:
     /// - `series:///pattern` - Builtin TinyFS FileSeries (Parquet)
-    /// - `series://gzip/pattern` - Compressed FileSeries
+    /// - `series+gzip:///pattern` - Compressed FileSeries
     /// - `csv:///pattern` - CSV files (requires format conversion)
-    /// - `csv://gzip/pattern?delimiter=;` - CSV with decompression and options
+    /// - `csv+gzip:///pattern?delimiter=;` - CSV with decompression and options
     /// - `excelhtml:///pattern` - HydroVu HTML exports
     ///
     /// Example: `series:///data/sensors/*.series`

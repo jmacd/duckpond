@@ -1,4 +1,5 @@
 #!/bin/bash
+# REQUIRES: compose
 # EXPERIMENT: Synth-Logs → Logfile-Ingest → S3 Replication Cycle
 # 
 # DESCRIPTION:
@@ -129,10 +130,10 @@ if curl -s "${MINIO_ENDPOINT}/minio/health/live" &>/dev/null; then
     MINIO_AVAILABLE=true
 elif command -v minio &>/dev/null; then
     echo "Starting MinIO server..."
-    mkdir -p /data/minio
+    mkdir -p /tmp/minio-data
     MINIO_ROOT_USER=${MINIO_ROOT_USER} \
     MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD} \
-    minio server /data/minio --console-address ":9001" &>/dev/null &
+    minio server /tmp/minio-data --console-address ":9001" &>/dev/null &
     MINIO_PID=$!
     
     # Wait for MinIO to be ready
@@ -247,9 +248,9 @@ secret_access_key: "${MINIO_ROOT_PASSWORD}"
 allow_http: true
 EOF
 else
-    mkdir -p /data/s3-backup
+    mkdir -p /tmp/s3-backup
     cat > /tmp/remote-config.yaml << 'EOF'
-url: "file:///data/s3-backup"
+url: "file:///tmp/s3-backup"
 compression_level: 3
 EOF
 fi
