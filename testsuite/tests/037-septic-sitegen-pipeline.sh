@@ -13,12 +13,20 @@ echo "=== Test: Septic Station Full Pipeline ==="
 echo ""
 
 # testdata/ is auto-mounted at /data/ by run-test.sh
-SAMPLE=/data/septic-sample.json
-if [ ! -f "$SAMPLE" ]; then
-    echo "SKIP: septic-sample.json not found at $SAMPLE"
+# Prefer the full sample if available (via --data), fall back to testdata excerpt
+if [ -f /data/septicstation-sample.json ]; then
+    SAMPLE=/data/septicstation-sample.json
+elif [ -f /data/septic-sample.json ]; then
+    SAMPLE=/data/septic-sample.json
+else
+    echo "SKIP: no septic sample data found at /data/"
     exit 0
 fi
 echo "Using sample: ${SAMPLE} ($(wc -c < "$SAMPLE" | tr -d ' ') bytes)"
+
+# Derive the ingested filename (basename of the sample file)
+INGESTED_NAME=$(basename "$SAMPLE")
+INGESTED_PATH="/ingest/${INGESTED_NAME}"
 
 OUTDIR=/tmp/septic-site
 
@@ -68,7 +76,7 @@ pond list '/ingest/*'
 
 echo ""
 echo "--- Describe ingested file ---"
-pond describe /ingest/septic-sample.json
+pond describe "${INGESTED_PATH}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 3: Verify oteljson:// works on ingested data
@@ -76,8 +84,8 @@ pond describe /ingest/septic-sample.json
 
 echo ""
 echo "--- Step 3: Verify oteljson:// reads ingested data ---"
-pond cat oteljson:///ingest/septic-sample.json --format=table --sql "SELECT COUNT(*) AS row_count FROM source"
-pond describe oteljson:///ingest/septic-sample.json
+pond cat "oteljson://${INGESTED_PATH}" --format=table --sql "SELECT COUNT(*) AS row_count FROM source"
+pond describe "oteljson://${INGESTED_PATH}"
 echo "✓ oteljson:// URL scheme works on ingested data"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -87,12 +95,12 @@ echo "✓ oteljson:// URL scheme works on ingested data"
 echo ""
 echo "--- Step 4: Create temporal-reduce (dynamic-dir) ---"
 
-cat > /tmp/reduce.yaml << 'EOF'
+cat > /tmp/reduce.yaml << EOF
 entries:
   - name: "pumps"
     factory: "temporal-reduce"
     config:
-      in_pattern: "oteljson:///ingest/septic-sample.json"
+      in_pattern: "oteljson://${INGESTED_PATH}"
       out_pattern: "data"
       time_column: "timestamp"
       resolutions: [1h, 6h, 1d]
@@ -119,7 +127,7 @@ entries:
   - name: "environment"
     factory: "temporal-reduce"
     config:
-      in_pattern: "oteljson:///ingest/septic-sample.json"
+      in_pattern: "oteljson://${INGESTED_PATH}"
       out_pattern: "data"
       time_column: "timestamp"
       resolutions: [1h, 6h, 1d]
