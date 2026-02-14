@@ -165,6 +165,11 @@ pub async fn cat_command(
         path, sql_query
     );
 
+    // Check for host+ URL — bypass pond entirely
+    if path.starts_with("host+") {
+        return cat_host_impl(path, display, output, sql_query).await;
+    }
+
     let mut ship = ship_context.open_pond().await?;
 
     let template_variables = ship_context.template_variables.clone();
@@ -329,6 +334,49 @@ async fn cat_impl(
     let stream = df.execute_stream().await?;
 
     // Use consolidated output handler
+    handle_stream_output(stream, display, sql_query, output, path).await?;
+
+    Ok(())
+}
+
+/// Cat a host filesystem file through a format provider — no pond required.
+///
+/// Pipeline: host file → decompress → format_provider → MemTable → DataFusion → output
+///
+/// Used by `pond cat host+oteljson:///path/to/file.json` (and csv, excelhtml, etc.)
+#[allow(clippy::print_stdout)]
+async fn cat_host_impl(
+    path: &str,
+    display: &str,
+    output: Option<&mut String>,
+    sql_query: Option<&str>,
+) -> Result<()> {
+    let url = provider::Url::parse(path)
+        .map_err(|e| anyhow::anyhow!("Invalid host URL '{}': {}", path, e))?;
+
+    debug!("cat_host_impl processing URL: {} (scheme={})", url, url.scheme());
+
+    let table_provider = provider::create_memtable_from_host_url(&url)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read host file '{}': {}", path, e))?;
+
+    let ctx = datafusion::prelude::SessionContext::new();
+    let _ = ctx
+        .register_table("source", table_provider)
+        .map_err(|e| anyhow::anyhow!("Failed to register table: {}", e))?;
+
+    let effective_sql_query = sql_query.unwrap_or("SELECT * FROM source");
+    debug!("Executing SQL query: {}", effective_sql_query);
+
+    let df = ctx.sql(effective_sql_query).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to execute SQL query '{}': {}",
+            effective_sql_query,
+            e
+        )
+    })?;
+
+    let stream = df.execute_stream().await?;
     handle_stream_output(stream, display, sql_query, output, path).await?;
 
     Ok(())
