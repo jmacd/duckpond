@@ -124,6 +124,120 @@ entries:
             - "orenco_DT_Pump3_Amps"
             - "orenco_DT_Pump4_Amps"
 
+  - name: "cycle-times"
+    factory: "temporal-reduce"
+    config:
+      in_pattern: "oteljson://${INGESTED_PATH}"
+      out_pattern: "data"
+      time_column: "timestamp"
+      resolutions: [1h, 6h, 1d]
+      aggregations:
+        - type: "avg"
+          columns:
+            - "orenco_RT_Pump1_CT"
+            - "orenco_RT_Pump2_CT"
+            - "orenco_DT_Pump3_CT"
+            - "orenco_DT_Pump4_CT"
+        - type: "min"
+          columns:
+            - "orenco_RT_Pump1_CT"
+            - "orenco_RT_Pump2_CT"
+            - "orenco_DT_Pump3_CT"
+            - "orenco_DT_Pump4_CT"
+        - type: "max"
+          columns:
+            - "orenco_RT_Pump1_CT"
+            - "orenco_RT_Pump2_CT"
+            - "orenco_DT_Pump3_CT"
+            - "orenco_DT_Pump4_CT"
+
+  - name: "pump-modes"
+    factory: "temporal-reduce"
+    config:
+      in_pattern: "oteljson://${INGESTED_PATH}"
+      out_pattern: "data"
+      time_column: "timestamp"
+      resolutions: [1h, 6h, 1d]
+      aggregations:
+        - type: "avg"
+          columns:
+            - "orenco_RT_PumpMode"
+            - "orenco_DT_PumpMode"
+        - type: "min"
+          columns:
+            - "orenco_RT_PumpMode"
+            - "orenco_DT_PumpMode"
+        - type: "max"
+          columns:
+            - "orenco_RT_PumpMode"
+            - "orenco_DT_PumpMode"
+
+  - name: "flow-totals"
+    factory: "temporal-reduce"
+    config:
+      in_pattern: "oteljson://${INGESTED_PATH}"
+      out_pattern: "data"
+      time_column: "timestamp"
+      resolutions: [1h, 6h, 1d]
+      aggregations:
+        - type: "avg"
+          columns:
+            - "orenco_RT_TotalCount"
+            - "orenco_RT_TotalFlow"
+            - "orenco_RT_TotalTime"
+            - "orenco_DT_TotalCount"
+            - "orenco_DT_TotalFlow"
+            - "orenco_DT_TotalTime"
+        - type: "min"
+          columns:
+            - "orenco_RT_TotalCount"
+            - "orenco_RT_TotalFlow"
+            - "orenco_RT_TotalTime"
+            - "orenco_DT_TotalCount"
+            - "orenco_DT_TotalFlow"
+            - "orenco_DT_TotalTime"
+        - type: "max"
+          columns:
+            - "orenco_RT_TotalCount"
+            - "orenco_RT_TotalFlow"
+            - "orenco_RT_TotalTime"
+            - "orenco_DT_TotalCount"
+            - "orenco_DT_TotalFlow"
+            - "orenco_DT_TotalTime"
+
+  - name: "dose-zones"
+    factory: "temporal-reduce"
+    config:
+      in_pattern: "oteljson://${INGESTED_PATH}"
+      out_pattern: "data"
+      time_column: "timestamp"
+      resolutions: [1h, 6h, 1d]
+      aggregations:
+        - type: "avg"
+          columns:
+            - "orenco_Zone1_CountTday"
+            - "orenco_Zone1_TimeTday"
+            - "orenco_Zone2_CountTday"
+            - "orenco_Zone2_TimeTday"
+            - "orenco_Zone3_CountTday"
+            - "orenco_Zone3_TimeTday"
+        - type: "min"
+          columns:
+            - "orenco_Zone1_CountTday"
+            - "orenco_Zone1_TimeTday"
+            - "orenco_Zone2_CountTday"
+            - "orenco_Zone2_TimeTday"
+            - "orenco_Zone3_CountTday"
+            - "orenco_Zone3_TimeTday"
+        - type: "max"
+          columns:
+            - "orenco_Zone1_CountTday"
+            - "orenco_Zone1_TimeTday"
+            - "orenco_Zone2_CountTday"
+            - "orenco_Zone2_TimeTday"
+            - "orenco_Zone3_CountTday"
+            - "orenco_Zone3_TimeTday"
+
   - name: "environment"
     factory: "temporal-reduce"
     config:
@@ -150,7 +264,7 @@ entries:
 EOF
 
 pond mknod dynamic-dir /reduced --config-path /tmp/reduce.yaml
-echo "✓ dynamic-dir with pumps + environment created"
+echo "✓ dynamic-dir with 6 groups created"
 
 echo ""
 echo "--- Reduced directory tree ---"
@@ -183,12 +297,16 @@ layout: default
 This site monitors an Orenco septic system via Modbus registers and a
 BME280 environment sensor.
 
-## Data Sources
+## Data Groups
 
-| Source | Interval | Metrics |
-|--------|----------|---------|
-| **BME280** | ~10 min | Temperature, Pressure, Humidity |
-| **Modbus (Orenco)** | ~5 min | Pump amps, flow, zone valves |
+| Group | Metrics | Description |
+|-------|---------|-------------|
+| [**Pump Amps**](/data/pumps.html) | RT Pump 1–2, DT Pump 3–4 | Motor current draw |
+| [**Cycle Times**](/data/cycle-times.html) | RT Pump 1–2 CT, DT Pump 3–4 CT | Cumulative pump cycle counts |
+| [**Pump Modes**](/data/pump-modes.html) | RT PumpMode, DT PumpMode | Operating mode registers |
+| [**Flow Totals**](/data/flow-totals.html) | RT/DT TotalCount, TotalFlow, TotalTime | Cumulative flow counters |
+| [**Dose Zones**](/data/dose-zones.html) | Zone 1–3 CountTday, TimeTday | Daily zone valve activity |
+| [**Environment**](/data/environment.html) | Temperature, Pressure, Humidity | BME280 sensor on BeaglePlay |
 
 Use the sidebar to explore the data at different time resolutions.
 MD
@@ -210,8 +328,18 @@ cat > /tmp/sidebar.md << 'MD'
 ## Septic Station
 
 - [Home](/)
+
+### Pumps
 - [Pump Amps](/data/pumps.html)
-- [Environment](/data/environment.html)
+- [Cycle Times](/data/cycle-times.html)
+- [Pump Modes](/data/pump-modes.html)
+
+### Flow & Zones
+- [Flow Totals](/data/flow-totals.html)
+- [Dose Zones](/data/dose-zones.html)
+
+### Environment
+- [BME280](/data/environment.html)
 MD
 
 pond copy host:///tmp/index.md   /etc/site/index.md
@@ -318,9 +446,13 @@ check_file "${OUTDIR}/index.html" "index.html"
 check_file "${OUTDIR}/style.css" "style.css"
 check_file "${OUTDIR}/chart.js" "chart.js"
 
-# Template routes: data/pumps.html and data/environment.html
-# $0 from pattern "/reduced/*/*.series" matches "pumps" and "environment"
+# Template routes: one page per group
+# $0 from pattern "/reduced/*/*/*/*.series" matches group names
 check_file "${OUTDIR}/data/pumps.html" "data/pumps.html"
+check_file "${OUTDIR}/data/cycle-times.html" "data/cycle-times.html"
+check_file "${OUTDIR}/data/pump-modes.html" "data/pump-modes.html"
+check_file "${OUTDIR}/data/flow-totals.html" "data/flow-totals.html"
+check_file "${OUTDIR}/data/dose-zones.html" "data/dose-zones.html"
 check_file "${OUTDIR}/data/environment.html" "data/environment.html"
 
 echo ""
@@ -330,18 +462,30 @@ check_contains "${OUTDIR}/index.html" "index.html" "</html>"
 
 # Data pages should have chart containers
 check_contains "${OUTDIR}/data/pumps.html" "pumps page" "chart-container"
+check_contains "${OUTDIR}/data/cycle-times.html" "cycle-times page" "chart-container"
+check_contains "${OUTDIR}/data/pump-modes.html" "pump-modes page" "chart-container"
+check_contains "${OUTDIR}/data/flow-totals.html" "flow-totals page" "chart-container"
+check_contains "${OUTDIR}/data/dose-zones.html" "dose-zones page" "chart-container"
 check_contains "${OUTDIR}/data/environment.html" "environment page" "chart-container"
 
 echo ""
 echo "--- Layout checks ---"
 check_contains "${OUTDIR}/index.html" "index.html (default layout)" 'class="hero"'
 check_contains "${OUTDIR}/data/pumps.html" "pumps (data layout)" 'class="data-page"'
+check_contains "${OUTDIR}/data/cycle-times.html" "cycle-times (data layout)" 'class="data-page"'
+check_contains "${OUTDIR}/data/pump-modes.html" "pump-modes (data layout)" 'class="data-page"'
+check_contains "${OUTDIR}/data/flow-totals.html" "flow-totals (data layout)" 'class="data-page"'
+check_contains "${OUTDIR}/data/dose-zones.html" "dose-zones (data layout)" 'class="data-page"'
 check_contains "${OUTDIR}/data/environment.html" "environment (data layout)" 'class="data-page"'
 
 echo ""
 echo "--- Navigation checks ---"
-# Sidebar should contain links to both data pages
+# Sidebar should contain links to all data pages
 check_contains "${OUTDIR}/index.html" "sidebar has pumps link" 'href="/data/pumps.html"'
+check_contains "${OUTDIR}/index.html" "sidebar has cycle-times link" 'href="/data/cycle-times.html"'
+check_contains "${OUTDIR}/index.html" "sidebar has pump-modes link" 'href="/data/pump-modes.html"'
+check_contains "${OUTDIR}/index.html" "sidebar has flow-totals link" 'href="/data/flow-totals.html"'
+check_contains "${OUTDIR}/index.html" "sidebar has dose-zones link" 'href="/data/dose-zones.html"'
 check_contains "${OUTDIR}/index.html" "sidebar has environment link" 'href="/data/environment.html"'
 
 echo ""
@@ -363,6 +507,10 @@ check_has_parquet_in() {
 
 for res in 1h 6h 1d; do
   check_has_parquet_in "${OUTDIR}/data/pumps/data/res=${res}" "data/pumps/data/res=${res}"
+  check_has_parquet_in "${OUTDIR}/data/cycle-times/data/res=${res}" "data/cycle-times/data/res=${res}"
+  check_has_parquet_in "${OUTDIR}/data/pump-modes/data/res=${res}" "data/pump-modes/data/res=${res}"
+  check_has_parquet_in "${OUTDIR}/data/flow-totals/data/res=${res}" "data/flow-totals/data/res=${res}"
+  check_has_parquet_in "${OUTDIR}/data/dose-zones/data/res=${res}" "data/dose-zones/data/res=${res}"
   check_has_parquet_in "${OUTDIR}/data/environment/data/res=${res}" "data/environment/data/res=${res}"
 done
 

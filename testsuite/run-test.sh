@@ -228,6 +228,13 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     
     SCRIPT_NAME=$(basename "${SCRIPT_FILE}")
 
+    # Tests marked '# REQUIRES: host' run directly on the host (not in Docker).
+    # They need tools like Node.js/Puppeteer that aren't in the test container.
+    if head -25 "${SCRIPT_FILE}" | grep -q '# REQUIRES: host'; then
+        echo "=== Running Test: ${SCRIPT_NAME} (host) ==="
+        exec bash "${SCRIPT_FILE}" "$@"
+    fi
+
     # Always capture output to /tmp/test-output for inspection
     # (--output overrides this if the user specifies a custom dir)
     if [[ -z "${OUTPUT_DIR}" ]]; then

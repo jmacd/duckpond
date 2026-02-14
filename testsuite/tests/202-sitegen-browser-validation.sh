@@ -18,14 +18,6 @@
 # First-time:    cd testsuite/browser && npm install
 set -e
 
-# Safety net: if somehow run inside Docker, fail loudly.
-if [[ -f /.dockerenv ]] || [[ "$(dirname "${BASH_SOURCE[0]}")" == "/test" ]]; then
-    echo "ERROR: Test 202 requires a browser and cannot run inside Docker."
-    echo "Use run-all.sh (which detects REQUIRES: host) or run directly:"
-    echo "  bash testsuite/tests/202-sitegen-browser-validation.sh"
-    exit 1
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BROWSER_DIR="$(cd "${SCRIPT_DIR}/../browser" && pwd)"
 

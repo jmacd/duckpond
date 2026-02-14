@@ -22,8 +22,12 @@ start_vite() {
     local site_root="$1"
     local base_path="${2:-/}"
 
+    # Kill anything already listening on our port
+    lsof -ti:${PORT} | xargs kill -9 2>/dev/null || true
+    sleep 0.5
+
     SITE_ROOT="${site_root}" BASE_PATH="${base_path}" \
-        npx vite --port ${PORT} --config "${SCRIPT_DIR}/vite.config.js" &
+        npx vite --port ${PORT} --strictPort --config "${SCRIPT_DIR}/vite.config.js" &
     VITE_PID=$!
 
     local url="http://localhost:${PORT}${base_path}"
