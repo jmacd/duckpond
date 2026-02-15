@@ -175,6 +175,18 @@ async fn execute(
 ///
 /// Uses `provider::export::export_series_to_parquet` — the same DataFusion
 /// `COPY TO ... PARTITIONED BY` pipeline used by `pond export`.
+///
+/// # Automatic Partitioning
+///
+/// For each stage, the export:
+///
+/// 1. Discovers all resolutions from glob matches (looking for `res=Xh` in
+///    capture groups).
+/// 2. Computes per-resolution partition plans using
+///    `partitions::compute_partitions()` — each resolution gets the finest
+///    temporal partition that satisfies the ≤ 2 file invariant for its
+///    maximum viewport width.
+/// 3. Exports each match with its resolution-specific temporal partition.
 async fn run_export_stages(
     config: &SiteConfig,
     context: &FactoryContext,
@@ -195,25 +207,95 @@ async fn run_export_stages(
             stage.pattern
         );
 
+        let target_points = stage.target_points;
+        let display = crate::partitions::DisplayConfig { target_points };
+
+        // Discover resolutions from matches
+        let mut resolutions = Vec::new();
+        for (_node_path, captures) in &matches {
+            if let Some(res) = crate::partitions::extract_resolution_from_captures(captures)
+                && !resolutions.contains(&res)
+            {
+                resolutions.push(res);
+            }
+        }
+
+        // Compute per-resolution partition plans
+        let partition_plans = if resolutions.is_empty() {
+            warn!(
+                "Export stage '{}': no resolutions found in captures. \
+                 Using default temporal partition ['year'].",
+                stage.name
+            );
+            None
+        } else {
+            // max_width = coarsest_resolution * target_points
+            // This is the widest viewport the coarsest resolution will serve.
+            let mut max_res_secs = 0u64;
+            for res in &resolutions {
+                if let Some(secs) = crate::partitions::parse_duration_secs(res) {
+                    max_res_secs = max_res_secs.max(secs);
+                }
+            }
+            let max_width_secs = max_res_secs * target_points;
+
+            let (partitions, warnings) =
+                crate::partitions::compute_partitions(&resolutions, &display, max_width_secs);
+
+            for w in &warnings {
+                warn!("Export stage '{}': {}", stage.name, w);
+            }
+
+            info!(
+                "Export stage '{}': auto-partitioning {} resolutions ({:?})",
+                stage.name,
+                partitions.len(),
+                resolutions,
+            );
+            for (res, plan) in &partitions {
+                info!(
+                    "  {} → {:?} (partition ≈ {}s, max {} pts/file)",
+                    res, plan.temporal, plan.partition_width_secs, plan.max_points_per_file
+                );
+            }
+
+            Some(partitions)
+        };
+
         let mut by_key: BTreeMap<String, Vec<shortcodes::ExportedFile>> = BTreeMap::new();
 
         for (node_path, captures) in &matches {
             let path_str = node_path.path.to_string_lossy().to_string();
             let key = captures.first().cloned().unwrap_or_default();
 
-            // Build the export directory for this series.
-            // e.g., /reduced/single_param/Temperature/res=1h.series
-            //     → <output>/data/single_param/Temperature/res=1h/
             let rel = series_path_to_data_rel(&path_str);
             let export_dir = data_dir.join(&rel);
 
-            let temporal_parts = &stage.temporal;
+            // Look up resolution-specific temporal partition
+            let temporal_parts: Vec<String> = if let Some(ref partitions) = partition_plans {
+                if let Some(res) = crate::partitions::extract_resolution_from_captures(captures) {
+                    if let Some(plan) = partitions.get(&res) {
+                        plan.temporal.clone()
+                    } else {
+                        warn!(
+                            "  {} — resolution '{}' not in partition plan, using ['year']",
+                            path_str, res
+                        );
+                        vec!["year".to_string()]
+                    }
+                } else {
+                    vec!["year".to_string()]
+                }
+            } else {
+                // No resolutions discovered — single partition
+                vec!["year".to_string()]
+            };
 
             let (export_outputs, _schema) = provider::export::export_series_to_parquet(
                 &root,
                 &path_str,
                 &export_dir,
-                temporal_parts,
+                &temporal_parts,
                 captures,
                 &data_dir,
                 provider_ctx,
@@ -223,9 +305,7 @@ async fn run_export_stages(
                 tinyfs::Error::Other(format!("export_series_to_parquet '{}': {}", path_str, e))
             })?;
 
-            // Build ExportedFile entries from the real output files
             for (_caps, export_output) in &export_outputs {
-                // Build temporal BTreeMap from Hive partition path components
                 let mut temporal = BTreeMap::new();
                 for component in export_output.file.components() {
                     let s = component.as_os_str().to_string_lossy();
@@ -236,7 +316,6 @@ async fn run_export_stages(
                     }
                 }
 
-                // Prefix data file URLs with base_url for subdir deployments.
                 let base = config.site.base_url.trim_end_matches('/');
                 by_key
                     .entry(key.clone())
@@ -252,9 +331,10 @@ async fn run_export_stages(
             }
 
             info!(
-                "  {} → {} partitioned files",
+                "  {} → {} partitioned files ({:?})",
                 path_str,
-                export_outputs.len()
+                export_outputs.len(),
+                temporal_parts,
             );
         }
 
@@ -560,5 +640,4 @@ mod tests {
     fn test_interpolate_empty() {
         assert_eq!(interpolate_captures("Static", &[]), "Static");
     }
-
 }

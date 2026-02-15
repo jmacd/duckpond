@@ -76,11 +76,7 @@ impl DynamicDirDirectory {
     /// Create a FactoryContext for a child entry, preserving pond_metadata and txn_seq
     fn create_child_context(&self, child_file_id: tinyfs::FileID) -> FactoryContext {
         let ctx = if let Some(ref pm) = self.context.pond_metadata {
-            FactoryContext::with_metadata(
-                self.context.context.clone(),
-                child_file_id,
-                pm.clone(),
-            )
+            FactoryContext::with_metadata(self.context.context.clone(), child_file_id, pm.clone())
         } else {
             FactoryContext::new(self.context.context.clone(), child_file_id)
         };
@@ -121,14 +117,10 @@ impl DynamicDirDirectory {
         // unique, non-colliding children.
         let (node_type, entry_type) = if creates_directory {
             let entry_type = EntryType::DirectoryDynamic;
-            let child_file_id =
-                tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes);
+            let child_file_id = tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes);
             let child_context = self.create_child_context(child_file_id);
-            let dir_handle = FactoryRegistry::create_directory(
-                &entry.factory,
-                &config_bytes,
-                child_context,
-            )?;
+            let dir_handle =
+                FactoryRegistry::create_directory(&entry.factory, &config_bytes, child_context)?;
             debug!(
                 "DynamicDirDirectory::create_entry_node - created directory for entry '{}'",
                 entry.name

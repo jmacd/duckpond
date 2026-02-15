@@ -354,7 +354,11 @@ async fn cat_host_impl(
     let url = provider::Url::parse(path)
         .map_err(|e| anyhow::anyhow!("Invalid host URL '{}': {}", path, e))?;
 
-    debug!("cat_host_impl processing URL: {} (scheme={})", url, url.scheme());
+    debug!(
+        "cat_host_impl processing URL: {} (scheme={})",
+        url,
+        url.scheme()
+    );
 
     let table_provider = provider::create_memtable_from_host_url(&url)
         .await

@@ -91,7 +91,7 @@ entries:
       in_pattern: "/singled/*"
       out_pattern: "$0"
       time_column: "timestamp"
-      resolutions: ["1h"]
+      resolutions: ["1h", "4h", "24h"]
       aggregations:
         - type: "avg"
           columns: ["*"]
@@ -174,7 +174,7 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year"]
+    target_points: 1500
 
 routes:
   - name: "home"
@@ -222,7 +222,7 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year"]
+    target_points: 1500
 
 routes:
   - name: "home"

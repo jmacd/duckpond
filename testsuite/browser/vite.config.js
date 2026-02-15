@@ -17,4 +17,12 @@ export default defineConfig({
   base: basePath,
   // The site is fully static — no bundling, no transforms.
   build: { rollupOptions: { input: {} } },
+  // Disable HMR and file watching — the site is pre-generated static content.
+  // Without this, Vite's watcher can trigger page reloads mid-test (e.g., if
+  // macOS writes .DS_Store or another process touches the directory), which
+  // destroys Puppeteer's execution context.
+  server: {
+    hmr: false,
+    watch: null,
+  },
 });

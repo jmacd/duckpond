@@ -364,7 +364,6 @@ site:
 exports:
   - name: "metrics"
     pattern: "/reduced/*/*/*.series"
-    temporal: ["year", "month"]
 
 routes:
   - name: "home"

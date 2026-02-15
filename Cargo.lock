@@ -4646,6 +4646,7 @@ version = "0.25.0"
 dependencies = [
  "chrono",
  "clap",
+ "humantime",
  "linkme",
  "log",
  "maud",

@@ -744,10 +744,10 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]       # Partition exported Parquet by year/month
+    target_points: 1500               # Points per plot (auto-partitions)
   - name: "sites"
     pattern: "/reduced/single_site/*/*.series"
-    temporal: ["year", "month"]
+    target_points: 1500
 
 routes:
   - name: "home"
@@ -796,7 +796,7 @@ static_assets: []                     # Extra files to copy (optional)
 |-------|----------|-------------|
 | `name` | yes | Name referenced by `export:` in routes |
 | `pattern` | yes | Glob pattern matching pond files. `*` captures become `$0`, `$1`, ... |
-| `temporal` | no | List of temporal partition keys (e.g., `["year", "month"]`) |
+| `target_points` | no | Target data points per plot (default: 1500). Used to auto-compute temporal partitions per resolution. |
 
 **Route types:**
 
@@ -870,9 +870,9 @@ layout: data
 pond run /etc/site.yaml build ./dist
 ```
 
-This single command: reads the site config → runs export stages (exports Parquet
-with temporal partitioning) → renders all routes (Markdown → HTML via Maud layouts)
-→ writes everything to `./dist`.
+This single command: reads the site config → runs export stages (auto-partitions
+exported Parquet per resolution based on `target_points`) → renders all routes
+(Markdown → HTML via Maud layouts) → writes everything to `./dist`.
 
 **Serving locally:**
 

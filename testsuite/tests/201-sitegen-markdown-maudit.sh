@@ -297,10 +297,10 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year"]
+    target_points: 1500
   - name: "sites"
     pattern: "/reduced/single_site/*/*.series"
-    temporal: ["year"]
+    target_points: 1500
 
 routes:
   - name: "home"
@@ -420,8 +420,9 @@ check_contains "${OUTDIR}/chart.js" "chart.js" "chart-data"
 echo ""
 echo "--- Data export checks (Hive-partitioned) ---"
 
-# With temporal: ["year"], data is exported as Hive-partitioned parquet:
-# data/<group>/<param>/res=<R>/year=<Y>/<file>.parquet
+# With target_points: 1500, data is exported as Hive-partitioned parquet with
+# per-resolution temporal partitions (auto-computed):
+# data/<group>/<param>/res=<R>/<temporal-dirs>/<file>.parquet
 # We check that partitioned directories exist and contain .parquet files.
 
 check_has_parquet_in() {
@@ -445,7 +446,7 @@ for res in 1h 2h 4h 12h 24h; do
   check_has_parquet_in "${OUTDIR}/data/single_site/SouthDock/res=${res}" "data/SouthDock res=${res}"
 done
 
-# Manifest URLs should reference partitioned paths (contain year=)
+# Manifest URLs should reference partitioned paths (contain res= paths)
 check_contains "${OUTDIR}/params/Temperature.html" "Temperature manifest has partitioned 1h" 'single_param/Temperature/res=1h/'
 check_contains "${OUTDIR}/params/Temperature.html" "Temperature manifest has partitioned 24h" 'single_param/Temperature/res=24h/'
 

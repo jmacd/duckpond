@@ -214,10 +214,8 @@ impl TemporalReduceSqlFile {
         );
 
         let fs = self.context.context.filesystem();
-        let provider = crate::Provider::with_context(
-            Arc::new(fs),
-            Arc::new(self.context.context.clone()),
-        );
+        let provider =
+            crate::Provider::with_context(Arc::new(fs), Arc::new(self.context.context.clone()));
         let datafusion_ctx = datafusion::prelude::SessionContext::new();
 
         let table_provider = provider
@@ -291,6 +289,16 @@ impl TemporalReduceSqlFile {
                     );
                 }
                 Some(patterns) => {
+                    // Special case: COUNT with ["*"] means COUNT(*), not glob expansion
+                    if matches!(agg.agg_type, AggregationType::Count)
+                        && patterns.len() == 1
+                        && patterns[0] == "*"
+                    {
+                        agg.columns = Some(vec!["*".to_string()]);
+                        log::debug!("TemporalReduceFile: COUNT aggregation preserved as COUNT(*)");
+                        continue;
+                    }
+
                     // Apply glob matching to filter discovered columns
                     let mut matched_columns = Vec::new();
                     for pattern in &patterns {
@@ -1517,10 +1525,7 @@ mod tests {
             // Write as raw data file (FilePhysicalVersion, NOT TablePhysicalSeries)
             use tokio::io::AsyncWriteExt;
             let mut w = root
-                .async_writer_path_with_type(
-                    "/ingest/weather.csv",
-                    EntryType::FilePhysicalVersion,
-                )
+                .async_writer_path_with_type("/ingest/weather.csv", EntryType::FilePhysicalVersion)
                 .await
                 .unwrap();
             w.write_all(csv_data.as_bytes()).await.unwrap();
@@ -1586,9 +1591,7 @@ mod tests {
                 let file_arc = file_handle.get_file().await;
                 let file_guard = file_arc.lock().await;
 
-                let queryable = file_guard
-                    .as_queryable()
-                    .expect("Should be queryable");
+                let queryable = file_guard.as_queryable().expect("Should be queryable");
 
                 let table_provider = queryable
                     .as_table_provider(file_id, &provider_context)
@@ -1597,9 +1600,7 @@ mod tests {
 
                 // Query: verify results
                 let ctx = &provider_context.datafusion_session;
-                _ = ctx
-                    .register_table("csv_reduced", table_provider)
-                    .unwrap();
+                _ = ctx.register_table("csv_reduced", table_provider).unwrap();
                 let df = ctx
                     .sql("SELECT * FROM csv_reduced ORDER BY timestamp")
                     .await
@@ -1610,7 +1611,11 @@ mod tests {
                 assert_eq!(total_rows, 2, "Should have 2 aggregated rows (2 days)");
 
                 // Debug: print schema and row count
-                log::info!("CSV reduced: {} rows, schema: {:?}", total_rows, batches[0].schema());
+                log::info!(
+                    "CSV reduced: {} rows, schema: {:?}",
+                    total_rows,
+                    batches[0].schema()
+                );
 
                 // Verify schema
                 let schema = &batches[0].schema();

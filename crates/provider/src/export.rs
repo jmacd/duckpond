@@ -411,7 +411,11 @@ pub fn extract_timestamps_from_path(relative_path: &Path) -> Result<(Option<i64>
                 let part_name = parts[0];
                 let part_value_str = parts[1];
 
-                if !["year", "quarter", "month", "day", "hour", "minute", "second"].contains(&part_name) {
+                if ![
+                    "year", "quarter", "month", "day", "hour", "minute", "second",
+                ]
+                .contains(&part_name)
+                {
                     continue;
                 }
 
@@ -438,7 +442,7 @@ pub fn extract_timestamps_from_path(relative_path: &Path) -> Result<(Option<i64>
     // Fill defaults for missing temporal parts.
     // Quarter → derive month from quarter value (start of quarter).
     if temporal_parts.contains_key("quarter") && !temporal_parts.contains_key("month") {
-        let q = *temporal_parts.get("quarter").unwrap();
+        let q = *temporal_parts.get("quarter").expect("checked");
         let start_month = (q - 1) * 3 + 1; // Q1→1, Q2→4, Q3→7, Q4→10
         _ = temporal_parts.insert("month", start_month);
     }
@@ -668,9 +672,7 @@ pub fn parse_field_name(field_name: &str) -> Result<TemplateField> {
     let mut parts: Vec<&str> = field_name.split('.').collect();
 
     match parts.len() {
-        0 => Err(anyhow::anyhow!(
-            "field name: empty field name"
-        )),
+        0 => Err(anyhow::anyhow!("field name: empty field name")),
         1 => {
             // Bare field name, no aggregation
             Ok(TemplateField {

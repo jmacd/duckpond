@@ -67,15 +67,15 @@ site:
   base_url: "/"
 
 # Export stages - specify what data to export and how
-# These run first, producing file manifests with temporal partitioning
+# These run first, producing file manifests with auto-computed temporal partitioning
 exports:
   - name: "params"
     pattern: "/reduced/single_param/**/*.series"
-    temporal: ["year", "month"]               # Partition by year/month
+    target_points: 1500                       # Auto-partitions per resolution
     
   - name: "sites"
     pattern: "/reduced/single_site/**/*.series"
-    temporal: ["year", "month"]
+    target_points: 1500
 
 # Hierarchical route tree - URLs are built from nesting
 # Routes reference exports to get their data context
@@ -124,7 +124,7 @@ pond run /etc/site.yaml build ./dist
 
 This single command:
 1. Reads the site definition
-2. Runs all export stages (exports data files with temporal partitioning)
+2. Runs all export stages (auto-partitions data files per resolution based on `target_points`)
 3. Builds file manifests with timestamps
 4. Renders all routes with manifest context
 5. Outputs HTML + data files to `./dist`
@@ -143,7 +143,7 @@ Given this config fragment:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/**/*.series"
-    temporal: ["year", "month"]
+    target_points: 1500
 
 routes:
   - name: "params"
@@ -471,11 +471,11 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]
+    target_points: 1500
     
   - name: "sites"
     pattern: "/reduced/single_site/*/*.series"
-    temporal: ["year", "month"]
+    target_points: 1500
 
 # Routes reference exports by name
 routes:

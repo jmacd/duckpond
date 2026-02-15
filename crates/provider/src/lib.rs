@@ -334,10 +334,9 @@ pub async fn create_memtable_from_host_url(
         batches.push(result?);
     }
 
-    let table =
-        datafusion::datasource::MemTable::try_new(schema, vec![batches]).map_err(|e| {
-            Error::InvalidUrl(format!("Failed to create MemTable from host file: {}", e))
-        })?;
+    let table = datafusion::datasource::MemTable::try_new(schema, vec![batches]).map_err(|e| {
+        Error::InvalidUrl(format!("Failed to create MemTable from host file: {}", e))
+    })?;
 
     Ok(std::sync::Arc::new(table))
 }

@@ -139,8 +139,7 @@ impl RemoteConfig {
                 );
             }
             if self.allow_http {
-                storage_options
-                    .insert("allow_http".to_string(), "true".to_string());
+                storage_options.insert("allow_http".to_string(), "true".to_string());
             }
         }
         storage_options
