@@ -138,7 +138,7 @@ check_row_count() {
   local expected_max="$4"
 
   local output
-  output=$(pond cat "$series" --sql "SELECT COUNT(*) as c FROM source" 2>&1)
+  output=$(pond cat "$series" --format=table --sql "SELECT COUNT(*) as c FROM source" 2>&1)
 
   # Parse the row count from the table output (the numeric value in the data row)
   local count
@@ -183,7 +183,7 @@ check_spread() {
 
   # avg(max - min) for the temperature column
   local output
-  output=$(pond cat "$series" --sql "
+  output=$(pond cat "$series" --format=table --sql "
     SELECT ROUND(AVG(\"TempProbe.temperature.C.max\" - \"TempProbe.temperature.C.min\"), 4) as spread
     FROM source
   " 2>&1)
@@ -230,7 +230,7 @@ echo "--- Sample rows (first 3 per resolution) ---"
 for res in 1h 2h 4h 12h 24h; do
   echo ""
   echo "  res=$res:"
-  pond cat "/reduced/single_site/NorthDock/res=${res}.series" --sql "
+  pond cat "/reduced/single_site/NorthDock/res=${res}.series" --format=table --sql "
     SELECT timestamp,
            ROUND(\"TempProbe.temperature.C.avg\", 2) as avg,
            ROUND(\"TempProbe.temperature.C.min\", 2) as min,

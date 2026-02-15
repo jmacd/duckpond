@@ -23,6 +23,8 @@ NO_REBUILD=false
 OUTPUT_DIR=""
 USER_OUTPUT_DIR=""
 INSPECT=false
+DATA_DIR=""
+COMPOSE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -55,6 +57,14 @@ while [[ $# -gt 0 ]]; do
             NO_REBUILD=true
             shift
             ;;
+        --data|-d)
+            DATA_DIR="$2"
+            shift 2
+            ;;
+        --compose|-c)
+            COMPOSE=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [options] [script.sh]"
             echo ""
@@ -65,6 +75,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --verbose, -v        Show container output in real-time"
             echo "  --no-rebuild, -n     Skip automatic rebuild (use existing image)"
             echo "  --output, -o DIR     Mount DIR as /output in the container (for capturing results)"
+            echo "  --data, -d DIR       Mount DIR as /data in the container (read-only test data)"
+            echo "  --compose, -c        Run with docker compose (starts MinIO for S3 tests)"
             echo "  --inspect            Copy output for inspection (always; default on failure)"
             echo "  --help, -h           Show this help"
             echo ""
@@ -216,6 +228,13 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     
     SCRIPT_NAME=$(basename "${SCRIPT_FILE}")
 
+    # Tests marked '# REQUIRES: host' run directly on the host (not in Docker).
+    # They need tools like Node.js/Puppeteer that aren't in the test container.
+    if head -25 "${SCRIPT_FILE}" | grep -q '# REQUIRES: host'; then
+        echo "=== Running Test: ${SCRIPT_NAME} (host) ==="
+        exec bash "${SCRIPT_FILE}" "$@"
+    fi
+
     # Always capture output to /tmp/test-output for inspection
     # (--output overrides this if the user specifies a custom dir)
     if [[ -z "${OUTPUT_DIR}" ]]; then
@@ -225,6 +244,14 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     mkdir -p "${OUTPUT_DIR}"
     OUTPUT_MOUNT=(-v "${OUTPUT_DIR}:/output")
 
+    # Mount testdata directory if --data specified, or auto-detect testdata/
+    DATA_MOUNT=()
+    if [[ -n "${DATA_DIR}" ]]; then
+        DATA_MOUNT=(-v "${DATA_DIR}:/data:ro")
+    elif [[ -d "${SCRIPT_DIR}/testdata" ]]; then
+        DATA_MOUNT=(-v "${SCRIPT_DIR}/testdata:/data:ro")
+    fi
+
     # Full log always goes to a known file for post-hoc inspection
     LOG_FILE="/tmp/test-${SCRIPT_NAME%.sh}.log"
 
@@ -233,14 +260,43 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
 
     # Run the script in the container — all output to log file, NOT to stdout
     set +e
-    docker run --rm \
-        -e POND=/pond \
-        -e RUST_LOG=info \
-        -v "${SCRIPT_FILE}:/test/run.sh:ro" \
-        "${OUTPUT_MOUNT[@]}" \
-        "${IMAGE_NAME}" \
-        -c "/bin/bash /test/run.sh" > "${LOG_FILE}" 2>&1
-    EXIT_CODE=$?
+    if [[ "${COMPOSE}" == "true" ]]; then
+        # Compose mode: start MinIO, run test via docker compose
+        COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.test.yaml"
+        COMPOSE_PROJECT="duckpond-test-$$"
+
+        compose_cleanup() {
+            docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" down --volumes --timeout 5 2>/dev/null || true
+        }
+        trap compose_cleanup EXIT
+
+        echo "  (compose test — starting MinIO)"
+
+        # Build volume args for docker compose run
+        COMPOSE_VOLUMES=(-v "${SCRIPT_FILE}:/test/run.sh:ro")
+        COMPOSE_VOLUMES+=("${OUTPUT_MOUNT[@]}")
+        COMPOSE_VOLUMES+=("${DATA_MOUNT[@]}")
+
+        docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" \
+            run --rm \
+            "${COMPOSE_VOLUMES[@]}" \
+            test \
+            -c "/bin/bash /test/run.sh" > "${LOG_FILE}" 2>&1
+        EXIT_CODE=$?
+
+        compose_cleanup
+        trap - EXIT
+    else
+        docker run --rm \
+            -e POND=/pond \
+            -e RUST_LOG=info \
+            -v "${SCRIPT_FILE}:/test/run.sh:ro" \
+            "${OUTPUT_MOUNT[@]}" \
+            "${DATA_MOUNT[@]}" \
+            "${IMAGE_NAME}" \
+            -c "/bin/bash /test/run.sh" > "${LOG_FILE}" 2>&1
+        EXIT_CODE=$?
+    fi
     set -e
 
     # Print a short summary

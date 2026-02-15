@@ -184,7 +184,6 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]
 
 routes:
   - name: "home"

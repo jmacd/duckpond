@@ -59,7 +59,7 @@ pond list /sensors/
 # --- Inspect with SQL: row count & time range ---------------------------------
 echo ""
 echo "=== Row count and time range ==="
-pond cat /sensors/synth --sql "
+pond cat /sensors/synth --format=table --sql "
   SELECT
     COUNT(*)          AS row_count,
     MIN(timestamp)    AS first_ts,
@@ -70,7 +70,7 @@ pond cat /sensors/synth --sql "
 # --- Inspect with SQL: value ranges per column --------------------------------
 echo ""
 echo "=== Value ranges ==="
-pond cat /sensors/synth --sql "
+pond cat /sensors/synth --format=table --sql "
   SELECT
     MIN(temperature)  AS temp_min,
     MAX(temperature)  AS temp_max,
@@ -84,14 +84,14 @@ pond cat /sensors/synth --sql "
 # --- Inspect with SQL: first 5 rows ------------------------------------------
 echo ""
 echo "=== First 5 rows ==="
-pond cat /sensors/synth --sql "
+pond cat /sensors/synth --format=table --sql "
   SELECT * FROM source ORDER BY timestamp LIMIT 5
 "
 
 # --- Inspect with SQL: last 5 rows -------------------------------------------
 echo ""
 echo "=== Last 5 rows ==="
-pond cat /sensors/synth --sql "
+pond cat /sensors/synth --format=table --sql "
   SELECT * FROM source ORDER BY timestamp DESC LIMIT 5
 "
 

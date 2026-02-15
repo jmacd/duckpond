@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "serve": "vite --open --port 4174",
-    "validate": "node validate.mjs"
+    "test": "bash test.sh",
+    "test:210": "node tests/210-browser-page-validation.mjs",
+    "test:211": "node tests/211-browser-parquet-loading.mjs"
   },
   "devDependencies": {
     "puppeteer": "^24.36.1",

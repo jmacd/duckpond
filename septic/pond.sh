@@ -1,43 +1,32 @@
-#!/bin/sh
+#!/usr/bin/env bash
+#
+# pond.sh — Run pond on the BeaglePlay via podman + SSH.
+#
+# Uses a locally-built arm64 container image pushed via build.sh.
+# Run ./build.sh first to build and push the image.
+#
 
 HOST=debian@septicplaystation.local
-# Project root and binary paths
-PROJECT_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-LOCAL_BIN=${PROJECT_ROOT}/target/aarch64-unknown-linux-gnu/debug/pond
+IMAGE=duckpond:latest-arm64
+VOLUME=pond-data
+
 # Remote paths
-REMOTE_BIN=/home/debian/bin/pond
-REMOTE_POND=/home/debian/pond
 REMOTE_CONFIG=/home/debian/config
 REMOTE_DATA=/home/data
+REMOTE_OUTPUT=/home/debian/site-output
 
-# Build the cross-compiled binary
-build_binary() {
-    echo "Building cross-compiled binary..."
-    (cd "${PROJECT_ROOT}" && cargo zigbuild --target aarch64-unknown-linux-gnu --bin pond)
-}
-
-# Sync binary to remote host
-sync_binary() {
-    if [ ! -f "${LOCAL_BIN}" ]; then
-        echo "Error: Binary not found at ${LOCAL_BIN}" >&2
-        exit 1
-    fi
-    
-    # Create remote bin directory if needed
-    ssh ${HOST} "mkdir -p $(dirname ${REMOTE_BIN})"
-    
-    # Use rsync for efficient sync (only copies if changed)
-    rsync -avz --progress "${LOCAL_BIN}" "${HOST}:${REMOTE_BIN}"
-}
-
-# Build and sync
-build_binary
-sync_binary
+# Ensure mount points exist
+ssh ${HOST} "mkdir -p ${REMOTE_CONFIG} ${REMOTE_OUTPUT}"
 
 ssh ${HOST} \
-    POND=${REMOTE_POND} \
-    RUST_LOG=${RUST_LOG:-info} \
-    R2_ENDPOINT=${R2_ENDPOINT} \
-    R2_KEY=${R2_KEY} \
-    R2_SECRET=${R2_SECRET} \
-    ${REMOTE_BIN} "$@"
+    podman run --pull=never -ti --rm \
+    -v "${VOLUME}:/pond" \
+    -v "${REMOTE_CONFIG}:/config:ro" \
+    -v "${REMOTE_DATA}:/data:ro" \
+    -v "${REMOTE_OUTPUT}:/output" \
+    -e POND=/pond \
+    -e RUST_LOG=${RUST_LOG:-info} \
+    -e R2_ENDPOINT=${R2_ENDPOINT:-} \
+    -e R2_KEY=${R2_KEY:-} \
+    -e R2_SECRET=${R2_SECRET:-} \
+    "${IMAGE}" "$@"

@@ -1,4 +1,5 @@
 #!/bin/bash
+# REQUIRES: compose
 # EXPERIMENT: Synth-Logs → Logfile-Ingest → S3 Replication Cycle
 # 
 # DESCRIPTION:
@@ -129,10 +130,10 @@ if curl -s "${MINIO_ENDPOINT}/minio/health/live" &>/dev/null; then
     MINIO_AVAILABLE=true
 elif command -v minio &>/dev/null; then
     echo "Starting MinIO server..."
-    mkdir -p /data/minio
+    mkdir -p /tmp/minio-data
     MINIO_ROOT_USER=${MINIO_ROOT_USER} \
     MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD} \
-    minio server /data/minio --console-address ":9001" &>/dev/null &
+    minio server /tmp/minio-data --console-address ":9001" &>/dev/null &
     MINIO_PID=$!
     
     # Wait for MinIO to be ready
@@ -247,9 +248,9 @@ secret_access_key: "${MINIO_ROOT_PASSWORD}"
 allow_http: true
 EOF
 else
-    mkdir -p /data/s3-backup
+    mkdir -p /tmp/s3-backup
     cat > /tmp/remote-config.yaml << 'EOF'
-url: "file:///data/s3-backup"
+url: "file:///tmp/s3-backup"
 compression_level: 3
 EOF
 fi
@@ -350,11 +351,11 @@ fi
 # Verify data integrity by checking first and last rows
 echo ""
 echo "--- Data Integrity Check ---"
-POND1_FIRST=$(POND=/pond1 pond cat /data/metrics/metrics.log --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
-POND2_FIRST=$(POND=/pond2 pond cat /data/metrics/metrics.log --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
+POND1_FIRST=$(POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
+POND2_FIRST=$(POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
 
-POND1_LAST=$(POND=/pond1 pond cat /data/metrics/metrics.log --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
-POND2_LAST=$(POND=/pond2 pond cat /data/metrics/metrics.log --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
+POND1_LAST=$(POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
+POND2_LAST=$(POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
 
 echo "First row - Pond1: ${POND1_FIRST}"
 echo "First row - Pond2: ${POND2_FIRST}"
@@ -480,7 +481,7 @@ echo "=== Summary Queries ==="
 
 echo ""
 echo "--- Min/Max row numbers (Pond1) ---"
-POND=/pond1 pond cat /data/metrics/metrics.log --query "
+POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "
     SELECT 
         MIN(CAST(column0 AS INTEGER)) as min_row,
         MAX(CAST(column0 AS INTEGER)) as max_row,
@@ -490,7 +491,7 @@ POND=/pond1 pond cat /data/metrics/metrics.log --query "
 
 echo ""
 echo "--- Min/Max row numbers (Pond2) ---"
-POND=/pond2 pond cat /data/metrics/metrics.log --query "
+POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "
     SELECT 
         MIN(CAST(column0 AS INTEGER)) as min_row,
         MAX(CAST(column0 AS INTEGER)) as max_row,

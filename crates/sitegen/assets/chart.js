@@ -6,6 +6,11 @@
 // Reads the chart-data JSON manifest, loads .parquet files via DuckDB-WASM,
 // renders time-series line charts with Observable Plot.
 // Supports duration buttons (1W … 1Y) and click-drag brush-to-zoom.
+//
+// LAZY LOADING: Parquet files are fetched on demand — only the files needed
+// for the current resolution and visible time window are loaded. Each
+// resolution tier is designed so that a typical screen view spans at most
+// one partition boundary, meaning at most 2 files are fetched per render.
 
 (async function () {
   "use strict";
@@ -85,11 +90,11 @@
     btnBar.appendChild(btn);
   });
 
-  // Reset-zoom button (hidden until a brush selection is made)
+  // Reset-zoom button (disabled until a brush selection is made)
   const resetBtn = document.createElement("button");
   resetBtn.className = "reset-zoom";
   resetBtn.textContent = "Reset zoom";
-  resetBtn.style.display = "none";
+  resetBtn.disabled = true;
   resetBtn.onclick = () => {
     zoomDomain = null;
     hideResetBtn();
@@ -101,8 +106,8 @@
   };
   toolbar.appendChild(resetBtn);
 
-  function showResetBtn() { resetBtn.style.display = ""; }
-  function hideResetBtn() { resetBtn.style.display = "none"; }
+  function showResetBtn() { resetBtn.disabled = false; }
+  function hideResetBtn() { resetBtn.disabled = true; }
 
   // Status message while loading
   container.innerHTML = '<div class="empty-state">Loading chart data…</div>';
@@ -126,21 +131,27 @@
     return;
   }
 
-  // Register each parquet file with DuckDB-WASM.
-  // Use simple indexed names (f0.parquet, f1.parquet, ...) to avoid issues
-  // with long or special-character paths in DuckDB's virtual filesystem.
+  // ── Lazy file loading ─────────────────────────────────────────────────────
+  //
+  // Files are NOT loaded eagerly. Instead, we index the manifest by resolution
+  // and only fetch + register files when they are needed for a query. A cache
+  // ensures each file is fetched at most once.
+
+  // Verify manifest has loadable files
   const fileUrls = manifest.map(m => m.file).filter(Boolean);
   if (fileUrls.length === 0) {
     container.innerHTML = '<div class="empty-state">No exported parquet files in manifest.</div>';
     return;
   }
 
-  // Map from manifest file URL → DuckDB registered name
+  // Cache: file URL → DuckDB registered name (populated lazily)
   const registeredNames = new Map();
   let fileIdx = 0;
 
-  for (const url of fileUrls) {
-    if (registeredNames.has(url)) continue; // deduplicate
+  // Fetch a single parquet file, register it with DuckDB, return its name.
+  // Returns null if the fetch fails. Results are cached.
+  async function ensureFile(url) {
+    if (registeredNames.has(url)) return registeredNames.get(url);
     const duckdbName = `f${fileIdx++}.parquet`;
     try {
       const resp = await fetch(url);
@@ -148,36 +159,98 @@
       const buf = await resp.arrayBuffer();
       await db.registerFileBuffer(duckdbName, new Uint8Array(buf));
       registeredNames.set(url, duckdbName);
+      return duckdbName;
     } catch (e) {
       console.error("chart.js: failed to load parquet file", url, e);
+      registeredNames.set(url, null); // cache failure to avoid retries
+      return null;
     }
   }
 
-  // Group manifest entries by resolution (captures[1], e.g. "res=1h").
+  // ── Resolution detection ────────────────────────────────────────────────
+  //
+  // Find the resolution from captures — it's the capture that starts with
+  // "res=".  The index varies by glob pattern, so we detect it dynamically.
+
+  function extractResolution(captures) {
+    if (!captures) return null;
+    for (const c of captures) {
+      if (typeof c === "string" && c.startsWith("res=")) return c;
+    }
+    return null;
+  }
+
+  // Parse a duration string like "1h", "6h", "1d" to seconds.
+  function parseDurationSecs(durStr) {
+    const m = durStr.match(/^(\d+)([smhd])$/);
+    if (!m) return Infinity;
+    const n = parseInt(m[1]);
+    switch (m[2]) {
+      case "s": return n;
+      case "m": return n * 60;
+      case "h": return n * 3600;
+      case "d": return n * 86400;
+      default: return Infinity;
+    }
+  }
+
+  // Group manifest entries by resolution.
+  // Entries keep their file URL — the actual fetch happens in queryData().
   const byResolution = new Map();
   for (const m of manifest) {
-    const res = (m.captures && m.captures[1]) || "res=1h";
+    const res = extractResolution(m.captures) || "res=1h";
     if (!byResolution.has(res)) byResolution.set(res, []);
-    const name = registeredNames.get(m.file);
-    if (!name) continue; // file failed to load
+    if (!m.file) continue;
     byResolution.get(res).push({
-      name,
+      url: m.file,
       start_time: m.start_time || 0,
       end_time: m.end_time || 0,
     });
   }
 
-  // Pick resolution based on the time window (fewer points for wider windows).
-  function pickResolution(days) {
-    const available = [...byResolution.keys()];
-    const prefer = [
-      [30, "res=1h"], [60, "res=2h"], [90, "res=4h"],
-      [180, "res=12h"], [Infinity, "res=24h"],
-    ];
-    for (const [maxDays, res] of prefer) {
-      if (days <= maxDays && available.includes(res)) return res;
+  // Sort resolutions finest-first by parsing the duration value.
+  const sortedResolutions = [...byResolution.keys()].sort((a, b) => {
+    const da = parseDurationSecs(a.replace("res=", ""));
+    const db = parseDurationSecs(b.replace("res=", ""));
+    return da - db;
+  });
+
+  // ── Data-driven resolution picker ─────────────────────────────────────────
+  //
+  // For a given time window, pick the finest resolution where at most 2
+  // manifest files overlap the window. This guarantees at most 2 fetches
+  // per render, matching the tiling design.
+  //
+  // If NO resolution satisfies ≤ 2 files, fall back to the coarsest and
+  // warn — this means the data needs a coarser resolution tier or wider
+  // partitions.
+
+  function countOverlapping(entries, beginMs, endMs) {
+    let count = 0;
+    for (const f of entries) {
+      if (f.start_time === 0 || (f.start_time * 1000 <= endMs && f.end_time * 1000 >= beginMs)) {
+        count++;
+      }
     }
-    return available[available.length - 1] || available[0];
+    return count;
+  }
+
+  function pickResolution(beginMs, endMs) {
+    // Try finest resolution first — pick the finest with ≤ 2 overlapping files.
+    for (const res of sortedResolutions) {
+      const entries = byResolution.get(res) || [];
+      if (countOverlapping(entries, beginMs, endMs) <= 2) return res;
+    }
+    // No resolution fits in 2 files — use coarsest and warn.
+    const coarsest = sortedResolutions[sortedResolutions.length - 1];
+    const entries = byResolution.get(coarsest) || [];
+    const n = countOverlapping(entries, beginMs, endMs);
+    console.warn(
+      `chart.js: no resolution fits within 2 files for this view ` +
+      `(coarsest ${coarsest} needs ${n} files). ` +
+      `Consider adding a coarser resolution tier or wider partitions.`
+    );
+    return coarsest;
   }
 
   // ── Data query ─────────────────────────────────────────────────────────────
@@ -187,15 +260,19 @@
 
   // Query data for a time window [beginMs, endMs].
   // Resolution is chosen automatically based on window width.
+  // Only the parquet files that overlap the window are fetched (lazy).
   async function queryData(beginMs, endMs) {
-    const windowDays = (endMs - beginMs) / 86400000;
-    const res = pickResolution(windowDays);
+    const res = pickResolution(beginMs, endMs);
     const entries = byResolution.get(res) || [];
 
-    const filtered = entries.filter(f =>
+    // Filter to files whose time range overlaps the query window.
+    const overlapping = entries.filter(f =>
       f.start_time === 0 || (f.start_time * 1000 <= endMs && f.end_time * 1000 >= beginMs)
     );
-    const tableNames = filtered.map(f => f.name);
+
+    // Lazily fetch only the overlapping files (parallel).
+    const loaded = await Promise.all(overlapping.map(f => ensureFile(f.url)));
+    const tableNames = loaded.filter(Boolean);
     if (tableNames.length === 0) return [];
 
     const parts = tableNames.map(t =>

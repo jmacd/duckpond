@@ -16,6 +16,7 @@ add-headers: install-reuse
 	reuse annotate --copyright="Caspar Water Company" \
 		--license="Apache-2.0" \
 		--skip-existing \
+		--skip-unrecognised \
 		--recursive \
 		crates
 

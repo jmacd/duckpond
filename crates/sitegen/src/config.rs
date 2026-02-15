@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 /// exports:
 ///   - name: "params"
 ///     pattern: "/reduced/single_param/*/*.series"
-///     temporal: ["year", "month"]
 ///
 /// routes:
 ///   - name: "home"
@@ -58,15 +57,32 @@ fn default_base_url() -> String {
 
 /// An export stage: runs `pond export` internally to produce data files
 /// that become template context.
+///
+/// # Automatic Temporal Partitioning
+///
+/// Parquet files are split into Hive-style temporal partitions automatically.
+/// The system discovers resolutions from the matched files (e.g., `res=1h`,
+/// `res=24h`) and computes the right partition level for each resolution
+/// so that any viewport loads at most 2 files.
+///
+/// `target_points` controls the trade-off: higher values mean finer partitions
+/// (more data per file, fewer files). Default is 1500, matching a typical
+/// screen width in pixels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportStage {
     /// Name referenced by routes (e.g., "params", "sites")
     pub name: String,
     /// Pond glob pattern (e.g., "/reduced/single_param/*/*.series")
     pub pattern: String,
-    /// Temporal partition keys (e.g., ["year", "month"])
-    #[serde(default)]
-    pub temporal: Vec<String>,
+    /// Target data points per screen width for partition sizing.
+    /// Typical value: 1000–2000. Default: 1500.
+    /// Controls how parquet files are temporally partitioned per resolution.
+    #[serde(default = "default_target_points")]
+    pub target_points: u64,
+}
+
+fn default_target_points() -> u64 {
+    1500
 }
 
 /// A route in the hierarchical route tree.
@@ -117,7 +133,6 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]
 
 routes:
   - name: "home"
@@ -136,8 +151,24 @@ routes:
         assert_eq!(config.site.base_url, "/");
         assert_eq!(config.exports.len(), 1);
         assert_eq!(config.exports[0].name, "params");
+        assert_eq!(config.exports[0].target_points, 1500); // default
         assert_eq!(config.routes.len(), 1);
         assert_eq!(config.routes[0].routes.len(), 1);
         assert_eq!(config.routes[0].routes[0].route_type, RouteType::Template);
+    }
+
+    #[test]
+    fn parse_config_with_target_points() {
+        let yaml = r#"
+site:
+  title: "Custom Points"
+
+exports:
+  - name: "metrics"
+    pattern: "/reduced/*/*/*.series"
+    target_points: 2000
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert_eq!(config.exports[0].target_points, 2000);
     }
 }

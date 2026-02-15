@@ -99,6 +99,7 @@ async fn discover_schema(reader: Pin<Box<dyn AsyncRead + Send>>) -> Result<Schem
     let mut reader = BufReader::new(reader);
     let mut metric_names_set = BTreeSet::new();
     let mut line = String::new();
+    let mut skipped = 0u64;
 
     loop {
         line.clear();
@@ -108,15 +109,27 @@ async fn discover_schema(reader: Pin<Box<dyn AsyncRead + Send>>) -> Result<Schem
             break; // EOF
         }
 
-        let trimmed = line.trim();
+        // Strip null bytes (flash storage corruption) and whitespace
+        let trimmed: String = line.chars().filter(|c| *c != '\0').collect();
+        let trimmed = trimmed.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let observations = parse_line(trimmed)?;
-        for obs in observations {
-            let _ = metric_names_set.insert(obs.metric_name);
+        match parse_line(trimmed) {
+            Ok(observations) => {
+                for obs in observations {
+                    let _ = metric_names_set.insert(obs.metric_name);
+                }
+            }
+            Err(_) => {
+                skipped += 1;
+            }
         }
+    }
+
+    if skipped > 0 {
+        log::warn!("oteljson: skipped {skipped} corrupt line(s) during schema discovery");
     }
 
     Ok(SchemaInfo {
@@ -226,6 +239,7 @@ impl FormatProvider for OtelJsonProvider {
         let mut metric_names_set = BTreeSet::new();
         let mut all_observations = Vec::new();
         let mut line = String::new();
+        let mut skipped = 0u64;
 
         loop {
             line.clear();
@@ -235,16 +249,28 @@ impl FormatProvider for OtelJsonProvider {
                 break; // EOF
             }
 
-            let trimmed = line.trim();
+            // Strip null bytes (flash storage corruption) and whitespace
+            let trimmed: String = line.chars().filter(|c| *c != '\0').collect();
+            let trimmed = trimmed.trim();
             if trimmed.is_empty() {
                 continue;
             }
 
-            let observations = parse_line(trimmed)?;
-            for obs in &observations {
-                let _ = metric_names_set.insert(obs.metric_name.clone());
+            match parse_line(trimmed) {
+                Ok(observations) => {
+                    for obs in &observations {
+                        let _ = metric_names_set.insert(obs.metric_name.clone());
+                    }
+                    all_observations.extend(observations);
+                }
+                Err(_) => {
+                    skipped += 1;
+                }
             }
-            all_observations.extend(observations);
+        }
+
+        if skipped > 0 {
+            log::warn!("oteljson: skipped {skipped} corrupt line(s) during read");
         }
 
         let metric_names: Vec<String> = metric_names_set.into_iter().collect();

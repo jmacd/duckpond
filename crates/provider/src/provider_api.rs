@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// Supports:
 /// - Single file: `csv:///data/file.csv`
 /// - Glob patterns: `csv:///data/**/*.csv`
-/// - Compression: `csv://gzip/data/*.csv.gz`
+/// - Compression: `csv+gzip:///data/*.csv.gz`
 /// - Format options: `csv:///data/file.csv?delimiter=;`
 /// - Builtin types: `file:///path`, `series:///path`, `table:///path`
 pub struct Provider {

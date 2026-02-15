@@ -193,9 +193,16 @@ main h1 {
   transition: all 0.15s;
 }
 
-.reset-zoom:hover {
+.reset-zoom:hover:not(:disabled) {
   background: var(--accent-color);
   color: white;
+}
+
+.reset-zoom:disabled {
+  opacity: 0.35;
+  cursor: default;
+  border-color: var(--text-muted);
+  color: var(--text-muted);
 }
 
 /* ── Brush-to-zoom overlay ──────────────────────────────────── */

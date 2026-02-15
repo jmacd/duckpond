@@ -1,4 +1,5 @@
 #!/bin/bash
+# REQUIRES: compose
 # EXPERIMENT: Remote Show Command Verification
 # DESCRIPTION:
 #   - Create a pond with files of various sizes
@@ -45,7 +46,7 @@ timestamp,sensor_id,value
 2024-01-01T01:00:00Z,sensor-001,43.1
 2024-01-01T02:00:00Z,sensor-002,21.0
 EOF
-pond copy /tmp/small.csv /data/small.csv
+pond copy host:///tmp/small.csv /data/small.csv
 echo "✓ Created small.csv (inline)"
 
 # Medium file (larger, but still single chunk)
@@ -63,7 +64,7 @@ with open('/tmp/medium.csv', 'w') as f:
         echo "$i,2024-01-01,$i.0,Record $i" >> /tmp/medium.csv
     done
 }
-pond copy /tmp/medium.csv /data/medium.csv
+pond copy host:///tmp/medium.csv /data/medium.csv
 echo "✓ Created medium.csv"
 
 # Create a metadata JSON file
@@ -75,7 +76,7 @@ cat > /tmp/metadata.json << 'EOF'
   "files": ["small.csv", "medium.csv"]
 }
 EOF
-pond copy /tmp/metadata.json /data/metadata.json
+pond copy host:///tmp/metadata.json /data/metadata.json
 echo "✓ Created metadata.json"
 
 echo ""
@@ -112,13 +113,14 @@ endpoint: "${MINIO_ENDPOINT}"
 region: "us-east-1"
 access_key: "${MINIO_ROOT_USER}"
 secret_key: "${MINIO_ROOT_PASSWORD}"
+allow_http: true
 EOF
     echo "✓ Configured S3/MinIO remote"
 else
     # Use local filesystem for testing without MinIO
-    mkdir -p /data/backup-verify
+    mkdir -p /tmp/backup-verify
     cat > /tmp/remote-config.yaml << 'EOF'
-url: "file:///data/backup-verify"
+url: "file:///tmp/backup-verify"
 EOF
     echo "✓ Configured local filesystem remote"
 fi
@@ -203,7 +205,7 @@ SET s3_secret_access_key='${MINIO_ROOT_PASSWORD}';
 SELECT COUNT(*) as total_chunks, COUNT(DISTINCT path) as unique_files FROM delta_scan('${TABLE_PATH}');
 " 2>&1 || echo "S3 access may require additional configuration"
 else
-    TABLE_PATH="/data/backup-verify"
+    TABLE_PATH="/tmp/backup-verify"
     echo "Testing Delta table at: ${TABLE_PATH}"
     
     duckdb -c "

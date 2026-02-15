@@ -28,7 +28,7 @@ SPDX-FileCopyrightText = "Caspar Water Company"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
-path = ["**.jpg", "**.png", "**.parquet", "OUT**", "CLIPPY", "DIFF", "ORIG", "WHATIS", ".dockerignore", ".gitignore"]
+path = ["**.jpg", "**.png", "**.parquet", "OUT**", "CLIPPY", "DIFF", "ORIG", "WHATIS", ".dockerignore", "**/.dockerignore", ".gitignore", "**/.gitignore"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Caspar Water Company"
 SPDX-License-Identifier = "CC0-1.0"

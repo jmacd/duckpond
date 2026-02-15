@@ -91,7 +91,7 @@ entries:
       in_pattern: "/singled/*"
       out_pattern: "$0"
       time_column: "timestamp"
-      resolutions: ["1h"]
+      resolutions: ["1h", "4h", "24h"]
       aggregations:
         - type: "avg"
           columns: ["*"]
@@ -174,7 +174,7 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]
+    target_points: 1500
 
 routes:
   - name: "home"
@@ -222,7 +222,7 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]
+    target_points: 1500
 
 routes:
   - name: "home"
@@ -287,6 +287,10 @@ check_not_contains() {
 
 echo ""
 echo "--- Root site (base_url: /) ---"
+
+echo ""
+echo "  Version marker:"
+check_contains "${ROOT_DIR}/index.html" "root: has version generator meta" 'name="generator" content="DuckPond v'
 
 echo ""
 echo "  Nav links:"

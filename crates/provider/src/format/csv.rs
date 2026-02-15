@@ -424,7 +424,7 @@ mod tests {
 
         // Create CSV provider with small batch size for more batches
         let provider = CsvProvider::new();
-        let url = Url::parse("csv://test.csv?batch_size=256").unwrap();
+        let url = Url::parse("csv:///test.csv?batch_size=256").unwrap();
 
         let (schema, mut stream) = provider.open_stream(reader, &url).await.unwrap();
 

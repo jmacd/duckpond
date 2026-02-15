@@ -17,11 +17,11 @@ use log::debug;
 async fn handle_stream_output(
     mut stream: datafusion::physical_plan::SendableRecordBatchStream,
     display: &str,
-    sql_query: Option<&str>,
+    _sql_query: Option<&str>,
     output: Option<&mut String>,
     source_desc: &str, // For debug messages: "url" or "path"
 ) -> Result<()> {
-    let use_table_format = display == "table" || sql_query.is_some();
+    let use_table_format = display == "table";
 
     if use_table_format {
         // Collect batches for table formatting
@@ -164,6 +164,11 @@ pub async fn cat_command(
         "cat_command called with path: {}, sql_query: {:?}",
         path, sql_query
     );
+
+    // Check for host+ URL — bypass pond entirely
+    if path.starts_with("host+") {
+        return cat_host_impl(path, display, output, sql_query).await;
+    }
 
     let mut ship = ship_context.open_pond().await?;
 
@@ -329,6 +334,53 @@ async fn cat_impl(
     let stream = df.execute_stream().await?;
 
     // Use consolidated output handler
+    handle_stream_output(stream, display, sql_query, output, path).await?;
+
+    Ok(())
+}
+
+/// Cat a host filesystem file through a format provider — no pond required.
+///
+/// Pipeline: host file → decompress → format_provider → MemTable → DataFusion → output
+///
+/// Used by `pond cat host+oteljson:///path/to/file.json` (and csv, excelhtml, etc.)
+#[allow(clippy::print_stdout)]
+async fn cat_host_impl(
+    path: &str,
+    display: &str,
+    output: Option<&mut String>,
+    sql_query: Option<&str>,
+) -> Result<()> {
+    let url = provider::Url::parse(path)
+        .map_err(|e| anyhow::anyhow!("Invalid host URL '{}': {}", path, e))?;
+
+    debug!(
+        "cat_host_impl processing URL: {} (scheme={})",
+        url,
+        url.scheme()
+    );
+
+    let table_provider = provider::create_memtable_from_host_url(&url)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read host file '{}': {}", path, e))?;
+
+    let ctx = datafusion::prelude::SessionContext::new();
+    let _ = ctx
+        .register_table("source", table_provider)
+        .map_err(|e| anyhow::anyhow!("Failed to register table: {}", e))?;
+
+    let effective_sql_query = sql_query.unwrap_or("SELECT * FROM source");
+    debug!("Executing SQL query: {}", effective_sql_query);
+
+    let df = ctx.sql(effective_sql_query).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to execute SQL query '{}': {}",
+            effective_sql_query,
+            e
+        )
+    })?;
+
+    let stream = df.execute_stream().await?;
     handle_stream_output(stream, display, sql_query, output, path).await?;
 
     Ok(())
@@ -727,7 +779,7 @@ mod tests {
         cat_command(
             &cat_context,
             "test_table.parquet",
-            "raw",
+            "table",
             Some(&mut output_buffer),
             None,
             None,
@@ -1169,7 +1221,7 @@ mod tests {
         cat_command(
             &cat_context,
             "test_series_sql.parquet",
-            "raw", // raw mode, but SQL query should trigger DataFusion formatting
+            "table",
             Some(&mut output_buffer),
             None,
             None,

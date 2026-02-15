@@ -58,6 +58,10 @@ for test in $TESTS; do
     if head -25 "$test" | grep -q '# REQUIRES: host'; then
         runner=(bash "$test")
         echo "  (host-only test — running locally)"
+    # Tests marked '# REQUIRES: compose' need docker compose (e.g., MinIO for S3).
+    elif head -25 "$test" | grep -q '# REQUIRES: compose'; then
+        runner=("$SCRIPT_DIR/run-test.sh" "--compose" "$test")
+        echo "  (compose test — starting MinIO)"
     else
         runner=("$SCRIPT_DIR/run-test.sh" "$test")
     fi

@@ -99,6 +99,15 @@ async function testPage(browser, page) {
       errors.forEach((e) => console.log(`    ERROR: ${e}`));
     }
 
+    // Version marker (meta generator tag)
+    const generator = await tab.evaluate(
+      () => document.querySelector('meta[name="generator"]')?.content || ""
+    );
+    check(
+      generator.startsWith("DuckPond v"),
+      `version marker present ("${generator}")`
+    );
+
     // Title present
     const title = await tab.title();
     check(
@@ -264,14 +273,23 @@ async function testNavigation(browser) {
 async function main() {
   console.log(`Validating site at: ${BASE_URL}${BASE_PATH} (${PAGES.length} pages)\n`);
 
-  const browser = await puppeteer.launch({ headless: true });
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      "--disable-dev-shm-usage",  // Use /tmp instead of /dev/shm (prevents OOM)
+      "--disable-gpu",            // Reduce memory pressure from WASM-heavy pages
+      "--no-sandbox",
+    ],
+  });
 
-  for (const page of PAGES) {
-    await testPage(browser, page);
+  try {
+    for (const page of PAGES) {
+      await testPage(browser, page);
+    }
+    await testNavigation(browser);
+  } finally {
+    await browser.close();
   }
-  await testNavigation(browser);
-
-  await browser.close();
 
   console.log(`\n=== Results: ${pass} passed, ${fail} failed ===`);
 

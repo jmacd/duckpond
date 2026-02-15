@@ -17,6 +17,7 @@ mod config;
 mod factory;
 mod layouts;
 pub mod markdown;
+pub mod partitions;
 mod routes;
 mod shortcodes;
 

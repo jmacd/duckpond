@@ -8,8 +8,10 @@
 //! distributions. Each series contains multiple named "points", where each point
 //! is a sum of configurable waveform components (sine, triangle, square, line).
 //!
-//! The factory produces Arrow RecordBatches in memory and serves them via a
-//! DataFusion MemTable — no Parquet serialization involved.
+//! The factory streams Arrow RecordBatches on demand via a DataFusion
+//! StreamingTable — no Parquet serialization or bulk in-memory materialization
+//! involved.  Batches are generated lazily in chunks of 8192 rows, keeping
+//! memory usage O(batch_size) regardless of the total time range.
 //!
 //! ## Example config
 //!
@@ -43,11 +45,18 @@ use arrow::array::{Float64Array, TimestampMillisecondArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use datafusion::datasource::MemTable;
+use datafusion::catalog::streaming::StreamingTable;
+use datafusion::error::DataFusionError;
+use datafusion::execution::TaskContext;
+use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::streaming::PartitionStream;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tinyfs::{EntryType, FileHandle, FileID, NodeMetadata, Result as TinyFSResult};
 use tokio::sync::Mutex;
 
@@ -197,16 +206,127 @@ fn parse_duration_secs(s: &str) -> f64 {
 }
 
 // ============================================================================
-// RecordBatch Generation
+// Schema & Streaming Batch Generation
 // ============================================================================
+
+/// Build the Arrow schema for a synthetic timeseries config.
+fn build_schema(config: &SyntheticTimeseriesConfig) -> SchemaRef {
+    let mut fields = vec![Field::new(
+        &config.time_column,
+        DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+        false,
+    )];
+    for point in &config.points {
+        fields.push(Field::new(&point.name, DataType::Float64, false));
+    }
+    Arc::new(Schema::new(fields))
+}
+
+/// Batch size for streaming generation — each poll yields at most this many rows.
+const STREAMING_BATCH_SIZE: usize = 8192;
+
+/// A synchronous, chunk-at-a-time Stream of RecordBatches.
+///
+/// Each `poll_next` generates up to `STREAMING_BATCH_SIZE` rows from the
+/// synthetic config, advancing `current_ts` forward.  Memory usage is
+/// O(STREAMING_BATCH_SIZE) regardless of the total time range.
+struct SyntheticBatchStream {
+    config: SyntheticTimeseriesConfig,
+    schema: SchemaRef,
+    start_ms: i64,
+    end_ms: i64,
+    interval_ms: i64,
+    current_ts: i64,
+}
+
+impl Stream for SyntheticBatchStream {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.current_ts > self.end_ms {
+            return Poll::Ready(None);
+        }
+
+        let start_ms = self.start_ms;
+        let end_ms = self.end_ms;
+        let interval_ms = self.interval_ms;
+
+        // Collect timestamps for this chunk
+        let mut timestamps = Vec::with_capacity(STREAMING_BATCH_SIZE);
+        let mut ts = self.current_ts;
+        while ts <= end_ms && timestamps.len() < STREAMING_BATCH_SIZE {
+            timestamps.push(ts);
+            ts += interval_ms;
+        }
+        self.current_ts = ts;
+
+        let num_rows = timestamps.len();
+        let mut columns: Vec<Arc<dyn arrow::array::Array>> =
+            Vec::with_capacity(1 + self.config.points.len());
+
+        // Timestamp column
+        columns.push(Arc::new(
+            TimestampMillisecondArray::from(timestamps.clone()).with_timezone("UTC"),
+        ));
+
+        // Value columns
+        for point in &self.config.points {
+            let mut values = Vec::with_capacity(num_rows);
+            for &ts_ms in &timestamps {
+                let t_seconds = (ts_ms - start_ms) as f64 / 1000.0;
+                let value: f64 = point.components.iter().map(|c| c.evaluate(t_seconds)).sum();
+                values.push(value);
+            }
+            columns.push(Arc::new(Float64Array::from(values)));
+        }
+
+        match RecordBatch::try_new(self.schema.clone(), columns) {
+            Ok(batch) => Poll::Ready(Some(Ok(batch))),
+            Err(e) => {
+                // Stop the stream after an error
+                self.current_ts = self.end_ms + 1;
+                Poll::Ready(Some(Err(DataFusionError::ArrowError(Box::new(e), None))))
+            }
+        }
+    }
+}
+
+/// PartitionStream adapter for the synthetic timeseries generator.
+#[derive(Debug)]
+struct SyntheticPartitionStream {
+    config: SyntheticTimeseriesConfig,
+    schema: SchemaRef,
+    start_ms: i64,
+    end_ms: i64,
+    interval_ms: i64,
+}
+
+impl PartitionStream for SyntheticPartitionStream {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let stream = SyntheticBatchStream {
+            config: self.config.clone(),
+            schema: self.schema.clone(),
+            start_ms: self.start_ms,
+            end_ms: self.end_ms,
+            interval_ms: self.interval_ms,
+            current_ts: self.start_ms,
+        };
+        Box::pin(RecordBatchStreamAdapter::new(self.schema.clone(), stream))
+    }
+}
 
 /// Generate Arrow RecordBatches from the synthetic config.
 ///
-/// Returns `(schema, batches)` ready for wrapping in a MemTable.
+/// Returns `(schema, batches)` — used only in unit tests.
+/// Production code uses `SyntheticPartitionStream` for streaming.
+#[cfg(test)]
 fn generate_batches(
     config: &SyntheticTimeseriesConfig,
 ) -> Result<(SchemaRef, Vec<RecordBatch>), String> {
-    // Parse start/end as UTC milliseconds
     let start_ms = parse_rfc3339_to_millis(&config.start)?;
     let end_ms = parse_rfc3339_to_millis(&config.end)?;
 
@@ -229,16 +349,7 @@ fn generate_batches(
         return Err("at least one point must be configured".to_string());
     }
 
-    // Build schema: timestamp + one Float64 column per point
-    let mut fields = vec![Field::new(
-        &config.time_column,
-        DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-        false,
-    )];
-    for point in &config.points {
-        fields.push(Field::new(&point.name, DataType::Float64, false));
-    }
-    let schema = Arc::new(Schema::new(fields));
+    let schema = build_schema(config);
 
     // Generate timestamps
     let mut timestamps: Vec<i64> = Vec::new();
@@ -255,16 +366,13 @@ fn generate_batches(
         );
     }
 
-    // Generate one column of values per point
     let mut columns: Vec<Arc<dyn arrow::array::Array>> =
         Vec::with_capacity(1 + config.points.len());
 
-    // Timestamp column
     columns.push(Arc::new(
         TimestampMillisecondArray::from(timestamps.clone()).with_timezone("UTC"),
     ));
 
-    // Value columns
     for point in &config.points {
         let mut values = Vec::with_capacity(num_rows);
         for &ts_ms in &timestamps {
@@ -355,14 +463,40 @@ impl tinyfs::QueryableFile for SyntheticTimeseriesFile {
         _id: FileID,
         _context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        let (schema, batches) = generate_batches(&self.config).map_err(|e| {
-            tinyfs::Error::Other(format!("Failed to generate synthetic timeseries: {}", e))
-        })?;
+        let start_ms = parse_rfc3339_to_millis(&self.config.start)
+            .map_err(|e| tinyfs::Error::Other(format!("Invalid start time: {}", e)))?;
+        let end_ms = parse_rfc3339_to_millis(&self.config.end)
+            .map_err(|e| tinyfs::Error::Other(format!("Invalid end time: {}", e)))?;
 
-        let mem_table = MemTable::try_new(schema, vec![batches])
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to create MemTable: {}", e)))?;
+        if end_ms <= start_ms {
+            return Err(tinyfs::Error::Other(format!(
+                "end ({}) must be after start ({})",
+                self.config.end, self.config.start
+            )));
+        }
 
-        Ok(Arc::new(mem_table))
+        let interval_ms = (parse_duration_secs(&self.config.interval) * 1000.0) as i64;
+        if interval_ms <= 0 {
+            return Err(tinyfs::Error::Other(format!(
+                "interval must be positive, got '{}'",
+                self.config.interval
+            )));
+        }
+
+        let schema = build_schema(&self.config);
+
+        let partition = SyntheticPartitionStream {
+            config: self.config.clone(),
+            schema: schema.clone(),
+            start_ms,
+            end_ms,
+            interval_ms,
+        };
+
+        let table = StreamingTable::try_new(schema, vec![Arc::new(partition)])
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to create StreamingTable: {}", e)))?;
+
+        Ok(Arc::new(table))
     }
 }
 

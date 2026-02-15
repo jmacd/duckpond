@@ -192,7 +192,7 @@ mod tests {
             exports: vec![ExportStage {
                 name: "params".to_string(),
                 pattern: "/reduced/single_param/*/*.series".to_string(),
-                temporal: vec!["year".to_string(), "month".to_string()],
+                target_points: 1500,
             }],
             routes: vec![RouteConfig {
                 name: "home".to_string(),

@@ -39,15 +39,15 @@ pond mknod synthetic-timeseries /sources/weather --config-path /tmp/synth_source
 echo ""
 echo "=== 1. Verify source data ==="
 echo "--- source row count ---"
-pond cat /sources/weather --sql "SELECT COUNT(*) AS cnt FROM source"
+pond cat /sources/weather --format=table --sql "SELECT COUNT(*) AS cnt FROM source"
 
 echo "--- source time span ---"
-pond cat /sources/weather --sql "
+pond cat /sources/weather --format=table --sql "
   SELECT MIN(timestamp) AS t_min, MAX(timestamp) AS t_max FROM source
 "
 
 echo "--- source value ranges ---"
-pond cat /sources/weather --sql "
+pond cat /sources/weather --format=table --sql "
   SELECT
     MIN(temperature) AS temp_min, MAX(temperature) AS temp_max,
     AVG(temperature) AS temp_avg,
@@ -81,10 +81,10 @@ pond list /reduce/weather
 echo ""
 echo "=== 3. Verify downsampled data ==="
 echo "--- hourly row count (expect 24) ---"
-pond cat /reduce/weather/res=1h.series --sql "SELECT COUNT(*) AS cnt FROM source"
+pond cat /reduce/weather/res=1h.series --format=table --sql "SELECT COUNT(*) AS cnt FROM source"
 
 echo "--- hourly time span ---"
-pond cat /reduce/weather/res=1h.series --sql "
+pond cat /reduce/weather/res=1h.series --format=table --sql "
   SELECT MIN(timestamp) AS t_min, MAX(timestamp) AS t_max FROM source
 "
 
@@ -92,7 +92,7 @@ echo "--- hourly schema ---"
 pond describe /reduce/weather/res=1h.series
 
 echo "--- all 24 hourly rows ---"
-pond cat /reduce/weather/res=1h.series --sql "
+pond cat /reduce/weather/res=1h.series --format=table --sql "
   SELECT
     timestamp,
     ROUND(\"temperature.avg\", 4) AS temp_avg,
@@ -107,7 +107,7 @@ echo ""
 echo "=== 4. Verify aggregation correctness ==="
 
 echo "--- pressure.avg should always be 1013.0 (constant input) ---"
-pond cat /reduce/weather/res=1h.series --sql "
+pond cat /reduce/weather/res=1h.series --format=table --sql "
   SELECT
     COUNT(*) AS total_hours,
     COUNT(CASE WHEN ABS(\"pressure.avg\" - 1013.0) < 0.001 THEN 1 END) AS correct_hours
@@ -115,7 +115,7 @@ pond cat /reduce/weather/res=1h.series --sql "
 "
 
 echo "--- temperature.min should always <= temperature.avg <= temperature.max ---"
-pond cat /reduce/weather/res=1h.series --sql "
+pond cat /reduce/weather/res=1h.series --format=table --sql "
   SELECT
     COUNT(*) AS total_hours,
     COUNT(CASE
@@ -127,7 +127,7 @@ pond cat /reduce/weather/res=1h.series --sql "
 "
 
 echo "--- global min/max of hourly temperature aggregates ---"
-pond cat /reduce/weather/res=1h.series --sql "
+pond cat /reduce/weather/res=1h.series --format=table --sql "
   SELECT
     ROUND(MIN(\"temperature.min\"), 2)  AS global_min,
     ROUND(MAX(\"temperature.max\"), 2)  AS global_max,
@@ -136,7 +136,7 @@ pond cat /reduce/weather/res=1h.series --sql "
 "
 
 echo "--- midnight bucket (hour 0) should be near offset=20 ---"
-pond cat /reduce/weather/res=1h.series --sql "
+pond cat /reduce/weather/res=1h.series --format=table --sql "
   SELECT
     timestamp,
     ROUND(\"temperature.avg\", 4) AS temp_avg

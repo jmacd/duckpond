@@ -27,16 +27,16 @@ pond describe /data/readings.csv
 echo ""
 echo "=== Try querying with csv:// URL scheme ==="
 # This should use CsvProvider instead of ParquetFormat
-pond cat csv:///data/readings.csv --query "SELECT * FROM source WHERE temperature >= 25" 2>&1 || echo "csv:// scheme failed"
+pond cat csv:///data/readings.csv --format=table --query "SELECT * FROM source WHERE temperature >= 25" 2>&1 || echo "csv:// scheme failed"
 
 echo ""
 echo "=== Try querying with file:// URL scheme ==="
 # This currently fails because it assumes Parquet
-pond cat file:///data/readings.csv --query "SELECT * FROM source WHERE temperature >= 25" 2>&1 || echo "file:// scheme failed (expected)"
+pond cat file:///data/readings.csv --format=table --query "SELECT * FROM source WHERE temperature >= 25" 2>&1 || echo "file:// scheme failed (expected)"
 
 echo ""
 echo "=== Check if we can use table:// scheme ==="
-pond cat table:///data/readings.csv --query "SELECT * FROM source WHERE temperature >= 25" 2>&1 || echo "table:// scheme failed"
+pond cat table:///data/readings.csv --format=table --query "SELECT * FROM source WHERE temperature >= 25" 2>&1 || echo "table:// scheme failed"
 
 echo ""
 echo "=== Experiment Complete ==="
