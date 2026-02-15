@@ -213,6 +213,7 @@ pub async fn export_series_to_parquet(
         .iter()
         .map(|part| match part.as_str() {
             "year" => "date_part('year', timestamp) as year".to_string(),
+            "quarter" => "date_part('quarter', timestamp) as quarter".to_string(),
             "month" => "date_part('month', timestamp) as month".to_string(),
             "day" => "date_part('day', timestamp) as day".to_string(),
             "hour" => "date_part('hour', timestamp) as hour".to_string(),
@@ -410,7 +411,7 @@ pub fn extract_timestamps_from_path(relative_path: &Path) -> Result<(Option<i64>
                 let part_name = parts[0];
                 let part_value_str = parts[1];
 
-                if !["year", "month", "day", "hour", "minute", "second"].contains(&part_name) {
+                if !["year", "quarter", "month", "day", "hour", "minute", "second"].contains(&part_name) {
                     continue;
                 }
 
@@ -434,7 +435,13 @@ pub fn extract_timestamps_from_path(relative_path: &Path) -> Result<(Option<i64>
         return Ok((None, None));
     }
 
-    // Fill defaults for missing temporal parts
+    // Fill defaults for missing temporal parts.
+    // Quarter → derive month from quarter value (start of quarter).
+    if temporal_parts.contains_key("quarter") && !temporal_parts.contains_key("month") {
+        let q = *temporal_parts.get("quarter").unwrap();
+        let start_month = (q - 1) * 3 + 1; // Q1→1, Q2→4, Q3→7, Q4→10
+        _ = temporal_parts.insert("month", start_month);
+    }
     if !temporal_parts.contains_key("month") {
         _ = temporal_parts.insert("month", 1);
     }
@@ -533,6 +540,20 @@ pub fn calculate_end_time(parts: &HashMap<&str, i32>, last_part: &str) -> Result
         "year" => start_dt
             .with_year(start_dt.year() + 1)
             .ok_or_else(|| anyhow::anyhow!("Failed to add 1 year"))?,
+        "quarter" => {
+            // Advance by 3 months from the start-of-quarter.
+            let new_month = start_dt.month() + 3;
+            if new_month > 12 {
+                start_dt
+                    .with_year(start_dt.year() + 1)
+                    .and_then(|dt| dt.with_month(new_month - 12))
+                    .ok_or_else(|| anyhow::anyhow!("Failed to advance quarter past December"))?
+            } else {
+                start_dt
+                    .with_month(new_month)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to advance quarter"))?
+            }
+        }
         "month" => {
             if start_dt.month() == 12 {
                 start_dt
@@ -829,5 +850,61 @@ mod tests {
         assert_eq!(f.name, "temperature");
         assert_eq!(f.unit, "celsius");
         assert_eq!(f.agg, "avg");
+    }
+
+    #[test]
+    fn test_extract_timestamps_year_quarter() {
+        // quarter=3 → month=7 (July), advance by 3 months → October
+        let path = PathBuf::from("pumps/data/res=6h/year=2025/quarter=3/data.parquet");
+        let (start, end) = extract_timestamps_from_path(&path).unwrap();
+
+        let expected_start = chrono::Utc
+            .with_ymd_and_hms(2025, 7, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        let expected_end = chrono::Utc
+            .with_ymd_and_hms(2025, 10, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+
+        assert_eq!(start, Some(expected_start));
+        assert_eq!(end, Some(expected_end));
+    }
+
+    #[test]
+    fn test_extract_timestamps_year_quarter_q4() {
+        // quarter=4 → month=10 (October), advance by 3 months → January next year
+        let path = PathBuf::from("pumps/data/res=6h/year=2025/quarter=4/data.parquet");
+        let (start, end) = extract_timestamps_from_path(&path).unwrap();
+
+        let expected_start = chrono::Utc
+            .with_ymd_and_hms(2025, 10, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        let expected_end = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+
+        assert_eq!(start, Some(expected_start));
+        assert_eq!(end, Some(expected_end));
+    }
+
+    #[test]
+    fn test_extract_timestamps_year_only() {
+        let path = PathBuf::from("pumps/data/res=1d/year=2025/data.parquet");
+        let (start, end) = extract_timestamps_from_path(&path).unwrap();
+
+        let expected_start = chrono::Utc
+            .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        let expected_end = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+
+        assert_eq!(start, Some(expected_start));
+        assert_eq!(end, Some(expected_end));
     }
 }

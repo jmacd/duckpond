@@ -174,7 +174,7 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]
+    temporal: ["year"]
 
 routes:
   - name: "home"
@@ -222,7 +222,7 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]
+    temporal: ["year"]
 
 routes:
   - name: "home"

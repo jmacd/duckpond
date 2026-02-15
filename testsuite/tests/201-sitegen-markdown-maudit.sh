@@ -297,10 +297,10 @@ site:
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
-    temporal: ["year", "month"]
+    temporal: ["year"]
   - name: "sites"
     pattern: "/reduced/single_site/*/*.series"
-    temporal: ["year", "month"]
+    temporal: ["year"]
 
 routes:
   - name: "home"
@@ -420,8 +420,8 @@ check_contains "${OUTDIR}/chart.js" "chart.js" "chart-data"
 echo ""
 echo "--- Data export checks (Hive-partitioned) ---"
 
-# With temporal: ["year", "month"], data is exported as Hive-partitioned parquet:
-# data/<group>/<param>/res=<R>/year=<Y>/month=<M>/<file>.parquet
+# With temporal: ["year"], data is exported as Hive-partitioned parquet:
+# data/<group>/<param>/res=<R>/year=<Y>/<file>.parquet
 # We check that partitioned directories exist and contain .parquet files.
 
 check_has_parquet_in() {

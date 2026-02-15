@@ -1,11 +1,15 @@
 #!/bin/bash
 # Browser validation for sitegen output.
 #
-# Orchestrates four stages:
+# Orchestrates:
 #   1. Generate root site via test 201 in Docker   → /tmp/test-output/
-#   2. Serve at / with Vite + validate with Puppeteer (root deployment)
+#   2. Serve at / with Vite, run all browser tests (root deployment)
 #   3. Generate subdir site via test 205 in Docker  → /tmp/test-output-subdir/
-#   4. Serve at /myapp/ with Vite + validate with Puppeteer (subdir deployment)
+#   4. Serve at /myapp/ with Vite, run all browser tests (subdir deployment)
+#
+# Browser tests live in browser/tests/NNN-name.mjs, numbered in the same
+# space as testsuite/tests/ (200-series).  All discovered tests are run
+# against each deployment.
 #
 # Prerequisites: Node.js >=22, Docker
 # First-time:    cd testsuite/browser && npm install
@@ -13,6 +17,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTSUITE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TESTS_DIR="${SCRIPT_DIR}/tests"
 ROOT_OUTPUT="/tmp/test-output"
 SUBDIR_OUTPUT="/tmp/test-output-subdir"
 PORT=4174
@@ -23,7 +28,7 @@ start_vite() {
     local base_path="${2:-/}"
 
     # Kill anything already listening on our port
-    lsof -ti:${PORT} | xargs kill -9 2>/dev/null || true
+    lsof -ti:${PORT} 2>/dev/null | xargs kill -9 2>/dev/null; true
     sleep 0.5
 
     SITE_ROOT="${site_root}" BASE_PATH="${base_path}" \
@@ -48,6 +53,8 @@ stop_vite() {
         wait "${VITE_PID}" 2>/dev/null || true
         VITE_PID=""
     fi
+    # Also kill anything still listening on the port (orphaned processes)
+    lsof -ti:${PORT} 2>/dev/null | xargs kill -9 2>/dev/null; true
 }
 
 cleanup() {
@@ -55,11 +62,44 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Discover browser tests (NNN-name.mjs in tests/)
+BROWSER_TESTS=()
+for t in "${TESTS_DIR}"/[0-9]*-*.mjs; do
+    [[ -f "$t" ]] && BROWSER_TESTS+=("$t")
+done
+
+if [[ ${#BROWSER_TESTS[@]} -eq 0 ]]; then
+    echo "ERROR: No browser tests found in ${TESTS_DIR}/"
+    exit 1
+fi
+
+echo "Browser tests discovered:"
+for t in "${BROWSER_TESTS[@]}"; do
+    echo "  $(basename "$t")"
+done
+
 # Ensure dependencies are installed
 if [[ ! -d "${SCRIPT_DIR}/node_modules" ]]; then
     echo "Installing browser test dependencies..."
     (cd "${SCRIPT_DIR}" && npm install)
 fi
+
+# Run all browser tests against a served site.
+# Args: base_url base_path site_root
+run_browser_tests() {
+    local base_url="$1"
+    local base_path="$2"
+    local site_root="$3"
+
+    for t in "${BROWSER_TESTS[@]}"; do
+        local name
+        name="$(basename "$t")"
+        echo ""
+        echo "--- ${name} ---"
+        BASE_URL="${base_url}" BASE_PATH="${base_path}" SITE_ROOT="${site_root}" \
+            node "$t"
+    done
+}
 
 # ── Stage 1: Generate root site via test 201 ────────────────
 
@@ -72,14 +112,13 @@ if [[ ! -f "${ROOT_OUTPUT}/index.html" ]]; then
 fi
 echo "  ✓ Root site generated in ${ROOT_OUTPUT}"
 
-# ── Stage 2: Validate root site ─────────────────────────────
+# ── Stage 2: Run browser tests (root: /) ────────────────────
 
 echo ""
-echo "=== Stage 2: Browser validation (root: /) ==="
+echo "=== Stage 2: Browser tests (root: /) ==="
 
 start_vite "${ROOT_OUTPUT}" "/"
-BASE_URL="http://localhost:${PORT}" BASE_PATH="/" SITE_ROOT="${ROOT_OUTPUT}" \
-    node "${SCRIPT_DIR}/validate.mjs"
+run_browser_tests "http://localhost:${PORT}" "/" "${ROOT_OUTPUT}"
 stop_vite
 
 # ── Stage 3: Generate subdir site in Docker ──────────────────
@@ -106,15 +145,14 @@ if [[ ! -f "${SUBDIR_OUTPUT}/index.html" ]]; then
 fi
 echo "  ✓ Subdir site generated in ${SUBDIR_OUTPUT}"
 
-# ── Stage 4: Validate subdir site ───────────────────────────
+# ── Stage 4: Run browser tests (subdir: /myapp/) ────────────
 
 echo ""
-echo "=== Stage 4: Browser validation (subdir: /myapp/) ==="
+echo "=== Stage 4: Browser tests (subdir: /myapp/) ==="
 
 start_vite "${SUBDIR_OUTPUT}" "/myapp/"
-BASE_URL="http://localhost:${PORT}" BASE_PATH="/myapp/" SITE_ROOT="${SUBDIR_OUTPUT}" \
-    node "${SCRIPT_DIR}/validate.mjs"
+run_browser_tests "http://localhost:${PORT}" "/myapp/" "${SUBDIR_OUTPUT}"
 stop_vite
 
 echo ""
-echo "=== All browser validation PASSED ==="
+echo "=== All browser tests PASSED ==="

@@ -207,12 +207,13 @@ async fn run_export_stages(
             let rel = series_path_to_data_rel(&path_str);
             let export_dir = data_dir.join(&rel);
 
-            // Export with temporal partitioning using the SAME path as pond export
+            let temporal_parts = &stage.temporal;
+
             let (export_outputs, _schema) = provider::export::export_series_to_parquet(
                 &root,
                 &path_str,
                 &export_dir,
-                &stage.temporal,
+                temporal_parts,
                 captures,
                 &data_dir,
                 provider_ctx,
@@ -229,7 +230,7 @@ async fn run_export_stages(
                 for component in export_output.file.components() {
                     let s = component.as_os_str().to_string_lossy();
                     if let Some((k, v)) = s.split_once('=')
-                        && stage.temporal.contains(&k.to_string())
+                        && temporal_parts.contains(&k.to_string())
                     {
                         temporal.insert(k.to_string(), v.to_string());
                     }
@@ -559,4 +560,5 @@ mod tests {
     fn test_interpolate_empty() {
         assert_eq!(interpolate_captures("Static", &[]), "Static");
     }
+
 }
