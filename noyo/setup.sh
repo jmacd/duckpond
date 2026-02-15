@@ -15,13 +15,13 @@ cargo build
 
 ${EXE} init
 
+${EXE} mkdir -p /etc/system.d
+
 ${EXE} copy host://${NOYO}/site /etc/site
 
 ${EXE} mkdir -p /laketech
 
 ${EXE} copy host://${NOYO}/laketech /laketech/data
-
-${EXE} mkdir /etc/system.d
 
 # Import archived instrument data (if any exported Parquet files exist)
 # Archive Parquet lives in noyo/hydrovu/ — same pattern as noyo/laketech/

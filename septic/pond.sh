@@ -2,12 +2,12 @@
 #
 # pond.sh — Run pond on the BeaglePlay via podman + SSH.
 #
-# Uses the pre-built arm64 container image from GHCR.
-# No cross-compilation needed.
+# Uses a locally-built arm64 container image pushed via build.sh.
+# Run ./build.sh first to build and push the image.
 #
 
 HOST=debian@septicplaystation.local
-IMAGE=ghcr.io/jmacd/duckpond/duckpond:latest-arm64
+IMAGE=duckpond:latest-arm64
 VOLUME=pond-data
 
 # Remote paths
@@ -19,14 +19,14 @@ REMOTE_OUTPUT=/home/debian/site-output
 ssh ${HOST} "mkdir -p ${REMOTE_CONFIG} ${REMOTE_OUTPUT}"
 
 ssh ${HOST} \
-    podman run --pull=always -ti --rm \
+    podman run --pull=never -ti --rm \
     -v "${VOLUME}:/pond" \
     -v "${REMOTE_CONFIG}:/config:ro" \
     -v "${REMOTE_DATA}:/data:ro" \
     -v "${REMOTE_OUTPUT}:/output" \
     -e POND=/pond \
     -e RUST_LOG=${RUST_LOG:-info} \
-    -e R2_ENDPOINT=${R2_ENDPOINT} \
-    -e R2_KEY=${R2_KEY} \
-    -e R2_SECRET=${R2_SECRET} \
+    -e R2_ENDPOINT=${R2_ENDPOINT:-} \
+    -e R2_KEY=${R2_KEY:-} \
+    -e R2_SECRET=${R2_SECRET:-} \
     "${IMAGE}" "$@"
