@@ -12,6 +12,7 @@
 //! capture an `Arc<ShortcodeContext>` with DuckPond data.
 
 use crate::markdown::{ShortcodeArgs, Shortcodes};
+use crate::routes::ContentPage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -55,6 +56,8 @@ pub struct ShortcodeContext {
     pub datafiles: Vec<ExportedFile>,
     /// Named collections for nav-list (e.g., "params" → ["Temperature", "DO", ...])
     pub collections: BTreeMap<String, Vec<String>>,
+    /// Content page lists for content_nav (e.g., "pages" → [ContentPage, ...])
+    pub content_pages: BTreeMap<String, Vec<ContentPage>>,
     /// Site title from config
     pub site_title: String,
     /// Current URL path
@@ -131,6 +134,25 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         shortcodes.register("base_url", move |_args: &ShortcodeArgs| c.base_url.clone());
     }
 
+    // {{ content_nav content="pages" /}} — navigation list for content pages
+    // Renders titles sorted by weight with active-page highlighting.
+    {
+        let c = ctx.clone();
+        shortcodes.register("content_nav", move |args: &ShortcodeArgs| {
+            let content_name = args.get_str("content").unwrap_or("");
+            render_content_nav(&c, content_name)
+        });
+    }
+
+    // {{ figure src="/img/photo.jpg" caption="..." float="right" /}}
+    // Renders a <figure> with optional float positioning.
+    {
+        let c = ctx.clone();
+        shortcodes.register("figure", move |args: &ShortcodeArgs| {
+            render_figure(&c, args)
+        });
+    }
+
     shortcodes
 }
 
@@ -151,6 +173,8 @@ pub fn preprocess_variables(content: &str) -> String {
         .replace("{{ $3 }}", "{{ cap3 /}}")
         .replace("nav-list", "nav_list")
         .replace("site-title", "site_title")
+        .replace("content-nav", "content_nav")
+        .replace("base-url", "base_url")
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +282,96 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
     html
 }
 
+/// Render a navigation list for content pages (ordered by weight).
+///
+/// Unlike `nav_list` which uses export-derived collection keys,
+/// `content_nav` uses full `ContentPage` metadata: titles, slugs,
+/// and weight ordering.
+fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
+    let pages = match ctx.content_pages.get(content_name) {
+        Some(pages) => pages,
+        None => {
+            return format!(
+                "<!-- content_nav: unknown content '{}' -->",
+                content_name
+            )
+        }
+    };
+
+    if pages.is_empty() {
+        return format!("<!-- content_nav: content '{}' is empty -->", content_name);
+    }
+
+    let base = ctx.base_url.trim_end_matches('/');
+    let mut html = String::from("<ul class=\"nav-list\">\n");
+    for page in pages {
+        if page.hidden {
+            continue;
+        }
+        let href = if base.is_empty() || base == "/" {
+            format!("/{}.html", page.slug)
+        } else {
+            format!("{}/{}.html", base, page.slug)
+        };
+        let is_active = ctx.current_path == href;
+        let li_class = if is_active { " class=\"active\"" } else { "" };
+        let aria = if is_active {
+            " aria-current=\"page\""
+        } else {
+            ""
+        };
+        html.push_str(&format!(
+            "  <li{}><a href=\"{}\"{}>{}</a></li>\n",
+            li_class, href, aria, page.title
+        ));
+    }
+    html.push_str("</ul>");
+    html
+}
+
+/// Render a `<figure>` element with optional float positioning.
+///
+/// Shortcode: `{{ figure src="/img/photo.jpg" caption="..." float="right" /}}`
+///
+/// `float` can be "right", "left", or "full" (default: no float).
+/// Caption text is also used as the `alt` attribute.
+fn render_figure(_ctx: &ShortcodeContext, args: &ShortcodeArgs) -> String {
+    let src = args.get_str("src").unwrap_or("");
+    let caption = args.get_str("caption").unwrap_or("");
+    let float = args.get_str("float").unwrap_or("");
+    let alt = args.get_str("alt").unwrap_or(caption);
+
+    let class = match float {
+        "right" => " class=\"figure-right\"",
+        "left" => " class=\"figure-left\"",
+        "full" => " class=\"figure-full\"",
+        _ => "",
+    };
+
+    let mut html = format!("<figure{}>\n", class);
+    if !src.is_empty() {
+        html.push_str(&format!(
+            "  <a href=\"{}\" target=\"_blank\"><img src=\"{}\" alt=\"{}\"></a>\n",
+            src,
+            src,
+            html_escape(alt),
+        ));
+    }
+    if !caption.is_empty() {
+        html.push_str(&format!("  <figcaption>{}</figcaption>\n", caption));
+    }
+    html.push_str("</figure>");
+    html
+}
+
+/// Minimal HTML escaping for attribute values.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +404,7 @@ mod tests {
                 "params".to_string(),
                 vec!["Temperature".to_string(), "DO".to_string()],
             )]),
+            content_pages: BTreeMap::new(),
             site_title: "Test Site".to_string(),
             current_path: "/params/Temperature".to_string(),
             breadcrumbs: vec![
@@ -349,6 +464,7 @@ mod tests {
                 "params".to_string(),
                 vec!["Temperature".to_string(), "DO".to_string()],
             )]),
+            content_pages: BTreeMap::new(),
             site_title: String::new(),
             current_path: "/params/Temperature.html".to_string(),
             breadcrumbs: vec![],
@@ -368,5 +484,83 @@ mod tests {
             "Expected plain li for DO, got: {}",
             html
         );
+    }
+
+    #[test]
+    fn test_render_content_nav() {
+        let pages = vec![
+            ContentPage {
+                title: "Water System".to_string(),
+                slug: "water".to_string(),
+                weight: 10,
+                hidden: false,
+                source_path: "/content/water.md".to_string(),
+            },
+            ContentPage {
+                title: "History".to_string(),
+                slug: "history".to_string(),
+                weight: 20,
+                hidden: false,
+                source_path: "/content/history.md".to_string(),
+            },
+            ContentPage {
+                title: "Hidden Page".to_string(),
+                slug: "hidden".to_string(),
+                weight: 5,
+                hidden: true,
+                source_path: "/content/hidden.md".to_string(),
+            },
+        ];
+        let ctx = ShortcodeContext {
+            captures: vec![],
+            datafiles: vec![],
+            collections: BTreeMap::new(),
+            content_pages: BTreeMap::from([("pages".to_string(), pages)]),
+            site_title: String::new(),
+            current_path: "/water.html".to_string(),
+            breadcrumbs: vec![],
+            base_url: "/".to_string(),
+        };
+        let html = render_content_nav(&ctx, "pages");
+        // Hidden page excluded
+        assert!(!html.contains("Hidden Page"), "Hidden page should be excluded: {}", html);
+        // Active page gets class
+        assert!(
+            html.contains(r#"<li class="active"><a href="/water.html" aria-current="page">Water System</a></li>"#),
+            "Expected active class on Water System, got: {}", html
+        );
+        // Non-active page
+        assert!(
+            html.contains("<li><a href=\"/history.html\">History</a></li>"),
+            "Expected plain li for History, got: {}", html
+        );
+    }
+
+    #[test]
+    fn test_render_figure() {
+        use crate::markdown::ShortcodeArgs;
+        use std::collections::HashMap;
+
+        let ctx = ShortcodeContext {
+            captures: vec![],
+            datafiles: vec![],
+            collections: BTreeMap::new(),
+            content_pages: BTreeMap::new(),
+            site_title: String::new(),
+            current_path: "/".to_string(),
+            breadcrumbs: vec![],
+            base_url: "/".to_string(),
+        };
+
+        let args = ShortcodeArgs::from_map(HashMap::from([
+            ("src".to_string(), "/img/photo.jpg".to_string()),
+            ("caption".to_string(), "A nice photo".to_string()),
+            ("float".to_string(), "right".to_string()),
+        ]));
+
+        let html = render_figure(&ctx, &args);
+        assert!(html.contains("figure-right"), "Expected float right class: {}", html);
+        assert!(html.contains("/img/photo.jpg"), "Expected src in img: {}", html);
+        assert!(html.contains("<figcaption>A nice photo</figcaption>"), "Expected caption: {}", html);
     }
 }

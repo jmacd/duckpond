@@ -34,6 +34,8 @@ use serde::{Deserialize, Serialize};
 pub struct SiteConfig {
     pub site: SiteMeta,
     #[serde(default)]
+    pub content: Vec<ContentStage>,
+    #[serde(default)]
     pub exports: Vec<ExportStage>,
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
@@ -53,6 +55,19 @@ pub struct SiteMeta {
 
 fn default_base_url() -> String {
     "/".to_string()
+}
+
+/// A content stage: globs markdown data files in the pond and reads
+/// their frontmatter for metadata (title, weight, slug).
+///
+/// Content stages are resolved before route expansion. A `content` route
+/// references a stage by name, producing one page per matched file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentStage {
+    /// Name referenced by content routes (e.g., "pages")
+    pub name: String,
+    /// Pond glob pattern matching data files (e.g., "/pages/*.md")
+    pub pattern: String,
 }
 
 /// An export stage: runs `pond export` internally to produce data files
@@ -101,6 +116,9 @@ pub struct RouteConfig {
     /// For template routes: which export stage provides data
     #[serde(default)]
     pub export: Option<String>,
+    /// For content routes: which content stage provides pages
+    #[serde(default)]
+    pub content: Option<String>,
     /// Nested child routes
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
@@ -112,6 +130,7 @@ pub struct RouteConfig {
 pub enum RouteType {
     Static,
     Template,
+    Content,
 }
 
 /// Static asset to copy verbatim.
@@ -155,6 +174,35 @@ routes:
         assert_eq!(config.routes.len(), 1);
         assert_eq!(config.routes[0].routes.len(), 1);
         assert_eq!(config.routes[0].routes[0].route_type, RouteType::Template);
+    }
+
+    #[test]
+    fn parse_content_config() {
+        let yaml = r#"
+site:
+  title: "Caspar Water"
+
+content:
+  - name: "pages"
+    pattern: "/pages/*.md"
+
+routes:
+  - name: "home"
+    type: static
+    slug: ""
+    page: "/etc/site/index.md"
+    routes:
+      - name: "pages"
+        type: content
+        slug: ""
+        content: "pages"
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert_eq!(config.content.len(), 1);
+        assert_eq!(config.content[0].name, "pages");
+        assert_eq!(config.content[0].pattern, "/pages/*.md");
+        assert_eq!(config.routes[0].routes[0].route_type, RouteType::Content);
+        assert_eq!(config.routes[0].routes[0].content.as_deref(), Some("pages"));
     }
 
     #[test]

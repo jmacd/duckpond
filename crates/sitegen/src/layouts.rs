@@ -36,6 +36,7 @@ pub struct LayoutContext<'a> {
 pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
     let markup = match name {
         "data" => data_layout(ctx),
+        "page" => page_layout(ctx),
         _ => default_layout(ctx),
     };
     markup.into_string()
@@ -67,6 +68,37 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 }
                 // Our glue code — loads DuckDB-WASM + Observable Plot dynamically
                 script src="/chart.js" type="module" {}
+            }
+        }
+    }
+}
+
+/// Layout for content pages (articles, documentation, blog posts).
+///
+/// Sidebar navigation + article wrapper, no CDN scripts.
+/// Content is wrapped in `<article>` for semantic HTML.
+fn page_layout(ctx: &LayoutContext) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="generator" content=(format!("DuckPond v{}", VERSION));
+                title { (ctx.title) " — " (ctx.site_title) }
+                link rel="stylesheet" href="/style.css";
+            }
+            body {
+                @if let Some(sidebar_html) = ctx.sidebar {
+                    nav class="sidebar" {
+                        (PreEscaped(sidebar_html))
+                    }
+                }
+                main class="content-page" {
+                    article {
+                        (PreEscaped(ctx.content))
+                    }
+                }
             }
         }
     }
@@ -145,5 +177,21 @@ mod tests {
         };
         let html = apply_layout("nonexistent", &ctx);
         assert!(html.contains("class=\"hero\"")); // Default layout uses hero class
+    }
+
+    #[test]
+    fn test_page_layout() {
+        let ctx = LayoutContext {
+            title: "Water System",
+            site_title: "Caspar Water",
+            content: "<h1>Water</h1><p>Info</p>",
+            sidebar: Some("<ul><li>Nav</li></ul>"),
+        };
+        let html = apply_layout("page", &ctx);
+        assert!(html.contains("content-page")); // Page layout class
+        assert!(html.contains("<article>")); // Wrapped in article
+        assert!(html.contains("class=\"sidebar\"")); // Sidebar present
+        assert!(!html.contains("chart.js")); // No CDN scripts
+        assert!(html.contains("Water System — Caspar Water")); // Title
     }
 }

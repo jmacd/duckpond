@@ -18,7 +18,7 @@
 use crate::config::SiteConfig;
 use crate::layouts::{self, LayoutContext};
 use crate::markdown::{preprocess_shortcodes, render_markdown};
-use crate::routes;
+use crate::routes::{self, ContentContext, ContentPage};
 use crate::shortcodes::{self, ExportContext, ShortcodeContext};
 use log::{debug, info, warn};
 use provider::{ExecutionContext, FactoryContext, register_executable_factory};
@@ -88,6 +88,9 @@ async fn execute(
             // parquet, scan output for real files with start_time/end_time.
             let exports = run_export_stages(&config, &context, &output_path).await?;
 
+            // Run content stages: glob-match markdown data files, parse frontmatter.
+            let content = run_content_stages(&config, &context).await?;
+
             // Pre-read all files from the pond into a map.
             // We cannot use block_on inside this async context, so we collect
             // everything we need up front.
@@ -97,7 +100,7 @@ async fn execute(
             let mut file_cache: BTreeMap<String, String> = BTreeMap::new();
 
             // Collect all page paths from route expansion
-            let jobs = routes::expand_routes(&config, &exports);
+            let jobs = routes::expand_routes(&config, &exports, &content);
             for job in &jobs {
                 if !file_cache.contains_key(&job.page_source) {
                     let data = root
@@ -156,7 +159,7 @@ async fn execute(
                     .ok_or_else(|| format!("File not in cache: {}", path))
             };
 
-            generate_site(&config, &exports, &read_pond_file, &output_path)
+            generate_site(&config, &exports, &content, &read_pond_file, &output_path)
                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
             // Copy static assets from pond
@@ -344,6 +347,105 @@ async fn run_export_stages(
     Ok(exports)
 }
 
+/// Run content stages: glob-match markdown data files, parse frontmatter for metadata.
+///
+/// Each content stage globs for data files in the pond, reads their frontmatter
+/// to extract title/weight/slug/hidden, and returns a `ContentContext` with pages
+/// sorted by (weight, title).
+async fn run_content_stages(
+    config: &SiteConfig,
+    context: &FactoryContext,
+) -> Result<BTreeMap<String, ContentContext>, tinyfs::Error> {
+    let fs = context.context.filesystem();
+    let root = fs.root().await?;
+    let mut content = BTreeMap::new();
+
+    for stage in &config.content {
+        let matches = root.collect_matches(&stage.pattern).await?;
+        info!(
+            "Content stage '{}': {} matches for '{}'",
+            stage.name,
+            matches.len(),
+            stage.pattern
+        );
+
+        let mut pages = Vec::new();
+        for (node_path, _captures) in &matches {
+            let path_str = node_path.path.to_string_lossy().to_string();
+
+            // Read the file to extract frontmatter
+            let data = root.read_file_path_to_vec(&path_str).await.map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Cannot read content file '{}': {}",
+                    path_str, e
+                ))
+            })?;
+            let text = String::from_utf8(data).map_err(|e| {
+                tinyfs::Error::Other(format!("Non-UTF8 content file '{}': {}", path_str, e))
+            })?;
+
+            let (fm_yaml, _body) = split_frontmatter(&text);
+            let fm: Frontmatter = if fm_yaml.is_empty() {
+                Frontmatter {
+                    title: slug_from_path(&path_str),
+                    layout: default_layout(),
+                    weight: default_weight(),
+                    slug: None,
+                    hidden: false,
+                }
+            } else {
+                serde_yaml::from_str(&fm_yaml).map_err(|e| {
+                    tinyfs::Error::Other(format!(
+                        "Bad frontmatter in content file '{}': {}",
+                        path_str, e
+                    ))
+                })?
+            };
+
+            let slug = fm
+                .slug
+                .unwrap_or_else(|| slug_from_path(&path_str));
+
+            pages.push(ContentPage {
+                title: if fm.title.is_empty() {
+                    slug.clone()
+                } else {
+                    fm.title
+                },
+                slug,
+                weight: fm.weight,
+                hidden: fm.hidden,
+                source_path: path_str,
+            });
+        }
+
+        // Sort by (weight, title) for stable ordering
+        pages.sort_by(|a, b| a.weight.cmp(&b.weight).then_with(|| a.title.cmp(&b.title)));
+
+        info!(
+            "Content stage '{}': {} pages resolved",
+            stage.name,
+            pages.len()
+        );
+
+        content.insert(stage.name.clone(), ContentContext { pages });
+    }
+
+    Ok(content)
+}
+
+/// Derive a URL slug from a pond path (filename without extension).
+///
+/// e.g. "/pages/water-system.md" → "water-system"
+fn slug_from_path(path: &str) -> String {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    filename
+        .strip_suffix(".md")
+        .or_else(|| filename.strip_suffix(".markdown"))
+        .unwrap_or(filename)
+        .to_string()
+}
+
 /// Copy static assets from pond to output directory.
 fn copy_static_assets(
     config: &SiteConfig,
@@ -428,25 +530,45 @@ struct Frontmatter {
     title: String,
     #[serde(default = "default_layout")]
     layout: String,
+    /// Sort weight for content pages (lower = higher in nav). Default: 100
+    #[serde(default = "default_weight")]
+    weight: i32,
+    /// URL slug override. If absent, derived from filename.
+    #[serde(default)]
+    slug: Option<String>,
+    /// If true, page renders but does not appear in navigation.
+    #[serde(default)]
+    hidden: bool,
 }
 
 fn default_layout() -> String {
     "default".to_string()
 }
 
+fn default_weight() -> i32 {
+    100
+}
+
 /// Generate the complete static site.
 fn generate_site(
     config: &SiteConfig,
     exports: &BTreeMap<String, ExportContext>,
+    content: &BTreeMap<String, ContentContext>,
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
     output_dir: &Path,
 ) -> Result<(), GenerateError> {
     // Expand the route tree into page jobs
-    let jobs = routes::expand_routes(config, exports);
+    let jobs = routes::expand_routes(config, exports, content);
     info!("Route expansion: {} pages to generate", jobs.len());
 
     // Build collections for navigation shortcodes
-    let collections = routes::build_collections(exports);
+    let collections = routes::build_collections(exports, content);
+
+    // Build content_pages map for content_nav shortcode
+    let content_pages: BTreeMap<String, Vec<ContentPage>> = content
+        .iter()
+        .map(|(name, ctx)| (name.clone(), ctx.pages.clone()))
+        .collect();
 
     // Render each page
     for job in &jobs {
@@ -462,6 +584,7 @@ fn generate_site(
             "sidebar",
             read_pond_file,
             &collections,
+            &content_pages,
             &current_path,
         );
         let raw_md = read_pond_file(&job.page_source)
@@ -472,6 +595,9 @@ fn generate_site(
             Frontmatter {
                 title: job.page_source.clone(),
                 layout: default_layout(),
+                weight: default_weight(),
+                slug: None,
+                hidden: false,
             }
         } else {
             serde_yaml::from_str(&fm_yaml).map_err(|e| {
@@ -487,6 +613,7 @@ fn generate_site(
             captures: job.captures.clone(),
             datafiles: job.datafiles.clone(),
             collections: collections.clone(),
+            content_pages: content_pages.clone(),
             site_title: config.site.title.clone(),
             current_path: current_path.clone(),
             breadcrumbs: job.breadcrumbs.clone(),
@@ -546,6 +673,7 @@ fn render_partial(
     name: &str,
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
     collections: &BTreeMap<String, Vec<String>>,
+    content_pages: &BTreeMap<String, Vec<ContentPage>>,
     current_path: &str,
 ) -> Option<String> {
     let path = config.partials.get(name)?;
@@ -557,6 +685,7 @@ fn render_partial(
                 captures: vec![],
                 datafiles: vec![],
                 collections: collections.clone(),
+                content_pages: content_pages.clone(),
                 site_title: config.site.title.clone(),
                 current_path: current_path.to_string(),
                 breadcrumbs: vec![],
@@ -639,5 +768,24 @@ mod tests {
     #[test]
     fn test_interpolate_empty() {
         assert_eq!(interpolate_captures("Static", &[]), "Static");
+    }
+
+    #[test]
+    fn test_slug_from_path() {
+        assert_eq!(slug_from_path("/pages/water-system.md"), "water-system");
+        assert_eq!(slug_from_path("/content/history.md"), "history");
+        assert_eq!(slug_from_path("readme.markdown"), "readme");
+        assert_eq!(slug_from_path("/etc/site/index.md"), "index");
+    }
+
+    #[test]
+    fn test_frontmatter_with_weight() {
+        let yaml = "title: Water\nweight: 10\nhidden: true";
+        let fm: Frontmatter = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(fm.title, "Water");
+        assert_eq!(fm.weight, 10);
+        assert!(fm.hidden);
+        assert!(fm.slug.is_none());
+        assert_eq!(fm.layout, "default");
     }
 }

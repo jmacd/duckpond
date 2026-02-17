@@ -14,7 +14,7 @@
 //! direct with pulldown-cmark gives us control over the parser options and
 //! a smaller dependency footprint.
 
-use pulldown_cmark::{Options, Parser, html::push_html};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html::push_html};
 use std::collections::HashMap;
 
 // ─── Markdown rendering ──────────────────────────────────────────────────────
@@ -40,12 +40,117 @@ pub fn render_markdown(content: &str) -> String {
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
 
     let parser = Parser::new_ext(&processed, options);
+
+    // Transform heading events to add id anchors.
+    let events = inject_heading_anchors(parser);
+
     let mut html = String::with_capacity(content.len() * 2);
-    push_html(&mut html, parser);
+    push_html(&mut html, events.into_iter());
 
     // Restore extracted script blocks.
     restore_scripts(&mut html, &scripts);
     html
+}
+
+/// Slugify text for use as an HTML id attribute.
+///
+/// Lowercases, replaces non-alphanumeric runs with hyphens, strips
+/// leading/trailing hyphens.
+fn slugify(text: &str) -> String {
+    let mut slug = String::with_capacity(text.len());
+    let mut prev_hyphen = true; // suppress leading hyphen
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_hyphen = false;
+        } else if !prev_hyphen {
+            slug.push('-');
+            prev_hyphen = true;
+        }
+    }
+    // Strip trailing hyphen
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+/// Walk the pulldown-cmark event stream and inject `id` attributes on headings.
+///
+/// For each heading, we:
+/// 1. Collect all text inside the heading to build a slug
+/// 2. Replace `Start(Heading { .. })` with an `Html` event containing
+///    `<hN id="slug">` so the heading gets an anchor
+/// 3. Append a clickable `#` link after the heading text
+fn inject_heading_anchors<'a>(parser: Parser<'a>) -> Vec<Event<'a>> {
+    let mut events: Vec<Event<'a>> = Vec::new();
+    let mut in_heading: Option<pulldown_cmark::HeadingLevel> = None;
+    let mut heading_text = String::new();
+    let mut heading_events: Vec<Event<'a>> = Vec::new();
+
+    for event in parser {
+        match &event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                in_heading = Some(*level);
+                heading_text.clear();
+                heading_events.clear();
+                heading_events.push(event);
+            }
+            Event::End(TagEnd::Heading(level)) if in_heading == Some(*level) => {
+                let slug = slugify(&heading_text);
+                let level_num = match level {
+                    pulldown_cmark::HeadingLevel::H1 => 1,
+                    pulldown_cmark::HeadingLevel::H2 => 2,
+                    pulldown_cmark::HeadingLevel::H3 => 3,
+                    pulldown_cmark::HeadingLevel::H4 => 4,
+                    pulldown_cmark::HeadingLevel::H5 => 5,
+                    pulldown_cmark::HeadingLevel::H6 => 6,
+                };
+
+                if !slug.is_empty() {
+                    // Emit <hN id="slug"> instead of <hN>
+                    events.push(Event::Html(
+                        format!("<h{} id=\"{}\">", level_num, slug).into(),
+                    ));
+                    // Emit the heading's inner events (text, inline code, etc.)
+                    // but skip the original Start(Heading) we buffered
+                    for e in heading_events.drain(..).skip(1) {
+                        events.push(e);
+                    }
+                    // Anchor link
+                    events.push(Event::Html(
+                        format!(
+                            " <a class=\"anchor\" href=\"#{}\" aria-hidden=\"true\">#</a>",
+                            slug
+                        )
+                        .into(),
+                    ));
+                    events.push(Event::Html(format!("</h{}>", level_num).into()));
+                } else {
+                    // No slug — pass through unchanged
+                    events.extend(heading_events.drain(..));
+                    events.push(event);
+                }
+                in_heading = None;
+            }
+            Event::Text(text) if in_heading.is_some() => {
+                heading_text.push_str(text);
+                heading_events.push(event);
+            }
+            Event::Code(code) if in_heading.is_some() => {
+                heading_text.push_str(code);
+                heading_events.push(event);
+            }
+            _ if in_heading.is_some() => {
+                heading_events.push(event);
+            }
+            _ => {
+                events.push(event);
+            }
+        }
+    }
+
+    events
 }
 
 /// Pull out every `<script …>…</script>` span, replacing each with an
@@ -125,6 +230,12 @@ impl ShortcodeArgs {
     /// Get argument as raw string.
     pub fn get_str(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(|s| s.as_str())
+    }
+
+    /// Create a ShortcodeArgs from a HashMap (for testing).
+    #[cfg(test)]
+    pub fn from_map(args: HashMap<String, String>) -> Self {
+        ShortcodeArgs(args)
     }
 }
 
@@ -342,7 +453,8 @@ mod tests {
     #[test]
     fn test_render_markdown_basic() {
         let html = render_markdown("# Hello\n\nWorld");
-        assert!(html.contains("<h1>Hello</h1>"));
+        assert!(html.contains(r#"<h1 id="hello">"#));
+        assert!(html.contains("Hello"));
         assert!(html.contains("<p>World</p>"));
     }
 
@@ -486,5 +598,39 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: '&c
         let args = parse_args(r#"collection="params" base="/params""#).unwrap();
         assert_eq!(args.get("collection").unwrap(), "params");
         assert_eq!(args.get("base").unwrap(), "/params");
+    }
+
+    #[test]
+    fn test_slugify() {
+        assert_eq!(slugify("Hello World"), "hello-world");
+        assert_eq!(slugify("The Water System"), "the-water-system");
+        assert_eq!(slugify("  Leading & Trailing  "), "leading-trailing");
+        assert_eq!(slugify("CamelCase123"), "camelcase123");
+    }
+
+    #[test]
+    fn test_heading_anchors() {
+        let html = render_markdown("## Hello World\n\nSome text.\n");
+        assert!(
+            html.contains(r#"<h2 id="hello-world">"#),
+            "Expected id on h2, got: {}",
+            html
+        );
+        assert!(
+            html.contains(r##"href="#hello-world""##),
+            "Expected anchor link, got: {}",
+            html
+        );
+        assert!(html.contains("Some text"), "Body text missing");
+    }
+
+    #[test]
+    fn test_heading_anchors_h1() {
+        let html = render_markdown("# Main Title\n");
+        assert!(
+            html.contains(r#"<h1 id="main-title">"#),
+            "Expected id on h1, got: {}",
+            html
+        );
     }
 }
