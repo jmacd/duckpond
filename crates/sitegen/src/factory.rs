@@ -392,6 +392,7 @@ async fn run_content_stages(
                     weight: default_weight(),
                     slug: None,
                     hidden: false,
+                    section: None,
                 }
             } else {
                 serde_yaml::from_str(&fm_yaml).map_err(|e| {
@@ -415,6 +416,7 @@ async fn run_content_stages(
                 slug,
                 weight: fm.weight,
                 hidden: fm.hidden,
+                section: fm.section,
                 source_path: path_str,
             });
         }
@@ -539,6 +541,9 @@ struct Frontmatter {
     /// If true, page renders but does not appear in navigation.
     #[serde(default)]
     hidden: bool,
+    /// Navigation section for grouping (e.g., "About", "Blog").
+    #[serde(default)]
+    section: Option<String>,
 }
 
 fn default_layout() -> String {
@@ -598,6 +603,7 @@ fn generate_site(
                 weight: default_weight(),
                 slug: None,
                 hidden: false,
+                section: None,
             }
         } else {
             serde_yaml::from_str(&fm_yaml).map_err(|e| {

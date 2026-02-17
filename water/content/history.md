@@ -2,6 +2,7 @@
 title: Our History
 weight: 30
 layout: page
+section: About
 ---
 
 ## Our History

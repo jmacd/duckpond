@@ -2,6 +2,7 @@
 title: Blog
 weight: 80
 layout: page
+section: Blog
 ---
 
 ## Blog

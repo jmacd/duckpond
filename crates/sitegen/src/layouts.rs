@@ -99,6 +99,9 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                         (PreEscaped(ctx.content))
                     }
                 }
+                script {
+                    (PreEscaped(r#"document.querySelectorAll('.nav-section-title').forEach(function(t){t.addEventListener('click',function(){var s=t.parentElement;if(s.classList.contains('expanded'))return;document.querySelectorAll('.nav-section.expanded').forEach(function(e){e.classList.remove('expanded')});s.classList.add('expanded')})})"#))
+                }
             }
         }
     }

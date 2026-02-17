@@ -2,6 +2,7 @@
 title: Software
 weight: 70
 layout: page
+section: About
 ---
 
 ## Software

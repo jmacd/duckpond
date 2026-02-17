@@ -117,14 +117,16 @@ fn inject_heading_anchors<'a>(parser: Parser<'a>) -> Vec<Event<'a>> {
                     for e in heading_events.drain(..).skip(1) {
                         events.push(e);
                     }
-                    // Anchor link
-                    events.push(Event::Html(
-                        format!(
-                            " <a class=\"anchor\" href=\"#{}\" aria-hidden=\"true\">#</a>",
-                            slug
-                        )
-                        .into(),
-                    ));
+                    // Anchor link (h2+ only — h1 is the page title)
+                    if level_num >= 2 {
+                        events.push(Event::Html(
+                            format!(
+                                " <a class=\"anchor\" href=\"#{}\" aria-hidden=\"true\">#</a>",
+                                slug
+                            )
+                            .into(),
+                        ));
+                    }
                     events.push(Event::Html(format!("</h{}>", level_num).into()));
                 } else {
                     // No slug — pass through unchanged

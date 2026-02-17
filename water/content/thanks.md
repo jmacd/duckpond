@@ -2,6 +2,7 @@
 title: Thanks
 weight: 90
 layout: page
+section: About
 ---
 
 ## Thanks

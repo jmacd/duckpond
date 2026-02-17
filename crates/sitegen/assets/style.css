@@ -88,11 +88,27 @@ body {
   color: var(--fg-primary);
 }
 
-.sidebar a.active {
+.sidebar li.active a {
   background: rgba(102,126,234,0.1);
   color: var(--accent-color);
   border-left: 3px solid var(--accent-color);
   padding-left: calc(1rem - 3px);
+  font-weight: 600;
+}
+
+/* ── Nav sections (collapsible) ─────────────────────────────── */
+
+.nav-section > ul {
+  display: none;
+}
+
+.nav-section.expanded > ul {
+  display: block;
+}
+
+.nav-section-title {
+  cursor: pointer;
+  user-select: none;
 }
 
 .nav-list {

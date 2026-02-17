@@ -23,6 +23,8 @@ pub struct ContentPage {
     pub weight: i32,
     /// If true, page renders but does not appear in nav
     pub hidden: bool,
+    /// Navigation section (for grouping in sidebar). Default: none
+    pub section: Option<String>,
     /// Pond path to the source markdown file
     pub source_path: String,
 }
@@ -407,6 +409,7 @@ mod tests {
                         slug: "water".to_string(),
                         weight: 10,
                         hidden: false,
+                        section: None,
                         source_path: "/pages/water.md".to_string(),
                     },
                     ContentPage {
@@ -414,6 +417,7 @@ mod tests {
                         slug: "history".to_string(),
                         weight: 30,
                         hidden: false,
+                        section: None,
                         source_path: "/pages/history.md".to_string(),
                     },
                 ],
@@ -475,6 +479,7 @@ mod tests {
                         slug: "water".to_string(),
                         weight: 10,
                         hidden: false,
+                        section: None,
                         source_path: "/pages/water.md".to_string(),
                     },
                     ContentPage {
@@ -482,6 +487,7 @@ mod tests {
                         slug: "secret".to_string(),
                         weight: 50,
                         hidden: true,
+                        section: None,
                         source_path: "/pages/secret.md".to_string(),
                     },
                 ],

@@ -2,6 +2,7 @@
 title: Monitoring
 weight: 40
 layout: page
+section: About
 ---
 
 ## Monitoring

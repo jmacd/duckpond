@@ -284,9 +284,10 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
 
 /// Render a navigation list for content pages (ordered by weight).
 ///
-/// Unlike `nav_list` which uses export-derived collection keys,
-/// `content_nav` uses full `ContentPage` metadata: titles, slugs,
-/// and weight ordering.
+/// Pages are grouped by their `section` frontmatter field. Each section
+/// becomes a collapsible `<details>` element. Pages without a section
+/// appear as top-level items. A section is auto-opened if it contains
+/// the current page.
 fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
     let pages = match ctx.content_pages.get(content_name) {
         Some(pages) => pages,
@@ -303,16 +304,19 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
     }
 
     let base = ctx.base_url.trim_end_matches('/');
-    let mut html = String::from("<ul class=\"nav-list\">\n");
-    for page in pages {
-        if page.hidden {
-            continue;
-        }
-        let href = if base.is_empty() || base == "/" {
-            format!("/{}.html", page.slug)
+
+    // Build href for a page
+    let page_href = |slug: &str| -> String {
+        if base.is_empty() || base == "/" {
+            format!("/{}.html", slug)
         } else {
-            format!("{}/{}.html", base, page.slug)
-        };
+            format!("{}/{}.html", base, slug)
+        }
+    };
+
+    // Render a single <li> for a page
+    let render_li = |page: &ContentPage, indent: &str| -> String {
+        let href = page_href(&page.slug);
         let is_active = ctx.current_path == href;
         let li_class = if is_active { " class=\"active\"" } else { "" };
         let aria = if is_active {
@@ -320,12 +324,75 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         } else {
             ""
         };
-        html.push_str(&format!(
-            "  <li{}><a href=\"{}\"{}>{}</a></li>\n",
-            li_class, href, aria, page.title
-        ));
+        format!(
+            "{}<li{}><a href=\"{}\"{}>{}</a></li>\n",
+            indent, li_class, href, aria, page.title
+        )
+    };
+
+    // Group pages by section, preserving weight order.
+    // We use a Vec of (section_name, pages) to preserve first-seen order.
+    let mut sections: Vec<(Option<String>, Vec<&ContentPage>)> = Vec::new();
+    for page in pages {
+        if page.hidden {
+            continue;
+        }
+        let key = page.section.clone();
+        if let Some(group) = sections.iter_mut().find(|(k, _)| *k == key) {
+            group.1.push(page);
+        } else {
+            sections.push((key, vec![page]));
+        }
     }
-    html.push_str("</ul>");
+
+    // Determine which section to expand. Exactly one section is expanded at
+    // all times: the one containing the active page, or the first section if
+    // no page matches (e.g., home/index page).
+    let active_section: Option<Option<String>> = sections.iter().find_map(|(key, section_pages)| {
+        if section_pages
+            .iter()
+            .any(|p| ctx.current_path == page_href(&p.slug))
+        {
+            Some(key.clone())
+        } else {
+            None
+        }
+    });
+    // Fall back to the first section when no page is active.
+    let expanded_section = active_section
+        .or_else(|| sections.first().map(|(k, _)| k.clone()));
+
+    let mut html = String::from("<nav class=\"nav-list\">\n");
+    for (section, section_pages) in &sections {
+        match section {
+            None => {
+                // Top-level items (no section grouping)
+                html.push_str("<ul>\n");
+                for page in section_pages {
+                    html.push_str(&render_li(page, "  "));
+                }
+                html.push_str("</ul>\n");
+            }
+            Some(section_name) => {
+                // Expand only the one section that should be open.
+                let expanded = expanded_section.as_ref() == Some(section);
+                let class = if expanded {
+                    "nav-section expanded"
+                } else {
+                    "nav-section"
+                };
+                html.push_str(&format!(
+                    "<div class=\"{}\">\n  <h3 class=\"nav-section-title\">{}</h3>\n  <ul>\n",
+                    class, section_name
+                ));
+                for page in section_pages {
+                    html.push_str(&render_li(page, "    "));
+                }
+                html.push_str("  </ul>\n</div>\n");
+            }
+        }
+    }
+    html.push_str("</nav>");
     html
 }
 
@@ -494,6 +561,7 @@ mod tests {
                 slug: "water".to_string(),
                 weight: 10,
                 hidden: false,
+                section: None,
                 source_path: "/content/water.md".to_string(),
             },
             ContentPage {
@@ -501,6 +569,7 @@ mod tests {
                 slug: "history".to_string(),
                 weight: 20,
                 hidden: false,
+                section: None,
                 source_path: "/content/history.md".to_string(),
             },
             ContentPage {
@@ -508,6 +577,7 @@ mod tests {
                 slug: "hidden".to_string(),
                 weight: 5,
                 hidden: true,
+                section: None,
                 source_path: "/content/hidden.md".to_string(),
             },
         ];
@@ -524,6 +594,10 @@ mod tests {
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
         assert!(!html.contains("Hidden Page"), "Hidden page should be excluded: {}", html);
+        // Wrapped in nav
+        assert!(html.contains("<nav class=\"nav-list\">"), "Expected nav wrapper: {}", html);
+        // No sections → flat <ul>
+        assert!(html.contains("<ul>"), "Expected ul for unsectioned pages: {}", html);
         // Active page gets class
         assert!(
             html.contains(r#"<li class="active"><a href="/water.html" aria-current="page">Water System</a></li>"#),
@@ -533,6 +607,104 @@ mod tests {
         assert!(
             html.contains("<li><a href=\"/history.html\">History</a></li>"),
             "Expected plain li for History, got: {}", html
+        );
+    }
+
+    #[test]
+    fn test_render_content_nav_sections() {
+        let pages = vec![
+            ContentPage {
+                title: "Water".to_string(),
+                slug: "water".to_string(),
+                weight: 10,
+                hidden: false,
+                section: Some("About".to_string()),
+                source_path: "/content/water.md".to_string(),
+            },
+            ContentPage {
+                title: "History".to_string(),
+                slug: "history".to_string(),
+                weight: 20,
+                hidden: false,
+                section: Some("About".to_string()),
+                source_path: "/content/history.md".to_string(),
+            },
+            ContentPage {
+                title: "Blog".to_string(),
+                slug: "blog".to_string(),
+                weight: 80,
+                hidden: false,
+                section: Some("Blog".to_string()),
+                source_path: "/content/blog.md".to_string(),
+            },
+        ];
+        let ctx = ShortcodeContext {
+            captures: vec![],
+            datafiles: vec![],
+            collections: BTreeMap::new(),
+            content_pages: BTreeMap::from([("pages".to_string(), pages)]),
+            site_title: String::new(),
+            current_path: "/water.html".to_string(),
+            breadcrumbs: vec![],
+            base_url: "/".to_string(),
+        };
+        let html = render_content_nav(&ctx, "pages");
+        // Active section is expanded
+        assert!(
+            html.contains("nav-section expanded"),
+            "Expected expanded class on active section, got: {}", html
+        );
+        // Section title rendered
+        assert!(
+            html.contains("<h3 class=\"nav-section-title\">About</h3>"),
+            "Expected About section title, got: {}", html
+        );
+        // Inactive section is not expanded
+        assert!(
+            html.contains("\"nav-section\""),
+            "Expected collapsed Blog section, got: {}", html
+        );
+        // No <details> or <summary>
+        assert!(!html.contains("<details"), "Should not use <details>: {}", html);
+        assert!(!html.contains("<summary"), "Should not use <summary>: {}", html);
+
+        // Exactly one section is expanded
+        assert_eq!(
+            html.matches("nav-section expanded").count(),
+            1,
+            "Exactly one section should be expanded, got: {}", html
+        );
+
+        // When current_path is the Blog page, Blog section is expanded, About is not.
+        let ctx_blog = ShortcodeContext {
+            current_path: "/blog.html".to_string(),
+            ..ctx.clone()
+        };
+        let html_blog = render_content_nav(&ctx_blog, "pages");
+        assert!(
+            html_blog.contains("<div class=\"nav-section expanded\">\n  <h3 class=\"nav-section-title\">Blog</h3>"),
+            "Blog section should be expanded on blog page, got: {}", html_blog
+        );
+        assert_eq!(
+            html_blog.matches("nav-section expanded").count(),
+            1,
+            "Only Blog section should be expanded, got: {}", html_blog
+        );
+
+        // When no page is active (home page), the first section is expanded.
+        let ctx_home = ShortcodeContext {
+            current_path: "/index.html".to_string(),
+            ..ctx.clone()
+        };
+        let html_home = render_content_nav(&ctx_home, "pages");
+        assert!(
+            html_home.contains("<div class=\"nav-section expanded\">\n  <h3 class=\"nav-section-title\">About</h3>"),
+            "First section (About) should be expanded on home page, got: {}", html_home
+        );
+        assert_eq!(
+            html_home.matches("nav-section expanded").count(),
+            1,
+            "Only one section expanded on home page, got: {}", html_home
         );
     }
 
