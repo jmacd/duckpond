@@ -1,0 +1,27 @@
+factory: sitegen
+
+site:
+  title: "Caspar Water"
+  base_url: "/"
+
+content:
+  - name: "pages"
+    pattern: "/content/*.md"
+
+exports: []
+
+routes:
+  - name: "home"
+    type: static
+    slug: ""
+    page: "/etc/site/index.md"
+    routes:
+      - name: "pages"
+        type: content
+        slug: ""
+        content: "pages"
+
+partials:
+  sidebar: "/etc/site/sidebar.md"
+
+static_assets: []
