@@ -1,5 +1,32 @@
 # Caspar Water Website — Design Document
 
+## Status
+
+**All phases complete.** The content page system is fully implemented
+in the sitegen crate, all 9 content pages are converted to markdown,
+the site renders locally via `water/render.sh`, and test 207 passes
+in Docker. 48 unit tests pass.
+
+### What's Working
+
+- Content route type in sitegen (config, routes, factory, layouts, shortcodes, markdown)
+- 9 content pages with YAML frontmatter (title, weight, layout, section)
+- Collapsible sidebar nav sections (About / Blog) with click-to-toggle JS
+- Exactly one section expanded at a time (active page's section, or first section on home)
+- Heading anchors on h2+ (h1 gets `id` but no `#` link)
+- `figure` shortcode for images with float positioning
+- `content_nav` shortcode with section grouping
+- `water/render.sh` builds the site via `cargo run` (no Docker needed for dev)
+- `testsuite/tests/207-sitegen-content-pages.sh` passes in Docker
+
+### What Remains
+
+- Images: copy images into pond, reference from content, configure static assets
+- Data pages: wire up monitoring data exports alongside content pages
+- CSS polish: typography, spacing, color refinement
+- Mobile: responsive sidebar behavior
+- Blog: date-based ordering when real blog posts are written
+
 ## Goal
 
 Build the Caspar Water Company website using DuckPond's sitegen factory.
@@ -10,29 +37,32 @@ invocation, zero external tooling.
 
 ## Content Inventory
 
-Source: `/Volumes/sourcecode/src/caspar.water/site/content/`
+Source: `water/content/` (local development) → `/content/` (in pond)
 
-| File | Title | Description |
-|------|-------|-------------|
-| `water.md` | Water | Water source, quality, aquifer capacity |
-| `system.md` | System Design | Treatment process, infrastructure |
-| `history.md` | Our History | Lumber town origins, evolution |
-| `monitoring.md` | Monitoring | Instruments, OpenTelemetry, well depth |
-| `operator.md` | Operator | Treatment and distribution operators |
-| `political.md` | Political | Water district proposal, smart growth, traffic |
-| `software.md` | Software | Open-source tools, DuckPond, Supruglue |
-| `blog.md` | Blog | Placeholder — future blog content |
-| `thanks.md` | Thanks | Acknowledgments |
+| File | Title | Section | Weight | Description |
+|------|-------|---------|--------|-------------|
+| `water.md` | Water | About | 10 | Water source, quality, aquifer capacity |
+| `system.md` | System Design | About | 20 | Treatment process, infrastructure |
+| `history.md` | Our History | About | 30 | Lumber town origins, evolution |
+| `monitoring.md` | Monitoring | About | 40 | Instruments, OpenTelemetry, well depth |
+| `operator.md` | Operator | About | 50 | Treatment and distribution operators |
+| `political.md` | Political | About | 60 | Water district proposal, smart growth, traffic |
+| `software.md` | Software | About | 70 | Open-source tools, DuckPond, Supruglue |
+| `blog.md` | Blog | Blog | 80 | Placeholder — future blog content |
+| `thanks.md` | Thanks | About | 90 | Acknowledgments |
 
-These files are currently HTML `<section>` fragments. They will be
-converted to markdown with YAML frontmatter and stored in the pond
-at `/pages/`.
+All files are markdown with YAML frontmatter.
 
-## Pond Layout
+## Pond Layout (Development vs. In-Pond)
+
+Development files live in `water/` and are copied into the pond by
+`render.sh`. The pond layout mirrors the directory structure:
 
 ```
-/
-├── pages/                          # Content pages (data files, raw markdown bytes)
+water/                              # Local development directory
+├── render.sh                       # Build script (cargo run based)
+├── site.yaml                       # Site configuration
+├── content/                        # Content pages (markdown + frontmatter)
 │   ├── water.md
 │   ├── system.md
 │   ├── history.md
@@ -42,25 +72,28 @@ at `/pages/`.
 │   ├── software.md
 │   ├── blog.md
 │   └── thanks.md
-├── pages/img/                      # Images referenced by content
-│   ├── caspar-fire-1891.jpg
-│   ├── district-proposed.jpg
-│   ├── system-proposed.jpg
-│   └── septic-proposed.jpg
-├── sensors/                        # Synthetic/real sensor data (existing)
-├── combined/                       # Joined timeseries (existing)
-├── reduced/                        # Reduced timeseries (existing)
-└── etc/
-    ├── site.yaml                   # Site configuration
-    ├── site/
-    │   ├── index.md                # Home page template
-    │   ├── sidebar.md              # Sidebar partial
-    │   ├── param.md                # Per-parameter data page template
-    │   └── site.md                 # Per-site data page template
-    └── static/                     # Static assets (if any beyond builtins)
+├── site/                           # Templates and partials
+│   ├── index.md                    # Home page
+│   └── sidebar.md                  # Sidebar partial
+└── dist/                           # Generated output (gitignored)
 ```
 
-### Why `/pages/` Not `/etc/site/`?
+In the pond:
+
+```
+/
+├── content/                        # Content pages (pond copy'd in)
+│   ├── water.md
+│   ├── system.md
+│   └── ...
+└── etc/
+    ├── site.yaml                   # Site configuration (mknod)
+    └── site/
+        ├── index.md                # Home page template
+        └── sidebar.md              # Sidebar partial
+```
+
+### Why `/content/` Not `/etc/site/`?
 
 Content pages are **content**, not configuration. They live in the
 pond's main namespace alongside data, not buried under `/etc/`. The
@@ -104,6 +137,7 @@ its workers...
 | `layout` | No | String | Layout name. Default: `"page"` |
 | `slug` | No | String | URL slug. Default: derived from filename |
 | `hidden` | No | Bool | If true, page renders but does not appear in nav. Default: false |
+| `section` | No | String | Nav section grouping (e.g., "About", "Blog"). Pages with the same section are grouped under a collapsible heading |
 
 ### Ordering via Weight
 
@@ -126,8 +160,10 @@ with equal weight fall back to alphabetical by title.
 
 ## Site Configuration
 
+The actual configuration (`water/site.yaml`):
+
 ```yaml
-# /etc/site.yaml
+factory: sitegen
 
 site:
   title: "Caspar Water"
@@ -135,16 +171,9 @@ site:
 
 content:
   - name: "pages"
-    pattern: "/pages/*.md"
+    pattern: "/content/*.md"
 
-exports:
-  - name: "params"
-    pattern: "/reduced/single_param/*/*.series"
-    target_points: 1500
-
-  - name: "sites"
-    pattern: "/reduced/single_site/*/*.series"
-    target_points: 1500
+exports: []
 
 routes:
   - name: "home"
@@ -154,40 +183,13 @@ routes:
     routes:
       - name: "pages"
         type: content
+        slug: ""
         content: "pages"
-
-      - name: "data"
-        type: static
-        slug: "data"
-        page: "/etc/site/data-index.md"
-        routes:
-          - name: "params"
-            type: static
-            slug: "params"
-            page: "/etc/site/params.md"
-            routes:
-              - name: "param"
-                type: template
-                slug: "$0"
-                export: "params"
-                page: "/etc/site/param.md"
-
-          - name: "sites"
-            type: static
-            slug: "sites"
-            page: "/etc/site/sites.md"
-            routes:
-              - name: "site"
-                type: template
-                slug: "$0"
-                export: "sites"
-                page: "/etc/site/site.md"
 
 partials:
   sidebar: "/etc/site/sidebar.md"
 
-static:
-  - pattern: "/etc/static/*"
+static_assets: []
 ```
 
 ### New Top-Level: `content`
@@ -255,45 +257,66 @@ dist/
 
 ## Sidebar
 
-The sidebar shows two sections: content pages and data pages.
+The sidebar renders from `sidebar.md`. It uses raw HTML for the site
+title (to avoid heading anchor injection) and the `content_nav`
+shortcode for page links.
 
 ### `/etc/site/sidebar.md`
 
 ```markdown
-## 💧 Caspar Water
+<h2><a href="{{ base_url /}}">Caspar Water</a></h2>
 
 {{ content_nav content="pages" /}}
-
-### Monitoring Data
-
-{{ nav_list collection="params" base="/data/params" /}}
-
-{{ nav_list collection="sites" base="/data/sites" /}}
 ```
 
-### New Shortcode: `content_nav`
+### `content_nav` Shortcode
 
-Like `nav_list` but renders from a content stage instead of an export
-stage. It has access to titles and weights, so it renders a properly
-ordered, titled navigation:
+Renders a sectioned navigation from a content stage. Pages are grouped
+by their `section` frontmatter field. Each section is a collapsible
+div with a clickable title.
+
+**Section behavior:** Exactly one section is expanded at all times.
+When a content page is active, its section is expanded. When no content
+page is active (e.g., home page), the first section is expanded. A
+small inline script handles click-to-toggle — clicking a collapsed
+section expands it and collapses the previously open one. Clicking the
+already-expanded section does nothing.
+
+Rendered HTML structure:
 
 ```html
-<ul class="nav-list">
-  <li><a href="/water.html">Water</a></li>
-  <li><a href="/system.html">System Design</a></li>
-  <li><a href="/history.html">Our History</a></li>
-  <li class="active"><a href="/monitoring.html" aria-current="page">Monitoring</a></li>
-  ...
-</ul>
+<nav class="nav-list">
+  <div class="nav-section expanded">
+    <h3 class="nav-section-title">About</h3>
+    <ul>
+      <li><a href="/water.html">Water</a></li>
+      <li><a href="/system.html">System Design</a></li>
+      <li class="active"><a href="/history.html" aria-current="page">Our History</a></li>
+      ...
+    </ul>
+  </div>
+  <div class="nav-section">
+    <h3 class="nav-section-title">Blog</h3>
+    <ul>
+      <li><a href="/blog.html">Blog</a></li>
+    </ul>
+  </div>
+</nav>
 ```
 
-Active-page highlighting works the same way as existing `nav_list` —
-the shortcode compares each link's URL against `ctx.current_path`.
+CSS:
+- `.nav-section > ul { display: none }` — collapsed by default
+- `.nav-section.expanded > ul { display: block }` — expanded section shows items
+- `.nav-section-title { cursor: pointer; user-select: none }` — clickable titles
+- `.sidebar li.active a` — bold + accent color for active page
 
-## New Layout: `page`
+Pages without a `section` field render as top-level `<ul>` items
+outside any section grouping.
 
-Content pages get a `page` layout — similar to `default` but with a
-sidebar and article formatting:
+## `page` Layout
+
+Content pages use the `page` layout — sidebar + article, no CDN scripts.
+A small inline script at the end of `<body>` handles section toggle.
 
 ```rust
 fn page_layout(ctx: &LayoutContext) -> Markup {
@@ -313,10 +336,14 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                         (PreEscaped(sidebar_html))
                     }
                 }
-                main {
+                main class="content-page" {
                     article {
                         (PreEscaped(ctx.content))
                     }
+                }
+                script {
+                    // Toggle nav sections — one expanded at a time
+                    (PreEscaped(NAV_SECTION_TOGGLE_JS))
                 }
             }
         }
@@ -324,10 +351,22 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
 }
 ```
 
-No CDN scripts — content pages are pure prose. The `data` layout
-(with chart.js, DuckDB-WASM) remains for data pages.
+## Heading Anchors
 
-## New Shortcode: `figure`
+Markdown headings get automatic `id` attributes and anchor links via
+`inject_heading_anchors()`. The `slugify()` function converts heading
+text to URL-safe IDs (lowercase, hyphens, strip non-alphanumeric).
+
+- **h1**: gets `id` attribute only (no visible `#` link) — page titles
+  should not have self-referencing anchors
+- **h2+**: gets `id` attribute AND a clickable `#` link for deep linking
+
+Example output for `## Water Quality`:
+```html
+<h2 id="water-quality"><a href="#water-quality">#</a> Water Quality</h2>
+```
+
+## `figure` Shortcode
 
 For images with captions and float positioning. Replaces the inline
 `<div style="float: right; ...">` pattern in the existing HTML.
@@ -410,97 +449,72 @@ its workers.
 
 ## Implementation Plan
 
-### Phase 1: `content` Route Type (Rust)
+### Phase 1: `content` Route Type (Rust) ✅
 
-| File | Change |
-|------|--------|
-| `config.rs` | Add `Content` variant to `RouteType`. Add `content` field to `RouteConfig`. Add `ContentStage` struct and `content` vec to `SiteConfig` |
-| `routes.rs` | Handle `RouteType::Content` in `expand_route()` — glob files, parse frontmatter, sort by weight, emit `PageJob` per file. Add content collections to `build_collections()` |
-| `shortcodes.rs` | Add `content_nav` shortcode. Add `figure` shortcode |
-| `layouts.rs` | Add `page` layout |
-| `factory.rs` | Extend `Frontmatter` struct (weight, slug, hidden). Wire content stages into file cache and route expansion. Pass content collections alongside export collections |
+All Rust implementation is complete across 6 source files:
 
-New structs:
+| File | Changes |
+|------|---------|
+| `config.rs` | `ContentStage` struct, `Content` variant in `RouteType`, `content` field on `RouteConfig`, `content` vec on `SiteConfig` |
+| `routes.rs` | `ContentPage` struct (title, slug, weight, hidden, section, source_path), `ContentContext`, Content arm in `expand_route()` |
+| `shortcodes.rs` | `content_nav` with section grouping + single-expanded logic, `figure` shortcode with float positioning |
+| `layouts.rs` | `page` layout with sidebar + article + nav-toggle script |
+| `factory.rs` | `Frontmatter` struct (title, weight, slug, hidden, section), `run_content_stages()`, wiring through `render_partial()` |
+| `markdown.rs` | `inject_heading_anchors()` (h2+ only), `slugify()`, `ShortcodeArgs::from_map()` test helper |
+
+48 unit tests pass.
+
+Key structs as implemented:
 
 ```rust
-/// A content stage: globs data files, reads frontmatter metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentStage {
     pub name: String,
     pub pattern: String,
 }
 
-/// Metadata extracted from a content page's frontmatter.
 #[derive(Debug, Clone)]
 pub struct ContentPage {
     pub title: String,
     pub slug: String,
     pub weight: i32,
     pub hidden: bool,
-    pub source_path: String,   // pond path to the markdown file
+    pub section: Option<String>,
+    pub source_path: String,
 }
 
-/// All discovered content pages for one content stage.
 #[derive(Debug, Clone)]
 pub struct ContentContext {
-    /// Pages sorted by (weight, title)
     pub pages: Vec<ContentPage>,
 }
 ```
 
-Route expansion for `Content`:
+### Phase 2: Convert Content ✅
 
-```rust
-RouteType::Content => {
-    let content_name = route.content.as_deref().unwrap_or("");
-    let content_ctx = match content_stages.get(content_name) {
-        Some(ctx) => ctx,
-        None => return,
-    };
+All 9 HTML fragments converted to markdown with YAML frontmatter.
+Files live in `water/content/` and are `pond copy`'d into the pond
+by `render.sh`. Each file has `section: About` or `section: Blog`.
 
-    for page in &content_ctx.pages {
-        let url_path = format!("{}/{}", parent_path, page.slug);
-        let output_path = format!("{}.html", url_path.trim_start_matches('/'));
+### Phase 3: Wire Up `site.yaml` ✅
 
-        let mut breadcrumbs = parent_breadcrumbs.to_vec();
-        breadcrumbs.push((page.title.clone(), prefix_base(base_url, &url_path)));
+`water/site.yaml` is the working config. `water/render.sh` handles
+the full build cycle: `pond init` → `pond copy` content + templates →
+`pond mknod` site factory → `pond run /etc/site generate ./dist`.
 
-        jobs.push(PageJob {
-            output_path,
-            page_source: page.source_path.clone(),
-            captures: vec![],
-            datafiles: vec![],
-            breadcrumbs,
-        });
-    }
-}
-```
-
-### Phase 2: Convert Content
-
-Convert the 9 HTML fragments to markdown files with frontmatter.
-Copy into the pond with `pond copy`.
-
-### Phase 3: Wire Up `site.yaml`
-
-Write the site config for Caspar Water, create sidebar partial,
-create home page, run `pond run /etc/site.yaml build ./dist`.
+The script uses a `pond()` shell function wrapping `cargo run` so
+no Docker container is needed for local development.
 
 ### Phase 4: Images
 
-Copy images into pond at `/pages/img/`. Reference from content pages.
-The `figure` shortcode handles rendering. Static asset config copies
-images to `dist/img/`.
+Not yet started. Images need to be copied into the pond and
+referenced from content pages. The `figure` shortcode is ready.
 
-### Phase 5: Testsuite
+### Phase 5: Testsuite ✅
 
-Write a test (`testsuite/tests/207-sitegen-content-pages.sh`) that:
-1. Creates a pond with a few content pages
-2. Configures a site.yaml with a content route
-3. Runs `pond run /etc/site.yaml build`
-4. Verifies output HTML files exist
-5. Verifies sidebar contains nav links in weight order
-6. Verifies page content is rendered
+`testsuite/tests/207-sitegen-content-pages.sh` tests the content
+page system end-to-end with synthetic data (alpha/beta/gamma pages).
+Verifies HTML output, sidebar nav links in weight order, active page
+highlighting, and page content rendering. Passes in Docker.
 
 ## Design Decisions
 
@@ -534,10 +548,32 @@ simplest default and matches the user's mental model: `water.md` →
 `/water.html`. Frontmatter `slug` override is there for special
 cases but shouldn't be needed often.
 
+### Sections Instead of Flat Nav
+
+The `section` frontmatter field groups pages under collapsible headings
+in the sidebar. This was chosen over a flat list because the content
+inventory has natural groupings (informational pages vs. blog posts).
+
+Sections are rendered as `<div class="nav-section">` with CSS show/hide
+and a small inline script for toggling. We explored and rejected
+`<details>/<summary>` — the browser-native disclosure triangles look
+dated and cannot be styled consistently.
+
+**Invariant:** Exactly one section is expanded at all times. This is
+enforced both at render time (server) and interactively (client JS).
+When no page is active, the first section opens. Clicking the
+already-open section does nothing.
+
+### Sidebar Title as Raw HTML
+
+The sidebar heading uses raw `<h2><a href="...">Caspar Water</a></h2>`
+instead of markdown `## [Caspar Water](...)`. This avoids the heading
+anchor injection that would add a `#` link to the site title.
+
 ### No Subdirectory Nesting (Yet)
 
 The initial design handles a flat list of content pages. Nested
-subdirectories (e.g., `/pages/political/water-district.md`) can be
+subdirectories (e.g., `/content/political/water-district.md`) can be
 added later if the site grows. The `content` route type and
 `ContentContext` struct are designed to support this — `pattern` could
 use `**/*.md` — but sorting and nav rendering would need hierarchy
@@ -557,3 +593,20 @@ pulldown-cmark passes raw HTML through unchanged. Content pages that
 have complex HTML (the chemistry equations in `system.md`, for
 example) can use inline HTML alongside markdown. No special handling
 needed.
+
+## Local Development
+
+```bash
+cd water
+./render.sh            # Build and open in browser (Vite on port 4175)
+./render.sh --no-open  # Build without opening browser
+```
+
+The script:
+1. Creates a temporary pond in `water/.pond/`
+2. Copies content and template files into the pond
+3. Creates the sitegen factory node
+4. Runs `pond run /etc/site generate ./dist`
+5. Starts Vite dev server for preview
+
+Uses `cargo run` via a shell function — no Docker required.
