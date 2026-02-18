@@ -375,10 +375,7 @@ async fn run_content_stages(
 
             // Read the file to extract frontmatter
             let data = root.read_file_path_to_vec(&path_str).await.map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "Cannot read content file '{}': {}",
-                    path_str, e
-                ))
+                tinyfs::Error::Other(format!("Cannot read content file '{}': {}", path_str, e))
             })?;
             let text = String::from_utf8(data).map_err(|e| {
                 tinyfs::Error::Other(format!("Non-UTF8 content file '{}': {}", path_str, e))
@@ -403,9 +400,7 @@ async fn run_content_stages(
                 })?
             };
 
-            let slug = fm
-                .slug
-                .unwrap_or_else(|| slug_from_path(&path_str));
+            let slug = fm.slug.unwrap_or_else(|| slug_from_path(&path_str));
 
             pages.push(ContentPage {
                 title: if fm.title.is_empty() {

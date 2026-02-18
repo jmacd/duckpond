@@ -123,7 +123,15 @@ fn expand_route(
 
             // Recurse into children
             for child in &route.routes {
-                expand_route(child, &url_path, &breadcrumbs, base_url, exports, content, jobs);
+                expand_route(
+                    child,
+                    &url_path,
+                    &breadcrumbs,
+                    base_url,
+                    exports,
+                    content,
+                    jobs,
+                );
             }
         }
 
@@ -171,7 +179,15 @@ fn expand_route(
 
                 // Recurse into children (rare for template routes, but supported)
                 for child in &route.routes {
-                    expand_route(child, &url_path, &breadcrumbs, base_url, exports, content, jobs);
+                    expand_route(
+                        child,
+                        &url_path,
+                        &breadcrumbs,
+                        base_url,
+                        exports,
+                        content,
+                        jobs,
+                    );
                 }
             }
         }

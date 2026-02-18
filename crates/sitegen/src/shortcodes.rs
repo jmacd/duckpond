@@ -291,12 +291,7 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
 fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
     let pages = match ctx.content_pages.get(content_name) {
         Some(pages) => pages,
-        None => {
-            return format!(
-                "<!-- content_nav: unknown content '{}' -->",
-                content_name
-            )
-        }
+        None => return format!("<!-- content_nav: unknown content '{}' -->", content_name),
     };
 
     if pages.is_empty() {
@@ -348,19 +343,19 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
     // Determine which section to expand. Exactly one section is expanded at
     // all times: the one containing the active page, or the first section if
     // no page matches (e.g., home/index page).
-    let active_section: Option<Option<String>> = sections.iter().find_map(|(key, section_pages)| {
-        if section_pages
-            .iter()
-            .any(|p| ctx.current_path == page_href(&p.slug))
-        {
-            Some(key.clone())
-        } else {
-            None
-        }
-    });
+    let active_section: Option<Option<String>> =
+        sections.iter().find_map(|(key, section_pages)| {
+            if section_pages
+                .iter()
+                .any(|p| ctx.current_path == page_href(&p.slug))
+            {
+                Some(key.clone())
+            } else {
+                None
+            }
+        });
     // Fall back to the first section when no page is active.
-    let expanded_section = active_section
-        .or_else(|| sections.first().map(|(k, _)| k.clone()));
+    let expanded_section = active_section.or_else(|| sections.first().map(|(k, _)| k.clone()));
 
     let mut html = String::from("<nav class=\"nav-list\">\n");
     for (section, section_pages) in &sections {
@@ -593,11 +588,23 @@ mod tests {
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
-        assert!(!html.contains("Hidden Page"), "Hidden page should be excluded: {}", html);
+        assert!(
+            !html.contains("Hidden Page"),
+            "Hidden page should be excluded: {}",
+            html
+        );
         // Wrapped in nav
-        assert!(html.contains("<nav class=\"nav-list\">"), "Expected nav wrapper: {}", html);
+        assert!(
+            html.contains("<nav class=\"nav-list\">"),
+            "Expected nav wrapper: {}",
+            html
+        );
         // No sections → flat <ul>
-        assert!(html.contains("<ul>"), "Expected ul for unsectioned pages: {}", html);
+        assert!(
+            html.contains("<ul>"),
+            "Expected ul for unsectioned pages: {}",
+            html
+        );
         // Active page gets class
         assert!(
             html.contains(r#"<li class="active"><a href="/water.html" aria-current="page">Water System</a></li>"#),
@@ -606,7 +613,8 @@ mod tests {
         // Non-active page
         assert!(
             html.contains("<li><a href=\"/history.html\">History</a></li>"),
-            "Expected plain li for History, got: {}", html
+            "Expected plain li for History, got: {}",
+            html
         );
     }
 
@@ -652,27 +660,39 @@ mod tests {
         // Active section is expanded
         assert!(
             html.contains("nav-section expanded"),
-            "Expected expanded class on active section, got: {}", html
+            "Expected expanded class on active section, got: {}",
+            html
         );
         // Section title rendered
         assert!(
             html.contains("<h3 class=\"nav-section-title\">About</h3>"),
-            "Expected About section title, got: {}", html
+            "Expected About section title, got: {}",
+            html
         );
         // Inactive section is not expanded
         assert!(
             html.contains("\"nav-section\""),
-            "Expected collapsed Blog section, got: {}", html
+            "Expected collapsed Blog section, got: {}",
+            html
         );
         // No <details> or <summary>
-        assert!(!html.contains("<details"), "Should not use <details>: {}", html);
-        assert!(!html.contains("<summary"), "Should not use <summary>: {}", html);
+        assert!(
+            !html.contains("<details"),
+            "Should not use <details>: {}",
+            html
+        );
+        assert!(
+            !html.contains("<summary"),
+            "Should not use <summary>: {}",
+            html
+        );
 
         // Exactly one section is expanded
         assert_eq!(
             html.matches("nav-section expanded").count(),
             1,
-            "Exactly one section should be expanded, got: {}", html
+            "Exactly one section should be expanded, got: {}",
+            html
         );
 
         // When current_path is the Blog page, Blog section is expanded, About is not.
@@ -682,13 +702,17 @@ mod tests {
         };
         let html_blog = render_content_nav(&ctx_blog, "pages");
         assert!(
-            html_blog.contains("<div class=\"nav-section expanded\">\n  <h3 class=\"nav-section-title\">Blog</h3>"),
-            "Blog section should be expanded on blog page, got: {}", html_blog
+            html_blog.contains(
+                "<div class=\"nav-section expanded\">\n  <h3 class=\"nav-section-title\">Blog</h3>"
+            ),
+            "Blog section should be expanded on blog page, got: {}",
+            html_blog
         );
         assert_eq!(
             html_blog.matches("nav-section expanded").count(),
             1,
-            "Only Blog section should be expanded, got: {}", html_blog
+            "Only Blog section should be expanded, got: {}",
+            html_blog
         );
 
         // When no page is active (home page), the first section is expanded.
@@ -698,13 +722,17 @@ mod tests {
         };
         let html_home = render_content_nav(&ctx_home, "pages");
         assert!(
-            html_home.contains("<div class=\"nav-section expanded\">\n  <h3 class=\"nav-section-title\">About</h3>"),
-            "First section (About) should be expanded on home page, got: {}", html_home
+            html_home.contains(
+                "<div class=\"nav-section expanded\">\n  <h3 class=\"nav-section-title\">About</h3>"
+            ),
+            "First section (About) should be expanded on home page, got: {}",
+            html_home
         );
         assert_eq!(
             html_home.matches("nav-section expanded").count(),
             1,
-            "Only one section expanded on home page, got: {}", html_home
+            "Only one section expanded on home page, got: {}",
+            html_home
         );
     }
 
@@ -731,8 +759,20 @@ mod tests {
         ]));
 
         let html = render_figure(&ctx, &args);
-        assert!(html.contains("figure-right"), "Expected float right class: {}", html);
-        assert!(html.contains("/img/photo.jpg"), "Expected src in img: {}", html);
-        assert!(html.contains("<figcaption>A nice photo</figcaption>"), "Expected caption: {}", html);
+        assert!(
+            html.contains("figure-right"),
+            "Expected float right class: {}",
+            html
+        );
+        assert!(
+            html.contains("/img/photo.jpg"),
+            "Expected src in img: {}",
+            html
+        );
+        assert!(
+            html.contains("<figcaption>A nice photo</figcaption>"),
+            "Expected caption: {}",
+            html
+        );
     }
 }

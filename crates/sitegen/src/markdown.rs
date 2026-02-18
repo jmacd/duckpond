@@ -130,7 +130,7 @@ fn inject_heading_anchors<'a>(parser: Parser<'a>) -> Vec<Event<'a>> {
                     events.push(Event::Html(format!("</h{}>", level_num).into()));
                 } else {
                     // No slug — pass through unchanged
-                    events.extend(heading_events.drain(..));
+                    events.append(&mut heading_events);
                     events.push(event);
                 }
                 in_heading = None;
