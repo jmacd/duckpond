@@ -248,10 +248,7 @@ async fn cat_impl(
     let fs_arc = std::sync::Arc::new(fs.clone());
 
     // Get ProviderContext from transaction (includes registered object stores)
-    let tlogfs_tx = tx.transaction_guard()?;
-    let state = tlogfs_tx.state()?;
-    let provider_context_ref = state.as_provider_context();
-    let provider_context = std::sync::Arc::new(provider_context_ref.clone());
+    let provider_context = std::sync::Arc::new(tx.provider_context()?.clone());
 
     // Create Provider with context (supports all types including file://)
     let provider = provider::Provider::with_context(fs_arc, provider_context.clone());

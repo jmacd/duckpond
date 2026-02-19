@@ -176,11 +176,10 @@ async fn mknod_impl(
         }
     };
 
-    // Create factory context with state from transaction guard
-    let state = tx
-        .state()
-        .map_err(|e| anyhow!("Failed to get state: {}", e))?;
-    let provider_context = state.as_provider_context();
+    // Create factory context from transaction guard
+    let provider_context = tx
+        .provider_context()
+        .map_err(|e| anyhow!("Failed to get provider context: {}", e))?;
     let context = provider::FactoryContext::new(provider_context, parent_node_id);
 
     // Run factory initialization if it exists (e.g., create directories)

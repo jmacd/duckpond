@@ -350,7 +350,7 @@ async fn describe_file_series_schema_impl(
     let root = fs.root().await?;
 
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let state = tx.transaction_guard()?.state()?;
+    let state = tx.state()?;
     let schema = tlogfs::get_file_schema(&root, path, &state)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
@@ -385,7 +385,7 @@ async fn describe_file_table_schema_impl(
     let root = fs.root().await?;
 
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let state = tx.transaction_guard()?.state()?;
+    let state = tx.state()?;
     let schema = tlogfs::get_file_schema(&root, path, &state)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
@@ -465,12 +465,9 @@ async fn describe_file_series_versions(
 
     let mut version_stats = Vec::new();
 
-    // Get state and session context for querying
-    let state = tx.transaction_guard()?.state()?;
+    // Get session context and provider context for querying
+    let provider_context = tx.provider_context()?;
     let session_ctx = tx.session_context().await?;
-
-    // Get ProviderContext from state
-    let provider_context = state.as_provider_context();
 
     for version_info in versions {
         // Create table provider for this specific version

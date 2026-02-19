@@ -132,9 +132,6 @@ pub async fn detect_overlaps_command(
         let version_count = versions.len();
         debug!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions");
 
-        // File versions will be discovered dynamically by ObjectStore when accessed
-        let _object_store = tx.object_store().await?; // Keep for future use if needed
-
         // Create a TemporalFilteredListingTable for each version using the new approach
         debug!("Creating table providers for {path_str} with {version_count} versions");
 
@@ -145,8 +142,7 @@ pub async fn detect_overlaps_command(
             let size = record.size.unwrap_or(0);
             debug!("Creating table provider for {path_str} version {version} (size: {size})");
 
-            let state = tx.state()?;
-            let context = state.as_provider_context();
+            let context = tx.provider_context()?;
             let table_provider = provider::create_table_provider(
                 *node_id,
                 &context,

@@ -100,6 +100,11 @@ impl<'a> StewardTransactionGuard<'a> {
     }
 
     /// Get access to the underlying transaction state (for queries)
+    ///
+    /// Prefer `provider_context()` when all you need is a `ProviderContext`.
+    /// This method exposes tlogfs internals and should only be used when
+    /// you need oplog-specific operations like `get_factory_for_node()` or
+    /// `query_records()`.
     pub fn state(&self) -> Result<tlogfs::persistence::State, tlogfs::TLogFSError> {
         self.data_tx
             .as_ref()
@@ -109,6 +114,17 @@ impl<'a> StewardTransactionGuard<'a> {
                 ))
             })?
             .state()
+    }
+
+    /// Get a `ProviderContext` for this transaction.
+    ///
+    /// This is the preferred way to get provider/factory context. It avoids
+    /// exposing tlogfs internals (`State`) to callers that only need to
+    /// create table providers or initialize factories.
+    pub fn provider_context(
+        &self,
+    ) -> Result<tinyfs::ProviderContext, tlogfs::TLogFSError> {
+        Ok(self.state()?.as_provider_context())
     }
 
     /// Get access to the underlying data persistence layer for read operations

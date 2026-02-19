@@ -469,8 +469,7 @@ async fn execute_sync_impl(
         let pond_metadata = control_table.get_pond_metadata().clone();
 
         // Create factory context
-        let state = tx.state()?;
-        let provider_context = state.as_provider_context();
+        let provider_context = tx.provider_context()?;
         let factory_context = provider::FactoryContext::with_metadata(
             provider_context,
             tinyfs::FileID::root(),
@@ -559,8 +558,7 @@ async fn execute_sync_impl(
     let pond_metadata = control_table.get_pond_metadata().clone();
 
     // Create factory context for ControlWriter mode
-    let state = tx.state()?;
-    let provider_context = state.as_provider_context();
+    let provider_context = tx.provider_context()?;
     let factory_context =
         provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
 
