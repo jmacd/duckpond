@@ -41,13 +41,8 @@ async fn show_filesystem_transactions(
     tx: &mut steward::StewardTransactionGuard<'_>,
     mode: &str,
 ) -> Result<String, steward::StewardError> {
-    // Get data persistence from the transaction guard
-    let persistence = tx
-        .data_persistence()
-        .map_err(steward::StewardError::DataInit)?;
-
     // Get commit history from the filesystem
-    let commit_history = persistence
+    let commit_history = tx
         .get_commit_history(None)
         .await
         .map_err(steward::StewardError::DataInit)?;
@@ -56,8 +51,12 @@ async fn show_filesystem_transactions(
         return Ok("No transactions found in this filesystem.".to_string());
     }
 
-    // Get pond path from persistence for control table access (clone to avoid borrow issues)
-    let store_path = persistence.store_path().to_string_lossy().to_string();
+    // Get store path for display purposes
+    let store_path = tx
+        .store_path()
+        .map_err(steward::StewardError::DataInit)?
+        .to_string_lossy()
+        .to_string();
     let pond_path = std::path::Path::new(&store_path)
         .parent()
         .ok_or_else(|| steward::StewardError::Dyn("Invalid store path".into()))?

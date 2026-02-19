@@ -127,6 +127,50 @@ impl<'a> StewardTransactionGuard<'a> {
         Ok(self.state()?.as_provider_context())
     }
 
+    /// Look up the factory name associated with a filesystem node.
+    ///
+    /// Returns `Ok(Some(name))` if the node was created by a factory,
+    /// `Ok(None)` if it is a static (non-factory) node.
+    pub async fn get_factory_for_node(
+        &self,
+        id: tinyfs::FileID,
+    ) -> Result<Option<String>, tlogfs::TLogFSError> {
+        self.state()?.get_factory_for_node(id).await
+    }
+
+    /// Query oplog records for a filesystem node.
+    ///
+    /// Returns the version history entries for the given file.
+    pub async fn query_records(
+        &self,
+        id: tinyfs::FileID,
+    ) -> Result<Vec<tlogfs::OplogEntry>, tlogfs::TLogFSError> {
+        self.state()?.query_records(id).await
+    }
+
+    /// Get the commit history from the underlying Delta table.
+    ///
+    /// Returns a list of `CommitInfo` entries (most recent first).
+    /// Pass `limit` to restrict how many entries are returned.
+    pub async fn get_commit_history(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<deltalake::kernel::CommitInfo>, tlogfs::TLogFSError> {
+        self.data_persistence()
+            .map_err(|e| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?
+            .get_commit_history(limit)
+            .await
+    }
+
+    /// Get the on-disk store path for the data filesystem.
+    pub fn store_path(&self) -> Result<PathBuf, tlogfs::TLogFSError> {
+        Ok(self
+            .data_persistence()
+            .map_err(|e| tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(e.to_string())))?
+            .store_path()
+            .clone())
+    }
+
     /// Get access to the underlying data persistence layer for read operations
     /// This allows access to the DeltaTable and other query components
     pub fn data_persistence(&self) -> Result<&tlogfs::OpLogPersistence, tlogfs::TLogFSError> {

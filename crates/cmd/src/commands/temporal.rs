@@ -107,8 +107,7 @@ pub async fn detect_overlaps_command(
 
     for (origin_id, (path_str, node_id, _part_id)) in file_info.iter().enumerate() {
         // Get all versions of this file from OpLog records
-        let state = tx.state()?;
-        let records = state
+        let records = tx
             .query_records(*node_id)
             .await
             .map_err(|e| anyhow!("Failed to get records for {}: {}", path_str, e))?;

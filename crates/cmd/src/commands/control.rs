@@ -523,7 +523,6 @@ async fn execute_sync_impl(
 
     // Get the factory name from the oplog
     let factory_name = tx
-        .state()?
         .get_factory_for_node(node_id)
         .await
         .with_context(|| format!("Failed to get factory for: {}", remote_path))?
