@@ -20,7 +20,7 @@ async fn test_debug_transaction_versions() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize pond: {}", e))?;
 
-    debug!("✅ Pond initialized successfully");
+    debug!("[OK] Pond initialized successfully");
 
     // Check what version we're at after initialization
     // We can't access get_committed_transaction_version directly since it's private,
@@ -31,16 +31,16 @@ async fn test_debug_transaction_versions() -> Result<()> {
     let meta = PondUserMetadata::new(vec!["test".to_string(), "debug-tx1".to_string()]);
     match ship
         .write_transaction(&meta, async |_fs| {
-            debug!("✅ First additional transaction started");
+            debug!("[OK] First additional transaction started");
             Ok(())
         })
         .await
     {
         Ok(_) => {
-            debug!("✅ First additional transaction committed successfully");
+            debug!("[OK] First additional transaction committed successfully");
         }
         Err(e) => {
-            debug!("❌ First additional transaction failed: {}", e);
+            debug!("[ERR] First additional transaction failed: {}", e);
             return Err(anyhow::anyhow!("First transaction failed: {}", e));
         }
     }
@@ -50,16 +50,16 @@ async fn test_debug_transaction_versions() -> Result<()> {
     let meta = PondUserMetadata::new(vec!["test".to_string(), "debug-tx2".to_string()]);
     match ship
         .write_transaction(&meta, async |_fs| {
-            debug!("✅ Second additional transaction started");
+            debug!("[OK] Second additional transaction started");
             Ok(())
         })
         .await
     {
         Ok(_) => {
-            debug!("✅ Second additional transaction committed successfully");
+            debug!("[OK] Second additional transaction committed successfully");
         }
         Err(e) => {
-            debug!("❌ Second additional transaction failed: {}", e);
+            debug!("[ERR] Second additional transaction failed: {}", e);
             return Err(anyhow::anyhow!("Second transaction failed: {}", e));
         }
     }
@@ -92,12 +92,12 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     match builder.load().await {
         Ok(table) => {
             debug!(
-                "✅ Delta table loaded after init, version: {:?}",
+                "[OK] Delta table loaded after init, version: {:?}",
                 table.version()
             );
         }
         Err(e) => {
-            debug!("❌ Failed to load Delta table after init: {:?}", e);
+            debug!("[ERR] Failed to load Delta table after init: {:?}", e);
         }
     }
 
@@ -115,7 +115,7 @@ async fn test_delta_table_version_inspection() -> Result<()> {
         .await
     {
         Ok(_) => {
-            debug!("✅ Transaction committed");
+            debug!("[OK] Transaction committed");
 
             // Check version after commit
             let url = url::Url::parse(&data_path_str)?;
@@ -123,17 +123,17 @@ async fn test_delta_table_version_inspection() -> Result<()> {
             match builder.load().await {
                 Ok(table) => {
                     debug!(
-                        "✅ Delta table version after first additional commit: {:?}",
+                        "[OK] Delta table version after first additional commit: {:?}",
                         table.version()
                     );
                 }
                 Err(e) => {
-                    debug!("❌ Failed to load Delta table after commit: {}", e);
+                    debug!("[ERR] Failed to load Delta table after commit: {}", e);
                 }
             }
         }
         Err(e) => {
-            debug!("❌ Transaction commit failed: {}", e);
+            debug!("[ERR] Transaction commit failed: {}", e);
         }
     }
 

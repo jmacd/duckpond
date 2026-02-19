@@ -54,7 +54,7 @@ pub async fn run_command(
         Ok(()) => {
             _ = tx.commit().await?;
             log::debug!("Configuration executed successfully");
-            debug!("✓ Execution complete");
+            debug!("[OK] Execution complete");
             Ok(())
         }
         Err(e) => Err(tx.abort(&e).await.into()),

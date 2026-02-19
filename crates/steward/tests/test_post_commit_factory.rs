@@ -75,7 +75,7 @@ repeat_count: 3
 
     // Commit - this should NOT trigger post-commit yet (no data written)
     _ = tx1.commit().await?;
-    debug!("✅ Post-commit config created (tx1 committed)");
+    debug!("[OK] Post-commit config created (tx1 committed)");
 
     // Verify the config was actually created by reading it back
     debug!("\n=== Verifying config was created ===");
@@ -88,14 +88,14 @@ repeat_count: 3
 
     // Check /etc exists
     match verify_root.resolve_path("/etc").await {
-        Ok(_) => debug!("✓ /etc exists"),
-        Err(e) => debug!("✗ /etc does NOT exist: {}", e),
+        Ok(_) => debug!("[OK] /etc exists"),
+        Err(e) => debug!("[FAIL] /etc does NOT exist: {}", e),
     }
 
     // Check /etc/system.d exists
     match verify_root.resolve_path("/etc/system.d").await {
-        Ok(_) => debug!("✓ /etc/system.d exists"),
-        Err(e) => debug!("✗ /etc/system.d does NOT exist: {}", e),
+        Ok(_) => debug!("[OK] /etc/system.d exists"),
+        Err(e) => debug!("[FAIL] /etc/system.d does NOT exist: {}", e),
     }
 
     // Try to resolve the specific file
@@ -105,17 +105,17 @@ repeat_count: 3
     {
         Ok((_, lookup)) => match lookup {
             tinyfs::Lookup::Found(_) => {
-                debug!("✓ /etc/system.d/test-post-commit.yaml EXISTS via resolve_path!")
+                debug!("[OK] /etc/system.d/test-post-commit.yaml EXISTS via resolve_path!")
             }
             tinyfs::Lookup::NotFound(_, _) => debug!(
-                "✗ /etc/system.d/test-post-commit.yaml not found (path resolved but file doesn't exist)"
+                "[FAIL] /etc/system.d/test-post-commit.yaml not found (path resolved but file doesn't exist)"
             ),
             tinyfs::Lookup::Empty(_) => {
-                debug!("✗ /etc/system.d/test-post-commit.yaml empty path")
+                debug!("[FAIL] /etc/system.d/test-post-commit.yaml empty path")
             }
         },
         Err(e) => debug!(
-            "✗ Failed to resolve /etc/system.d/test-post-commit.yaml: {}",
+            "[FAIL] Failed to resolve /etc/system.d/test-post-commit.yaml: {}",
             e
         ),
     }
@@ -123,7 +123,7 @@ repeat_count: 3
     // Check for files in /etc/system.d
     let matches = verify_root.collect_matches("/etc/system.d/*").await?;
     debug!(
-        "✓ Found {} file(s) in /etc/system.d/ via collect_matches",
+        "[OK] Found {} file(s) in /etc/system.d/ via collect_matches",
         matches.len()
     );
     for (node_path, captures) in &matches {
@@ -161,7 +161,7 @@ repeat_count: 3
     // Commit - this SHOULD trigger post-commit factory execution
     debug!("Committing transaction (should trigger post-commit)...");
     _ = tx2.commit().await?;
-    debug!("✅ Transaction committed, post-commit should have executed");
+    debug!("[OK] Transaction committed, post-commit should have executed");
 
     // Verify the test factory was executed by checking the result file it creates
     // The test-executor factory writes to /tmp/test-executor-result-{factory_node_id}.txt
@@ -189,13 +189,13 @@ repeat_count: 3
                 "Should have run in ControlWriter mode"
             );
 
-            debug!("✅ Post-commit factory executed successfully!");
+            debug!("[OK] Post-commit factory executed successfully!");
 
             // Cleanup
             let _ = std::fs::remove_file(&result_path);
         }
         Err(e) => {
-            debug!("⚠️  Result file not found: {}", e);
+            debug!("[WARN]  Result file not found: {}", e);
             debug!("This is expected if post-commit execution hasn't been fully implemented yet.");
             debug!("Once implemented, this test should pass.");
         }
@@ -273,7 +273,7 @@ repeat_count: 1
     )
     .await?;
 
-    debug!("✅ Read-only transaction completed");
+    debug!("[OK] Read-only transaction completed");
     debug!("Post-commit factories should NOT have executed (read-only, no version change)");
 
     Ok(())
@@ -344,7 +344,7 @@ repeat_count: 1
     }
 
     _ = tx1.commit().await?;
-    debug!("✅ Multiple configs created");
+    debug!("[OK] Multiple configs created");
 
     // Trigger post-commit with a data write
     debug!("\n=== Triggering post-commit ===");
@@ -365,7 +365,7 @@ repeat_count: 1
     writer.shutdown().await?;
 
     _ = tx2.commit().await?;
-    debug!("✅ Transaction committed, multiple post-commit factories should execute in order");
+    debug!("[OK] Transaction committed, multiple post-commit factories should execute in order");
 
     Ok(())
 }

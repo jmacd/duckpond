@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sitegen factory — registered as an executable factory, invoked via `pond run`.
+//! Sitegen factory -- registered as an executable factory, invoked via `pond run`.
 //!
 //! ```bash
 //! pond run /etc/site.yaml build ./dist
@@ -12,7 +12,7 @@
 //! 1. Parses the site.yaml config from the pond
 //! 2. Runs export stages to produce ExportContext per stage
 //! 3. Expands the route tree into page jobs
-//! 4. Renders each page: markdown → shortcodes → HTML → layout
+//! 4. Renders each page: markdown -> shortcodes -> HTML -> layout
 //! 5. Writes the complete site to the output directory
 
 use crate::config::SiteConfig;
@@ -151,7 +151,7 @@ async fn execute(
                 }
             }
 
-            // Simple lookup closure — no async needed
+            // Simple lookup closure -- no async needed
             let read_pond_file = |path: &str| -> Result<String, String> {
                 file_cache
                     .get(path)
@@ -176,7 +176,7 @@ async fn execute(
 /// Run export stages: glob-match pond files, export as Hive-partitioned parquet,
 /// scan output for real files with start_time/end_time.
 ///
-/// Uses `provider::export::export_series_to_parquet` — the same DataFusion
+/// Uses `provider::export::export_series_to_parquet` -- the same DataFusion
 /// `COPY TO ... PARTITIONED BY` pipeline used by `pond export`.
 ///
 /// # Automatic Partitioning
@@ -186,8 +186,8 @@ async fn execute(
 /// 1. Discovers all resolutions from glob matches (looking for `res=Xh` in
 ///    capture groups).
 /// 2. Computes per-resolution partition plans using
-///    `partitions::compute_partitions()` — each resolution gets the finest
-///    temporal partition that satisfies the ≤ 2 file invariant for its
+///    `partitions::compute_partitions()` -- each resolution gets the finest
+///    temporal partition that satisfies the <= 2 file invariant for its
 ///    maximum viewport width.
 /// 3. Exports each match with its resolution-specific temporal partition.
 async fn run_export_stages(
@@ -257,7 +257,7 @@ async fn run_export_stages(
             );
             for (res, plan) in &partitions {
                 info!(
-                    "  {} → {:?} (partition ≈ {}s, max {} pts/file)",
+                    "  {} -> {:?} (partition ~= {}s, max {} pts/file)",
                     res, plan.temporal, plan.partition_width_secs, plan.max_points_per_file
                 );
             }
@@ -281,7 +281,7 @@ async fn run_export_stages(
                         plan.temporal.clone()
                     } else {
                         warn!(
-                            "  {} — resolution '{}' not in partition plan, using ['year']",
+                            "  {} -- resolution '{}' not in partition plan, using ['year']",
                             path_str, res
                         );
                         vec!["year".to_string()]
@@ -290,7 +290,7 @@ async fn run_export_stages(
                     vec!["year".to_string()]
                 }
             } else {
-                // No resolutions discovered — single partition
+                // No resolutions discovered -- single partition
                 vec!["year".to_string()]
             };
 
@@ -334,7 +334,7 @@ async fn run_export_stages(
             }
 
             info!(
-                "  {} → {} partitioned files ({:?})",
+                "  {} -> {} partitioned files ({:?})",
                 path_str,
                 export_outputs.len(),
                 temporal_parts,
@@ -433,7 +433,7 @@ async fn run_content_stages(
 
 /// Derive a URL slug from a pond path (filename without extension).
 ///
-/// e.g. "/pages/water-system.md" → "water-system"
+/// e.g. "/pages/water-system.md" -> "water-system"
 fn slug_from_path(path: &str) -> String {
     let filename = path.rsplit('/').next().unwrap_or(path);
     filename
@@ -496,7 +496,7 @@ fn write_builtin_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
 /// Convert a pond series path to a relative directory path for export.
 ///
 /// e.g. "/reduced/single_param/Temperature/res=1h.series"
-///    → "single_param/Temperature/res=1h"
+///    -> "single_param/Temperature/res=1h"
 ///
 /// The first path component (e.g. "reduced") is stripped, and the
 /// `.series` extension is removed. The result is used as a subdirectory
@@ -510,7 +510,7 @@ fn series_path_to_data_rel(pond_path: &str) -> String {
 
 register_executable_factory!(
     name: "sitegen",
-    description: "Static site generator — Markdown + Maud templates powered by Maudit",
+    description: "Static site generator -- Markdown + Maud templates powered by Maudit",
     validate: validate_config,
     initialize: initialize,
     execute: execute
@@ -621,7 +621,7 @@ fn generate_site(
             base_url: config.site.base_url.clone(),
         });
 
-        // Rewrite {{ $0 }} → {{ cap0 }}, nav-list → nav_list, etc.
+        // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
         let preprocessed = shortcodes::preprocess_variables(&body);
 
         // Expand shortcodes
@@ -631,7 +631,7 @@ fn generate_site(
                 GenerateError(format!("Shortcode error in '{}': {}", job.page_source, e))
             })?;
 
-        // Render markdown → HTML
+        // Render markdown -> HTML
         let content_html = render_markdown(&expanded);
 
         // Wrap in layout
@@ -680,7 +680,7 @@ fn render_partial(
     let path = config.partials.get(name)?;
     match read_pond_file(path) {
         Ok(md) => {
-            // Build a shortcode context for the partial — includes current_path
+            // Build a shortcode context for the partial -- includes current_path
             // so nav_list can highlight the active page link.
             let sc_ctx = Arc::new(ShortcodeContext {
                 captures: vec![],

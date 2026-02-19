@@ -250,7 +250,7 @@ impl Ship {
     /// Runs the async closure with `&FS` access, auto-commits on `Ok`,
     /// auto-aborts on `Err`. The closure's error type must convert into
     /// `StewardError` (which `tinyfs::Error` and `tlogfs::TLogFSError` do
-    /// via `#[from]` impls — just use `?`).
+    /// via `#[from]` impls -- just use `?`).
     pub async fn write_transaction<F>(
         &mut self,
         meta: &PondUserMetadata,
@@ -870,7 +870,7 @@ mod tests {
             // SIMULATE CRASH HERE - don't call commit_control_metadata()
             // This leaves data committed but control metadata missing
 
-            debug!("✅ Simulated crash after data commit");
+            debug!("[OK] Simulated crash after data commit");
         } // Ship drops here, simulating crash
 
         // SECOND: Create a new ship (simulating restart) and test recovery
@@ -883,10 +883,10 @@ mod tests {
             let recovery_result = match ship.check_recovery_needed().await {
                 Err(StewardError::RecoveryNeeded { txn_meta }) => {
                     debug!(
-                        "✅ Detected recovery needed for seq={}, txn_id: {}",
+                        "[OK] Detected recovery needed for seq={}, txn_id: {}",
                         txn_meta.txn_seq, txn_meta.user.txn_id
                     );
-                    debug!("✅ Recovery metadata: {:?}", txn_meta);
+                    debug!("[OK] Recovery metadata: {:?}", txn_meta);
                     // Perform actual recovery
                     ship.recover().await.expect("Recovery should succeed")
                 }
@@ -924,7 +924,7 @@ mod tests {
                 .await
                 .expect("Failed to commit read transaction");
 
-            debug!("✅ Recovery completed successfully");
+            debug!("[OK] Recovery completed successfully");
         }
     }
 
@@ -1053,7 +1053,7 @@ mod tests {
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH: Don't record control metadata
-            debug!("✅ Simulated crash after data commit");
+            debug!("[OK] Simulated crash after data commit");
         }
 
         // Step 3: Recovery after crash using production code
@@ -1216,7 +1216,7 @@ mod tests {
             .await
             .expect("Failed to commit steward transaction");
 
-        debug!("✅ New transaction API works with proper sequencing via steward guard commit");
+        debug!("[OK] New transaction API works with proper sequencing via steward guard commit");
     }
 
     #[tokio::test]
@@ -1324,7 +1324,7 @@ mod tests {
             "After reopening, last_write_seq should still be 1"
         );
 
-        debug!("✅ Root directory initialization is recorded in control table with txn_seq=1");
+        debug!("[OK] Root directory initialization is recorded in control table with txn_seq=1");
     }
 
     #[tokio::test]
@@ -1426,7 +1426,7 @@ mod tests {
         );
 
         debug!(
-            "✅ Directory tree creation produces exactly one version per node with correct numbering"
+            "[OK] Directory tree creation produces exactly one version per node with correct numbering"
         );
     }
 }

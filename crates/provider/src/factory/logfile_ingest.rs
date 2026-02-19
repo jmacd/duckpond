@@ -211,9 +211,9 @@ pub async fn execute(
 
         if let Some(pond_active) = pond_files.get(active_filename) {
             // Check if rotation might have occurred:
-            // 1. File shrunk (classic case) → definitely rotated
-            // 2. File same size but content differs → rotated to same-size file (rare)
-            // 3. File grew → normal append, NO prefix check needed here (verified in ingest_append)
+            // 1. File shrunk (classic case) -> definitely rotated
+            // 2. File same size but content differs -> rotated to same-size file (rare)
+            // 3. File grew -> normal append, NO prefix check needed here (verified in ingest_append)
             let might_be_rotated = if host_active.size < pond_active.cumulative_size {
                 info!(
                     "Active file {} shrunk from {} to {} bytes - checking for rotation",

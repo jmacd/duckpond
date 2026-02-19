@@ -13,7 +13,7 @@
 //!
 //! ## How it works
 //!
-//! For single-block files (≤16KB), the outboard is empty and we validate by checking
+//! For single-block files (<=16KB), the outboard is empty and we validate by checking
 //! that the content hash matches the root hash (blake3).
 //!
 //! For multi-block files, we use `bao_tree::io::sync::valid_ranges()` to validate
@@ -97,7 +97,7 @@ impl BaoValidatingReader {
             return Ok(()); // Already validated
         }
 
-        // For files with a single block (≤16KB), the outboard is empty
+        // For files with a single block (<=16KB), the outboard is empty
         // In this case, validate by checking the content hash matches the root hash
         if self.outboard.data.is_empty() {
             let computed_hash = blake3::hash(&self.content);

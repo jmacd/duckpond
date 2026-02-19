@@ -109,7 +109,7 @@ async fn test_dynamic_nodes_not_supported() {
     assert!(result.is_err());
 }
 
-// ─── FS + WD integration tests ───────────────────────────────────────
+// --- FS + WD integration tests ---------------------------------------
 
 async fn create_test_fs() -> (TempDir, FS) {
     let dir = create_test_tree();
@@ -270,7 +270,7 @@ async fn test_deterministic_file_ids() {
     let fs2 = FS::new(persistence2).await.unwrap();
     let root2 = fs2.root().await.unwrap();
 
-    // Look up the same file in both — should get identical FileIDs
+    // Look up the same file in both -- should get identical FileIDs
     let np1 = root1
         .get("hello.txt")
         .await

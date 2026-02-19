@@ -371,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_layer_3_complete() -> Result<()> {
-        // Full Layer 3 integration test: URL → Provider → FormatProvider → TableProvider
+        // Full Layer 3 integration test: URL -> Provider -> FormatProvider -> TableProvider
         let fs = create_test_fs().await;
 
         // Create test CSV file in memory

@@ -13,9 +13,9 @@ pub const BANNER_WIDTH: usize = 64;
 #[must_use]
 pub fn format_banner_title(title: &str) -> String {
     let mut output = String::new();
-    output.push_str("╔════════════════════════════════════════════════════════════════╗\n");
-    output.push_str(&format!("║ {:<62} ║\n", title));
-    output.push_str("╚════════════════════════════════════════════════════════════════╝\n");
+    output.push_str("+================================================================+\n");
+    output.push_str(&format!("| {:<62} |\n", title));
+    output.push_str("+================================================================+\n");
     output
 }
 
@@ -37,11 +37,11 @@ pub fn format_banner_with_fields(
     let mut output = String::new();
 
     // Top border
-    output.push_str("╔════════════════════════════════════════════════════════════════╗\n");
+    output.push_str("+================================================================+\n");
 
     // Title line if provided
     if let Some(title_text) = title {
-        output.push_str(&format!("║ {:<62} ║\n", title_text));
+        output.push_str(&format!("| {:<62} |\n", title_text));
     }
 
     // Content lines
@@ -56,14 +56,14 @@ pub fn format_banner_with_fields(
                     // Text too long - just show left, truncated
                     let max_len = content_width - 3; // Leave room for "..."
                     if left.len() > max_len {
-                        output.push_str(&format!("║ {}... ║\n", &left[..max_len]));
+                        output.push_str(&format!("| {}... |\n", &left[..max_len]));
                     } else {
-                        output.push_str(&format!("║ {:<62} ║\n", left));
+                        output.push_str(&format!("| {:<62} |\n", left));
                     }
                 } else {
                     let spaces = content_width - total_text_len;
                     output.push_str(&format!(
-                        "║ {}{:width$}{} ║\n",
+                        "| {}{:width$}{} |\n",
                         left,
                         "",
                         right,
@@ -73,23 +73,23 @@ pub fn format_banner_with_fields(
             }
             (Some(left), None) => {
                 // Only left, left-justified
-                output.push_str(&format!("║ {:<62} ║\n", left));
+                output.push_str(&format!("| {:<62} |\n", left));
             }
             (None, Some(right)) => {
                 // Only right, right-justified
-                output.push_str(&format!("║ {:>62} ║\n", right));
+                output.push_str(&format!("| {:>62} |\n", right));
             }
             (None, None) => {
                 // Empty line
                 output.push_str(
-                    "║                                                                ║\n",
+                    "|                                                                |\n",
                 );
             }
         }
     }
 
     // Bottom border
-    output.push_str("╚════════════════════════════════════════════════════════════════╝\n");
+    output.push_str("+================================================================+\n");
 
     output
 }
@@ -183,8 +183,8 @@ mod tests {
     fn test_banner_title() {
         let output = format_banner_title("TEST TITLE");
         assert!(output.contains("TEST TITLE"));
-        assert!(output.contains("╔"));
-        assert!(output.contains("╚"));
+        assert!(output.contains("+"));
+        assert!(output.contains("+"));
     }
 
     #[test]

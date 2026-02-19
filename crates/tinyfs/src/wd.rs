@@ -421,7 +421,7 @@ impl WD {
     /// Remove an entry from this directory by name.
     ///
     /// Returns `Ok(())` if the entry was found and removed, `Err(NotFound)` otherwise.
-    /// The removed node is dropped — this is a destructive unlink.
+    /// The removed node is dropped -- this is a destructive unlink.
     pub async fn remove_entry(&self, name: &str) -> Result<()> {
         let _node = self
             .dref
@@ -785,7 +785,7 @@ impl WD {
                 WildcardComponent::Wildcard { .. } => {
                     let all_entries = self.get_entries().await?;
                     debug!(
-                        "🔍 Wildcard pattern: got {} total entries from directory {}",
+                        "[SEARCH] Wildcard pattern: got {} total entries from directory {}",
                         all_entries.len(),
                         self.id()
                     );
@@ -796,7 +796,7 @@ impl WD {
                         .filter(|entry| pattern[0].match_component(&entry.name).is_some())
                         .collect();
                     debug!(
-                        "🔍 Wildcard pattern: {} entries matched name pattern",
+                        "[SEARCH] Wildcard pattern: {} entries matched name pattern",
                         matching_entries.len()
                     );
 
@@ -805,7 +805,7 @@ impl WD {
                         if let Some(wildcard_captures) = pattern[0].match_component(&entry.name)
                             && let Some(child) = self.dref.get(&entry.name).await?
                         {
-                            debug!("🔍 Wildcard pattern: loaded child '{}'", entry.name);
+                            debug!("[SEARCH] Wildcard pattern: loaded child '{}'", entry.name);
                             // Add all captures from this wildcard component
                             let captures_count = wildcard_captures.len();
                             captured.extend(wildcard_captures);
@@ -898,7 +898,7 @@ impl WD {
         T: Send,
     {
         debug!(
-            "🔍 visit_match_with_visitor: child={}, pattern.len()={}",
+            "[SEARCH] visit_match_with_visitor: child={}, pattern.len()={}",
             child.id(),
             pattern.len()
         );
@@ -1078,7 +1078,7 @@ impl WD {
 
     /// Export a queryable file (series/table) as a parquet file on disk.
     ///
-    /// Uses DataFusion `COPY TO` internally — the caller does not need to
+    /// Uses DataFusion `COPY TO` internally -- the caller does not need to
     /// know about DataFusion at all.
     ///
     /// # Arguments

@@ -10,8 +10,8 @@
 //! - `scope-prefix` factory: Auto-generated rules for scope prefixing
 //!
 //! The implementation wraps any TableProvider and applies column renaming via:
-//! - Schema transformation (forward map: original → renamed)
-//! - Filter rewriting (reverse map: renamed → original for pushdown)
+//! - Schema transformation (forward map: original -> renamed)
+//! - Filter rewriting (reverse map: renamed -> original for pushdown)
 //! - Batch column renaming in ExecutionPlan
 
 use async_trait::async_trait;
@@ -55,16 +55,16 @@ pub struct ColumnRenameTableProvider {
     /// The underlying table provider
     inner: Arc<dyn TableProvider>,
 
-    /// Function to rename columns (original → renamed)
+    /// Function to rename columns (original -> renamed)
     rename_fn: ColumnRenameFunc,
 
-    /// Optional type casts to apply: renamed_column → type_name (e.g., "timestamp")
+    /// Optional type casts to apply: renamed_column -> type_name (e.g., "timestamp")
     cast_map: ColumnCastMap,
 
     /// Cached renamed schema
     schema: SchemaRef,
 
-    /// Reverse mapping: renamed → original (for filter pushdown)
+    /// Reverse mapping: renamed -> original (for filter pushdown)
     reverse_map: HashMap<String, String>,
 }
 
@@ -74,7 +74,7 @@ impl ColumnRenameTableProvider {
     /// # Arguments
     /// * `inner` - The underlying table provider to wrap
     /// * `rename_fn` - Function that maps original column names to renamed names
-    /// * `cast_map` - Optional map of renamed columns to cast types (e.g., "timestamp" → "timestamp")
+    /// * `cast_map` - Optional map of renamed columns to cast types (e.g., "timestamp" -> "timestamp")
     pub fn new(
         inner: Arc<dyn TableProvider>,
         rename_fn: ColumnRenameFunc,

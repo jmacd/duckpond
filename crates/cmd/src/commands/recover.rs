@@ -30,9 +30,9 @@ pub async fn recover_command(ship_context: &ShipContext) -> Result<()> {
     // Report results
     if recovery_result.was_needed {
         let recovered_count = recovery_result.recovered_count;
-        info!("✅ Recovery completed: {recovered_count} transaction(s) recovered");
+        info!("[OK] Recovery completed: {recovered_count} transaction(s) recovered");
     } else {
-        info!("✅ No recovery needed - pond is consistent");
+        info!("[OK] No recovery needed - pond is consistent");
     }
 
     // Verify recovery was successful by checking if further recovery is needed
@@ -43,6 +43,6 @@ pub async fn recover_command(ship_context: &ShipContext) -> Result<()> {
         e => anyhow!("Post-recovery verification failed: {}", e),
     })?;
 
-    info!("✅ Recovery command completed successfully");
+    info!("[OK] Recovery command completed successfully");
     Ok(())
 }

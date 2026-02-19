@@ -5,11 +5,11 @@
 //! TinyFS path handling utilities for ObjectStore integration
 //!
 //! Provides centralized path building for TinyFS files in ObjectStore contexts,
-//! following the partition → node → version hierarchy.
+//! following the partition -> node -> version hierarchy.
 
 use tinyfs::FileID;
 
-/// Centralized TinyFS path handling following partition → node → version hierarchy
+/// Centralized TinyFS path handling following partition -> node -> version hierarchy
 pub struct TinyFsPathBuilder;
 
 impl TinyFsPathBuilder {

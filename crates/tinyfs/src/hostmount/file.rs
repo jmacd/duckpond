@@ -16,7 +16,7 @@ use tokio::io::AsyncWrite;
 /// Represents a file backed by a host filesystem file.
 ///
 /// Reads and writes go directly to the host file. No versioning,
-/// no bao-tree integrity, no OpLog — just plain file I/O.
+/// no bao-tree integrity, no OpLog -- just plain file I/O.
 ///
 /// `host_path` is `None` when the node has been created by
 /// `create_file_node` but not yet inserted into a directory (the path
@@ -99,7 +99,7 @@ impl HostFile {
         }
     }
 
-    /// Create a HostFile with no path yet — must be resolved via `set_path`
+    /// Create a HostFile with no path yet -- must be resolved via `set_path`
     /// before any I/O is attempted.
     #[must_use]
     pub fn new_pending(id: FileID) -> Self {
@@ -141,7 +141,7 @@ impl HostFile {
     fn require_path(&self) -> error::Result<&PathBuf> {
         self.host_path.as_ref().ok_or_else(|| {
             error::Error::Other(format!(
-                "HostFile {} has no path — node was created but not yet \
+                "HostFile {} has no path -- node was created but not yet \
                  inserted into a directory",
                 self.id
             ))

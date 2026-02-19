@@ -12,8 +12,8 @@
 //! logic that can be applied to a TableProvider.
 //!
 //! The configuration supports:
-//! - Direct column name mappings: "DateTime" → "timestamp"
-//! - Regex pattern replacements: "Name (Unit)" → "Name.Unit"
+//! - Direct column name mappings: "DateTime" -> "timestamp"
+//! - Regex pattern replacements: "Name (Unit)" -> "Name.Unit"
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ pub enum RenameRule {
     ///   pattern: "^(.+) \\((.+)\\)$"
     ///   replacement: "$1.$2"
     /// ```
-    /// This transforms "Temperature (C)" → "Temperature.C"
+    /// This transforms "Temperature (C)" -> "Temperature.C"
     #[serde(rename = "pattern")]
     Pattern {
         pattern: String,
@@ -120,7 +120,7 @@ impl ColumnRenameConfig {
 
     /// Create a forward mapping of column renames
     ///
-    /// Returns HashMap: original_name → renamed_name (only for columns that change)
+    /// Returns HashMap: original_name -> renamed_name (only for columns that change)
     #[must_use]
     pub fn create_forward_map(&self, column_names: &[String]) -> HashMap<String, String> {
         let mut map = HashMap::new();
@@ -137,7 +137,7 @@ impl ColumnRenameConfig {
 
     /// Create a reverse mapping of column renames
     ///
-    /// Returns HashMap: renamed_name → original_name (for filter pushdown)
+    /// Returns HashMap: renamed_name -> original_name (for filter pushdown)
     #[must_use]
     pub fn create_reverse_map(&self, column_names: &[String]) -> HashMap<String, String> {
         let mut map = HashMap::new();
@@ -154,7 +154,7 @@ impl ColumnRenameConfig {
 
     /// Build a map of columns that need type casting
     ///
-    /// Returns HashMap: renamed_column_name → cast_type_name
+    /// Returns HashMap: renamed_column_name -> cast_type_name
     #[must_use]
     pub fn build_cast_map(&self, column_names: Vec<&str>) -> HashMap<String, String> {
         let mut cast_map = HashMap::new();

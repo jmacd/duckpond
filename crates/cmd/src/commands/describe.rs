@@ -109,7 +109,7 @@ async fn describe_provider_url(
 
         for field_info in &schema_info.fields {
             output.push_str(&format!(
-                "  • {}: {}\n",
+                "  * {}: {}\n",
                 field_info.name, field_info.data_type
             ));
         }
@@ -159,7 +159,7 @@ async fn describe_command_impl(
     output.push_str(&format!("Files found: {}\n\n", files.len()));
 
     for file_info in files {
-        output.push_str(&format!("📄 {}\n", file_info.path));
+        output.push_str(&format!("[FILE] {}\n", file_info.path));
         output.push_str(&format!("   Type: {:?}\n", file_info.metadata.entry_type));
 
         match file_info.metadata.entry_type {
@@ -171,7 +171,7 @@ async fn describe_command_impl(
                             .push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
                         for field_info in schema_info.fields {
                             output.push_str(&format!(
-                                "     • {}: {}\n",
+                                "     * {}: {}\n",
                                 field_info.name, field_info.data_type
                             ));
                         }
@@ -262,7 +262,7 @@ async fn describe_command_impl(
                             .push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
                         for field_info in schema_info.fields {
                             output.push_str(&format!(
-                                "     • {}: {}\n",
+                                "     * {}: {}\n",
                                 field_info.name, field_info.data_type
                             ));
                         }
@@ -858,11 +858,11 @@ mod tests {
 
         let output = setup.describe_output("users.parquet").await?;
 
-        assert!(output.contains("📄 /users.parquet"));
+        assert!(output.contains("[FILE] /users.parquet"));
         assert!(output.contains("Type: TablePhysicalVersion"));
         let output = setup.describe_output("users.parquet").await?;
 
-        assert!(output.contains("📄 /users.parquet"));
+        assert!(output.contains("[FILE] /users.parquet"));
         assert!(output.contains("Type: TablePhysicalVersion"));
         assert!(output.contains("Format: Parquet table"));
         // Schema parsing might fail in tests, so be more flexible
@@ -884,7 +884,7 @@ mod tests {
 
         let output = setup.describe_output("sensors.parquet").await?;
 
-        assert!(output.contains("📄 /sensors.parquet"));
+        assert!(output.contains("[FILE] /sensors.parquet"));
         assert!(output.contains("Type: TablePhysicalSeries"));
         assert!(output.contains("Format: Parquet series"));
         // Schema parsing might fail in tests, so be more flexible
@@ -911,9 +911,9 @@ mod tests {
         let output = setup.describe_output("**/*").await?;
 
         assert!(output.contains("Files found: 3"));
-        assert!(output.contains("📄 /readme.txt"));
-        assert!(output.contains("📄 /series1.parquet"));
-        assert!(output.contains("📄 /table1.parquet"));
+        assert!(output.contains("[FILE] /readme.txt"));
+        assert!(output.contains("[FILE] /series1.parquet"));
+        assert!(output.contains("[FILE] /table1.parquet"));
 
         // Check that different types are described correctly
         assert!(output.contains("Type: TablePhysicalVersion"));

@@ -43,13 +43,13 @@ async fn test_double_wildcard_root_bug() {
 
     // Create a test directory structure:
     // /
-    // ├── file1.txt
-    // ├── file2.txt
-    // ├── subdir1/
-    // │   ├── file3.txt
-    // │   └── file4.txt
-    // └── subdir2/
-    //     └── file5.txt
+    // |-- file1.txt
+    // |-- file2.txt
+    // |-- subdir1/
+    // |   |-- file3.txt
+    // |   +-- file4.txt
+    // +-- subdir2/
+    //     +-- file5.txt
 
     // Create files at root
     _ = convenience::create_file_path(&root, "/file1.txt", b"content1")
@@ -142,11 +142,11 @@ async fn test_double_wildcard_non_root() {
 
     // Create test structure:
     // /
-    // └── testdir/
-    //     ├── file1.txt
-    //     ├── file2.txt
-    //     └── subdir/
-    //         └── file3.txt
+    // +-- testdir/
+    //     |-- file1.txt
+    //     |-- file2.txt
+    //     +-- subdir/
+    //         +-- file3.txt
 
     _ = root.create_dir_path("/testdir").await.unwrap();
     _ = convenience::create_file_path(&root, "/testdir/file1.txt", b"content1")

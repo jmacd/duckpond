@@ -66,7 +66,7 @@ pub fn extract_temporal_bounds_from_batch(
             .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
         let max = arrow::compute::max::<TimestampSecondType>(ts_array)
             .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
-        // Convert seconds → microseconds
+        // Convert seconds -> microseconds
         return Ok((min * 1_000_000, max * 1_000_000));
     }
 
@@ -79,7 +79,7 @@ pub fn extract_temporal_bounds_from_batch(
             .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
         let max = arrow::compute::max::<TimestampMillisecondType>(ts_array)
             .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
-        // Convert milliseconds → microseconds
+        // Convert milliseconds -> microseconds
         return Ok((min * 1_000, max * 1_000));
     }
 
@@ -104,7 +104,7 @@ pub fn extract_temporal_bounds_from_batch(
             .ok_or_else(|| crate::Error::Other("No min value in timestamp column".into()))?;
         let max = arrow::compute::max::<TimestampNanosecondType>(ts_array)
             .ok_or_else(|| crate::Error::Other("No max value in timestamp column".into()))?;
-        // Convert nanoseconds → microseconds
+        // Convert nanoseconds -> microseconds
         return Ok((min / 1_000, max / 1_000));
     }
 
@@ -549,7 +549,7 @@ impl ParquetExt for WD {
             }
             None => {
                 return Err(crate::Error::Other(
-                    "Empty stream — no data to write".to_string(),
+                    "Empty stream -- no data to write".to_string(),
                 ));
             }
         };
@@ -679,7 +679,7 @@ mod tests {
             assert_eq!(original, read);
         }
 
-        debug!("✅ Full ParquetExt ForArrow roundtrip successful!");
+        debug!("[OK] Full ParquetExt ForArrow roundtrip successful!");
         Ok(())
     }
 
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(batch.num_rows(), read_batch.num_rows());
         assert_eq!(batch.num_columns(), read_batch.num_columns());
 
-        debug!("✅ Low-level RecordBatch operations successful!");
+        debug!("[OK] Low-level RecordBatch operations successful!");
         Ok(())
     }
 
@@ -729,7 +729,7 @@ mod tests {
         assert_eq!(min, 100);
         assert_eq!(max, 500);
 
-        debug!("✅ Temporal bounds extraction using Arrow kernels works!");
+        debug!("[OK] Temporal bounds extraction using Arrow kernels works!");
         Ok(())
     }
 
@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(large_data[1000], read_data[1000]);
         assert_eq!(large_data[2499], read_data[2499]);
 
-        debug!("✅ Large dataset batching successful!");
+        debug!("[OK] Large dataset batching successful!");
         Ok(())
     }
 
@@ -798,7 +798,7 @@ mod tests {
         assert_eq!(test_data, table_data);
         assert_eq!(test_data, data_data);
 
-        debug!("✅ Entry type integration successful!");
+        debug!("[OK] Entry type integration successful!");
         Ok(())
     }
 
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(min1, 100);
         assert_eq!(max1, 200);
         debug!(
-            "✅ First write (create) successful: min={}, max={}",
+            "[OK] First write (create) successful: min={}, max={}",
             min1, max1
         );
 
@@ -854,11 +854,11 @@ mod tests {
         assert_eq!(min2, 300);
         assert_eq!(max2, 400);
         debug!(
-            "✅ Second write (append) successful: min={}, max={}",
+            "[OK] Second write (append) successful: min={}, max={}",
             min2, max2
         );
 
-        debug!("✅ write_series_from_batch handles both create and append!");
+        debug!("[OK] write_series_from_batch handles both create and append!");
         Ok(())
     }
 }

@@ -64,7 +64,7 @@ async fn test_large_file_content_reconstruction() -> Result<(), Box<dyn std::err
     .await?;
     tx.commit_test().await?;
 
-    debug!("✅ Large file stored successfully");
+    debug!("[OK] Large file stored successfully");
 
     // Read the file back through the TinyFS API
     let tx2 = persistence.begin_test().await?;
@@ -89,7 +89,7 @@ async fn test_large_file_content_reconstruction() -> Result<(), Box<dyn std::err
         "Reconstructed content must match original exactly"
     );
 
-    debug!("✅ Content reconstruction successful!");
+    debug!("[OK] Content reconstruction successful!");
     debug!("   Original: {} bytes", original_content.len());
     debug!("   Reconstructed: {} bytes", reconstructed_content.len());
     debug!("   Content verified: identical");
@@ -152,10 +152,10 @@ async fn test_large_file_size_consistency() -> Result<(), Box<dyn std::error::Er
     // Verify content is correct
     assert_eq!(read_content, original_content);
 
-    debug!("✅ Size consistency verified!");
+    debug!("[OK] Size consistency verified!");
     debug!("   Original size: {} bytes", original_content.len());
     debug!("   Read size: {} bytes", actual_size);
-    debug!("   Match: ✓");
+    debug!("   Match: [OK]");
 
     tx2.commit_test().await?;
     Ok(())
@@ -209,7 +209,7 @@ async fn test_large_file_multiple_reads() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(read3.len(), original_content.len());
     assert_eq!(read3, original_content);
 
-    debug!("✅ Multiple reads successful and consistent!");
+    debug!("[OK] Multiple reads successful and consistent!");
     debug!(
         "   All {} reads returned {} bytes",
         3,

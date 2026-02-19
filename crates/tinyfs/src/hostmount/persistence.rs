@@ -19,15 +19,15 @@ use tokio::sync::Mutex;
 /// The root FileID maps to the configured host root directory.
 /// Child FileIDs are deterministic (computed from path via `FileID::from_content`).
 ///
-/// A registry maps `FileID` → host path so that `load_node` can reconstruct
+/// A registry maps `FileID` -> host path so that `load_node` can reconstruct
 /// nodes from their IDs. The registry is populated as directories are listed
 /// and nodes are created.
 pub struct HostmountPersistence {
     /// The host directory that maps to TinyFS root `/`
     root_path: PathBuf,
-    /// FileID → host path mapping, populated as nodes are discovered
+    /// FileID -> host path mapping, populated as nodes are discovered
     path_registry: Arc<Mutex<HashMap<FileID, PathBuf>>>,
-    /// Transaction state (no-op for hostmount — no real transactions)
+    /// Transaction state (no-op for hostmount -- no real transactions)
     txn_state: Arc<TransactionState>,
 }
 
@@ -61,7 +61,7 @@ impl HostmountPersistence {
         })
     }
 
-    /// Register a FileID → host path mapping.
+    /// Register a FileID -> host path mapping.
     ///
     /// Called internally when nodes are constructed (by HostDirectory::get/entries)
     /// so that future `load_node` calls can reconstruct them.
@@ -135,7 +135,7 @@ impl PersistenceLayer for HostmountPersistence {
     }
 
     async fn create_file_node(&self, id: FileID) -> Result<Node> {
-        // Create a HostFile node — the actual file on disk is created
+        // Create a HostFile node -- the actual file on disk is created
         // by Directory::insert, not here. This just returns the Node.
         let registry = self.path_registry.lock().await;
         let path = registry.get(&id).cloned();
@@ -147,7 +147,7 @@ impl PersistenceLayer for HostmountPersistence {
                 NodeType::File(super::HostFile::new_handle(p, id)),
             )),
             None => {
-                // Path unknown — the file will be placed by Directory::insert
+                // Path unknown -- the file will be placed by Directory::insert
                 // which calls HostFile::set_path through the shared Handle.
                 Ok(Node::new(
                     id,
@@ -168,7 +168,7 @@ impl PersistenceLayer for HostmountPersistence {
                 NodeType::Directory(super::HostDirectory::new_handle(p, id)),
             )),
             None => {
-                // Path unknown — the directory will be placed by Directory::insert
+                // Path unknown -- the directory will be placed by Directory::insert
                 // which calls HostDirectory::set_path through the shared Handle.
                 Ok(Node::new(
                     id,
@@ -249,7 +249,7 @@ impl PersistenceLayer for HostmountPersistence {
     }
 
     async fn list_file_versions(&self, id: FileID) -> Result<Vec<FileVersionInfo>> {
-        // Host files have exactly one "version" — the current file content
+        // Host files have exactly one "version" -- the current file content
         let registry = self.path_registry.lock().await;
         let path = registry.get(&id).ok_or(Error::IDNotFound(id))?.clone();
         drop(registry);

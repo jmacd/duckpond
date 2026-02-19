@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Site configuration — parsed from `/etc/site.yaml` inside the pond.
+//! Site configuration -- parsed from `/etc/site.yaml` inside the pond.
 
 use serde::{Deserialize, Serialize};
 
@@ -90,7 +90,7 @@ pub struct ExportStage {
     /// Pond glob pattern (e.g., "/reduced/single_param/*/*.series")
     pub pattern: String,
     /// Target data points per screen width for partition sizing.
-    /// Typical value: 1000–2000. Default: 1500.
+    /// Typical value: 1000-2000. Default: 1500.
     /// Controls how parquet files are temporally partitioned per resolution.
     #[serde(default = "default_target_points")]
     pub target_points: u64,
@@ -108,7 +108,7 @@ pub struct RouteConfig {
     /// "static" or "template"
     #[serde(rename = "type")]
     pub route_type: RouteType,
-    /// URL slug — may contain `$0`, `$1` for template routes
+    /// URL slug -- may contain `$0`, `$1` for template routes
     pub slug: String,
     /// Pond path to markdown page (e.g., "/etc/site/index.md")
     #[serde(default)]

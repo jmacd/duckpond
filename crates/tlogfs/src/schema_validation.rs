@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// * `Err(String)` with detailed error message if validation fails
 pub fn validate_fileseries_timestamp(schema: &Arc<Schema>, context: &str) -> Result<(), String> {
     log::debug!(
-        "🔍 SCHEMA VALIDATION for '{}': Schema has {} fields",
+        "[SEARCH] SCHEMA VALIDATION for '{}': Schema has {} fields",
         context,
         schema.fields().len()
     );
@@ -33,7 +33,7 @@ pub fn validate_fileseries_timestamp(schema: &Arc<Schema>, context: &str) -> Res
     // Log all field information for debugging
     for (i, field) in schema.fields().iter().enumerate() {
         log::debug!(
-            "🔍   Field {}: name='{}', data_type={:?}, nullable={}",
+            "[SEARCH]   Field {}: name='{}', data_type={:?}, nullable={}",
             i,
             field.name(),
             field.data_type(),
@@ -45,14 +45,14 @@ pub fn validate_fileseries_timestamp(schema: &Arc<Schema>, context: &str) -> Res
     match schema.field_with_name("timestamp") {
         Ok(timestamp_field) => {
             log::debug!(
-                "🔍 TIMESTAMP FIELD: name='{}', data_type={:?}, nullable={}",
+                "[SEARCH] TIMESTAMP FIELD: name='{}', data_type={:?}, nullable={}",
                 timestamp_field.name(),
                 timestamp_field.data_type(),
                 timestamp_field.is_nullable()
             );
 
             if timestamp_field.is_nullable() {
-                log::error!("❌ NULLABLE TIMESTAMP DETECTED in '{}'", context);
+                log::error!("[ERR] NULLABLE TIMESTAMP DETECTED in '{}'", context);
                 return Err(format!(
                     "FileSeries schema violation in '{}': timestamp column is nullable. \
                     FileSeries must have non-nullable timestamp columns for temporal partitioning. \
@@ -63,11 +63,11 @@ pub fn validate_fileseries_timestamp(schema: &Arc<Schema>, context: &str) -> Res
                 ));
             }
 
-            log::debug!("✅ Timestamp column is non-nullable - schema validation passed");
+            log::debug!("[OK] Timestamp column is non-nullable - schema validation passed");
             Ok(())
         }
         Err(_) => {
-            log::error!("❌ NO TIMESTAMP COLUMN found in '{}'", context);
+            log::error!("[ERR] NO TIMESTAMP COLUMN found in '{}'", context);
             Err(format!(
                 "FileSeries schema error in '{}': no timestamp column found",
                 context

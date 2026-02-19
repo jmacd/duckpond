@@ -208,7 +208,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("test.txt"));
-        assert!(results[0].contains("📄")); // FileData emoji
+        assert!(results[0].contains("[FILE]")); // FileData emoji
     }
 
     #[tokio::test]
@@ -295,7 +295,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("testdir"));
-        assert!(results[0].contains("📁")); // Directory emoji
+        assert!(results[0].contains("[DIR]")); // Directory emoji
     }
 
     #[tokio::test]

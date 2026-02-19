@@ -20,9 +20,9 @@
 //! let output = format_tree(&root);
 //! // Produces:
 //! // root
-//! // ├── child1
-//! // └── child2
-//! //     └── grandchild
+//! // |-- child1
+//! // +-- child2
+//! //     +-- grandchild
 //! ```
 
 use std::fmt;
@@ -88,21 +88,21 @@ fn format_children(output: &mut String, children: &[TreeNode], prefix: &str) {
         let is_last = index == child_count - 1;
 
         // Choose the appropriate connector
-        // If this child has children of its own, use a tee connector (├─┬ or └─┬)
-        // Otherwise use a simple connector (├── or └──)
+        // If this child has children of its own, use a tee connector (|-+ or +-+)
+        // Otherwise use a simple connector (|-- or +--)
         let (connector, continuation_char) = if child.children.is_empty() {
             // Leaf node: simple connector
             if is_last {
-                ("└──", ' ')
+                ("+--", ' ')
             } else {
-                ("├──", '│')
+                ("|--", '|')
             }
         } else {
             // Has children: use tee connector
             if is_last {
-                ("└─┬", ' ')
+                ("+-+", ' ')
             } else {
-                ("├─┬", '│')
+                ("|-+", '|')
             }
         };
 
@@ -128,7 +128,7 @@ fn format_children(output: &mut String, children: &[TreeNode], prefix: &str) {
 
         // Recursively format children with updated prefix
         if !child.children.is_empty() {
-            // The new prefix continues with the continuation character (│ or space)
+            // The new prefix continues with the continuation character (| or space)
             let new_prefix = format!("{}{} ", prefix, continuation_char);
             format_children(output, &child.children, &new_prefix);
         }
@@ -154,8 +154,8 @@ mod tests {
 
         let output = format_tree(&root);
         assert!(output.contains("root"));
-        assert!(output.contains("├── child1"));
-        assert!(output.contains("└── child2"));
+        assert!(output.contains("|-- child1"));
+        assert!(output.contains("+-- child2"));
     }
 
     #[test]
@@ -166,9 +166,9 @@ mod tests {
 
         let output = format_tree(&root);
         assert!(output.contains("root"));
-        assert!(output.contains("├─┬ child1"));
-        assert!(output.contains("│ └── grandchild1"));
-        assert!(output.contains("└── child2"));
+        assert!(output.contains("|-+ child1"));
+        assert!(output.contains("| +-- grandchild1"));
+        assert!(output.contains("+-- child2"));
     }
 
     #[test]
@@ -178,9 +178,9 @@ mod tests {
         );
 
         let output = format_tree(&root);
-        assert!(output.contains("└─┬ a"));
-        assert!(output.contains("  └─┬ b"));
-        assert!(output.contains("    └── c"));
+        assert!(output.contains("+-+ a"));
+        assert!(output.contains("  +-+ b"));
+        assert!(output.contains("    +-- c"));
     }
 
     #[test]
@@ -197,11 +197,11 @@ mod tests {
         debug!("Output:\n{}", output);
 
         // Verify structure with tee connectors
-        assert!(output.contains("├─┬ a"));
-        assert!(output.contains("│ ├── a1"));
-        assert!(output.contains("│ └── a2"));
-        assert!(output.contains("└─┬ b"));
-        assert!(output.contains("  └── b1"));
+        assert!(output.contains("|-+ a"));
+        assert!(output.contains("| |-- a1"));
+        assert!(output.contains("| +-- a2"));
+        assert!(output.contains("+-+ b"));
+        assert!(output.contains("  +-- b1"));
     }
 
     #[test]
@@ -209,8 +209,8 @@ mod tests {
         let root = TreeNode::new("root").with_child(TreeNode::new("only_child"));
 
         let output = format_tree(&root);
-        assert!(output.contains("└── only_child"));
+        assert!(output.contains("+-- only_child"));
         // Leaf node should use simple connector, not tee
-        assert!(!output.contains("└─┬"));
+        assert!(!output.contains("+-+"));
     }
 }

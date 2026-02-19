@@ -4,7 +4,7 @@
 
 //! Markdown rendering and shortcode expansion for sitegen.
 //!
-//! Uses pulldown-cmark directly for markdown → HTML conversion, and a simple
+//! Uses pulldown-cmark directly for markdown -> HTML conversion, and a simple
 //! `{{ name key="value" /}}` shortcode system for template expansion.
 //!
 //! ## Why not maudit?
@@ -17,7 +17,7 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, html::push_html};
 use std::collections::HashMap;
 
-// ─── Markdown rendering ──────────────────────────────────────────────────────
+// --- Markdown rendering ------------------------------------------------------
 
 /// Render markdown to HTML.
 ///
@@ -27,13 +27,13 @@ use std::collections::HashMap;
 ///
 /// ## Script block extraction
 ///
-/// `<script>…</script>` blocks are extracted before markdown parsing and
+/// `<script>...</script>` blocks are extracted before markdown parsing and
 /// re-inserted afterwards.  This works around a CommonMark spec interaction
 /// where a preceding type-6 HTML block (e.g. `<link>`) absorbs a `<script>`
 /// tag on the next line; the first blank line inside the script then ends
 /// the type-6 block and the remaining JS is parsed as regular markdown.
 pub fn render_markdown(content: &str) -> String {
-    // Extract <script>…</script> blocks before markdown parsing.
+    // Extract <script>...</script> blocks before markdown parsing.
     let (processed, scripts) = extract_scripts(content);
 
     let options =
@@ -117,7 +117,7 @@ fn inject_heading_anchors<'a>(parser: Parser<'a>) -> Vec<Event<'a>> {
                     for e in heading_events.drain(..).skip(1) {
                         events.push(e);
                     }
-                    // Anchor link (h2+ only — h1 is the page title)
+                    // Anchor link (h2+ only -- h1 is the page title)
                     if level_num >= 2 {
                         events.push(Event::Html(
                             format!(
@@ -129,7 +129,7 @@ fn inject_heading_anchors<'a>(parser: Parser<'a>) -> Vec<Event<'a>> {
                     }
                     events.push(Event::Html(format!("</h{}>", level_num).into()));
                 } else {
-                    // No slug — pass through unchanged
+                    // No slug -- pass through unchanged
                     events.append(&mut heading_events);
                     events.push(event);
                 }
@@ -155,7 +155,7 @@ fn inject_heading_anchors<'a>(parser: Parser<'a>) -> Vec<Event<'a>> {
     events
 }
 
-/// Pull out every `<script …>…</script>` span, replacing each with an
+/// Pull out every `<script ...>...</script>` span, replacing each with an
 /// HTML-comment placeholder that pulldown-cmark passes through untouched
 /// (CommonMark type-2 HTML block).
 fn extract_scripts(content: &str) -> (String, Vec<String>) {
@@ -181,7 +181,7 @@ fn extract_scripts(content: &str) -> (String, Vec<String>) {
             scripts.push(remaining[start..end].to_string());
             remaining = &remaining[end..];
         } else {
-            // No closing tag — pass rest through as-is.
+            // No closing tag -- pass rest through as-is.
             break;
         }
     }
@@ -199,7 +199,7 @@ fn restore_scripts(html: &mut String, scripts: &[String]) {
     }
 }
 
-// ─── Shortcodes ──────────────────────────────────────────────────────────────
+// --- Shortcodes --------------------------------------------------------------
 
 /// A registered shortcode function.
 pub type ShortcodeFn = Box<dyn Fn(&ShortcodeArgs) -> String + Send + Sync>;
@@ -257,7 +257,7 @@ pub fn preprocess_shortcodes(
     let mut rest = content;
 
     while let Some(start) = rest.find("{{") {
-        // Escaped \{{ → literal
+        // Escaped \{{ -> literal
         if start > 0 && rest.as_bytes()[start - 1] == b'\\' {
             output.push_str(&rest[..start - 1]);
             output.push_str("{{");
@@ -314,7 +314,7 @@ pub fn preprocess_shortcodes(
             }
             rest = after_tag;
         } else {
-            // Block shortcode — find closing tag
+            // Block shortcode -- find closing tag
             let close_compact = format!("{{{{/{}}}}}", name);
             let close_spaced = format!("{{{{ /{} }}}}", name);
 
@@ -352,7 +352,7 @@ pub fn preprocess_shortcodes(
     Ok(output)
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// --- Helpers -----------------------------------------------------------------
 
 /// Valid shortcode name: `[A-Za-z_][A-Za-z0-9_]+`
 fn is_valid_name(name: &str) -> bool {
@@ -530,7 +530,7 @@ console.log("Script loaded successfully");
         assert!(html.contains("<script>real</script>"));
     }
 
-    /// Noyo index.md pattern: markdown → div → markdown → link + script (no
+    /// Noyo index.md pattern: markdown -> div -> markdown -> link + script (no
     /// blank lines in the script body).
     #[test]
     fn test_render_markdown_noyo_index() {

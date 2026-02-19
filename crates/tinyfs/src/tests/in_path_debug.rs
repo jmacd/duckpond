@@ -45,8 +45,8 @@ mod in_path_tests {
         debug!("in_path call completed");
 
         match result {
-            Ok(()) => debug!("✅ Test passed"),
-            Err(e) => debug!("❌ Test failed: {}", e),
+            Ok(()) => debug!("[OK] Test passed"),
+            Err(e) => debug!("[ERR] Test failed: {}", e),
         }
     }
 
@@ -76,8 +76,8 @@ mod in_path_tests {
                 .await;
 
             match result {
-                Ok(()) => debug!("  ✅ Path '{}' completed", path),
-                Err(e) => debug!("  ❌ Path '{}' failed: {}", path, e),
+                Ok(()) => debug!("  [OK] Path '{}' completed", path),
+                Err(e) => debug!("  [ERR] Path '{}' failed: {}", path, e),
             }
         }
     }

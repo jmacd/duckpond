@@ -292,7 +292,7 @@ impl TemplateDirectory {
     }
 
     /// Build hierarchical export structure from pattern matches
-    /// Groups matches by their capture structure (e.g., param/site → name → resolution)
+    /// Groups matches by their capture structure (e.g., param/site -> name -> resolution)
     fn build_matches_export(&self, matches: &[(PathBuf, Vec<String>)]) -> Value {
         use serde_json::Map;
 
@@ -448,7 +448,7 @@ impl TemplateFile {
             .expect("template_variables lock not poisoned")
             .clone();
         debug!(
-            "🎨 RENDER: Fresh template variables during rendering: {:?}",
+            "[FMT] RENDER: Fresh template variables during rendering: {:?}",
             fresh_template_variables.keys().collect::<Vec<_>>()
         );
 
@@ -481,7 +481,7 @@ impl TemplateFile {
             // Add all fresh template variables to context (vars, export, and any other keys)
             for (key, value) in fresh_template_variables {
                 context.insert(&key, &value);
-                debug!("🎨 RENDER: Added '{}' to template context", key);
+                debug!("[FMT] RENDER: Added '{}' to template context", key);
             }
 
             // @@@ Terrible!
@@ -495,7 +495,7 @@ impl TemplateFile {
             // - If args is non-empty (parameterized templates like param=$0.html), use pipeline's export
             //   These templates need the export context from the export command (files, schema, etc.)
             info!(
-                "🎨 EXPORT DECISION: args.is_empty()={}, matches_export.is_null()={}, args={:?}",
+                "[FMT] EXPORT DECISION: args.is_empty()={}, matches_export.is_null()={}, args={:?}",
                 args.is_empty(),
                 matches_export.is_null(),
                 args
@@ -503,21 +503,21 @@ impl TemplateFile {
             if args.is_empty() && !matches_export.is_null() {
                 // Literal templates use their own pattern-matched context
                 context.insert("export", &matches_export);
-                info!("🎨 RENDER: Added 'export' from in_pattern matches (literal template)");
+                info!("[FMT] RENDER: Added 'export' from in_pattern matches (literal template)");
             } else if !context.contains_key("export") && !matches_export.is_null() {
                 // Fallback: use matches_export if pipeline didn't provide export
                 context.insert("export", &matches_export);
                 debug!(
-                    "🎨 RENDER: Added 'export' from in_pattern matches (fallback): {:?}",
+                    "[FMT] RENDER: Added 'export' from in_pattern matches (fallback): {:?}",
                     matches_export
                 );
             } else {
                 info!(
-                    "🎨 RENDER: NOT overriding export - args non-empty or matches_export is null"
+                    "[FMT] RENDER: NOT overriding export - args non-empty or matches_export is null"
                 );
             }
 
-            debug!("🎨 RENDER: Template context ready");
+            debug!("[FMT] RENDER: Template context ready");
             debug!("Template context setup complete - vars and export guaranteed available");
             debug!("Template content: {}", template_content);
             debug!("Template context has export data available");
@@ -777,13 +777,13 @@ fn count_error_chain_levels(err: &dyn std::error::Error) -> usize {
 
 /// Print complete error chain with proper formatting (from Tera diagnostics report)
 fn print_error_chain(err: &dyn std::error::Error) {
-    error!("  → {}", err);
+    error!("  -> {}", err);
 
     let mut source = err.source();
     let mut level = 1;
 
     while let Some(err) = source {
-        error!("  ├─ Level {}: {}", level, err);
+        error!("  |- Level {}: {}", level, err);
         source = err.source();
         level += 1;
     }

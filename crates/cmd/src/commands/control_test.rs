@@ -636,7 +636,7 @@ repeat_count: 1
     );
 
     println!(
-        "✓ Record counts: {} pending, {} started, {} completed, {} failed",
+        "[OK] Record counts: {} pending, {} started, {} completed, {} failed",
         pending_count, started_count, completed_count, failed_count
     );
 
@@ -678,7 +678,7 @@ repeat_count: 1
         "Execution sequences should be 1, 2, 3"
     );
 
-    println!("✓ Pending records have correct factory details and sequencing");
+    println!("[OK] Pending records have correct factory details and sequencing");
 
     // ========================================================================
     // VERIFY FAILED RECORD (Error message and duration captured)
@@ -718,7 +718,7 @@ repeat_count: 1
         "Failed record should be for execution_seq=2 (middle factory)"
     );
 
-    println!("✓ Failed record has error_message and duration_ms");
+    println!("[OK] Failed record has error_message and duration_ms");
     println!("  Error: {}", error_msg);
     println!("  Duration: {} ms", failed_record.duration_ms.unwrap());
 
@@ -758,7 +758,7 @@ repeat_count: 1
         "Factories 1 and 3 should have completed successfully"
     );
 
-    println!("✓ Completed records (exec_seq 1, 3) have duration_ms, no errors");
+    println!("[OK] Completed records (exec_seq 1, 3) have duration_ms, no errors");
 
     // ========================================================================
     // VERIFY POND CONTROL COMMAND WORKS
@@ -778,7 +778,7 @@ repeat_count: 1
         .await
         .expect("pond control incomplete should not fail");
 
-    println!("\n✅ Independent execution test PASSED");
+    println!("\n[OK] Independent execution test PASSED");
     println!("   - 3 factories executed independently");
     println!("   - 1 failure did not block other factories");
     println!("   - Control table captured all lifecycle events");
@@ -1161,7 +1161,7 @@ expected_content: "{}"
     // If we got here, the factory successfully read and verified the content
     // This proves that post-commit factories see data committed at txn_seq+1
     println!(
-        "✅ Version visibility test PASSED: Post-commit factory successfully read data committed in parent transaction"
+        "[OK] Version visibility test PASSED: Post-commit factory successfully read data committed in parent transaction"
     );
 }
 
@@ -1275,7 +1275,7 @@ async fn test_transaction_completion_records_written() {
         "write transaction should have 'data_committed' record"
     );
 
-    println!("\n✅ Transaction completion records test PASSED");
+    println!("\n[OK] Transaction completion records test PASSED");
     println!("   - All transactions have 'begin' records");
     println!("   - Write transactions have 'data_committed' records");
 
@@ -1467,7 +1467,7 @@ async fn test_replica_preserves_transaction_sequences() {
 
     drop(replica_ship);
 
-    println!("\n✅ Replica transaction sequence preservation test PASSED");
+    println!("\n[OK] Replica transaction sequence preservation test PASSED");
     println!("   - create_pond() creates txn_seq=1 (normal initialization)");
     println!("   - create_pond_for_restoration() creates txn_seq=0 (no initial transaction)");
     println!("   - First bundle restoration creates txn_seq=1 (not txn_seq=2 - bug fixed!)");

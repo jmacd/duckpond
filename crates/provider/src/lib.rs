@@ -61,10 +61,10 @@ use tokio::io::AsyncRead;
 /// The URL host component (authority) must be empty.
 ///
 /// Examples:
-/// - `csv:///data/file.csv?delimiter=;`           — pond CSV file
-/// - `host+oteljson:///tmp/metrics.json`           — host OtelJSON file
-/// - `host+csv+gzip:///tmp/data.csv.gz`            — host gzipped CSV file
-/// - `oteljson+zstd:///logs/**/*.json.zstd`        — pond compressed OtelJSON
+/// - `csv:///data/file.csv?delimiter=;`           -- pond CSV file
+/// - `host+oteljson:///tmp/metrics.json`           -- host OtelJSON file
+/// - `host+csv+gzip:///tmp/data.csv.gz`            -- host gzipped CSV file
+/// - `oteljson+zstd:///logs/**/*.json.zstd`        -- pond compressed OtelJSON
 #[derive(Debug, Clone)]
 pub struct Url {
     inner: url::Url,
@@ -130,10 +130,10 @@ impl Url {
     ///
     /// Scheme segments are parsed left-to-right:
     ///   `host+oteljson+gzip:///path`
-    ///    │     │         │
-    ///    │     │         └── compression (known: zstd, gzip, bzip2)
-    ///    │     └──────────── format provider (csv, oteljson, etc.)
-    ///    └────────────────── source: host filesystem
+    ///    |     |         |
+    ///    |     |         +-- compression (known: zstd, gzip, bzip2)
+    ///    |     +------------ format provider (csv, oteljson, etc.)
+    ///    +------------------ source: host filesystem
     ///
     /// Returns error if fragment, port, username, password, or non-empty host are present.
     ///
@@ -171,7 +171,7 @@ impl Url {
             return Err(Error::InvalidUrl("password not allowed".into()));
         }
 
-        // Reject non-empty host — the host position is reserved
+        // Reject non-empty host -- the host position is reserved
         if let Some(host) = inner.host_str().filter(|h| !h.is_empty()) {
             return Err(Error::InvalidUrl(format!(
                 "non-empty host '{}' is not allowed in provider URLs; \
@@ -180,14 +180,14 @@ impl Url {
             )));
         }
 
-        // Extract compression from scheme suffix (e.g., "csv+gzip" → ("csv", Some("gzip")))
+        // Extract compression from scheme suffix (e.g., "csv+gzip" -> ("csv", Some("gzip")))
         let raw_scheme = inner.scheme().to_string();
         let (format_scheme, compression) = if let Some(pos) = raw_scheme.rfind('+') {
             let suffix = &raw_scheme[pos + 1..];
             if Self::KNOWN_COMPRESSIONS.contains(&suffix) {
                 (raw_scheme[..pos].to_string(), Some(suffix.to_string()))
             } else {
-                // Unknown suffix — treat the whole thing as the scheme
+                // Unknown suffix -- treat the whole thing as the scheme
                 (raw_scheme, None)
             }
         } else {
@@ -222,8 +222,8 @@ impl Url {
     /// Get optional compression from scheme suffix (e.g., "gzip", "zstd")
     ///
     /// Compression is encoded as `+suffix` on the scheme:
-    /// - `csv+gzip:///path` → `Some("gzip")`
-    /// - `csv:///path` → `None`
+    /// - `csv+gzip:///path` -> `Some("gzip")`
+    /// - `csv:///path` -> `None`
     #[must_use]
     pub fn compression(&self) -> Option<&str> {
         self.compression.as_deref()
@@ -288,7 +288,7 @@ impl FileProvider for tinyfs::FS {
 
 /// Open a host filesystem file as an AsyncRead with optional decompression.
 ///
-/// This does NOT require a pond — it reads directly from the local filesystem.
+/// This does NOT require a pond -- it reads directly from the local filesystem.
 /// Used by `pond cat host+format:///path` to process local files through
 /// format providers (e.g., oteljson, csv).
 pub async fn open_host_url(url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
@@ -312,7 +312,7 @@ pub async fn open_host_url(url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>> 
 /// Create a DataFusion MemTable from a host filesystem URL.
 ///
 /// This is the standalone pipeline for `pond cat host+format:///path`:
-///   host file → decompress → format_provider → MemTable
+///   host file -> decompress -> format_provider -> MemTable
 ///
 /// No pond or TinyFS required.
 pub async fn create_memtable_from_host_url(

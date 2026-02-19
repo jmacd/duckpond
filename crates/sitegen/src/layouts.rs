@@ -54,7 +54,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " — " (ctx.site_title) }
+                title { (ctx.title) " -- " (ctx.site_title) }
                 link rel="stylesheet" href="/style.css";
             }
             body {
@@ -66,7 +66,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 main class="data-page" {
                     (PreEscaped(ctx.content))
                 }
-                // Our glue code — loads DuckDB-WASM + Observable Plot dynamically
+                // Our glue code -- loads DuckDB-WASM + Observable Plot dynamically
                 script src="/chart.js" type="module" {}
             }
         }
@@ -85,7 +85,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " — " (ctx.site_title) }
+                title { (ctx.title) " -- " (ctx.site_title) }
                 link rel="stylesheet" href="/style.css";
             }
             body {
@@ -109,7 +109,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
 
 /// Default layout for static pages (index, listing pages).
 ///
-/// No CDN scripts — these are informational pages without interactive charts.
+/// No CDN scripts -- these are informational pages without interactive charts.
 fn default_layout(ctx: &LayoutContext) -> Markup {
     html! {
         (DOCTYPE)
@@ -118,7 +118,7 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " — " (ctx.site_title) }
+                title { (ctx.title) " -- " (ctx.site_title) }
                 link rel="stylesheet" href="/style.css";
             }
             body {
@@ -149,7 +149,7 @@ mod tests {
         };
         let html = apply_layout("default", &ctx);
         assert!(html.contains("<!DOCTYPE html>"));
-        assert!(html.contains("Home — Test Site"));
+        assert!(html.contains("Home -- Test Site"));
         assert!(html.contains("<h1>Hello</h1>"));
         assert!(!html.contains("duckdb")); // No CDN scripts in default layout
     }
@@ -195,6 +195,6 @@ mod tests {
         assert!(html.contains("<article>")); // Wrapped in article
         assert!(html.contains("class=\"sidebar\"")); // Sidebar present
         assert!(!html.contains("chart.js")); // No CDN scripts
-        assert!(html.contains("Water System — Caspar Water")); // Title
+        assert!(html.contains("Water System -- Caspar Water")); // Title
     }
 }

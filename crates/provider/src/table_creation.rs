@@ -70,18 +70,18 @@ pub async fn create_table_provider(
 
         if let Some(cached_provider) = context.get_table_provider_cache(&cache_key) {
             debug!(
-                "🚀 CACHE HIT: Returning cached TableProvider for file_id: {}",
+                "[GO] CACHE HIT: Returning cached TableProvider for file_id: {}",
                 file_id.node_id()
             );
             return Ok(cached_provider);
         } else {
             debug!(
-                "💾 CACHE MISS: Creating new TableProvider for file_id: {}",
+                "[SAVE] CACHE MISS: Creating new TableProvider for file_id: {}",
                 file_id.node_id()
             );
         }
     } else {
-        debug!("⚠️ CACHE BYPASS: additional_urls present, creating fresh TableProvider");
+        debug!("[WARN] CACHE BYPASS: additional_urls present, creating fresh TableProvider");
     }
 
     // Create ListingTable URL(s) - either from options.additional_urls or pattern generation
@@ -169,7 +169,7 @@ pub async fn create_table_provider(
     ));
 
     log::debug!(
-        "📋 CREATED TableProvider: file_id={}, temporal_bounds=({}, {}), urls={}",
+        "[LIST] CREATED TableProvider: file_id={}, temporal_bounds=({}, {}), urls={}",
         file_id,
         min_time,
         max_time,
@@ -182,13 +182,13 @@ pub async fn create_table_provider(
             TableProviderKey::new(file_id, options.version_selection.clone()).to_cache_string();
 
         context.set_table_provider_cache(cache_key, table_provider.clone())?;
-        debug!("💾 CACHED: Stored TableProvider for file_id: {file_id}");
+        debug!("[SAVE] CACHED: Stored TableProvider for file_id: {file_id}");
     }
 
     Ok(table_provider)
 }
 
-// ✅ Thin convenience wrappers for backward compatibility (no logic duplication)
+// [OK] Thin convenience wrappers for backward compatibility (no logic duplication)
 // Following anti-duplication guidelines: use main function with default options
 
 /// Create a table provider with default options (all versions)

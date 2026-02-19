@@ -38,7 +38,7 @@ impl HostDirectory {
         }
     }
 
-    /// Create a HostDirectory with no path yet — must be resolved via `set_path`
+    /// Create a HostDirectory with no path yet -- must be resolved via `set_path`
     /// before any I/O is attempted.
     #[must_use]
     pub fn new_pending(file_id: FileID) -> Self {
@@ -74,7 +74,7 @@ impl HostDirectory {
     fn require_path(&self) -> Result<&PathBuf> {
         self.host_path.as_ref().ok_or_else(|| {
             Error::Other(format!(
-                "HostDirectory {} has no path — node was created but not yet \
+                "HostDirectory {} has no path -- node was created but not yet \
                  inserted into a directory",
                 self.file_id
             ))
@@ -211,13 +211,13 @@ impl Directory for HostDirectory {
                 })?;
                 // The node was created with host_path=None (pending).
                 // Now we know the real path, so replace the inner object.
-                // Since Handle wraps Arc<Mutex<…>>, this is visible to all clones.
+                // Since Handle wraps Arc<Mutex<...>>, this is visible to all clones.
                 let arc = handle.get_inner();
                 let mut inner = arc.lock().await;
                 *inner = Box::new(HostDirectory::new(child_path, node.id));
             }
             NodeType::File(handle) => {
-                // Create an empty file — content will be written via the File handle
+                // Create an empty file -- content will be written via the File handle
                 let _ = std::fs::File::create(&child_path).map_err(|e| {
                     Error::Other(format!(
                         "Failed to create file '{}': {}",

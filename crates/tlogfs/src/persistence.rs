@@ -355,7 +355,7 @@ impl OpLogPersistence {
     pub(crate) fn state(&self) -> Result<State, TLogFSError> {
         if self.state.is_none() {
             panic!(
-                "❌ CRITICAL BUG: state() called but self.state is None! This should never happen during an active transaction."
+                "[ERR] CRITICAL BUG: state() called but self.state is None! This should never happen during an active transaction."
             );
         }
         self.state.clone().ok_or(TLogFSError::Missing)
@@ -461,7 +461,7 @@ impl OpLogPersistence {
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Sanity check - state/fs should be None between transactions
         if self.state.is_some() || self.fs.is_some() {
-            panic!("🚨 INTERNAL ERROR: state/fs is Some at begin_impl start");
+            panic!("[ALERT] INTERNAL ERROR: state/fs is Some at begin_impl start");
         }
 
         let inner_state = InnerState::new(
@@ -537,7 +537,7 @@ impl OpLogPersistence {
             })?;
         self.table = deltalake::open_table(reload_url).await?;
         debug!(
-            "🔄 Reloaded table after commit, new version: {:?}",
+            "[SYNC] Reloaded table after commit, new version: {:?}",
             self.table.version()
         );
         self.last_txn_seq = new_seq;
@@ -708,15 +708,15 @@ impl State {
             TLogFSError::ArrowMessage(format!("Failed to acquire template variables lock: {}", e))
         })?;
         debug!(
-            "📝 STATE: Before add_export_data: keys = {:?}",
+            "[NOTE] STATE: Before add_export_data: keys = {:?}",
             variables.keys().collect::<Vec<_>>()
         );
         _ = variables.insert("export".to_string(), export_data.clone());
         debug!(
-            "📝 STATE: After add_export_data: keys = {:?}",
+            "[NOTE] STATE: After add_export_data: keys = {:?}",
             variables.keys().collect::<Vec<_>>()
         );
-        debug!("📝 STATE: Added export data: {:?}", export_data);
+        debug!("[NOTE] STATE: Added export data: {:?}", export_data);
         Ok(())
     }
 
@@ -1075,7 +1075,7 @@ impl State {
         &self,
         id: FileID,
     ) -> Result<Option<(i64, i64)>, TLogFSError> {
-        debug!("🔍 TEMPORAL: Looking up temporal overrides for node_id: {id}");
+        debug!("[SEARCH] TEMPORAL: Looking up temporal overrides for node_id: {id}");
 
         // FAIL-FAST: Use consistent data access by duplicating query_records logic
         // This ensures we see the same data that persistence operations work with
@@ -1100,7 +1100,7 @@ impl State {
                             }
                             Err(e) => {
                                 debug!(
-                                    "❌ FAIL-FAST: Failed to deserialize temporal override records: {e}"
+                                    "[ERR] FAIL-FAST: Failed to deserialize temporal override records: {e}"
                                 );
                                 return Err(TLogFSError::Transaction {
                                     message: format!(
@@ -1113,14 +1113,14 @@ impl State {
                     records
                 }
                 Err(e) => {
-                    debug!("❌ FAIL-FAST: Failed to collect temporal override records: {e}");
+                    debug!("[ERR] FAIL-FAST: Failed to collect temporal override records: {e}");
                     return Err(TLogFSError::Transaction {
                         message: format!("Temporal override collection failed for {id}: {e}"),
                     });
                 }
             },
             Err(e) => {
-                debug!("❌ FAIL-FAST: Failed to query temporal overrides SQL: {e}");
+                debug!("[ERR] FAIL-FAST: Failed to query temporal overrides SQL: {e}");
                 return Err(TLogFSError::Transaction {
                     message: format!("Temporal override SQL query failed for {id}: {e}"),
                 });
@@ -1145,13 +1145,13 @@ impl State {
             .collect();
 
         debug!(
-            "🔍 TEMPORAL: Found {} FileSeries records for node_id {id}",
+            "[SEARCH] TEMPORAL: Found {} FileSeries records for node_id {id}",
             file_series_records.len()
         );
 
         if file_series_records.is_empty() {
             debug!(
-                "⚠️ TEMPORAL: No FileSeries records found for node_id {id} - temporal overrides not available"
+                "[WARN] TEMPORAL: No FileSeries records found for node_id {id} - temporal overrides not available"
             );
             return Ok(None);
         }
@@ -1162,7 +1162,7 @@ impl State {
             .max_by_key(|r| r.version)
             .ok_or_else(|| {
                 debug!(
-                    "❌ FAIL-FAST: No records found to determine latest version for node_id {id}"
+                    "[ERR] FAIL-FAST: No records found to determine latest version for node_id {id}"
                 );
                 TLogFSError::Transaction {
                     message: format!(
@@ -1174,16 +1174,16 @@ impl State {
         let version = latest_version.version;
         let temporal_overrides = latest_version.temporal_overrides();
         let has_overrides = temporal_overrides.is_some();
-        debug!("🔍 TEMPORAL: Latest version {version} has temporal overrides: {has_overrides}");
+        debug!("[SEARCH] TEMPORAL: Latest version {version} has temporal overrides: {has_overrides}");
 
         if let Some((min_time, max_time)) = temporal_overrides {
             debug!(
-                "✅ TEMPORAL: Found temporal overrides in latest version {version}: {min_time} to {max_time}"
+                "[OK] TEMPORAL: Found temporal overrides in latest version {version}: {min_time} to {max_time}"
             );
             Ok(Some((min_time, max_time)))
         } else {
             debug!(
-                "⚠️ TEMPORAL: Latest version {version} has no temporal overrides - this may be expected"
+                "[WARN] TEMPORAL: Latest version {version} has no temporal overrides - this may be expected"
             );
             Ok(None)
         }
@@ -1231,12 +1231,12 @@ impl InnerState {
         ));
 
         debug!(
-            "📋 ENABLED DataFusion caching: file statistics + list files caches with 512 MiB memory limit, parallelism=2"
+            "[LIST] ENABLED DataFusion caching: file statistics + list files caches with 512 MiB memory limit, parallelism=2"
         );
 
         // Register the fundamental delta_table for direct DeltaTable queries
         debug!(
-            "📋 REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}",
+            "[LIST] REGISTERING fundamental table 'delta_table' in State constructor, Delta table version={:?}",
             table.version()
         );
         _ = ctx
@@ -1269,7 +1269,7 @@ impl InnerState {
             provider::register_tinyfs_object_store(&self.session_context, state.clone()).map_err(
                 |e| TLogFSError::ArrowMessage(format!("Failed to register object store: {}", e)),
             )?;
-        debug!("✅ Completed SessionContext setup with TinyFS ObjectStore");
+        debug!("[OK] Completed SessionContext setup with TinyFS ObjectStore");
         Ok(())
     }
 
@@ -1659,7 +1659,7 @@ impl InnerState {
     /// Poison the transaction due to write failure
     async fn poison_transaction(&mut self, reason: String) {
         if !self.poisoned {
-            warn!("🧪 TRANSACTION POISONED: {reason}");
+            warn!("[TEST] TRANSACTION POISONED: {reason}");
             self.poisoned = true;
         }
     }
@@ -1985,7 +1985,7 @@ impl InnerState {
 
         // Convert records to RecordBatch
         debug!(
-            "🔄 About to serialize {} records with serde_arrow",
+            "[SYNC] About to serialize {} records with serde_arrow",
             records.len()
         );
         let batches = vec![serde_arrow::to_record_batch(
@@ -1997,7 +1997,7 @@ impl InnerState {
         drop(records);
 
         debug!(
-            "📊 RecordBatch created with {} batches, batch[0] has {} rows",
+            "[TBL] RecordBatch created with {} batches, batch[0] has {} rows",
             batches.len(),
             batches[0].num_rows()
         );
@@ -2007,7 +2007,7 @@ impl InnerState {
             use arrow::array::StringArray;
             let part_id_col = batches[0].column(0);
             let node_id_col = batches[0].column(1);
-            debug!("🔍 First 3 rows of RecordBatch:");
+            debug!("[SEARCH] First 3 rows of RecordBatch:");
             for i in 0..batches[0].num_rows().min(3) {
                 debug!(
                     "   Row {}: part_id={:?}, node_id={:?}",
@@ -2034,7 +2034,7 @@ impl InnerState {
         let version = write_op.await?;
 
         debug!(
-            "✅ Delta write completed successfully, new table version: {:?}",
+            "[OK] Delta write completed successfully, new table version: {:?}",
             version.version()
         );
 
@@ -2235,7 +2235,7 @@ impl InnerState {
 
     /// Query directory entries for a parent node (OPTIMIZED: LATEST VERSION ONLY)
     ///
-    /// 🚀 MAJOR PERFORMANCE IMPROVEMENT: This function now reads ONLY the latest version
+    /// [GO] MAJOR PERFORMANCE IMPROVEMENT: This function now reads ONLY the latest version
     /// instead of iterating through all historical versions. This is O(1) instead of O(N)
     /// where N = number of transactions that modified the directory.
     ///
@@ -2244,7 +2244,7 @@ impl InnerState {
         &self,
         id: FileID,
     ) -> Result<Vec<DirectoryEntry>, TLogFSError> {
-        // 🚀 CRITICAL: Use specialized query that fetches ONLY latest record via SQL LIMIT 1
+        // [GO] CRITICAL: Use specialized query that fetches ONLY latest record via SQL LIMIT 1
         let latest_record = self
             .query_latest_directory_record(id)
             .await?
@@ -2253,7 +2253,7 @@ impl InnerState {
             })?;
 
         debug!(
-            "🚀 query_directory_entries: read ONLY version {} for part_id={} (SQL LIMIT 1)",
+            "[GO] query_directory_entries: read ONLY version {} for part_id={} (SQL LIMIT 1)",
             latest_record.version, id
         );
 
@@ -2267,11 +2267,11 @@ impl InnerState {
             // Don't fail - allow Inline format for backward compatibility during transition
         }
 
-        // ✅ Single record fetched via SQL LIMIT 1
-        // ✅ Single deserialize - complete directory state as HashMap
-        // ✅ No iteration through history
-        // ✅ No deduplication across versions
-        // ✅ Constant time regardless of transaction count
+        // [OK] Single record fetched via SQL LIMIT 1
+        // [OK] Single deserialize - complete directory state as HashMap
+        // [OK] No iteration through history
+        // [OK] No deduplication across versions
+        // [OK] Constant time regardless of transaction count
         if let Some(content) = &latest_record.content {
             debug!(
                 "query_directory_entries: deserializing {} bytes for directory {}",
@@ -2285,7 +2285,7 @@ impl InnerState {
                 ))
             })?;
             debug!(
-                "✅ query_directory_entries: loaded {} entries from snapshot (version {})",
+                "[OK] query_directory_entries: loaded {} entries from snapshot (version {})",
                 entries_map.len(),
                 latest_record.version
             );
@@ -2362,7 +2362,7 @@ impl InnerState {
             );
 
             debug!(
-                "📝 FLUSH CREATING RECORD: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, format={:?}",
+                "[NOTE] FLUSH CREATING RECORD: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, format={:?}",
                 record.part_id,
                 record.node_id,
                 record.file_type,
@@ -2420,7 +2420,7 @@ impl InnerState {
         );
 
         debug!(
-            "📝 CREATING DYNAMIC NODE OPLOG ENTRY: part_id={}, node_id={}, file_type={:?}, version={}, factory={:?}, content_len={:?}, extended_attrs={:?}, format={:?}, txn_seq={}",
+            "[NOTE] CREATING DYNAMIC NODE OPLOG ENTRY: part_id={}, node_id={}, file_type={:?}, version={}, factory={:?}, content_len={:?}, extended_attrs={:?}, format={:?}, txn_seq={}",
             oplog_entry.part_id,
             oplog_entry.node_id,
             oplog_entry.file_type,
@@ -2662,8 +2662,8 @@ impl InnerState {
                         Err(TLogFSError::Missing)
                     } else {
                         let batch = &batches[0];
-                        debug!("🔍 Query returned {} rows", batch.num_rows());
-                        debug!("🔍 Schema: {:?}", batch.schema());
+                        debug!("[SEARCH] Query returned {} rows", batch.num_rows());
+                        debug!("[SEARCH] Schema: {:?}", batch.schema());
 
                         // Print first row details
                         if batch.num_rows() > 0 {
@@ -2804,7 +2804,7 @@ impl InnerState {
     async fn load_node(&self, id: FileID, state: State) -> TinyFSResult<Node> {
         debug!("load_node {id:?}");
 
-        // 🔍 CRITICAL FIX: Check if this is a directory in self.directories first
+        // [SEARCH] CRITICAL FIX: Check if this is a directory in self.directories first
         // During a transaction, directories created by store_node() exist in self.directories
         // but don't have OpLog records in self.records until flush_directory_operations() is called at commit
         if self.directories.contains_key(&id) {
@@ -2816,7 +2816,7 @@ impl InnerState {
             return node_factory::create_directory_node(id, state);
         }
 
-        // 🚀 OPTIMIZATION: Query only the latest record (O(1) instead of O(N))
+        // [GO] OPTIMIZATION: Query only the latest record (O(1) instead of O(N))
         match self.query_latest_record(id).await {
             Ok(record) => {
                 debug!("load_node: found latest record version {}", record.version);
@@ -3363,7 +3363,7 @@ mod serialization {
         const MAX_REASONABLE_DIRECTORY_SIZE: usize = 10 * 1024 * 1024; // 10MB should be plenty for directory metadata
         if content_size > MAX_REASONABLE_DIRECTORY_SIZE {
             return Err(TLogFSError::ArrowMessage(format!(
-                "🚨 CORRUPTED IPC DATA: Content size {} bytes exceeds reasonable limit of {} bytes. \
+                "[ALERT] CORRUPTED IPC DATA: Content size {} bytes exceeds reasonable limit of {} bytes. \
                 This indicates corrupted Arrow IPC stream data. \
                 Directory metadata should never be this large.",
                 content_size, MAX_REASONABLE_DIRECTORY_SIZE
@@ -3525,7 +3525,7 @@ mod node_factory {
         };
 
         debug!(
-            "🔍 create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}",
+            "[SEARCH] create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}",
             factory_type,
             oplog_entry.file_type,
             config_content.len()
@@ -3535,7 +3535,7 @@ mod node_factory {
         let node_type = match oplog_entry.file_type {
             EntryType::DirectoryDynamic => {
                 debug!(
-                    "🔍 Calling FactoryRegistry::create_directory for '{}'",
+                    "[SEARCH] Calling FactoryRegistry::create_directory for '{}'",
                     factory_type
                 );
                 let dir_handle = FactoryRegistry::create_directory(
@@ -3544,10 +3544,10 @@ mod node_factory {
                     context.clone(),
                 )
                 .map_err(|e| {
-                    debug!("❌ FactoryRegistry::create_directory failed: {}", e);
+                    debug!("[ERR] FactoryRegistry::create_directory failed: {}", e);
                     e
                 })?;
-                debug!("✅ FactoryRegistry::create_directory succeeded");
+                debug!("[OK] FactoryRegistry::create_directory succeeded");
                 NodeType::Directory(dir_handle)
             }
             EntryType::FileDynamic | EntryType::TableDynamic => {
@@ -3556,7 +3556,7 @@ mod node_factory {
                     if factory.create_file.is_some() {
                         // File factory - call create_file
                         debug!(
-                            "🔍 Calling FactoryRegistry::create_file for '{}'",
+                            "[SEARCH] Calling FactoryRegistry::create_file for '{}'",
                             factory_type
                         );
                         let file_handle = FactoryRegistry::create_file(
@@ -3566,15 +3566,15 @@ mod node_factory {
                         )
                         .await
                         .map_err(|e| {
-                            debug!("❌ FactoryRegistry::create_file failed: {}", e);
+                            debug!("[ERR] FactoryRegistry::create_file failed: {}", e);
                             e
                         })?;
-                        debug!("✅ FactoryRegistry::create_file succeeded");
+                        debug!("[OK] FactoryRegistry::create_file succeeded");
                         NodeType::File(file_handle)
                     } else {
                         // Executable factory - config IS the file content
                         debug!(
-                            "🔍 Executable factory '{}' - using config as file content",
+                            "[SEARCH] Executable factory '{}' - using config as file content",
                             factory_type
                         );
                         let config_file = provider::ConfigFile::new(config_content.to_vec());

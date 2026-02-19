@@ -146,8 +146,8 @@ enum Commands {
     },
     /// Copy files into or out of the pond
     ///
-    /// Copy IN (host → pond): pond copy file1.csv file2.csv /dest/path --format=table
-    /// Copy OUT (pond → host): pond copy '/pattern/**/*.series' host:///output/dir
+    /// Copy IN (host -> pond): pond copy file1.csv file2.csv /dest/path --format=table
+    /// Copy OUT (pond -> host): pond copy '/pattern/**/*.series' host:///output/dir
     Copy {
         /// Source paths: host files (copy IN) or pond paths/patterns (copy OUT)
         #[arg(required = true)]

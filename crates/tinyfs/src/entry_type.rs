@@ -37,7 +37,7 @@ pub enum EntryType {
     #[serde(rename = "file:physical:series")]
     FilePhysicalSeries = 7,
 
-    /// Physical series file - m    FilePhysicalSeries → ChainedReader (version concatenation) → csv:// URL → CsvProvider → RecordBatch stream → MemTable → DataFusion SQLulti-version table series, supports time-travel queries
+    /// Physical series file - m    FilePhysicalSeries -> ChainedReader (version concatenation) -> csv:// URL -> CsvProvider -> RecordBatch stream -> MemTable -> DataFusion SQLulti-version table series, supports time-travel queries
     #[serde(rename = "table:physical:series")]
     TablePhysicalSeries = 8,
 

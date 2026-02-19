@@ -13,10 +13,10 @@
 //!
 //! | EntryType              | `blake3` contains                              | Verifiable per-version? |
 //! |------------------------|------------------------------------------------|-------------------------|
-//! | `FilePhysicalVersion`  | `blake3(this_version)` - per-version hash      | ✓ Yes                   |
-//! | `FilePhysicalSeries`   | `bao_root(v1\|\|v2\|\|...\|\|vN)` - **CUMULATIVE** | ✗ No                    |
-//! | `TablePhysicalVersion` | `blake3(this_version)` - per-version hash      | ✓ Yes                   |
-//! | `TablePhysicalSeries`  | `blake3(this_version)` - per-version (parquet) | ✓ Yes                   |
+//! | `FilePhysicalVersion`  | `blake3(this_version)` - per-version hash      | [OK] Yes                   |
+//! | `FilePhysicalSeries`   | `bao_root(v1\|\|v2\|\|...\|\|vN)` - **CUMULATIVE** | [FAIL] No                    |
+//! | `TablePhysicalVersion` | `blake3(this_version)` - per-version hash      | [OK] Yes                   |
+//! | `TablePhysicalSeries`  | `blake3(this_version)` - per-version (parquet) | [OK] Yes                   |
 //!
 //! **Why FilePhysicalSeries is cumulative**: Raw file content (like logs) can be
 //! concatenated: `read(series) = v1 || v2 || ... || vN`. The cumulative hash
@@ -51,8 +51,8 @@
 //! boundaries. For example, with 16KB blocks:
 //!
 //! - Version 0: 10KB (no complete blocks, 10KB pending)
-//! - Version 1: 6KB  (10KB + 6KB = 16KB → 1 complete block, 0KB pending)
-//! - Version 2: 20KB (20KB → 1 complete block, 4KB pending)
+//! - Version 1: 6KB  (10KB + 6KB = 16KB -> 1 complete block, 0KB pending)
+//! - Version 2: 20KB (20KB -> 1 complete block, 4KB pending)
 //!
 //! **We do NOT store pending bytes**. Instead, we:
 //! 1. Store `version_hash` (blake3 of each version's content)
@@ -182,8 +182,8 @@ pub struct SeriesOutboard {
 /// the binary representations tell us exactly which subtrees finalize.
 ///
 /// Example with 16KB blocks:
-/// - v1: 24KB (1.5 blocks) → block 0 complete, 8KB pending
-/// - v2: 16KB (1 block) → completes block 1 (8KB + 8KB), starts block 2
+/// - v1: 24KB (1.5 blocks) -> block 0 complete, 8KB pending
+/// - v2: 16KB (1 block) -> completes block 1 (8KB + 8KB), starts block 2
 ///   - new_stable_subtrees: [(1, hash(block0, block1))] // level-1 = 2 blocks
 ///   - frontier: [(0, hash(partial_block2), 2)] // level-0 pending
 ///
@@ -2155,7 +2155,7 @@ mod tests {
 
     #[test]
     fn test_resume_two_blocks() {
-        // 32KB = 2 complete blocks → merges to level 1
+        // 32KB = 2 complete blocks -> merges to level 1
         let content = vec![0xCCu8; 2 * BLOCK_SIZE];
 
         let mut state1 = IncrementalHashState::new();
@@ -2184,7 +2184,7 @@ mod tests {
 
     #[test]
     fn test_resume_five_blocks() {
-        // 5 blocks = binary 101 → frontier has level 2 (4 blocks) + level 0 (1 block)
+        // 5 blocks = binary 101 -> frontier has level 2 (4 blocks) + level 0 (1 block)
         let content = vec![0xEEu8; 5 * BLOCK_SIZE];
 
         let mut state1 = IncrementalHashState::new();
@@ -2208,7 +2208,7 @@ mod tests {
 
     #[test]
     fn test_resume_seven_blocks() {
-        // 7 blocks = binary 111 → frontier has level 2, level 1, level 0
+        // 7 blocks = binary 111 -> frontier has level 2, level 1, level 0
         let content = vec![0xFFu8; 7 * BLOCK_SIZE];
 
         let mut state1 = IncrementalHashState::new();
@@ -2301,7 +2301,7 @@ mod tests {
 
     #[test]
     fn test_resume_multi_version_pending_span() {
-        // v1 = 5KB, v2 = 5KB, v3 = 5KB → 15KB total, 0 complete blocks
+        // v1 = 5KB, v2 = 5KB, v3 = 5KB -> 15KB total, 0 complete blocks
         // Need to re-read all 3 versions to get pending bytes
 
         let v1 = vec![0x11u8; 5 * 1024];
@@ -2325,7 +2325,7 @@ mod tests {
         assert_eq!(so3.cumulative_size, 15 * 1024);
 
         // Add v4 that crosses the block boundary
-        let v4 = vec![0x44u8; 2 * 1024]; // 2KB more → 17KB total
+        let v4 = vec![0x44u8; 2 * 1024]; // 2KB more -> 17KB total
         let pending_all = [v1.as_slice(), v2.as_slice(), v3.as_slice()].concat();
         let so4 = SeriesOutboard::append_version_inline(&so3, &pending_all, &v4);
 
@@ -2337,7 +2337,7 @@ mod tests {
     #[test]
     fn test_series_outboard_serialization_with_frontier() {
         // Create a state with non-trivial frontier
-        let content = vec![0x55u8; 5 * BLOCK_SIZE]; // 5 blocks → frontier has 2 entries
+        let content = vec![0x55u8; 5 * BLOCK_SIZE]; // 5 blocks -> frontier has 2 entries
 
         let so = SeriesOutboard::first_version_inline(&content);
         assert_eq!(so.frontier().len(), 2);

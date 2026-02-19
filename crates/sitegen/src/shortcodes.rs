@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 /// One exported data file with capture groups and time range.
 ///
-/// This is the typed struct that shortcodes receive directly — no JSON
+/// This is the typed struct that shortcodes receive directly -- no JSON
 /// serialization boundary between export and rendering.
 #[derive(Debug, Clone)]
 pub struct ExportedFile {
@@ -54,9 +54,9 @@ pub struct ShortcodeContext {
     pub captures: Vec<String>,
     /// All exported data files for this page (filtered to this $0 value)
     pub datafiles: Vec<ExportedFile>,
-    /// Named collections for nav-list (e.g., "params" → ["Temperature", "DO", ...])
+    /// Named collections for nav-list (e.g., "params" -> ["Temperature", "DO", ...])
     pub collections: BTreeMap<String, Vec<String>>,
-    /// Content page lists for content_nav (e.g., "pages" → [ContentPage, ...])
+    /// Content page lists for content_nav (e.g., "pages" -> [ContentPage, ...])
     pub content_pages: BTreeMap<String, Vec<ContentPage>>,
     /// Site title from config
     pub site_title: String,
@@ -70,17 +70,17 @@ pub struct ShortcodeContext {
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
 ///
-/// Each closure captures `Arc<ShortcodeContext>` — no thread-locals, no RefCell.
+/// Each closure captures `Arc<ShortcodeContext>` -- no thread-locals, no RefCell.
 /// This function is called once per page, creating a fresh shortcodes set
 /// with the page's specific context.
 pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
     let mut shortcodes = Shortcodes::new();
 
-    // {{ cap0 }}, {{ cap1 }}, ... — capture group values
+    // {{ cap0 }}, {{ cap1 }}, ... -- capture group values
     //
     // Design doc uses `{{ $0 }}` syntax, but shortcode name validation
     // requires ^[A-Za-z_][0-9A-Za-z_]+$. So templates use `{{ cap0 }}` and
-    // `preprocess_variables()` rewrites `{{ $0 }}` → `{{ cap0 }}` before rendering.
+    // `preprocess_variables()` rewrites `{{ $0 }}` -> `{{ cap0 }}` before rendering.
     for i in 0..10usize {
         let c = ctx.clone();
         let name = format!("cap{}", i);
@@ -89,7 +89,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
-    // {{ chart }} — emit chart container with inline datafile manifest as JSON.
+    // {{ chart }} -- emit chart container with inline datafile manifest as JSON.
     // Client-side chart.js reads the JSON to load parquet via DuckDB-WASM.
     {
         let c = ctx.clone();
@@ -98,7 +98,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
-    // {{ nav_list collection="params" base="/params" /}} — link list for a collection
+    // {{ nav_list collection="params" base="/params" /}} -- link list for a collection
     {
         let c = ctx.clone();
         shortcodes.register("nav_list", move |args: &ShortcodeArgs| {
@@ -112,7 +112,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
-    // {{ breadcrumb }} — breadcrumb trail
+    // {{ breadcrumb }} -- breadcrumb trail
     {
         let c = ctx.clone();
         shortcodes.register("breadcrumb", move |_args: &ShortcodeArgs| {
@@ -120,7 +120,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
-    // {{ site_title }} — site title from config
+    // {{ site_title }} -- site title from config
     {
         let c = ctx.clone();
         shortcodes.register("site_title", move |_args: &ShortcodeArgs| {
@@ -128,13 +128,13 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
-    // {{ base_url }} — base URL for use in markdown links: [Home]({{ base_url /}})
+    // {{ base_url }} -- base URL for use in markdown links: [Home]({{ base_url /}})
     {
         let c = ctx.clone();
         shortcodes.register("base_url", move |_args: &ShortcodeArgs| c.base_url.clone());
     }
 
-    // {{ content_nav content="pages" /}} — navigation list for content pages
+    // {{ content_nav content="pages" /}} -- navigation list for content pages
     // Renders titles sorted by weight with active-page highlighting.
     {
         let c = ctx.clone();
@@ -159,10 +159,10 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
 /// Pre-process markdown, rewriting design-doc syntax into valid shortcode names.
 ///
 /// Maudit requires shortcode names matching `^[A-Za-z_][0-9A-Za-z_]+$`, so:
-/// - `{{ $0 }}` → `{{ cap0 }}`
-/// - `{{ $1 }}` → `{{ cap1 }}`
-/// - `{{ nav-list ... }}` → `{{ nav_list ... }}`
-/// - `{{ site-title }}` → `{{ site_title }}`
+/// - `{{ $0 }}` -> `{{ cap0 }}`
+/// - `{{ $1 }}` -> `{{ cap1 }}`
+/// - `{{ nav-list ... }}` -> `{{ nav_list ... }}`
+/// - `{{ site-title }}` -> `{{ site_title }}`
 ///
 /// Also rewrites the YAML frontmatter variable references.
 pub fn preprocess_variables(content: &str) -> String {
@@ -599,7 +599,7 @@ mod tests {
             "Expected nav wrapper: {}",
             html
         );
-        // No sections → flat <ul>
+        // No sections -> flat <ul>
         assert!(
             html.contains("<ul>"),
             "Expected ul for unsectioned pages: {}",

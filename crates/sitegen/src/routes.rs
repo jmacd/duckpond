@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Route expansion — turns a `SiteConfig` route tree + export results into
+//! Route expansion -- turns a `SiteConfig` route tree + export results into
 //! a flat list of `PageJob`s, one per output HTML file.
 //!
 //! Static routes produce one page. Template routes produce one page per unique
@@ -35,14 +35,14 @@ pub struct ContentContext {
     pub pages: Vec<ContentPage>,
 }
 
-/// One page to generate — the flattened output of route expansion.
+/// One page to generate -- the flattened output of route expansion.
 #[derive(Debug, Clone)]
 pub struct PageJob {
     /// Output path relative to dist/ (e.g., "params/Temperature.html")
     pub output_path: String,
     /// Pond path to the markdown template (e.g., "/etc/site/param.md")
     pub page_source: String,
-    /// Capture group values ($0, $1, ...) — empty for static routes
+    /// Capture group values ($0, $1, ...) -- empty for static routes
     pub captures: Vec<String>,
     /// Exported data files for this page (empty for static routes)
     pub datafiles: Vec<ExportedFile>,
@@ -228,7 +228,7 @@ fn expand_route(
                 });
             }
 
-            // Content routes do not recurse — each page is a leaf
+            // Content routes do not recurse -- each page is a leaf
         }
     }
 }
@@ -244,12 +244,12 @@ fn prefix_base(base_url: &str, path: &str) -> String {
     }
 }
 
-/// Collect all unique $0 values from an export context — used for navigation.
+/// Collect all unique $0 values from an export context -- used for navigation.
 pub fn collection_keys(export: &ExportContext) -> Vec<String> {
     export.by_key.keys().cloned().collect()
 }
 
-/// Build the collections map for shortcode context (collection name → list of keys).
+/// Build the collections map for shortcode context (collection name -> list of keys).
 ///
 /// Merges export collections (keyed by $0 values) with content collections
 /// (keyed by page titles, ordered by weight).

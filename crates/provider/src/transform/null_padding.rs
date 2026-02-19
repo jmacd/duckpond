@@ -1039,8 +1039,8 @@ mod tests {
 
         // Test that filter simplification works correctly
         // DataFusion's ExprSimplifier + our filter classification handles this:
-        // - "extra IS NOT NULL" on always-NULL column → 0 rows
-        // - "extra IS NULL" on always-NULL column → all rows
+        // - "extra IS NOT NULL" on always-NULL column -> 0 rows
+        // - "extra IS NULL" on always-NULL column -> all rows
 
         let df = ctx
             .sql("SELECT value FROM test WHERE extra IS NOT NULL")

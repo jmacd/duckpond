@@ -195,7 +195,7 @@ impl TemporalReduceSqlFile {
 
         if let Some(cached_columns) = &*columns_guard {
             log::debug!(
-                "🚀 CACHE HIT (race): Using cached {} columns for temporal reduce source '{}'",
+                "[GO] CACHE HIT (race): Using cached {} columns for temporal reduce source '{}'",
                 cached_columns.len(),
                 self.source_path
             );
@@ -253,7 +253,7 @@ impl TemporalReduceSqlFile {
         // Cache the discovered columns for future calls
         *columns_guard = Some(columns.clone());
         log::debug!(
-            "💾 CACHED: Stored {} discovered columns for temporal reduce source '{}'",
+            "[SAVE] CACHED: Stored {} discovered columns for temporal reduce source '{}'",
             columns.len(),
             self.source_path
         );
@@ -334,7 +334,7 @@ impl TemporalReduceSqlFile {
         )
         .await?;
         log::debug!(
-            "🔍 TEMPORAL-REDUCE SQL for {}: \n{}",
+            "[SEARCH] TEMPORAL-REDUCE SQL for {}: \n{}",
             &self.source_path,
             sql
         );
@@ -359,24 +359,24 @@ impl TemporalReduceSqlFile {
 
             // Generate the SQL query with schema discovery, using the unique pattern name
             log::debug!(
-                "🔍 TEMPORAL-REDUCE: Generating SQL query for source path: {}",
+                "[SEARCH] TEMPORAL-REDUCE: Generating SQL query for source path: {}",
                 self.source_path
             );
             let sql_query = self
                 .generate_sql_with_discovered_schema(&pattern_name)
                 .await?;
-            log::debug!("🔍 TEMPORAL-REDUCE: Generated SQL query: {}", sql_query);
+            log::debug!("[SEARCH] TEMPORAL-REDUCE: Generated SQL query: {}", sql_query);
 
             // Create the actual SqlDerivedFile
             log::debug!(
-                "🔍 TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern '{}' -> '{}'",
+                "[SEARCH] TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern '{}' -> '{}'",
                 pattern_name,
                 self.source_path
             );
 
             // Convert source_path to URL preserving the original in_pattern scheme.
             // Previously this hardcoded series://, which broke format providers like
-            // oteljson://, csv://, excelhtml:// — the SqlDerivedFile needs the correct
+            // oteljson://, csv://, excelhtml:// -- the SqlDerivedFile needs the correct
             // scheme to route through the format provider instead of assuming Parquet.
             let source_url_str = self.source_url();
             let source_url = crate::Url::parse(&source_url_str).map_err(|e| {
@@ -400,15 +400,15 @@ impl TemporalReduceSqlFile {
             };
 
             log::debug!(
-                "🔍 TEMPORAL-REDUCE SqlDerivedConfig for '{}': query=\n{}",
+                "[SEARCH] TEMPORAL-REDUCE SqlDerivedConfig for '{}': query=\n{}",
                 self.source_path,
                 sql_query
             );
 
-            log::debug!("🔍 TEMPORAL-REDUCE: Creating SqlDerivedFile with SqlDerivedMode::Series");
+            log::debug!("[SEARCH] TEMPORAL-REDUCE: Creating SqlDerivedFile with SqlDerivedMode::Series");
             let sql_file =
                 SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
-            log::debug!("✅ TEMPORAL-REDUCE: Successfully created SqlDerivedFile");
+            log::debug!("[OK] TEMPORAL-REDUCE: Successfully created SqlDerivedFile");
             *inner_guard = Some(sql_file);
         }
         Ok(())
@@ -600,7 +600,7 @@ async fn generate_temporal_sql(
     // Generate SQL with time bucketing using date_bin() for arbitrary intervals.
     //
     // DATE_TRUNC only supports single calendar units (hour, day, etc.) and
-    // discards the multiplier — so DATE_TRUNC('hour', ts) is the same whether
+    // discards the multiplier -- so DATE_TRUNC('hour', ts) is the same whether
     // the config says 1h, 4h, or 12h. date_bin() properly handles multi-unit
     // intervals like INTERVAL '4 HOUR' by binning from an epoch origin.
     //
@@ -1159,7 +1159,7 @@ mod tests {
                 let mut all_temps = Vec::new();
                 let mut all_salinities = Vec::new();
 
-                // 3 days × 24 hours = 72 data points per site
+                // 3 days x 24 hours = 72 data points per site
                 for day in 0..3 {
                     for hour in 0..24 {
                         let timestamp_ms = (day * 86400 + hour * 3600) * 1000; // milliseconds
@@ -1371,7 +1371,7 @@ mod tests {
                     );
 
                     log::info!(
-                        "✅ Site {} verified: {} rows, avg={:.2}, min={:.2}, max={:.2}",
+                        "[OK] Site {} verified: {} rows, avg={:.2}, min={:.2}, max={:.2}",
                         site_num,
                         total_rows,
                         temp_avg_col.value(0),
@@ -1384,7 +1384,7 @@ mod tests {
             }
         }
 
-        log::info!("✅ Temporal-reduce integration test completed successfully");
+        log::info!("[OK] Temporal-reduce integration test completed successfully");
         log::info!("   - Created 3 series files with 72 hourly records each (3 days)");
         log::info!("   - Verified temporal-reduce discovered all 3 sites");
         log::info!("   - Validated daily aggregations: 3 rows per site");
@@ -1586,7 +1586,7 @@ mod tests {
             let daily_node = weather_dir.get("res=1d.series").await.unwrap().unwrap();
             let file_id = daily_node.id;
 
-            // Query the aggregated data — this is where the bug manifested as "Corrupt footer"
+            // Query the aggregated data -- this is where the bug manifested as "Corrupt footer"
             if let NodeType::File(file_handle) = &daily_node.node_type {
                 let file_arc = file_handle.get_file().await;
                 let file_guard = file_arc.lock().await;
@@ -1654,7 +1654,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(temp_max.value(0), 43.5, "Day 0 max temperature");
 
-                log::info!("✅ CSV format provider temporal-reduce test passed");
+                log::info!("[OK] CSV format provider temporal-reduce test passed");
                 log::info!("   - Raw CSV data read via csv:// scheme (not Parquet)");
                 log::info!("   - 48 hourly rows aggregated to 2 daily rows");
                 log::info!("   - avg/min/max values verified correct");

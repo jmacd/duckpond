@@ -285,7 +285,7 @@ impl SqlDerivedFile {
         };
 
         debug!(
-            "🔧 SQL-DERIVED: Applying {} transforms to table '{}': {:?}",
+            "[FIX] SQL-DERIVED: Applying {} transforms to table '{}': {:?}",
             transform_paths.len(),
             pattern_name,
             transform_paths
@@ -294,7 +294,7 @@ impl SqlDerivedFile {
         // Apply each transform in order
         for (index, transform_path) in transform_paths.iter().enumerate() {
             debug!(
-                "🔧 SQL-DERIVED: Applying transform {}/{}: '{}'",
+                "[FIX] SQL-DERIVED: Applying transform {}/{}: '{}'",
                 index + 1,
                 transform_paths.len(),
                 transform_path
@@ -314,7 +314,7 @@ impl SqlDerivedFile {
                         "Failed to resolve transform path '{}' (pattern: '{}'): {}",
                         transform_path, pattern_name, e
                     );
-                    log::error!("❌ SQL-DERIVED: {}", err_msg);
+                    log::error!("[ERR] SQL-DERIVED: {}", err_msg);
                     tinyfs::Error::Other(err_msg)
                 })?;
 
@@ -325,7 +325,7 @@ impl SqlDerivedFile {
                         "Transform path '{}' not found (pattern: '{}')",
                         transform_path, pattern_name
                     );
-                    log::error!("❌ SQL-DERIVED: {}", err_msg);
+                    log::error!("[ERR] SQL-DERIVED: {}", err_msg);
                     return Err(tinyfs::Error::Other(err_msg));
                 }
             };
@@ -353,7 +353,7 @@ impl SqlDerivedFile {
                 })?;
 
             debug!(
-                "🔧 SQL-DERIVED: Transform '{}' uses factory '{}'",
+                "[FIX] SQL-DERIVED: Transform '{}' uses factory '{}'",
                 transform_path, factory_name
             );
 
@@ -388,7 +388,7 @@ impl SqlDerivedFile {
             };
 
             debug!(
-                "🔧 SQL-DERIVED: Applying transform '{}' (factory: '{}')",
+                "[FIX] SQL-DERIVED: Applying transform '{}' (factory: '{}')",
                 transform_path, factory_name
             );
 
@@ -400,7 +400,7 @@ impl SqlDerivedFile {
                 })?;
 
             debug!(
-                "🔧 SQL-DERIVED: Transform {} applied successfully",
+                "[FIX] SQL-DERIVED: Transform {} applied successfully",
                 index + 1
             );
         }
@@ -556,7 +556,7 @@ impl SqlDerivedFile {
             let actual_entry_type = file_id.entry_type();
 
             debug!(
-                "🔍 Checking file at path '{}': file_id={}, actual_entry_type={:?}, lookup_entry_types={:?}",
+                "[SEARCH] Checking file at path '{}': file_id={}, actual_entry_type={:?}, lookup_entry_types={:?}",
                 node_path.path().display(),
                 file_id,
                 actual_entry_type,
@@ -829,11 +829,11 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
             .to_cache_string();
 
         if let Some(cached_provider) = context.get_table_provider_cache(&cache_key) {
-            debug!("🚀 CACHE HIT: Returning cached ViewTable for node_id: {id}");
+            debug!("[GO] CACHE HIT: Returning cached ViewTable for node_id: {id}");
             return Ok(cached_provider);
         }
 
-        debug!("💾 CACHE MISS: Creating new ViewTable for node_id: {id}");
+        debug!("[SAVE] CACHE MISS: Creating new ViewTable for node_id: {id}");
 
         // Get SessionContext directly from ProviderContext
         let ctx = &context.datafusion_session;
@@ -856,13 +856,13 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                 }
             };
             debug!(
-                "🔍 SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_types: {:?})",
+                "[SEARCH] SQL-DERIVED: Processing pattern '{}' -> '{}' (entry_types: {:?})",
                 pattern_name, pattern, entry_types
             );
 
             // Try to resolve pattern with all applicable entry types (Physical and Dynamic)
             debug!(
-                "🔍 SQL-DERIVED: Resolving pattern '{}' to queryable files (trying {} entry types)...",
+                "[SEARCH] SQL-DERIVED: Resolving pattern '{}' to queryable files (trying {} entry types)...",
                 pattern,
                 entry_types.len()
             );
@@ -874,7 +874,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                 {
                     Ok(files) => {
                         debug!(
-                            "🔍 SQL-DERIVED: Found {} files for pattern '{}' with entry_type {:?}",
+                            "[SEARCH] SQL-DERIVED: Found {} files for pattern '{}' with entry_type {:?}",
                             files.len(),
                             pattern,
                             entry_type
@@ -883,14 +883,14 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     }
                     Err(e) => {
                         debug!(
-                            "🔍 SQL-DERIVED: No files found for pattern '{}' with entry_type {:?}: {}",
+                            "[SEARCH] SQL-DERIVED: No files found for pattern '{}' with entry_type {:?}: {}",
                             pattern, entry_type, e
                         );
                     }
                 }
             }
             debug!(
-                "✅ SQL-DERIVED: Pattern '{}' resolved to {} total files across all entry types",
+                "[OK] SQL-DERIVED: Pattern '{}' resolved to {} total files across all entry types",
                 pattern,
                 queryable_files.len()
             );
@@ -921,7 +921,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                 let listing_table_provider = if is_format_provider {
                     // Format providers: Use Provider API to convert format to series/table
                     debug!(
-                        "🔍 SQL-DERIVED: Pattern '{}' uses format provider '{}' with {} files",
+                        "[SEARCH] SQL-DERIVED: Pattern '{}' uses format provider '{}' with {} files",
                         pattern_name,
                         scheme,
                         queryable_files.len()
@@ -942,7 +942,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         {
                             Ok(table_provider) => {
                                 debug!(
-                                    "✅ SQL-DERIVED: Format provider created table for single file"
+                                    "[OK] SQL-DERIVED: Format provider created table for single file"
                                 );
                                 if let Some(wrapper) = &self.config.provider_wrapper {
                                     wrapper(table_provider)
@@ -953,7 +953,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                             }
                             Err(e) => {
                                 log::error!(
-                                    "❌ SQL-DERIVED: Format provider failed for '{}': {}",
+                                    "[ERR] SQL-DERIVED: Format provider failed for '{}': {}",
                                     file_url,
                                     e
                                 );
@@ -975,7 +975,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                 Ok(tp) => table_providers.push(tp),
                                 Err(e) => {
                                     log::error!(
-                                        "❌ SQL-DERIVED: Format provider failed for '{}': {}",
+                                        "[ERR] SQL-DERIVED: Format provider failed for '{}': {}",
                                         file_url,
                                         e
                                     );
@@ -1026,7 +1026,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     let node_path = &queryable_files[0];
                     let file_id = node_path.id();
                     debug!(
-                        "🔍 SQL-DERIVED: Creating table provider for single file: file_id={}",
+                        "[SEARCH] SQL-DERIVED: Creating table provider for single file: file_id={}",
                         file_id.node_id()
                     );
                     let file_handle = node_path.as_file().await.map_err(|e| {
@@ -1036,12 +1036,12 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     let file_guard = file_arc.lock().await;
                     if let Some(queryable_file) = file_guard.as_queryable() {
                         debug!(
-                            "🔍 SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider..."
+                            "[SEARCH] SQL-DERIVED: File implements QueryableFile trait, calling as_table_provider..."
                         );
                         match queryable_file.as_table_provider(file_id, context).await {
                             Ok(provider) => {
                                 debug!(
-                                    "✅ SQL-DERIVED: Successfully created table provider for file_id={}",
+                                    "[OK] SQL-DERIVED: Successfully created table provider for file_id={}",
                                     file_id.node_id()
                                 );
                                 // Apply optional provider wrapper (e.g., null_padding_table)
@@ -1055,7 +1055,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                             }
                             Err(e) => {
                                 log::error!(
-                                    "❌ SQL-DERIVED: Failed to create table provider for file_id={}: {}",
+                                    "[ERR] SQL-DERIVED: Failed to create table provider for file_id={}: {}",
                                     file_id.node_id(),
                                     e
                                 );
@@ -1064,7 +1064,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         }
                     } else {
                         log::error!(
-                            "❌ SQL-DERIVED: File for pattern '{}' does not implement QueryableFile trait",
+                            "[ERR] SQL-DERIVED: File for pattern '{}' does not implement QueryableFile trait",
                             pattern_name
                         );
                         return Err(tinyfs::Error::Other(format!(
@@ -1086,7 +1086,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         let file_guard = file_arc.lock().await;
                         if let Some(_queryable_file) = file_guard.as_queryable() {
                             // For files that implement QueryableFile, we need to get their URL pattern
-                            // This maintains the ownership chain: FS Root → State → Cache → Single TableProvider
+                            // This maintains the ownership chain: FS Root -> State -> Cache -> Single TableProvider
 
                             // Generate URL pattern - works for both OpLogFile and MemoryFile
                             // Format: tinyfs:///part/{part_id}/node/{node_id}/version/
@@ -1122,7 +1122,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     };
 
                     log::debug!(
-                        "📋 CREATING multi-URL TableProvider for pattern '{}': {} URLs",
+                        "[LIST] CREATING multi-URL TableProvider for pattern '{}': {} URLs",
                         pattern_name,
                         urls.len()
                     );
@@ -1161,7 +1161,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     debug!("Table '{unique_table_name}' already exists, skipping registration");
                 } else {
                     debug!(
-                        "🔍 SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...",
+                        "[SEARCH] SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...",
                         unique_table_name, pattern_name
                     );
 
@@ -1175,7 +1175,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         &self.config.scope_prefixes
                     {
                         log::debug!(
-                            "🔧 SQL-DERIVED: Checking scope_prefixes for pattern '{}'. Available keys: {:?}",
+                            "[FIX] SQL-DERIVED: Checking scope_prefixes for pattern '{}'. Available keys: {:?}",
                             pattern_name,
                             scope_prefixes.keys().collect::<Vec<_>>()
                         );
@@ -1183,7 +1183,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                             scope_prefixes.get(pattern_name.as_str())
                         {
                             log::debug!(
-                                "🔧 SQL-DERIVED: Wrapping table '{}' (pattern '{}') with scope prefix '{}'",
+                                "[FIX] SQL-DERIVED: Wrapping table '{}' (pattern '{}') with scope prefix '{}'",
                                 unique_table_name,
                                 pattern_name,
                                 scope_prefix
@@ -1198,7 +1198,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                             );
                             use datafusion::catalog::TableProvider;
                             debug!(
-                                "🔧 SQL-DERIVED: Wrapped table '{}' schema: {:?}",
+                                "[FIX] SQL-DERIVED: Wrapped table '{}' schema: {:?}",
                                 unique_table_name,
                                 wrapped
                                     .schema()
@@ -1222,7 +1222,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         )
                         .map_err(|e| {
                             log::error!(
-                                "❌ SQL-DERIVED: Failed to register table '{}': {}",
+                                "[ERR] SQL-DERIVED: Failed to register table '{}': {}",
                                 unique_table_name,
                                 e
                             );
@@ -1232,7 +1232,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                             ))
                         })?;
                     debug!(
-                        "✅ SQL-DERIVED: Successfully registered table '{}' (user pattern: '{}') in SessionContext",
+                        "[OK] SQL-DERIVED: Successfully registered table '{}' (user pattern: '{}') in SessionContext",
                         unique_table_name, pattern_name
                     );
                 }
@@ -1240,8 +1240,8 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
         }
 
         // Get the effective SQL query with table name substitutions using our unique internal names
-        debug!("🔍 SQL-DERIVED: Original query: {:?}", self.config.query);
-        debug!("🔍 SQL-DERIVED: Table mappings: {:?}", table_mappings);
+        debug!("[SEARCH] SQL-DERIVED: Original query: {:?}", self.config.query);
+        debug!("[SEARCH] SQL-DERIVED: Table mappings: {:?}", table_mappings);
         let effective_sql = self.get_effective_sql(&SqlTransformOptions {
             table_mappings: Some(table_mappings.clone()),
             source_replacement: None,
@@ -1249,31 +1249,31 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
 
         let mapping_count = table_mappings.len();
         debug!(
-            "✅ SQL-DERIVED: Effective SQL after table mapping ({} mappings): {}",
+            "[OK] SQL-DERIVED: Effective SQL after table mapping ({} mappings): {}",
             mapping_count, effective_sql
         );
         debug!(
-            "🔍 SQL-DERIVED: Table mappings details: {:?}",
+            "[SEARCH] SQL-DERIVED: Table mappings details: {:?}",
             table_mappings
         );
 
         // Parse the SQL into a LogicalPlan
         debug!(
-            "🔍 SQL-DERIVED: Executing SQL with DataFusion: {}",
+            "[SEARCH] SQL-DERIVED: Executing SQL with DataFusion: {}",
             effective_sql
         );
 
         // Debug: List all registered tables in the context
-        debug!("🔍 SQL-DERIVED: Available tables in DataFusion context:");
+        debug!("[SEARCH] SQL-DERIVED: Available tables in DataFusion context:");
         if let Some(catalog) = ctx.catalog("datafusion") {
             if let Some(schema) = catalog.schema("public") {
                 let table_names: Vec<String> = schema.table_names();
-                debug!("🔍 SQL-DERIVED: Registered tables: {:?}", table_names);
+                debug!("[SEARCH] SQL-DERIVED: Registered tables: {:?}", table_names);
             } else {
-                debug!("🔍 SQL-DERIVED: Could not access 'public' schema");
+                debug!("[SEARCH] SQL-DERIVED: Could not access 'public' schema");
             }
         } else {
-            debug!("🔍 SQL-DERIVED: Could not access 'datafusion' catalog");
+            debug!("[SEARCH] SQL-DERIVED: Could not access 'datafusion' catalog");
         }
 
         let logical_plan = ctx
@@ -1281,15 +1281,15 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
             .await
             .map_err(|e| {
                 log::error!(
-                    "❌ SQL-DERIVED: Failed to parse SQL into LogicalPlan: {}",
+                    "[ERR] SQL-DERIVED: Failed to parse SQL into LogicalPlan: {}",
                     e
                 );
-                log::error!("❌ SQL-DERIVED: Failed SQL was: {}", effective_sql);
+                log::error!("[ERR] SQL-DERIVED: Failed SQL was: {}", effective_sql);
                 tinyfs::Error::Other(format!("Failed to parse SQL into LogicalPlan: {}", e))
             })?
             .logical_plan()
             .clone();
-        debug!("✅ SQL-DERIVED: Successfully created logical plan");
+        debug!("[OK] SQL-DERIVED: Successfully created logical plan");
 
         use datafusion::catalog::view::ViewTable;
 
@@ -1298,7 +1298,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
 
         // Cache the ViewTable for future reuse
         context.set_table_provider_cache(cache_key, table_provider.clone())?;
-        debug!("💾 CACHED: Stored ViewTable for node_id: {id}");
+        debug!("[SAVE] CACHED: Stored ViewTable for node_id: {id}");
 
         Ok(table_provider)
     }
@@ -2449,7 +2449,7 @@ query: ""
         // ## Observations from This Test
         //
         // This test demonstrates the current materialized approach:
-        // 1. **Full Materialization**: 3 rows → intermediate.parquet → 2 final rows
+        // 1. **Full Materialization**: 3 rows -> intermediate.parquet -> 2 final rows
         // 2. **No Cross-Node Optimization**: DataFusion optimizes each query independently
         // 3. **Predictable Behavior**: Each step is explicit and debuggable
         //
@@ -2458,8 +2458,8 @@ query: ""
         // - First filter `value >= 200` could be pushed to source: scan only 3 rows
         // - Second filter `adjusted_value > 250` could be rewritten as `value > 200` and
         //   combined: scan only 2 rows (David=300, Eve=250)
-        // - Current approach: scan 5 rows → materialize 3 → scan 3 → return 2
-        // - Optimized approach: scan 2 rows → return 2 (60% less I/O)
+        // - Current approach: scan 5 rows -> materialize 3 -> scan 3 -> return 2
+        // - Optimized approach: scan 2 rows -> return 2 (60% less I/O)
     }
 
     /// Test SQL-derived factory with multiple file versions and wildcard patterns
@@ -2738,7 +2738,7 @@ query: ""
     /// This test exercises the same path as the command:
     /// `RUST_LOG=tlogfs=debug POND=/tmp/dynpond cargo run --bin pond cat '/test-locations/BDockDownsampled/res=1d.series'`
     ///
-    /// Testing the chain: Parquet files → SQL-derived (join/filter) → Temporal-reduce (downsampling)
+    /// Testing the chain: Parquet files -> SQL-derived (join/filter) -> Temporal-reduce (downsampling)
     #[tokio::test]
     async fn test_temporal_reduce_over_sql_derived_over_parquet() {
         // Initialize logger for debugging (safe to call multiple times)
@@ -2958,13 +2958,13 @@ query: ""
             }
 
             log::debug!(
-                "✅ Temporal-reduce over SQL-derived over Parquet test completed successfully"
+                "[OK] Temporal-reduce over SQL-derived over Parquet test completed successfully"
             );
             log::debug!("   - Created 72 hourly sensor records from 2 stations");
             log::debug!("   - SQL-derived filtered to 36 BDock-only records");
             log::debug!("   - Temporal-reduce configuration validated");
             log::debug!(
-                "   - Architecture demonstrates: Parquet → SQL-derived → Temporal-reduce chain"
+                "   - Architecture demonstrates: Parquet -> SQL-derived -> Temporal-reduce chain"
             );
         }
     }
@@ -3035,7 +3035,7 @@ query: ""
                         .unwrap();
 
                     log::debug!(
-                        "✅ OpLogFile successfully detected as QueryableFile and registered with DataFusion"
+                        "[OK] OpLogFile successfully detected as QueryableFile and registered with DataFusion"
                     );
                 } else {
                     panic!("Expected file node");
@@ -3205,7 +3205,7 @@ query: ""
                                     .await
                                 {
                                     Ok(_exec_plan) => {
-                                        log::debug!("   - ✅ Table provider scan succeeded");
+                                        log::debug!("   - [OK] Table provider scan succeeded");
 
                                         // Check schema again after scan - maybe it's lazy-loaded
                                         let schema_after_scan = table_provider.schema();
@@ -3231,7 +3231,7 @@ query: ""
                                         }
                                     }
                                     Err(e) => {
-                                        log::debug!("   - ❌ Table provider scan failed: {}", e);
+                                        log::debug!("   - [ERR] Table provider scan failed: {}", e);
                                     }
                                 }
                             }
@@ -3355,7 +3355,7 @@ query: ""
                 panic!("Expected directory node for site directory");
             }
 
-            log::debug!("✅ Wildcard temporal-reduce schema discovery test completed successfully");
+            log::debug!("[OK] Wildcard temporal-reduce schema discovery test completed successfully");
             log::debug!("   - Created 72 hourly sensor records with numeric columns only");
             log::debug!("   - Temporal-reduce automatically discovered all numeric columns");
             log::debug!(

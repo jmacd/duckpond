@@ -269,7 +269,7 @@ impl TimeseriesJoinFile {
         let mut inner_guard = self.inner.lock().await;
         if inner_guard.is_none() {
             log::debug!(
-                "🔍 TIMESERIES-JOIN: Generating schema-aware SQL for {} inputs",
+                "[SEARCH] TIMESERIES-JOIN: Generating schema-aware SQL for {} inputs",
                 self.config.inputs.len()
             );
 
@@ -277,7 +277,7 @@ impl TimeseriesJoinFile {
             let (sql_query, patterns, scope_prefixes, pattern_transforms) =
                 self.generate_union_join_sql().await?;
 
-            log::debug!("🔍 Generated SQL:\n{}", sql_query);
+            log::debug!("[SEARCH] Generated SQL:\n{}", sql_query);
 
             // Create SqlDerivedConfig with scope prefixes and pattern transforms
             let mut sql_config = if scope_prefixes.is_empty() {
@@ -292,10 +292,10 @@ impl TimeseriesJoinFile {
             }
 
             // Create SqlDerivedFile in Series mode
-            log::debug!("🔍 TIMESERIES-JOIN: Creating SqlDerivedFile with SqlDerivedMode::Series");
+            log::debug!("[SEARCH] TIMESERIES-JOIN: Creating SqlDerivedFile with SqlDerivedMode::Series");
             let sql_file =
                 SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
-            log::debug!("✅ TIMESERIES-JOIN: Successfully created SqlDerivedFile");
+            log::debug!("[OK] TIMESERIES-JOIN: Successfully created SqlDerivedFile");
             *inner_guard = Some(sql_file);
         }
         Ok(())
@@ -359,7 +359,7 @@ impl TimeseriesJoinFile {
         }
 
         log::debug!(
-            "🔍 TIMESERIES-JOIN: Grouped {} inputs into {} scope groups",
+            "[SEARCH] TIMESERIES-JOIN: Grouped {} inputs into {} scope groups",
             self.config.inputs.len(),
             scope_groups.len()
         );
@@ -437,7 +437,7 @@ impl TimeseriesJoinFile {
         }
 
         log::debug!(
-            "🔍 TIMESERIES-JOIN: Created {} combined scope tables",
+            "[SEARCH] TIMESERIES-JOIN: Created {} combined scope tables",
             scope_table_names.len()
         );
 
@@ -498,10 +498,10 @@ impl TimeseriesJoinFile {
             self.config.time_column
         );
 
-        log::debug!("🔍 TIMESERIES-JOIN: Generated SQL:\n{}", sql);
-        log::debug!("🔍 TIMESERIES-JOIN: Scope prefixes: {:?}", scope_prefixes);
+        log::debug!("[SEARCH] TIMESERIES-JOIN: Generated SQL:\n{}", sql);
+        log::debug!("[SEARCH] TIMESERIES-JOIN: Scope prefixes: {:?}", scope_prefixes);
         log::debug!(
-            "🔍 TIMESERIES-JOIN: Pattern transforms: {:?}",
+            "[SEARCH] TIMESERIES-JOIN: Pattern transforms: {:?}",
             pattern_transforms
         );
 

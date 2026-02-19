@@ -165,7 +165,7 @@ pub async fn cat_command(
         path, sql_query
     );
 
-    // Check for host+ URL — bypass pond entirely
+    // Check for host+ URL -- bypass pond entirely
     if path.starts_with("host+") {
         return cat_host_impl(path, display, output, sql_query).await;
     }
@@ -339,9 +339,9 @@ async fn cat_impl(
     Ok(())
 }
 
-/// Cat a host filesystem file through a format provider — no pond required.
+/// Cat a host filesystem file through a format provider -- no pond required.
 ///
-/// Pipeline: host file → decompress → format_provider → MemTable → DataFusion → output
+/// Pipeline: host file -> decompress -> format_provider -> MemTable -> DataFusion -> output
 ///
 /// Used by `pond cat host+oteljson:///path/to/file.json` (and csv, excelhtml, etc.)
 #[allow(clippy::print_stdout)]
@@ -728,7 +728,7 @@ mod tests {
             "Cat command DataFusion output should exactly match baseline formatting"
         );
 
-        debug!("✅ DataFusion SQL output matches baseline!");
+        debug!("[OK] DataFusion SQL output matches baseline!");
 
         Ok(())
     }
@@ -780,7 +780,7 @@ mod tests {
             "Output should contain filtered row count"
         );
 
-        debug!("✅ SQL query filtering and computation works!");
+        debug!("[OK] SQL query filtering and computation works!");
 
         Ok(())
     }

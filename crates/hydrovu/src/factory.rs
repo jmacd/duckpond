@@ -164,7 +164,7 @@ async fn execute_hydrovu(
     context: FactoryContext,
     ctx: ExecutionContext,
 ) -> Result<(), TLogFSError> {
-    log::info!("🌊 HYDROVU FACTORY");
+    log::info!("[HYDRO] HYDROVU FACTORY");
     log::info!("   Context: {:?}", ctx);
 
     let cmd: HydroVuCommand = ctx.to_command::<HydroVuCommand, TLogFSError>()?;

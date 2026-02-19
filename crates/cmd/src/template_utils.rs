@@ -87,9 +87,9 @@ pub fn expand_yaml_template(
             error_parts.push(format!("Error chain ({} levels):", chain.len()));
             for (i, err_msg) in chain.iter().enumerate() {
                 if i == 0 {
-                    error_parts.push(format!("  → {}", err_msg));
+                    error_parts.push(format!("  -> {}", err_msg));
                 } else {
-                    error_parts.push(format!("  ├─ Level {}: {}", i, err_msg));
+                    error_parts.push(format!("  |- Level {}: {}", i, err_msg));
                 }
             }
         }

@@ -28,8 +28,8 @@ fn parse_host_path(path: &str) -> (bool, String) {
 }
 
 /// Determine copy direction based on sources and destination
-/// - If dest has "host://" → copying OUT (pond → host), sources must NOT have "host://"
-/// - If sources have "host://" → copying IN (host → pond), dest must NOT have "host://"
+/// - If dest has "host://" -> copying OUT (pond -> host), sources must NOT have "host://"
+/// - If sources have "host://" -> copying IN (host -> pond), dest must NOT have "host://"
 /// - Require explicit and consistent use of "host://" prefix
 fn determine_copy_direction(sources: &[String], dest: &str) -> Result<CopyDirection> {
     let (dest_is_host, _) = parse_host_path(dest);
@@ -42,11 +42,11 @@ fn determine_copy_direction(sources: &[String], dest: &str) -> Result<CopyDirect
             "Invalid copy: cannot use 'host://' prefix on both sources and destination"
         )),
         (true, false) => {
-            // Copy OUT: pond → host
+            // Copy OUT: pond -> host
             Ok(CopyDirection::Out)
         }
         (false, true) => {
-            // Copy IN: host → pond
+            // Copy IN: host -> pond
             // Verify ALL sources have host:// prefix for consistency
             for source in sources {
                 if !parse_host_path(source).0 {
@@ -353,7 +353,7 @@ async fn copy_directory_recursive(
 
 /// Copy files INTO the pond from host filesystem
 ///
-/// This function handles the original copy behavior: host → pond
+/// This function handles the original copy behavior: host -> pond
 /// Uses scoped transactions for automatic commit/rollback handling.
 async fn copy_in(
     ship_context: &ShipContext,
@@ -384,7 +384,7 @@ async fn copy_in(
             {
                 // This is a recursive directory copy from host to pond
                 log::info!(
-                    "Detected directory copy from host: {} → {}",
+                    "Detected directory copy from host: {} -> {}",
                     host_path,
                     dest
                 );
@@ -415,7 +415,7 @@ async fn copy_in(
                             Ok(())
                         }
                         tinyfs::CopyDestination::ExistingFile => {
-                            // Destination is an existing file — overwrite it (Unix cp semantics).
+                            // Destination is an existing file -- overwrite it (Unix cp semantics).
                             // For single-source, write a new version via async_writer_path_with_type;
                             // reads always return the latest version, so the old content is superseded.
                             if sources.len() == 1 {
@@ -482,7 +482,7 @@ async fn copy_in(
         }
     ).await.map_err(|e| anyhow!("Copy operation failed: {}", e))?;
 
-    log::info!("✅ File(s) copied into pond successfully");
+    log::info!("[OK] File(s) copied into pond successfully");
     Ok(())
 }
 
@@ -600,7 +600,7 @@ async fn copy_out(
         }
     }
 
-    log::info!("✅ {} file(s) exported successfully", file_count);
+    log::info!("[OK] {} file(s) exported successfully", file_count);
     Ok(())
 }
 
@@ -724,7 +724,7 @@ async fn export_raw_file(
 /// Options for copy operations.
 ///
 /// Uses `Default` so callers only specify what they care about.
-/// New flags go here — existing callers never break.
+/// New flags go here -- existing callers never break.
 #[derive(Debug, Default)]
 pub struct CopyOptions {
     /// Strip a leading path prefix from pond paths when copying OUT.
@@ -736,8 +736,8 @@ pub struct CopyOptions {
 /// Main copy command dispatcher
 ///
 /// Determines copy direction and dispatches to appropriate handler:
-/// - If dest has "host://" prefix → copy OUT (pond → host)
-/// - Otherwise → copy IN (host → pond)
+/// - If dest has "host://" prefix -> copy OUT (pond -> host)
+/// - Otherwise -> copy IN (host -> pond)
 pub async fn copy_command(
     ship_context: &ShipContext,
     sources: &[String],
@@ -755,14 +755,14 @@ pub async fn copy_command(
 
     match direction {
         CopyDirection::In => {
-            log::debug!("Copy direction: IN (host → pond)");
+            log::debug!("Copy direction: IN (host -> pond)");
             if options.strip_prefix.is_some() {
                 log::warn!("--strip-prefix is ignored when copying in (only applies to copy out)");
             }
             copy_in(ship_context, sources, dest, format).await
         }
         CopyDirection::Out => {
-            log::debug!("Copy direction: OUT (pond → host)");
+            log::debug!("Copy direction: OUT (pond -> host)");
             if !format.is_empty() && format != "data" {
                 log::warn!(
                     "--format flag is ignored when copying out (format determined by source file type)"
@@ -1384,7 +1384,7 @@ mod tests {
 
             assert!(row_count > 0, "Exported parquet file should contain data");
             log::debug!(
-                "✅ Verified exported file: {:?} ({} rows)",
+                "[OK] Verified exported file: {:?} ({} rows)",
                 exported_file,
                 row_count
             );
@@ -1555,14 +1555,14 @@ mod tests {
             assert_eq!(&content[0..4], b"PAR1", "Should be valid parquet file");
 
             log::debug!(
-                "✅ Round-trip verified for: {} ({} bytes)",
+                "[OK] Round-trip verified for: {} ({} bytes)",
                 imported_path,
                 content.len()
             );
         }
 
         log::info!(
-            "✅ Round-trip test complete: {} files copied OUT and IN successfully",
+            "[OK] Round-trip test complete: {} files copied OUT and IN successfully",
             test_files.len()
         );
         Ok(())

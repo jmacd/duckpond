@@ -256,13 +256,13 @@ async fn show_brief_mode(
     // Format the output
     output.push('\n');
     output.push_str(
-        "╔════════════════════════════════════════════════════════════════════════════╗\n",
+        "+============================================================================+\n",
     );
     output.push_str(
-        "║                            POND SUMMARY                                    ║\n",
+        "|                            POND SUMMARY                                    |\n",
     );
     output.push_str(
-        "╚════════════════════════════════════════════════════════════════════════════╝\n",
+        "+============================================================================+\n",
     );
     output.push('\n');
 
@@ -277,7 +277,7 @@ async fn show_brief_mode(
     output.push('\n');
 
     output.push_str("  Storage Statistics\n");
-    output.push_str("  ──────────────────\n");
+    output.push_str("  ------------------\n");
     output.push_str(&format!("  Parquet Files      : {}\n", total_parquet_files));
     output.push_str(&format!(
         "  Total Size         : {}\n",
@@ -292,7 +292,7 @@ async fn show_brief_mode(
 
     // Show all partitions with detailed breakdown
     output.push_str("  Partitions (by row count)\n");
-    output.push_str("  ─────────────────────────\n");
+    output.push_str("  -------------------------\n");
     for (part_id, stats) in partition_vec.iter() {
         let path_display = stats.path_name.as_deref().unwrap_or("<unknown>");
 
@@ -771,7 +771,7 @@ fn format_operations_from_batches(
             // Convert directory entries to strings
             let entry_strings: Vec<String> = dir_entries
                 .iter()
-                .map(|entry| format!("{} → {}", entry.name, format_node_id(&entry.child_node_id)))
+                .map(|entry| format!("{} -> {}", entry.name, format_node_id(&entry.child_node_id)))
                 .collect();
 
             // Group by partition (directory) - use PartID for grouping

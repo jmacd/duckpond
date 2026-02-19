@@ -37,7 +37,7 @@ async fn test_ship_drop_and_reopen() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to execute transaction after reopen: {}", e))?;
 
-    debug!("✅ Ship drop and reopen works correctly");
+    debug!("[OK] Ship drop and reopen works correctly");
     Ok(())
 }
 
@@ -70,6 +70,6 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("Failed to execute second transaction: {}", e))?;
 
-    debug!("✅ Multiple transactions on same Ship instance work correctly");
+    debug!("[OK] Multiple transactions on same Ship instance work correctly");
     Ok(())
 }

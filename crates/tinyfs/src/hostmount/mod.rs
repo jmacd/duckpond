@@ -2,14 +2,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Hostmount — host filesystem as a TinyFS persistence layer
+//! Hostmount -- host filesystem as a TinyFS persistence layer
 //!
 //! This module maps a host directory tree onto TinyFS, implementing
 //! `PersistenceLayer` backed by `std::fs` / `tokio::fs`. It is a peer
 //! of the `memory` module (in-memory persistence) and `tlogfs` (Delta Lake).
 //!
 //! The hostmount root `/` maps to a configurable host directory. Files are
-//! presented as `FilePhysicalVersion` (data) by default — URL scheme
+//! presented as `FilePhysicalVersion` (data) by default -- URL scheme
 //! layering handles type interpretation at command time.
 //!
 //! FileIDs are deterministic using `FileID::from_content()`, derived from

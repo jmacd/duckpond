@@ -91,7 +91,7 @@ async fn create_command(ship_context: &ShipContext, config_path: &str) -> Result
     )
     .await?;
 
-    println!("✓ Created HydroVu pond directory structure");
+    println!("[OK] Created HydroVu pond directory structure");
     println!("  Base path: {}", config_for_output.hydrovu_path);
     println!("  Devices configured: {}", config_for_output.devices.len());
     for device in &config_for_output.devices {
@@ -260,7 +260,7 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
         .with_context(|| "Failed to commit transaction")?;
 
     println!(
-        "✓ HydroVu data collection completed successfully {}",
+        "[OK] HydroVu data collection completed successfully {}",
         results.records_collected
     );
     println!("Results:");

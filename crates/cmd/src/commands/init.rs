@@ -99,16 +99,16 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
                     format!("Failed to parse config YAML from {}", config_path.display())
                 })?;
 
-            info!("✓ Configuration validated");
+            info!("[OK] Configuration validated");
             (config, None) // No pond metadata preservation for file-based init
         }
         InitConfig::FromBase64(encoded) => {
-            info!("📦 Decoding replication configuration...");
+            info!("[PKG] Decoding replication configuration...");
 
             let repl_config = remote::ReplicationConfig::from_base64(&encoded)
                 .with_context(|| "Failed to decode base64 replication config")?;
 
-            info!("✓ Configuration decoded successfully");
+            info!("[OK] Configuration decoded successfully");
             info!("   Source Pond ID: {}", repl_config.pond_id);
             info!(
                 "   Created: {}",
@@ -212,7 +212,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         .await
         .map_err(|e| anyhow!("Failed to restore transaction {}: {}", txn_seq, e))?;
 
-        info!("      ✓ Transaction {} restored", txn_seq);
+        info!("      [OK] Transaction {} restored", txn_seq);
     }
 
     // Restore large files (stored separately from transactions)
@@ -221,7 +221,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
             .await
             .map_err(|e| anyhow!("Failed to restore large files: {}", e))?;
 
-    info!("✓ Pond initialized from backup successfully");
+    info!("[OK] Pond initialized from backup successfully");
     info!("   Restored {} transactions", transactions.len());
     if large_file_count > 0 {
         info!("   Restored {} large files", large_file_count);
@@ -230,7 +230,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     // Set remote factory mode to "pull" for replica
     // This tells Steward to only run the remote factory on manual sync (pond control --mode sync)
     // not automatically after each write transaction
-    info!("🔄 Configuring replica pond for pull mode...");
+    info!("[SYNC] Configuring replica pond for pull mode...");
 
     // Set factory mode in control table (outside transaction)
     ship.control_table_mut()
@@ -238,7 +238,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
         .await
         .map_err(|e| anyhow!("Failed to set factory mode: {}", e))?;
 
-    info!("   ✓ Remote factory mode set to 'pull'");
+    info!("   [OK] Remote factory mode set to 'pull'");
 
     // Verify it was set correctly
     match ship.control_table().get_factory_mode("remote") {

@@ -94,7 +94,7 @@ pub fn apply_temporal_filter_to_batch(
     let filter_array = BooleanArray::from(filter_mask);
 
     debug!(
-        "Temporal filter: {original_rows} → {filtered_rows} rows (bounds: {min_time} to {max_time})"
+        "Temporal filter: {original_rows} -> {filtered_rows} rows (bounds: {min_time} to {max_time})"
     );
 
     // Apply filter to all columns

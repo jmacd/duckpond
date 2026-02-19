@@ -172,13 +172,13 @@ impl FileInfo {
     #[must_use]
     pub fn format_duckpond_style(&self) -> String {
         let type_symbol = match self.metadata.entry_type {
-            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "📁",
-            EntryType::Symlink => "🔗",
+            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "[DIR]",
+            EntryType::Symlink => "[LINK]",
             EntryType::FilePhysicalVersion
             | EntryType::FilePhysicalSeries
-            | EntryType::FileDynamic => "📄",
-            EntryType::TablePhysicalVersion => "📊",
-            EntryType::TablePhysicalSeries | EntryType::TableDynamic => "📈",
+            | EntryType::FileDynamic => "[FILE]",
+            EntryType::TablePhysicalVersion => "[TBL]",
+            EntryType::TablePhysicalSeries | EntryType::TableDynamic => "[SER]",
         };
 
         let size_str = if self.metadata.entry_type.is_directory() {

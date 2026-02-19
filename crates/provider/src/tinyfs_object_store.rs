@@ -341,19 +341,19 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         range: Range<u64>,
     ) -> ObjectStoreResult<Bytes> {
         let path = location.as_ref();
-        debug!("🔍 ObjectStore get_range called for path: {path}, range: {range:?}");
+        debug!("[SEARCH] ObjectStore get_range called for path: {path}, range: {range:?}");
 
         let (_series_key, version_num) = match self.parse_versioned_path(location) {
             Ok(result) => {
                 let _series_key = &result.0;
                 let version_num = &result.1;
                 debug!(
-                    "✅ ObjectStore get_range parsed path - series_key: {_series_key}, version: {version_num:?}"
+                    "[OK] ObjectStore get_range parsed path - series_key: {_series_key}, version: {version_num:?}"
                 );
                 result
             }
             Err(e) => {
-                debug!("❌ ObjectStore get_range failed to parse path {path}: {e}");
+                debug!("[ERR] ObjectStore get_range failed to parse path {path}: {e}");
                 return Err(e);
             }
         };
@@ -378,10 +378,10 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         let has_cached_metadata = cached_metadata.is_some();
 
         if has_cached_metadata {
-            debug!("✅ ObjectStore get_range: metadata found in cache, skipping version query");
+            debug!("[OK] ObjectStore get_range: metadata found in cache, skipping version query");
         } else {
             debug!(
-                "⚠️ ObjectStore get_range: no cached metadata, will query for latest version if needed"
+                "[WARN] ObjectStore get_range: no cached metadata, will query for latest version if needed"
             );
         }
 
@@ -393,10 +393,10 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
                 location
             ).into(),
         })?;
-        debug!("🔍 ObjectStore get_range using version: {version_to_read}");
+        debug!("[SEARCH] ObjectStore get_range using version: {version_to_read}");
 
         debug!(
-            "🔍 ObjectStore get_range reading version {version_to_read} for DataFusion schema inference"
+            "[SEARCH] ObjectStore get_range reading version {version_to_read} for DataFusion schema inference"
         );
 
         // Get version-specific content using read_file_version
@@ -407,11 +407,11 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         {
             Ok(data) => {
                 let len = data.len();
-                debug!("✅ ObjectStore get_range successfully read {len} bytes from persistence");
+                debug!("[OK] ObjectStore get_range successfully read {len} bytes from persistence");
                 data
             }
             Err(e) => {
-                debug!("❌ ObjectStore get_range failed to read version {version_to_read}: {e}");
+                debug!("[ERR] ObjectStore get_range failed to read version {version_to_read}: {e}");
                 return Err(object_store::Error::Generic {
                     store: "TinyFS",
                     source: format!("Failed to read version {}: {}", version_to_read, e).into(),
@@ -421,13 +421,13 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
 
         let total_size = version_data.len() as u64;
         debug!(
-            "🔍 ObjectStore get_range: file has {total_size} bytes total, requested range: {range:?}"
+            "[SEARCH] ObjectStore get_range: file has {total_size} bytes total, requested range: {range:?}"
         );
 
         // Validate range bounds
         if range.start >= total_size {
             let start = range.start;
-            debug!("❌ ObjectStore get_range: range start {start} exceeds file size {total_size}");
+            debug!("[ERR] ObjectStore get_range: range start {start} exceeds file size {total_size}");
             return Err(object_store::Error::Generic {
                 store: "TinyFS",
                 source: format!(
@@ -445,7 +445,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         if start_usize >= version_data.len() || end_usize > version_data.len() {
             let data_len = version_data.len();
             debug!(
-                "❌ ObjectStore get_range: invalid slice bounds start={start_usize}, end={end_usize}, data_len={data_len}"
+                "[ERR] ObjectStore get_range: invalid slice bounds start={start_usize}, end={end_usize}, data_len={data_len}"
             );
             return Err(object_store::Error::Generic {
                 store: "TinyFS", // @@@ ugh
@@ -455,7 +455,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
 
         let range_data = &version_data[start_usize..end_usize];
         let range_size = range_data.len();
-        debug!("🔍 ObjectStore get_range returning {range_size} bytes from range {range:?}");
+        debug!("[SEARCH] ObjectStore get_range returning {range_size} bytes from range {range:?}");
 
         // Log first few bytes for debugging DataFusion schema inference
         if range.start == 0 && range_size >= 16 {
@@ -478,7 +478,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
                 range_data[14],
                 range_data[15]
             );
-            debug!("🔍 ObjectStore get_range (file start): {preview}");
+            debug!("[SEARCH] ObjectStore get_range (file start): {preview}");
         }
 
         // Log last few bytes for Parquet footer detection (DataFusion reads footer first)
@@ -503,18 +503,18 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
                 range_data[start_idx + 14],
                 range_data[start_idx + 15]
             );
-            debug!("🔍 ObjectStore get_range (file end): {preview}");
+            debug!("[SEARCH] ObjectStore get_range (file end): {preview}");
         }
 
         // Check if this looks like a Parquet file
         if range.start == 0 && range_size >= 4 {
             if &range_data[0..4] == b"PAR1" {
                 debug!(
-                    "✅ ObjectStore get_range: File starts with PAR1 - valid Parquet magic number"
+                    "[OK] ObjectStore get_range: File starts with PAR1 - valid Parquet magic number"
                 );
             } else {
                 debug!(
-                    "❌ ObjectStore get_range: File does NOT start with PAR1 - may not be valid Parquet"
+                    "[ERR] ObjectStore get_range: File does NOT start with PAR1 - may not be valid Parquet"
                 );
             }
         }
@@ -523,15 +523,15 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         if range.end == total_size && range_size >= 4 {
             let footer_start = range_size.saturating_sub(4);
             if &range_data[footer_start..] == b"PAR1" {
-                debug!("✅ ObjectStore get_range: File ends with PAR1 - valid Parquet footer");
+                debug!("[OK] ObjectStore get_range: File ends with PAR1 - valid Parquet footer");
             } else {
                 debug!(
-                    "❌ ObjectStore get_range: File does NOT end with PAR1 - may not be valid Parquet"
+                    "[ERR] ObjectStore get_range: File does NOT end with PAR1 - may not be valid Parquet"
                 );
             }
         }
 
-        debug!("✅ ObjectStore get_range successfully returning {range_size} bytes");
+        debug!("[OK] ObjectStore get_range successfully returning {range_size} bytes");
         Ok(Bytes::copy_from_slice(range_data))
     }
 
@@ -701,7 +701,7 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
         });
     }
 
-    // Handle file paths (following partition → node → version hierarchy):
+    // Handle file paths (following partition -> node -> version hierarchy):
     // - "part/{part_id}/node/{node_id}/version/"
     // - "part/{part_id}/node/{node_id}/version/{version}.parquet"
 
