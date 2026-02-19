@@ -39,17 +39,17 @@ impl ShipContext {
     }
 
     /// Create a Ship for an existing pond (read-only operations)
-    pub async fn open_pond(&self) -> Result<steward::Ship> {
+    pub async fn open_pond(&self) -> Result<steward::Steward> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Ship::open_pond(&pond_path)
+        steward::Steward::open_pond(&pond_path)
             .await
             .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
     }
 
     /// Initialize a new pond (for init command only)
-    pub async fn create_pond(&self) -> Result<steward::Ship> {
+    pub async fn create_pond(&self) -> Result<steward::Steward> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Ship::create_pond(&pond_path)
+        steward::Steward::create_pond(&pond_path)
             .await
             .map_err(|e| anyhow!("Failed to initialize pond: {}", e))
     }
@@ -65,9 +65,9 @@ impl ShipContext {
     pub async fn create_pond_for_restoration(
         &self,
         preserve_metadata: steward::PondMetadata,
-    ) -> Result<steward::Ship> {
+    ) -> Result<steward::Steward> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Ship::create_pond_for_restoration(&pond_path, preserve_metadata)
+        steward::Steward::create_pond_for_restoration(&pond_path, preserve_metadata)
             .await
             .map_err(|e| anyhow!("Failed to create pond for restoration: {}", e))
     }

@@ -96,7 +96,7 @@ pub async fn mknod_command(
 }
 
 async fn mknod_impl(
-    tx: &steward::StewardTransactionGuard<'_>,
+    tx: &steward::Transaction<'_>,
     fs: &tinyfs::FS,
     path: &str,
     factory_type: &str,

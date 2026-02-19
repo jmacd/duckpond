@@ -455,7 +455,7 @@ async fn execute_sync(
 
 /// Implementation of sync operation
 async fn execute_sync_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     control_table: &mut steward::ControlTable,
     config_base64: Option<String>,
 ) -> Result<()> {

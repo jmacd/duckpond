@@ -38,7 +38,7 @@ where
 }
 
 async fn show_filesystem_transactions(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     mode: &str,
 ) -> Result<String, steward::StewardError> {
     // Get commit history from the filesystem
@@ -81,7 +81,7 @@ async fn show_brief_mode(
     commit_history: &[deltalake::kernel::CommitInfo],
     store_path: &str,
     _pond_path: &std::path::Path,
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
 
@@ -392,7 +392,7 @@ async fn show_detailed_mode(
     _commit_history: &[deltalake::kernel::CommitInfo],
     _store_path: &str,
     _pond_path: &std::path::Path,
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
 

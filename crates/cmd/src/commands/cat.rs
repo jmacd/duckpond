@@ -197,7 +197,7 @@ pub async fn cat_command(
 /// Internal implementation of cat command
 #[allow(clippy::print_stdout)]
 async fn cat_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     path: &str,
     display: &str,
     output: Option<&mut String>,

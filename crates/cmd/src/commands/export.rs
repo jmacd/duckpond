@@ -338,7 +338,7 @@ fn parse_temporal_parts(temporal: &str) -> Vec<String> {
 
 /// Discover all pond files matching the export patterns
 async fn discover_export_targets(
-    tx: &steward::StewardTransactionGuard<'_>,
+    tx: &steward::Transaction<'_>,
     pattern: String,
 ) -> Result<Vec<ExportTarget>> {
     let fs = &**tx;
@@ -456,7 +456,7 @@ impl Visitor<ExportTarget> for ExportTargetVisitor {
 
 /// Export a single file from pond to external directory
 async fn export_target(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     target: &ExportTarget,
     output_dir: &str,
     temporal_parts: &[String],
@@ -520,7 +520,7 @@ async fn export_target(
 
 /// Export queryable files (FileSeries/FileTable) with DataFusion and temporal partitioning
 async fn export_queryable_file(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     target: &ExportTarget,
     output_file_path: &str,
     temporal_parts: &[String],
@@ -891,7 +891,7 @@ async fn execute_direct_copy_query(
 
 /// Export raw data files (FileData) without temporal partitioning
 async fn export_raw_file(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     target: &ExportTarget,
     output_file_path: &str,
     base_output_dir: &str,

@@ -49,7 +49,7 @@ where
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
 
     let result = {
-        let fs = &*tx; // StewardTransactionGuard derefs to FS
+        let fs = &*tx; // Transaction derefs to FS
         let root = fs.root().await?;
 
         // Use FileInfoVisitor to collect file information - always allow all files at visitor level

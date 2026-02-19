@@ -46,7 +46,7 @@ where
 
 /// Describe a provider URL (e.g., "oteljson:///otel/file.json" or "excelhtml:///data/*.htm")
 async fn describe_provider_url(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     _ship_context: &ShipContext,
     url: &str,
 ) -> Result<String> {
@@ -124,7 +124,7 @@ async fn describe_provider_url(
 
 /// Implementation of describe command
 async fn describe_command_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     ship_context: &ShipContext,
     pattern: &str,
 ) -> Result<String> {
@@ -343,7 +343,7 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
 
 /// Implementation of file series schema description
 async fn describe_file_series_schema_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     path: &str,
 ) -> Result<SchemaInfo> {
     let fs = &**tx;
@@ -377,7 +377,7 @@ async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> R
 
 /// Implementation of file table schema description
 async fn describe_file_table_schema_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     path: &str,
 ) -> Result<SchemaInfo> {
     let fs = &**tx;
@@ -438,7 +438,7 @@ pub struct VersionStats {
 
 /// Get detailed statistics for all versions of a file series
 async fn describe_file_series_versions(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     path: &str,
 ) -> Result<Vec<VersionStats>> {
     let fs = &**tx;

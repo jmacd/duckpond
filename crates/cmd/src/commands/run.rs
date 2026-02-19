@@ -63,7 +63,7 @@ pub async fn run_command(
 
 /// Implementation of run command
 async fn run_command_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     config_path: &str,
     extra_args: Vec<String>,
     all_factory_modes: std::collections::HashMap<String, String>,
