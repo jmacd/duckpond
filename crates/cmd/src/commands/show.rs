@@ -921,21 +921,15 @@ mod tests {
 
         // Add a transaction with some file operations
         let args = vec!["test_command".to_string(), "test_arg".to_string()];
-        ship.transact(&steward::PondUserMetadata::new(args), |_tx, fs| {
-            Box::pin(async move {
-                let data_root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = tinyfs::async_helpers::convenience::create_file_path(
-                    &data_root,
-                    "/example.txt",
-                    b"test content for show",
-                )
-                .await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })
+        ship.write_transaction(&steward::PondUserMetadata::new(args), async |fs| {
+            let data_root = fs.root().await?;
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &data_root,
+                "/example.txt",
+                b"test content for show",
+            )
+            .await?;
+            Ok(())
         })
         .await
         .expect("Failed to execute test transaction");

@@ -74,32 +74,24 @@ impl TestSetup {
         let args = vec!["test".to_string(), description.to_string()];
         let description_owned = description.to_string();
 
-        ship.transact(&steward::PondUserMetadata::new(args), move |_tx, fs| {
+        ship.write_transaction(&steward::PondUserMetadata::new(args), async move |fs| {
             let desc = description_owned.clone();
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            let root = fs.root().await?;
 
-                // Create /test directory if it doesn't exist
-                if !root.exists("/test").await {
-                    _ = root.create_dir_path("/test").await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                }
+            // Create /test directory if it doesn't exist
+            if !root.exists("/test").await {
+                _ = root.create_dir_path("/test").await?;
+            }
 
-                // Create a simple file to make this a write transaction
-                _ = tinyfs::async_helpers::convenience::create_file_path(
-                    &root,
-                    &format!("/test/{}.txt", desc),
-                    format!("Test data for {}", desc).as_bytes(),
-                )
-                .await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            // Create a simple file to make this a write transaction
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &root,
+                &format!("/test/{}.txt", desc),
+                format!("Test data for {}", desc).as_bytes(),
+            )
+            .await?;
 
-                Ok(())
-            })
+            Ok(())
         })
         .await?;
 
@@ -1059,26 +1051,20 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
     let content_clone = test_content.to_string();
     let path_clone = test_file_path.to_string();
 
-    ship.transact(&steward::PondUserMetadata::new(args), move |_tx, fs| {
+    ship.write_transaction(&steward::PondUserMetadata::new(args), async move |fs| {
         let content = content_clone.clone();
         let path = path_clone.clone();
-        Box::pin(async move {
-            let root = fs
-                .root()
-                .await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        let root = fs.root().await?;
 
-            // Write the test file with known content
-            _ = tinyfs::async_helpers::convenience::create_file_path(
-                &root,
-                &path,
-                content.as_bytes(),
-            )
-            .await
-            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        // Write the test file with known content
+        _ = tinyfs::async_helpers::convenience::create_file_path(
+            &root,
+            &path,
+            content.as_bytes(),
+        )
+        .await?;
 
-            Ok(())
-        })
+        Ok(())
     })
     .await
     .expect("Failed to write test data");
@@ -1423,29 +1409,26 @@ async fn test_replica_preserves_transaction_sequences() {
 
     // Simulate restoring the first bundle with "pond init" command
     // This should create transaction #1, not #2
-    replica_ship
-        .transact(
-            &steward::PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]),
-            |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
-                Box::pin(async move {
-                    // Initialize root directory (what the first bundle contains)
-                    let state = tx.state().map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                            tinyfs::Error::Other(format!("Failed to get state: {}", e)),
-                        ))
-                    })?;
-
-                    state
-                        .initialize_root_directory()
-                        .await
-                        .map_err(steward::StewardError::DataInit)?;
-
-                    Ok(())
-                })
-            },
-        )
+    // This test uses tx.state() so it can't use write_transaction() yet.
+    let tx = replica_ship
+        .begin_write(&steward::PondUserMetadata::new(vec![
+            "pond".to_string(),
+            "init".to_string(),
+        ]))
         .await
-        .expect("Failed to restore first bundle");
+        .expect("Failed to begin transaction");
+
+    let state = tx
+        .state()
+        .expect("Failed to get state");
+
+    state
+        .initialize_root_directory()
+        .await
+        .map_err(steward::StewardError::DataInit)
+        .expect("Failed to initialize root directory");
+
+    _ = tx.commit().await.expect("Failed to commit");
 
     let after_restore_seq = replica_ship
         .control_table()

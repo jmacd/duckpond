@@ -262,21 +262,13 @@ repeat_count: 1
 
     // Now do a read-only transaction using the transact helper
     debug!("\n=== Executing read-only transaction ===");
-    ship.transact(
+    ship.write_transaction(
         &PondUserMetadata::new(vec!["test".to_string(), "read-only".to_string()]),
-        |_tx, fs| {
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                // Just read something - no writes
-                let _ = root
-                    .resolve_path("/etc/system.d")
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })
+        async |fs| {
+            let root = fs.root().await?;
+            // Just read something - no writes
+            let _ = root.resolve_path("/etc/system.d").await?;
+            Ok(())
         },
     )
     .await?;

@@ -65,33 +65,37 @@ pub async fn mknod_command(
     let path_clone = path.to_string();
     let factory_type_clone = factory_type.to_string();
 
-    ship.transact(
-        &steward::PondUserMetadata::new(vec![
+    // mknod needs the transaction guard for tx.state() (provider context),
+    // so we can't use write_transaction() yet (it only passes &FS).
+    let tx = ship
+        .begin_write(&steward::PondUserMetadata::new(vec![
             "mknod".to_string(),
             factory_type_clone.clone(),
             path_clone.clone(),
-        ]),
-        |tx, fs| {
-            Box::pin(async move {
-                mknod_impl(
-                    tx,
-                    fs,
-                    &path_clone,
-                    &factory_type_clone,
-                    processed_config_bytes.clone(),
-                    overwrite,
-                )
-                .await
-                .map_err(|e| {
-                    steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                        tinyfs::Error::Other(e.to_string()),
-                    ))
-                })
-            })
-        },
+        ]))
+        .await
+        .map_err(|e| anyhow!("mknod operation failed: {}", e))?;
+
+    match mknod_impl(
+        &tx,
+        &tx,
+        &path_clone,
+        &factory_type_clone,
+        processed_config_bytes.clone(),
+        overwrite,
     )
     .await
-    .map_err(|e| anyhow!("mknod operation failed: {}", e))?;
+    {
+        Ok(()) => {
+            _ = tx
+                .commit()
+                .await
+                .map_err(|e| anyhow!("mknod operation failed: {}", e))?;
+        }
+        Err(e) => {
+            return Err(anyhow!("mknod operation failed: {}", e));
+        }
+    }
 
     Ok(())
 }

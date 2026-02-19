@@ -519,22 +519,15 @@ mod tests {
             let test_content = self.test_content.clone();
             let filename = filename.to_string();
 
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec!["test".to_string(), "write".to_string()]),
-                |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        root.write_file_path_from_slice(&filename, test_content.as_bytes())
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                    root.write_file_path_from_slice(&filename, test_content.as_bytes())
+                        .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await
@@ -551,45 +544,36 @@ mod tests {
 
             let filename = filename.to_string();
 
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec![
                     "test".to_string(),
                     "write_table".to_string(),
                 ]),
-                |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        // Create Arrow RecordBatch from our test data
-                        let batch = record_batch!(
-                            (
-                                "timestamp",
-                                Utf8,
-                                ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]
-                            ),
-                            ("value", Float64, [42.0_f64, 43.5_f64])
-                        )
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!("Arrow error: {}", e)),
-                            ))
-                        })?;
+                    // Create Arrow RecordBatch from our test data
+                    let batch = record_batch!(
+                        (
+                            "timestamp",
+                            Utf8,
+                            ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]
+                        ),
+                        ("value", Float64, [42.0_f64, 43.5_f64])
+                    )
+                    .map_err(|e| {
+                        tinyfs::Error::Other(format!("Arrow error: {}", e))
+                    })?;
 
-                        // Write as parquet table using ParquetExt
-                        root.create_table_from_batch(
-                            &filename,
-                            &batch,
-                            tinyfs::EntryType::TablePhysicalVersion,
-                        )
-                        .await
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                    // Write as parquet table using ParquetExt
+                    root.create_table_from_batch(
+                        &filename,
+                        &batch,
+                        tinyfs::EntryType::TablePhysicalVersion,
+                    )
+                    .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await
@@ -606,38 +590,29 @@ mod tests {
 
             let filename = filename.to_string();
 
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec![
                     "test".to_string(),
                     "write_series".to_string(),
                 ]),
-                |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        // Create Arrow RecordBatch with temporal data for series using proper timestamp type
-                        let batch = record_batch!(
-                            ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]), // 2024-01-01 timestamps in milliseconds
-                            ("value", Float64, [42.0_f64, 43.5_f64])
-                        )
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!("Arrow error: {}", e)),
-                            ))
-                        })?;
+                    // Create Arrow RecordBatch with temporal data for series using proper timestamp type
+                    let batch = record_batch!(
+                        ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]), // 2024-01-01 timestamps in milliseconds
+                        ("value", Float64, [42.0_f64, 43.5_f64])
+                    )
+                    .map_err(|e| {
+                        tinyfs::Error::Other(format!("Arrow error: {}", e))
+                    })?;
 
-                        // Write as file:series using ParquetExt with temporal metadata extraction
-                        let _ = root
-                            .create_series_from_batch(&filename, &batch, Some("timestamp"))
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                    // Write as file:series using ParquetExt with temporal metadata extraction
+                    let _ = root
+                        .create_series_from_batch(&filename, &batch, Some("timestamp"))
+                        .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await

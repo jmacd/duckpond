@@ -22,14 +22,12 @@ pub async fn mkdir_command(
 ) -> Result<()> {
     let mut ship = ship_context.open_pond().await?;
 
-    // Clone path for use in closure and save original for logging
     let path_for_closure = path.to_string();
     let path_display = path.to_string();
 
     debug!("Creating directory in pond: {path} (create_parents: {create_parents})");
 
-    // Use scoped transaction for mkdir operation
-    ship.transact(
+    ship.write_transaction(
         &steward::PondUserMetadata::new(vec![
             "mkdir".to_string(),
             path_for_closure.clone(),
@@ -39,101 +37,72 @@ pub async fn mkdir_command(
                 "".to_string()
             },
         ]),
-        |_tx, fs| {
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        async |fs| {
+            let root = fs.root().await?;
 
-                if create_parents {
-                    // Create directory and all parent directories as needed (mkdir -p behavior)
-                    // We need to implement this ourselves since create_dir_path fails on existing dirs
-                    let path_components: Vec<&str> = path_for_closure
-                        .trim_start_matches('/')
-                        .split('/')
-                        .filter(|s| !s.is_empty())
-                        .collect();
+            if create_parents {
+                let path_components: Vec<&str> = path_for_closure
+                    .trim_start_matches('/')
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .collect();
 
-                    if path_components.is_empty() {
-                        // Creating root directory - this is always idempotent
-                        return Ok(());
-                    }
-
-                    // Build path incrementally
-                    let mut current_path = String::new();
-                    for (i, component) in path_components.iter().enumerate() {
-                        if path_for_closure.starts_with('/') || i > 0 {
-                            current_path.push('/');
-                        }
-                        current_path.push_str(component);
-
-                        // Check if this path component already exists
-                        if root.exists(&current_path).await {
-                            // Make sure it's actually a directory
-                            match root.open_dir_path(&current_path).await {
-                                Ok(_) => continue, // It's a directory, continue
-                                Err(_) => {
-                                    // Exists but not a directory
-                                    return Err(steward::StewardError::DataInit(
-                                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!(
-                                            "Path '{}' exists but is not a directory",
-                                            current_path
-                                        ))),
-                                    ));
-                                }
-                            }
-                        } else {
-                            // Directory doesn't exist, create it
-                            _ = root.create_dir_path(&current_path).await.map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
-                        }
-                    }
-                } else {
-                    // Create only the specified directory (parent must exist)
-
-                    // Handle root directory and empty path specially - always succeed
-                    if path_for_closure.is_empty() || path_for_closure == "/" {
-                        return Ok(()); // Root directory creation is always idempotent
-                    }
-
-                    // For other paths, check if parent directory exists (for non-p behavior)
-                    if let Some(parent_pos) = path_for_closure.rfind('/') {
-                        let parent_path = if parent_pos == 0 {
-                            // Creating directly in root
-                            "/"
-                        } else {
-                            &path_for_closure[..parent_pos]
-                        };
-
-                        // Check if parent exists
-                        if !root.exists(parent_path).await {
-                            return Err(steward::StewardError::DataInit(
-                                tlogfs::TLogFSError::TinyFS(tinyfs::Error::not_found(format!(
-                                    "Parent directory '{}' does not exist",
-                                    parent_path
-                                ))),
-                            ));
-                        }
-                    }
-
-                    // Check if directory already exists
-                    if root.exists(&path_for_closure).await {
-                        return Err(steward::StewardError::DataInit(
-                            tlogfs::TLogFSError::TinyFS(tinyfs::Error::already_exists(
-                                &path_for_closure,
-                            )),
-                        ));
-                    }
-
-                    // Now create the directory - this should not fail if parents exist
-                    _ = root.create_dir_path(&path_for_closure).await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
+                if path_components.is_empty() {
+                    return Ok(());
                 }
-                Ok(())
-            })
+
+                let mut current_path = String::new();
+                for (i, component) in path_components.iter().enumerate() {
+                    if path_for_closure.starts_with('/') || i > 0 {
+                        current_path.push('/');
+                    }
+                    current_path.push_str(component);
+
+                    if root.exists(&current_path).await {
+                        match root.open_dir_path(&current_path).await {
+                            Ok(_) => continue,
+                            Err(_) => {
+                                return Err(tinyfs::Error::Other(format!(
+                                    "Path '{}' exists but is not a directory",
+                                    current_path
+                                ))
+                                .into());
+                            }
+                        }
+                    } else {
+                        _ = root.create_dir_path(&current_path).await?;
+                    }
+                }
+            } else {
+                if path_for_closure.is_empty() || path_for_closure == "/" {
+                    return Ok(());
+                }
+
+                if let Some(parent_pos) = path_for_closure.rfind('/') {
+                    let parent_path = if parent_pos == 0 {
+                        "/"
+                    } else {
+                        &path_for_closure[..parent_pos]
+                    };
+
+                    if !root.exists(parent_path).await {
+                        return Err(tinyfs::Error::not_found(format!(
+                            "Parent directory '{}' does not exist",
+                            parent_path
+                        ))
+                        .into());
+                    }
+                }
+
+                if root.exists(&path_for_closure).await {
+                    return Err(
+                        tinyfs::Error::already_exists(&path_for_closure).into()
+                    );
+                }
+
+                _ = root.create_dir_path(&path_for_closure).await?;
+            }
+            Ok(())
         },
     )
     .await

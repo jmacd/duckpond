@@ -733,28 +733,19 @@ mod tests {
             // Write directly to pond using transact
             let pond_path = pond_path.to_string();
             let mut ship = self.ship_context.open_pond().await?;
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec!["test".to_string()]),
-                |_tx, fs| {
-                    let batch = batch.clone();
-                    let pond_path = pond_path.clone();
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        root.create_table_from_batch(
-                            &pond_path,
-                            &batch,
-                            tinyfs::EntryType::TablePhysicalVersion,
-                        )
-                        .await
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                    root.create_table_from_batch(
+                        &pond_path,
+                        &batch,
+                        tinyfs::EntryType::TablePhysicalVersion,
+                    )
+                    .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await?;
@@ -803,25 +794,16 @@ mod tests {
             // Write directly to pond using transact
             let pond_path = pond_path.to_string();
             let mut ship = self.ship_context.open_pond().await?;
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec!["test".to_string()]),
-                |_tx, fs| {
-                    let batch = batch.clone();
-                    let pond_path = pond_path.clone();
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        let _ = root
-                            .create_series_from_batch(&pond_path, &batch, Some("timestamp"))
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                    let _ = root
+                        .create_series_from_batch(&pond_path, &batch, Some("timestamp"))
+                        .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await?;

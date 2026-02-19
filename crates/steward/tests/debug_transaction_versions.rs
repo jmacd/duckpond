@@ -30,11 +30,9 @@ async fn test_debug_transaction_versions() -> Result<()> {
     debug!("--- Starting first additional transaction ---");
     let meta = PondUserMetadata::new(vec!["test".to_string(), "debug-tx1".to_string()]);
     match ship
-        .transact(&meta, |_tx, _fs| {
-            Box::pin(async move {
-                debug!("✅ First additional transaction started");
-                Ok(())
-            })
+        .write_transaction(&meta, async |_fs| {
+            debug!("✅ First additional transaction started");
+            Ok(())
         })
         .await
     {
@@ -51,11 +49,9 @@ async fn test_debug_transaction_versions() -> Result<()> {
     debug!("--- Starting second additional transaction ---");
     let meta = PondUserMetadata::new(vec!["test".to_string(), "debug-tx2".to_string()]);
     match ship
-        .transact(&meta, |_tx, _fs| {
-            Box::pin(async move {
-                debug!("✅ Second additional transaction started");
-                Ok(())
-            })
+        .write_transaction(&meta, async |_fs| {
+            debug!("✅ Second additional transaction started");
+            Ok(())
         })
         .await
     {
@@ -112,11 +108,9 @@ async fn test_delta_table_version_inspection() -> Result<()> {
 
     let meta = PondUserMetadata::new(vec!["test".to_string(), "inspect-tx1".to_string()]);
     match ship2
-        .transact(&meta, |_tx, _fs| {
-            Box::pin(async move {
-                // Transaction automatically commits
-                Ok(())
-            })
+        .write_transaction(&meta, async |_fs| {
+            // Transaction automatically commits
+            Ok(())
         })
         .await
     {

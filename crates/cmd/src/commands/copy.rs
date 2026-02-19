@@ -229,144 +229,122 @@ async fn copy_directory_recursive(
     let host_base = Path::new(host_base_dir).to_path_buf();
     let pond_dest = pond_dest.to_string();
 
-    ship.transact(
+    ship.write_transaction(
         &steward::PondUserMetadata::new(vec!["copy-recursive".to_string()]),
-        |_tx, fs| {
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        async |fs| {
+            let root = fs.root().await?;
 
-                // Navigate to or create destination directory
-                let dest_wd = if pond_dest != "/" {
-                    let clean_dest = pond_dest.trim_end_matches('/');
-                    root.create_dir_path(clean_dest).await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?
-                } else {
-                    root
-                };
+            // Navigate to or create destination directory
+            let dest_wd = if pond_dest != "/" {
+                let clean_dest = pond_dest.trim_end_matches('/');
+                root.create_dir_path(clean_dest).await?
+            } else {
+                root
+            };
 
-                // Dual traversal helper
-                fn copy_dir_contents<'a>(
-                    host_path: &'a Path,
-                    pond_wd: tinyfs::WD,
-                ) -> Pin<
-                    Box<dyn Future<Output = Result<(u32, u32), steward::StewardError>> + Send + 'a>,
-                > {
-                    Box::pin(async move {
-                        let mut dir_count = 0u32;
-                        let mut file_count = 0u32;
+            // Dual traversal helper
+            fn copy_dir_contents<'a>(
+                host_path: &'a Path,
+                pond_wd: tinyfs::WD,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<(u32, u32), steward::StewardError>> + Send + 'a>,
+            > {
+                Box::pin(async move {
+                    let mut dir_count = 0u32;
+                    let mut file_count = 0u32;
 
-                        let mut entries = fs::read_dir(host_path).await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!(
-                                    "Failed to read directory {:?}: {}",
-                                    host_path, e
-                                )),
-                            ))
+                    let mut entries = fs::read_dir(host_path).await.map_err(|e| {
+                        tinyfs::Error::Other(format!(
+                            "Failed to read directory {:?}: {}",
+                            host_path, e
+                        ))
+                    })?;
+
+                    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                        tinyfs::Error::Other(format!("Failed to read entry: {}", e))
+                    })? {
+                        let host_entry_path = entry.path();
+                        let entry_name = entry.file_name();
+                        let name_str = entry_name.to_string_lossy().to_string();
+
+                        let metadata = entry.metadata().await.map_err(|e| {
+                            tinyfs::Error::Other(format!("Failed to get metadata: {}", e))
                         })?;
 
-                        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!("Failed to read entry: {}", e)),
-                            ))
-                        })? {
-                            let host_entry_path = entry.path();
-                            let entry_name = entry.file_name();
-                            let name_str = entry_name.to_string_lossy().to_string();
-
-                            let metadata = entry.metadata().await.map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                    tinyfs::Error::Other(format!("Failed to get metadata: {}", e)),
-                                ))
-                            })?;
-
-                            if metadata.is_dir() {
-                                // Create directory in pond and recurse
-                                let name_for_closure = name_str.clone();
-                                let child_wd = pond_wd
-                                    .in_path(&name_str, |parent_wd, lookup| async move {
-                                        match lookup {
-                                            tinyfs::Lookup::NotFound(_, name) => {
-                                                // Create directory and return WD for it
-                                                parent_wd.create_dir_path(&name).await
-                                            }
-                                            tinyfs::Lookup::Found(_) => {
-                                                // Directory already exists, open it as WD
-                                                parent_wd.open_dir_path(&name_for_closure).await
-                                            }
-                                            tinyfs::Lookup::Empty(_) => {
-                                                Err(tinyfs::Error::empty_path())
-                                            }
+                        if metadata.is_dir() {
+                            // Create directory in pond and recurse
+                            let name_for_closure = name_str.clone();
+                            let child_wd = pond_wd
+                                .in_path(&name_str, |parent_wd, lookup| async move {
+                                    match lookup {
+                                        tinyfs::Lookup::NotFound(_, name) => {
+                                            // Create directory and return WD for it
+                                            parent_wd.create_dir_path(&name).await
                                         }
-                                    })
-                                    .await
-                                    .map_err(|e| {
-                                        steward::StewardError::DataInit(
-                                            tlogfs::TLogFSError::TinyFS(e),
-                                        )
-                                    })?;
+                                        tinyfs::Lookup::Found(_) => {
+                                            // Directory already exists, open it as WD
+                                            parent_wd.open_dir_path(&name_for_closure).await
+                                        }
+                                        tinyfs::Lookup::Empty(_) => {
+                                            Err(tinyfs::Error::empty_path())
+                                        }
+                                    }
+                                })
+                                .await?;
 
-                                dir_count += 1;
+                            dir_count += 1;
 
-                                // Recurse into subdirectory
-                                let (sub_dirs, sub_files) =
-                                    copy_dir_contents(&host_entry_path, child_wd).await?;
-                                dir_count += sub_dirs;
-                                file_count += sub_files;
-                            } else if metadata.is_file() {
-                                // Copy file into pond at this level
-                                let source_path_str =
-                                    host_entry_path.to_str().ok_or_else(|| {
-                                        steward::StewardError::DataInit(
-                                            tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                                                "Invalid UTF-8 in path".to_string(),
-                                            )),
-                                        )
-                                    })?;
-
-                                // Infer format from file extension
-                                let format = if name_str.ends_with(".series") {
-                                    "series"
-                                } else if name_str.ends_with(".table") {
-                                    "table"
-                                } else {
-                                    "data"
-                                };
-
-                                copy_single_file_to_directory_with_name(
-                                    source_path_str,
-                                    &pond_wd,
-                                    &name_str,
-                                    format,
-                                )
-                                .await
-                                .map_err(|e| {
-                                    steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                        tinyfs::Error::Other(format!("Failed to copy file: {}", e)),
-                                    ))
+                            // Recurse into subdirectory
+                            let (sub_dirs, sub_files) =
+                                copy_dir_contents(&host_entry_path, child_wd).await?;
+                            dir_count += sub_dirs;
+                            file_count += sub_files;
+                        } else if metadata.is_file() {
+                            // Copy file into pond at this level
+                            let source_path_str =
+                                host_entry_path.to_str().ok_or_else(|| {
+                                    tinyfs::Error::Other(
+                                        "Invalid UTF-8 in path".to_string(),
+                                    )
                                 })?;
 
-                                file_count += 1;
-                            }
+                            // Infer format from file extension
+                            let format = if name_str.ends_with(".series") {
+                                "series"
+                            } else if name_str.ends_with(".table") {
+                                "table"
+                            } else {
+                                "data"
+                            };
+
+                            copy_single_file_to_directory_with_name(
+                                source_path_str,
+                                &pond_wd,
+                                &name_str,
+                                format,
+                            )
+                            .await
+                            .map_err(|e| {
+                                tinyfs::Error::Other(format!("Failed to copy file: {}", e))
+                            })?;
+
+                            file_count += 1;
                         }
+                    }
 
-                        Ok((dir_count, file_count))
-                    })
-                }
+                    Ok((dir_count, file_count))
+                })
+            }
 
-                let (dirs, files) = copy_dir_contents(&host_base, dest_wd).await?;
-                log::info!(
-                    "Recursively copied {} directories and {} files from {:?} to {:?}",
-                    dirs,
-                    files,
-                    host_base,
-                    pond_dest
-                );
-                Ok(())
-            })
+            let (dirs, files) = copy_dir_contents(&host_base, dest_wd).await?;
+            log::info!(
+                "Recursively copied {} directories and {} files from {:?} to {:?}",
+                dirs,
+                files,
+                host_base,
+                pond_dest
+            );
+            Ok(())
         },
     )
     .await
@@ -421,11 +399,10 @@ async fn copy_in(
     let format = format.to_string();
 
     // Use scoped transaction for the copy operation
-    ship.transact(
+    ship.write_transaction(
         &steward::PondUserMetadata::new(vec!["copy".to_string(), dest.clone()]),
-        |_tx, fs| Box::pin(async move {
-            let root = fs.root().await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        async |fs| {
+            let root = fs.root().await?;
 
             let copy_result = root.resolve_copy_destination(&dest).await;
             match copy_result {
@@ -434,9 +411,8 @@ async fn copy_in(
                         tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
                             // Destination is a directory (either explicit with / or existing) - copy files into it
                             copy_files_to_directory(&sources, &dest_wd, &format).await
-                                .map_err(|e| steward::StewardError::DataInit(
-                                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Copy to directory failed: {}", e)))
-                                ))
+                                .map_err(|e| tinyfs::Error::Other(format!("Copy to directory failed: {}", e)))?;
+                            Ok(())
                         }
                         tinyfs::CopyDestination::ExistingFile => {
                             // Destination is an existing file — overwrite it (Unix cp semantics).
@@ -451,17 +427,13 @@ async fn copy_in(
                                     .and_then(|f| f.to_str())
                                     .unwrap_or(&dest);
                                 copy_single_file_to_directory_with_name(&clean_source, &dest_wd, dest_filename, &format).await
-                                    .map_err(|e| steward::StewardError::DataInit(
-                                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to overwrite file: {}", e)))
-                                    ))?;
+                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to overwrite file: {}", e)))?;
                                 log::info!("Overwrote {}", &dest);
                                 Ok(())
                             } else {
-                                Err(steward::StewardError::DataInit(
-                                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                                        format!("When copying multiple files, destination '{}' must be a directory", &dest)
-                                    ))
-                                ))
+                                Err(tinyfs::Error::Other(
+                                    format!("When copying multiple files, destination '{}' must be a directory", &dest)
+                                ).into())
                             }
                         }
                         tinyfs::CopyDestination::NewPath(name) => {
@@ -475,18 +447,14 @@ async fn copy_in(
 
                                 // Use the same logic as directory copying, just with the specific filename
                                 copy_single_file_to_directory_with_name(&clean_source, &dest_wd, &name, &format).await
-                                    .map_err(|e| steward::StewardError::DataInit(
-                                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to copy file: {}", e)))
-                                    ))?;
+                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to copy file: {}", e)))?;
 
                                 log::debug!("Copied {source} to {name}");
                                 Ok(())
                             } else {
-                                Err(steward::StewardError::DataInit(
-                                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                                        format!("When copying multiple files, destination '{}' must be an existing directory", &dest)
-                                    ))
-                                ))
+                                Err(tinyfs::Error::Other(
+                                    format!("When copying multiple files, destination '{}' must be an existing directory", &dest)
+                                ).into())
                             }
                         }
                     }
@@ -497,26 +465,21 @@ async fn copy_in(
                         // Directory doesn't exist but user wants to copy into directory
                         // Create the directory first
                         let clean_dest = dest.trim_end_matches('/');
-                        _ = root.create_dir_path(clean_dest).await
-                            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                        _ = root.create_dir_path(clean_dest).await?;
 
                         // Now resolve the destination again (should work now)
-                        let (dest_wd, _) = root.resolve_copy_destination(clean_dest).await
-                            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                        let (dest_wd, _) = root.resolve_copy_destination(clean_dest).await?;
 
                         // Copy files to the newly created directory
                         copy_files_to_directory(&sources, &dest_wd, &format).await
-                            .map_err(|e| steward::StewardError::DataInit(
-                                tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Copy to created directory failed: {}", e)))
-                            ))
+                            .map_err(|e| tinyfs::Error::Other(format!("Copy to created directory failed: {}", e)))?;
+                        Ok(())
                     } else {
-                        Err(steward::StewardError::DataInit(
-                            tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to resolve destination '{}': {}", &dest, e)))
-                        ))
+                        Err(tinyfs::Error::Other(format!("Failed to resolve destination '{}': {}", &dest, e)).into())
                     }
                 }
             }
-        })
+        }
     ).await.map_err(|e| anyhow!("Copy operation failed: {}", e))?;
 
     log::info!("✅ File(s) copied into pond successfully");
@@ -1262,38 +1225,29 @@ mod tests {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
 
             let path = path.to_string();
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec![
                     "test".to_string(),
                     "create_series".to_string(),
                 ]),
-                move |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async move |fs| {
+                    let root = fs.root().await?;
 
-                        // Create Arrow RecordBatch with temporal data using record_batch! macro
-                        let batch = record_batch!(
-                            ("timestamp", Int64, [1000_i64, 2000_i64, 3000_i64]),
-                            ("value", Float64, [10.5_f64, 20.5_f64, 30.5_f64])
-                        )
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!("Arrow error: {}", e)),
-                            ))
-                        })?;
+                    // Create Arrow RecordBatch with temporal data using record_batch! macro
+                    let batch = record_batch!(
+                        ("timestamp", Int64, [1000_i64, 2000_i64, 3000_i64]),
+                        ("value", Float64, [10.5_f64, 20.5_f64, 30.5_f64])
+                    )
+                    .map_err(|e| {
+                        tinyfs::Error::Other(format!("Arrow error: {}", e))
+                    })?;
 
-                        // Write as file:series using ParquetExt with temporal metadata extraction
-                        let _ = root
-                            .create_series_from_batch(&path, &batch, Some("timestamp"))
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                    // Write as file:series using ParquetExt with temporal metadata extraction
+                    let _ = root
+                        .create_series_from_batch(&path, &batch, Some("timestamp"))
+                        .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await?;
@@ -1376,21 +1330,13 @@ mod tests {
 
         // Create directories first
         let mut ship = steward::Ship::open_pond(&setup.pond_path).await?;
-        ship.transact(
+        ship.write_transaction(
             &steward::PondUserMetadata::new(vec!["test".to_string(), "setup".to_string()]),
-            |_tx, fs| {
-                Box::pin(async move {
-                    let root = fs.root().await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                    _ = root.create_dir_path("/data").await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                    _ = root.create_dir_path("/data/nested").await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                    Ok(())
-                })
+            async |fs| {
+                let root = fs.root().await?;
+                _ = root.create_dir_path("/data").await?;
+                _ = root.create_dir_path("/data/nested").await?;
+                Ok(())
             },
         )
         .await?;
@@ -1529,21 +1475,13 @@ mod tests {
         // Create directories first
         let mut ship1 = steward::Ship::open_pond(&setup1.pond_path).await?;
         ship1
-            .transact(
+            .write_transaction(
                 &steward::PondUserMetadata::new(vec!["test".to_string(), "setup".to_string()]),
-                |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
-                        _ = root.create_dir_path("/data").await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
-                        _ = root.create_dir_path("/data/subdir").await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
-                        Ok(())
-                    })
+                async |fs| {
+                    let root = fs.root().await?;
+                    _ = root.create_dir_path("/data").await?;
+                    _ = root.create_dir_path("/data/subdir").await?;
+                    Ok(())
                 },
             )
             .await?;

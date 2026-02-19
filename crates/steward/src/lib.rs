@@ -71,6 +71,14 @@ pub enum StewardError {
     Dyn(Box<dyn std::error::Error + Send + Sync>),
 }
 
+// Bridge the two-hop conversion tinyfs::Error → TLogFSError → StewardError
+// so `?` works directly on tinyfs operations.
+impl From<tinyfs::Error> for StewardError {
+    fn from(e: tinyfs::Error) -> Self {
+        StewardError::DataInit(tlogfs::TLogFSError::from(e))
+    }
+}
+
 /// Get the data filesystem path under the pond
 #[must_use]
 pub fn get_data_path(pond_path: &Path) -> PathBuf {
