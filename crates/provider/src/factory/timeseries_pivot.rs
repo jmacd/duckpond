@@ -368,7 +368,6 @@ register_dynamic_factory!(
 mod tests {
     use super::*;
     use datafusion::execution::context::SessionContext;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tinyfs::{FileID, MemoryPersistence, ProviderContext};
 
@@ -388,7 +387,7 @@ mod tests {
         let session = Arc::new(SessionContext::new());
         let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
             .expect("Failed to register TinyFS object store");
-        ProviderContext::new(session, HashMap::new(), Arc::new(persistence))
+        ProviderContext::new(session, Arc::new(persistence))
     }
 
     // Helper to create a TimeseriesPivotFile for SQL generation testing

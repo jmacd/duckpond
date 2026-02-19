@@ -1426,7 +1426,7 @@ mod tests {
         let session = Arc::new(SessionContext::new());
         let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
             .expect("Failed to register TinyFS object store");
-        let provider_context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
+        let provider_context = ProviderContext::new(session, Arc::new(persistence));
 
         (fs, provider_context)
     }

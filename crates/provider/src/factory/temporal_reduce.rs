@@ -1069,7 +1069,6 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use datafusion::execution::context::SessionContext;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tinyfs::{EntryType, FS, FileID, MemoryPersistence, NodeType, ProviderContext};
 
@@ -1092,7 +1091,7 @@ mod tests {
         let session = Arc::new(SessionContext::new());
         let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
             .expect("Failed to register TinyFS object store");
-        let provider_context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
+        let provider_context = ProviderContext::new(session, Arc::new(persistence));
         (fs, provider_context)
     }
 

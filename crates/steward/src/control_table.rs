@@ -183,8 +183,7 @@ impl TransactionRecord {
             transaction_type,
             cli_args: serde_json::to_string(&txn_meta.user.args)
                 .unwrap_or_else(|_| "[]".to_string()),
-            environment: serde_json::to_string(&txn_meta.user.vars)
-                .unwrap_or_else(|_| "{}".to_string()),
+            environment: "{}".to_string(),
             data_fs_version: None,
             error_message: None,
             duration_ms: None,
@@ -1257,6 +1256,7 @@ impl ControlTable {
         }
 
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct IncompleteRow {
             txn_seq: i64,
             txn_id: String,
@@ -1285,11 +1285,7 @@ impl ControlTable {
                 let args: Vec<String> = serde_json::from_str(&row.cli_args)
                     .unwrap_or_else(|_| vec!["recovery".to_string()]);
 
-                // Parse environment from JSON
-                let vars: HashMap<String, String> =
-                    serde_json::from_str(&row.environment).unwrap_or_default();
-
-                let user_meta = tlogfs::PondUserMetadata { txn_id, args, vars };
+                let user_meta = tlogfs::PondUserMetadata { txn_id, args };
                 let txn_meta = PondTxnMetadata::new(row.txn_seq, user_meta);
                 results.push((txn_meta, row.data_fs_version));
             }

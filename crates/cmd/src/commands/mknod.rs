@@ -24,20 +24,15 @@ pub async fn mknod_command(
     let config_content = fs::read_to_string(config_path)
         .map_err(|e| anyhow!("Failed to read config file '{}': {}", config_path, e))?;
 
-    debug!(
-        "Template variables available: {:?}",
-        ship_context.template_variables.keys().collect::<Vec<_>>()
-    );
-
-    // Apply template expansion using variables from ShipContext
+    // Apply template expansion (supports {{ env(name='VAR') }} for environment variables)
     let expanded_content = template_utils::expand_yaml_template(
         &config_content,
-        &ship_context.template_variables,
+        &std::collections::HashMap::new(),
     )
     .map_err(|e| {
         anyhow!(
             "Failed to expand template in config file '{}':\n  {}\n  \
-            Tip: Use -v key=value to provide variables, or {{ env(name='VAR') }} to read environment variables",
+            Tip: Use {{ env(name='VAR') }} to read environment variables",
             config_path, e
         )
     })?;
@@ -228,24 +223,13 @@ mod tests {
             })
         }
 
-        /// Create template configuration file for testing
-        fn create_template_config(&self) -> Result<PathBuf> {
-            // Create a template file
-            let template_file_path = self.temp_dir.path().join("test_template.tmpl");
-            let template_content = r#"Test template content
-Generated file: {{ filename }}
+        /// Create a factory configuration file for testing (sql-derived-table)
+        fn create_factory_config(&self) -> Result<PathBuf> {
+            let config_path = self.temp_dir.path().join("factory_config.yaml");
+            let config_content = r#"patterns:
+  source: "table:///data/*.table"
+query: "SELECT * FROM source"
 "#;
-            fs::write(&template_file_path, template_content)?;
-
-            // Create config that references the template file
-            let config_path = self.temp_dir.path().join("template_config.yaml");
-            let config_content = format!(
-                r#"in_pattern: "file:///base/*.tmpl"
-out_pattern: "$0.txt"
-template_file: "file://{}"
-"#,
-                template_file_path.to_string_lossy()
-            );
             fs::write(&config_path, config_content)?;
             Ok(config_path)
         }
@@ -333,14 +317,14 @@ template_file: "file://{}"
         crate::commands::mkdir::mkdir_command(&setup.ship_context, "/deep/nested/path", true)
             .await?;
 
-        // Create template config
-        let config_path = setup.create_template_config()?;
+        // Create factory config
+        let config_path = setup.create_factory_config()?;
 
         // Create node at nested path
         let result = mknod_command(
             &setup.ship_context,
-            "template",
-            "/deep/nested/path/templates",
+            "sql-derived-table",
+            "/deep/nested/path/derived",
             &config_path.to_string_lossy(),
             false,
         )
@@ -355,7 +339,7 @@ template_file: "file://{}"
         // Verify the nested node was created
         assert!(
             setup
-                .verify_node_exists("/deep/nested/path/templates")
+                .verify_node_exists("/deep/nested/path/derived")
                 .await?
         );
 
@@ -366,13 +350,13 @@ template_file: "file://{}"
     async fn test_mknod_duplicate_path() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        // Create template config
-        let config_path = setup.create_template_config()?;
+        // Create factory config
+        let config_path = setup.create_factory_config()?;
 
         // Create first node
         let result1 = mknod_command(
             &setup.ship_context,
-            "template",
+            "sql-derived-table",
             "/duplicate_node",
             &config_path.to_string_lossy(),
             false,
@@ -387,7 +371,7 @@ template_file: "file://{}"
         // Try to create second node at same path
         let result2 = mknod_command(
             &setup.ship_context,
-            "template",
+            "sql-derived-table",
             "/duplicate_node",
             &config_path.to_string_lossy(),
             false,
@@ -432,13 +416,13 @@ template_file: "file://{}"
     async fn test_mknod_overwrite_flag_error_message() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        // Create template config
-        let config_path = setup.create_template_config()?;
+        // Create factory config
+        let config_path = setup.create_factory_config()?;
 
         // Create first node
         let result1 = mknod_command(
             &setup.ship_context,
-            "template",
+            "sql-derived-table",
             "/test_overwrite",
             &config_path.to_string_lossy(),
             false,
@@ -449,7 +433,7 @@ template_file: "file://{}"
         // Try to create second node at same path without --overwrite - should show helpful error
         let result2 = mknod_command(
             &setup.ship_context,
-            "template",
+            "sql-derived-table",
             "/test_overwrite",
             &config_path.to_string_lossy(),
             false,
@@ -468,13 +452,13 @@ template_file: "file://{}"
     async fn test_mknod_overwrite_success() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        // Create first template config
-        let config_path1 = setup.create_template_config()?;
+        // Create first factory config
+        let config_path1 = setup.create_factory_config()?;
 
         // Create first node
         let result1 = mknod_command(
             &setup.ship_context,
-            "template",
+            "sql-derived-table",
             "/test_overwrite_success",
             &config_path1.to_string_lossy(),
             false,
@@ -489,27 +473,18 @@ template_file: "file://{}"
         // Verify the node was created
         assert!(setup.verify_node_exists("/test_overwrite_success").await?);
 
-        // Create second template config with different content
-        let template_file_path2 = setup.temp_dir.path().join("test_template2.tmpl");
-        let template_content2 = r#"Updated template content
-New file: {{ filename }}
+        // Create second factory config with different query
+        let config_path2 = setup.temp_dir.path().join("factory_config2.yaml");
+        let config_content2 = r#"patterns:
+  source: "table:///data/*.table"
+query: "SELECT * FROM source LIMIT 10"
 "#;
-        fs::write(&template_file_path2, template_content2)?;
-
-        let config_path2 = setup.temp_dir.path().join("template_config2.yaml");
-        let config_content2 = format!(
-            r#"in_pattern: "file:///base/*.tmpl"
-out_pattern: "$0.html"
-template_file: "file://{}"
-"#,
-            template_file_path2.to_string_lossy()
-        );
         fs::write(&config_path2, config_content2)?;
 
         // Overwrite the node with new configuration
         let result2 = mknod_command(
             &setup.ship_context,
-            "template",
+            "sql-derived-table",
             "/test_overwrite_success",
             &config_path2.to_string_lossy(),
             true,

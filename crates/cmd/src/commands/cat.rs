@@ -172,12 +172,9 @@ pub async fn cat_command(
 
     let mut ship = ship_context.open_pond().await?;
 
-    let template_variables = ship_context.template_variables.clone();
-
     let mut tx = ship
         .begin_read(
-            &steward::PondUserMetadata::new(ship_context.original_args.clone())
-                .with_vars(template_variables),
+            &steward::PondUserMetadata::new(ship_context.original_args.clone()),
         )
         .await?;
 

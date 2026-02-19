@@ -88,7 +88,7 @@ serde_qs = "0.15"
 serde_repr = "0.1.19"
 serde_yaml = "0.9.34-deprecated"
 tempfile = "3.8"
-tera = "1"
+minijinja = "2.15"
 thiserror = "2.0.12"
 tl = "0.7.8"
 tokio = { version = "1.32", features = ["io-util", "rt"] }

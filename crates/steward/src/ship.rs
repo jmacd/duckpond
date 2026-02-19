@@ -11,8 +11,6 @@ use crate::{
 };
 use anyhow::Result;
 use log::{debug, info};
-use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::ops::AsyncFnOnce;
 use std::path::{Path, PathBuf};
 use tlogfs::{OpLogPersistence, PondMetadata, PondTxnMetadata, PondUserMetadata};
@@ -406,23 +404,6 @@ impl Ship {
                 .map_err(StewardError::DataInit)?
         };
 
-        let vars_value: Value = meta
-            .vars
-            .clone()
-            .into_iter()
-            .map(|(k, v)| (k, Value::String(v)))
-            .collect::<Map<String, Value>>()
-            .into();
-
-        let structured_variables: HashMap<String, Value> =
-            HashMap::from([("vars".to_string(), vars_value)]);
-
-        // This is kind of weird, we should probably just let PondUserMetadata
-        // pass through @@@.
-        data_tx
-            .state()?
-            .set_template_variables(structured_variables)?;
-
         // Create steward transaction guard with sequence tracking
         // Pass pond_path so guard can reload OpLogPersistence for post-commit
         Ok(StewardTransactionGuard::new(
@@ -498,23 +479,6 @@ impl Ship {
             .await
             .map_err(StewardError::DataInit)?;
 
-        let vars_value: Value = txn_meta
-            .user
-            .vars
-            .clone()
-            .into_iter()
-            .map(|(k, v)| (k, Value::String(v)))
-            .collect::<Map<String, Value>>()
-            .into();
-
-        // Add CLI variables under "vars" key
-        let structured_variables: HashMap<String, Value> =
-            HashMap::from([("vars".to_string(), vars_value)]);
-
-        data_tx
-            .state()?
-            .set_template_variables(structured_variables)?;
-
         // Create steward transaction guard with sequence tracking
         Ok(StewardTransactionGuard::new(
             data_tx,
@@ -562,8 +526,8 @@ impl Ship {
             );
 
             info!(
-                "Transaction details: args={:?}, vars={:?}, data_fs_version={}",
-                &txn_meta.user.args, &txn_meta.user.vars, data_fs_version
+                "Transaction details: args={:?}, data_fs_version={}",
+                &txn_meta.user.args, data_fs_version
             );
 
             // Return RecoveryNeeded error with complete metadata

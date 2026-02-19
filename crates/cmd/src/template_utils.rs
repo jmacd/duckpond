@@ -4,12 +4,11 @@
 
 //! Template expansion utilities for YAML configuration files
 //!
-//! This module provides template expansion functionality using the Tera template engine.
+//! This module provides template expansion functionality using the MiniJinja template engine.
 //! It allows configuration files to use template variables and built-in functions.
 
 use anyhow::Result;
 use std::collections::HashMap;
-use tera::{Tera, Value};
 
 #[cfg(test)]
 #[allow(unsafe_code)]
@@ -27,15 +26,15 @@ fn env_remove_var(key: impl AsRef<std::ffi::OsStr>) {
     }
 }
 
-/// Expand a YAML configuration file using Tera templates
+/// Expand a YAML configuration file using MiniJinja templates
 ///
-/// This function takes YAML content as a string and applies Tera template expansion
+/// This function takes YAML content as a string and applies template expansion
 /// with the provided variables. It also registers built-in functions like `env` for
 /// reading environment variables.
 ///
 /// # Arguments
 ///
-/// * `yaml_content` - The YAML content as a string (may contain Tera template syntax)
+/// * `yaml_content` - The YAML content as a string (may contain template syntax)
 /// * `variables` - Variables to make available in the template context
 ///
 /// # Returns
@@ -61,20 +60,17 @@ pub fn expand_yaml_template(
     yaml_content: &str,
     variables: &HashMap<String, String>,
 ) -> Result<String> {
-    // Create a new Tera instance without loading any templates from disk
-    let mut tera = Tera::default();
+    let mut env = minijinja::Environment::new();
+    env.set_keep_trailing_newline(true);
 
     // Register the env function for reading environment variables
-    tera.register_function("env", env_function());
+    env.add_function("env", env_function);
 
-    // Create context with provided variables
-    let mut context = tera::Context::new();
-    for (key, value) in variables {
-        context.insert(key, value);
-    }
+    // Build context from provided variables
+    let ctx = minijinja::Value::from_serialize(variables);
 
     // Render the template with detailed error reporting
-    tera.render_str(yaml_content, &context).map_err(|e| {
+    env.render_str(yaml_content, ctx).map_err(|e| {
         // Build detailed error message with complete error chain
         let mut error_parts = vec![];
 
@@ -127,38 +123,31 @@ fn collect_error_chain(err: &dyn std::error::Error) -> Vec<String> {
 /// Usage in templates:
 /// - `{{ env(name="VAR_NAME") }}` - Read environment variable, error if not set
 /// - `{{ env(name="VAR_NAME", default="fallback") }}` - Read with default fallback
-fn env_function() -> impl tera::Function {
-    Box::new(
-        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
-            // Get the environment variable name
-            let var_name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| tera::Error::msg("env function requires 'name' parameter"))?;
+fn env_function(kwargs: minijinja::value::Kwargs) -> Result<String, minijinja::Error> {
+    let name: String = kwargs.get("name")?;
+    let default: Option<String> = kwargs.get("default")?;
+    kwargs.assert_all_used()?;
 
-            // Check if a default value was provided
-            let default_value = args.get("default").and_then(|v| v.as_str());
-
-            // Read environment variable
-            match std::env::var(var_name) {
-                Ok(value) => Ok(Value::String(value)),
-                Err(std::env::VarError::NotPresent) => {
-                    if let Some(default) = default_value {
-                        Ok(Value::String(default.to_string()))
-                    } else {
-                        Err(tera::Error::msg(format!(
-                            "Environment variable '{}' not set and no default provided",
-                            var_name
-                        )))
-                    }
-                }
-                Err(e) => Err(tera::Error::msg(format!(
-                    "Failed to read environment variable '{}': {}",
-                    var_name, e
-                ))),
+    match std::env::var(&name) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => {
+            if let Some(default) = default {
+                Ok(default)
+            } else {
+                Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!(
+                        "Environment variable '{}' not set and no default provided",
+                        name
+                    ),
+                ))
             }
-        },
-    )
+        }
+        Err(e) => Err(minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            format!("Failed to read environment variable '{}': {}", name, e),
+        )),
+    }
 }
 
 #[cfg(test)]

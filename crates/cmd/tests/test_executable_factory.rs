@@ -12,7 +12,6 @@
 use cmd::common::ShipContext;
 use log::debug;
 use provider::registry::ExecutionContext;
-use std::collections::HashMap;
 use steward::PondUserMetadata;
 use tempfile::TempDir;
 use tinyfs::FS;
@@ -26,7 +25,6 @@ async fn setup_test_ship() -> (ShipContext, TempDir) {
     let ship_context = ShipContext {
         pond_path: Some(pond_path.clone()),
         original_args: vec!["pond".to_string(), "init".to_string()],
-        template_variables: HashMap::new(),
     };
 
     // Initialize the pond

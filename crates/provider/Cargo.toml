@@ -44,7 +44,6 @@ object_store.workspace = true
 parquet.workspace = true
 async-stream.workspace = true
 humantime.workspace = true
-tera.workspace = true
 regex.workspace = true
 tl.workspace = true
 opentelemetry-proto.workspace = true

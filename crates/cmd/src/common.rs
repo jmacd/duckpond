@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
@@ -22,8 +21,6 @@ pub struct ShipContext {
     pub pond_path: Option<PathBuf>,
     /// Original command line arguments for transaction metadata
     pub original_args: Vec<String>,
-    /// Template variables from CLI (-v key=value flags)
-    pub template_variables: HashMap<String, String>,
 }
 
 impl ShipContext {
@@ -33,21 +30,6 @@ impl ShipContext {
         Self {
             pond_path: pond_path.map(|p| p.as_ref().to_path_buf()),
             original_args,
-            template_variables: HashMap::new(),
-        }
-    }
-
-    /// Create a new ShipContext with template variables from CLI parsing
-    #[must_use]
-    pub fn with_variables(
-        pond_path: Option<PathBuf>,
-        original_args: Vec<String>,
-        template_variables: HashMap<String, String>,
-    ) -> Self {
-        Self {
-            pond_path,
-            original_args,
-            template_variables,
         }
     }
 

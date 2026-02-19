@@ -7,7 +7,6 @@ use clap::{Parser, Subcommand};
 use common::ShipContext;
 use panic_alloc::PanicOnLargeAlloc;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 mod commands;
 mod common;
@@ -55,22 +54,6 @@ enum ControlCommand {
     },
 }
 
-/// Parse a single key-value pair
-fn parse_key_value<T, U>(
-    s: &str,
-) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
-where
-    T: FromStr,
-    T::Err: std::error::Error + Send + Sync + 'static,
-    U: FromStr,
-    U::Err: std::error::Error + Send + Sync + 'static,
-{
-    let pos = s
-        .find('=')
-        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
-    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
-}
-
 #[derive(Parser)]
 #[command(author, version, about = "DuckPond - A very small data lake")]
 #[command(name = "pond")]
@@ -78,10 +61,6 @@ struct Cli {
     /// Pond path override (defaults to POND env var)
     #[arg(long, global = true)]
     pond: Option<PathBuf>,
-
-    /// Template variables in key=value format (can be repeated)
-    #[arg(long = "var", short = 'v', global = true, value_parser = parse_key_value::<String, String>)]
-    variables: Vec<(String, String)>,
 
     #[command(subcommand)]
     command: Commands,
@@ -253,14 +232,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     log::debug!("CLI parsed successfully");
 
-    // Create the ship context with global variables
-    let ship_context = if cli.variables.is_empty() {
-        ShipContext::new(cli.pond.as_ref(), original_args.clone())
-    } else {
-        let variables_map: std::collections::HashMap<String, String> =
-            cli.variables.into_iter().collect();
-        ShipContext::with_variables(cli.pond.clone(), original_args.clone(), variables_map)
-    };
+    // Create the ship context
+    let ship_context = ShipContext::new(cli.pond.as_ref(), original_args.clone());
 
     let result = match cli.command {
         Commands::Init {

@@ -100,8 +100,6 @@ pub struct State {
     /// The DataFusion SessionContext - stored outside the lock to avoid deadlocks
     /// This is the same instance stored in inner.session_context
     session_context: Arc<SessionContext>,
-    /// Template variables for CLI variable expansion - mutable shared state
-    template_variables: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
     /// Cache for TableProvider instances to avoid repeated ListingTable creation and schema inference
     /// Key: (node_id, part_id, version_selection) -> TableProvider with temporal filtering
     table_provider_cache: Arc<
@@ -477,7 +475,6 @@ impl OpLogPersistence {
             inner: Arc::new(Mutex::new(inner_state)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
             session_context,
-            template_variables: Arc::new(std::sync::Mutex::new(HashMap::new())),
             table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             txn_state: self.txn_state.clone(),
             large_file_options: self.large_file_options.clone(),
@@ -657,22 +654,6 @@ impl OpLogPersistence {
 }
 
 impl State {
-    /// Set template variables for CLI variable expansion
-    pub fn set_template_variables(
-        &self,
-        variables: HashMap<String, serde_json::Value>,
-    ) -> Result<(), TLogFSError> {
-        match self.template_variables.lock() {
-            Ok(mut guard) => {
-                *guard = variables;
-                Ok(())
-            }
-            Err(_) => Err(TLogFSError::Transaction {
-                message: "Template variables mutex poisoned".to_string(),
-            }),
-        }
-    }
-
     /// Get the Delta table for this transaction
     /// This allows factories to access the table for operations like reading Parquet files
     pub async fn table(&self) -> DeltaTable {
@@ -689,35 +670,6 @@ impl State {
     #[must_use]
     pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
         &self.large_file_options
-    }
-
-    /// Get template variables for CLI variable expansion
-    #[must_use]
-    pub fn get_template_variables(&self) -> Arc<HashMap<String, serde_json::Value>> {
-        Arc::new(
-            self.template_variables
-                .lock()
-                .expect("Failed to acquire template variables lock")
-                .clone(),
-        )
-    }
-
-    /// Add export data to template variables
-    pub fn add_export_data(&self, export_data: serde_json::Value) -> Result<(), TLogFSError> {
-        let mut variables = self.template_variables.lock().map_err(|e| {
-            TLogFSError::ArrowMessage(format!("Failed to acquire template variables lock: {}", e))
-        })?;
-        debug!(
-            "[NOTE] STATE: Before add_export_data: keys = {:?}",
-            variables.keys().collect::<Vec<_>>()
-        );
-        _ = variables.insert("export".to_string(), export_data.clone());
-        debug!(
-            "[NOTE] STATE: After add_export_data: keys = {:?}",
-            variables.keys().collect::<Vec<_>>()
-        );
-        debug!("[NOTE] STATE: Added export data: {:?}", export_data);
-        Ok(())
     }
 
     /// Initialize root directory - delegates to inner StateImpl
@@ -784,17 +736,9 @@ impl State {
     /// This is synchronous and lock-free - it accesses session_context directly
     #[must_use]
     pub fn as_provider_context(&self) -> provider::ProviderContext {
-        // Get current template variables
-        let template_vars = self
-            .template_variables
-            .lock()
-            .expect("Failed to lock template variables")
-            .clone();
-
         // Create provider context with State as the persistence layer
         provider::ProviderContext::new(
             self.session_context.clone(),
-            template_vars,
             Arc::new(self.clone()) as Arc<dyn PersistenceLayer>,
         )
     }

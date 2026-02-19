@@ -14,8 +14,8 @@ use tinyfs::{EntryType, Error as TinyFsError, NodePath, Visitor};
 
 // Re-export shared export types from provider crate
 pub use provider::export::{
-    ExportOutput, ExportSet, TemplateSchema, count_export_set_files, discover_exported_files,
-    extract_timestamps_from_path, merge_export_sets, print_export_set, read_parquet_schema,
+    ExportOutput, ExportSet, TemplateSchema, discover_exported_files,
+    extract_timestamps_from_path, print_export_set, read_parquet_schema,
 };
 
 // TODO: the timestamps are confusingly local and/or UTC. do not trust the
@@ -130,22 +130,8 @@ pub async fn export_command(
 
 /// Core export engine - handles business logic without UI concerns
 ///
-/// MULTI-STAGE EXPORT PIPELINE IMPLEMENTATION:
-///
-/// This function implements a sophisticated multi-stage export pipeline where:
-/// 1. Each pattern represents a "stage" that can export files or generate templates
-/// 2. Stage N can use the export results from Stage N-1 as context for template processing
-/// 3. Each target within a stage gets target-specific filtered context based on its captures
-///
-/// KEY ARCHITECTURAL FEATURES:
-/// - Stage-to-stage handoff: Each stage only sees results from the previous stage (not all previous stages)
-/// - Per-target context filtering: Targets with captures ["A", "B"] only see export data matching that path
-/// - Clear separation: Stage discovery -> Context setup -> Target processing -> Result handoff
-///
-/// EXAMPLE FLOW:
-/// Stage 1: Export parquet files from `/sensors/*.series` -> Results: {temp: files, pressure: files}
-/// Stage 2: Process template `/templates/*.tmpl` with captures ["temp"] -> Gets only temp-related export context
-///
+/// Processes each pattern independently, exporting matching pond files
+/// to the output directory with optional temporal partitioning.
 async fn export_pond_data(
     ship_context: &ShipContext,
     patterns: &[String],
@@ -159,151 +145,56 @@ async fn export_pond_data(
     // Create output directory
     std::fs::create_dir_all(output_dir)?;
 
-    // Open transaction for all operations with CLI variables
+    // Open transaction for all operations
     let mut ship = ship_context.open_pond().await?;
-
-    // Pass CLI template variables to the transaction
-    let template_variables = ship_context.template_variables.clone();
 
     let mut stx_guard = ship
         .begin_write(
-            &steward::PondUserMetadata::new(vec!["export".to_string()])
-                .with_vars(template_variables),
+            &steward::PondUserMetadata::new(vec!["export".to_string()]),
         )
         .await?;
     let tx_guard = stx_guard.transaction_guard()?;
 
-    // Track results from previous stage to pass as context to next stage
-    let mut previous_stage_results = ExportSet::Empty;
-
-    // Multi-stage export pipeline: each stage processes a pattern and can use previous stage results
-    for (stage_idx, pattern) in patterns.iter().enumerate() {
+    // Process each pattern independently
+    for pattern in patterns.iter() {
         log::info!(
-            "[STAGE] STAGE {}: Processing pattern '{}'",
-            stage_idx + 1,
+            "[EXPORT] Processing pattern '{}'",
             pattern
         );
 
-        // Find all files matching this stage's pattern
+        // Find all files matching this pattern
         let export_targets = discover_export_targets(tx_guard, pattern.clone()).await?;
         log::info!(
-            "[SEARCH] STAGE {}: Found {} targets matching pattern",
-            stage_idx + 1,
-            export_targets.len()
+            "[SEARCH] Found {} targets matching pattern '{}'",
+            export_targets.len(),
+            pattern
         );
 
-        // Determine context from previous stage (Stage 1 has no context, Stage 2+ uses previous results)
-        let previous_stage_context = if stage_idx == 0 {
-            None
-        } else {
-            Some(&previous_stage_results)
-        };
-
-        // Add previous stage export data to transaction state for template access
-        if let Some(export_data) = previous_stage_context {
-            let export_json = serde_json::to_value(export_data)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize export data: {}", e))?;
-            let state = tx_guard.state()?;
-            state
-                .add_export_data(export_json.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to add export data: {}", e))?;
-            log::debug!(
-                " STAGE {}: Made previous stage results available to templates",
-                stage_idx + 1
-            );
-        } else {
-            log::debug!(
-                " STAGE {}: No previous stage data (first stage)",
-                stage_idx + 1
-            );
-        }
-
-        // Process each individual target found by this stage's pattern
-        let mut current_stage_export_set = ExportSet::Empty;
-
+        // Process each individual target
         for target in export_targets {
             log::debug!(
-                " STAGE {}: Processing target '{}' (captures: {:?})",
-                stage_idx + 1,
+                "[EXPORT] Processing target '{}' (captures: {:?})",
                 target.pond_path,
                 target.captures
             );
 
-            // FIXED: Create target-specific context filtered by this target's captures
-            // This ensures each target gets the right subset of previous stage data
-            let target_specific_context = if let Some(prev_stage_data) = previous_stage_context {
-                // Filter previous stage data to only include entries matching this target's captures
-                // This allows templates to access only the relevant export data based on pattern matching
-                let filtered_data = prev_stage_data.filter_by_captures(&target.captures);
-
-                // Only provide context if the filtered result is not empty
-                match filtered_data {
-                    ExportSet::Empty => {
-                        log::debug!(
-                            "[SEARCH] STAGE {}: No matching previous stage data for target '{}' with captures {:?}",
-                            stage_idx + 1,
-                            target.pond_path,
-                            target.captures
-                        );
-                        None
-                    }
-                    filtered => {
-                        log::debug!(
-                            "[STAGE] STAGE {}: Filtered previous stage data for target '{}' using captures {:?}",
-                            stage_idx + 1,
-                            target.pond_path,
-                            target.captures
-                        );
-                        Some(filtered)
-                    }
-                }
-            } else {
-                None
-            };
-
-            // CORE EXPORT: This is where each target gets exported (parquet files, templates, etc.)
-            let (target_metadata, target_schema) = export_target(
+            let (target_metadata, _target_schema) = export_target(
                 tx_guard,
                 &target,
                 output_dir,
                 &temporal_parts,
-                target_specific_context.as_ref(), // Per-target filtered context
                 export_range.clone(),
             )
             .await?;
 
-            // Build ExportSet with this target's specific schema (preserves per-target schemas)
-            let target_export_set =
-                ExportSet::construct_with_schema(target_metadata.clone(), target_schema);
-
-            // Merge this target's results into the stage's accumulated ExportSet
-            current_stage_export_set =
-                merge_export_sets(current_stage_export_set, target_export_set);
-
-            // Also add to summary for reporting (this still needs the old format)
             export_summary.add_export_results(pattern, target_metadata.clone());
 
             log::debug!(
-                "[OK] STAGE {}: Target '{}' exported {} files",
-                stage_idx + 1,
+                "[OK] Target '{}' exported {} files",
                 target.pond_path,
                 target_metadata.len()
             );
         }
-
-        // Stage completed - results are already accumulated in current_stage_export_set
-        let stage_result_count = count_export_set_files(&current_stage_export_set);
-        log::info!(
-            "[TBL] STAGE {}: Completed with {} export results",
-            stage_idx + 1,
-            stage_result_count
-        );
-
-        // FIXED: Pass only current stage results to next stage (not accumulated history)
-        // This ensures Stage N+1 only sees Stage N results, not all previous stages
-        previous_stage_results = current_stage_export_set;
-
-        log::debug!("[SYNC] STAGE {}: Results ready for next stage", stage_idx + 1);
     }
 
     // Commit transaction
@@ -570,7 +461,6 @@ async fn export_target(
     target: &ExportTarget,
     output_dir: &str,
     temporal_parts: &[String],
-    export_set: Option<&ExportSet>, // Template context from previous export stage
     export_range: ExportRange,
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!("Exporting {} ({:?})", target.pond_path, target.file_type);
@@ -616,7 +506,6 @@ async fn export_target(
                 target,
                 output_path.to_str().expect("utf8"),
                 output_dir,
-                export_set,
             )
             .await
         }
@@ -1012,7 +901,6 @@ async fn export_raw_file(
     target: &ExportTarget,
     output_file_path: &str,
     base_output_dir: &str,
-    _export_set: Option<&ExportSet>, // Template context (unused for raw files)
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     use tokio::io::AsyncReadExt;
 
