@@ -499,9 +499,8 @@ async fn execute_sync_impl(
     let remote_path = "/etc/system.d/1-backup"; // Standard location
     log::info!("Looking for remote factory at: {}", remote_path);
 
-    // Get filesystem root
-    let fs = tinyfs::FS::new(tx.state()?).await?;
-    let root = fs.root().await?;
+    // Get filesystem root (guard derefs to FS)
+    let root = tx.root().await?;
 
     // Resolve the factory config path
     let (_parent_wd, lookup_result) = root

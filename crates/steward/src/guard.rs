@@ -160,23 +160,6 @@ impl<'a> StewardTransactionGuard<'a> {
             .await
     }
 
-    /// Get access to the TinyFS ObjectStore instance used by the SessionContext
-    /// This allows direct operations on the same ObjectStore that DataFusion uses
-    pub async fn object_store(
-        &mut self,
-    ) -> Result<Arc<tlogfs::TinyFsObjectStore<tlogfs::persistence::State>>, tlogfs::TLogFSError>
-    {
-        self.data_tx
-            .as_mut()
-            .ok_or_else(|| {
-                tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                    "Transaction guard has been consumed".to_string(),
-                ))
-            })?
-            .object_store()
-            .await
-    }
-
     /// Get mutable access to the underlying TransactionGuard for tlogfs operations
     /// This allows tlogfs functions to accept the transaction guard directly
     pub fn transaction_guard(&mut self) -> Result<&mut TransactionGuard<'a>, tlogfs::TLogFSError> {

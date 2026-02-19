@@ -69,9 +69,8 @@ async fn run_command_impl(
     all_factory_modes: std::collections::HashMap<String, String>,
     pond_metadata: tlogfs::PondMetadata,
 ) -> Result<()> {
-    // Get filesystem root
-    let fs = tinyfs::FS::new(tx.state()?).await?;
-    let root = fs.root().await?;
+    // Get filesystem root (guard derefs to FS)
+    let root = tx.root().await?;
 
     // Get the node ID for the config file
     let (_parent_wd, lookup_result) = root

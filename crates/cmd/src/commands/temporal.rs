@@ -41,15 +41,8 @@ pub async fn detect_overlaps_command(
 
     // SIMPLIFIED APPROACH: Use TLogFS factory directly to get time series data
 
-    // Get TinyFS root for file access
-    let fs = tinyfs::FS::new(tx.state()?)
-        .await
-        .map_err(|e| anyhow!("Failed to get TinyFS: {}", e))?;
-    let tinyfs_root = Arc::new(
-        fs.root()
-            .await
-            .map_err(|e| anyhow!("Failed to get TinyFS root: {}", e))?,
-    );
+    // Get TinyFS root for file access (guard derefs to FS)
+    let tinyfs_root = Arc::new(tx.root().await?);
 
     // NodeTable no longer needed - TemporalFilteredListingTable handles metadata internally
 
