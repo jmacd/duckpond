@@ -301,11 +301,18 @@ pond list /path/to/check  # ALWAYS verify results
 
 ---
 
-## 🚫 HARD RULES (Violations = Wasted Time)
+## HARD RULES (Violations = Wasted Time)
+
+### Source Code: ASCII Only
+
+**No emoji or non-ASCII characters in `.rs` files.** Use ASCII bracket tags for
+log prefixes (e.g., `[OK]`, `[ERR]`, `[WARN]`, `[SEARCH]`) and ASCII art for
+box drawing (`+`, `-`, `|`, `=`). This rule exists because non-ASCII bytes break
+text-based editing tools and cause silent file corruption.
 
 ### Rust Code Anti-Patterns
 
-| ❌ NEVER | ✅ INSTEAD | WHY |
+| NEVER | INSTEAD | WHY |
 |----------|-----------|-----|
 | `persistence.begin()` twice | Pass `&mut tx` to helpers | Single transaction rule - **PANICS** |
 | `OpLogPersistence::open(path)` in helpers | Use existing `tx.session_context()` | Creates duplicate transaction |
