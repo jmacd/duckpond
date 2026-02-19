@@ -102,10 +102,9 @@ impl<'a> StewardTransactionGuard<'a> {
     /// Get access to the underlying transaction state (for queries)
     ///
     /// Prefer `provider_context()` when all you need is a `ProviderContext`.
-    /// This method exposes tlogfs internals and should only be used when
-    /// you need oplog-specific operations like `get_factory_for_node()` or
-    /// `query_records()`.
-    pub fn state(&self) -> Result<tlogfs::persistence::State, tlogfs::TLogFSError> {
+    /// Internal only -- external callers should use convenience methods
+    /// (`provider_context()`, `get_factory_for_node()`, `query_records()`).
+    pub(crate) fn state(&self) -> Result<tlogfs::persistence::State, tlogfs::TLogFSError> {
         self.data_tx
             .as_ref()
             .ok_or_else(|| {
@@ -171,9 +170,19 @@ impl<'a> StewardTransactionGuard<'a> {
             .clone())
     }
 
+    /// Initialize the root directory in the oplog.
+    ///
+    /// This is used during pond creation / restoration to set up the
+    /// filesystem root. Most callers should use `Ship::create_pond()` instead.
+    pub async fn initialize_root_directory(&self) -> Result<(), tlogfs::TLogFSError> {
+        self.state()?.initialize_root_directory().await
+    }
+
     /// Get access to the underlying data persistence layer for read operations
-    /// This allows access to the DeltaTable and other query components
-    pub fn data_persistence(&self) -> Result<&tlogfs::OpLogPersistence, tlogfs::TLogFSError> {
+    /// This allows access to the DeltaTable and other query components.
+    /// Internal only -- external callers should use convenience methods
+    /// (`get_commit_history()`, `store_path()`) instead.
+    pub(crate) fn data_persistence(&self) -> Result<&tlogfs::OpLogPersistence, tlogfs::TLogFSError> {
         Ok(self
             .data_tx
             .as_ref()
@@ -202,16 +211,6 @@ impl<'a> StewardTransactionGuard<'a> {
             })?
             .session_context()
             .await
-    }
-
-    /// Get mutable access to the underlying TransactionGuard for tlogfs operations
-    /// This allows tlogfs functions to accept the transaction guard directly
-    pub fn transaction_guard(&mut self) -> Result<&mut TransactionGuard<'a>, tlogfs::TLogFSError> {
-        self.data_tx.as_mut().ok_or_else(|| {
-            tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                "Transaction guard has been consumed".to_string(),
-            ))
-        })
     }
 
     /// Abort the transaction and record it as failed

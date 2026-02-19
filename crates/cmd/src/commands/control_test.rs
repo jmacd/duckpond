@@ -1409,7 +1409,6 @@ async fn test_replica_preserves_transaction_sequences() {
 
     // Simulate restoring the first bundle with "pond init" command
     // This should create transaction #1, not #2
-    // This test uses tx.state() so it can't use write_transaction() yet.
     let tx = replica_ship
         .begin_write(&steward::PondUserMetadata::new(vec![
             "pond".to_string(),
@@ -1418,12 +1417,7 @@ async fn test_replica_preserves_transaction_sequences() {
         .await
         .expect("Failed to begin transaction");
 
-    let state = tx
-        .state()
-        .expect("Failed to get state");
-
-    state
-        .initialize_root_directory()
+    tx.initialize_root_directory()
         .await
         .map_err(steward::StewardError::DataInit)
         .expect("Failed to initialize root directory");

@@ -216,7 +216,7 @@ async fn execute_collect(
         .map_err(TLogFSError::TinyFS)?;
 
     // Run collection within the existing transaction
-    let result = collector.collect_data(&state, &fs).await.map_err(|e| {
+    let result = collector.collect_data(&fs).await.map_err(|e| {
         TLogFSError::TinyFS(tinyfs::Error::Other(format!(
             "HydroVu data collection failed: {}",
             e

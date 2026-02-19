@@ -319,7 +319,6 @@ impl HydroVuCollector {
     /// Works within a single transaction - caller manages transaction lifecycle
     pub async fn collect_data(
         &mut self,
-        state: &tlogfs::persistence::State,
         fs: &FS,
     ) -> Result<CollectionResult> {
         let device_count = self.config.devices.len();
@@ -341,7 +340,7 @@ impl HydroVuCollector {
                 );
                 continue;
             }
-            let result = self.collect_device(&device, state, fs).await?;
+            let result = self.collect_device(&device, fs).await?;
             total_records += result.records_collected;
 
             if let Some(final_ts) = result.final_timestamp
@@ -373,7 +372,6 @@ impl HydroVuCollector {
     async fn collect_device(
         &mut self,
         device: &HydroVuDevice,
-        _state: &tlogfs::persistence::State,
         fs: &FS,
     ) -> Result<DeviceCollectionResult> {
         let device_id = device.id;

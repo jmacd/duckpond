@@ -6,7 +6,6 @@ use anyhow::Result;
 use log::debug;
 use steward::{PondUserMetadata, Ship};
 use tempfile::tempdir;
-use tinyfs::FS;
 use tlogfs::FactoryRegistry;
 
 /// Test that post-commit factories are discovered and executed after a write transaction
@@ -34,9 +33,7 @@ async fn test_post_commit_factory_execution() -> Result<()> {
         ]))
         .await?;
 
-    let state1 = tx1.state()?;
-    let fs1 = FS::new(state1.clone()).await?;
-    let root1 = fs1.root().await?;
+    let root1 = tx1.root().await?;
 
     // Create /etc first, then /etc/system.d/ directory
     _ = root1.create_dir_path("/etc").await?;
@@ -62,7 +59,7 @@ repeat_count: 3
     let factory_node_id = factory_node.id();
 
     // Initialize the factory
-    let provider_context1 = state1.as_provider_context();
+    let provider_context1 = tx1.provider_context()?;
     let context1 = provider::FactoryContext::new(provider_context1, factory_node_id);
     FactoryRegistry::initialize::<tlogfs::TLogFSError>(
         "test-executor",
@@ -82,9 +79,7 @@ repeat_count: 3
     let verify_tx = ship
         .begin_read(&PondUserMetadata::new(vec!["verify".to_string()]))
         .await?;
-    let verify_state = verify_tx.state()?;
-    let verify_fs = FS::new(verify_state.clone()).await?;
-    let verify_root = verify_fs.root().await?;
+    let verify_root = verify_tx.root().await?;
 
     // Check /etc exists
     match verify_root.resolve_path("/etc").await {
@@ -145,9 +140,7 @@ repeat_count: 3
         ]))
         .await?;
 
-    let state2 = tx2.state()?;
-    let fs2 = FS::new(state2.clone()).await?;
-    let root2 = fs2.root().await?;
+    let root2 = tx2.root().await?;
 
     // Write a simple file to trigger a real data commit
     _ = root2.create_dir_path("/data").await?;
@@ -228,9 +221,7 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
         ]))
         .await?;
 
-    let state1 = tx1.state()?;
-    let fs1 = FS::new(state1.clone()).await?;
-    let root1 = fs1.root().await?;
+    let root1 = tx1.root().await?;
 
     _ = root1.create_dir_path("/etc").await?;
     _ = root1.create_dir_path("/etc/system.d").await?;
@@ -249,7 +240,7 @@ repeat_count: 1
         )
         .await?;
 
-    let provider_context1 = state1.as_provider_context();
+    let provider_context1 = tx1.provider_context()?;
     let context1 = provider::FactoryContext::new(provider_context1, factory_node.id());
     FactoryRegistry::initialize::<tlogfs::TLogFSError>(
         "test-executor",
@@ -301,9 +292,7 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
         ]))
         .await?;
 
-    let state1 = tx1.state()?;
-    let fs1 = FS::new(state1.clone()).await?;
-    let root1 = fs1.root().await?;
+    let root1 = tx1.root().await?;
 
     _ = root1.create_dir_path("/etc").await?;
     _ = root1.create_dir_path("/etc/system.d").await?;
@@ -333,7 +322,7 @@ repeat_count: 1
             )
             .await?;
 
-        let provider_context = state1.as_provider_context();
+        let provider_context = tx1.provider_context()?;
         let context = provider::FactoryContext::new(provider_context, factory_node.id());
         FactoryRegistry::initialize::<tlogfs::TLogFSError>(
             "test-executor",
@@ -355,9 +344,7 @@ repeat_count: 1
         ]))
         .await?;
 
-    let state2 = tx2.state()?;
-    let fs2 = FS::new(state2.clone()).await?;
-    let root2 = fs2.root().await?;
+    let root2 = tx2.root().await?;
 
     let mut writer = root2.async_writer_path("/trigger-multi.txt").await?;
     use tokio::io::AsyncWriteExt;

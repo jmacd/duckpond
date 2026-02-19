@@ -153,7 +153,6 @@ async fn export_pond_data(
             &steward::PondUserMetadata::new(vec!["export".to_string()]),
         )
         .await?;
-    let tx_guard = stx_guard.transaction_guard()?;
 
     // Process each pattern independently
     for pattern in patterns.iter() {
@@ -163,7 +162,7 @@ async fn export_pond_data(
         );
 
         // Find all files matching this pattern
-        let export_targets = discover_export_targets(tx_guard, pattern.clone()).await?;
+        let export_targets = discover_export_targets(&stx_guard, pattern.clone()).await?;
         log::info!(
             "[SEARCH] Found {} targets matching pattern '{}'",
             export_targets.len(),
@@ -179,7 +178,7 @@ async fn export_pond_data(
             );
 
             let (target_metadata, _target_schema) = export_target(
-                tx_guard,
+                &mut stx_guard,
                 &target,
                 output_dir,
                 &temporal_parts,
@@ -339,10 +338,10 @@ fn parse_temporal_parts(temporal: &str) -> Vec<String> {
 
 /// Discover all pond files matching the export patterns
 async fn discover_export_targets(
-    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    tx: &steward::StewardTransactionGuard<'_>,
     pattern: String,
 ) -> Result<Vec<ExportTarget>> {
-    let fs = &*tx_guard;
+    let fs = &**tx;
     let root = fs.root().await?;
 
     log::debug!("[SEARCH] Processing pattern: {}", pattern);
@@ -457,7 +456,7 @@ impl Visitor<ExportTarget> for ExportTargetVisitor {
 
 /// Export a single file from pond to external directory
 async fn export_target(
-    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    tx: &mut steward::StewardTransactionGuard<'_>,
     target: &ExportTarget,
     output_dir: &str,
     temporal_parts: &[String],
@@ -491,7 +490,7 @@ async fn export_target(
         | EntryType::TableDynamic
         | EntryType::TablePhysicalVersion => {
             export_queryable_file(
-                tx_guard,
+                tx,
                 target,
                 output_path.to_str().expect("utf8"),
                 temporal_parts,
@@ -502,7 +501,7 @@ async fn export_target(
         }
         EntryType::FilePhysicalVersion | EntryType::FileDynamic => {
             export_raw_file(
-                tx_guard,
+                tx,
                 target,
                 output_path.to_str().expect("utf8"),
                 output_dir,
@@ -521,7 +520,7 @@ async fn export_target(
 
 /// Export queryable files (FileSeries/FileTable) with DataFusion and temporal partitioning
 async fn export_queryable_file(
-    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    tx: &mut steward::StewardTransactionGuard<'_>,
     target: &ExportTarget,
     output_file_path: &str,
     temporal_parts: &[String],
@@ -533,7 +532,7 @@ async fn export_queryable_file(
         target.pond_path,
         output_file_path
     );
-    let root = tx_guard.root().await?;
+    let root = tx.root().await?;
 
     // Build SQL query with temporal partitioning columns
     let temporal_columns = temporal_parts
@@ -593,7 +592,7 @@ async fn export_queryable_file(
         &unique_table_name,
         export_path,
         temporal_parts,
-        tx_guard,
+        &tx.provider_context().map_err(|e| anyhow::anyhow!("Failed to get provider context: {}", e))?,
         export_range,
     )
     .await?;
@@ -653,7 +652,7 @@ async fn execute_direct_copy_query(
     unique_table_name: &str,
     export_path: &std::path::Path,
     temporal_parts: &[String],
-    tx: &mut tlogfs::TransactionGuard<'_>,
+    provider_context: &tinyfs::ProviderContext,
     export_range: ExportRange,
 ) -> Result<usize> {
     use tinyfs::Lookup;
@@ -665,14 +664,11 @@ async fn execute_direct_copy_query(
         export_path.display()
     );
 
-    // Get SessionContext from transaction
-    let ctx = tx
-        .session_context()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get session context: {}", e))?;
+    // Get SessionContext from provider context
+    let ctx = &provider_context.datafusion_session;
     log::debug!(
         "[SEARCH] EXPORT: Got SessionContext {:p} for pond_path={}",
-        std::sync::Arc::as_ptr(&ctx),
+        std::sync::Arc::as_ptr(ctx),
         pond_path
     );
     log::debug!("[SEARCH] Got session context");
@@ -709,10 +705,8 @@ async fn execute_direct_copy_query(
                     let queryable_file = file_guard.as_queryable();
 
                     if let Some(queryable_file) = queryable_file {
-                        let state = tx.state()?;
-                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
-                            .as_table_provider(node_id, &provider_context)
+                            .as_table_provider(node_id, provider_context)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to get table provider: {}", e))?;
 
@@ -897,7 +891,7 @@ async fn execute_direct_copy_query(
 
 /// Export raw data files (FileData) without temporal partitioning
 async fn export_raw_file(
-    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    tx: &mut steward::StewardTransactionGuard<'_>,
     target: &ExportTarget,
     output_file_path: &str,
     base_output_dir: &str,
@@ -907,7 +901,7 @@ async fn export_raw_file(
     let output_path = std::path::Path::new(output_file_path);
 
     // Read file content from pond
-    let data_wd = tx_guard.root().await?;
+    let data_wd = tx.root().await?;
     let (_parent_wd, lookup_result) = data_wd.resolve_path(&target.pond_path).await?;
 
     match lookup_result {

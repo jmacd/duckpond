@@ -242,15 +242,9 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
         .await
         .with_context(|| "Failed to begin transaction")?;
 
-    // Get filesystem from transaction state
-    let state = tx.state()?;
-    let fs = tinyfs::FS::new(state.clone())
-        .await
-        .with_context(|| "Failed to create filesystem")?;
-
-    // Run data collection with State and FS
+    // Run data collection (guard derefs to FS)
     let results = collector
-        .collect_data(&state, &fs)
+        .collect_data(&*tx)
         .await
         .with_context(|| "Failed to collect data from HydroVu")?;
 

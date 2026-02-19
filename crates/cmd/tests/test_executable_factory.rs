@@ -14,7 +14,6 @@ use log::debug;
 use provider::registry::ExecutionContext;
 use steward::PondUserMetadata;
 use tempfile::TempDir;
-use tinyfs::FS;
 use tlogfs::FactoryRegistry;
 
 /// Helper to create a test ship and workspace
@@ -50,9 +49,7 @@ async fn create_test_config(
         ]))
         .await?;
 
-    let state = tx.state()?;
-    let fs = FS::new(state.clone()).await?;
-    let root = fs.root().await?;
+    let root = tx.root().await?;
 
     // Create parent directories
     let parts: Vec<&str> = path.rsplitn(2, '/').collect();
@@ -82,7 +79,7 @@ async fn create_test_config(
         .await?;
 
     // Initialize the factory
-    let provider_context = state.as_provider_context();
+    let provider_context = tx.provider_context()?;
     let context = provider::FactoryContext::new(provider_context, parent_node_id);
     FactoryRegistry::initialize::<tlogfs::TLogFSError>(
         "test-executor",
@@ -136,9 +133,7 @@ repeat_count: 5
         .await
         .expect("Failed to begin transaction");
 
-    let state = tx.state().expect("Failed to get state");
-    let fs = FS::new(state.clone()).await.expect("Failed to create FS");
-    let root = fs.root().await.expect("Failed to get root");
+    let root = tx.root().await.expect("Failed to get root");
 
     // Create parent directory and config node
     _ = root
@@ -163,7 +158,7 @@ repeat_count: 5
         .expect("Failed to create config node");
 
     // Initialize and execute in the SAME transaction
-    let provider_context = state.as_provider_context();
+    let provider_context = tx.provider_context().expect("Failed to get provider context");
     let context = provider::FactoryContext::new(provider_context, parent_node_id);
     FactoryRegistry::initialize::<tlogfs::TLogFSError>(
         "test-executor",
