@@ -8,7 +8,6 @@
 //! without requiring the caller to understand the underlying DataFusion setup.
 
 use crate::error::TLogFSError;
-use crate::transaction_guard::TransactionGuard;
 use datafusion::physical_plan::SendableRecordBatchStream; // Import the canonical version
 
 /// Execute a SQL query against a TLogFS file and return a streaming result
@@ -26,14 +25,14 @@ use datafusion::physical_plan::SendableRecordBatchStream; // Import the canonica
 ///
 /// # Returns
 /// A stream of RecordBatch results from the query execution
-pub async fn execute_sql_on_file<'a>(
+pub async fn execute_sql_on_file(
     tinyfs_wd: &tinyfs::WD,
     path: &str,
     sql_query: &str,
-    tx: &mut TransactionGuard<'a>,
+    provider_context: &tinyfs::ProviderContext,
 ) -> Result<SendableRecordBatchStream, TLogFSError> {
-    // Get SessionContext from transaction (anti-duplication)
-    let ctx = tx.session_context().await?;
+    // Get SessionContext from provider context
+    let ctx = &provider_context.datafusion_session;
 
     // Resolve path to get node_id and part_id directly (anti-duplication - no wrapper function)
     use tinyfs::Lookup;
@@ -84,10 +83,8 @@ pub async fn execute_sql_on_file<'a>(
                     let file_guard = file_arc.lock().await;
 
                     if let Some(queryable_file) = file_guard.as_queryable() {
-                        let state = tx.state()?;
-                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
-                            .as_table_provider(node_path.id(), &provider_context)
+                            .as_table_provider(node_path.id(), provider_context)
                             .await
                             .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
                         drop(file_guard);
@@ -150,7 +147,7 @@ pub async fn execute_sql_on_file<'a>(
 pub async fn get_file_schema(
     tinyfs_wd: &tinyfs::WD,
     path: &str,
-    state: &crate::persistence::State,
+    provider_context: &tinyfs::ProviderContext,
 ) -> Result<arrow::datatypes::SchemaRef, TLogFSError> {
     use tinyfs::Lookup;
     let (_, lookup_result) = tinyfs_wd
@@ -187,9 +184,8 @@ pub async fn get_file_schema(
 
                     // Get QueryableFile and table provider
                     if let Some(queryable_file) = file_guard.as_queryable() {
-                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
-                            .as_table_provider(node_path.id(), &provider_context)
+                            .as_table_provider(node_path.id(), provider_context)
                             .await
                             .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
                         drop(file_guard);

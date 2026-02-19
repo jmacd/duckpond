@@ -1021,14 +1021,14 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     // Transaction 3: Query the series before setting temporal bounds - should return 12 rows
     debug!("Querying series before temporal bounds...");
     {
-        let mut tx = persistence.begin_test().await?;
+        let tx = persistence.begin_test().await?;
         let wd = tx.root().await?;
 
         let mut result_stream = execute_sql_on_file(
             &wd,
             series_path,
             "SELECT COUNT(*) as row_count FROM series",
-            &mut tx,
+            &tx.state()?.as_provider_context(),
         )
         .await?;
 
@@ -1095,14 +1095,14 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     // Transaction 5: Query the series after setting temporal bounds - should return 10 rows
     debug!("Querying series after temporal bounds...");
     {
-        let mut tx = persistence.begin_test().await?;
+        let tx = persistence.begin_test().await?;
         let wd = tx.root().await?;
 
         let mut result_stream = execute_sql_on_file(
             &wd,
             series_path,
             "SELECT COUNT(*) as row_count FROM series",
-            &mut tx,
+            &tx.state()?.as_provider_context(),
         )
         .await?;
 

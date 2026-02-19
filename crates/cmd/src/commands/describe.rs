@@ -350,8 +350,7 @@ async fn describe_file_series_schema_impl(
     let root = fs.root().await?;
 
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let state = tx.state()?;
-    let schema = tlogfs::get_file_schema(&root, path, &state)
+    let schema = tlogfs::get_file_schema(&root, path, &tx.provider_context()?)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
 
@@ -385,8 +384,7 @@ async fn describe_file_table_schema_impl(
     let root = fs.root().await?;
 
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let state = tx.state()?;
-    let schema = tlogfs::get_file_schema(&root, path, &state)
+    let schema = tlogfs::get_file_schema(&root, path, &tx.provider_context()?)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
 

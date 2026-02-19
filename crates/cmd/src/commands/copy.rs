@@ -616,7 +616,7 @@ async fn export_queryable_file_as_parquet(
     use std::fs::File;
 
     let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship
+    let tx = ship
         .begin_read(&steward::PondUserMetadata::new(vec![
             "export".to_string(),
             pond_path.to_string(),
@@ -630,7 +630,7 @@ async fn export_queryable_file_as_parquet(
         // Use default SELECT * query sorted by timestamp
         let sql_query = "SELECT * FROM series ORDER BY timestamp";
 
-        tlogfs::execute_sql_on_file(&root, pond_path, sql_query, tx.transaction_guard()?)
+        tlogfs::execute_sql_on_file(&root, pond_path, sql_query, &tx.provider_context()?)
             .await
             .map_err(|e| anyhow!("Failed to execute SQL query on '{}': {}", pond_path, e))?
     };
