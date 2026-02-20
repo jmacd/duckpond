@@ -75,7 +75,7 @@ impl Steward {
     ) -> Result<Transaction<'_>, StewardError> {
         match self {
             Steward::Pond(ship) => Ok(Transaction::Pond(ship.begin_read(meta).await?)),
-            Steward::Host(host) => Ok(Transaction::Host(host.begin().await?)),
+            Steward::Host(host) => Ok(Transaction::Host(host.begin(meta).await?)),
         }
     }
 
@@ -86,7 +86,7 @@ impl Steward {
     ) -> Result<Transaction<'_>, StewardError> {
         match self {
             Steward::Pond(ship) => Ok(Transaction::Pond(ship.begin_write(meta).await?)),
-            Steward::Host(host) => Ok(Transaction::Host(host.begin().await?)),
+            Steward::Host(host) => Ok(Transaction::Host(host.begin(meta).await?)),
         }
     }
 
@@ -105,7 +105,7 @@ impl Steward {
         match self {
             Steward::Pond(ship) => ship.write_transaction(meta, f).await,
             Steward::Host(host) => {
-                let tx = host.begin().await?;
+                let tx = host.begin(meta).await?;
                 f(&tx).await
             }
         }

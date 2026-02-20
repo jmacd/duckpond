@@ -123,11 +123,11 @@ impl TimeseriesPivotFile {
 
         // Register each matched input with its pattern
         for (alias, path) in matched_inputs {
-            // Convert filesystem path to series:// URL
+            // Convert filesystem path to file+series:// URL (canonical entry type form)
             let url_str = if path.starts_with('/') {
-                format!("series://{}", path)
+                format!("file+series://{}", path)
             } else {
-                format!("series:///{}", path)
+                format!("file+series:///{}", path)
             };
             // Parse path as URL - if it fails, skip this entry
             if let Ok(url) = crate::Url::parse(&url_str) {

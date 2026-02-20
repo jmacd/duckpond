@@ -62,6 +62,11 @@ struct Cli {
     #[arg(long, global = true)]
     pond: Option<PathBuf>,
 
+    /// Host directory root for host+ URL operations (defaults to none;
+    /// when set, host+ paths are resolved relative to this directory)
+    #[arg(short = 'd', long = "directory", global = true)]
+    directory: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -233,7 +238,11 @@ async fn main() -> Result<()> {
     log::debug!("CLI parsed successfully");
 
     // Create the ship context
-    let ship_context = ShipContext::new(cli.pond.as_ref(), original_args.clone());
+    let ship_context = ShipContext::new(
+        cli.pond.as_ref(),
+        cli.directory.as_ref(),
+        original_args.clone(),
+    );
 
     let result = match cli.command {
         Commands::Init {

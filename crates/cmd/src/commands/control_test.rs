@@ -30,7 +30,7 @@ impl TestSetup {
 
         // Create ship context for initialization
         let init_args = vec!["pond".to_string(), "init".to_string()];
-        let ship_context = ShipContext::new(Some(&pond_path), init_args);
+        let ship_context = ShipContext::pond_only(Some(&pond_path), init_args);
 
         // Initialize pond
         init_command(&ship_context, None, None).await?;
@@ -1305,7 +1305,7 @@ async fn test_replica_preserves_transaction_sequences() {
     // Part 1: Verify that create_pond() records transaction #1
     println!("\n--- Part 1: Normal pond creation ---");
     let normal_path = temp_dir.path().join("normal_pond");
-    let normal_context = ShipContext::new(
+    let normal_context = ShipContext::pond_only(
         Some(normal_path.clone()),
         vec!["pond".to_string(), "init".to_string()],
     );
@@ -1357,7 +1357,7 @@ async fn test_replica_preserves_transaction_sequences() {
     // Part 2: Verify that create_pond_for_restoration() does NOT record transaction #1
     println!("\n--- Part 2: Restoration-ready pond creation ---");
     let replica_path = temp_dir.path().join("replica_pond");
-    let replica_context = ShipContext::new(
+    let replica_context = ShipContext::pond_only(
         Some(replica_path.clone()),
         vec!["pond".to_string(), "init".to_string()],
     );

@@ -668,6 +668,7 @@ mod tests {
             // Initialize the pond using init_command
             let ship_context = ShipContext {
                 pond_path: Some(pond_path.clone()),
+                host_root: None,
                 original_args: vec!["pond".to_string(), "init".to_string()],
             };
             init_command(&ship_context, None, None).await?;

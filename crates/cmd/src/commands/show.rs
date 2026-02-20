@@ -867,7 +867,7 @@ mod tests {
 
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
-            let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
+            let ship_context = ShipContext::pond_only(Some(pond_path.clone()), init_args.clone());
 
             // Initialize pond
             init_command(&ship_context, None, None)
@@ -937,7 +937,7 @@ mod tests {
         .expect("Failed to execute test transaction");
 
         // Create ship context for show command
-        let ship_context = ShipContext::new(Some(pond_path.clone()), vec!["test".to_string()]);
+        let ship_context = ShipContext::pond_only(Some(pond_path.clone()), vec!["test".to_string()]);
 
         // Capture show command output
         let mut captured_output = String::new();

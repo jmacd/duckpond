@@ -1,0 +1,414 @@
+# Hostmount Phase 3 -- Open Questions
+
+## What Phase 3 Proposes
+
+Phase 3 adds a `-d <dir>` global CLI flag, refactors `ShipContext` so commands can
+determine whether they need a pond, hostmount, or both based on URL arguments, and
+applies chroot semantics to the hostmount root.
+
+## What's Already in Place
+
+| Component | Status | Location |
+|-----------|--------|----------|
+| `HostmountPersistence` | Complete, 24 tests | `crates/tinyfs/src/hostmount/` |
+| `Steward::Host(HostSteward)` | Variant exists, fully wired | `crates/steward/src/dispatch.rs` |
+| `Steward::open_host(root_path)` | Ready | `dispatch.rs:70` |
+| `Transaction::Host(HostTransaction)` | `Deref<Target=FS>`, `provider_context()`, `session_context()` all work | `crates/steward/src/host.rs` |
+| `HostTransaction::get_factory_for_node()` | Stub: always returns `None` | `host.rs:94` |
+| `cat_host_impl` | Pre-existing bypass, no tinyfs involvement | `cat.rs:168-170` |
+| `copy.rs` host detection | `strip_prefix("host://")`, separate from provider `Url` | `copy.rs:23-27` |
+
+**Key observation:** `Steward::Host` is fully functional but *never constructed
+from any CLI code path*. No command calls `Steward::open_host()`. The entire Phase 2
+host infrastructure is unused plumbing.
+
+## Current Command Landscape
+
+| Command | Current host behavior | Needs pond? |
+|---------|----------------------|-------------|
+| `cat` | `host+` prefix -> `cat_host_impl` (standalone, no tinyfs) | Conditional |
+| `copy` | `host://` prefix -> string stripping, always opens pond | Yes |
+| `run` | Always opens pond | Yes |
+| `list` | Always opens pond | Yes |
+| `list-factories` | No pond at all | No |
+| Everything else | Always opens pond | Yes |
+
+## Interaction with copy-url-design.md
+
+The `copy-url-design.md` proposes a second, conflicting URL grammar for host access.
+These two designs must be reconciled before Phase 3 work begins.
+
+### The conflict: two ways to say "host file with format"
+
+| Design | URL syntax | Example |
+|--------|-----------|---------|
+| Hostmount | `host+scheme:///path` (prefix) | `host+csv:///tmp/data.csv` |
+| Copy-URL | `scheme://host/path` (authority) | `csv://host/tmp/data.csv` |
+
+Both express the same intent ("read a host file through a format provider") but
+with incompatible URL structures. Today `pond cat` already uses the prefix style
+(`host+csv:///path`). The copy-url-design proposes the authority style for `pond copy`.
+
+If both are implemented, we'd have `cat` using prefix syntax and `copy` using
+authority syntax for the same operation -- exactly the kind of inconsistency the
+hostmount design was created to eliminate.
+
+### Where they agree
+
+- Raw host copy: both use `host:///path` (scheme = `host`, no format)
+- Entry type modifiers: copy-url adds `+table`/`+series` suffixes -- orthogonal,
+  not conflicting. Hostmount doesn't propose these but doesn't contradict them.
+- Both want to replace `strip_prefix("host://")` with proper URL parsing.
+
+### Where they diverge
+
+| Topic | Hostmount design | Copy-URL design |
+|-------|-----------------|-----------------|
+| `host` position | Prefix on scheme (`host+csv`) | Authority (`csv://host`) |
+| Format-driven host access | Through hostmount FS + provider | Direct `tokio::fs` + provider |
+| `-d` / chroot | Yes | Not mentioned |
+| Entry type in URL | Not proposed | `+table`/`+series` suffixes |
+| `provider::Url` changes | `is_host` flag (exists) | `entry_type` field + authority parsing (new) |
+
+### The reconciliation question (new Q0)
+
+These designs were written at different times. Before Phase 3 proceeds, the URL
+grammar must be unified. See Q0 below.
+
+---
+
+## Open Questions
+
+### Q0: Unified URL grammar -- prefix vs authority for `host`
+
+The two designs propose incompatible grammars:
+
+**Option A: Prefix only** (`host+scheme:///path`) -- what `cat` already uses.
+All host URLs start with `host+`. Simple to detect (`starts_with("host+")`).
+`host` is always the leftmost segment. `provider::Url` already has `is_host` for this.
+
+```
+host+csv:///data.csv           -> host file, CSV format
+host+csv+gzip:///data.csv.gz   -> host file, CSV, gzipped
+host+table:///data.parquet     -> host file, table entry type
+host+series:///data.parquet    -> host file, series entry type
+host+csv+series:///data.csv    -> host file, CSV format, series entry type
+```
+
+**Option B: Authority only** (`scheme://host/path`) -- what copy-url proposes for
+format-driven access. `host` goes in the URL authority position (between `://` and path).
+More "correct" URL semantics (authority = where, scheme = what).
+
+```
+csv://host/data.csv            -> host file, CSV format
+csv+gzip://host/data.csv.gz   -> host file, CSV, gzipped
+host:///data.parquet           -> host file, raw bytes (no authority)
+```
+
+**Option C: Both** -- prefix for raw/entrytype, authority for format. This is what
+the two docs collectively propose, but it means two different syntaxes for "host file"
+depending on whether a format provider is involved:
+- `host+table:///f.parquet` (prefix, no format provider)
+- `csv://host/f.csv` (authority, format provider)
+
+**Option D: Prefix always, kill authority** -- standardize on `host+` prefix everywhere.
+`csv://host/path` is never valid. This means copy-url-design's authority approach is
+rejected in favor of consistency with the existing `cat` syntax.
+
+My read: Option D (prefix always) is simplest. The existing `pond cat host+csv:///path`
+syntax works and is already implemented. Introducing a second syntax for the same
+concept adds complexity without clear benefit. The "semantic correctness" of authority
+position doesn't outweigh the cost of two syntaxes.
+
+If D is chosen, the copy-url-design needs to be updated to use prefix syntax:
+```
+pond copy host+csv:///data.csv /tables/         -> copy IN with CSV parsing
+pond copy host+csv+gzip:///data.csv.gz /tables/ -> copy IN with CSV+gzip
+pond copy host+series:///data.parquet /tables/   -> copy IN as series
+```
+
+**Decision:**
+
+(D). This was an unintentional divergence. The layering of schemes makes more sense, and I do not want to keep the other style.
+
+### Q1: Deliverable scope -- what does Phase 3 ship?
+
+The motivating example (`pond run -d ./water host+sitegen://site.yaml build ./dist`)
+requires Phases 3 + 4 + 5 together. Phase 3 alone delivers no user-visible behavior
+change.
+
+Two options:
+
+**A. Narrow Phase 3** -- plumbing only:
+- Add `-d <dir>` flag to `Cli` struct
+- Add `host_root: Option<PathBuf>` to `ShipContext`
+- Add `ShipContext::open_host()` -> `Steward::Host(...)`
+- Don't change any command -- no command uses this path yet
+- Value: clean foundation, no risk
+
+**B. Phase 3 includes one command migration** -- plumbing + proof of life:
+- Everything in (A), plus
+- Migrate `pond cat host+...://` to use the hostmount path instead of `cat_host_impl`
+- Value: proves the architecture works end-to-end
+
+Which scope?
+**Decision:**
+
+(A) narrow
+
+### Q2: Where does "do I need a pond?" logic live?
+
+Commands have different argument shapes (`cat` takes one path, `copy` takes N
+sources + dest, `run` takes path + args). The "inspect arguments to determine
+context" logic needs a home.
+
+**A. ShipContext method** -- e.g. `ship_context.open_for_urls(&["host+csv:///a.csv", "/tables/"])`
+inspects the URLs and returns the right `Steward` variant (or both).
+
+**B. Per-command** -- each command checks its own args, calls `open_pond()` or
+`open_host()` directly. This is what `cat` already does with the `host+` prefix check.
+
+**C. CLI-level resolver** -- parse all path arguments at the top level (before command
+dispatch) and determine the context once. Pass a resolved environment to commands.
+
+My read: (B) is simplest and matches the existing pattern. The context determination
+is command-specific anyway (`copy` cares about source vs dest direction; `cat` doesn't).
+
+**Decision:**
+I prefer (C) and (B). A list of URLs is specific to the command syntax, but the logic of determining which can be combined somewhere in crates/cmd.
+
+### Q3: `-d` default -- CWD or explicit-only?
+
+The design says the default (no `-d`) is the process working directory.
+
+This means `pond cat host+csv:///data.csv` with no `-d` resolves `/data.csv` relative
+to CWD, giving `./data.csv`. But today, `host+csv:///data.csv` means the *absolute*
+host path `/data.csv` (the URL path is treated literally).
+
+Three options:
+
+**A. `-d` only takes effect when explicitly provided.** Without `-d`, `host+` URLs
+use absolute paths (current behavior preserved). With `-d ./water`, paths resolve
+under `./water/`.
+
+**B. `-d` always defaults to CWD.** This is a breaking change for existing
+`host+csv:///absolute/path` URLs.
+
+**C. Distinguish absolute from relative** in the URL:
+- `host+csv:///full/path` (triple slash = absolute, ignores `-d`)
+- `host+csv://relative/path` (double slash = relative, uses `-d`)
+
+My read: (A) avoids breaking current behavior and is simplest. The chroot semantics
+only activate when `-d` is explicit. This also avoids interaction with the copy-url
+design -- `+table`/`+series` suffixes work regardless of how the path is resolved.
+
+**Decision:**
+(A)
+
+### Q3a: Entry type suffixes (`+table`/`+series`) -- Phase 3 or separate?
+
+The copy-url-design proposes extending `provider::Url` with `+table`/`+series`
+suffixes. This changes the URL parser that hostmount Phase 3 would use.
+
+Options:
+- **Do it in Phase 3** -- extend `provider::Url` with entry type parsing before
+  wiring hostmount, so the URL model is complete
+- **Do it separately** -- the copy-url-design's Phase 1 (extend `provider::Url`)
+  can happen independently as a prerequisite, then Phase 3 builds on top
+
+Either way, the entry type suffixes don't conflict with hostmount -- they're additive.
+But the work ordering matters for avoiding merge conflicts in `provider::Url`.
+
+**Decision:**
+Do this in phase3. I want to ensure the URL structure and interpretation is powerful and consistent. I think the +table and +series schemes should be optional and that the default behavior may be conditioned on the command or the file type with different capabilities for host and pond. Pond knows entry type so +table and +series can be implicit, but for host it will be required in some cases.
+
+### Q4: Mixed operations -- two stewards in one command?
+
+`pond copy host+csv:///data.csv /tables/` needs both a hostmount (source) and a
+pond (destination). Today this works by string-stripping `host://` and using raw
+`tokio::fs` for the host side.
+
+The copy-url-design addresses this same use case but doesn't use the hostmount at
+all -- it proposes reading host files via `tokio::fs` + format providers, with no
+tinyfs involvement on the host side. The hostmount design's Phase 7 says the opposite:
+replace all ad-hoc host access with hostmount tinyfs.
+
+This is a crucial architectural question: **does `pond copy` host access go through
+hostmount, or remain direct `tokio::fs`?**
+
+**A. Hostmount for everything** -- `copy` opens a `Steward::Host` for source,
+`Steward::Pond` for dest, reads through tinyfs on both sides. Clean but means two
+active stewards/transactions per command.
+
+**B. Direct I/O for copy, hostmount for factories** -- `pond copy` keeps its
+direct host file reading (maybe cleaned up with `provider::Url` parsing). Hostmount
+is only used by commands that need a full FS context (like `pond run` with sitegen).
+This matches the copy-url-design.
+
+**C. Defer** -- Phase 3 doesn't touch `copy` at all. For Phase 3, only commands
+that are purely host-side (like `cat host+...`) would use the hostmount. `copy`
+is migrated later.
+
+My read: (C) for Phase 3 scope, with (B) as the long-term answer. `copy` doesn't
+need a full tinyfs FS for its host side -- it just needs to read bytes. The hostmount's
+value is for commands that navigate directory trees and resolve paths (factories, list).
+
+**Decision:**
+(A) Yes we want two active stewards in this case.
+
+### Q5: Does `-d` interact with `--pond`?
+
+Valid combinations:
+
+| Flags | Meaning |
+|-------|---------|
+| `--pond /my/pond` | Pond only (current) |
+| `-d ./water` | Hostmount only, rooted at `./water` |
+| `--pond /my/pond -d ./water` | Both available; command routes by URL |
+| Neither | `POND` env var for pond (if needed); no hostmount |
+
+Questions:
+- Is `-d` without `--pond`/`POND` a valid configuration? (Yes for `cat host+...`,
+  no for `list /something`)
+- Should `-d` set a `HOSTMOUNT_ROOT` env var as fallback, analogous to `POND`?
+- When `-d` is set but the command needs a pond (no `host+` URLs), should the error
+  message say "this command requires a pond" or silently ignore `-d`?
+
+**Decision:**
+You should only require POND or --pond when the command requires a pond. If the command doesn't, b/c e.g., it uses only host access, then it's OK to omit. The host filesystem always exists, so this is not symmetric. You can always access a host file path, and -d is always optional. OK to supply -d even when no host file access.
+
+### Q6: Should `cat_host_impl` be migrated or left alone?
+
+`cat_host_impl` works today without any tinyfs involvement:
+host file -> format provider -> MemTable -> DataFusion -> output.
+
+Routing through hostmount means: `HostSteward` -> `HostTransaction` -> `FS` -> `WD`
+-> resolve path -> get reader -> format provider -> MemTable -> query. More machinery.
+
+Benefits of migration:
+- Consistency: every command follows the same pattern
+- Glob support: `pond cat host+csv:///data/*.csv` could work (cat currently takes
+  exact paths though)
+- Path resolution: hostmount handles `..` traversal guard, symlink semantics
+
+Benefits of leaving it:
+- Simpler code path for a simple operation
+- No regression risk
+- Performance: fewer allocations, no persistence layer overhead
+
+This is a Phase 7 question per the design doc, but it determines whether Phase 3
+has a user-visible deliverable.
+
+**Decision:**
+Migrate it. I want consistent use of tinyfs.
+
+### Q7: What about `pond list -d ./water`?
+
+If hostmount is available, `pond list` could list host files through tinyfs.
+This would be useful for debugging ("what does the hostmount see?") but it's
+not in the design.
+
+Should `pond list` gain host awareness in Phase 3, or is that a later concern?
+
+**Decision:**
+Hostmount is always available, using CWD or -d to override. This question seems to almost answer itself. The HostMount tinyfs provider will just work.
+
+### Q8: HostTransaction metadata
+
+`Steward::begin_read/write` takes `&PondUserMetadata` for audit logging. The Host
+variant silently drops it:
+
+```rust
+Steward::Host(host) => Ok(Transaction::Host(host.begin().await?)),
+```
+
+Should `HostTransaction` carry the metadata for debugging/logging purposes, even
+without a control table? Minor point, but easier to add now than retrofit.
+
+**Decision:**
+I feel this is useful for debugging purposes. You can observe the host transaction even if it can't abort, will be helpful for debugging.
+
+### Q9: Error message improvements
+
+Today, `pond list` without `POND` set gives: `"POND environment variable not set"`.
+
+With `-d` available, should the error suggest using `-d` for host operations?
+Example: `"POND not set. Use -d <dir> for host filesystem operations or set POND
+for pond access."`
+
+This is UX polish but affects discoverability of the hostmount feature.
+
+**Decision:**
+
+I think it's OK to keep the default URL as a pond URL, meaning you have to use the full URL syntax to access host files but otherise a path like "/" expands into the active pond root dir, so "pond list" with its default will require a POND. No need to mention -d for this scenario.
+
+---
+
+## Decision Summary
+
+| Question | Decision |
+|----------|----------|
+| Q0: URL grammar | (D) Prefix always (`host+scheme:///path`). Kill authority style. Update copy-url-design. |
+| Q1: Phase 3 scope | (A) Narrow plumbing + `list` as proof-of-life. `cat` migration deferred to 3B. |
+| Q2: Context routing | (C)+(B) — shared URL classification in cmd crate, commands pass their own args. |
+| Q3: `-d` default | (A) — explicit only; without `-d`, `host+` URLs use absolute paths. |
+| Q3a: `+table`/`+series` | Do in Phase 3. Defaults depend on command/context. Pond knows entry type; host requires explicit in some cases. |
+| Q4: Mixed operations | (A) Two active stewards for commands that touch both host and pond. |
+| Q5: `-d` vs `--pond` | POND only required when command needs pond. Host always available. `-d` always optional. |
+| Q6: `cat_host_impl` | Migrate to hostmount tinyfs for consistency. |
+| Q7: `pond list` on host | Should just work via hostmount — not a separate feature. |
+| Q8: HostTransaction metadata | Yes, carry `PondUserMetadata` for debugging. |
+| Q9: Error messages | No change. Bare paths remain pond paths; no `-d` hint needed. |
+
+### Tensions to resolve
+
+**Q1 vs Q6 — resolved by choosing `list` as proof-of-life instead of `cat`.**
+`list` is pure FS — directory traversal and glob matching, no format providers,
+no DataFusion, no MemTable. It exercises exactly the hostmount value (directory
+tree through tinyfs) without the `cat` migration's complexity (format pipeline,
+SQL, stream handling, replacing `cat_host_impl`). `list` has no existing host
+bypass to replace — it's a clean addition. `cat` migration (Q6) is deferred to
+Phase 3B.
+
+`pond list host+file:///tmp/data/` (or `pond -d /tmp/data list`) becomes the
+Phase 3 proof-of-life: it opens a `Steward::Host`, traverses host directories
+through tinyfs, and prints entries. If that works, the hostmount plumbing is proven.
+
+---
+
+## Suggested Task Breakdown
+
+Decisions narrow Phase 3 to: URL parser extensions, `-d` plumbing, context routing,
+and `list` as the single proof-of-life command. `cat` migration and `copy` dual-steward
+are Phase 3B+.
+
+### Phase 3: URL parser + plumbing + `list` proof-of-life
+
+| Task | Description | Dependencies |
+|------|-------------|-------------|
+| 3-1 | Update copy-url-design.md: replace authority style with prefix style (Q0) | None |
+| 3-2 | Extend `provider::Url` with `+table`/`+series` entry type parsing (Q3a) | None |
+| 3-3 | Add `-d <dir>` global flag to `Cli` struct | None |
+| 3-4 | Add `host_root: Option<PathBuf>` to `ShipContext`; `-d` populates it | 3-3 |
+| 3-5 | Add `ShipContext::open_host()` -> `Steward::Host(...)` | 3-4 |
+| 3-6 | `HostTransaction` carries `PondUserMetadata` for debugging (Q8) | None |
+| 3-7 | Shared URL classification in cmd: detect `host+` URLs, determine context (Q2) | 3-2 |
+| 3-8 | Wire `list` to use host steward when pattern starts with `host+` (proof-of-life) | 3-5, 3-7 |
+| 3-9 | Unit + integration tests for all of the above | 3-2..8 |
+
+### Phase 3B: Remaining command migrations
+
+| Task | Description | Dependencies |
+|------|-------------|-------------|
+| 3B-1 | Migrate `cat` to use hostmount (replaces `cat_host_impl`) (Q6) | Phase 3 |
+| 3B-2 | Context routing for dual-steward commands (Q4) | Phase 3 |
+| 3B-3 | Migrate `copy` host handling to hostmount | 3B-2 |
+| 3B-4 | Integration tests: cat + copy on host files via hostmount | 3B-1, 3B-3 |
+
+### Not in Phase 3 (future)
+
+| Task | Phase | Description |
+|------|-------|-------------|
+| `pond run` on hostmount | Phase 5 | Factory dispatch from host FS |
+| Unified scheme registry | Phase 4 | Factory names in URL schemes |
+| Deprecate `--format` flag on copy | Phase 4+ | Entry type from URL replaces flag |

@@ -489,7 +489,7 @@ mod tests {
 
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
-            let ship_context = ShipContext::new(Some(&pond_path), init_args.clone());
+            let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize the pond
             init_command(&ship_context, None, None).await?;
@@ -618,7 +618,7 @@ mod tests {
         /// Create ShipContext for cat command
         fn cat_context(&self, filename: &str) -> ShipContext {
             let cat_args = vec!["pond".to_string(), "cat".to_string(), filename.to_string()];
-            ShipContext::new(Some(self.pond_path.clone()), cat_args)
+            ShipContext::pond_only(Some(self.pond_path.clone()), cat_args)
         }
 
         /// Create expected DataFusion output for our test data using the same formatting path
@@ -742,7 +742,7 @@ mod tests {
             "--sql".to_string(),
             "SELECT timestamp, value * 2 as doubled_value FROM source WHERE value > 42".to_string(),
         ];
-        let cat_context = ShipContext::new(Some(setup.pond_path.clone()), cat_args);
+        let cat_context = ShipContext::pond_only(Some(setup.pond_path.clone()), cat_args);
         let mut output_buffer = String::new();
 
         cat_command(

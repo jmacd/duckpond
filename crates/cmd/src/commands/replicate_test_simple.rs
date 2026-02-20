@@ -34,7 +34,7 @@ impl SimpleReplicationTest {
 
     async fn init_source(&self) -> Result<()> {
         let ship_context =
-            ShipContext::new(Some(self.source_pond.clone()), vec!["pond".to_string()]);
+            ShipContext::pond_only(Some(self.source_pond.clone()), vec!["pond".to_string()]);
 
         init_command(&ship_context, None, None).await?;
         Ok(())
@@ -42,7 +42,7 @@ impl SimpleReplicationTest {
 
     async fn verify_source_pond_identity(&self) -> Result<Uuid> {
         let ship_context =
-            ShipContext::new(Some(self.source_pond.clone()), vec!["pond".to_string()]);
+            ShipContext::pond_only(Some(self.source_pond.clone()), vec!["pond".to_string()]);
 
         let ship = ship_context.open_pond().await?;
         let control_table = ship.control_table();
@@ -57,10 +57,10 @@ impl SimpleReplicationTest {
         pond1_path: &Path,
         pond2_path: &Path,
     ) -> Result<(Uuid, Uuid, bool)> {
-        let ship1 = ShipContext::new(Some(&pond1_path), vec!["pond".to_string()])
+        let ship1 = ShipContext::pond_only(Some(&pond1_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
-        let ship2 = ShipContext::new(Some(&pond2_path), vec!["pond".to_string()])
+        let ship2 = ShipContext::pond_only(Some(&pond2_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
 
@@ -79,10 +79,10 @@ impl SimpleReplicationTest {
         pond1_path: &Path,
         pond2_path: &Path,
     ) -> Result<(i64, i64)> {
-        let ship1 = ShipContext::new(Some(&pond1_path), vec!["pond".to_string()])
+        let ship1 = ShipContext::pond_only(Some(&pond1_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
-        let ship2 = ShipContext::new(Some(&pond2_path), vec!["pond".to_string()])
+        let ship2 = ShipContext::pond_only(Some(&pond2_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
 
@@ -94,7 +94,7 @@ impl SimpleReplicationTest {
 
     /// Query transaction records from a pond
     async fn get_transaction_records(pond_path: &Path) -> Result<Vec<(i64, String)>> {
-        let ship = ShipContext::new(Some(&pond_path), vec!["pond".to_string()])
+        let ship = ShipContext::pond_only(Some(&pond_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
 
@@ -153,7 +153,7 @@ impl SimpleReplicationTest {
 
     /// Get comprehensive statistics about a pond's structure
     async fn get_pond_stats(pond_path: &Path) -> Result<PondStats, anyhow::Error> {
-        let ship = ShipContext::new(Some(&pond_path), vec!["pond".to_string()])
+        let ship = ShipContext::pond_only(Some(&pond_path), vec!["pond".to_string()])
             .open_pond()
             .await?;
 
@@ -316,7 +316,7 @@ async fn test_simple_pond_creation() -> Result<()> {
     );
 
     // Write some data: create multiple directories
-    let ship_context = ShipContext::new(Some(test.source_pond.clone()), vec!["pond".to_string()]);
+    let ship_context = ShipContext::pond_only(Some(test.source_pond.clone()), vec!["pond".to_string()]);
 
     mkdir_command(&ship_context, "/data", false).await?;
     mkdir_command(&ship_context, "/logs/app1", true).await?; // with parents
@@ -484,7 +484,7 @@ async fn test_pond_structural_statistics() -> Result<()> {
     let _ = writer.close()?;
     let parquet_path = temp_parquet.path().to_str().unwrap().to_string();
 
-    let ship_context = ShipContext::new(Some(test.source_pond.clone()), vec!["pond".to_string()]);
+    let ship_context = ShipContext::pond_only(Some(test.source_pond.clone()), vec!["pond".to_string()]);
 
     // Create directories and copy files
     mkdir_command(&ship_context, "/data", false).await?;

@@ -167,23 +167,13 @@ impl TemporalReduceSqlFile {
     /// the source_path. This ensures that schema discovery and SQL execution both use
     /// the correct format provider for the source data.
     fn source_url(&self) -> String {
-        let scheme = self.config.in_pattern.scheme();
-        let is_format_provider = matches!(scheme, "csv" | "excelhtml" | "oteljson");
-
-        if is_format_provider {
-            // Format providers: reconstruct URL with original scheme + source path
-            if self.source_path.starts_with('/') {
-                format!("{}://{}", scheme, self.source_path)
-            } else {
-                format!("{}:///{}", scheme, self.source_path)
-            }
+        // Use full_scheme() to preserve compression and entry type suffixes
+        // (e.g., "csv+gzip", "file+series", "file+table").
+        let scheme = self.config.in_pattern.full_scheme();
+        if self.source_path.starts_with('/') {
+            format!("{}://{}", scheme, self.source_path)
         } else {
-            // Builtin types: preserve original scheme (series, table, file)
-            if self.source_path.starts_with('/') {
-                format!("{}://{}", scheme, self.source_path)
-            } else {
-                format!("{}:///{}", scheme, self.source_path)
-            }
+            format!("{}:///{}", scheme, self.source_path)
         }
     }
 
@@ -1460,19 +1450,21 @@ mod tests {
             "excelhtml:// scheme must be preserved"
         );
 
-        // Builtin schemes must also be preserved
+        // Builtin schemes: series and table are now entry type suffixes.
+        // series:///path parses to format=file + entry_type=series,
+        // so full_scheme() returns "file+series" (the canonical form).
         let series_file = make_file("series", "/combined/site1.series");
         assert_eq!(
             series_file.source_url(),
-            "series:///combined/site1.series",
-            "series:// scheme must be preserved"
+            "file+series:///combined/site1.series",
+            "series entry type must be preserved via full_scheme()"
         );
 
         let table_file = make_file("table", "/tables/lookup");
         assert_eq!(
             table_file.source_url(),
-            "table:///tables/lookup",
-            "table:// scheme must be preserved"
+            "file+table:///tables/lookup",
+            "table entry type must be preserved via full_scheme()"
         );
 
         let file_file = make_file("file", "/raw/data.parquet");

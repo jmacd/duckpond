@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::common::{FileInfoVisitor, ShipContext};
+use crate::common::{FileInfoVisitor, ShipContext, TargetContext, classify_target};
 use anyhow::Result;
 
 /// Normalize a pattern for the list command.
@@ -36,8 +36,21 @@ pub async fn list_command<F>(
 where
     F: FnMut(&str),
 {
-    let normalized_pattern = normalize_pattern(pattern);
-    let mut ship = ship_context.open_pond().await?;
+    // Classify the pattern to determine pond vs host context
+    let target = classify_target(pattern);
+
+    let (normalized_pattern, mut ship) = match target {
+        TargetContext::Host(ref host_path) => {
+            let np = normalize_pattern(host_path);
+            let s = ship_context.open_host()?;
+            (np, s)
+        }
+        TargetContext::Pond(_) => {
+            let np = normalize_pattern(pattern);
+            let s = ship_context.open_pond().await?;
+            (np, s)
+        }
+    };
 
     // Use transaction for consistent filesystem access
     let tx = ship
@@ -113,7 +126,7 @@ mod tests {
 
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
-            let ship_context = ShipContext::new(Some(&pond_path), init_args.clone());
+            let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize the pond
             init_command(&ship_context, None, None).await?;

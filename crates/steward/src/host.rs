@@ -15,6 +15,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tinyfs::{FS, PersistenceLayer, ProviderContext};
+use tlogfs::PondUserMetadata;
 
 /// Lightweight steward for the host filesystem.
 ///
@@ -45,7 +46,8 @@ impl HostSteward {
     ///
     /// There is no distinction between read and write transactions
     /// on the host filesystem -- both return the same `HostTransaction`.
-    pub async fn begin(&mut self) -> Result<HostTransaction, StewardError> {
+    /// The `meta` is carried for debugging/logging, not for audit.
+    pub async fn begin(&mut self, meta: &PondUserMetadata) -> Result<HostTransaction, StewardError> {
         let persistence = tinyfs::hostmount::HostmountPersistence::new(
             self.root_path.clone(),
         )?;
@@ -53,10 +55,17 @@ impl HostSteward {
         let fs = FS::from_arc(persistence_arc.clone());
         let session = Arc::new(SessionContext::new());
 
+        log::debug!(
+            "[HOST] Begin transaction: root={:?}, meta={:?}",
+            self.root_path,
+            meta.args
+        );
+
         Ok(HostTransaction {
             fs,
             session,
             persistence: persistence_arc,
+            meta: meta.clone(),
         })
     }
 }
@@ -73,6 +82,8 @@ pub struct HostTransaction {
     session: Arc<SessionContext>,
     /// Persistence layer (shared with fs, used for ProviderContext)
     persistence: Arc<dyn PersistenceLayer>,
+    /// Command metadata for debugging (not persisted -- host has no control table)
+    meta: PondUserMetadata,
 }
 
 impl HostTransaction {
@@ -98,6 +109,12 @@ impl HostTransaction {
         _id: tinyfs::FileID,
     ) -> Result<Option<String>, tinyfs::Error> {
         Ok(None)
+    }
+
+    /// Get the debug metadata for this transaction.
+    #[must_use]
+    pub fn meta(&self) -> &PondUserMetadata {
+        &self.meta
     }
 }
 
