@@ -41,8 +41,11 @@ async fn show_filesystem_transactions(
     tx: &mut steward::Transaction<'_>,
     mode: &str,
 ) -> Result<String, steward::StewardError> {
+    // Get the pond-specific guard for commit history and store path
+    let pond = tx.as_pond().expect("show command requires a pond transaction");
+
     // Get commit history from the filesystem
-    let commit_history = tx
+    let commit_history = pond
         .get_commit_history(None)
         .await
         .map_err(steward::StewardError::DataInit)?;
@@ -52,7 +55,7 @@ async fn show_filesystem_transactions(
     }
 
     // Get store path for display purposes
-    let store_path = tx
+    let store_path = pond
         .store_path()
         .map_err(steward::StewardError::DataInit)?
         .to_string_lossy()
@@ -87,8 +90,8 @@ async fn show_brief_mode(
 
     let mut output = String::new();
 
-    // Access control table through transaction guard (uses Ship's cached instance)
-    let control_table = tx.control_table();
+    // Access control table through pond-specific guard (uses Ship's cached instance)
+    let control_table = tx.as_pond().expect("show command requires a pond transaction").control_table();
 
     control_table.print_banner();
 
@@ -398,8 +401,8 @@ async fn show_detailed_mode(
 
     let mut output = String::new();
 
-    // Access control table through transaction guard (uses Ship's cached instance)
-    let control_table = tx.control_table();
+    // Access control table through pond-specific guard (uses Ship's cached instance)
+    let control_table = tx.as_pond().expect("show command requires a pond transaction").control_table();
 
     control_table.print_banner();
 

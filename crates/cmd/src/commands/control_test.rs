@@ -1417,7 +1417,7 @@ async fn test_replica_preserves_transaction_sequences() {
         .await
         .expect("Failed to begin transaction");
 
-    tx.initialize_root_directory()
+    tx.as_pond().expect("test requires a pond transaction").initialize_root_directory()
         .await
         .map_err(steward::StewardError::DataInit)
         .expect("Failed to initialize root directory");

@@ -11,14 +11,14 @@
 
 use crate::{
     RecoveryResult, StewardError, StewardTransactionGuard,
-    control_table::{ControlTable, TransactionType},
+    control_table::ControlTable,
     ship::Ship,
 };
 use std::ops::{AsyncFnOnce, Deref};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tinyfs::FS;
-use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
+use tlogfs::{PondMetadata, PondUserMetadata};
 
 // ---------------------------------------------------------------------------
 // Steward enum -- wraps the concrete steward implementations
@@ -169,40 +169,6 @@ pub enum Transaction<'a> {
 }
 
 impl<'a> Transaction<'a> {
-    // -- Metadata --
-
-    /// Get the transaction metadata.
-    #[must_use]
-    pub fn txn_meta(&self) -> &PondTxnMetadata {
-        match self {
-            Transaction::Pond(guard) => guard.txn_meta(),
-        }
-    }
-
-    /// Get the transaction type.
-    #[must_use]
-    pub fn transaction_type(&self) -> TransactionType {
-        match self {
-            Transaction::Pond(guard) => guard.transaction_type(),
-        }
-    }
-
-    /// Check if this is a write transaction.
-    #[must_use]
-    pub fn is_write_transaction(&self) -> bool {
-        match self {
-            Transaction::Pond(guard) => guard.is_write_transaction(),
-        }
-    }
-
-    /// Check if this is a read transaction.
-    #[must_use]
-    pub fn is_read_transaction(&self) -> bool {
-        match self {
-            Transaction::Pond(guard) => guard.is_read_transaction(),
-        }
-    }
-
     // -- Backend-agnostic access --
 
     /// Get a `ProviderContext` for this transaction.
@@ -223,20 +189,6 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    // -- Control table (pond-specific) --
-
-    /// Get access to the control table.
-    ///
-    /// Panics if called on a non-Pond transaction (not yet applicable).
-    #[must_use]
-    pub fn control_table(&self) -> &ControlTable {
-        match self {
-            Transaction::Pond(guard) => guard.control_table(),
-        }
-    }
-
-    // -- Convenience methods --
-
     /// Look up the factory name associated with a filesystem node.
     pub async fn get_factory_for_node(
         &self,
@@ -247,37 +199,24 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// Query oplog records for a filesystem node.
-    pub async fn query_records(
-        &self,
-        id: tinyfs::FileID,
-    ) -> Result<Vec<tlogfs::OplogEntry>, tlogfs::TLogFSError> {
+    // -- Access to the underlying guard (for pond-specific operations) --
+
+    /// Get the underlying `StewardTransactionGuard` if this is a Pond transaction.
+    ///
+    /// Use this for pond-specific operations that are not part of the common
+    /// `Transaction` interface (e.g., `control_table`, `get_commit_history`,
+    /// `store_path`, `query_records`, `initialize_root_directory`).
+    #[must_use]
+    pub fn as_pond(&self) -> Option<&StewardTransactionGuard<'a>> {
         match self {
-            Transaction::Pond(guard) => guard.query_records(id).await,
+            Transaction::Pond(guard) => Some(guard),
         }
     }
 
-    /// Get the commit history from the underlying Delta table.
-    pub async fn get_commit_history(
-        &self,
-        limit: Option<usize>,
-    ) -> Result<Vec<deltalake::kernel::CommitInfo>, tlogfs::TLogFSError> {
+    /// Get the underlying `StewardTransactionGuard` mutably if this is a Pond transaction.
+    pub fn as_pond_mut(&mut self) -> Option<&mut StewardTransactionGuard<'a>> {
         match self {
-            Transaction::Pond(guard) => guard.get_commit_history(limit).await,
-        }
-    }
-
-    /// Get the on-disk store path for the data filesystem.
-    pub fn store_path(&self) -> Result<PathBuf, tlogfs::TLogFSError> {
-        match self {
-            Transaction::Pond(guard) => guard.store_path(),
-        }
-    }
-
-    /// Initialize the root directory in the oplog.
-    pub async fn initialize_root_directory(&self) -> Result<(), tlogfs::TLogFSError> {
-        match self {
-            Transaction::Pond(guard) => guard.initialize_root_directory().await,
+            Transaction::Pond(guard) => Some(guard),
         }
     }
 
