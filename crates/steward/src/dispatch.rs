@@ -12,6 +12,7 @@
 use crate::{
     RecoveryResult, StewardError, StewardTransactionGuard,
     control_table::ControlTable,
+    host::{HostSteward, HostTransaction},
     ship::Ship,
 };
 use std::ops::{AsyncFnOnce, Deref};
@@ -31,7 +32,9 @@ use tlogfs::{PondMetadata, PondUserMetadata};
 /// layer is ready.
 pub enum Steward {
     /// Full tlogfs-backed steward with Delta Lake transactions and control table
-    Pond(Ship),
+    Pond(Box<Ship>),
+    /// Lightweight host filesystem steward (no transactions, no control table)
+    Host(HostSteward),
 }
 
 impl Steward {
@@ -39,12 +42,12 @@ impl Steward {
 
     /// Initialize a completely new pond.
     pub async fn create_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        Ok(Steward::Pond(Ship::create_pond(pond_path).await?))
+        Ok(Steward::Pond(Box::new(Ship::create_pond(pond_path).await?)))
     }
 
     /// Open an existing pond.
     pub async fn open_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
-        Ok(Steward::Pond(Ship::open_pond(pond_path).await?))
+        Ok(Steward::Pond(Box::new(Ship::open_pond(pond_path).await?)))
     }
 
     /// Create pond infrastructure for bundle restoration.
@@ -53,8 +56,14 @@ impl Steward {
         preserve_metadata: PondMetadata,
     ) -> Result<Self, StewardError> {
         Ok(Steward::Pond(
-            Ship::create_pond_for_restoration(pond_path, preserve_metadata).await?,
+            Box::new(Ship::create_pond_for_restoration(pond_path, preserve_metadata).await?),
         ))
+    }
+
+    /// Create a host filesystem steward rooted at the given directory.
+    #[must_use]
+    pub fn open_host(root_path: std::path::PathBuf) -> Self {
+        Steward::Host(HostSteward::new(root_path))
     }
 
     // -- Transaction lifecycle --
@@ -66,6 +75,7 @@ impl Steward {
     ) -> Result<Transaction<'_>, StewardError> {
         match self {
             Steward::Pond(ship) => Ok(Transaction::Pond(ship.begin_read(meta).await?)),
+            Steward::Host(host) => Ok(Transaction::Host(host.begin().await?)),
         }
     }
 
@@ -76,6 +86,7 @@ impl Steward {
     ) -> Result<Transaction<'_>, StewardError> {
         match self {
             Steward::Pond(ship) => Ok(Transaction::Pond(ship.begin_write(meta).await?)),
+            Steward::Host(host) => Ok(Transaction::Host(host.begin().await?)),
         }
     }
 
@@ -93,6 +104,10 @@ impl Steward {
     {
         match self {
             Steward::Pond(ship) => ship.write_transaction(meta, f).await,
+            Steward::Host(host) => {
+                let tx = host.begin().await?;
+                f(&tx).await
+            }
         }
     }
 
@@ -100,20 +115,26 @@ impl Steward {
 
     /// Get a reference to the control table.
     ///
-    /// Panics if called on a non-Pond steward (not yet applicable).
+    /// # Panics
+    ///
+    /// Panics if called on a Host steward (the host filesystem has no control table).
     #[must_use]
     pub fn control_table(&self) -> &ControlTable {
         match self {
             Steward::Pond(ship) => ship.control_table(),
+            Steward::Host(_) => panic!("control_table() called on Host steward"),
         }
     }
 
     /// Get a mutable reference to the control table.
     ///
-    /// Panics if called on a non-Pond steward (not yet applicable).
+    /// # Panics
+    ///
+    /// Panics if called on a Host steward (the host filesystem has no control table).
     pub fn control_table_mut(&mut self) -> &mut ControlTable {
         match self {
             Steward::Pond(ship) => ship.control_table_mut(),
+            Steward::Host(_) => panic!("control_table_mut() called on Host steward"),
         }
     }
 
@@ -123,6 +144,7 @@ impl Steward {
     pub async fn check_recovery_needed(&mut self) -> Result<(), StewardError> {
         match self {
             Steward::Pond(ship) => ship.check_recovery_needed().await,
+            Steward::Host(_) => Ok(()), // No recovery concept for hostmount
         }
     }
 
@@ -130,6 +152,10 @@ impl Steward {
     pub async fn recover(&mut self) -> Result<RecoveryResult, StewardError> {
         match self {
             Steward::Pond(ship) => ship.recover().await,
+            Steward::Host(_) => Ok(RecoveryResult {
+                recovered_count: 0,
+                was_needed: false,
+            }),
         }
     }
 
@@ -144,6 +170,7 @@ impl Steward {
     pub fn as_pond(&self) -> Option<&Ship> {
         match self {
             Steward::Pond(ship) => Some(ship),
+            Steward::Host(_) => None,
         }
     }
 
@@ -151,6 +178,24 @@ impl Steward {
     pub fn as_pond_mut(&mut self) -> Option<&mut Ship> {
         match self {
             Steward::Pond(ship) => Some(ship),
+            Steward::Host(_) => None,
+        }
+    }
+
+    /// Get the underlying HostSteward if this is a Host steward.
+    #[must_use]
+    pub fn as_host(&self) -> Option<&HostSteward> {
+        match self {
+            Steward::Host(host) => Some(host),
+            Steward::Pond(_) => None,
+        }
+    }
+
+    /// Get the underlying HostSteward mutably if this is a Host steward.
+    pub fn as_host_mut(&mut self) -> Option<&mut HostSteward> {
+        match self {
+            Steward::Host(host) => Some(host),
+            Steward::Pond(_) => None,
         }
     }
 }
@@ -166,6 +211,8 @@ impl Steward {
 pub enum Transaction<'a> {
     /// Full tlogfs transaction with control table tracking
     Pond(StewardTransactionGuard<'a>),
+    /// Lightweight host filesystem transaction (no real commit/rollback)
+    Host(HostTransaction),
 }
 
 impl<'a> Transaction<'a> {
@@ -177,6 +224,7 @@ impl<'a> Transaction<'a> {
     ) -> Result<tinyfs::ProviderContext, tlogfs::TLogFSError> {
         match self {
             Transaction::Pond(guard) => guard.provider_context(),
+            Transaction::Host(host) => Ok(host.provider_context()),
         }
     }
 
@@ -186,6 +234,7 @@ impl<'a> Transaction<'a> {
     ) -> Result<Arc<datafusion::execution::context::SessionContext>, tlogfs::TLogFSError> {
         match self {
             Transaction::Pond(guard) => guard.session_context().await,
+            Transaction::Host(host) => Ok(host.session_context()),
         }
     }
 
@@ -196,6 +245,10 @@ impl<'a> Transaction<'a> {
     ) -> Result<Option<String>, tlogfs::TLogFSError> {
         match self {
             Transaction::Pond(guard) => guard.get_factory_for_node(id).await,
+            Transaction::Host(host) => host
+                .get_factory_for_node(id)
+                .await
+                .map_err(tlogfs::TLogFSError::TinyFS),
         }
     }
 
@@ -210,6 +263,7 @@ impl<'a> Transaction<'a> {
     pub fn as_pond(&self) -> Option<&StewardTransactionGuard<'a>> {
         match self {
             Transaction::Pond(guard) => Some(guard),
+            Transaction::Host(_) => None,
         }
     }
 
@@ -217,6 +271,24 @@ impl<'a> Transaction<'a> {
     pub fn as_pond_mut(&mut self) -> Option<&mut StewardTransactionGuard<'a>> {
         match self {
             Transaction::Pond(guard) => Some(guard),
+            Transaction::Host(_) => None,
+        }
+    }
+
+    /// Get the underlying `HostTransaction` if this is a Host transaction.
+    #[must_use]
+    pub fn as_host(&self) -> Option<&HostTransaction> {
+        match self {
+            Transaction::Host(host) => Some(host),
+            Transaction::Pond(_) => None,
+        }
+    }
+
+    /// Get the underlying `HostTransaction` mutably if this is a Host transaction.
+    pub fn as_host_mut(&mut self) -> Option<&mut HostTransaction> {
+        match self {
+            Transaction::Host(host) => Some(host),
+            Transaction::Pond(_) => None,
         }
     }
 
@@ -226,6 +298,7 @@ impl<'a> Transaction<'a> {
     pub async fn commit(self) -> Result<Option<()>, StewardError> {
         match self {
             Transaction::Pond(guard) => guard.commit().await,
+            Transaction::Host(_) => Ok(Some(())), // No-op: host writes are immediate
         }
     }
 
@@ -233,6 +306,10 @@ impl<'a> Transaction<'a> {
     pub async fn abort(self, error: impl std::fmt::Display) -> StewardError {
         match self {
             Transaction::Pond(guard) => guard.abort(error).await,
+            Transaction::Host(_) => {
+                // No abort mechanism on host filesystem; return the error as-is
+                StewardError::Aborted(error.to_string())
+            }
         }
     }
 }
@@ -243,6 +320,7 @@ impl<'a> Deref for Transaction<'a> {
     fn deref(&self) -> &Self::Target {
         match self {
             Transaction::Pond(guard) => guard,
+            Transaction::Host(host) => host,
         }
     }
 }
