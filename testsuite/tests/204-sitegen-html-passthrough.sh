@@ -267,7 +267,7 @@ check_contains "$INDEX" "link tag preserved" '<link rel="stylesheet"'
 
 echo ""
 echo "--- Markdown still renders ---"
-check_contains "$INDEX" "h1 rendered" '<h1>Test Page</h1>'
+check_contains "$INDEX" "h1 rendered" '<h1 id="test-page">Test Page</h1>'
 check_contains "$INDEX" "paragraph rendered" '<p>Some markdown content here.</p>'
 
 echo ""
