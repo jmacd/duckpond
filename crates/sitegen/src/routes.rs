@@ -40,7 +40,7 @@ pub struct ContentContext {
 pub struct PageJob {
     /// Output path relative to dist/ (e.g., "params/Temperature.html")
     pub output_path: String,
-    /// Pond path to the markdown template (e.g., "/etc/site/param.md")
+    /// Path to the markdown template (e.g., "/site/param.md")
     pub page_source: String,
     /// Capture group values ($0, $1, ...) -- empty for static routes
     pub captures: Vec<String>,
@@ -297,21 +297,21 @@ mod tests {
                 name: "home".to_string(),
                 route_type: RouteType::Static,
                 slug: "".to_string(),
-                page: Some("/etc/site/index.md".to_string()),
+                page: Some("/site/index.md".to_string()),
                 export: None,
                 content: None,
                 routes: vec![RouteConfig {
                     name: "params".to_string(),
                     route_type: RouteType::Static,
                     slug: "params".to_string(),
-                    page: Some("/etc/site/params.md".to_string()),
+                    page: Some("/site/params.md".to_string()),
                     export: None,
                     content: None,
                     routes: vec![RouteConfig {
                         name: "param".to_string(),
                         route_type: RouteType::Template,
                         slug: "$0".to_string(),
-                        page: Some("/etc/site/param.md".to_string()),
+                        page: Some("/site/param.md".to_string()),
                         export: Some("params".to_string()),
                         content: None,
                         routes: vec![],
@@ -451,7 +451,7 @@ mod tests {
                 name: "home".to_string(),
                 route_type: RouteType::Static,
                 slug: "".to_string(),
-                page: Some("/etc/site/index.md".to_string()),
+                page: Some("/site/index.md".to_string()),
                 export: None,
                 content: None,
                 routes: vec![RouteConfig {

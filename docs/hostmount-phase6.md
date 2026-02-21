@@ -159,5 +159,9 @@ navigation, active page highlighting, and heading anchors.
 
 ## What's Next
 
-- **Phase 7**: Deprecate remaining ad-hoc host access -- remove `strip_prefix("host://")`
-  from `pond copy`, route all host access through hostmount tinyfs
+Phase 7 (deprecating ad-hoc host access in `pond copy`) was already completed
+in Phase 3B. All host access now routes through hostmount tinyfs. The hostmount
+design is fully applied.
+
+Remaining work is content-focused: images, data pages, CSS polish, mobile
+responsive sidebar, and blog date ordering (see `caspar-water-site-design.md`).

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Site configuration -- parsed from `/etc/site.yaml` inside the pond.
+//! Site configuration -- parsed from `site.yaml` (pond or host filesystem).
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 ///   - name: "home"
 ///     type: static
 ///     slug: ""
-///     page: "/etc/site/index.md"
+///     page: "/site/index.md"
 ///     routes: [...]
 ///
 /// partials:
@@ -110,7 +110,7 @@ pub struct RouteConfig {
     pub route_type: RouteType,
     /// URL slug -- may contain `$0`, `$1` for template routes
     pub slug: String,
-    /// Pond path to markdown page (e.g., "/etc/site/index.md")
+    /// Path to markdown page (e.g., "/site/index.md")
     #[serde(default)]
     pub page: Option<String>,
     /// For template routes: which export stage provides data
@@ -157,13 +157,13 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
     routes:
       - name: "param"
         type: template
         slug: "$0"
         export: "params"
-        page: "/etc/site/param.md"
+        page: "/site/param.md"
 "#;
         let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
         assert_eq!(config.site.title, "Test Site");
@@ -190,7 +190,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
     routes:
       - name: "pages"
         type: content

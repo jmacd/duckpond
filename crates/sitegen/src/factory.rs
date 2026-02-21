@@ -777,7 +777,7 @@ mod tests {
         assert_eq!(slug_from_path("/pages/water-system.md"), "water-system");
         assert_eq!(slug_from_path("/content/history.md"), "history");
         assert_eq!(slug_from_path("readme.markdown"), "readme");
-        assert_eq!(slug_from_path("/etc/site/index.md"), "index");
+        assert_eq!(slug_from_path("/site/index.md"), "index");
     }
 
     #[test]

@@ -24,7 +24,7 @@ echo ""
 echo "--- Step 1: Create host directory structure ---"
 
 mkdir -p "${SITE_ROOT}/content"
-mkdir -p "${SITE_ROOT}/etc/site"
+mkdir -p "${SITE_ROOT}/site"
 
 echo "directory tree:"
 find "${SITE_ROOT}" -type d | sort
@@ -83,7 +83,7 @@ ls -la "${SITE_ROOT}/content/"
 echo ""
 echo "--- Step 3: Create site templates ---"
 
-cat > "${SITE_ROOT}/etc/site/index.md" << 'MD'
+cat > "${SITE_ROOT}/site/index.md" << 'MD'
 ---
 title: Host Site
 layout: default
@@ -94,14 +94,14 @@ layout: default
 Welcome to the site generated from the host filesystem.
 MD
 
-cat > "${SITE_ROOT}/etc/site/sidebar.md" << 'MD'
+cat > "${SITE_ROOT}/site/sidebar.md" << 'MD'
 ## [Home]({{ base_url /}})
 
 {{ content_nav content="pages" /}}
 MD
 
 echo "template files:"
-ls -la "${SITE_ROOT}/etc/site/"
+ls -la "${SITE_ROOT}/site/"
 
 # ==============================================================================
 # Step 4: Create sitegen config on host
@@ -127,7 +127,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
     routes:
       - name: "pages"
         type: content
@@ -135,7 +135,7 @@ routes:
         content: "pages"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML

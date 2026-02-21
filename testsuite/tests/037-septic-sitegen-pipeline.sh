@@ -283,7 +283,7 @@ pond cat /reduced/environment/data/res=1d.series --format=table --sql "SELECT CO
 echo ""
 echo "--- Step 5: Load sitegen pages ---"
 
-pond mkdir /etc/site
+pond mkdir /site
 
 cat > /tmp/index.md << 'MD'
 ---
@@ -343,9 +343,9 @@ cat > /tmp/sidebar.md << 'MD'
 - [BME280](/data/environment.html)
 MD
 
-pond copy host:///tmp/index.md   /etc/site/index.md
-pond copy host:///tmp/data.md    /etc/site/data.md
-pond copy host:///tmp/sidebar.md /etc/site/sidebar.md
+pond copy host:///tmp/index.md   /site/index.md
+pond copy host:///tmp/data.md    /site/data.md
+pond copy host:///tmp/sidebar.md /site/sidebar.md
 echo "✓ markdown pages loaded"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -370,7 +370,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "data"
     type: static
     slug: "data"
@@ -378,21 +378,21 @@ routes:
       - name: "metric-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "metrics"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site.yaml --config-path /tmp/site.yaml
+pond mknod sitegen /site.yaml --config-path /tmp/site.yaml
 echo "✓ sitegen factory created"
 
 echo ""
 echo "--- Pond tree ---"
-pond list '/etc/**'
+pond list '/site/**'
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 7: Run sitegen build
@@ -403,7 +403,7 @@ echo "--- Step 7: Run sitegen build ---"
 rm -rf "${OUTDIR}"
 mkdir -p "${OUTDIR}"
 
-pond run /etc/site.yaml build "${OUTDIR}"
+pond run /site.yaml build "${OUTDIR}"
 echo "✓ sitegen complete"
 
 # ══════════════════════════════════════════════════════════════════════════════

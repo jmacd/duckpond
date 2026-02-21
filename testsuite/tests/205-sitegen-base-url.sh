@@ -115,7 +115,7 @@ echo "✓ Data pipeline created"
 echo ""
 echo "--- Step 2: Create pages ---"
 
-pond mkdir -p /etc/site
+pond mkdir -p /site
 
 cat > /tmp/index.md << 'MD'
 ---
@@ -153,9 +153,9 @@ cat > /tmp/sidebar.md << 'MD'
 {{ nav_list collection="params" base="/params" /}}
 MD
 
-pond copy host:///tmp/index.md /etc/site/index.md
-pond copy host:///tmp/data.md /etc/site/data.md
-pond copy host:///tmp/sidebar.md /etc/site/sidebar.md
+pond copy host:///tmp/index.md /site/index.md
+pond copy host:///tmp/data.md /site/data.md
+pond copy host:///tmp/sidebar.md /site/sidebar.md
 echo "✓ Pages loaded"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -181,7 +181,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "params"
     type: static
     slug: "params"
@@ -189,21 +189,21 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "params"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site-root.yaml --config-path /tmp/site-root.yaml
+pond mknod sitegen /site-root.yaml --config-path /tmp/site-root.yaml
 
 ROOT_DIR=/tmp/sitegen-root
 rm -rf "${ROOT_DIR}"
 mkdir -p "${ROOT_DIR}"
-pond run /etc/site-root.yaml build "${ROOT_DIR}"
+pond run /site-root.yaml build "${ROOT_DIR}"
 echo "✓ Root site generated"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -229,7 +229,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "params"
     type: static
     slug: "params"
@@ -237,21 +237,21 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "params"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site-subdir.yaml --config-path /tmp/site-subdir.yaml
+pond mknod sitegen /site-subdir.yaml --config-path /tmp/site-subdir.yaml
 
 SUB_DIR=/tmp/sitegen-subdir
 rm -rf "${SUB_DIR}"
 mkdir -p "${SUB_DIR}"
-pond run /etc/site-subdir.yaml build "${SUB_DIR}"
+pond run /site-subdir.yaml build "${SUB_DIR}"
 echo "✓ Subdir site generated"
 
 # ══════════════════════════════════════════════════════════════════════════════

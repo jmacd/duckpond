@@ -106,7 +106,7 @@ echo "✓ Data pipeline created"
 echo ""
 echo "--- Step 2: Create pages with embedded HTML ---"
 
-pond mkdir -p /etc/site
+pond mkdir -p /site
 
 # Index page with inline script block — the key test case
 cat > /tmp/index.md << 'HTMLMD'
@@ -163,9 +163,9 @@ cat > /tmp/sidebar.md << 'MD'
 {{ nav_list collection="params" base="/params" /}}
 MD
 
-pond copy host:///tmp/index.md /etc/site/index.md
-pond copy host:///tmp/data.md /etc/site/data.md
-pond copy host:///tmp/sidebar.md /etc/site/sidebar.md
+pond copy host:///tmp/index.md /site/index.md
+pond copy host:///tmp/data.md /site/data.md
+pond copy host:///tmp/sidebar.md /site/sidebar.md
 echo "✓ Pages loaded"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -190,7 +190,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "params"
     type: static
     slug: "params"
@@ -198,20 +198,20 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "params"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site.yaml --config-path /tmp/site.yaml
+pond mknod sitegen /site.yaml --config-path /tmp/site.yaml
 
 rm -rf "${OUTDIR}"
 mkdir -p "${OUTDIR}"
-pond run /etc/site.yaml build "${OUTDIR}"
+pond run /site.yaml build "${OUTDIR}"
 echo "✓ Sitegen complete"
 
 # ══════════════════════════════════════════════════════════════════════════════

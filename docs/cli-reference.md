@@ -786,7 +786,7 @@ routes:
   - name: "home"
     type: static
     slug: ""                          # Root: /index.html
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "params"
     type: static
     slug: "params"                    # /params/index.html (if page given)
@@ -794,7 +794,7 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"                    # /params/Temperature.html, etc.
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "params"              # Links to export stage by name
   - name: "sites"
     type: static
@@ -803,11 +803,11 @@ routes:
       - name: "site-detail"
         type: template
         slug: "$0"                    # /sites/NorthDock.html, etc.
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "sites"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []                     # Extra files to copy (optional)
 ```
@@ -900,7 +900,7 @@ layout: data
 **Build command:**
 
 ```bash
-pond run /etc/site.yaml build ./dist
+pond run /site.yaml build ./dist
 ```
 
 This single command: reads the site config → runs export stages (auto-partitions
@@ -921,19 +921,19 @@ python3 -m http.server 8000 -d ./dist
 
 ```bash
 # Store templates in the pond
-pond copy host:///path/to/site /etc/site
+pond copy host:///path/to/site /site
 
 # Create the sitegen factory node
-pond mknod sitegen /etc/site.yaml --config-path /path/to/site.yaml
+pond mknod sitegen /site.yaml --config-path /path/to/site.yaml
 
 # Build the site
-pond run /etc/site.yaml build ./dist
+pond run /site.yaml build ./dist
 
 # Update templates without recreating the factory
-pond copy host:///path/to/site /etc/site --overwrite
+pond copy host:///path/to/site /site --overwrite
 
 # Update factory config
-pond mknod sitegen /etc/site.yaml --overwrite --config-path /path/to/site.yaml
+pond mknod sitegen /site.yaml --overwrite --config-path /path/to/site.yaml
 ```
 
 **Notes:**
@@ -1201,7 +1201,7 @@ temporal-reduce (/reduced)
     → /reduced/single_site/NorthDock/res={1h,6h,1d}.series
     → /reduced/single_param/Temperature/res={1h,6h,1d}.series
 
-sitegen (/etc/site.yaml)
+sitegen (/site.yaml)
     → dist/ (HTML + Parquet, served as static site)
 ```
 
@@ -1211,13 +1211,13 @@ sitegen (/etc/site.yaml)
 **Setup pattern:**
 ```bash
 pond init
-pond copy host:///path/to/site  /etc/site          # Markdown templates
+pond copy host:///path/to/site  /site              # Markdown templates
 pond mknod dynamic-dir /combined --config-path combine.yaml
 pond mknod dynamic-dir /singled  --config-path single.yaml
 pond mknod dynamic-dir /reduced  --config-path reduce.yaml
-pond mknod sitegen /etc/site.yaml --config-path site.yaml
+pond mknod sitegen /site.yaml --config-path site.yaml
 pond mknod column-rename /etc/hydro_rename --config-path hrename.yaml
-pond run /etc/site.yaml build ./dist
+pond run /site.yaml build ./dist
 ```
 
 ### Single-Source (Septic)
@@ -1233,7 +1233,7 @@ logfile-ingest (/etc/ingest)
 temporal-reduce (/reduced)                using oteljson:// URL scheme
     → /reduced/septic/res={1h,6h,1d}.series
 
-sitegen (/etc/site.yaml)
+sitegen (/site.yaml)
     → dist/ (HTML + Parquet)
 ```
 
@@ -1260,15 +1260,15 @@ config:
 pond init
 pond mkdir -p /etc/system.d
 pond mkdir -p /ingest
-pond copy host:///path/to/site /etc/site
+pond copy host:///path/to/site /site
 pond mknod logfile-ingest /etc/ingest --config-path ingest.yaml
 pond mknod remote /etc/system.d/1-backup --config-path backup.yaml
 pond mknod temporal-reduce /reduced --config-path reduce.yaml
-pond mknod sitegen /etc/site.yaml --config-path site.yaml
+pond mknod sitegen /site.yaml --config-path site.yaml
 
 # Operational cycle:
 pond run /etc/ingest                        # ingest new log data
-pond run /etc/site.yaml build ./dist        # build site (reduce is dynamic)
+pond run /site.yaml build ./dist        # build site (reduce is dynamic)
 pond run /etc/system.d/1-backup push        # backup to S3
 ```
 

@@ -5,7 +5,7 @@
 #           Produces index.html + per-param + per-site pages.
 #
 # Pipeline: synthetic-timeseries → timeseries-join → timeseries-pivot
-#           → temporal-reduce → sitegen (pond run /etc/site.yaml build)
+#           → temporal-reduce → sitegen (pond run /site.yaml build)
 #
 # Data: 2 sites (NorthDock, SouthDock) × 2 params (Temperature, DO)
 #       1 year (2025) at 1h resolution
@@ -221,8 +221,7 @@ pond list /reduced/**
 echo ""
 echo "--- Step 5: Load sitegen pages into pond ---"
 
-pond mkdir /etc
-pond mkdir /etc/site
+pond mkdir /site
 
 # Write markdown pages into pond
 cat > /tmp/index.md << 'MD'
@@ -281,9 +280,9 @@ cat > /tmp/sidebar.md << 'MD'
 {{ nav_list collection="sites" base="/sites" /}}
 MD
 
-pond copy host:///tmp/index.md   /etc/site/index.md
-pond copy host:///tmp/data.md    /etc/site/data.md
-pond copy host:///tmp/sidebar.md /etc/site/sidebar.md
+pond copy host:///tmp/index.md   /site/index.md
+pond copy host:///tmp/data.md    /site/data.md
+pond copy host:///tmp/sidebar.md /site/sidebar.md
 echo "✓ markdown pages loaded"
 
 # Write site.yaml config
@@ -307,7 +306,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "params"
     type: static
     slug: "params"
@@ -315,7 +314,7 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "params"
   - name: "sites"
     type: static
@@ -324,22 +323,22 @@ routes:
       - name: "site-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "sites"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 {% endraw %}
 YAML
 
-pond mknod sitegen /etc/site.yaml --config-path /tmp/site.yaml
+pond mknod sitegen /site.yaml --config-path /tmp/site.yaml
 echo "✓ site.yaml loaded (factory=sitegen)"
 
 echo ""
 echo "Pond /etc listing:"
-pond list '/etc/**'
+pond list '/site/**'
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 6: Run sitegen factory
@@ -350,7 +349,7 @@ echo "--- Step 6: Run sitegen factory ---"
 rm -rf "${OUTDIR}"
 mkdir -p "${OUTDIR}"
 
-pond run /etc/site.yaml build "${OUTDIR}"
+pond run /site.yaml build "${OUTDIR}"
 echo "✓ sitegen complete"
 
 # ══════════════════════════════════════════════════════════════════════════════

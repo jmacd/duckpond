@@ -93,13 +93,12 @@ In the pond:
         └── sidebar.md              # Sidebar partial
 ```
 
-### Why `/content/` Not `/etc/site/`?
+### Why `/content/` Not `/site/`?
 
 Content pages are **content**, not configuration. They live in the
-pond's main namespace alongside data, not buried under `/etc/`. The
-`/etc/site/` directory holds templates and config — structural files
-that control *how* content is rendered. Content pages are *what* gets
-rendered.
+namespace alongside data. The `/site/` directory holds templates and
+config — structural files that control *how* content is rendered.
+Content pages are *what* gets rendered.
 
 This also means content pages are first-class pond citizens: you can
 `pond copy` them in and out, `pond cat` them, and manage them with
@@ -179,7 +178,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
     routes:
       - name: "pages"
         type: content
@@ -187,7 +186,7 @@ routes:
         content: "pages"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 ```
@@ -261,7 +260,7 @@ The sidebar renders from `sidebar.md`. It uses raw HTML for the site
 title (to avoid heading anchor injection) and the `content_nav`
 shortcode for page links.
 
-### `/etc/site/sidebar.md`
+### `/site/sidebar.md`
 
 ```markdown
 <h2><a href="{{ base_url /}}">Caspar Water</a></h2>
@@ -499,7 +498,7 @@ by `render.sh`. Each file has `section: About` or `section: Blog`.
 
 `water/site.yaml` is the working config. `water/render.sh` handles
 the full build cycle: `pond init` → `pond copy` content + templates →
-`pond mknod` site factory → `pond run /etc/site generate ./dist`.
+`pond mknod` site factory → `pond run /site.yaml build ./dist`.
 
 The script uses a `pond()` shell function wrapping `cargo run` so
 no Docker container is needed for local development.
@@ -602,11 +601,11 @@ cd water
 ./render.sh --no-open  # Build without opening browser
 ```
 
-The script:
-1. Creates a temporary pond in `water/.pond/`
-2. Copies content and template files into the pond
-3. Creates the sitegen factory node
-4. Runs `pond run /etc/site generate ./dist`
-5. Starts Vite dev server for preview
+The script uses hostmount (`pond run -d ./water`) — no pond directory
+needed. It runs a single command:
 
-Uses `cargo run` via a shell function — no Docker required.
+```bash
+pond run -d "${SCRIPT_DIR}" host+sitegen:///site.yaml build "${OUTDIR}"
+```
+
+This reads `water/site.yaml` and templates directly from the host filesystem.

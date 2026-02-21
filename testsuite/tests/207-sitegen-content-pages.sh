@@ -1,26 +1,33 @@
 #!/bin/bash
-# EXPERIMENT: Sitegen — content page route type
+# EXPERIMENT: Sitegen — content page route type (hostmount)
 # EXPECTED: Content stage globs markdown files, parses frontmatter,
 #           generates one page per file with sidebar navigation.
 #           No export stages — pure content site.
+#           Uses hostmount: no pond required.
 set -e
 source check.sh
 
-echo "=== Experiment: Sitegen Content Pages ==="
+echo "=== Experiment: Sitegen Content Pages (Hostmount) ==="
 
-pond init
+SITE_ROOT="/tmp/host-content-pages"
 OUTDIR="${OUTPUT:-/output}"
 
+# Clean up from any prior run
+rm -rf "${SITE_ROOT}"
+rm -rf "${OUTDIR:?}"/* 2>/dev/null || true
+mkdir -p "${OUTDIR}"
+
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 1: Create synthetic content files
+# Step 1: Create host directory structure with content files
 # ══════════════════════════════════════════════════════════════════════════════
 
 echo ""
 echo "--- Step 1: Create content files ---"
 
-pond mkdir /content
+mkdir -p "${SITE_ROOT}/content"
+mkdir -p "${SITE_ROOT}/site"
 
-cat > /tmp/alpha.md << 'MD'
+cat > "${SITE_ROOT}/content/alpha.md" << 'MD'
 ---
 title: Alpha Page
 weight: 10
@@ -32,7 +39,7 @@ layout: page
 This is the alpha page. It should appear first in navigation.
 MD
 
-cat > /tmp/beta.md << 'MD'
+cat > "${SITE_ROOT}/content/beta.md" << 'MD'
 ---
 title: Beta Page
 weight: 20
@@ -48,7 +55,7 @@ This is the beta page with a [link](https://example.com).
 Some more text under a sub-heading.
 MD
 
-cat > /tmp/gamma.md << 'MD'
+cat > "${SITE_ROOT}/content/gamma.md" << 'MD'
 ---
 title: Gamma Page
 weight: 30
@@ -61,12 +68,8 @@ hidden: true
 This page is hidden — it should render but not appear in navigation.
 MD
 
-pond copy host:///tmp/alpha.md /content/alpha.md
-pond copy host:///tmp/beta.md /content/beta.md
-pond copy host:///tmp/gamma.md /content/gamma.md
-
-echo "✓ Content files loaded"
-pond list /content
+echo "content files:"
+ls -la "${SITE_ROOT}/content/"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 2: Create site templates
@@ -75,10 +78,7 @@ pond list /content
 echo ""
 echo "--- Step 2: Create site templates ---"
 
-pond mkdir /etc
-pond mkdir /etc/site
-
-cat > /tmp/index.md << 'MD'
+cat > "${SITE_ROOT}/site/index.md" << 'MD'
 ---
 title: Test Site
 layout: default
@@ -88,25 +88,24 @@ layout: default
 
 Welcome to the test site.
 MD
-pond copy host:///tmp/index.md /etc/site/index.md
 
-cat > /tmp/sidebar.md << 'MD'
+cat > "${SITE_ROOT}/site/sidebar.md" << 'MD'
 ## [Home]({{ base_url /}})
 
 {{ content_nav content="pages" /}}
 MD
-pond copy host:///tmp/sidebar.md /etc/site/sidebar.md
 
-echo "✓ Templates created"
+echo "template files:"
+ls -la "${SITE_ROOT}/site/"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 3: Create site.yaml and run sitegen
+# Step 3: Create site.yaml and run sitegen via hostmount
 # ══════════════════════════════════════════════════════════════════════════════
 
 echo ""
-echo "--- Step 3: Run sitegen ---"
+echo "--- Step 3: Run sitegen via hostmount ---"
 
-cat > /tmp/site.yaml << 'YAML'
+cat > "${SITE_ROOT}/site.yaml" << 'YAML'
 factory: sitegen
 
 site:
@@ -123,7 +122,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
     routes:
       - name: "pages"
         type: content
@@ -131,16 +130,13 @@ routes:
         content: "pages"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site.yaml --config-path /tmp/site.yaml
-
-rm -rf "${OUTDIR:?}"/* 2>/dev/null || true
-mkdir -p "${OUTDIR}"
-pond run /etc/site.yaml build "${OUTDIR}"
+echo "Command: pond run -d ${SITE_ROOT} host+sitegen:///site.yaml build ${OUTDIR}"
+pond run -d "${SITE_ROOT}" host+sitegen:///site.yaml build "${OUTDIR}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 4: Verify content pages
@@ -166,7 +162,7 @@ check_not_contains "${OUTDIR}/alpha.html"  "hidden page excluded from nav"  'Gam
 check_not_contains "${OUTDIR}/alpha.html"  "no CDN scripts in page layout"  'chart.js'
 
 echo ""
-echo "Generated $(find ${OUTDIR} -name '*.html' | wc -l | tr -d ' ') HTML files"
+echo "Generated $(find ${OUTDIR} -name '*.html' | wc -l | tr -d ' ') HTML files from host filesystem (no pond)"
 find ${OUTDIR} -name '*.html' | sort
 
 check_finish

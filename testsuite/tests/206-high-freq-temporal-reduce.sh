@@ -97,7 +97,7 @@ echo "Rows with timestamp.count != 3600: ${BAD_COUNTS}"
 echo ""
 echo "--- Step 4: Create sitegen config ---"
 
-pond mkdir -p /etc/site
+pond mkdir -p /site
 
 cat > /tmp/index.md << 'MD'
 ---
@@ -129,9 +129,9 @@ cat > /tmp/sidebar.md << 'MD'
 {{ nav_list collection="sensors" base="/sensors" /}}
 MD
 
-pond copy host:///tmp/index.md /etc/site/index.md
-pond copy host:///tmp/data.md /etc/site/data.md
-pond copy host:///tmp/sidebar.md /etc/site/sidebar.md
+pond copy host:///tmp/index.md /site/index.md
+pond copy host:///tmp/data.md /site/data.md
+pond copy host:///tmp/sidebar.md /site/sidebar.md
 
 cat > /tmp/site.yaml << 'YAML'
 factory: sitegen
@@ -149,7 +149,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "sensors"
     type: static
     slug: "sensors"
@@ -157,16 +157,16 @@ routes:
       - name: "sensor-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "sensors"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site.yaml --config-path /tmp/site.yaml
+pond mknod sitegen /site.yaml --config-path /tmp/site.yaml
 echo "✓ Sitegen factory created"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -175,7 +175,7 @@ echo "✓ Sitegen factory created"
 
 echo ""
 echo "--- Step 5: Build site ---"
-pond run /etc/site.yaml build "${OUTDIR}"
+pond run /site.yaml build "${OUTDIR}"
 echo "✓ Site generated in ${OUTDIR}"
 
 echo ""
