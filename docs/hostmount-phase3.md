@@ -1,4 +1,6 @@
-# Hostmount Phase 3 -- Open Questions
+# Hostmount Phase 3 -- Design & Implementation Record
+
+**Status: COMPLETE** (Phase 3 + Phase 3B)
 
 ## What Phase 3 Proposes
 
@@ -6,9 +8,9 @@ Phase 3 adds a `-d <dir>` global CLI flag, refactors `ShipContext` so commands c
 determine whether they need a pond, hostmount, or both based on URL arguments, and
 applies chroot semantics to the hostmount root.
 
-## What's Already in Place
+## What Was Already in Place (Pre-Phase 3)
 
-| Component | Status | Location |
+| Component | Pre-Phase-3 Status | Location |
 |-----------|--------|----------|
 | `HostmountPersistence` | Complete, 24 tests | `crates/tinyfs/src/hostmount/` |
 | `Steward::Host(HostSteward)` | Variant exists, fully wired | `crates/steward/src/dispatch.rs` |
@@ -18,13 +20,13 @@ applies chroot semantics to the hostmount root.
 | `cat_host_impl` | Pre-existing bypass, no tinyfs involvement | `cat.rs:168-170` |
 | `copy.rs` host detection | `strip_prefix("host://")`, separate from provider `Url` | `copy.rs:23-27` |
 
-**Key observation:** `Steward::Host` is fully functional but *never constructed
-from any CLI code path*. No command calls `Steward::open_host()`. The entire Phase 2
-host infrastructure is unused plumbing.
+**Key observation at the time:** `Steward::Host` was fully functional but *never constructed
+from any CLI code path*. No command called `Steward::open_host()`. The entire Phase 2
+host infrastructure was unused plumbing. Phase 3 + 3B resolved this.
 
-## Current Command Landscape
+## Command Landscape (Pre-Phase 3)
 
-| Command | Current host behavior | Needs pond? |
+| Command | Pre-Phase-3 host behavior | Needs pond? |
 |---------|----------------------|-------------|
 | `cat` | `host+` prefix -> `cat_host_impl` (standalone, no tinyfs) | Conditional |
 | `copy` | `host://` prefix -> string stripping, always opens pond | Yes |
@@ -32,6 +34,10 @@ host infrastructure is unused plumbing.
 | `list` | Always opens pond | Yes |
 | `list-factories` | No pond at all | No |
 | Everything else | Always opens pond | Yes |
+
+**Post-Phase 3B:** `cat`, `copy`, and `list` all route host URLs through
+`Steward::Host` via `classify_target()`. `cat_host_impl` was removed.
+`copy` uses dual-steward (host + pond) for both directions.
 
 ## Interaction with copy-url-design.md
 
@@ -415,9 +421,10 @@ are Phase 3B+.
 
 ---
 
-## Phase 3 Implementation Progress
+## Implementation Record
 
-All Phase 3 tasks are **complete**. Summary of what was implemented and where.
+All Phase 3 and Phase 3B tasks are **complete**. Summary of what was
+implemented and where.
 
 ### Task 3-1: Update copy-url-design.md (Q0 -- prefix always)
 
@@ -577,3 +584,73 @@ All unit and integration tests pass:
 | `tlogfs` (unit) | 58 |
 | `steward` (unit) | 16 |
 | Testsuite (integration) | 38+ including 302 |
+
+---
+
+## Final Summary
+
+Phase 3 and Phase 3B are **complete**. All 13 tasks (3-1 through 3-9 and 3B-1
+through 3B-4) are implemented, tested, and documented.
+
+### What was delivered
+
+**Phase 3** established the hostmount plumbing:
+
+- Unified URL grammar: `host+scheme:///path` prefix style everywhere (Q0=D)
+- `provider::Url` extended with `+table`/`+series` entry type parsing
+- `-d <dir>` global CLI flag with `ShipContext` integration
+- `classify_target()` shared URL classification
+- `pond list` host awareness as proof-of-life
+- `HostTransaction` carries `PondUserMetadata` for debugging
+
+**Phase 3B** migrated all commands to use hostmount consistently:
+
+- `cat`: replaced ad-hoc `cat_host_impl` with hostmount tinyfs routing
+- `copy` (both directions): dual-steward pattern -- host steward + pond steward
+  operating simultaneously, with `AsyncArrowWriter` for parquet export
+- DataFusion table name standardized to `"source"` with proper deregistration
+- Dead code removed (`copy_to_parquet`, `cat_host_impl`)
+
+### Architecture after Phase 3B
+
+Every CLI command that touches host files now goes through the same path:
+
+```
+CLI argument
+  -> classify_target() -> TargetContext::Host | TargetContext::Pond
+  -> Steward::Host (hostmount tinyfs) | Steward::Pond (tlogfs)
+  -> Transaction -> FS -> WD -> read/write operations
+```
+
+For dual-steward commands (`pond copy`), both stewards are open simultaneously:
+- Copy IN: host steward (read) + pond steward (write)
+- Copy OUT: pond steward (read) + host steward (write)
+
+No production code uses `tokio::fs` or `std::fs` for host file access.
+
+### Files modified
+
+| Crate | Files | Nature of changes |
+|-------|-------|-------------------|
+| `cmd` | `main.rs`, `common.rs`, `cat.rs`, `copy.rs`, `export.rs` | `-d` flag, URL classification, hostmount routing, dual-steward, AsyncArrowWriter |
+| `provider` | `lib.rs`, `url_pattern_matcher.rs`, `temporal_reduce.rs`, `timeseries_pivot.rs` | Entry type parsing, multi-segment URL classifier |
+| `steward` | `host.rs`, `dispatch.rs` | PondUserMetadata on HostTransaction |
+| `tlogfs` | `sql_executor.rs`, `tests/mod.rs` | Table name "source", deregistration |
+| `tinyfs` | `wd.rs` | Removed dead `copy_to_parquet` |
+| `docs` | `copy-url-design.md`, `hostmount-phase3-questions.md` | Authority->prefix URL style, implementation records |
+
+### Integration tests
+
+| Test | Covers |
+|------|--------|
+| `300-hostmount-list-proof-of-life.sh` | `list` via host steward, `-d` flag, recursive glob |
+| `301-hostmount-cat-variations.sh` | `cat` host files: raw, CSV, CSV+SQL, CSV+series, zstd, no-POND |
+| `302-hostmount-copy-out.sh` | `copy` out: raw export, parquet export, directory structure, glob, roundtrip, `-d` flag |
+
+### What's next
+
+| Task | Phase | Description |
+|------|-------|-------------|
+| `pond run` on hostmount | Phase 5 | Factory dispatch from host FS |
+| Unified scheme registry | Phase 4 | Factory names in URL schemes |
+| Deprecate `--format` flag on copy | Phase 4+ | Entry type from URL replaces flag |
