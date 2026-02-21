@@ -43,6 +43,8 @@ impl ShipContext {
     }
 
     /// Create a ShipContext for pond-only operations (no host root).
+    /// Only used in test code -- production always has a host root from CLI args.
+    #[cfg(test)]
     #[must_use]
     pub fn pond_only<P: AsRef<Path>>(pond_path: Option<P>, original_args: Vec<String>) -> Self {
         Self {

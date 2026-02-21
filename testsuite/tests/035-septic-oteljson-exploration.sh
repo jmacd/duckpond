@@ -31,7 +31,7 @@ pond init
 
 echo "=== Ingesting septicstation-sample.json ==="
 pond mkdir -p /ingest
-pond copy "host://${SAMPLE}" /ingest/septicstation.json --format=data
+pond copy "host://${SAMPLE}" /ingest/septicstation.json
 
 echo ""
 echo "=== File info ==="

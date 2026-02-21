@@ -492,14 +492,13 @@ async fn test_pond_structural_statistics() -> Result<()> {
     mkdir_command(&ship_context, "/data", false).await?;
     mkdir_command(&ship_context, "/tables", false).await?;
 
-    // Copy files of different types
-    let sources1 = vec![temp_path.clone()];
-    let sources2 = vec![parquet_path.clone()];
+    // Copy files of different types (entry type encoded in URL)
+    let sources1 = vec![format!("host:///{}", temp_path)];
+    let sources2 = vec![format!("host+table:///{}", parquet_path)];
     copy_command(
         &ship_context,
         &sources1,
         "/data/file1.txt",
-        "data",
         &CopyOptions::default(),
     )
     .await?;
@@ -507,7 +506,6 @@ async fn test_pond_structural_statistics() -> Result<()> {
         &ship_context,
         &sources2,
         "/tables/table1.parquet",
-        "table",
         &CopyOptions::default(),
     )
     .await?;

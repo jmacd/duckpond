@@ -498,9 +498,9 @@ migrates additional commands:
 | Task | Description | Status |
 |------|-------------|--------|
 | 3B-1 | Migrate `cat` to use hostmount (replaces `cat_host_impl`) | **COMPLETE** |
-| 3B-2 | Context routing for dual-steward commands | |
-| 3B-3 | Migrate `copy` host handling to hostmount | |
-| 3B-4 | Integration tests for cat + copy on host files via hostmount | |
+| 3B-2 | Context routing for dual-steward commands | **COMPLETE** |
+| 3B-3 | Migrate `copy` host handling to hostmount | **COMPLETE** |
+| 3B-4 | Integration tests for cat + copy on host files via hostmount | **COMPLETE** |
 
 ### Task 3B-1: Migrate `cat` to hostmount — COMPLETE
 
@@ -534,3 +534,46 @@ For `pond cat host+csv:///data.csv` (with `-d ./mydir`):
 For `pond cat host+file:///readme.txt`:
 - scheme=`file`, entry_type=None -> metadata check -> `FilePhysicalVersion` (not queryable)
 - Streams raw bytes via `stream_file_to_stdout` through hostmount `async_reader_path`
+
+### Tasks 3B-2/3B-3: Dual-steward copy + hostmount migration — COMPLETE
+
+Replaced all direct `tokio::fs`/`std::fs` host file access in `copy_out` with
+dual-steward hostmount tinyfs. Both copy directions now go through tinyfs:
+copy-in uses host steward (read) + pond steward (write), copy-out uses
+pond steward (read) + host steward (write).
+
+| File | Changes |
+|------|---------|
+| [crates/cmd/src/commands/copy.rs](crates/cmd/src/commands/copy.rs) | `copy_out()`: opens host steward (write) + pond steward (read). Uses `host_root.create_dir_all()` for directory creation. No direct filesystem calls. |
+| [crates/cmd/src/commands/copy.rs](crates/cmd/src/commands/copy.rs) | `export_queryable_file_as_parquet()`: replaced sync `ArrowWriter` + `std::fs::File` with `AsyncArrowWriter` + `host_wd.async_writer_path()`. Streams batches from DataFusion SQL directly to hostmount. |
+| [crates/cmd/src/commands/copy.rs](crates/cmd/src/commands/copy.rs) | `export_raw_file()`: replaced `tokio::fs::File::create` with `host_wd.async_writer_path()` + `tokio::io::copy`. |
+| [crates/tlogfs/src/query/sql_executor.rs](crates/tlogfs/src/query/sql_executor.rs) | Table name standardized to `"source"` (was `"series"`). Deregisters stale table before registering, and deregisters after `execute_stream()`. |
+| [crates/cmd/src/commands/cat.rs](crates/cmd/src/commands/cat.rs) | Added `ctx.deregister_table("source")` after `df.execute_stream().await`. |
+| [crates/cmd/src/commands/export.rs](crates/cmd/src/commands/export.rs) | SQL template changed `FROM series` to `FROM source`. Added deregister after COPY. |
+| [crates/tlogfs/src/tests/mod.rs](crates/tlogfs/src/tests/mod.rs) | Test SQL queries updated `FROM series` to `FROM source`. |
+| [crates/tinyfs/src/wd.rs](crates/tinyfs/src/wd.rs) | Removed dead `copy_to_parquet` method. |
+
+#### DataFusion table registration conventions
+
+- Table name is always `"source"` (matching existing CLI docs and SQL convention)
+- Deregister before registering (handles re-use within same session)
+- Deregister after `execute_stream()` — execution plan holds its own `Arc<dyn TableProvider>`,
+  so removing from the catalog is safe and prevents stale bindings
+
+### Task 3B-4: Integration tests — COMPLETE
+
+| Test | Description |
+|------|-------------|
+| [testsuite/tests/302-hostmount-copy-out.sh](testsuite/tests/302-hostmount-copy-out.sh) | 6 test scenarios, 14 checks: raw data export, series-as-parquet export (PAR1 magic + size verification), directory structure preservation, glob pattern export, full roundtrip (out then back in with content verification), `-d` flag support. |
+
+#### Test results
+
+All unit and integration tests pass:
+
+| Suite | Tests |
+|-------|-------|
+| `cmd` (unit) | 202 |
+| `provider` (unit) | 143 |
+| `tlogfs` (unit) | 58 |
+| `steward` (unit) | 16 |
+| Testsuite (integration) | 38+ including 302 |

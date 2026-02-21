@@ -547,15 +547,15 @@ async fn export_queryable_file(
             .as_nanos()
     );
 
-    // Build user-visible SQL query (using "series" name)
+    // Build user-visible SQL query (using "source" name)
     let user_sql_query = if temporal_columns.is_empty() {
-        "SELECT * FROM series".to_string()
+        "SELECT * FROM source".to_string()
     } else {
-        format!("SELECT *, {} FROM series", temporal_columns)
+        format!("SELECT *, {} FROM source", temporal_columns)
     };
 
     // Translate user query to use unique table name
-    let sql_query = user_sql_query.replace("series", &unique_table_name);
+    let sql_query = user_sql_query.replace("source", &unique_table_name);
 
     log::debug!("[SEARCH] User query: {}", user_sql_query);
     log::debug!("[SEARCH] Executing translated query: {}", sql_query);
@@ -782,7 +782,7 @@ async fn execute_direct_copy_query(
                     }
 
                     // Build COPY command with subquery - no MemTable needed!
-                    let mut translated_query = user_sql_query.replace("series", unique_table_name);
+                    let mut translated_query = user_sql_query.replace("source", unique_table_name);
 
                     // Add temporal filtering WHERE clauses if time ranges are specified
                     if export_range.start_seconds.is_some() || export_range.end_seconds.is_some() {
@@ -866,6 +866,10 @@ async fn execute_direct_copy_query(
                         "    [OK] DataFusion direct COPY completed: {} total rows exported",
                         total_rows
                     );
+
+                    // Deregister the table to prevent stale bindings
+                    let _ = ctx
+                        .deregister_table(datafusion::sql::TableReference::bare(unique_table_name));
 
                     Ok(total_rows)
                 }

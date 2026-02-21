@@ -21,7 +21,7 @@ pond mkdir /data
 
 # Copy as raw data (FilePhysicalVersion)
 echo "=== Copy as --format=data (raw bytes) ==="
-pond copy host:///tmp/data.csv /data/readings.csv --format=data
+pond copy host:///tmp/data.csv /data/readings.csv
 pond describe /data/readings.csv
 
 echo ""

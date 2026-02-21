@@ -8,9 +8,9 @@
 |---------|---------|---------|
 | `pond init` | Initialize a new pond | `pond init` |
 | `pond mkdir` | Create directories | `pond mkdir /data` |
-| `pond copy` | Copy files into pond | `pond copy data.csv /data/` |
+| `pond copy` | Copy files into pond | `pond copy host:///tmp/data.csv /data/` |
 | `pond list` | List files (glob patterns) | `pond list '**/*'` |
-| `pond cat` | Read file contents | `pond cat /data/file.csv` |
+| `pond cat` | Read file contents | `pond cat host+csv:///tmp/data.csv --format=table` |
 | `pond describe` | Show file schema | `pond describe /data/*.csv` |
 | `pond mknod` | Create factory nodes | `pond mknod --config f.yaml /path` |
 | `pond run` | Execute factory nodes | `pond run /etc/system.d/20-foo collect` |
@@ -91,39 +91,43 @@ Parent directories are created automatically (like `mkdir -p`).
 
 ### pond copy
 
-Copy external files into the pond.
+Copy files between host filesystem and the pond.
+
+#### Copy IN (host → pond)
+
+Source URLs must have the `host://` or `host+` prefix. The entry type is encoded in the URL:
 
 ```bash
-# Copy single file (use host:// prefix for external files)
+# Copy raw data (default): store as opaque bytes
 pond copy host:///tmp/data.csv /data/readings.csv
+
+# Copy as queryable Parquet table (validates PAR1 magic bytes)
+pond copy host+table:///tmp/data.parquet /data/readings.parquet
+
+# Copy as time-series Parquet (validates PAR1 + extracts temporal bounds)
+pond copy host+series:///tmp/readings.parquet /data/readings.parquet
 
 # Copy to directory (keeps filename)
 pond copy host:///tmp/data.csv /data/
 ```
 
-⚠️ **Deprecation**: Plain paths like `/tmp/file.csv` still work but are deprecated.
-Use `host:///path/to/file` for external filesystem paths.
+| URL Prefix | Entry Type | Validates | Use Case |
+|------------|-----------|-----------|----------|
+| `host:///path` | data (raw bytes) | None | CSV, JSON, any file |
+| `host+file:///path` | data (raw bytes) | None | Same as `host:///` |
+| `host+table:///path` | queryable Parquet | PAR1 magic | Parquet tables |
+| `host+series:///path` | time-series Parquet | PAR1 magic + temporal | Parquet with timestamp |
 
-#### Format Options
-
-| Format | Purpose | Use Case |
-|--------|---------|----------|
-| `--format=data` | Store as raw bytes (default) | CSV, JSON, any file |
-| `--format=table` | Store as queryable Parquet | Parquet files ONLY |
-| `--format=series` | Store as time-series Parquet | Parquet with timestamp |
-
-⚠️ **Important**: `--format=table` validates that input is Parquet (PAR1 magic bytes).
-To copy CSV files, use the default `--format=data`, then query with `csv://` prefix.
+> **Note**: `host+table:///` validates that the input is valid Parquet (PAR1 magic bytes).
+> To copy a CSV file, use `host:///` (raw data), then query with `csv://` URL scheme.
 
 ```bash
-# ✅ Correct: Copy CSV as raw data
+# Correct: Copy CSV as raw data, then query with csv:// prefix
 pond copy host:///tmp/data.csv /data/readings.csv
+pond cat csv:///data/readings.csv --sql "SELECT * FROM source WHERE temp > 20"
 
-# ✅ Correct: Copy Parquet as table
-pond copy host:///tmp/data.parquet /data/readings.parquet --format=table
-
-# ❌ Wrong: This will error - CSV is not Parquet
-pond copy host:///tmp/data.csv /data/readings.csv --format=table
+# Wrong: host+table:// will error on CSV (not valid Parquet)
+pond copy host+table:///tmp/data.csv /data/readings.csv  # ERROR: missing PAR1 magic
 ```
 
 #### Copy OUT (pond → host)
@@ -139,8 +143,9 @@ pond copy '/hydrovu/devices/**/*.series' host:///tmp/export
 pond copy /data/readings.parquet host:///tmp/output
 ```
 
-The `--format` flag is **ignored** when copying out — the export format is determined by the
-source entry type (table/series → Parquet via DataFusion, data → raw bytes).
+The export format is determined by the source entry type:
+- table/series entries → exported as Parquet (via DataFusion)
+- data entries → exported as raw bytes (bit-for-bit copy)
 
 #### --strip-prefix
 
@@ -160,19 +165,30 @@ pond copy '/hydrovu/**/*.series' host:///tmp/output --strip-prefix=/hydrovu
 
 ### pond cat
 
-Read and optionally transform file contents.
+Read and optionally transform file contents. Works on both **pond files** and
+**host filesystem files** (via `host+` URL prefix). No `$POND` is required when
+reading host files.
 
 ```bash
-# Read raw file contents
+# Read raw file contents from pond
 pond cat /data/readings.csv
 
-# Query CSV files with SQL (use csv:// prefix)
+# Read a host file directly (no pond needed)
+pond cat host+file:///tmp/readme.txt
+
+# Query a host CSV with SQL
+pond cat host+csv:///tmp/data.csv --format=table --sql "SELECT * FROM source WHERE temp > 20"
+
+# Query a host zstd-compressed CSV
+pond cat host+csv+zstd:///tmp/data.csv.zst --format=table
+
+# Query pond CSV files with SQL (use csv:// prefix)
 pond cat csv:///data/readings.csv --sql "SELECT * FROM source WHERE temp > 20"
 
 # Query OtelJSON Lines files (use oteljson:// prefix)
 pond cat oteljson:///logs/metrics.json --sql "SELECT * FROM source ORDER BY timestamp"
 
-# Query Parquet files (stored with --format=table)
+# Query Parquet files (stored with host+table:// via pond copy)
 pond cat /data/readings.parquet --sql "SELECT AVG(temperature) as avg_temp FROM source"
 ```
 
@@ -185,7 +201,10 @@ The table is always named `source` in SQL queries.
 | `--format=raw` (default) | Parquet bytes (binary) | Piping to files, downstream tools |
 | `--format=table` | Human-readable text table | Terminal display, debugging |
 
-The `--format` flag controls **output** format only. It is independent of `--sql`.
+> **Note**: `--format` on `pond cat` controls **output display** (raw bytes vs ASCII table).
+> `pond copy` does not have a `--format` flag — entry type is encoded in the source URL
+> (e.g., `host+table:///path` for Parquet tables).
+
 `--sql` controls **what** data is queried; `--format` controls **how** it's displayed.
 
 ```bash
@@ -199,19 +218,33 @@ pond cat oteljson:///ingest/data.json --format=table --sql "SELECT * FROM source
 pond cat oteljson:///ingest/data.json --format=table
 ```
 
-#### URL Schemes for Querying
+#### URL Schemes
+
+URL schemes tell `pond cat` how to parse the file. Pond files and host files
+use the same format/compression/entry-type syntax — host files just add the
+`host+` prefix.
+
+**General syntax**: `[host+]format[+compression][+entrytype]:///path`
 
 | Scheme | Purpose | Example |
 |--------|---------|--------|
-| `csv://` | Parse file as CSV | `pond cat csv:///data/file.csv --sql "..."` |
-| `oteljson://` | Parse file as OtelJSON Lines | `pond cat oteljson:///logs/metrics.json --sql "..."` |
-| `excelhtml://` | Parse file as Excel HTML | `pond cat excelhtml:///data/export.html --sql "..."` |
-| `file://` | Raw bytes or Parquet | `pond cat file:///data/file.parquet` |
-| (none) | Auto-detect | `pond cat /data/file.csv` |
+| `csv://` | Parse as CSV (pond) | `pond cat csv:///data/file.csv --sql "..."` |
+| `host+csv://` | Parse as CSV (host) | `pond cat host+csv:///tmp/file.csv --format=table` |
+| `host+csv+zstd://` | Zstd-compressed CSV (host) | `pond cat host+csv+zstd:///tmp/file.csv.zst --format=table` |
+| `host+csv+series://` | CSV as time-series (host) | `pond cat host+csv+series:///tmp/ts.csv --format=table` |
+| `oteljson://` | Parse as OtelJSON Lines | `pond cat oteljson:///logs/metrics.json --sql "..."` |
+| `excelhtml://` | Parse as Excel HTML | `pond cat excelhtml:///data/export.html --sql "..."` |
+| `host+file://` | Raw bytes (host) | `pond cat host+file:///tmp/readme.txt` |
+| `file://` | Raw bytes or Parquet (pond) | `pond cat file:///data/file.parquet` |
+| (none) | Auto-detect (pond) | `pond cat /data/file.csv` |
+
+**Supported compressions**: `zstd`, `gzip`, `bzip2`
+
+**Supported entry types**: `table`, `series`
 
 ⚠️ **Important**: The `--sql` flag (or `--query` alias) only works when the file can be parsed as a table:
-- Parquet files (stored with `--format=table` or `--format=series`)
-- CSV files when using `csv://` prefix
+- Parquet files (stored as table or series entry types)
+- CSV files when using `csv://` or `host+csv://` prefix
 - OtelJSON Lines files when using `oteljson://` prefix (two-pass: discovers all metric names as columns)
 - Raw data files without a scheme will output raw bytes, ignoring `--sql`
 
@@ -1296,10 +1329,17 @@ pond run /etc/system.d/1-backup push        # backup to S3
 The default output format is Parquet bytes (binary).
 **Fix**: Add `--format=table` for human-readable output, or `--sql "SELECT * FROM source LIMIT 10"`.
 
-### `pond copy --format=table` errors on CSV
+### `--format` does the wrong thing
 
-**Cause**: `--format=table` validates PAR1 magic bytes — only Parquet input accepted.
-**Fix**: Use default `--format=data` for CSV. Query CSV with `pond cat csv:///path --sql "..."`.
+**Cause**: `--format` on `pond cat` controls output display (raw vs table).
+`pond copy` does not use `--format` — entry type is in the source URL.
+**Fix**: For `pond cat`, use `--format=raw` (default, binary) or `--format=table` (ASCII).
+For `pond copy`, use `host:///` (data), `host+table:///` (Parquet), or `host+series:///` (time-series).
+
+### `host+table:///` errors on CSV
+
+**Cause**: `host+table:///` validates PAR1 magic bytes — only Parquet input accepted.
+**Fix**: Use `host:///` for CSV (stores as raw bytes). Query CSV with `pond cat csv:///path --sql "..."`.
 
 ### Export pattern matches nothing in sitegen
 

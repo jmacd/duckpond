@@ -22,21 +22,21 @@ EOF
 pond mkdir /data
 
 #############################
-# TEST 1: --format=table should reject CSV
+# TEST 1: host+table:// should reject CSV
 #############################
-echo "=== Test 1: --format=table should reject CSV ==="
-if pond copy host:///tmp/data.csv /data/bad.csv --format=table 2>&1; then
-    echo "ERROR: Should have rejected CSV with --format=table"
+echo "=== Test 1: host+table:// should reject CSV ==="
+if pond copy "host+table:///tmp/data.csv" /data/bad.csv 2>&1; then
+    echo "ERROR: Should have rejected CSV with host+table://"
     exit 1
 else
-    echo "✓ Correctly rejected CSV with --format=table"
+    echo "OK: Correctly rejected CSV with host+table://"
 fi
 
 #############################
-# TEST 2: Default --format=data works for CSV
+# TEST 2: Default host:// works for CSV (raw data)
 #############################
 echo ""
-echo "=== Test 2: Copy CSV with default --format=data ==="
+echo "=== Test 2: Copy CSV with host:// (raw data) ==="
 pond copy host:///tmp/data.csv /data/readings.csv
 pond describe /data/readings.csv
 echo "✓ CSV copied as raw data"

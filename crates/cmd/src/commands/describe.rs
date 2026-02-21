@@ -811,9 +811,8 @@ mod tests {
             let host_file = self.create_host_file("temp.txt", content).await?;
             copy_command(
                 &self.ship_context,
-                &[host_file.to_string_lossy().to_string()],
+                &[format!("host:///{}", host_file.display())],
                 pond_path,
-                "data",
                 &CopyOptions::default(),
             )
             .await?;

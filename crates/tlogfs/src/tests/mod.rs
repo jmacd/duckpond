@@ -1029,7 +1029,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         let mut result_stream = execute_sql_on_file(
             &wd,
             series_path,
-            "SELECT COUNT(*) as row_count FROM series",
+            "SELECT COUNT(*) as row_count FROM source",
             &tx.state()?.as_provider_context(),
         )
         .await?;
@@ -1103,7 +1103,7 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
         let mut result_stream = execute_sql_on_file(
             &wd,
             series_path,
-            "SELECT COUNT(*) as row_count FROM series",
+            "SELECT COUNT(*) as row_count FROM source",
             &tx.state()?.as_provider_context(),
         )
         .await?;

@@ -79,14 +79,14 @@ if command -v b3sum &>/dev/null; then
 fi
 
 # Copy to pond
-pond copy /tmp/testfile.txt /data/testfile.txt 2>&1 | grep -v "^\[" || true
+pond copy host:///tmp/testfile.txt /data/testfile.txt 2>&1 | grep -v "^\[" || true
 echo "✓ File copied to pond"
 
 # Create JSON config
 cat > /tmp/config.json << 'EOF'
 {"name": "emergency-test", "version": "1.0", "verified": true}
 EOF
-pond copy /tmp/config.json /data/config.json 2>&1 | grep -v "^\[" || true
+pond copy host:///tmp/config.json /data/config.json 2>&1 | grep -v "^\[" || true
 echo "✓ Config copied to pond"
 
 #############################

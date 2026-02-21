@@ -18,14 +18,14 @@ EOF
 
 pond mkdir /data
 
-echo "=== Test 1: Copy CSV as --format=data (raw) - should succeed ==="
-pond copy host:///tmp/data.csv /data/raw.csv --format=data
+echo "=== Test 1: Copy CSV as host:// (raw data) - should succeed ==="
+pond copy host:///tmp/data.csv /data/raw.csv
 pond list '/data/raw.csv'
-echo "✓ CSV with --format=data succeeded"
+echo "OK: CSV with host:// (raw data) succeeded"
 
 echo ""
-echo "=== Test 2: Copy CSV as --format=table - should fail with helpful error ==="
-ERROR_OUTPUT=$(pond copy host:///tmp/data.csv /data/table.csv --format=table 2>&1 || true)
+echo "=== Test 2: Copy CSV as host+table:// - should fail with helpful error ==="
+ERROR_OUTPUT=$(pond copy "host+table:///tmp/data.csv" /data/table.csv 2>&1 || true)
 echo "$ERROR_OUTPUT"
 
 # Verify the error message is helpful
@@ -43,10 +43,10 @@ else
     exit 1
 fi
 
-if echo "$ERROR_OUTPUT" | grep -q "Use --format=data"; then
-    echo "✓ Error suggests using --format=data"
+if echo "$ERROR_OUTPUT" | grep -q "host:///path"; then
+    echo "OK: Error suggests using host:///path"
 else
-    echo "✗ Missing suggestion to use --format=data"
+    echo "FAIL: Missing suggestion to use host:///path"
     exit 1
 fi
 

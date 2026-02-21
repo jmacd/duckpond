@@ -14,14 +14,14 @@ use datafusion::physical_plan::SendableRecordBatchStream; // Import the canonica
 ///
 /// This is the main interface for executing SQL queries against any TLogFS file type
 /// (FileTable, FileSeries, SqlDerivedFile, etc.). The file is automatically registered
-/// as a table named "series" in the DataFusion context.
+/// as a table named "source" in the DataFusion context.
 ///
 /// Returns a stream of RecordBatch results for efficient processing of large datasets.
 ///
 /// # Arguments
 /// * `tinyfs_wd` - TinyFS working directory for file resolution
 /// * `path` - Path to the TLogFS file
-/// * `sql_query` - SQL query to execute (the file will be available as "series" table)
+/// * `sql_query` - SQL query to execute (the file will be available as "source" table)
 ///
 /// # Returns
 /// A stream of RecordBatch results from the query execution
@@ -89,14 +89,19 @@ pub async fn execute_sql_on_file(
                             .map_err(|e| TLogFSError::ArrowMessage(e.to_string()))?;
                         drop(file_guard);
 
+                        // Deregister any stale "source" table from a previous call
+                        // in the same session before registering the new one
+                        let _ =
+                            ctx.deregister_table(datafusion::sql::TableReference::bare("source"));
+
                         _ = ctx
                             .register_table(
-                                datafusion::sql::TableReference::bare("series"),
+                                datafusion::sql::TableReference::bare("source"),
                                 table_provider,
                             )
                             .map_err(|e| {
                                 TLogFSError::ArrowMessage(format!(
-                                    "Failed to register table 'series': {}",
+                                    "Failed to register table 'source': {}",
                                     e
                                 ))
                             })?;
@@ -106,7 +111,7 @@ pub async fn execute_sql_on_file(
                         ));
                     }
 
-                    // Unified SQL execution - works for both file types now!
+                    // Execute SQL and create the stream
                     let df = ctx.sql(sql_query).await.map_err(|e| {
                         TLogFSError::ArrowMessage(format!(
                             "Failed to execute SQL query '{}': {}",
@@ -117,6 +122,11 @@ pub async fn execute_sql_on_file(
                     let stream = df.execute_stream().await.map_err(|e| {
                         TLogFSError::ArrowMessage(format!("Failed to create result stream: {}", e))
                     })?;
+
+                    // Deregister "source" now that the execution plan holds its
+                    // own Arc to the table provider -- prevents stale bindings
+                    // from leaking into later queries within the same session
+                    let _ = ctx.deregister_table(datafusion::sql::TableReference::bare("source"));
 
                     Ok(stream)
                 }

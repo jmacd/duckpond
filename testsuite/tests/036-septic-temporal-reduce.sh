@@ -29,7 +29,7 @@ pond init
 echo ""
 echo "=== Step 1: Copy OtelJSON into pond ==="
 pond mkdir -p /ingest
-pond copy "host://${SAMPLE}" /ingest/septicstation.json --format=data
+pond copy "host://${SAMPLE}" /ingest/septicstation.json
 pond describe /ingest/septicstation.json
 echo "✓ Ingested as raw data"
 

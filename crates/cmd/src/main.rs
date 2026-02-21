@@ -130,17 +130,18 @@ enum Commands {
     },
     /// Copy files into or out of the pond
     ///
-    /// Copy IN (host -> pond): pond copy file1.csv file2.csv /dest/path --format=table
+    /// Copy IN (host -> pond): pond copy host:///file.csv /dest/path
+    ///   Entry type is encoded in the source URL:
+    ///     host:///file.csv              -> raw data (default)
+    ///     host+table:///file.parquet    -> queryable parquet table
+    ///     host+series:///file.parquet   -> time-series parquet
     /// Copy OUT (pond -> host): pond copy '/pattern/**/*.series' host:///output/dir
     Copy {
-        /// Source paths: host files (copy IN) or pond paths/patterns (copy OUT)
+        /// Source paths: host URLs (copy IN) or pond paths/patterns (copy OUT)
         #[arg(required = true)]
         sources: Vec<String>,
-        /// Destination: pond path (copy IN) or host://path (copy OUT)
+        /// Destination: pond path (copy IN) or host:///path (copy OUT)
         dest: String,
-        /// Format for copying IN [possible values: data, table, series] (ignored for copy OUT)
-        #[arg(long, default_value = "data")]
-        format: String,
         /// Strip a leading path prefix from pond paths when copying OUT.
         /// e.g. --strip-prefix=/hydrovu copies /hydrovu/devices/123/foo.series
         /// to <dest>/devices/123/foo.series instead of <dest>/hydrovu/devices/123/foo.series
@@ -309,11 +310,10 @@ async fn main() -> Result<()> {
         Commands::Copy {
             sources,
             dest,
-            format,
             strip_prefix,
         } => {
             let options = commands::CopyOptions { strip_prefix };
-            commands::copy_command(&ship_context, &sources, &dest, &format, &options).await
+            commands::copy_command(&ship_context, &sources, &dest, &options).await
         }
         Commands::Mkdir { path, parents } => {
             commands::mkdir_command(&ship_context, &path, parents).await

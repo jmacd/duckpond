@@ -218,8 +218,8 @@ async fn cat_impl(
     };
 
     // Parse the URL for routing decisions (handles host+scheme:///path, scheme:///path, etc.)
-    let parsed_url = provider::Url::parse(&url)
-        .map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", path, e))?;
+    let parsed_url =
+        provider::Url::parse(&url).map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", path, e))?;
 
     debug!(
         "cat_impl processing URL: {} (scheme={}, is_host={})",
@@ -338,6 +338,11 @@ async fn cat_impl(
     })?;
 
     let stream = df.execute_stream().await?;
+
+    // Deregister "source" now that the execution plan holds its own
+    // Arc to the table provider -- prevents stale bindings from
+    // leaking into later queries within the same session
+    let _ = ctx.deregister_table("source");
 
     // Use consolidated output handler
     handle_stream_output(stream, display, sql_query, output, path).await?;
