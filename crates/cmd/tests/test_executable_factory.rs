@@ -159,7 +159,9 @@ repeat_count: 5
         .expect("Failed to create config node");
 
     // Initialize and execute in the SAME transaction
-    let provider_context = tx.provider_context().expect("Failed to get provider context");
+    let provider_context = tx
+        .provider_context()
+        .expect("Failed to get provider context");
     let context = provider::FactoryContext::new(provider_context, parent_node_id);
     FactoryRegistry::initialize::<tlogfs::TLogFSError>(
         "test-executor",

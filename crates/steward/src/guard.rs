@@ -120,9 +120,7 @@ impl<'a> StewardTransactionGuard<'a> {
     /// This is the preferred way to get provider/factory context. It avoids
     /// exposing tlogfs internals (`State`) to callers that only need to
     /// create table providers or initialize factories.
-    pub fn provider_context(
-        &self,
-    ) -> Result<tinyfs::ProviderContext, tlogfs::TLogFSError> {
+    pub fn provider_context(&self) -> Result<tinyfs::ProviderContext, tlogfs::TLogFSError> {
         Ok(self.state()?.as_provider_context())
     }
 
@@ -182,7 +180,9 @@ impl<'a> StewardTransactionGuard<'a> {
     /// This allows access to the DeltaTable and other query components.
     /// Internal only -- external callers should use convenience methods
     /// (`get_commit_history()`, `store_path()`) instead.
-    pub(crate) fn data_persistence(&self) -> Result<&tlogfs::OpLogPersistence, tlogfs::TLogFSError> {
+    pub(crate) fn data_persistence(
+        &self,
+    ) -> Result<&tlogfs::OpLogPersistence, tlogfs::TLogFSError> {
         Ok(self
             .data_tx
             .as_ref()

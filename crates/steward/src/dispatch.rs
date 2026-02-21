@@ -55,9 +55,9 @@ impl Steward {
         pond_path: P,
         preserve_metadata: PondMetadata,
     ) -> Result<Self, StewardError> {
-        Ok(Steward::Pond(
-            Box::new(Ship::create_pond_for_restoration(pond_path, preserve_metadata).await?),
-        ))
+        Ok(Steward::Pond(Box::new(
+            Ship::create_pond_for_restoration(pond_path, preserve_metadata).await?,
+        )))
     }
 
     /// Create a host filesystem steward rooted at the given directory.
@@ -219,9 +219,7 @@ impl<'a> Transaction<'a> {
     // -- Backend-agnostic access --
 
     /// Get a `ProviderContext` for this transaction.
-    pub fn provider_context(
-        &self,
-    ) -> Result<tinyfs::ProviderContext, tlogfs::TLogFSError> {
+    pub fn provider_context(&self) -> Result<tinyfs::ProviderContext, tlogfs::TLogFSError> {
         match self {
             Transaction::Pond(guard) => guard.provider_context(),
             Transaction::Host(host) => Ok(host.provider_context()),

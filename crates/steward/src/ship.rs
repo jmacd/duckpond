@@ -1117,9 +1117,7 @@ mod tests {
             let meta = PondUserMetadata::new(args);
             ship.write_transaction(&meta, async |fs| {
                 let data_root = fs.root().await?;
-                _ = data_root
-                    .create_dir_path(&format!("/dir{}", i))
-                    .await?;
+                _ = data_root.create_dir_path(&format!("/dir{}", i)).await?;
                 Ok(())
             })
             .await

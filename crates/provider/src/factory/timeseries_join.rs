@@ -292,7 +292,9 @@ impl TimeseriesJoinFile {
             }
 
             // Create SqlDerivedFile in Series mode
-            log::debug!("[SEARCH] TIMESERIES-JOIN: Creating SqlDerivedFile with SqlDerivedMode::Series");
+            log::debug!(
+                "[SEARCH] TIMESERIES-JOIN: Creating SqlDerivedFile with SqlDerivedMode::Series"
+            );
             let sql_file =
                 SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
             log::debug!("[OK] TIMESERIES-JOIN: Successfully created SqlDerivedFile");
@@ -499,7 +501,10 @@ impl TimeseriesJoinFile {
         );
 
         log::debug!("[SEARCH] TIMESERIES-JOIN: Generated SQL:\n{}", sql);
-        log::debug!("[SEARCH] TIMESERIES-JOIN: Scope prefixes: {:?}", scope_prefixes);
+        log::debug!(
+            "[SEARCH] TIMESERIES-JOIN: Scope prefixes: {:?}",
+            scope_prefixes
+        );
         log::debug!(
             "[SEARCH] TIMESERIES-JOIN: Pattern transforms: {:?}",
             pattern_transforms

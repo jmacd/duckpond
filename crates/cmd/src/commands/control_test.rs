@@ -1057,12 +1057,8 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
         let root = fs.root().await?;
 
         // Write the test file with known content
-        _ = tinyfs::async_helpers::convenience::create_file_path(
-            &root,
-            &path,
-            content.as_bytes(),
-        )
-        .await?;
+        _ = tinyfs::async_helpers::convenience::create_file_path(&root, &path, content.as_bytes())
+            .await?;
 
         Ok(())
     })
@@ -1417,7 +1413,9 @@ async fn test_replica_preserves_transaction_sequences() {
         .await
         .expect("Failed to begin transaction");
 
-    tx.as_pond().expect("test requires a pond transaction").initialize_root_directory()
+    tx.as_pond()
+        .expect("test requires a pond transaction")
+        .initialize_root_directory()
         .await
         .map_err(steward::StewardError::DataInit)
         .expect("Failed to initialize root directory");

@@ -427,7 +427,9 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         // Validate range bounds
         if range.start >= total_size {
             let start = range.start;
-            debug!("[ERR] ObjectStore get_range: range start {start} exceeds file size {total_size}");
+            debug!(
+                "[ERR] ObjectStore get_range: range start {start} exceeds file size {total_size}"
+            );
             return Err(object_store::Error::Generic {
                 store: "TinyFS",
                 source: format!(

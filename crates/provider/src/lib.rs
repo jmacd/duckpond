@@ -535,10 +535,7 @@ mod tests {
         assert_eq!(url.scheme(), "csv");
         assert_eq!(url.compression(), Some("gzip"));
         assert_eq!(url.entry_type(), Some("series"));
-        assert_eq!(
-            url.to_string(),
-            "host+csv+gzip+series:///tmp/data.csv.gz"
-        );
+        assert_eq!(url.to_string(), "host+csv+gzip+series:///tmp/data.csv.gz");
     }
 
     #[test]

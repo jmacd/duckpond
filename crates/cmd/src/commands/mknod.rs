@@ -25,17 +25,16 @@ pub async fn mknod_command(
         .map_err(|e| anyhow!("Failed to read config file '{}': {}", config_path, e))?;
 
     // Apply template expansion (supports {{ env(name='VAR') }} for environment variables)
-    let expanded_content = template_utils::expand_yaml_template(
-        &config_content,
-        &std::collections::HashMap::new(),
-    )
-    .map_err(|e| {
-        anyhow!(
-            "Failed to expand template in config file '{}':\n  {}\n  \
+    let expanded_content =
+        template_utils::expand_yaml_template(&config_content, &std::collections::HashMap::new())
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to expand template in config file '{}':\n  {}\n  \
             Tip: Use {{ env(name='VAR') }} to read environment variables",
-            config_path, e
-        )
-    })?;
+                    config_path,
+                    e
+                )
+            })?;
 
     // Convert expanded content to bytes for validation
     let config_bytes = expanded_content.as_bytes();

@@ -95,9 +95,7 @@ pub async fn mkdir_command(
                 }
 
                 if root.exists(&path_for_closure).await {
-                    return Err(
-                        tinyfs::Error::already_exists(&path_for_closure).into()
-                    );
+                    return Err(tinyfs::Error::already_exists(&path_for_closure).into());
                 }
 
                 _ = root.create_dir_path(&path_for_closure).await?;

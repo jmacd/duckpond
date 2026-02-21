@@ -355,7 +355,10 @@ impl TemporalReduceSqlFile {
             let sql_query = self
                 .generate_sql_with_discovered_schema(&pattern_name)
                 .await?;
-            log::debug!("[SEARCH] TEMPORAL-REDUCE: Generated SQL query: {}", sql_query);
+            log::debug!(
+                "[SEARCH] TEMPORAL-REDUCE: Generated SQL query: {}",
+                sql_query
+            );
 
             // Create the actual SqlDerivedFile
             log::debug!(
@@ -395,7 +398,9 @@ impl TemporalReduceSqlFile {
                 sql_query
             );
 
-            log::debug!("[SEARCH] TEMPORAL-REDUCE: Creating SqlDerivedFile with SqlDerivedMode::Series");
+            log::debug!(
+                "[SEARCH] TEMPORAL-REDUCE: Creating SqlDerivedFile with SqlDerivedMode::Series"
+            );
             let sql_file =
                 SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
             log::debug!("[OK] TEMPORAL-REDUCE: Successfully created SqlDerivedFile");

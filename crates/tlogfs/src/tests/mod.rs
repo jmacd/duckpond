@@ -593,7 +593,9 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
 
     // The temporal metadata should reflect the actual timestamps, not be 0,0
     if min_time == 0 && max_time == 0 {
-        debug!("[WARN]  WARNING: Temporal metadata extraction returned 0,0 - this indicates a problem");
+        debug!(
+            "[WARN]  WARNING: Temporal metadata extraction returned 0,0 - this indicates a problem"
+        );
         debug!("   Expected: min_time = 1704067200000, max_time = 1704074400000");
     } else {
         debug!("[OK] Temporal metadata extracted successfully");
@@ -1699,7 +1701,10 @@ async fn test_create_dynamic_directory_path() {
         }
     }
 
-    log::debug!("\n[HINT] Use: ./catparquet.sh {} <file>.parquet", store_path);
+    log::debug!(
+        "\n[HINT] Use: ./catparquet.sh {} <file>.parquet",
+        store_path
+    );
     log::debug!("[HINT] to inspect the actual data written\n");
 
     // Verify in new transaction
@@ -1869,7 +1874,10 @@ async fn test_dynamic_node_entry_type_validation() {
         .expect("Failed to get dynamic directory");
 
     let read_dir_id = dir_node.id();
-    log::debug!("[OK] Read back dynamic directory with ID: {:?}", read_dir_id);
+    log::debug!(
+        "[OK] Read back dynamic directory with ID: {:?}",
+        read_dir_id
+    );
 
     // This is the critical test: can we parse the EntryType from the persisted FileID?
     let read_dir_entry_type = read_dir_id.entry_type();

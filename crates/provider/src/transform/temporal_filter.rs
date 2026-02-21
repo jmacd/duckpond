@@ -166,7 +166,9 @@ impl TableProvider for TemporalFilteredListingTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        debug!("[ALERT] TemporalFilteredListingTable.scan() called - temporal filtering is active!");
+        debug!(
+            "[ALERT] TemporalFilteredListingTable.scan() called - temporal filtering is active!"
+        );
 
         // Convert from milliseconds to seconds for HydroVu data
         let min_seconds = self.min_time / 1000;

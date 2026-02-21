@@ -355,7 +355,10 @@ async fn show_transaction_detail(
                     .duration_ms
                     .map(|d| format!("{}ms", d))
                     .unwrap_or_else(|| "N/A".to_string());
-                println!("|  [OK] COMPLETED at {} (duration: {})", timestamp, duration);
+                println!(
+                    "|  [OK] COMPLETED at {} (duration: {})",
+                    timestamp, duration
+                );
             }
             "failed" => {
                 let duration = detail
@@ -391,7 +394,10 @@ async fn show_transaction_detail(
                     .duration_ms
                     .map(|d| format!("{}ms", d))
                     .unwrap_or_else(|| "N/A".to_string());
-                println!("|  [OK] COMPLETED at {} (duration: {})", timestamp, duration);
+                println!(
+                    "|  [OK] COMPLETED at {} (duration: {})",
+                    timestamp, duration
+                );
                 println!("+----------------------------------------------------------------");
             }
             "post_commit_failed" => {

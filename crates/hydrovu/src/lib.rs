@@ -317,10 +317,7 @@ impl HydroVuCollector {
 
     /// Core data collection function
     /// Works within a single transaction - caller manages transaction lifecycle
-    pub async fn collect_data(
-        &mut self,
-        fs: &FS,
-    ) -> Result<CollectionResult> {
+    pub async fn collect_data(&mut self, fs: &FS) -> Result<CollectionResult> {
         let device_count = self.config.devices.len();
         debug!("Starting HydroVu data collection for {device_count} devices");
 

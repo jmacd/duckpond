@@ -28,8 +28,11 @@ pub struct ProviderContext {
     pub datafusion_session: Arc<SessionContext>,
 
     /// Table provider cache for performance
-    pub table_provider_cache:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<dyn datafusion::catalog::TableProvider>>>>,
+    pub table_provider_cache: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, Arc<dyn datafusion::catalog::TableProvider>>,
+        >,
+    >,
 
     /// TinyFS persistence layer for transaction management
     pub persistence: Arc<dyn PersistenceLayer>,

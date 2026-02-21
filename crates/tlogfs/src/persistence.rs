@@ -1118,7 +1118,9 @@ impl State {
         let version = latest_version.version;
         let temporal_overrides = latest_version.temporal_overrides();
         let has_overrides = temporal_overrides.is_some();
-        debug!("[SEARCH] TEMPORAL: Latest version {version} has temporal overrides: {has_overrides}");
+        debug!(
+            "[SEARCH] TEMPORAL: Latest version {version} has temporal overrides: {has_overrides}"
+        );
 
         if let Some((min_time, max_time)) = temporal_overrides {
             debug!(

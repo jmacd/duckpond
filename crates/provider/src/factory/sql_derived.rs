@@ -1240,7 +1240,10 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
         }
 
         // Get the effective SQL query with table name substitutions using our unique internal names
-        debug!("[SEARCH] SQL-DERIVED: Original query: {:?}", self.config.query);
+        debug!(
+            "[SEARCH] SQL-DERIVED: Original query: {:?}",
+            self.config.query
+        );
         debug!("[SEARCH] SQL-DERIVED: Table mappings: {:?}", table_mappings);
         let effective_sql = self.get_effective_sql(&SqlTransformOptions {
             table_mappings: Some(table_mappings.clone()),
@@ -3355,7 +3358,9 @@ query: ""
                 panic!("Expected directory node for site directory");
             }
 
-            log::debug!("[OK] Wildcard temporal-reduce schema discovery test completed successfully");
+            log::debug!(
+                "[OK] Wildcard temporal-reduce schema discovery test completed successfully"
+            );
             log::debug!("   - Created 72 hourly sensor records with numeric columns only");
             log::debug!("   - Temporal-reduce automatically discovered all numeric columns");
             log::debug!(

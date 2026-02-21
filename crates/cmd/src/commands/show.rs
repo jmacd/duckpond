@@ -42,7 +42,9 @@ async fn show_filesystem_transactions(
     mode: &str,
 ) -> Result<String, steward::StewardError> {
     // Get the pond-specific guard for commit history and store path
-    let pond = tx.as_pond().expect("show command requires a pond transaction");
+    let pond = tx
+        .as_pond()
+        .expect("show command requires a pond transaction");
 
     // Get commit history from the filesystem
     let commit_history = pond
@@ -91,7 +93,10 @@ async fn show_brief_mode(
     let mut output = String::new();
 
     // Access control table through pond-specific guard (uses Ship's cached instance)
-    let control_table = tx.as_pond().expect("show command requires a pond transaction").control_table();
+    let control_table = tx
+        .as_pond()
+        .expect("show command requires a pond transaction")
+        .control_table();
 
     control_table.print_banner();
 
@@ -402,7 +407,10 @@ async fn show_detailed_mode(
     let mut output = String::new();
 
     // Access control table through pond-specific guard (uses Ship's cached instance)
-    let control_table = tx.as_pond().expect("show command requires a pond transaction").control_table();
+    let control_table = tx
+        .as_pond()
+        .expect("show command requires a pond transaction")
+        .control_table();
 
     control_table.print_banner();
 
@@ -937,7 +945,8 @@ mod tests {
         .expect("Failed to execute test transaction");
 
         // Create ship context for show command
-        let ship_context = ShipContext::pond_only(Some(pond_path.clone()), vec!["test".to_string()]);
+        let ship_context =
+            ShipContext::pond_only(Some(pond_path.clone()), vec!["test".to_string()]);
 
         // Capture show command output
         let mut captured_output = String::new();

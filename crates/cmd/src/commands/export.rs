@@ -14,8 +14,8 @@ use tinyfs::{EntryType, Error as TinyFsError, NodePath, Visitor};
 
 // Re-export shared export types from provider crate
 pub use provider::export::{
-    ExportOutput, ExportSet, TemplateSchema, discover_exported_files,
-    extract_timestamps_from_path, print_export_set, read_parquet_schema,
+    ExportOutput, ExportSet, TemplateSchema, discover_exported_files, extract_timestamps_from_path,
+    print_export_set, read_parquet_schema,
 };
 
 // TODO: the timestamps are confusingly local and/or UTC. do not trust the
@@ -149,17 +149,12 @@ async fn export_pond_data(
     let mut ship = ship_context.open_pond().await?;
 
     let mut stx_guard = ship
-        .begin_write(
-            &steward::PondUserMetadata::new(vec!["export".to_string()]),
-        )
+        .begin_write(&steward::PondUserMetadata::new(vec!["export".to_string()]))
         .await?;
 
     // Process each pattern independently
     for pattern in patterns.iter() {
-        log::info!(
-            "[EXPORT] Processing pattern '{}'",
-            pattern
-        );
+        log::info!("[EXPORT] Processing pattern '{}'", pattern);
 
         // Find all files matching this pattern
         let export_targets = discover_export_targets(&stx_guard, pattern.clone()).await?;
@@ -500,13 +495,7 @@ async fn export_target(
             .await
         }
         EntryType::FilePhysicalVersion | EntryType::FileDynamic => {
-            export_raw_file(
-                tx,
-                target,
-                output_path.to_str().expect("utf8"),
-                output_dir,
-            )
-            .await
+            export_raw_file(tx, target, output_path.to_str().expect("utf8"), output_dir).await
         }
         _ => Err(anyhow::anyhow!(
             "Unsupported file type: {:?}. Supported types: FileSeries, FileTable, FileData",
@@ -592,7 +581,8 @@ async fn export_queryable_file(
         &unique_table_name,
         export_path,
         temporal_parts,
-        &tx.provider_context().map_err(|e| anyhow::anyhow!("Failed to get provider context: {}", e))?,
+        &tx.provider_context()
+            .map_err(|e| anyhow::anyhow!("Failed to get provider context: {}", e))?,
         export_range,
     )
     .await?;

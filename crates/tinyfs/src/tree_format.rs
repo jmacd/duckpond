@@ -92,18 +92,10 @@ fn format_children(output: &mut String, children: &[TreeNode], prefix: &str) {
         // Otherwise use a simple connector (|-- or +--)
         let (connector, continuation_char) = if child.children.is_empty() {
             // Leaf node: simple connector
-            if is_last {
-                ("+--", ' ')
-            } else {
-                ("|--", '|')
-            }
+            if is_last { ("+--", ' ') } else { ("|--", '|') }
         } else {
             // Has children: use tee connector
-            if is_last {
-                ("+-+", ' ')
-            } else {
-                ("|-+", '|')
-            }
+            if is_last { ("+-+", ' ') } else { ("|-+", '|') }
         };
 
         // Format the child's label (handle multi-line labels)

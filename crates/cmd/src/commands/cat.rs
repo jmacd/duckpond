@@ -173,9 +173,9 @@ pub async fn cat_command(
     let mut ship = ship_context.open_pond().await?;
 
     let mut tx = ship
-        .begin_read(
-            &steward::PondUserMetadata::new(ship_context.original_args.clone()),
-        )
+        .begin_read(&steward::PondUserMetadata::new(
+            ship_context.original_args.clone(),
+        ))
         .await?;
 
     // Execute the cat operation and handle errors properly
@@ -555,9 +555,7 @@ mod tests {
                         ),
                         ("value", Float64, [42.0_f64, 43.5_f64])
                     )
-                    .map_err(|e| {
-                        tinyfs::Error::Other(format!("Arrow error: {}", e))
-                    })?;
+                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
 
                     // Write as parquet table using ParquetExt
                     root.create_table_from_batch(
@@ -597,9 +595,7 @@ mod tests {
                         ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]), // 2024-01-01 timestamps in milliseconds
                         ("value", Float64, [42.0_f64, 43.5_f64])
                     )
-                    .map_err(|e| {
-                        tinyfs::Error::Other(format!("Arrow error: {}", e))
-                    })?;
+                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
 
                     // Write as file:series using ParquetExt with temporal metadata extraction
                     let _ = root

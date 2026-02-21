@@ -1238,9 +1238,7 @@ mod tests {
                         ("timestamp", Int64, [1000_i64, 2000_i64, 3000_i64]),
                         ("value", Float64, [10.5_f64, 20.5_f64, 30.5_f64])
                     )
-                    .map_err(|e| {
-                        tinyfs::Error::Other(format!("Arrow error: {}", e))
-                    })?;
+                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
 
                     // Write as file:series using ParquetExt with temporal metadata extraction
                     let _ = root

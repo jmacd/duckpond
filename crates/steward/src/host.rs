@@ -47,10 +47,11 @@ impl HostSteward {
     /// There is no distinction between read and write transactions
     /// on the host filesystem -- both return the same `HostTransaction`.
     /// The `meta` is carried for debugging/logging, not for audit.
-    pub async fn begin(&mut self, meta: &PondUserMetadata) -> Result<HostTransaction, StewardError> {
-        let persistence = tinyfs::hostmount::HostmountPersistence::new(
-            self.root_path.clone(),
-        )?;
+    pub async fn begin(
+        &mut self,
+        meta: &PondUserMetadata,
+    ) -> Result<HostTransaction, StewardError> {
+        let persistence = tinyfs::hostmount::HostmountPersistence::new(self.root_path.clone())?;
         let persistence_arc: Arc<dyn PersistenceLayer> = Arc::new(persistence);
         let fs = FS::from_arc(persistence_arc.clone());
         let session = Arc::new(SessionContext::new());

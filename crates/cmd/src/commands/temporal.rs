@@ -107,7 +107,9 @@ pub async fn detect_overlaps_command(
 
     for (origin_id, (path_str, node_id, _part_id)) in file_info.iter().enumerate() {
         // Get all versions of this file from OpLog records
-        let pond = tx.as_pond().expect("temporal command requires a pond transaction");
+        let pond = tx
+            .as_pond()
+            .expect("temporal command requires a pond transaction");
         let records = pond
             .query_records(*node_id)
             .await

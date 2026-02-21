@@ -316,7 +316,8 @@ async fn test_simple_pond_creation() -> Result<()> {
     );
 
     // Write some data: create multiple directories
-    let ship_context = ShipContext::pond_only(Some(test.source_pond.clone()), vec!["pond".to_string()]);
+    let ship_context =
+        ShipContext::pond_only(Some(test.source_pond.clone()), vec!["pond".to_string()]);
 
     mkdir_command(&ship_context, "/data", false).await?;
     mkdir_command(&ship_context, "/logs/app1", true).await?; // with parents
@@ -484,7 +485,8 @@ async fn test_pond_structural_statistics() -> Result<()> {
     let _ = writer.close()?;
     let parquet_path = temp_parquet.path().to_str().unwrap().to_string();
 
-    let ship_context = ShipContext::pond_only(Some(test.source_pond.clone()), vec!["pond".to_string()]);
+    let ship_context =
+        ShipContext::pond_only(Some(test.source_pond.clone()), vec!["pond".to_string()]);
 
     // Create directories and copy files
     mkdir_command(&ship_context, "/data", false).await?;
