@@ -2,8 +2,9 @@
 # EXPERIMENT: Host cat with format, compression, and entry type variations
 # EXPECTED: pond cat reads host files via hostmount with proper format/compression handling
 set -e
+source check.sh
 
-echo "=== TEST: Hostmount cat variations ==="
+echo "=== Experiment: Hostmount cat variations ==="
 
 # Install zstd for compression test (not in base image)
 apt-get update -qq > /dev/null 2>&1
@@ -29,61 +30,52 @@ EOF
 zstd -q "$TEST_DIR/data.csv" -o "$TEST_DIR/data.csv.zst"
 
 echo ""
-echo "--- Test 1: Raw file via host+file:// ---"
-OUTPUT=$(pond cat "host+file:///$TEST_DIR/readme.txt" 2>&1)
-echo "$OUTPUT"
-echo "$OUTPUT" | grep -q "Hello from host filesystem" || { echo "FAIL: raw file content mismatch"; exit 1; }
-echo "PASS: host+file:// streams raw bytes correctly"
+echo "--- Executing tests ---"
 
-echo ""
-echo "--- Test 2: CSV as table via host+csv:// ---"
-OUTPUT=$(pond cat --format table "host+csv:///$TEST_DIR/data.csv" 2>&1)
-echo "$OUTPUT"
-echo "$OUTPUT" | grep -q "alpha" || { echo "FAIL: CSV table should contain alpha"; exit 1; }
-echo "$OUTPUT" | grep -q "delta" || { echo "FAIL: CSV table should contain delta"; exit 1; }
-echo "PASS: host+csv:// displays CSV as table"
+OUT_RAW=$(pond cat "host+file:///$TEST_DIR/readme.txt" 2>&1)
+echo "raw: $OUT_RAW"
 
-echo ""
-echo "--- Test 3: CSV as table with --sql filter ---"
-OUTPUT=$(pond cat --sql "SELECT name, value FROM source WHERE value > 15" --format table "host+csv:///$TEST_DIR/data.csv" 2>&1)
-echo "$OUTPUT"
-echo "$OUTPUT" | grep -q "beta" || { echo "FAIL: SQL WHERE should include beta (20)"; exit 1; }
-echo "$OUTPUT" | grep -q "gamma" || { echo "FAIL: SQL WHERE should include gamma (30)"; exit 1; }
-if echo "$OUTPUT" | grep -q "alpha"; then
-    echo "FAIL: SQL WHERE should exclude alpha (10)"
-    exit 1
-fi
-echo "PASS: host+csv:// with --sql filters correctly"
+OUT_CSV=$(pond cat --format table "host+csv:///$TEST_DIR/data.csv" 2>&1)
+echo "csv table:"
+echo "$OUT_CSV"
 
-echo ""
-echo "--- Test 4: CSV as series via host+csv+series:// ---"
-OUTPUT=$(pond cat --sql "SELECT name, value FROM source ORDER BY timestamp" --format table "host+csv+series:///$TEST_DIR/data.csv" 2>&1)
-echo "$OUTPUT"
-echo "$OUTPUT" | grep -q "alpha" || { echo "FAIL: series should contain alpha"; exit 1; }
-echo "$OUTPUT" | grep -q "delta" || { echo "FAIL: series should contain delta"; exit 1; }
-echo "PASS: host+csv+series:// queries series data with SQL"
+OUT_SQL=$(pond cat --sql "SELECT name, value FROM source WHERE value > 15" --format table "host+csv:///$TEST_DIR/data.csv" 2>&1)
+echo "csv+sql:"
+echo "$OUT_SQL"
 
-echo ""
-echo "--- Test 5: Zstd-compressed CSV via host+csv+zstd:// ---"
-OUTPUT=$(pond cat --sql "SELECT name, value FROM source WHERE value >= 30" --format table "host+csv+zstd:///$TEST_DIR/data.csv.zst" 2>&1)
-echo "$OUTPUT"
-echo "$OUTPUT" | grep -q "gamma" || { echo "FAIL: zstd CSV should contain gamma (30)"; exit 1; }
-echo "$OUTPUT" | grep -q "delta" || { echo "FAIL: zstd CSV should contain delta (40)"; exit 1; }
-if echo "$OUTPUT" | grep -q "alpha"; then
-    echo "FAIL: SQL WHERE should exclude alpha from zstd CSV"
-    exit 1
-fi
-echo "PASS: host+csv+zstd:// decompresses and queries correctly"
+OUT_SERIES=$(pond cat --sql "SELECT name, value FROM source ORDER BY timestamp" --format table "host+csv+series:///$TEST_DIR/data.csv" 2>&1)
+echo "csv+series:"
+echo "$OUT_SERIES"
 
-echo ""
-echo "--- Test 6: No POND required for host cat ---"
+OUT_ZSTD=$(pond cat --sql "SELECT name, value FROM source WHERE value >= 30" --format table "host+csv+zstd:///$TEST_DIR/data.csv.zst" 2>&1)
+echo "csv+zstd:"
+echo "$OUT_ZSTD"
+
 unset POND
-OUTPUT=$(pond cat "host+file:///$TEST_DIR/readme.txt" 2>&1)
-echo "$OUTPUT" | grep -q "Hello from host filesystem" || { echo "FAIL: host cat should work without POND"; exit 1; }
-echo "PASS: host cat works without POND env var"
+OUT_NOPOND=$(pond cat "host+file:///$TEST_DIR/readme.txt" 2>&1)
 
 # Cleanup
 rm -rf "$TEST_DIR"
 
 echo ""
-echo "=== ALL HOSTMOUNT CAT TESTS PASSED ==="
+echo "--- Verification ---"
+
+check 'echo "$OUT_RAW" | grep -q "Hello from host filesystem"'  "host+file:// streams raw bytes"
+
+check 'echo "$OUT_CSV" | grep -q "alpha"'  "host+csv:// contains alpha"
+check 'echo "$OUT_CSV" | grep -q "delta"'  "host+csv:// contains delta"
+
+check 'echo "$OUT_SQL" | grep -q "beta"'   "host+csv:// SQL includes beta (20)"
+check 'echo "$OUT_SQL" | grep -q "gamma"'  "host+csv:// SQL includes gamma (30)"
+check '! echo "$OUT_SQL" | grep -q "alpha"' "host+csv:// SQL excludes alpha (10)"
+
+check 'echo "$OUT_SERIES" | grep -q "alpha"'  "host+csv+series:// contains alpha"
+check 'echo "$OUT_SERIES" | grep -q "delta"'  "host+csv+series:// contains delta"
+
+check 'echo "$OUT_ZSTD" | grep -q "gamma"'    "host+csv+zstd:// contains gamma (30)"
+check 'echo "$OUT_ZSTD" | grep -q "delta"'    "host+csv+zstd:// contains delta (40)"
+check '! echo "$OUT_ZSTD" | grep -q "alpha"'  "host+csv+zstd:// excludes alpha"
+
+check 'echo "$OUT_NOPOND" | grep -q "Hello from host filesystem"'  "host cat works without POND env var"
+
+check_finish

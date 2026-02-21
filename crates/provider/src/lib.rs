@@ -29,7 +29,7 @@ pub use format_registry::{FORMAT_PROVIDERS, FormatProviderEntry, FormatRegistry}
 pub use provider_api::Provider;
 pub use registry::{
     ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
-    FactoryRegistry, QueryableFile,
+    FactoryRegistry, QueryableFile, SchemeKind, SchemeRegistry,
 };
 pub use sql_transform::transform_sql;
 pub use table_creation::{
@@ -579,5 +579,60 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c); // different entry type
         assert_ne!(a, d); // entry type vs none
+    }
+
+    // --- SchemeRegistry tests ---
+
+    #[test]
+    fn test_scheme_registry_no_conflicts() {
+        let conflicts = SchemeRegistry::find_conflicts();
+        assert!(
+            conflicts.is_empty(),
+            "Scheme name conflicts detected: {:?}",
+            conflicts
+        );
+    }
+
+    #[test]
+    fn test_scheme_registry_classify_builtins() {
+        assert_eq!(SchemeRegistry::classify("file"), Some(SchemeKind::Builtin));
+        assert_eq!(SchemeRegistry::classify("series"), Some(SchemeKind::Builtin));
+        assert_eq!(SchemeRegistry::classify("table"), Some(SchemeKind::Builtin));
+        assert_eq!(SchemeRegistry::classify("data"), Some(SchemeKind::Builtin));
+    }
+
+    #[test]
+    fn test_scheme_registry_classify_format_providers() {
+        // csv, oteljson, excelhtml are registered format providers
+        assert_eq!(SchemeRegistry::classify("csv"), Some(SchemeKind::Format));
+        assert_eq!(
+            SchemeRegistry::classify("oteljson"),
+            Some(SchemeKind::Format)
+        );
+        assert_eq!(
+            SchemeRegistry::classify("excelhtml"),
+            Some(SchemeKind::Format)
+        );
+    }
+
+    #[test]
+    fn test_scheme_registry_classify_factories() {
+        // Test factories registered within the provider crate itself
+        // External factories (sitegen, hydrovu, remote) are tested in cmd
+        // since they're only linked there
+        assert_eq!(
+            SchemeRegistry::classify("sql-derived-table"),
+            Some(SchemeKind::Factory)
+        );
+        assert_eq!(
+            SchemeRegistry::classify("dynamic-dir"),
+            Some(SchemeKind::Factory)
+        );
+    }
+
+    #[test]
+    fn test_scheme_registry_classify_unknown() {
+        assert_eq!(SchemeRegistry::classify("banana"), None);
+        assert_eq!(SchemeRegistry::classify("nosuch"), None);
     }
 }

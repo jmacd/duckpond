@@ -8,6 +8,7 @@
 # rendered verbatim, which is needed for pages that embed Leaflet maps
 # or other client-side JS.
 set -e
+source check.sh
 
 echo "=== Experiment: Sitegen HTML Pass-Through ==="
 
@@ -220,28 +221,8 @@ echo "✓ Sitegen complete"
 echo ""
 echo "=== VERIFICATION ==="
 
-PASS=0
-FAIL=0
-
-check_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ $2"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_not_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✗ $2 (found unwanted: '$3')"
-    FAIL=$((FAIL + 1))
-  else
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  fi
-}
+echo ""
+echo "--- Verification ---"
 
 INDEX="${OUTDIR}/index.html"
 
@@ -270,15 +251,4 @@ echo "--- Markdown still renders ---"
 check_contains "$INDEX" "h1 rendered" '<h1 id="test-page">Test Page</h1>'
 check_contains "$INDEX" "paragraph rendered" '<p>Some markdown content here.</p>'
 
-echo ""
-echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
-
-if [ "${FAIL}" -gt 0 ]; then
-  echo ""
-  echo "DEBUG: Rendered index.html around script block:"
-  grep -B 2 -A 20 '<script' "${INDEX}" || echo "(no script tag found)"
-  exit 1
-fi
-
-echo ""
-echo "=== Test 204 PASSED ==="
+check_finish

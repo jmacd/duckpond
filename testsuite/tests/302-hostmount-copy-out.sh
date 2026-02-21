@@ -6,19 +6,9 @@
 #   directory structure preservation, and full roundtrip (out then back in).
 # EXPECTED: All exports succeed, parquet files are valid, roundtrip preserves data.
 set -e
+source check.sh
 
-check() {
-  if eval "$1"; then
-    echo "  OK $2"
-  else
-    echo "  FAIL $2"
-    FAIL=1
-  fi
-}
-
-FAIL=0
-
-echo "=== Test: Copy Out via Hostmount ==="
+echo "=== Experiment: Copy Out via Hostmount ==="
 echo ""
 
 pond init
@@ -183,6 +173,4 @@ pond -d "$OUTPUT_DIR" copy /raw-file.txt "host:///output"
 check 'test -f "$OUTPUT_DIR/output/raw-file.txt"' "-d flag: file exported under host root"
 check 'grep -q "Hello from inside the pond" "$OUTPUT_DIR/output/raw-file.txt"' "-d flag: content matches"
 
-echo ""
-echo "=== Results ==="
-exit $FAIL
+check_finish

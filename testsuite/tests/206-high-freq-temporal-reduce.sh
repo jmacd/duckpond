@@ -4,6 +4,7 @@
 #           3600 points per bucket. Sitegen exports partitioned parquet files. DuckDB
 #           queries confirm every row has timestamp.count = 3600.
 set -e
+source check.sh
 
 echo "=== Experiment: High-frequency temporal reduce + count verification ==="
 
@@ -188,29 +189,6 @@ find "${OUTDIR}" -type f | sort
 echo ""
 echo "=== VERIFICATION ==="
 
-PASS=0
-FAIL=0
-
-check() {
-  if [ "$1" = "true" ]; then
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ $2"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_file() {
-  if [ -f "$1" ]; then
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ MISSING: $2"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
 check_has_parquet_in() {
   local dir="$1"
   local label="$2"
@@ -218,19 +196,19 @@ check_has_parquet_in() {
   count=$(find "$dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
   if [ "$count" -gt 0 ]; then
     echo "  ✓ ${label} (${count} parquet files)"
-    PASS=$((PASS + 1))
+    _CHECK_PASS=$((_CHECK_PASS + 1))
   else
     echo "  ✗ MISSING parquet in: ${label}"
-    FAIL=$((FAIL + 1))
+    _CHECK_FAIL=$((_CHECK_FAIL + 1))
   fi
 }
 
 echo ""
 echo "--- Structure checks ---"
-check_file "${OUTDIR}/index.html" "index.html exists"
-check_file "${OUTDIR}/sensors/sensor_a.html" "sensors/sensor_a.html exists"
-check_file "${OUTDIR}/style.css" "style.css exists"
-check_file "${OUTDIR}/chart.js" "chart.js exists"
+check '[ -f "${OUTDIR}/index.html" ]' "index.html exists"
+check '[ -f "${OUTDIR}/sensors/sensor_a.html" ]' "sensors/sensor_a.html exists"
+check '[ -f "${OUTDIR}/style.css" ]' "style.css exists"
+check '[ -f "${OUTDIR}/chart.js" ]' "chart.js exists"
 
 echo ""
 echo "--- Parquet export checks ---"
@@ -238,14 +216,14 @@ check_has_parquet_in "${OUTDIR}/data/hourly/sensor_a/res=1h" "data/hourly/sensor
 
 echo ""
 echo "--- Temporal-reduce row count ---"
-# Should be exactly 2160 hourly buckets (90 days × 24 hours)
-check "$([ "${ROW_COUNT}" = "2160" ] && echo true || echo false)" \
+# Should be exactly 2160 hourly buckets (90 days x 24 hours)
+check '[ "${ROW_COUNT}" = "2160" ]' \
   "temporal-reduce produced 2160 hourly rows (got ${ROW_COUNT})"
 
 echo ""
 echo "--- Count aggregation verification ---"
 # Every hourly bucket should have exactly 3600 input points
-check "$([ "${BAD_COUNTS}" = "0" ] && echo true || echo false)" \
+check '[ "${BAD_COUNTS}" = "0" ]' \
   "all hourly buckets have timestamp.count=3600 (bad rows: ${BAD_COUNTS})"
 
 echo ""
@@ -280,11 +258,11 @@ for pf in ${PARQUET_FILES}; do
   echo "    Rows with count=3600: ${ALL_3600}"
   echo "    Rows with count≠3600: ${NOT_3600}"
 
-  check "$([ "${NOT_3600}" = "0" ] && echo true || echo false)" \
+  check '[ "${NOT_3600}" = "0" ]' \
     "${RELPATH}: all rows have timestamp.count=3600 (${ALL_3600} rows OK)"
 
   # Verify total row count matches expected
-  check "$([ "${TOTAL}" = "${ALL_3600}" ] && echo true || echo false)" \
+  check '[ "${TOTAL}" = "${ALL_3600}" ]' \
     "${RELPATH}: total rows (${TOTAL}) = verified rows (${ALL_3600})"
 
   # Show schema for debugging
@@ -298,17 +276,7 @@ GLOBAL_TOTAL=$(duckdb -noheader -csv -c "
 " 2>/dev/null | tr -d '[:space:]')
 echo ""
 echo "  Total rows across all parquet files: ${GLOBAL_TOTAL}"
-check "$([ "${GLOBAL_TOTAL}" = "2160" ] && echo true || echo false)" \
+check '[ "${GLOBAL_TOTAL}" = "2160" ]' \
   "total exported rows = 2160 (got ${GLOBAL_TOTAL})"
 
-echo ""
-echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
-
-if [ "${FAIL}" -gt 0 ]; then
-  echo ""
-  echo "FAILED"
-  exit 1
-fi
-
-echo ""
-echo "=== Test 206 PASSED ==="
+check_finish

@@ -8,8 +8,9 @@
 #
 # REQUIRES: testsuite/testdata/septic-sample.json (auto-mounted at /data/)
 set -e
+source check.sh
 
-echo "=== Test: Septic Station Full Pipeline ==="
+echo "=== Experiment: Septic Station Full Pipeline ==="
 echo ""
 
 # testdata/ is auto-mounted at /data/ by run-test.sh
@@ -416,43 +417,34 @@ echo ""
 echo "Output directory structure:"
 find "${OUTDIR}" -type f | sort
 
-PASS=0
-FAIL=0
-
-check_file() {
-  if [ -f "$1" ]; then
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
+check_has_parquet_in() {
+  local dir="$1"
+  local label="$2"
+  local count
+  count=$(find "$dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$count" -gt 0 ]; then
+    echo "  ✓ ${label} (${count} parquet files)"
+    _CHECK_PASS=$((_CHECK_PASS + 1))
   else
-    echo "  ✗ MISSING: $2"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✓ $2 contains '$3'"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ $2 missing '$3'"
-    FAIL=$((FAIL + 1))
+    echo "  ✗ MISSING parquet in: ${label}"
+    _CHECK_FAIL=$((_CHECK_FAIL + 1))
   fi
 }
 
 echo ""
 echo "--- File existence ---"
-check_file "${OUTDIR}/index.html" "index.html"
-check_file "${OUTDIR}/style.css" "style.css"
-check_file "${OUTDIR}/chart.js" "chart.js"
+check '[ -f "${OUTDIR}/index.html" ]'  "index.html"
+check '[ -f "${OUTDIR}/style.css" ]'   "style.css"
+check '[ -f "${OUTDIR}/chart.js" ]'    "chart.js"
 
 # Template routes: one page per group
 # $0 from pattern "/reduced/*/*/*/*.series" matches group names
-check_file "${OUTDIR}/data/pumps.html" "data/pumps.html"
-check_file "${OUTDIR}/data/cycle-times.html" "data/cycle-times.html"
-check_file "${OUTDIR}/data/pump-modes.html" "data/pump-modes.html"
-check_file "${OUTDIR}/data/flow-totals.html" "data/flow-totals.html"
-check_file "${OUTDIR}/data/dose-zones.html" "data/dose-zones.html"
-check_file "${OUTDIR}/data/environment.html" "data/environment.html"
+check '[ -f "${OUTDIR}/data/pumps.html" ]'        "data/pumps.html"
+check '[ -f "${OUTDIR}/data/cycle-times.html" ]'   "data/cycle-times.html"
+check '[ -f "${OUTDIR}/data/pump-modes.html" ]'    "data/pump-modes.html"
+check '[ -f "${OUTDIR}/data/flow-totals.html" ]'   "data/flow-totals.html"
+check '[ -f "${OUTDIR}/data/dose-zones.html" ]'    "data/dose-zones.html"
+check '[ -f "${OUTDIR}/data/environment.html" ]'   "data/environment.html"
 
 echo ""
 echo "--- Content checks ---"
@@ -490,19 +482,6 @@ check_contains "${OUTDIR}/index.html" "sidebar has environment link" 'href="/dat
 echo ""
 echo "--- Data export checks ---"
 # Hive-partitioned parquet under data/metrics/septic/res=<R>/year=<Y>/month=<M>/
-check_has_parquet_in() {
-  local dir="$1"
-  local label="$2"
-  local count
-  count=$(find "$dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$count" -gt 0 ]; then
-    echo "  ✓ ${label} (${count} parquet files)"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ MISSING parquet in: ${label}"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 for res in 1h 6h 1d; do
   check_has_parquet_in "${OUTDIR}/data/pumps/data/res=${res}" "data/pumps/data/res=${res}"
@@ -518,25 +497,9 @@ echo "--- Asset checks ---"
 check_contains "${OUTDIR}/style.css" "style.css" "sidebar-width"
 check_contains "${OUTDIR}/chart.js" "chart.js" "chart-data"
 
-echo ""
-echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
-
-if [ "${FAIL}" -gt 0 ]; then
-  echo ""
-  echo "FAILED — showing generated files for debugging:"
-  for f in $(find "${OUTDIR}" -name '*.html' | head -5); do
-    echo ""
-    echo "=== ${f} ==="
-    head -30 "${f}"
-  done
-  exit 1
-fi
-
 # Copy output to /output if mounted
 if [ -d /output ]; then
   cp -r "${OUTDIR}/"* /output/
-  echo "✓ Output copied to /output"
 fi
 
-echo ""
-echo "=== Test 037 PASSED ==="
+check_finish

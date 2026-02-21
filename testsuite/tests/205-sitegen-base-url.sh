@@ -5,6 +5,7 @@
 #           Layout asset references (style.css, chart.js) stay at "/" since
 #           Vite handles base path rewriting for those.
 set -e
+source check.sh
 
 echo "=== Experiment: Sitegen base_url ==="
 
@@ -260,28 +261,8 @@ echo "✓ Subdir site generated"
 echo ""
 echo "=== VERIFICATION ==="
 
-PASS=0
-FAIL=0
-
-check_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ $2 — expected: '$3'"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_not_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✗ $2 — found unwanted: '$3'"
-    FAIL=$((FAIL + 1))
-  else
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  fi
-}
+echo ""
+echo "--- Verification ---"
 
 # ── Root site checks (base_url: "/") ────────────────────────
 
@@ -363,31 +344,6 @@ echo "--- Both sites have same file structure ---"
 
 ROOT_FILES=$(cd "${ROOT_DIR}" && find . -name '*.html' | sort)
 SUB_FILES=$(cd "${SUB_DIR}" && find . -name '*.html' | sort)
-if [ "${ROOT_FILES}" = "${SUB_FILES}" ]; then
-  echo "  ✓ HTML file structure matches"
-  PASS=$((PASS + 1))
-else
-  echo "  ✗ HTML file structure differs"
-  echo "    Root: ${ROOT_FILES}"
-  echo "    Sub:  ${SUB_FILES}"
-  FAIL=$((FAIL + 1))
-fi
+check '[ "${ROOT_FILES}" = "${SUB_FILES}" ]'  "HTML file structure matches"
 
-echo ""
-echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
-
-if [ "${FAIL}" -gt 0 ]; then
-  echo ""
-  echo "DEBUG: Root index.html sidebar:"
-  grep -E 'href=|src=' "${ROOT_DIR}/index.html" | head -20
-  echo ""
-  echo "DEBUG: Subdir index.html sidebar:"
-  grep -E 'href=|src=' "${SUB_DIR}/index.html" | head -20
-  echo ""
-  echo "DEBUG: Subdir params/Temperature.html breadcrumbs:"
-  grep -i 'breadcrumb' "${SUB_DIR}/params/Temperature.html" | head -10
-  exit 1
-fi
-
-echo ""
-echo "=== Test 205 PASSED ==="
+check_finish

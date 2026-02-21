@@ -12,6 +12,7 @@
 # synthetic pipeline as test 201, then inspects the reduced series
 # directly with `pond cat --sql`.
 set -e
+source check.sh
 
 echo "=== Experiment: Temporal-Reduce Factory Isolation ==="
 
@@ -128,9 +129,6 @@ pond list /reduced/**
 echo ""
 echo "=== VERIFICATION ==="
 
-PASS=0
-FAIL=0
-
 check_row_count() {
   local series="$1"
   local label="$2"
@@ -147,16 +145,16 @@ check_row_count() {
   if [ -z "$count" ]; then
     echo "  ✗ $label — could not read series"
     echo "    output: $output"
-    FAIL=$((FAIL + 1))
+    _CHECK_FAIL=$((_CHECK_FAIL + 1))
     return
   fi
 
   if [ "$count" -ge "$expected_min" ] && [ "$count" -le "$expected_max" ]; then
     echo "  ✓ $label: $count rows (expected $expected_min–$expected_max)"
-    PASS=$((PASS + 1))
+    _CHECK_PASS=$((_CHECK_PASS + 1))
   else
     echo "  ✗ $label: $count rows (expected $expected_min–$expected_max)"
-    FAIL=$((FAIL + 1))
+    _CHECK_FAIL=$((_CHECK_FAIL + 1))
   fi
 }
 
@@ -192,7 +190,7 @@ check_spread() {
 
   if [ -z "$spread" ]; then
     echo "  ✗ $label — could not compute spread"
-    FAIL=$((FAIL + 1))
+    _CHECK_FAIL=$((_CHECK_FAIL + 1))
     return
   fi
 
@@ -201,16 +199,16 @@ check_spread() {
 
   if [ "$expect_nonzero" = "yes" ] && [ "$is_zero" = "no" ]; then
     echo "  ✓ $label: avg spread = $spread (nonzero, good)"
-    PASS=$((PASS + 1))
+    _CHECK_PASS=$((_CHECK_PASS + 1))
   elif [ "$expect_nonzero" = "no" ] && [ "$is_zero" = "yes" ]; then
     echo "  ✓ $label: avg spread = $spread (zero expected for 1:1 buckets)"
-    PASS=$((PASS + 1))
+    _CHECK_PASS=$((_CHECK_PASS + 1))
   elif [ "$expect_nonzero" = "yes" ] && [ "$is_zero" = "yes" ]; then
     echo "  ✗ $label: avg spread = $spread (EXPECTED NONZERO — not downsampling?)"
-    FAIL=$((FAIL + 1))
+    _CHECK_FAIL=$((_CHECK_FAIL + 1))
   else
     echo "  ✗ $label: avg spread = $spread (unexpected)"
-    FAIL=$((FAIL + 1))
+    _CHECK_FAIL=$((_CHECK_FAIL + 1))
   fi
 }
 
@@ -239,12 +237,4 @@ for res in 1h 2h 4h 12h 24h; do
   " 2>&1 | head -10
 done
 
-echo ""
-echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
-
-if [ "${FAIL}" -gt 0 ]; then
-  exit 1
-fi
-
-echo ""
-echo "=== Test 203 PASSED ==="
+check_finish

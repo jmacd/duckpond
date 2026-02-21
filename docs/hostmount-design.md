@@ -251,21 +251,17 @@ Refactor `ShipContext` / main CLI dispatch:
   - Both → construct both
 - `chroot` semantics for `-d`: all host paths resolve under the root
 
-### Phase 4: Unified scheme registry
+### Phase 4+5: Unified scheme registry + `pond run` on hostmount
 
-Merge format provider and factory registries into a single namespace:
-- Compile-time or startup validation for name conflicts
-- `provider::Url` parses scheme and resolves via unified registry
-- `pond run host+sitegen://site.yaml` dispatches: parse URL → look up `sitegen` in
-  registry → found as factory → extract config from host file → execute
-
-### Phase 5: `pond run` on hostmount
-
-Wire `pond run` to work with hostmount-only context:
-- Factory name from URL scheme (no oplog lookup)
-- Config bytes from host file (no `mknod` required)
-- `FactoryContext` from hostmount steward + standalone DataFusion session
-- Sitegen patterns resolve via hostmount `WD::collect_matches()`
+Merged into a single phase:
+- Unified `SchemeRegistry` classifies schemes as Builtin, Format, or Factory
+- `SchemeRegistry::find_conflicts()` asserts no factory name collides with
+  format providers or builtins
+- `pond run` detects `host+factory://` URLs via `classify_target()`, extracts
+  factory name from the URL scheme, reads config from the host filesystem,
+  and executes via `FactoryRegistry::execute()` with a hostmount steward
+- No pond required for host factory execution
+- `pond run host+sitegen://site.yaml build ./dist` works end-to-end
 
 ### Phase 6: Site config restructuring
 
@@ -273,9 +269,9 @@ Wire `pond run` to work with hostmount-only context:
 - Update `render.sh` and sitegen test scripts
 - Verify `pond run -d ./water host+sitegen://site.yaml build ./dist` works end-to-end
 
-### Phase 7: Deprecate ad-hoc host access
+### Phase 7: Deprecate remaining ad-hoc host access
 
 - Remove `strip_prefix("host://")` from `pond copy`
-- Remove `cat_host_impl` special path from `pond cat`
 - All host access flows through hostmount tinyfs
 - `host+` prefix in URLs routes to the hostmount FS in the execution context
+- Note: `cat_host_impl` was already removed in Phase 3

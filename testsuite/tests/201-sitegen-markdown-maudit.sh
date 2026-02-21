@@ -10,6 +10,7 @@
 # Data: 2 sites (NorthDock, SouthDock) × 2 params (Temperature, DO)
 #       1 year (2025) at 1h resolution
 set -e
+source check.sh
 
 echo "=== Experiment: Sitegen Factory — Markdown + Maud ==="
 
@@ -369,38 +370,30 @@ HTML_COUNT=$(find "${OUTDIR}" -name '*.html' | wc -l | tr -d ' ')
 echo "  HTML files: ${HTML_COUNT}"
 
 # Check expected files
-PASS=0
-FAIL=0
 
-check_file() {
-  if [ -f "$1" ]; then
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
+check_has_parquet_in() {
+  local dir="$1"
+  local label="$2"
+  local count
+  count=$(find "$dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$count" -gt 0 ]; then
+    echo "  ✓ ${label} (${count} parquet files)"
+    _CHECK_PASS=$((_CHECK_PASS + 1))
   else
-    echo "  ✗ MISSING: $2"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✓ $2 contains '$3'"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ $2 missing '$3'"
-    FAIL=$((FAIL + 1))
+    echo "  ✗ MISSING parquet in: ${label}"
+    _CHECK_FAIL=$((_CHECK_FAIL + 1))
   fi
 }
 
 echo ""
 echo "--- File existence ---"
-check_file "${OUTDIR}/index.html" "index.html"
-check_file "${OUTDIR}/params/Temperature.html" "params/Temperature.html"
-check_file "${OUTDIR}/params/DO.html" "params/DO.html"
-check_file "${OUTDIR}/sites/NorthDock.html" "sites/NorthDock.html"
-check_file "${OUTDIR}/sites/SouthDock.html" "sites/SouthDock.html"
-check_file "${OUTDIR}/style.css" "style.css"
-check_file "${OUTDIR}/chart.js" "chart.js"
+check '[ -f "${OUTDIR}/index.html" ]'                 "index.html"
+check '[ -f "${OUTDIR}/params/Temperature.html" ]'    "params/Temperature.html"
+check '[ -f "${OUTDIR}/params/DO.html" ]'             "params/DO.html"
+check '[ -f "${OUTDIR}/sites/NorthDock.html" ]'       "sites/NorthDock.html"
+check '[ -f "${OUTDIR}/sites/SouthDock.html" ]'       "sites/SouthDock.html"
+check '[ -f "${OUTDIR}/style.css" ]'                  "style.css"
+check '[ -f "${OUTDIR}/chart.js" ]'                   "chart.js"
 
 echo ""
 echo "--- Content checks ---"
@@ -419,25 +412,6 @@ check_contains "${OUTDIR}/chart.js" "chart.js" "chart-data"
 
 echo ""
 echo "--- Data export checks (Hive-partitioned) ---"
-
-# With target_points: 1500, data is exported as Hive-partitioned parquet with
-# per-resolution temporal partitions (auto-computed):
-# data/<group>/<param>/res=<R>/<temporal-dirs>/<file>.parquet
-# We check that partitioned directories exist and contain .parquet files.
-
-check_has_parquet_in() {
-  local dir="$1"
-  local label="$2"
-  local count
-  count=$(find "$dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$count" -gt 0 ]; then
-    echo "  ✓ ${label} (${count} parquet files)"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ MISSING parquet in: ${label}"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 for res in 1h 2h 4h 12h 24h; do
   check_has_parquet_in "${OUTDIR}/data/single_param/Temperature/res=${res}" "data/Temperature res=${res}"
@@ -459,38 +433,16 @@ echo ""
 echo "--- Temporal bounds checks ---"
 # start_time/end_time should be non-zero in the chart manifest
 # The manifest contains JSON with "start_time": <epoch_seconds>
-if grep -oP '"start_time":\s*\d+' "${OUTDIR}/params/Temperature.html" | grep -v '"start_time": *0' | head -1 > /dev/null 2>&1; then
-  echo "  ✓ Temperature manifest has non-zero start_time"
-  PASS=$((PASS + 1))
-else
-  echo "  ✗ Temperature manifest start_time is 0 or missing"
-  FAIL=$((FAIL + 1))
-fi
+check 'grep -oP '"'"'"start_time":\s*\d+'"'"' "${OUTDIR}/params/Temperature.html" | grep -v '"'"'"start_time": *0'"'"' | head -1 > /dev/null 2>&1' "Temperature manifest has non-zero start_time"
 
 echo ""
 echo "--- Layout checks ---"
 check_contains "${OUTDIR}/index.html" "index.html (default layout)" 'class="hero"'
 check_contains "${OUTDIR}/params/Temperature.html" "params/Temperature.html (data layout)" 'class="data-page"'
 
-echo ""
-echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
-
-if [ "${FAIL}" -gt 0 ]; then
-  echo ""
-  echo "FAILED — showing generated files for debugging:"
-  for f in $(find "${OUTDIR}" -name '*.html' | head -5); do
-    echo ""
-    echo "=== HEAD: ${f} ==="
-    head -20 "${f}"
-  done
-  exit 1
-fi
-
 # Copy output to /output if mounted (use: ./run-test.sh 201 --output /tmp/sitegen-output)
 if [ -d /output ]; then
   cp -r "${OUTDIR}/"* /output/
-  echo "✓ Output copied to /output"
 fi
 
-echo ""
-echo "=== Test 201 PASSED ==="
+check_finish
