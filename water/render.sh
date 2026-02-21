@@ -1,6 +1,8 @@
 #!/bin/bash
 # Render the Caspar Water site locally
 #
+# Uses hostmount: no pond required. The host directory IS the filesystem.
+#
 # Usage:
 #   ./render.sh              # Build and open in browser
 #   ./render.sh --no-open    # Build only
@@ -9,42 +11,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTDIR="${SCRIPT_DIR}/dist"
-POND_DIR="${SCRIPT_DIR}/.pond"
 
 pond() { cargo run --quiet --manifest-path "${REPO_ROOT}/Cargo.toml" -- "$@"; }
 
-export POND="${POND_DIR}"
 export RUST_LOG=info
 
-# Fresh pond every time
-echo "=== Initializing pond ==="
-rm -rf "${POND_DIR}"
-pond init
-
-# Copy content files
-echo "=== Loading content ==="
-pond mkdir /content
-for f in "${SCRIPT_DIR}"/content/*.md; do
-    pond copy "host://${f}" "/content/$(basename "$f")"
-done
-echo "  $(ls "${SCRIPT_DIR}"/content/*.md | wc -l | tr -d ' ') content files"
-
-# Copy site templates
-echo "=== Loading site templates ==="
-pond mkdir /etc
-pond mkdir /etc/site
-for f in "${SCRIPT_DIR}"/site/*.md; do
-    pond copy "host://${f}" "/etc/site/$(basename "$f")"
-done
-
-# Create sitegen node with config
-pond mknod sitegen /etc/site.yaml --config-path "${SCRIPT_DIR}/site.yaml"
-
-# Generate site
+# Generate site directly from host filesystem
 echo "=== Generating site ==="
 rm -rf "${OUTDIR}"
 mkdir -p "${OUTDIR}"
-pond run /etc/site.yaml build "${OUTDIR}"
+pond run -d "${SCRIPT_DIR}" host+sitegen:///site.yaml build "${OUTDIR}"
 
 echo ""
 echo "=== Site generated ==="

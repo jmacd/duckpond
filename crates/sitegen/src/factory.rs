@@ -451,22 +451,23 @@ fn copy_static_assets(
 ) -> Result<(), tinyfs::Error> {
     for asset in &config.static_assets {
         // For static assets, read from pond and write to output
-        // The pattern is a literal path like "/etc/static/style.css"
+        // The pattern is a literal path like "/static/style.css"
         match read_pond_file(&asset.pattern) {
             Ok(content) => {
-                // Strip leading /etc/static/ to get relative output path
-                let rel = asset
-                    .pattern
-                    .strip_prefix("/etc/static/")
+                // Use the filename as the output path. Static assets are
+                // written flat into the output directory.
+                let filename = Path::new(&asset.pattern)
+                    .file_name()
+                    .and_then(|n| n.to_str())
                     .unwrap_or(&asset.pattern);
-                let out_path = output_dir.join(rel);
+                let out_path = output_dir.join(filename);
                 if let Some(parent) = out_path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e)))?;
                 }
                 std::fs::write(&out_path, content.as_bytes())
                     .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", out_path, e)))?;
-                debug!("copied static asset: {}", rel);
+                debug!("copied static asset: {}", filename);
             }
             Err(e) => {
                 warn!("Cannot read static asset '{}': {}", asset.pattern, e);

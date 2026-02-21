@@ -25,10 +25,10 @@ use serde::{Deserialize, Serialize};
 ///     routes: [...]
 ///
 /// partials:
-///   sidebar: "/etc/site/sidebar.md"
+///   sidebar: "/site/sidebar.md"
 ///
 /// static:
-///   - pattern: "/etc/static/*"
+///   - pattern: "/static/*"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteConfig {
