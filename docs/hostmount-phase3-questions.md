@@ -412,3 +412,125 @@ are Phase 3B+.
 | `pond run` on hostmount | Phase 5 | Factory dispatch from host FS |
 | Unified scheme registry | Phase 4 | Factory names in URL schemes |
 | Deprecate `--format` flag on copy | Phase 4+ | Entry type from URL replaces flag |
+
+---
+
+## Phase 3 Implementation Progress
+
+All Phase 3 tasks are **complete**. Summary of what was implemented and where.
+
+### Task 3-1: Update copy-url-design.md (Q0 -- prefix always)
+
+Authority-style host URLs (`csv://host/path`) replaced with prefix-style
+(`host+csv:///path`) throughout `docs/copy-url-design.md`. 10 replacements.
+The document now matches the Q0=D decision.
+
+### Task 3-2: Extend `provider::Url` with entry type parsing (Q3a)
+
+`provider::Url` gained a multi-segment `+` suffix classifier that categorizes
+scheme components into format, compression, and entry type.
+
+| File | Changes |
+|------|---------|
+| [crates/provider/src/lib.rs](crates/provider/src/lib.rs) | New fields: `entry_type`, `full_scheme_str`, `is_host`. Classifier uses `KNOWN_ENTRY_TYPES` (`table`, `series`) and `KNOWN_COMPRESSIONS` (`zstd`, `gzip`, `bzip2`). Bare `series:///path` canonicalizes to format=`file` + entry_type=`series`, Display: `file+series:///path`. 11 new tests (136 total passing). |
+| [crates/provider/src/factory/temporal_reduce.rs](crates/provider/src/factory/temporal_reduce.rs) | `source_url()` uses `full_scheme()` instead of `scheme()` to preserve multi-segment schemes. |
+| [crates/provider/src/factory/timeseries_pivot.rs](crates/provider/src/factory/timeseries_pivot.rs) | `series://` changed to `file+series://` for canonical URL construction. |
+| [crates/provider/src/url_pattern_matcher.rs](crates/provider/src/url_pattern_matcher.rs) | Dispatch uses `entry_type()` priority over `scheme()` for builtin type matching. `series:///path` now correctly filters to `TablePhysicalSeries` + `TableDynamic`. |
+
+### Task 3-3 / 3-4 / 3-5: `-d` flag, `ShipContext`, `open_host()`
+
+| File | Changes |
+|------|---------|
+| [crates/cmd/src/main.rs](crates/cmd/src/main.rs) | `-d` / `--directory` global clap flag added to `Cli` struct. Passed to `ShipContext::new()`. |
+| [crates/cmd/src/common.rs](crates/cmd/src/common.rs) | `ShipContext` gained `host_root: Option<PathBuf>` field. `open_host()` method constructs `Steward::Host(...)` using `-d` path (or `/` default). `pond_only()` convenience constructor added for test sites that never use host access. |
+
+### Task 3-6: HostTransaction carries PondUserMetadata (Q8)
+
+| File | Changes |
+|------|---------|
+| [crates/steward/src/host.rs](crates/steward/src/host.rs) | `begin()` accepts `&PondUserMetadata`. `HostTransaction` stores `meta` field with `meta()` accessor. |
+| [crates/steward/src/dispatch.rs](crates/steward/src/dispatch.rs) | `begin_read/write` pass metadata through to `host.begin(meta)`. |
+
+### Task 3-7: Shared URL classification (Q2)
+
+| File | Changes |
+|------|---------|
+| [crates/cmd/src/common.rs](crates/cmd/src/common.rs) | `classify_target()` function uses `provider::Url::parse` to determine `TargetContext::Pond(path)` vs `TargetContext::Host(path)`. 12 unit tests covering host URLs, pond URLs, bare paths, globs, absolute paths. |
+
+### Task 3-8: Wire `list` command to host steward
+
+| File | Changes |
+|------|---------|
+| [crates/cmd/src/commands/list.rs](crates/cmd/src/commands/list.rs) | `list_command()` calls `classify_target(pattern)` and dispatches to `ship_context.open_host()` for `TargetContext::Host`, `ship_context.open_pond()` for `TargetContext::Pond`. |
+
+### Task 3-9: Tests
+
+| Test | Description |
+|------|-------------|
+| `crates/cmd/src/common.rs` (12 unit tests) | `classify_target` for host URLs, pond URLs, bare paths, globs, absolute paths, edge cases. |
+| `crates/provider/src/lib.rs` (11 new tests) | Entry type parsing, multi-segment classifier, canonicalization, `is_host` detection. |
+| [testsuite/tests/300-hostmount-list-proof-of-life.sh](testsuite/tests/300-hostmount-list-proof-of-life.sh) | Integration test: host URL listing, recursive glob, `-d` flag, no POND required. |
+
+### Follow-up fixes (post-task)
+
+| Fix | Description |
+|-----|-------------|
+| `url_pattern_matcher` dispatch | Changed to use `entry_type().unwrap_or_else(\|\| scheme())` as type key, so `series:///path` matches `TablePhysicalSeries` correctly. |
+| `classify_target` proper parsing | Replaced ad-hoc string checks with `provider::Url::parse` for robust host detection. |
+| `ShipContext::pond_only()` | Added convenience constructor; converted 22 test call sites from `ShipContext::new(..., None::<&str>, ...)` to eliminate turbofish noise. |
+
+### Test results
+
+All tests pass across the three modified crates:
+
+| Crate | Tests |
+|-------|-------|
+| `provider` | 136 |
+| `cmd` | 101 |
+| `steward` | 16 |
+| **Total** | **253** |
+
+### What's next: Phase 3B
+
+Phase 3 proved the hostmount plumbing works end-to-end with `list`. Phase 3B
+migrates additional commands:
+
+| Task | Description | Status |
+|------|-------------|--------|
+| 3B-1 | Migrate `cat` to use hostmount (replaces `cat_host_impl`) | **COMPLETE** |
+| 3B-2 | Context routing for dual-steward commands | |
+| 3B-3 | Migrate `copy` host handling to hostmount | |
+| 3B-4 | Integration tests for cat + copy on host files via hostmount | |
+
+### Task 3B-1: Migrate `cat` to hostmount — COMPLETE
+
+Replaced the ad-hoc `cat_host_impl` bypass with proper hostmount tinyfs routing.
+Host files are now read through the same `Provider` + `FS` pipeline as pond files.
+
+| File | Changes |
+|------|---------|
+| [crates/cmd/src/commands/cat.rs](crates/cmd/src/commands/cat.rs) | `cat_command`: replaced `starts_with("host+")` check with `classify_target()` dispatch. Opens `Steward::Host` for host URLs, `Steward::Pond` for pond paths. Both pass through `cat_impl`. Removed `cat_host_impl` function (40 lines). |
+| [crates/cmd/src/commands/cat.rs](crates/cmd/src/commands/cat.rs) | `cat_impl`: replaced `url.strip_prefix("file://")` string matching with `provider::Url::parse()` for proper URL classification. Now correctly handles both `file:///path` (pond) and `host+file:///path` (host) for raw byte streaming. Added `entry_type().is_none()` guard so `host+series:///` and `host+table:///` URLs skip the raw-streaming path. |
+| [crates/cmd/src/commands/cat.rs](crates/cmd/src/commands/cat.rs) | Default SQL query changed from `SELECT * FROM source ORDER BY timestamp` to `SELECT * FROM source`. The `ORDER BY timestamp` assumed time-series data, which fails for files without a `timestamp` column (e.g., host CSV files). |
+| [crates/cmd/src/commands/cat.rs](crates/cmd/src/commands/cat.rs) | 5 new host cat tests: raw file streaming, CSV format provider, CSV with SQL query, absolute path (no `-d`), nonexistent file error. |
+
+#### How it works
+
+For `pond cat host+csv:///data.csv` (with `-d ./mydir`):
+
+1. `cat_command` calls `classify_target("host+csv:///data.csv")` -> `TargetContext::Host`
+2. Opens `Steward::Host(root=./mydir)` via `ship_context.open_host()`
+3. Begins a host transaction (creates hostmount `FS` + standalone DataFusion session)
+4. Calls `cat_impl(&mut tx, "host+csv:///data.csv", ...)`
+5. `cat_impl` parses URL: scheme=`csv`, is_host=true, path=`/data.csv`
+6. Scheme is not `file`, so skips raw-streaming check
+7. Creates `Provider::with_context(hostmount_fs, host_provider_context)`
+8. `Provider.for_each_match("host+csv:///data.csv", ...)`:
+   - scheme=`csv` -> format provider lookup -> csv provider
+   - `create_memtable_from_url` -> `fs.open_url(&url)` -> hostmount reads `./mydir/data.csv`
+   - CSV format provider parses -> MemTable
+9. Registers MemTable as `source`, runs SQL, streams output
+
+For `pond cat host+file:///readme.txt`:
+- scheme=`file`, entry_type=None -> metadata check -> `FilePhysicalVersion` (not queryable)
+- Streams raw bytes via `stream_file_to_stdout` through hostmount `async_reader_path`
