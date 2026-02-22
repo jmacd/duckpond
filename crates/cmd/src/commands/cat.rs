@@ -1203,6 +1203,7 @@ mod tests {
         let ship_context = ShipContext::new(
             None::<&std::path::Path>,
             Some(temp_dir.path()),
+            Vec::new(),
             vec!["pond".to_string(), "cat".to_string()],
         );
 
@@ -1239,6 +1240,7 @@ mod tests {
         let ship_context = ShipContext::new(
             None::<&std::path::Path>,
             Some(temp_dir.path()),
+            Vec::new(),
             vec!["pond".to_string(), "cat".to_string()],
         );
 
@@ -1290,6 +1292,7 @@ mod tests {
         let ship_context = ShipContext::new(
             None::<&std::path::Path>,
             Some(temp_dir.path()),
+            Vec::new(),
             vec!["pond".to_string(), "cat".to_string()],
         );
 
@@ -1337,10 +1340,11 @@ mod tests {
         let file_path = temp_dir.path().join("abs_test.txt");
         std::fs::write(&file_path, "absolute path test\n")?;
 
-        // No host_root — host URLs use absolute paths
+        // No host_root -- host URLs use absolute paths
         let ship_context = ShipContext::new(
             None::<&std::path::Path>,
             None::<&std::path::Path>,
+            Vec::new(),
             vec!["pond".to_string(), "cat".to_string()],
         );
 
@@ -1374,6 +1378,7 @@ mod tests {
         let ship_context = ShipContext::new(
             None::<&std::path::Path>,
             Some(temp_dir.path()),
+            Vec::new(),
             vec!["pond".to_string(), "cat".to_string()],
         );
 

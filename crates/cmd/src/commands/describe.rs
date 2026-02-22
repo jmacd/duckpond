@@ -669,6 +669,7 @@ mod tests {
             let ship_context = ShipContext {
                 pond_path: Some(pond_path.clone()),
                 host_root: None,
+                mount_specs: Vec::new(),
                 original_args: vec!["pond".to_string(), "init".to_string()],
             };
             init_command(&ship_context, None, None).await?;

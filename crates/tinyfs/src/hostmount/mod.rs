@@ -18,6 +18,8 @@
 
 mod directory;
 mod file;
+pub mod overlay;
+mod overlay_persistence;
 mod persistence;
 
 #[cfg(test)]
@@ -25,6 +27,8 @@ mod tests;
 
 pub use directory::HostDirectory;
 pub use file::HostFile;
+pub use overlay::{MountSpec, OverlayDirectory};
+pub use overlay_persistence::OverlayPersistence;
 pub use persistence::HostmountPersistence;
 
 /// Create a new hostmount-based filesystem rooted at the given host directory

@@ -1,7 +1,10 @@
 #!/bin/bash
 # Render the Caspar Water site with live data from casparwater-sample.json
 #
-# This builds a temporary pond, ingests the sample oteljson data,
+# LEGACY: This builds a temporary pond. For the faster hostmount approach,
+# use render.sh instead (no pond required).
+#
+# This script builds a temporary pond, ingests the sample oteljson data,
 # creates temporal-reduce aggregations, and runs sitegen to produce
 # a static site with interactive charts.
 #
@@ -35,23 +38,16 @@ pond init
 
 # Create directory structure
 pond mkdir -p /etc
-pond mkdir -p /ingest
 pond mkdir -p /content
 pond mkdir -p /site
 
-# Ingest the sample oteljson file via logfile-ingest
-cat > /tmp/water-ingest.yaml << EOF
-archived_pattern: ${SAMPLE}
-active_pattern: ${SCRIPT_DIR}/casparwater-active.json
-pond_path: /ingest
-EOF
-
-pond mknod logfile-ingest /etc/ingest --config-path /tmp/water-ingest.yaml
-pond run /etc/ingest
+# Copy the sample oteljson file to the pond root
+# (reduce.yaml references oteljson:///casparwater-sample.json)
+pond copy "host://${SAMPLE}" "/casparwater-sample.json"
 
 echo ""
 echo "=== Ingested data ==="
-pond list '/ingest/*'
+pond list '/casparwater-sample.json'
 
 # Create temporal-reduce dynamic directory
 pond mknod dynamic-dir /reduced --config-path "${SCRIPT_DIR}/reduce.yaml"

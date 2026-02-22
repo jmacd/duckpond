@@ -1670,6 +1670,7 @@ mod tests {
         let ship_context = ShipContext::new(
             Some(&pond_path),
             Some(&host_files_dir), // -d host_files_dir
+            Vec::new(),
             init_args.clone(),
         );
 

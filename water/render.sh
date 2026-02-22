@@ -1,7 +1,9 @@
 #!/bin/bash
-# Render the Caspar Water site locally
+# Render the Caspar Water site locally with live data
 #
-# Uses hostmount: no pond required. The host directory IS the filesystem.
+# Uses hostmount overlay: no pond required. The host directory IS the filesystem.
+# The --hostmount flag mounts a dynamic-dir containing temporal-reduce factories
+# at /reduced, providing computed time-series data for sitegen chart pages.
 #
 # Usage:
 #   ./render.sh              # Build and open in browser
@@ -16,11 +18,15 @@ pond() { cargo run --quiet --manifest-path "${REPO_ROOT}/Cargo.toml" -- "$@"; }
 
 export RUST_LOG=info
 
-# Generate site directly from host filesystem
+# Generate site from host filesystem with temporal-reduce overlay
 echo "=== Generating site ==="
 rm -rf "${OUTDIR}"
 mkdir -p "${OUTDIR}"
-pond run -d "${SCRIPT_DIR}" host+sitegen:///site.yaml build "${OUTDIR}"
+pond run \
+  -d "${SCRIPT_DIR}" \
+  --hostmount "/reduced=host+dyndir:///reduce.yaml" \
+  host+sitegen:///site.yaml \
+  build "${OUTDIR}"
 
 echo ""
 echo "=== Site generated ==="

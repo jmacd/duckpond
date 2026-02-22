@@ -23,6 +23,8 @@ pub struct ShipContext {
     /// When Some, host+ URL paths are resolved relative to this directory.
     /// When None, host+ URLs use absolute paths only.
     pub host_root: Option<PathBuf>,
+    /// Overlay mount specifications for factory nodes on hostmount
+    pub mount_specs: Vec<tinyfs::hostmount::MountSpec>,
     /// Original command line arguments for transaction metadata
     pub original_args: Vec<String>,
 }
@@ -33,11 +35,13 @@ impl ShipContext {
     pub fn new<P: AsRef<Path>, Q: AsRef<Path>>(
         pond_path: Option<P>,
         host_root: Option<Q>,
+        mount_specs: Vec<tinyfs::hostmount::MountSpec>,
         original_args: Vec<String>,
     ) -> Self {
         Self {
             pond_path: pond_path.map(|p| p.as_ref().to_path_buf()),
             host_root: host_root.map(|p| p.as_ref().to_path_buf()),
+            mount_specs,
             original_args,
         }
     }
@@ -50,6 +54,7 @@ impl ShipContext {
         Self {
             pond_path: pond_path.map(|p| p.as_ref().to_path_buf()),
             host_root: None,
+            mount_specs: Vec::new(),
             original_args,
         }
     }
@@ -101,6 +106,8 @@ impl ShipContext {
     ///
     /// This creates a lightweight HostSteward that provides read-only
     /// filesystem access without any Delta Lake or transaction overhead.
+    /// If `--hostmount` specs were provided, they are passed through to
+    /// the steward for overlay processing.
     pub fn open_host(&self) -> Result<steward::Steward> {
         let root_path = if let Some(ref dir) = self.host_root {
             // Convert relative -d paths to absolute
@@ -116,7 +123,7 @@ impl ShipContext {
         };
 
         debug!("Opening host steward at root: {:?}", root_path);
-        Ok(steward::Steward::open_host(root_path))
+        Ok(steward::Steward::open_host(root_path, self.mount_specs.clone()))
     }
 }
 

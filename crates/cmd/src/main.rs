@@ -67,6 +67,12 @@ struct Cli {
     #[arg(short = 'd', long = "directory", global = true)]
     directory: Option<PathBuf>,
 
+    /// Mount factory definitions onto host filesystem paths.
+    /// Format: <mount_path>=host+<factory>:///<config_path>
+    /// Example: --hostmount /reduced=host+dyndir:///reduce.yaml
+    #[arg(long = "hostmount", global = true)]
+    hostmount: Vec<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -238,10 +244,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     log::debug!("CLI parsed successfully");
 
+    // Parse hostmount specs
+    let mount_specs: Vec<tinyfs::hostmount::MountSpec> = cli
+        .hostmount
+        .iter()
+        .map(|s| tinyfs::hostmount::MountSpec::parse(s))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("Invalid --hostmount: {}", e))?;
+
     // Create the ship context
     let ship_context = ShipContext::new(
         cli.pond.as_ref(),
         cli.directory.as_ref(),
+        mount_specs,
         original_args.clone(),
     );
 
