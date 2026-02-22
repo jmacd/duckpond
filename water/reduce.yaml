@@ -8,7 +8,9 @@
 #   - pH (Atlas Scientific pH probe)
 #
 # Each entry reads OtelJSON from /casparwater-sample.json on the host filesystem
-# and produces a three-level tree:
+# and produces a five-level tree:
+#   <name>/data/res=1m.series
+#   <name>/data/res=10m.series
 #   <name>/data/res=1h.series
 #   <name>/data/res=6h.series
 #   <name>/data/res=1d.series
@@ -31,7 +33,7 @@ entries:
       in_pattern: "oteljson:///casparwater-sample.json"
       out_pattern: "data"
       time_column: "timestamp"
-      resolutions: [1h, 6h, 1d]
+      resolutions: [1m, 10m, 1h, 6h, 1d]
       aggregations:
         - type: "avg"
           columns:
@@ -50,7 +52,7 @@ entries:
       in_pattern: "oteljson:///casparwater-sample.json"
       out_pattern: "data"
       time_column: "timestamp"
-      resolutions: [1h, 6h, 1d]
+      resolutions: [1m, 10m, 1h, 6h, 1d]
       aggregations:
         - type: "avg"
           columns:
@@ -69,7 +71,7 @@ entries:
       in_pattern: "oteljson:///casparwater-sample.json"
       out_pattern: "data"
       time_column: "timestamp"
-      resolutions: [1h, 6h, 1d]
+      resolutions: [1m, 10m, 1h, 6h, 1d]
       aggregations:
         - type: "avg"
           columns:
@@ -88,7 +90,7 @@ entries:
       in_pattern: "oteljson:///casparwater-sample.json"
       out_pattern: "data"
       time_column: "timestamp"
-      resolutions: [1h, 6h, 1d]
+      resolutions: [1m, 10m, 1h, 6h, 1d]
       aggregations:
         - type: "avg"
           columns:
@@ -107,7 +109,7 @@ entries:
       in_pattern: "oteljson:///casparwater-sample.json"
       out_pattern: "data"
       time_column: "timestamp"
-      resolutions: [1h, 6h, 1d]
+      resolutions: [1m, 10m, 1h, 6h, 1d]
       aggregations:
         - type: "avg"
           columns:
