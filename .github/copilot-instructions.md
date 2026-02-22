@@ -64,10 +64,10 @@ the entry was created. This type determines how every command behaves.
 
 | Type | Created By | Storage | Description |
 |------|-----------|---------|-------------|
-| `data` | `pond copy` (default) | Raw bytes | Opaque file, any format |
+| `data` | `pond copy host:///path` (default) | Raw bytes | Opaque file, any format |
 | `data:series` | (internal) | Raw bytes, multi-version | Versioned raw byte file |
-| `table` | `pond copy --format=table` | Parquet (single) | Queryable via SQL |
-| `table:series` | `--format=series`, HydroVu | Parquet, multi-version | Time-series, queryable via SQL |
+| `table` | `pond copy host+table:///path` | Parquet (single) | Queryable via SQL |
+| `table:series` | `pond copy host+series:///path`, HydroVu | Parquet, multi-version | Time-series, queryable via SQL |
 | `table:dynamic` | Factory nodes | Parquet, computed on read | Factory-generated series |
 | `directory` | `pond mkdir`, factories | N/A | Physical directory (own partition) |
 | `dynamic-directory` | Factory nodes | N/A | Factory-generated directory |
@@ -78,30 +78,39 @@ the entry was created. This type determines how every command behaves.
 **`pond cat`** — dispatches on entry type, NOT filename:
 - **data types** → streams raw bytes to stdout
 - **table/series types** → routes through DataFusion; default outputs Parquet bytes;
-  use `--sql "SELECT ..."` or `--display=table` for readable output
+  use `--sql "SELECT ..."` or `--format=table` for readable output
+- **host files** -> use `host+` prefix (e.g., `host+csv:///tmp/data.csv`); no POND needed
 
-**`pond copy` INTO pond** — `--format` flag sets the entry type:
-- `--format=data` (default): raw bytes
-- `--format=table`: validates Parquet (PAR1 magic)
-- `--format=series`: validates Parquet + extracts temporal bounds
+**`pond copy` INTO pond** -- entry type is encoded in the source URL:
+- `host:///path` (default): raw bytes
+- `host+table:///path`: validates Parquet (PAR1 magic)
+- `host+series:///path`: validates Parquet + extracts temporal bounds
+
+> **Note**: `--format` on `pond cat` controls output display (raw vs ASCII table).
+> `pond copy` does not have a `--format` flag -- entry type is in the source URL.
 
 **`pond copy` OUT OF pond** (to `host://`) — determined by source entry type:
 - table/series → exported as Parquet (via DataFusion)
 - data → exported as raw bytes (bit-for-bit copy)
-- `--format` flag is **ignored** on export
 
 ### URL Schemes (Provider Layer)
 
-Factory configs and `pond cat` use URL schemes to control how files are interpreted:
+Factory configs and `pond cat` use URL schemes to control how files are interpreted.
+
+General syntax: `[host+]format[+compression][+entrytype]:///path`
 
 | Scheme | Purpose | Used In |
-|--------|---------|---------|
+|--------|---------|--------|
 | `series:///path` | Multi-version Parquet series | Factory configs |
 | `table:///path` | Single Parquet table | Factory configs |
 | `csv:///path` | Parse raw data file as CSV | `pond cat`, factory configs |
 | `csv+gzip:///path` | Gzipped CSV | Factory configs |
 | `excelhtml:///path` | HydroVu Excel HTML exports | Factory configs |
 | `file:///path` | Raw bytes or auto-detect | `pond cat` |
+| `host+file:///path` | Host raw bytes | `pond cat` |
+| `host+csv:///path` | Host CSV as table | `pond cat` |
+| `host+csv+zstd:///path` | Host zstd-compressed CSV | `pond cat` |
+| `host+csv+series:///path` | Host CSV as time-series | `pond cat` |
 | `host:///path` | Host filesystem (not in pond) | `pond copy` |
 
 ### Factories (Physical vs Dynamic)
@@ -170,7 +179,6 @@ Before writing new data-processing code, **check what already exists** in tinyfs
 | `read_file_path_to_vec(path)` | | | Read raw bytes (loads all into memory) |
 | `async_reader_path(path)` | | | Streaming read |
 | `write_file_path_from_slice(path, &[u8])` | ✅ If missing | ✅ If exists | Write raw bytes |
-| `copy_to_parquet(pond_path, host_path, ctx)` | | | Export to host filesystem |
 
 #### WD — Directory Operations
 
@@ -301,11 +309,18 @@ pond list /path/to/check  # ALWAYS verify results
 
 ---
 
-## 🚫 HARD RULES (Violations = Wasted Time)
+## HARD RULES (Violations = Wasted Time)
+
+### Source Code: ASCII Only
+
+**No emoji or non-ASCII characters in `.rs` files.** Use ASCII bracket tags for
+log prefixes (e.g., `[OK]`, `[ERR]`, `[WARN]`, `[SEARCH]`) and ASCII art for
+box drawing (`+`, `-`, `|`, `=`). This rule exists because non-ASCII bytes break
+text-based editing tools and cause silent file corruption.
 
 ### Rust Code Anti-Patterns
 
-| ❌ NEVER | ✅ INSTEAD | WHY |
+| NEVER | INSTEAD | WHY |
 |----------|-----------|-----|
 | `persistence.begin()` twice | Pass `&mut tx` to helpers | Single transaction rule - **PANICS** |
 | `OpLogPersistence::open(path)` in helpers | Use existing `tx.session_context()` | Creates duplicate transaction |
@@ -335,8 +350,9 @@ pond list /path/to/check  # ALWAYS verify results
 | ❌ Wrong assumption | ✅ Reality |
 |---------------------|-----------|
 | Filename `.series` means it's a series | Entry type is metadata, not filename-derived |
-| `pond cat` on a table prints readable text | Default output is Parquet bytes; use `--sql` or `--display=table` |
-| `pond copy --format=table` works on CSV | Only Parquet input; CSV stays as `--format=data` |
+| `pond cat` on a table prints readable text | Default output is Parquet bytes; use `--sql` or `--format=table` |
+| `host+table:///` works on CSV | Only Parquet input; CSV uses `host:///` (raw data) |
+| `pond copy` has a `--format` flag | No -- entry type is in the source URL: `host+table:///`, `host+series:///` |
 | `--format` controls export format | Export format is determined by source entry type |
 | `pond cat` dumps binary "because it's Parquet" | Behavior is driven by entry type, not file contents |
 | Collect batches into `Vec<RecordBatch>` then concat | Stream through `ArrowWriter` one batch at a time |

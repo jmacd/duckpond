@@ -78,19 +78,17 @@ impl UrlPatternMatcher {
     ) -> Result<Vec<MatchedFile>> {
         let url = Url::parse(url_str)?;
 
-        // Determine if this is a builtin type or requires format provider
-        let scheme = url.scheme();
+        // Classify the URL to determine builtin vs format-provider dispatch.
+        // Entry type (from +series/+table suffix) takes priority over scheme,
+        // because `series:///path` now parses as scheme="file" + entry_type="series".
+        let is_builtin = url.entry_type().is_some()
+            || matches!(url.scheme(), "series" | "table" | "data" | "file");
 
-        match scheme {
-            "series" | "table" | "data" | "file" => {
-                // Builtin TinyFS types - use direct TinyFS matching
-                // "file" scheme uses EntryType to determine actual type
-                self.match_builtin_type(&url, context).await
-            }
-            _ => {
-                // Format provider required (csv, excelhtml, etc.)
-                self.match_with_format_provider(&url, context).await
-            }
+        if is_builtin {
+            self.match_builtin_type(&url, context).await
+        } else {
+            // Format provider required (csv, excelhtml, oteljson, etc.)
+            self.match_with_format_provider(&url, context).await
         }
     }
 
@@ -100,8 +98,18 @@ impl UrlPatternMatcher {
         url: &Url,
         context: &ProviderContext,
     ) -> Result<Vec<MatchedFile>> {
-        // Map scheme to EntryType
-        let entry_types = match url.scheme() {
+        // Determine the entry type filter.
+        // Priority: explicit entry_type() suffix > scheme name > wildcard.
+        //
+        // Examples:
+        //   series:///path       -> entry_type()=Some("series"), scheme()="file" -> series filter
+        //   file+series:///path  -> entry_type()=Some("series"), scheme()="file" -> series filter
+        //   csv+table:///path    -> entry_type()=Some("table"),  scheme()="csv"  -> table filter
+        //   file:///path         -> entry_type()=None,          scheme()="file" -> wildcard
+        //   data:///path         -> entry_type()=None,          scheme()="data" -> data filter
+        let type_key = url.entry_type().unwrap_or_else(|| url.scheme());
+
+        let entry_types = match type_key {
             "series" => vec![EntryType::TablePhysicalSeries, EntryType::TableDynamic],
             "table" => vec![EntryType::TablePhysicalVersion],
             "data" => vec![EntryType::FilePhysicalVersion, EntryType::FileDynamic],
@@ -113,10 +121,10 @@ impl UrlPatternMatcher {
                 EntryType::FilePhysicalVersion,
                 EntryType::FileDynamic,
             ],
-            scheme => {
+            other => {
                 return Err(Error::InvalidUrl(format!(
                     "Unknown builtin type: {}",
-                    scheme
+                    other
                 )));
             }
         };

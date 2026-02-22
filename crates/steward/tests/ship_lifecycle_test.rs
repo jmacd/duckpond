@@ -30,16 +30,14 @@ async fn test_ship_drop_and_reopen() -> Result<()> {
     // Try to start a transaction on the reopened pond using scoped transactions
     let meta = PondUserMetadata::new(vec!["test".to_string(), "after-reopen".to_string()]);
     ship2
-        .transact(&meta, |_tx, _fs| {
-            Box::pin(async move {
-                // Transaction automatically commits on Ok
-                Ok(())
-            })
+        .write_transaction(&meta, async |_fs| {
+            // Transaction automatically commits on Ok
+            Ok(())
         })
         .await
         .map_err(|e| anyhow::anyhow!("Failed to execute transaction after reopen: {}", e))?;
 
-    debug!("✅ Ship drop and reopen works correctly");
+    debug!("[OK] Ship drop and reopen works correctly");
     Ok(())
 }
 
@@ -56,26 +54,22 @@ async fn test_ship_multiple_transactions_same_instance() -> Result<()> {
 
     // Do first transaction on same Ship instance using scoped transactions
     let meta = PondUserMetadata::new(vec!["test".to_string(), "first-transaction".to_string()]);
-    ship.transact(&meta, |_tx, _fs| {
-        Box::pin(async move {
-            // Transaction automatically commits on Ok
-            Ok(())
-        })
+    ship.write_transaction(&meta, async |_fs| {
+        // Transaction automatically commits on Ok
+        Ok(())
     })
     .await
     .map_err(|e| anyhow::anyhow!("Failed to execute first transaction: {}", e))?;
 
     // Do second transaction on same Ship instance
     let meta = PondUserMetadata::new(vec!["test".to_string(), "second-transaction".to_string()]);
-    ship.transact(&meta, |_tx, _fs| {
-        Box::pin(async move {
-            // Transaction automatically commits on Ok
-            Ok(())
-        })
+    ship.write_transaction(&meta, async |_fs| {
+        // Transaction automatically commits on Ok
+        Ok(())
     })
     .await
     .map_err(|e| anyhow::anyhow!("Failed to execute second transaction: {}", e))?;
 
-    debug!("✅ Multiple transactions on same Ship instance work correctly");
+    debug!("[OK] Multiple transactions on same Ship instance work correctly");
     Ok(())
 }

@@ -56,55 +56,42 @@ async fn create_command(ship_context: &ShipContext, config_path: &str) -> Result
     let config_for_output = config.clone();
 
     // Create HydroVu directory structure using transaction
-    ship.transact(
-        vec![
+    ship.write_transaction(
+        &steward::PondUserMetadata::new(vec![
             "pond".to_string(),
             "hydrovu".to_string(),
             "create".to_string(),
-        ],
-        move |_tx, fs| {
-            let config = config.clone();
-            Box::pin(async move {
-                // Get filesystem root
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        ]),
+        async move |fs| {
+            // Get filesystem root
+            let root = fs.root().await?;
 
-                // Create base HydroVu directory
-                let hydrovu_path = &config.hydrovu_path;
-                debug!("Creating HydroVu base directory: {hydrovu_path}");
-                root.create_dir_path(&config.hydrovu_path)
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            // Create base HydroVu directory
+            let hydrovu_path = &config.hydrovu_path;
+            debug!("Creating HydroVu base directory: {hydrovu_path}");
+            root.create_dir_path(&config.hydrovu_path).await?;
 
-                // Create devices directory
-                let devices_path = format!("{}/devices", config.hydrovu_path);
-                debug!("Creating devices directory: {devices_path}");
-                root.create_dir_path(&devices_path)
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            // Create devices directory
+            let devices_path = format!("{}/devices", config.hydrovu_path);
+            debug!("Creating devices directory: {devices_path}");
+            root.create_dir_path(&devices_path).await?;
 
-                // Create directory for each configured device
-                for device in &config.devices {
-                    let device_id = device.id;
-                    let device_name = &device.name;
-                    let device_path = format!("{}/{}", devices_path, device_id);
-                    debug!("Creating device directory: {device_path} ({device_name})");
+            // Create directory for each configured device
+            for device in &config.devices {
+                let device_id = device.id;
+                let device_name = &device.name;
+                let device_path = format!("{}/{}", devices_path, device_id);
+                debug!("Creating device directory: {device_path} ({device_name})");
+                root.create_dir_path(&device_path).await?;
+            }
 
-                    root.create_dir_path(&device_path).await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                }
-
-                debug!("HydroVu directory structure created successfully");
-                Ok(())
-            })
+            debug!("HydroVu directory structure created successfully");
+            Ok(())
         },
     )
     .await?;
 
-    println!("✓ Created HydroVu pond directory structure");
+    println!("[OK] Created HydroVu pond directory structure");
     println!("  Base path: {}", config_for_output.hydrovu_path);
     println!("  Devices configured: {}", config_for_output.devices.len());
     for device in &config_for_output.devices {
@@ -255,15 +242,9 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
         .await
         .with_context(|| "Failed to begin transaction")?;
 
-    // Get filesystem from transaction state
-    let state = tx.state()?;
-    let fs = tinyfs::FS::new(state.clone())
-        .await
-        .with_context(|| "Failed to create filesystem")?;
-
-    // Run data collection with State and FS
+    // Run data collection (guard derefs to FS)
     let results = collector
-        .collect_data(&state, &fs)
+        .collect_data(&*tx)
         .await
         .with_context(|| "Failed to collect data from HydroVu")?;
 
@@ -273,7 +254,7 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
         .with_context(|| "Failed to commit transaction")?;
 
     println!(
-        "✓ HydroVu data collection completed successfully {}",
+        "[OK] HydroVu data collection completed successfully {}",
         results.records_collected
     );
     println!("Results:");

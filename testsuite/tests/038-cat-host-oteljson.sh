@@ -6,6 +6,7 @@
 #   queries of OTLP JSON Lines files from the host filesystem.
 #
 set -e
+source check.sh
 
 echo "=== Experiment: Cat Host+OtelJSON Without Pond ==="
 echo ""
@@ -27,7 +28,7 @@ cat > /tmp/oteljson-test/metrics.json << 'OTELJSON'
 {"resourceMetrics":[{"resource":{},"scopeMetrics":[{"scope":{"name":"modbus"},"metrics":[{"name":"pump1_amps","unit":"amps","gauge":{"dataPoints":[{"timeUnixNano":"1700000120000000000","asDouble":0.0}]}},{"name":"pump2_amps","unit":"amps","gauge":{"dataPoints":[{"timeUnixNano":"1700000120000000000","asDouble":6.10}]}},{"name":"tank_level","unit":"inches","gauge":{"dataPoints":[{"timeUnixNano":"1700000120000000000","asDouble":11.8}]}}]}]}]}
 OTELJSON
 
-echo "  ✓ Created 3-line OtelJSON file"
+check '[ -f /tmp/oteljson-test/metrics.json ]' "Created 3-line OtelJSON file"
 
 #############################
 # TEST 1: Basic cat --format=table
@@ -41,27 +42,11 @@ echo "$OUTPUT"
 
 # Verify we got rows
 ROW_COUNT=$(echo "$OUTPUT" | grep -c '|' || true)
-if [ "$ROW_COUNT" -gt 2 ]; then
-    echo "  ✓ Got table output with $ROW_COUNT lines"
-else
-    echo "  ✗ Expected table output, got $ROW_COUNT lines"
-    exit 1
-fi
+check '[ "$ROW_COUNT" -gt 2 ]' "Got table output with $ROW_COUNT lines"
 
 # Verify column names are present (oteljson pivots metrics into columns)
-if echo "$OUTPUT" | grep -q "pump1_amps"; then
-    echo "  ✓ Found pump1_amps column"
-else
-    echo "  ✗ Missing pump1_amps column"
-    exit 1
-fi
-
-if echo "$OUTPUT" | grep -q "timestamp"; then
-    echo "  ✓ Found timestamp column"
-else
-    echo "  ✗ Missing timestamp column"
-    exit 1
-fi
+check 'echo "$OUTPUT" | grep -q "pump1_amps"' "Found pump1_amps column"
+check 'echo "$OUTPUT" | grep -q "timestamp"' "Found timestamp column"
 
 #############################
 # TEST 2: SQL query filtering
@@ -77,12 +62,7 @@ echo "$OUTPUT"
 
 # Should have exactly 3 data rows
 DATA_ROWS=$(echo "$OUTPUT" | grep -cE '^\|.*202[0-9]' || true)
-if [ "$DATA_ROWS" -eq 3 ]; then
-    echo "  ✓ Got 3 data rows"
-else
-    echo "  ✗ Expected 3 data rows, got $DATA_ROWS"
-    exit 1
-fi
+check '[ "$DATA_ROWS" -eq 3 ]' "Got 3 data rows"
 
 #############################
 # TEST 3: Aggregation query
@@ -96,12 +76,7 @@ OUTPUT=$(pond cat "host+oteljson:///tmp/oteljson-test/metrics.json" \
     --format=table 2>&1)
 echo "$OUTPUT"
 
-if echo "$OUTPUT" | grep -q "avg_pump1"; then
-    echo "  ✓ Aggregation includes avg_pump1"
-else
-    echo "  ✗ Missing avg_pump1 in aggregation"
-    exit 1
-fi
+check 'echo "$OUTPUT" | grep -q "avg_pump1"' "Aggregation includes avg_pump1"
 
 #############################
 # TEST 4: No POND env needed
@@ -110,12 +85,7 @@ fi
 echo ""
 echo "=== Test 4: Verify no POND env is set ==="
 
-if [ -z "${POND}" ]; then
-    echo "  ✓ POND env is unset (no pond needed)"
-else
-    echo "  ✗ POND env is unexpectedly set: ${POND}"
-    exit 1
-fi
+check '[ -z "${POND}" ]' "POND env is unset (no pond needed)"
 
-echo ""
+check_finish
 echo "=== Results: All host+oteljson tests passed ==="

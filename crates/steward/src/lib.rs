@@ -13,11 +13,15 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 mod control_table;
+mod dispatch;
 mod guard;
+mod host;
 mod ship;
 
 pub use control_table::ControlTable;
+pub use dispatch::{Steward, Transaction};
 pub use guard::StewardTransactionGuard;
+pub use host::{HostSteward, HostTransaction};
 pub use ship::Ship;
 pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
 
@@ -69,6 +73,14 @@ pub enum StewardError {
 
     #[error("Dynamic error: {0}")]
     Dyn(Box<dyn std::error::Error + Send + Sync>),
+}
+
+// Bridge the two-hop conversion tinyfs::Error -> TLogFSError -> StewardError
+// so `?` works directly on tinyfs operations.
+impl From<tinyfs::Error> for StewardError {
+    fn from(e: tinyfs::Error) -> Self {
+        StewardError::DataInit(tlogfs::TLogFSError::from(e))
+    }
 }
 
 /// Get the data filesystem path under the pond

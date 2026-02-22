@@ -1,0 +1,5 @@
+dist/
+.pond-data/
+systemlogs*
+casparwater*
+data/

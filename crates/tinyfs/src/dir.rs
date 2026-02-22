@@ -127,6 +127,12 @@ impl Handle {
         let dir = self.0.lock().await;
         dir.metadata().await
     }
+
+    /// Access the underlying directory for mutation (clones the Arc)
+    #[must_use]
+    pub fn get_inner(&self) -> Arc<tokio::sync::Mutex<Box<dyn Directory>>> {
+        self.0.clone()
+    }
 }
 
 impl<T> Pathed<T> {

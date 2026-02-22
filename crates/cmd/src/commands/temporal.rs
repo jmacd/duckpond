@@ -41,15 +41,8 @@ pub async fn detect_overlaps_command(
 
     // SIMPLIFIED APPROACH: Use TLogFS factory directly to get time series data
 
-    // Get TinyFS root for file access
-    let fs = tinyfs::FS::new(tx.state()?)
-        .await
-        .map_err(|e| anyhow!("Failed to get TinyFS: {}", e))?;
-    let tinyfs_root = Arc::new(
-        fs.root()
-            .await
-            .map_err(|e| anyhow!("Failed to get TinyFS root: {}", e))?,
-    );
+    // Get TinyFS root for file access (guard derefs to FS)
+    let tinyfs_root = Arc::new(tx.root().await?);
 
     // NodeTable no longer needed - TemporalFilteredListingTable handles metadata internally
 
@@ -114,8 +107,10 @@ pub async fn detect_overlaps_command(
 
     for (origin_id, (path_str, node_id, _part_id)) in file_info.iter().enumerate() {
         // Get all versions of this file from OpLog records
-        let state = tx.state()?;
-        let records = state
+        let pond = tx
+            .as_pond()
+            .expect("temporal command requires a pond transaction");
+        let records = pond
             .query_records(*node_id)
             .await
             .map_err(|e| anyhow!("Failed to get records for {}: {}", path_str, e))?;
@@ -132,9 +127,6 @@ pub async fn detect_overlaps_command(
         let version_count = versions.len();
         debug!("Found file: {path_str} (node: {node_id}) with {version_count} non-empty versions");
 
-        // File versions will be discovered dynamically by ObjectStore when accessed
-        let _object_store = tx.object_store().await?; // Keep for future use if needed
-
         // Create a TemporalFilteredListingTable for each version using the new approach
         debug!("Creating table providers for {path_str} with {version_count} versions");
 
@@ -145,8 +137,7 @@ pub async fn detect_overlaps_command(
             let size = record.size.unwrap_or(0);
             debug!("Creating table provider for {path_str} version {version} (size: {size})");
 
-            let state = tx.state()?;
-            let context = state.as_provider_context();
+            let context = tx.provider_context()?;
             let table_provider = provider::create_table_provider(
                 *node_id,
                 &context,

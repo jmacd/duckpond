@@ -208,6 +208,73 @@ pub struct DynamicFactory {
 #[distributed_slice]
 pub static DYNAMIC_FACTORIES: [DynamicFactory];
 
+// ---------------------------------------------------------------------------
+// Unified scheme classification
+// ---------------------------------------------------------------------------
+
+/// Builtin scheme names reserved by the core URL system.
+/// These are neither format providers nor factories -- they map directly
+/// to TinyFS entry types or raw file access.
+const BUILTIN_SCHEMES: &[&str] = &["file", "series", "table", "data"];
+
+/// Classification of a URL scheme name across all registries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemeKind {
+    /// A builtin scheme handled directly by the provider layer
+    /// (`file`, `series`, `table`, `data`).
+    Builtin,
+    /// A registered format provider (CSV, OtelJSON, ExcelHTML, etc.).
+    Format,
+    /// A registered factory (sitegen, hydrovu, remote, etc.).
+    Factory,
+}
+
+/// Unified scheme registry that queries both format providers and factories.
+pub struct SchemeRegistry;
+
+impl SchemeRegistry {
+    /// Classify a scheme name by searching builtins, format providers, and factories.
+    ///
+    /// Returns `None` if the scheme is not recognized by any registry.
+    #[must_use]
+    pub fn classify(scheme: &str) -> Option<SchemeKind> {
+        if BUILTIN_SCHEMES.contains(&scheme) {
+            return Some(SchemeKind::Builtin);
+        }
+        if crate::FormatRegistry::get_provider(scheme).is_some() {
+            return Some(SchemeKind::Format);
+        }
+        if FactoryRegistry::get_factory(scheme).is_some() {
+            return Some(SchemeKind::Factory);
+        }
+        None
+    }
+
+    /// Validate that no factory name collides with a format provider name or
+    /// a builtin scheme.
+    ///
+    /// Returns a list of conflicting names (empty means no conflicts).
+    /// Call this from tests or at startup to catch registration errors.
+    #[must_use]
+    pub fn find_conflicts() -> Vec<String> {
+        let mut conflicts = Vec::new();
+
+        for factory in DYNAMIC_FACTORIES.iter() {
+            let name = factory.name;
+
+            if BUILTIN_SCHEMES.contains(&name) {
+                conflicts.push(format!("factory '{}' conflicts with builtin scheme", name));
+            }
+
+            if crate::FormatRegistry::get_provider(name).is_some() {
+                conflicts.push(format!("factory '{}' conflicts with format provider", name));
+            }
+        }
+
+        conflicts
+    }
+}
+
 /// Factory registry for looking up and creating dynamic nodes
 pub struct FactoryRegistry;
 

@@ -28,7 +28,7 @@ Maudit has built-in integration with Maud as one of its templating options, but 
 │                                                                          │
 │  ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────────┐ │
 │  │ Data Files       │   │ Templates        │   │ Config               │ │
-│  │ /reduced/**      │   │ /etc/templates/  │   │ /etc/site.yaml       │ │
+│  │ /reduced/**      │   │ /site/  │   │ /site.yaml       │ │
 │  │ *.series         │   │ *.md             │   │                      │ │
 │  └────────┬─────────┘   └────────┬─────────┘   └───────────┬──────────┘ │
 │           │                      │                         │            │
@@ -60,7 +60,7 @@ Maudit has built-in integration with Maud as one of its templating options, but 
 ## Configuration Schema
 
 ```yaml
-# /etc/site.yaml
+# /site.yaml
 
 site:
   title: "Noyo Harbor Blue Economy"
@@ -83,33 +83,33 @@ routes:
   - name: "home"
     type: static
     slug: ""                                    # Root: /index.html
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
     routes:
       - name: "params"
         type: static
         slug: "params"                          # /params/index.html
-        page: "/etc/site/params.md"
+        page: "/site/params.md"
         routes:
           - name: "param"
             type: template
             slug: "$0"                          # /params/Temperature.html
             export: "params"                    # Links to export stage
-            page: "/etc/site/param.md"
+            page: "/site/param.md"
             
       - name: "sites"
         type: static
         slug: "sites"                           # /sites/index.html
-        page: "/etc/site/sites.md"
+        page: "/site/sites.md"
         routes:
           - name: "site"
             type: template
             slug: "$0"                          # /sites/BDock.html
             export: "sites"                     # Links to export stage
-            page: "/etc/site/site.md"
+            page: "/site/site.md"
 
 # Partials included by pages (not routes)
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 # Static assets to copy
 static:
@@ -119,7 +119,7 @@ static:
 ### Build Command
 
 ```bash
-pond run /etc/site.yaml build ./dist
+pond run /site.yaml build ./dist
 ```
 
 This single command:
@@ -149,13 +149,13 @@ routes:
   - name: "params"
     type: static
     slug: "params"
-    page: "/etc/site/params.md"
+    page: "/site/params.md"
     routes:
       - name: "param"
         type: template
         slug: "$0"
         export: "params"                    # Links to export stage
-        page: "/etc/site/param.md"
+        page: "/site/param.md"
 ```
 
 The export stage matches:
@@ -192,7 +192,7 @@ Each template page's shortcode context receives its `&[ExportedFile]` directly �
 
 ## Template Format
 
-### Example: `/etc/site/param.md`
+### Example: `/site/param.md`
 
 Template for individual parameter pages (e.g., `/params/Temperature.html`).
 
@@ -211,7 +211,7 @@ layout: data
 {{ chart }}
 ```
 
-### Example: `/etc/site/site.md`
+### Example: `/site/site.md`
 
 Template for individual site pages (e.g., `/sites/BDock.html`).
 
@@ -230,7 +230,7 @@ layout: data
 {{ chart }}
 ```
 
-### Example: `/etc/site/sidebar.md`
+### Example: `/site/sidebar.md`
 
 The sidebar is a **partial** included by layouts. It receives the full navigation context.
 
@@ -247,7 +247,7 @@ The sidebar is a **partial** included by layouts. It receives the full navigatio
 {{ nav-list collection="sites" path="/sites" }}
 ```
 
-### Example: `/etc/site/index.md`
+### Example: `/site/index.md`
 
 Static home page at root.
 
@@ -455,13 +455,13 @@ layout: data
 Use DuckPond's factory command entry point:
 
 ```bash
-pond run /etc/site.yaml build ./dist
+pond run /site.yaml build ./dist
 ```
 
 The site definition includes **export stages** that specify what data to export and how. This replaces the manual `export.sh` script:
 
 ```yaml
-# /etc/site.yaml
+# /site.yaml
 
 site:
   title: "Noyo Harbor Blue Economy"
@@ -482,19 +482,19 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
     routes:
       - name: "param"
         type: template
         slug: "$0"
         export: "params"                        # Links to export stage above
-        page: "/etc/site/param.md"
+        page: "/site/param.md"
         
       - name: "site"
         type: template
         slug: "$0"
         export: "sites"
-        page: "/etc/site/site.md"
+        page: "/site/site.md"
 
 static:
   - pattern: "/etc/static/*"
@@ -639,7 +639,7 @@ Two-step workflow: DuckPond builds the site, Vite serves it for dev iteration.
 
 ```bash
 # 1. Build the site
-pond run /etc/site.yaml build ./dist
+pond run /site.yaml build ./dist
 
 # 2. Serve locally with hot reload on file changes
 npx vite dist
@@ -660,10 +660,10 @@ Vite adds zero config file serving with live reload — when you re-run the buil
 Template errors are build errors. The build stops and reports the file, line, and what went wrong.
 
 ```
-Error in /etc/site/param.md:12
+Error in /site/param.md:12
   Unknown shortcode: $site (did you mean $0?)
 
-Error in /etc/site/index.md:8
+Error in /site/index.md:8
   Shortcode "map" failed: no map data configured
 ```
 

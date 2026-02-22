@@ -151,7 +151,7 @@ pub async fn archive_devices(
         let new_path = format!("{}/{}", device_dir_path, new_name);
 
         log::info!(
-            "Compacting device {} ({}): {} → {}",
+            "Compacting device {} ({}): {} -> {}",
             device.name,
             device.id,
             old_name,
@@ -265,7 +265,7 @@ async fn run_compaction_query(
         .await
         .map_err(|e| anyhow!("Stream error: {}", e))?;
 
-    // Peek first batch — return None for empty series
+    // Peek first batch -- return None for empty series
     let first_batch = match stream.next().await {
         Some(Ok(batch)) if batch.num_rows() > 0 => batch,
         Some(Err(e)) => return Err(anyhow!("Read error: {}", e)),
@@ -317,11 +317,7 @@ impl HydroVuCollector {
 
     /// Core data collection function
     /// Works within a single transaction - caller manages transaction lifecycle
-    pub async fn collect_data(
-        &mut self,
-        state: &tlogfs::persistence::State,
-        fs: &FS,
-    ) -> Result<CollectionResult> {
+    pub async fn collect_data(&mut self, fs: &FS) -> Result<CollectionResult> {
         let device_count = self.config.devices.len();
         debug!("Starting HydroVu data collection for {device_count} devices");
 
@@ -341,7 +337,7 @@ impl HydroVuCollector {
                 );
                 continue;
             }
-            let result = self.collect_device(&device, state, fs).await?;
+            let result = self.collect_device(&device, fs).await?;
             total_records += result.records_collected;
 
             if let Some(final_ts) = result.final_timestamp
@@ -373,7 +369,6 @@ impl HydroVuCollector {
     async fn collect_device(
         &mut self,
         device: &HydroVuDevice,
-        _state: &tlogfs::persistence::State,
         fs: &FS,
     ) -> Result<DeviceCollectionResult> {
         let device_id = device.id;
@@ -593,7 +588,7 @@ impl HydroVuCollector {
         let count = wide_records.len();
         debug!("Fetched {count} new records from API (client handled row limiting)");
 
-        // Track final timestamp if needed (in microseconds — DuckPond canonical unit)
+        // Track final timestamp if needed (in microseconds -- DuckPond canonical unit)
         let mut final_timestamp = youngest_timestamp;
         if !wide_records.is_empty() {
             let oldest_timestamp = wide_records
@@ -912,7 +907,7 @@ mod tests {
         for version_info in &versions {
             if !seen_versions.insert(version_info.version) {
                 log::error!(
-                    "❌ DUPLICATE VERSION FOUND: version {} appears multiple times",
+                    "[ERR] DUPLICATE VERSION FOUND: version {} appears multiple times",
                     version_info.version
                 );
                 duplicate_found = true;

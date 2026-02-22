@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::common::{FileInfoVisitor, ShipContext};
+use crate::common::{FileInfoVisitor, ShipContext, TargetContext, classify_target};
 use anyhow::Result;
 
 /// Normalize a pattern for the list command.
@@ -36,8 +36,21 @@ pub async fn list_command<F>(
 where
     F: FnMut(&str),
 {
-    let normalized_pattern = normalize_pattern(pattern);
-    let mut ship = ship_context.open_pond().await?;
+    // Classify the pattern to determine pond vs host context
+    let target = classify_target(pattern);
+
+    let (normalized_pattern, mut ship) = match target {
+        TargetContext::Host(ref host_path) => {
+            let np = normalize_pattern(host_path);
+            let s = ship_context.open_host()?;
+            (np, s)
+        }
+        TargetContext::Pond(_) => {
+            let np = normalize_pattern(pattern);
+            let s = ship_context.open_pond().await?;
+            (np, s)
+        }
+    };
 
     // Use transaction for consistent filesystem access
     let tx = ship
@@ -49,7 +62,7 @@ where
         .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
 
     let result = {
-        let fs = &*tx; // StewardTransactionGuard derefs to FS
+        let fs = &*tx; // Transaction derefs to FS
         let root = fs.root().await?;
 
         // Use FileInfoVisitor to collect file information - always allow all files at visitor level
@@ -113,7 +126,7 @@ mod tests {
 
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
-            let ship_context = ShipContext::new(Some(&pond_path), init_args.clone());
+            let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize the pond
             init_command(&ship_context, None, None).await?;
@@ -208,7 +221,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("test.txt"));
-        assert!(results[0].contains("📄")); // FileData emoji
+        assert!(results[0].contains("[FILE]")); // FileData emoji
     }
 
     #[tokio::test]
@@ -295,7 +308,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("testdir"));
-        assert!(results[0].contains("📁")); // Directory emoji
+        assert!(results[0].contains("[DIR]")); // Directory emoji
     }
 
     #[tokio::test]

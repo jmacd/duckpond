@@ -9,7 +9,7 @@
 //! is a sum of configurable waveform components (sine, triangle, square, line).
 //!
 //! The factory streams Arrow RecordBatches on demand via a DataFusion
-//! StreamingTable — no Parquet serialization or bulk in-memory materialization
+//! StreamingTable -- no Parquet serialization or bulk in-memory materialization
 //! involved.  Batches are generated lazily in chunks of 8192 rows, keeping
 //! memory usage O(batch_size) regardless of the total time range.
 //!
@@ -68,7 +68,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WaveformComponent {
-    /// Sine wave: offset + amplitude * sin(2π * t / period + phase)
+    /// Sine wave: offset + amplitude * sin(2pi * t / period + phase)
     Sine {
         #[serde(default)]
         amplitude: f64,
@@ -90,7 +90,7 @@ pub enum WaveformComponent {
         #[serde(default)]
         phase: f64,
     },
-    /// Square wave: offset + amplitude * sign(sin(2π * t / period + phase))
+    /// Square wave: offset + amplitude * sign(sin(2pi * t / period + phase))
     Square {
         #[serde(default)]
         amplitude: f64,
@@ -156,7 +156,7 @@ impl WaveformComponent {
     }
 }
 
-/// A named timeseries point — its value at each timestamp is the sum of its components
+/// A named timeseries point -- its value at each timestamp is the sum of its components
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PointConfig {
@@ -222,7 +222,7 @@ fn build_schema(config: &SyntheticTimeseriesConfig) -> SchemaRef {
     Arc::new(Schema::new(fields))
 }
 
-/// Batch size for streaming generation — each poll yields at most this many rows.
+/// Batch size for streaming generation -- each poll yields at most this many rows.
 const STREAMING_BATCH_SIZE: usize = 8192;
 
 /// A synchronous, chunk-at-a-time Stream of RecordBatches.
@@ -321,7 +321,7 @@ impl PartitionStream for SyntheticPartitionStream {
 
 /// Generate Arrow RecordBatches from the synthetic config.
 ///
-/// Returns `(schema, batches)` — used only in unit tests.
+/// Returns `(schema, batches)` -- used only in unit tests.
 /// Production code uses `SyntheticPartitionStream` for streaming.
 #[cfg(test)]
 fn generate_batches(
@@ -362,7 +362,7 @@ fn generate_batches(
     let num_rows = timestamps.len();
     if num_rows == 0 {
         return Err(
-            "interval is larger than the time range — no data points generated".to_string(),
+            "interval is larger than the time range -- no data points generated".to_string(),
         );
     }
 
@@ -637,7 +637,7 @@ mod tests {
         };
         // At t=0, sin(0) = 0
         assert!((comp.evaluate(0.0) - 20.0).abs() < 0.001);
-        // At t=quarter-period, sin(π/2) = 1
+        // At t=quarter-period, sin(pi/2) = 1
         let quarter = 6.0 * 3600.0; // 6 hours
         assert!((comp.evaluate(quarter) - 30.0).abs() < 0.001);
     }
@@ -650,12 +650,12 @@ mod tests {
             offset: 0.0,
             phase: 0.0,
         };
-        // At t=0 → -1 * 10 = -10
+        // At t=0 -> -1 * 10 = -10
         assert!((comp.evaluate(0.0) - (-10.0)).abs() < 0.001);
-        // At t=quarter-period → 0 * 10 = 0
+        // At t=quarter-period -> 0 * 10 = 0
         let quarter = 3600.0; // 1 hour
         assert!((comp.evaluate(quarter) - 0.0).abs() < 0.001);
-        // At t=half-period → 1 * 10 = 10
+        // At t=half-period -> 1 * 10 = 10
         let half = 2.0 * 3600.0; // 2 hours
         assert!((comp.evaluate(half) - 10.0).abs() < 0.001);
     }
@@ -668,9 +668,9 @@ mod tests {
             offset: 0.0,
             phase: 0.0,
         };
-        // Just after t=0, sin is positive → +5
+        // Just after t=0, sin is positive -> +5
         assert!((comp.evaluate(1.0) - 5.0).abs() < 0.001);
-        // At t=half-period + epsilon, sin is negative → -5
+        // At t=half-period + epsilon, sin is negative -> -5
         assert!((comp.evaluate(3601.0) - (-5.0)).abs() < 0.001);
     }
 

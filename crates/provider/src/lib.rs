@@ -29,7 +29,7 @@ pub use format_registry::{FORMAT_PROVIDERS, FormatProviderEntry, FormatRegistry}
 pub use provider_api::Provider;
 pub use registry::{
     ConfigFile, DYNAMIC_FACTORIES, DynamicFactory, ExecutionContext, ExecutionMode, FactoryCommand,
-    FactoryRegistry, QueryableFile,
+    FactoryRegistry, QueryableFile, SchemeKind, SchemeRegistry,
 };
 pub use sql_transform::transform_sql;
 pub use table_creation::{
@@ -61,17 +61,25 @@ use tokio::io::AsyncRead;
 /// The URL host component (authority) must be empty.
 ///
 /// Examples:
-/// - `csv:///data/file.csv?delimiter=;`           — pond CSV file
-/// - `host+oteljson:///tmp/metrics.json`           — host OtelJSON file
-/// - `host+csv+gzip:///tmp/data.csv.gz`            — host gzipped CSV file
-/// - `oteljson+zstd:///logs/**/*.json.zstd`        — pond compressed OtelJSON
+/// - `csv:///data/file.csv?delimiter=;`           -- pond CSV file
+/// - `host+oteljson:///tmp/metrics.json`           -- host OtelJSON file
+/// - `host+csv+gzip:///tmp/data.csv.gz`            -- host gzipped CSV file
+/// - `host+csv+gzip+series:///tmp/data.csv.gz`     -- host gzipped CSV as time-series
+/// - `oteljson+zstd:///logs/**/*.json.zstd`        -- pond compressed OtelJSON
+/// - `host+table:///tmp/snapshot.parquet`           -- host file as table entry type
+/// - `host+series:///tmp/readings.parquet`          -- host file as series entry type
 #[derive(Debug, Clone)]
 pub struct Url {
     inner: url::Url,
-    /// The base format scheme (e.g., "csv", "oteljson"), without host prefix or compression suffix
+    /// The base format scheme (e.g., "csv", "oteljson"), without host prefix, compression, or entry type
     format_scheme: String,
+    /// The full scheme including compression and entry type suffixes (e.g., "csv+gzip+series")
+    /// Precomputed from the decomposed fields for efficient &str access.
+    full_scheme_str: String,
     /// Optional compression extracted from scheme suffix (e.g., "gzip", "zstd")
     compression: Option<String>,
+    /// Optional entry type extracted from scheme suffix (e.g., "table", "series")
+    entry_type: Option<String>,
     /// Whether the URL targets the host filesystem (leading `host+` prefix)
     is_host: bool,
 }
@@ -80,6 +88,7 @@ impl PartialEq for Url {
     fn eq(&self, other: &Self) -> bool {
         self.format_scheme == other.format_scheme
             && self.compression == other.compression
+            && self.entry_type == other.entry_type
             && self.is_host == other.is_host
             && self.inner.path() == other.inner.path()
             && self.inner.query() == other.inner.query()
@@ -109,11 +118,18 @@ impl<'de> serde::Deserialize<'de> for Url {
 
 impl std::fmt::Display for Url {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Reconstruct canonical form: [host+]scheme[+compression]:///path[?query]
+        // Reconstruct canonical form: [host+]scheme[+compression][+entrytype]:///path[?query]
         if self.is_host {
             write!(f, "host+")?;
         }
-        write!(f, "{}://", self.full_scheme())?;
+        write!(f, "{}", self.format_scheme)?;
+        if let Some(ref c) = self.compression {
+            write!(f, "+{}", c)?;
+        }
+        if let Some(ref et) = self.entry_type {
+            write!(f, "+{}", et)?;
+        }
+        write!(f, "://")?;
         write!(f, "{}", self.inner.path())?;
         if let Some(query) = self.inner.query() {
             write!(f, "?{}", query)?;
@@ -126,14 +142,18 @@ impl Url {
     /// Known compression suffixes that can appear after `+` in the scheme
     const KNOWN_COMPRESSIONS: &[&str] = &["zstd", "gzip", "bzip2"];
 
+    /// Known entry type suffixes that can appear after `+` in the scheme
+    const KNOWN_ENTRY_TYPES: &[&str] = &["table", "series"];
+
     /// Parse URL from string using standard url crate
     ///
     /// Scheme segments are parsed left-to-right:
-    ///   `host+oteljson+gzip:///path`
-    ///    │     │         │
-    ///    │     │         └── compression (known: zstd, gzip, bzip2)
-    ///    │     └──────────── format provider (csv, oteljson, etc.)
-    ///    └────────────────── source: host filesystem
+    ///   `host+oteljson+gzip+series:///path`
+    ///    |     |         |     |
+    ///    |     |         |     +-- entry type (known: table, series)
+    ///    |     |         +------- compression (known: zstd, gzip, bzip2)
+    ///    |     +----------------- format provider (csv, oteljson, etc.)
+    ///    +----------------------- source: host filesystem
     ///
     /// Returns error if fragment, port, username, password, or non-empty host are present.
     ///
@@ -171,33 +191,89 @@ impl Url {
             return Err(Error::InvalidUrl("password not allowed".into()));
         }
 
-        // Reject non-empty host — the host position is reserved
+        // Reject non-empty host -- the host position is reserved
         if let Some(host) = inner.host_str().filter(|h| !h.is_empty()) {
             return Err(Error::InvalidUrl(format!(
                 "non-empty host '{}' is not allowed in provider URLs; \
-                 use scheme+compression syntax instead (e.g., csv+gzip:///path)",
+                 use host+ prefix instead (e.g., host+csv:///path)",
                 host
             )));
         }
 
-        // Extract compression from scheme suffix (e.g., "csv+gzip" → ("csv", Some("gzip")))
+        // Classify scheme segments: split on '+' and assign each to its category.
+        // The first segment is the format scheme UNLESS it is itself a known entry
+        // type (e.g., `table:///path` or `series:///path`), in which case format
+        // defaults to "file" and the segment is treated as the entry type.
         let raw_scheme = inner.scheme().to_string();
-        let (format_scheme, compression) = if let Some(pos) = raw_scheme.rfind('+') {
-            let suffix = &raw_scheme[pos + 1..];
-            if Self::KNOWN_COMPRESSIONS.contains(&suffix) {
-                (raw_scheme[..pos].to_string(), Some(suffix.to_string()))
-            } else {
-                // Unknown suffix — treat the whole thing as the scheme
-                (raw_scheme, None)
-            }
+        let segments: Vec<&str> = raw_scheme.split('+').collect();
+
+        let format_scheme;
+        let mut compression = None;
+        let mut entry_type = None;
+        let suffix_start;
+
+        if Self::KNOWN_ENTRY_TYPES.contains(&segments[0]) {
+            // Bare entry type as scheme: `table:///path` -> format="file", entry_type="table"
+            format_scheme = "file".to_string();
+            entry_type = Some(segments[0].to_string());
+            suffix_start = 1;
+        } else if Self::KNOWN_COMPRESSIONS.contains(&segments[0]) {
+            // Bare compression as scheme doesn't make sense
+            return Err(Error::InvalidUrl(format!(
+                "compression '{}' cannot be the primary scheme; use format+compression syntax (e.g., csv+gzip:///path)",
+                segments[0]
+            )));
         } else {
-            (raw_scheme, None)
-        };
+            format_scheme = segments[0].to_string();
+            suffix_start = 1;
+        }
+
+        for &segment in &segments[suffix_start..] {
+            if Self::KNOWN_COMPRESSIONS.contains(&segment) {
+                if compression.is_some() {
+                    return Err(Error::InvalidUrl(format!(
+                        "duplicate compression in scheme '{}': '{}' conflicts with earlier compression",
+                        raw_scheme, segment
+                    )));
+                }
+                compression = Some(segment.to_string());
+            } else if Self::KNOWN_ENTRY_TYPES.contains(&segment) {
+                if entry_type.is_some() {
+                    return Err(Error::InvalidUrl(format!(
+                        "duplicate entry type in scheme '{}': '{}' conflicts with earlier entry type",
+                        raw_scheme, segment
+                    )));
+                }
+                entry_type = Some(segment.to_string());
+            } else {
+                return Err(Error::InvalidUrl(format!(
+                    "unknown scheme suffix '+{}' in '{}'; expected compression ({}) or entry type ({})",
+                    segment,
+                    raw_scheme,
+                    Self::KNOWN_COMPRESSIONS.join(", "),
+                    Self::KNOWN_ENTRY_TYPES.join(", ")
+                )));
+            }
+        }
+
+        // Precompute the full scheme string from decomposed fields.
+        // This is the canonical form: format[+compression][+entrytype]
+        let mut full_scheme_str = format_scheme.clone();
+        if let Some(ref c) = compression {
+            full_scheme_str.push('+');
+            full_scheme_str.push_str(c);
+        }
+        if let Some(ref et) = entry_type {
+            full_scheme_str.push('+');
+            full_scheme_str.push_str(et);
+        }
 
         Ok(Self {
             inner,
             format_scheme,
+            full_scheme_str,
             compression,
+            entry_type,
             is_host,
         })
     }
@@ -211,22 +287,35 @@ impl Url {
         &self.format_scheme
     }
 
-    /// Get the full scheme including compression suffix (e.g., "csv+gzip")
+    /// Get the full scheme including compression and entry type suffixes (e.g., "csv+gzip+series")
     ///
-    /// This is the raw scheme as it appears in the URL.
+    /// This is reconstructed from the decomposed segments, ensuring consistency
+    /// even when the input used shorthand forms (e.g., `series:///` -> `file+series`).
+    /// Excludes the `host+` prefix.
     #[must_use]
     pub fn full_scheme(&self) -> &str {
-        self.inner.scheme()
+        &self.full_scheme_str
     }
 
     /// Get optional compression from scheme suffix (e.g., "gzip", "zstd")
     ///
     /// Compression is encoded as `+suffix` on the scheme:
-    /// - `csv+gzip:///path` → `Some("gzip")`
-    /// - `csv:///path` → `None`
+    /// - `csv+gzip:///path` -> `Some("gzip")`
+    /// - `csv:///path` -> `None`
     #[must_use]
     pub fn compression(&self) -> Option<&str> {
         self.compression.as_deref()
+    }
+
+    /// Get optional entry type from scheme suffix (e.g., "table", "series")
+    ///
+    /// Entry type is encoded as `+suffix` on the scheme:
+    /// - `host+table:///path` -> `Some("table")`
+    /// - `host+csv+series:///path` -> `Some("series")`
+    /// - `csv:///path` -> `None`
+    #[must_use]
+    pub fn entry_type(&self) -> Option<&str> {
+        self.entry_type.as_deref()
     }
 
     /// Whether this URL targets the host filesystem (has `host+` prefix)
@@ -288,7 +377,7 @@ impl FileProvider for tinyfs::FS {
 
 /// Open a host filesystem file as an AsyncRead with optional decompression.
 ///
-/// This does NOT require a pond — it reads directly from the local filesystem.
+/// This does NOT require a pond -- it reads directly from the local filesystem.
 /// Used by `pond cat host+format:///path` to process local files through
 /// format providers (e.g., oteljson, csv).
 pub async fn open_host_url(url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>> {
@@ -312,7 +401,7 @@ pub async fn open_host_url(url: &Url) -> Result<Pin<Box<dyn AsyncRead + Send>>> 
 /// Create a DataFusion MemTable from a host filesystem URL.
 ///
 /// This is the standalone pipeline for `pond cat host+format:///path`:
-///   host file → decompress → format_provider → MemTable
+///   host file -> decompress -> format_provider -> MemTable
 ///
 /// No pond or TinyFS required.
 pub async fn create_memtable_from_host_url(
@@ -405,5 +494,148 @@ mod tests {
         assert!(url.is_host());
         assert_eq!(url.scheme(), "csv");
         assert_eq!(url.path(), "/tmp/data.csv");
+    }
+
+    // --- Entry type tests ---
+
+    #[test]
+    fn test_host_table_entry_type() {
+        let url = Url::parse("host+table:///tmp/snapshot.parquet").unwrap();
+        assert!(url.is_host());
+        assert_eq!(url.scheme(), "file");
+        assert_eq!(url.entry_type(), Some("table"));
+        assert_eq!(url.compression(), None);
+        assert_eq!(url.path(), "/tmp/snapshot.parquet");
+        assert_eq!(url.to_string(), "host+file+table:///tmp/snapshot.parquet");
+    }
+
+    #[test]
+    fn test_host_series_entry_type() {
+        let url = Url::parse("host+series:///tmp/readings.parquet").unwrap();
+        assert!(url.is_host());
+        assert_eq!(url.scheme(), "file");
+        assert_eq!(url.entry_type(), Some("series"));
+        assert_eq!(url.path(), "/tmp/readings.parquet");
+    }
+
+    #[test]
+    fn test_csv_series_entry_type() {
+        let url = Url::parse("csv+series:///data/timeseries.csv").unwrap();
+        assert!(!url.is_host());
+        assert_eq!(url.scheme(), "csv");
+        assert_eq!(url.entry_type(), Some("series"));
+        assert_eq!(url.compression(), None);
+        assert_eq!(url.to_string(), "csv+series:///data/timeseries.csv");
+    }
+
+    #[test]
+    fn test_host_csv_gzip_series() {
+        let url = Url::parse("host+csv+gzip+series:///tmp/data.csv.gz").unwrap();
+        assert!(url.is_host());
+        assert_eq!(url.scheme(), "csv");
+        assert_eq!(url.compression(), Some("gzip"));
+        assert_eq!(url.entry_type(), Some("series"));
+        assert_eq!(url.to_string(), "host+csv+gzip+series:///tmp/data.csv.gz");
+    }
+
+    #[test]
+    fn test_entry_type_display_roundtrip() {
+        let original = "host+csv+gzip+series:///tmp/data.csv.gz";
+        let url = Url::parse(original).unwrap();
+        assert_eq!(url.to_string(), original);
+    }
+
+    #[test]
+    fn test_no_entry_type_when_absent() {
+        let url = Url::parse("csv+gzip:///data/file.csv.gz").unwrap();
+        assert_eq!(url.entry_type(), None);
+        assert_eq!(url.compression(), Some("gzip"));
+    }
+
+    #[test]
+    fn test_duplicate_compression_rejected() {
+        let result = Url::parse("csv+gzip+zstd:///path");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_duplicate_entry_type_rejected() {
+        let result = Url::parse("csv+table+series:///path");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unknown_suffix_rejected() {
+        let result = Url::parse("csv+banana:///path");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_entry_type_equality() {
+        let a = Url::parse("host+csv+series:///tmp/a.csv").unwrap();
+        let b = Url::parse("host+csv+series:///tmp/a.csv").unwrap();
+        let c = Url::parse("host+csv+table:///tmp/a.csv").unwrap();
+        let d = Url::parse("host+csv:///tmp/a.csv").unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c); // different entry type
+        assert_ne!(a, d); // entry type vs none
+    }
+
+    // --- SchemeRegistry tests ---
+
+    #[test]
+    fn test_scheme_registry_no_conflicts() {
+        let conflicts = SchemeRegistry::find_conflicts();
+        assert!(
+            conflicts.is_empty(),
+            "Scheme name conflicts detected: {:?}",
+            conflicts
+        );
+    }
+
+    #[test]
+    fn test_scheme_registry_classify_builtins() {
+        assert_eq!(SchemeRegistry::classify("file"), Some(SchemeKind::Builtin));
+        assert_eq!(
+            SchemeRegistry::classify("series"),
+            Some(SchemeKind::Builtin)
+        );
+        assert_eq!(SchemeRegistry::classify("table"), Some(SchemeKind::Builtin));
+        assert_eq!(SchemeRegistry::classify("data"), Some(SchemeKind::Builtin));
+    }
+
+    #[test]
+    fn test_scheme_registry_classify_format_providers() {
+        // csv, oteljson, excelhtml are registered format providers
+        assert_eq!(SchemeRegistry::classify("csv"), Some(SchemeKind::Format));
+        assert_eq!(
+            SchemeRegistry::classify("oteljson"),
+            Some(SchemeKind::Format)
+        );
+        assert_eq!(
+            SchemeRegistry::classify("excelhtml"),
+            Some(SchemeKind::Format)
+        );
+    }
+
+    #[test]
+    fn test_scheme_registry_classify_factories() {
+        // Test factories registered within the provider crate itself
+        // External factories (sitegen, hydrovu, remote) are tested in cmd
+        // since they're only linked there
+        assert_eq!(
+            SchemeRegistry::classify("sql-derived-table"),
+            Some(SchemeKind::Factory)
+        );
+        assert_eq!(
+            SchemeRegistry::classify("dynamic-dir"),
+            Some(SchemeKind::Factory)
+        );
+    }
+
+    #[test]
+    fn test_scheme_registry_classify_unknown() {
+        assert_eq!(SchemeRegistry::classify("banana"), None);
+        assert_eq!(SchemeRegistry::classify("nosuch"), None);
     }
 }

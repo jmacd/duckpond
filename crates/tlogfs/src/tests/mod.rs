@@ -56,7 +56,7 @@ async fn test_transaction_guard_basic_usage() {
     let root = tx.root().await.expect("Failed to get root directory");
 
     let root_debug = format!("{:?}", root);
-    info!("✅ Successfully got root directory: {:?}", &root_debug);
+    info!("[OK] Successfully got root directory: {:?}", &root_debug);
 
     // Commit the transaction
     debug!("Committing transaction");
@@ -64,7 +64,7 @@ async fn test_transaction_guard_basic_usage() {
         .await
         .expect("Failed to commit transaction");
 
-    info!("✅ Transaction committed successfully");
+    info!("[OK] Transaction committed successfully");
 }
 
 /// Test the absolute basics: create, commit, reopen, read empty root
@@ -88,7 +88,7 @@ async fn test_create_commit_reopen_read_root() {
         .expect("Failed to begin transaction");
 
     let root1 = tx1.root().await.expect("Failed to get root directory");
-    debug!("✅ Got root directory in first transaction");
+    debug!("[OK] Got root directory in first transaction");
 
     // List the root directory (should be empty)
     use futures::stream::StreamExt;
@@ -106,7 +106,7 @@ async fn test_create_commit_reopen_read_root() {
     tx1.commit_test()
         .await
         .expect("Failed to commit first transaction");
-    debug!("✅ First transaction committed");
+    debug!("[OK] First transaction committed");
 
     // Step 4: Begin a second transaction and read root again
     debug!("Step 4: Beginning second transaction (should see committed data)");
@@ -119,7 +119,7 @@ async fn test_create_commit_reopen_read_root() {
         .root()
         .await
         .expect("Failed to get root in second transaction");
-    debug!("✅ Got root directory in second transaction");
+    debug!("[OK] Got root directory in second transaction");
 
     // List the root directory again (should still be empty)
     let mut entries_stream2 = root2.entries().await.expect("Failed to get entries stream");
@@ -135,7 +135,7 @@ async fn test_create_commit_reopen_read_root() {
     assert_eq!(entries2.len(), 0, "Root should still be empty");
 
     // No need to commit read transaction
-    debug!("✅ Test passed - can create, commit, and read empty root");
+    debug!("[OK] Test passed - can create, commit, and read empty root");
 }
 
 /// Test create file, commit, reopen, read file
@@ -163,10 +163,10 @@ async fn test_create_file_commit_reopen_read() {
             .await
             .expect("Failed to write file");
 
-        debug!("✅ File created");
+        debug!("[OK] File created");
 
         tx.commit_test().await.expect("Failed to commit");
-        debug!("✅ Transaction committed");
+        debug!("[OK] Transaction committed");
     }
 
     // Step 3: Read the file back in a new transaction
@@ -185,11 +185,11 @@ async fn test_create_file_commit_reopen_read() {
             .expect("Failed to read file");
 
         let content_str = String::from_utf8(content).expect("Invalid UTF-8");
-        debug!("✅ Read file content: '{}'", content_str);
+        debug!("[OK] Read file content: '{}'", content_str);
 
         assert_eq!(content_str, "Hello, World!", "File content should match");
 
-        debug!("✅ Test passed - can create file, commit, and read back");
+        debug!("[OK] Test passed - can create file, commit, and read back");
     }
 }
 
@@ -229,12 +229,12 @@ async fn test_create_series_commit_reopen_read_simple() {
             .expect("Failed to create series");
 
         debug!(
-            "✅ Series created with time range: {} to {}",
+            "[OK] Series created with time range: {} to {}",
             min_time, max_time
         );
 
         tx.commit_test().await.expect("Failed to commit");
-        debug!("✅ Transaction committed");
+        debug!("[OK] Transaction committed");
     }
 
     // Step 3: Read the series back in a new transaction
@@ -258,7 +258,7 @@ async fn test_create_series_commit_reopen_read_simple() {
             .expect("Failed to read series");
 
         debug!(
-            "✅ Read RecordBatch with {} rows, {} columns",
+            "[OK] Read RecordBatch with {} rows, {} columns",
             read_batch.num_rows(),
             read_batch.num_columns()
         );
@@ -266,7 +266,7 @@ async fn test_create_series_commit_reopen_read_simple() {
         assert_eq!(read_batch.num_rows(), 1, "Should have 1 row");
         assert_eq!(read_batch.num_columns(), 2, "Should have 2 columns");
 
-        debug!("✅ Test passed - can create series, commit, and read back");
+        debug!("[OK] Test passed - can create series, commit, and read back");
     }
 }
 
@@ -309,9 +309,9 @@ async fn test_create_series_in_subdir() {
             .await
             .expect("Failed to create series");
 
-        debug!("✅ Series created, committing...");
+        debug!("[OK] Series created, committing...");
         tx.commit_test().await.expect("Failed to commit");
-        debug!("✅ Committed");
+        debug!("[OK] Committed");
     }
 
     // Read back in new transaction
@@ -332,11 +332,11 @@ async fn test_create_series_in_subdir() {
             .await
             .expect("Failed to read series");
 
-        debug!("✅ Read {} rows", read_batch.num_rows());
+        debug!("[OK] Read {} rows", read_batch.num_rows());
         assert_eq!(read_batch.num_rows(), 1);
     }
 
-    debug!("✅ Test passed");
+    debug!("[OK] Test passed");
 }
 
 /// Test reading from a directory after creation (simulating steward's read pattern)
@@ -385,12 +385,12 @@ async fn test_transaction_guard_read_after_create() {
             .await
             .expect("Failed to get /txn directory");
 
-        debug!("✅ Successfully accessed /txn directory in new transaction");
+        debug!("[OK] Successfully accessed /txn directory in new transaction");
 
         // Don't commit - this is a read-only transaction
     }
 
-    debug!("✅ Read-after-create test completed successfully");
+    debug!("[OK] Read-after-create test completed successfully");
 }
 
 /// Test for single version file:series write/read operations using TinyFS on TLogFS
@@ -593,10 +593,12 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
 
     // The temporal metadata should reflect the actual timestamps, not be 0,0
     if min_time == 0 && max_time == 0 {
-        debug!("⚠️  WARNING: Temporal metadata extraction returned 0,0 - this indicates a problem");
+        debug!(
+            "[WARN]  WARNING: Temporal metadata extraction returned 0,0 - this indicates a problem"
+        );
         debug!("   Expected: min_time = 1704067200000, max_time = 1704074400000");
     } else {
-        debug!("✅ Temporal metadata extracted successfully");
+        debug!("[OK] Temporal metadata extracted successfully");
         assert_eq!(
             min_time, 1704067200000_i64,
             "Min time should match first timestamp"
@@ -622,7 +624,7 @@ async fn test_single_version_series_temporal_metadata() -> Result<(), Box<dyn st
     let read_batch = wd2.read_table_as_batch("temporal_test.series").await?;
     assert_eq!(read_batch.num_rows(), 3, "Should read back 3 rows");
 
-    debug!("✅ Temporal metadata test completed");
+    debug!("[OK] Temporal metadata test completed");
     Ok(())
 }
 
@@ -669,9 +671,9 @@ async fn test_single_version_series_storage_investigation() -> Result<(), Box<dy
     if raw_data.len() >= 4 {
         debug!("File magic bytes: {:?}", &raw_data[0..4]);
         if &raw_data[0..4] == b"PAR1" {
-            debug!("✅ File is valid Parquet");
+            debug!("[OK] File is valid Parquet");
         } else {
-            debug!("❌ File is not Parquet format");
+            debug!("[ERR] File is not Parquet format");
         }
     }
 
@@ -707,7 +709,7 @@ async fn test_single_version_series_storage_investigation() -> Result<(), Box<dy
             .collect::<Vec<_>>()
     );
 
-    debug!("✅ Storage investigation completed");
+    debug!("[OK] Storage investigation completed");
     Ok(())
 }
 
@@ -734,12 +736,12 @@ async fn test_single_version_series_summary() -> Result<(), Box<dyn std::error::
     tx.commit_test().await?;
 
     debug!("FINDINGS:");
-    debug!("✅ No hanging issues - operations complete successfully");
-    debug!("✅ File storage works correctly - Parquet format preserved");
-    debug!("✅ Data integrity maintained - all rows and columns readable");
-    debug!("✅ Entry type correctly set to FileSeries");
+    debug!("[OK] No hanging issues - operations complete successfully");
+    debug!("[OK] File storage works correctly - Parquet format preserved");
+    debug!("[OK] Data integrity maintained - all rows and columns readable");
+    debug!("[OK] Entry type correctly set to FileSeries");
     debug!(
-        "❌ Temporal metadata extraction broken - returns (0, 0) instead of actual timestamp range"
+        "[ERR] Temporal metadata extraction broken - returns (0, 0) instead of actual timestamp range"
     );
     debug!("");
     debug!("EXPECTED: min_time = 1704067200000, max_time = 1704070800000");
@@ -786,7 +788,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     .await?;
     tx.commit_test().await?;
 
-    debug!("✅ Large file stored successfully");
+    debug!("[OK] Large file stored successfully");
 
     // Now test streaming reader - this should NOT load the entire file into memory
     let tx2 = persistence.begin_test().await?;
@@ -803,7 +805,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     let bytes_read = reader.read_exact(&mut buffer).await?;
 
     debug!(
-        "✅ Successfully read {} bytes from start of file",
+        "[OK] Successfully read {} bytes from start of file",
         bytes_read
     );
     assert_eq!(buffer, vec![42u8; 100], "First 100 bytes should all be 42");
@@ -816,7 +818,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
     _ = reader.read_exact(&mut middle_buffer).await?;
 
     debug!(
-        "✅ Successfully seeked to position {} and read 50 bytes",
+        "[OK] Successfully seeked to position {} and read 50 bytes",
         middle_pos
     );
     assert_eq!(
@@ -827,7 +829,7 @@ async fn test_streaming_async_reader_large_file() -> Result<(), Box<dyn std::err
 
     // Test: Seek to end and verify size
     let end_pos = reader.seek(std::io::SeekFrom::End(0)).await?;
-    debug!("✅ File end position: {} bytes", end_pos);
+    debug!("[OK] File end position: {} bytes", end_pos);
     assert_eq!(
         end_pos as usize, expected_size,
         "File size should match expected size"
@@ -869,7 +871,7 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
         .await?;
     tx.commit_test().await?;
 
-    debug!("✅ Small file stored successfully");
+    debug!("[OK] Small file stored successfully");
 
     // Now test streaming reader with small file (stored inline in Delta Lake)
     let tx2 = persistence.begin_test().await?;
@@ -885,7 +887,7 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     let mut buffer = vec![0u8; expected_size];
     _ = reader.read_exact(&mut buffer).await?;
 
-    debug!("✅ Successfully read {} bytes", expected_size);
+    debug!("[OK] Successfully read {} bytes", expected_size);
     assert_eq!(&buffer, small_content, "Content should match exactly");
 
     // Test: Seek to start and read first 5 bytes
@@ -893,12 +895,12 @@ async fn test_streaming_async_reader_small_file() -> Result<(), Box<dyn std::err
     let mut start_buffer = vec![0u8; 5];
     _ = reader.read_exact(&mut start_buffer).await?;
 
-    debug!("✅ Successfully seeked to start and read first 5 bytes");
+    debug!("[OK] Successfully seeked to start and read first 5 bytes");
     assert_eq!(&start_buffer, b"Hello", "First 5 bytes should be 'Hello'");
 
     // Test: Seek to end and verify size
     let end_pos = reader.seek(std::io::SeekFrom::End(0)).await?;
-    debug!("✅ File end position: {} bytes", end_pos);
+    debug!("[OK] File end position: {} bytes", end_pos);
     assert_eq!(
         end_pos as usize, expected_size,
         "File size should match expected size"
@@ -1021,14 +1023,14 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     // Transaction 3: Query the series before setting temporal bounds - should return 12 rows
     debug!("Querying series before temporal bounds...");
     {
-        let mut tx = persistence.begin_test().await?;
+        let tx = persistence.begin_test().await?;
         let wd = tx.root().await?;
 
         let mut result_stream = execute_sql_on_file(
             &wd,
             series_path,
-            "SELECT COUNT(*) as row_count FROM series",
-            &mut tx,
+            "SELECT COUNT(*) as row_count FROM source",
+            &tx.state()?.as_provider_context(),
         )
         .await?;
 
@@ -1095,14 +1097,14 @@ async fn test_temporal_bounds_on_file_series() -> Result<(), Box<dyn std::error:
     // Transaction 5: Query the series after setting temporal bounds - should return 10 rows
     debug!("Querying series after temporal bounds...");
     {
-        let mut tx = persistence.begin_test().await?;
+        let tx = persistence.begin_test().await?;
         let wd = tx.root().await?;
 
         let mut result_stream = execute_sql_on_file(
             &wd,
             series_path,
-            "SELECT COUNT(*) as row_count FROM series",
-            &mut tx,
+            "SELECT COUNT(*) as row_count FROM source",
+            &tx.state()?.as_provider_context(),
         )
         .await?;
 
@@ -1377,7 +1379,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
 
         // THE CRITICAL CHECK: TX3 should write exactly 1 row
         if tx3_count != 1 {
-            debug!("\n🐛 BUG DETECTED IN TX3!");
+            debug!("\n[BUG] BUG DETECTED IN TX3!");
             debug!("TX3 (file append) wrote {} records when it should write exactly 1", tx3_count);
             debug!("Expected: 1 row (file v2 only)");
             debug!("Actual: {} row(s)", tx3_count);
@@ -1385,7 +1387,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
             panic!("Test failed: TX3 wrote {} records instead of 1", tx3_count);
         }
 
-        debug!("✅ PASS: TX3 wrote exactly 1 record (file version only, no directory update)");
+        debug!("[OK] PASS: TX3 wrote exactly 1 record (file version only, no directory update)");
 
         // Also check: TX3 should create exactly 1 entry (the file v2)
         // Total should be: 1 (root v1) + 4 (TX2: root v2, devices, sensor_123, file v1) + 1 (TX3: file v2) = 6
@@ -1399,7 +1401,7 @@ async fn test_multiple_series_appends_directory_updates() -> Result<(), Box<dyn 
             "Expected {} directory entries (root v1 empty, root v2 with devices, devices v1, sensor_123 v1), but found {}",
             expected_dir_entries, total_dir_entries);
 
-        debug!("\n✅ TEST PASSED!");
+        debug!("\n[OK] TEST PASSED!");
         debug!("- TX3 (file append) wrote exactly 1 row (file version only)");
         debug!("- No unnecessary directory updates during file append");
         debug!("- Root directory correctly has 2 versions (v1 empty, v2 when devices added)");
@@ -1458,7 +1460,7 @@ async fn test_symlink_create_and_read() {
         "Should be able to read file through symlink in same transaction"
     );
     debug!(
-        "✅ Read file content through symlink in TX1: {:?}",
+        "[OK] Read file content through symlink in TX1: {:?}",
         String::from_utf8_lossy(&content)
     );
 
@@ -1484,11 +1486,11 @@ async fn test_symlink_create_and_read() {
         "Should be able to read file through symlink in new transaction"
     );
     debug!(
-        "✅ Read file content through symlink in TX2: {:?}",
+        "[OK] Read file content through symlink in TX2: {:?}",
         String::from_utf8_lossy(&content2)
     );
 
-    debug!("\n✅ TEST PASSED!");
+    debug!("\n[OK] TEST PASSED!");
     debug!("- Created symlink in TX1");
     debug!("- Read symlink target in same transaction");
     debug!("- Followed symlink to read file content in same transaction");
@@ -1539,7 +1541,7 @@ async fn test_create_dynamic_file_path() {
         .await
         .expect("Failed to create dynamic file");
 
-    debug!("✅ Created dynamic file with factory: test-file");
+    debug!("[OK] Created dynamic file with factory: test-file");
     debug!("   Node ID: {:?}", dynamic_node.id());
 
     // Verify EntryType is correctly embedded in the FileID
@@ -1550,7 +1552,7 @@ async fn test_create_dynamic_file_path() {
         tinyfs::EntryType::FileDynamic,
         "Dynamic file should have FileDynamic EntryType"
     );
-    debug!("✅ FileID has correct EntryType: {:?}", entry_type);
+    debug!("[OK] FileID has correct EntryType: {:?}", entry_type);
 
     // Verify we can read the file back
     let read_content = root
@@ -1564,7 +1566,7 @@ async fn test_create_dynamic_file_path() {
         "SELECT 1",
         "Dynamic file content should be from TestFileConfig.content field"
     );
-    debug!("✅ Read back dynamic file content successfully");
+    debug!("[OK] Read back dynamic file content successfully");
 
     // Commit and verify persistence
     debug!("Committing transaction");
@@ -1590,7 +1592,7 @@ async fn test_create_dynamic_file_path() {
         "Persisted dynamic file should have valid FileDynamic EntryType"
     );
     debug!(
-        "✅ Persisted FileID has correct EntryType: {:?}",
+        "[OK] Persisted FileID has correct EntryType: {:?}",
         entry_type2
     );
 
@@ -1605,9 +1607,9 @@ async fn test_create_dynamic_file_path() {
         "SELECT 1",
         "Dynamic file should persist and return content from factory"
     );
-    debug!("✅ Dynamic file persisted correctly");
+    debug!("[OK] Dynamic file persisted correctly");
 
-    debug!("\n✅ TEST PASSED!");
+    debug!("\n[OK] TEST PASSED!");
     debug!("- Created dynamic file using high-level path API");
     debug!("- Read back content in same transaction");
     debug!("- Committed and verified persistence");
@@ -1622,7 +1624,7 @@ async fn test_create_dynamic_directory_path() {
     let store_path = "/tmp/tlogfs_dynamic_dir_test";
     let _ = std::fs::remove_dir_all(store_path); // Clean up from previous run
 
-    log::debug!("\n🔍 Test store path: {}", store_path);
+    log::debug!("\n[SEARCH] Test store path: {}", store_path);
 
     let mut persistence = OpLogPersistence::create_test(store_path)
         .await
@@ -1661,7 +1663,7 @@ async fn test_create_dynamic_directory_path() {
         .await
         .expect("Failed to create dynamic directory");
 
-    debug!("✅ Created dynamic directory with factory: test-dir");
+    debug!("[OK] Created dynamic directory with factory: test-dir");
     debug!("   Node ID: {:?}", dynamic_dir.id());
 
     // Verify the directory exists
@@ -1669,20 +1671,20 @@ async fn test_create_dynamic_directory_path() {
         .exists(std::path::Path::new("/factories/processors"))
         .await;
     assert!(exists, "Dynamic directory should exist");
-    debug!("✅ Dynamic directory exists");
+    debug!("[OK] Dynamic directory exists");
 
     // Commit
     debug!("Committing transaction");
     _ = tx.commit().await.expect("Failed to commit");
 
     // Inspect what Delta Lake actually wrote
-    log::debug!("\n🔍 After TX1 commit - inspecting Delta Lake files:");
-    log::debug!("📁 Store path: {}", store_path);
+    log::debug!("\n[SEARCH] After TX1 commit - inspecting Delta Lake files:");
+    log::debug!("[DIR] Store path: {}", store_path);
 
     // List _delta_log directory
     let delta_log_path = format!("{}/_delta_log", store_path);
     if let Ok(entries) = std::fs::read_dir(&delta_log_path) {
-        log::debug!("📂 _delta_log directory:");
+        log::debug!("[DIR] _delta_log directory:");
         for entry in entries.flatten() {
             log::debug!("  - {}", entry.file_name().to_string_lossy());
         }
@@ -1690,7 +1692,7 @@ async fn test_create_dynamic_directory_path() {
 
     // List main directory for Parquet files
     if let Ok(entries) = std::fs::read_dir(store_path) {
-        log::debug!("📂 Main directory:");
+        log::debug!("[DIR] Main directory:");
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
             if fname.ends_with(".parquet") {
@@ -1699,8 +1701,11 @@ async fn test_create_dynamic_directory_path() {
         }
     }
 
-    log::debug!("\n💡 Use: ./catparquet.sh {} <file>.parquet", store_path);
-    log::debug!("💡 to inspect the actual data written\n");
+    log::debug!(
+        "\n[HINT] Use: ./catparquet.sh {} <file>.parquet",
+        store_path
+    );
+    log::debug!("[HINT] to inspect the actual data written\n");
 
     // Verify in new transaction
     let tx2 = persistence.begin_test().await.expect("Failed to begin TX2");
@@ -1713,9 +1718,9 @@ async fn test_create_dynamic_directory_path() {
         .await;
 
     let _node_path = result.expect("Dynamic directory should persist");
-    debug!("✅ Dynamic directory persisted correctly");
+    debug!("[OK] Dynamic directory persisted correctly");
 
-    debug!("\n✅ TEST PASSED!");
+    debug!("\n[OK] TEST PASSED!");
     debug!("- Created dynamic directory using high-level path API");
     debug!("- Verified existence in same transaction");
     debug!("- Committed and verified persistence");
@@ -1732,7 +1737,7 @@ async fn test_create_dynamic_directory_path() {
 async fn test_dynamic_node_entry_type_validation() {
     let store_path = test_dir();
 
-    log::debug!("\n🔍 Testing dynamic node EntryType validation");
+    log::debug!("\n[SEARCH] Testing dynamic node EntryType validation");
 
     let mut persistence = OpLogPersistence::create_test(&store_path)
         .await
@@ -1772,7 +1777,7 @@ async fn test_dynamic_node_entry_type_validation() {
         .expect("Failed to create dynamic file");
 
     let file_id = dynamic_file.id();
-    log::debug!("✅ Created dynamic file with ID: {:?}", file_id);
+    log::debug!("[OK] Created dynamic file with ID: {:?}", file_id);
 
     // Verify EntryType is valid immediately after creation
     let file_entry_type = file_id.entry_type();
@@ -1801,7 +1806,7 @@ async fn test_dynamic_node_entry_type_validation() {
         .expect("Failed to create dynamic directory");
 
     let dir_id = dynamic_dir.id();
-    log::debug!("✅ Created dynamic directory with ID: {:?}", dir_id);
+    log::debug!("[OK] Created dynamic directory with ID: {:?}", dir_id);
 
     // Verify EntryType is valid immediately after creation
     let dir_entry_type = dir_id.entry_type();
@@ -1835,7 +1840,7 @@ async fn test_dynamic_node_entry_type_validation() {
         .expect("Failed to get dynamic file");
 
     let read_file_id = file_node.id();
-    log::debug!("✅ Read back dynamic file with ID: {:?}", read_file_id);
+    log::debug!("[OK] Read back dynamic file with ID: {:?}", read_file_id);
 
     // This is the critical test: can we parse the EntryType from the persisted FileID?
     let read_file_entry_type = read_file_id.entry_type();
@@ -1869,7 +1874,10 @@ async fn test_dynamic_node_entry_type_validation() {
         .expect("Failed to get dynamic directory");
 
     let read_dir_id = dir_node.id();
-    log::debug!("✅ Read back dynamic directory with ID: {:?}", read_dir_id);
+    log::debug!(
+        "[OK] Read back dynamic directory with ID: {:?}",
+        read_dir_id
+    );
 
     // This is the critical test: can we parse the EntryType from the persisted FileID?
     let read_dir_entry_type = read_dir_id.entry_type();
@@ -1901,7 +1909,7 @@ async fn test_dynamic_node_entry_type_validation() {
     }
     log::debug!("  Directory has {} entries", entry_count);
 
-    log::debug!("\n✅ TEST PASSED!");
+    log::debug!("\n[OK] TEST PASSED!");
     log::debug!("- Created dynamic file and directory");
     log::debug!("- Verified EntryType immediately after creation");
     log::debug!("- Committed to persistence");
@@ -1961,7 +1969,7 @@ async fn test_file_physical_series_version_concatenation() {
             .expect("Failed to shutdown version 1 writer");
 
         tx.commit_test().await.expect("Failed to commit version 1");
-        log::debug!("✅ Committed version 1 with {} bytes", csv_v1.len());
+        log::debug!("[OK] Committed version 1 with {} bytes", csv_v1.len());
     }
 
     // Write second version (more data rows)
@@ -1989,7 +1997,7 @@ async fn test_file_physical_series_version_concatenation() {
             .expect("Failed to shutdown version 2 writer");
 
         tx.commit_test().await.expect("Failed to commit version 2");
-        log::debug!("✅ Committed version 2 with {} bytes", csv_v2.len());
+        log::debug!("[OK] Committed version 2 with {} bytes", csv_v2.len());
     }
 
     // Write third version (even more data rows)
@@ -2017,7 +2025,7 @@ async fn test_file_physical_series_version_concatenation() {
             .expect("Failed to shutdown version 3 writer");
 
         tx.commit_test().await.expect("Failed to commit version 3");
-        log::debug!("✅ Committed version 3 with {} bytes", csv_v3.len());
+        log::debug!("[OK] Committed version 3 with {} bytes", csv_v3.len());
     }
 
     // Read back and verify concatenated content
@@ -2044,10 +2052,10 @@ async fn test_file_physical_series_version_concatenation() {
             "FilePhysicalSeries should concatenate all versions in oldest-to-newest order"
         );
 
-        log::debug!("✅ Content matches expected concatenation");
+        log::debug!("[OK] Content matches expected concatenation");
     }
 
-    log::debug!("\n✅ TEST PASSED!");
+    log::debug!("\n[OK] TEST PASSED!");
     log::debug!("- Wrote 3 versions to FilePhysicalSeries file");
     log::debug!("- Each version appended data");
     log::debug!("- Read back yielded concatenated content in correct order");
@@ -2107,7 +2115,7 @@ async fn test_file_physical_series_csv_provider_sql() {
             .expect("Failed to shutdown version 1 writer");
 
         tx.commit_test().await.expect("Failed to commit version 1");
-        log::debug!("✅ Committed version 1 with {} bytes", csv_v1.len());
+        log::debug!("[OK] Committed version 1 with {} bytes", csv_v1.len());
     }
 
     // Write second version (more data rows - no header since it's appending)
@@ -2135,7 +2143,7 @@ async fn test_file_physical_series_csv_provider_sql() {
             .expect("Failed to shutdown version 2 writer");
 
         tx.commit_test().await.expect("Failed to commit version 2");
-        log::debug!("✅ Committed version 2 with {} bytes", csv_v2.len());
+        log::debug!("[OK] Committed version 2 with {} bytes", csv_v2.len());
     }
 
     // Write third version (even more data)
@@ -2163,7 +2171,7 @@ async fn test_file_physical_series_csv_provider_sql() {
             .expect("Failed to shutdown version 3 writer");
 
         tx.commit_test().await.expect("Failed to commit version 3");
-        log::debug!("✅ Committed version 3 with {} bytes", csv_v3.len());
+        log::debug!("[OK] Committed version 3 with {} bytes", csv_v3.len());
     }
 
     // Now read via CSV provider and query with DataFusion
@@ -2232,7 +2240,7 @@ async fn test_file_physical_series_csv_provider_sql() {
             .unwrap()
             .value(0);
         assert_eq!(count, 6, "COUNT(*) should be 6");
-        log::debug!("✅ COUNT(*) = {}", count);
+        log::debug!("[OK] COUNT(*) = {}", count);
 
         // Query: SUM(value)
         let df = ctx
@@ -2248,7 +2256,7 @@ async fn test_file_physical_series_csv_provider_sql() {
             .value(0);
         // 100 + 200 + 300 + 400 + 500 + 600 = 2100
         assert_eq!(total, 2100, "SUM(value) should be 2100");
-        log::debug!("✅ SUM(value) = {}", total);
+        log::debug!("[OK] SUM(value) = {}", total);
 
         // Query: SELECT * with ordering
         let df = ctx
@@ -2275,10 +2283,10 @@ async fn test_file_physical_series_csv_provider_sql() {
             vec!["alice", "bob", "carol", "dave", "eve", "frank"],
             "Names should be in value order"
         );
-        log::debug!("✅ SELECT ORDER BY verified: {:?}", names);
+        log::debug!("[OK] SELECT ORDER BY verified: {:?}", names);
     }
 
-    log::debug!("\n✅ TEST PASSED!");
+    log::debug!("\n[OK] TEST PASSED!");
     log::debug!("- Wrote 3 versions to FilePhysicalSeries CSV file");
     log::debug!("- Opened via csv:// URL with CsvProvider");
     log::debug!("- Streamed 6 total rows (concatenated from all versions)");

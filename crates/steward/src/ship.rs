@@ -11,8 +11,7 @@ use crate::{
 };
 use anyhow::Result;
 use log::{debug, info};
-use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::ops::AsyncFnOnce;
 use std::path::{Path, PathBuf};
 use tlogfs::{OpLogPersistence, PondMetadata, PondTxnMetadata, PondUserMetadata};
 
@@ -244,34 +243,31 @@ impl Ship {
         })
     }
 
-    /// Execute operations within a scoped data filesystem transaction.
-    /// DEPRECATED: Do not use in new tests.
-    pub async fn transact<F, R>(&mut self, meta: &PondUserMetadata, f: F) -> Result<R, StewardError>
+    /// Execute operations within a scoped write transaction.
+    ///
+    /// Runs the async closure with `&FS` access, auto-commits on `Ok`,
+    /// auto-aborts on `Err`. The closure's error type must convert into
+    /// `StewardError` (which `tinyfs::Error` and `tlogfs::TLogFSError` do
+    /// via `#[from]` impls -- just use `?`).
+    pub async fn write_transaction<F>(
+        &mut self,
+        meta: &PondUserMetadata,
+        f: F,
+    ) -> Result<(), StewardError>
     where
-        F: for<'a> FnOnce(
-            &'a StewardTransactionGuard<'a>,
-            &'a tinyfs::FS,
-        ) -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, StewardError>> + Send + 'a>,
-        >,
+        F: for<'a> AsyncFnOnce(&'a tinyfs::FS) -> Result<(), StewardError>,
     {
-        debug!("Beginning scoped transaction {:?}", meta);
-
-        // Create steward transaction guard
+        debug!("Beginning write transaction {:?}", meta);
         let tx = self.begin_write(meta).await?;
-
-        let result = f(&tx, &tx).await;
-
+        let result = f(&tx).await;
         match result {
-            Ok(value) => {
-                // Success - commit using steward guard (ensures proper sequencing)
+            Ok(()) => {
                 _ = tx.commit().await?;
-                Ok(value)
+                Ok(())
             }
             Err(e) => {
-                // Error - steward transaction guard will auto-rollback on drop
                 let error_msg = format!("{}", e);
-                debug!("Scoped transaction failed {error_msg}");
+                debug!("Transaction failed: {error_msg}");
                 Err(e)
             }
         }
@@ -408,23 +404,6 @@ impl Ship {
                 .map_err(StewardError::DataInit)?
         };
 
-        let vars_value: Value = meta
-            .vars
-            .clone()
-            .into_iter()
-            .map(|(k, v)| (k, Value::String(v)))
-            .collect::<Map<String, Value>>()
-            .into();
-
-        let structured_variables: HashMap<String, Value> =
-            HashMap::from([("vars".to_string(), vars_value)]);
-
-        // This is kind of weird, we should probably just let PondUserMetadata
-        // pass through @@@.
-        data_tx
-            .state()?
-            .set_template_variables(structured_variables)?;
-
         // Create steward transaction guard with sequence tracking
         // Pass pond_path so guard can reload OpLogPersistence for post-commit
         Ok(StewardTransactionGuard::new(
@@ -500,23 +479,6 @@ impl Ship {
             .await
             .map_err(StewardError::DataInit)?;
 
-        let vars_value: Value = txn_meta
-            .user
-            .vars
-            .clone()
-            .into_iter()
-            .map(|(k, v)| (k, Value::String(v)))
-            .collect::<Map<String, Value>>()
-            .into();
-
-        // Add CLI variables under "vars" key
-        let structured_variables: HashMap<String, Value> =
-            HashMap::from([("vars".to_string(), vars_value)]);
-
-        data_tx
-            .state()?
-            .set_template_variables(structured_variables)?;
-
         // Create steward transaction guard with sequence tracking
         Ok(StewardTransactionGuard::new(
             data_tx,
@@ -564,8 +526,8 @@ impl Ship {
             );
 
             info!(
-                "Transaction details: args={:?}, vars={:?}, data_fs_version={}",
-                &txn_meta.user.args, &txn_meta.user.vars, data_fs_version
+                "Transaction details: args={:?}, data_fs_version={}",
+                &txn_meta.user.args, data_fs_version
             );
 
             // Return RecoveryNeeded error with complete metadata
@@ -653,21 +615,13 @@ impl Ship {
 
         // Step 2: Use scoped transaction with init arguments
         // @@@ a litle awkward that we have two clones of PondTxnMetadata.
-        ship.transact(&txn_meta.user, |_tx, fs| {
-            Box::pin(async move {
-                // Step 3: Create initial pond directory structure (this generates actual filesystem operations)
-                let data_root = fs
-                    .root()
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = data_root
-                    .create_dir_path("/data")
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        ship.write_transaction(&txn_meta.user, async |fs| {
+            // Step 3: Create initial pond directory structure (this generates actual filesystem operations)
+            let data_root = fs.root().await?;
+            _ = data_root.create_dir_path("/data").await?;
 
-                // Transaction automatically commits on Ok return
-                Ok(())
-            })
+            // Transaction automatically commits on Ok return
+            Ok(())
         })
         .await?;
 
@@ -761,22 +715,16 @@ mod tests {
         // Begin a second transaction with test arguments using scoped transaction
         let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
         let meta = PondUserMetadata::new(args);
-        ship.transact(&meta, |_tx, fs| {
-            Box::pin(async move {
-                // Do some filesystem operation to ensure the transaction has operations to commit
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = tinyfs::async_helpers::convenience::create_file_path(
-                    &root,
-                    "/test.txt",
-                    b"test content",
-                )
-                .await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })
+        ship.write_transaction(&meta, async |fs| {
+            // Do some filesystem operation to ensure the transaction has operations to commit
+            let root = fs.root().await?;
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &root,
+                "/test.txt",
+                b"test content",
+            )
+            .await?;
+            Ok(())
         })
         .await
         .expect("Failed to execute scoped transaction");
@@ -800,22 +748,16 @@ mod tests {
         // Begin a second transaction with arguments using scoped transaction
         let args = vec!["test".to_string(), "arg1".to_string(), "arg2".to_string()];
         let meta = PondUserMetadata::new(args.clone());
-        ship.transact(&meta, |_tx, fs| {
-            Box::pin(async move {
-                // Do some operation on data filesystem
-                let data_root = fs
-                    .root()
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = tinyfs::async_helpers::convenience::create_file_path(
-                    &data_root,
-                    "/test.txt",
-                    b"test content",
-                )
-                .await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })
+        ship.write_transaction(&meta, async |fs| {
+            // Do some operation on data filesystem
+            let data_root = fs.root().await?;
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &data_root,
+                "/test.txt",
+                b"test content",
+            )
+            .await?;
+            Ok(())
         })
         .await
         .expect("Failed to execute scoped transaction");
@@ -892,7 +834,7 @@ mod tests {
             // SIMULATE CRASH HERE - don't call commit_control_metadata()
             // This leaves data committed but control metadata missing
 
-            debug!("✅ Simulated crash after data commit");
+            debug!("[OK] Simulated crash after data commit");
         } // Ship drops here, simulating crash
 
         // SECOND: Create a new ship (simulating restart) and test recovery
@@ -905,10 +847,10 @@ mod tests {
             let recovery_result = match ship.check_recovery_needed().await {
                 Err(StewardError::RecoveryNeeded { txn_meta }) => {
                     debug!(
-                        "✅ Detected recovery needed for seq={}, txn_id: {}",
+                        "[OK] Detected recovery needed for seq={}, txn_id: {}",
                         txn_meta.txn_seq, txn_meta.user.txn_id
                     );
-                    debug!("✅ Recovery metadata: {:?}", txn_meta);
+                    debug!("[OK] Recovery metadata: {:?}", txn_meta);
                     // Perform actual recovery
                     ship.recover().await.expect("Recovery should succeed")
                 }
@@ -946,7 +888,7 @@ mod tests {
                 .await
                 .expect("Failed to commit read transaction");
 
-            debug!("✅ Recovery completed successfully");
+            debug!("[OK] Recovery completed successfully");
         }
     }
 
@@ -963,21 +905,15 @@ mod tests {
         for i in 1..=3 {
             let args = vec!["test".to_string(), format!("operation{}", i)];
             let meta = PondUserMetadata::new(args);
-            ship.transact(&meta, |_tx, fs| {
-                Box::pin(async move {
-                    let data_root = fs
-                        .root()
-                        .await
-                        .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    _ = tinyfs::async_helpers::convenience::create_file_path(
-                        &data_root,
-                        &format!("/file{}.txt", i),
-                        format!("content{}", i).as_bytes(),
-                    )
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    Ok(())
-                })
+            ship.write_transaction(&meta, async |fs| {
+                let data_root = fs.root().await?;
+                _ = tinyfs::async_helpers::convenience::create_file_path(
+                    &data_root,
+                    &format!("/file{}.txt", i),
+                    format!("content{}", i).as_bytes(),
+                )
+                .await?;
+                Ok(())
             })
             .await
             .expect("Failed to execute scoped transaction");
@@ -1081,7 +1017,7 @@ mod tests {
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH: Don't record control metadata
-            debug!("✅ Simulated crash after data commit");
+            debug!("[OK] Simulated crash after data commit");
         }
 
         // Step 3: Recovery after crash using production code
@@ -1179,18 +1115,10 @@ mod tests {
                 format!("/dir{}", i),
             ];
             let meta = PondUserMetadata::new(args);
-            ship.transact(&meta, |_tx, fs| {
-                Box::pin(async move {
-                    let data_root = fs
-                        .root()
-                        .await
-                        .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    _ = data_root
-                        .create_dir_path(&format!("/dir{}", i))
-                        .await
-                        .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                    Ok(())
-                })
+            ship.write_transaction(&meta, async |fs| {
+                let data_root = fs.root().await?;
+                _ = data_root.create_dir_path(&format!("/dir{}", i)).await?;
+                Ok(())
             })
             .await
             .expect("Failed to execute scoped transaction");
@@ -1250,7 +1178,7 @@ mod tests {
             .await
             .expect("Failed to commit steward transaction");
 
-        debug!("✅ New transaction API works with proper sequencing via steward guard commit");
+        debug!("[OK] New transaction API works with proper sequencing via steward guard commit");
     }
 
     #[tokio::test]
@@ -1273,21 +1201,15 @@ mod tests {
 
         // First user transaction should get txn_seq=2
         let meta = PondUserMetadata::new(vec!["first".to_string()]);
-        ship.transact(&meta, |_tx, fs| {
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = tinyfs::async_helpers::convenience::create_file_path(
-                    &root,
-                    "/file1.txt",
-                    b"content1",
-                )
-                .await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })
+        ship.write_transaction(&meta, async |fs| {
+            let root = fs.root().await?;
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &root,
+                "/file1.txt",
+                b"content1",
+            )
+            .await?;
+            Ok(())
         })
         .await
         .expect("First transaction should succeed");
@@ -1302,21 +1224,15 @@ mod tests {
 
         // Second user transaction should get txn_seq=3
         let meta = PondUserMetadata::new(vec!["second".to_string()]);
-        ship.transact(&meta, |_tx, fs| {
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = tinyfs::async_helpers::convenience::create_file_path(
-                    &root,
-                    "/file2.txt",
-                    b"content2",
-                )
-                .await
-                .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })
+        ship.write_transaction(&meta, async |fs| {
+            let root = fs.root().await?;
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &root,
+                "/file2.txt",
+                b"content2",
+            )
+            .await?;
+            Ok(())
         })
         .await
         .expect("Second transaction should succeed");
@@ -1370,7 +1286,7 @@ mod tests {
             "After reopening, last_write_seq should still be 1"
         );
 
-        debug!("✅ Root directory initialization is recorded in control table with txn_seq=1");
+        debug!("[OK] Root directory initialization is recorded in control table with txn_seq=1");
     }
 
     #[tokio::test]
@@ -1386,37 +1302,17 @@ mod tests {
 
         // Create a tree of directories in a single transaction
         let meta = PondUserMetadata::new(vec!["create_tree".to_string()]);
-        ship.transact(&meta, |_tx, fs| {
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        ship.write_transaction(&meta, async |fs| {
+            let root = fs.root().await?;
 
-                // Create nested directory structure: /a/b/c and /a/d/e
-                _ = root
-                    .create_dir_path("/a")
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = root
-                    .create_dir_path("/a/b")
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = root
-                    .create_dir_path("/a/b/c")
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = root
-                    .create_dir_path("/a/d")
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = root
-                    .create_dir_path("/a/d/e")
-                    .await
-                    .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            // Create nested directory structure: /a/b/c and /a/d/e
+            _ = root.create_dir_path("/a").await?;
+            _ = root.create_dir_path("/a/b").await?;
+            _ = root.create_dir_path("/a/b/c").await?;
+            _ = root.create_dir_path("/a/d").await?;
+            _ = root.create_dir_path("/a/d/e").await?;
 
-                Ok(())
-            })
+            Ok(())
         })
         .await
         .expect("Failed to create directory tree");
@@ -1492,7 +1388,7 @@ mod tests {
         );
 
         debug!(
-            "✅ Directory tree creation produces exactly one version per node with correct numbering"
+            "[OK] Directory tree creation produces exactly one version per node with correct numbering"
         );
     }
 }

@@ -8,7 +8,7 @@ use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
 use std::io::{self, Write};
 
-use crate::common::ShipContext;
+use crate::common::{ShipContext, TargetContext, classify_target};
 use log::debug;
 
 /// Handle output from a DataFusion stream based on display mode
@@ -165,20 +165,18 @@ pub async fn cat_command(
         path, sql_query
     );
 
-    // Check for host+ URL — bypass pond entirely
-    if path.starts_with("host+") {
-        return cat_host_impl(path, display, output, sql_query).await;
-    }
+    // Classify the path to determine pond vs host context
+    let target = classify_target(path);
 
-    let mut ship = ship_context.open_pond().await?;
-
-    let template_variables = ship_context.template_variables.clone();
+    let mut ship = match &target {
+        TargetContext::Host(_) => ship_context.open_host()?,
+        TargetContext::Pond(_) => ship_context.open_pond().await?,
+    };
 
     let mut tx = ship
-        .begin_read(
-            &steward::PondUserMetadata::new(ship_context.original_args.clone())
-                .with_vars(template_variables),
-        )
+        .begin_read(&steward::PondUserMetadata::new(
+            ship_context.original_args.clone(),
+        ))
         .await?;
 
     // Execute the cat operation and handle errors properly
@@ -200,13 +198,13 @@ pub async fn cat_command(
 /// Internal implementation of cat command
 #[allow(clippy::print_stdout)]
 async fn cat_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     path: &str,
     display: &str,
     output: Option<&mut String>,
     sql_query: Option<&str>,
 ) -> Result<()> {
-    // Check if path contains :// - if not, normalize to file:// scheme
+    // Normalize bare paths to file:// URLs, keep URLs with schemes as-is
     let url = if path.contains("://") {
         path.to_string()
     } else {
@@ -219,12 +217,23 @@ async fn cat_impl(
         format!("file://{}", normalized_path)
     };
 
-    debug!("cat_impl processing URL: {}", url);
+    // Parse the URL for routing decisions (handles host+scheme:///path, scheme:///path, etc.)
+    let parsed_url =
+        provider::Url::parse(&url).map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", path, e))?;
 
-    // For file:// URLs, check if file is queryable before proceeding
-    if let Some(file_path) = url.strip_prefix("file://") {
+    debug!(
+        "cat_impl processing URL: {} (scheme={}, is_host={})",
+        parsed_url,
+        parsed_url.scheme(),
+        parsed_url.is_host()
+    );
+
+    // For file:// scheme (raw data access), check if the file is queryable.
+    // This handles both pond paths (file:///path) and host paths (host+file:///path).
+    if parsed_url.scheme() == "file" && parsed_url.entry_type().is_none() {
         let fs = &**tx;
         let root = fs.root().await?;
+        let file_path = parsed_url.path();
 
         let metadata = root
             .metadata_for_path(file_path)
@@ -251,10 +260,7 @@ async fn cat_impl(
     let fs_arc = std::sync::Arc::new(fs.clone());
 
     // Get ProviderContext from transaction (includes registered object stores)
-    let tlogfs_tx = tx.transaction_guard()?;
-    let state = tlogfs_tx.state()?;
-    let provider_context_ref = state.as_provider_context();
-    let provider_context = std::sync::Arc::new(provider_context_ref.clone());
+    let provider_context = std::sync::Arc::new(tx.provider_context()?.clone());
 
     // Create Provider with context (supports all types including file://)
     let provider = provider::Provider::with_context(fs_arc, provider_context.clone());
@@ -320,55 +326,6 @@ async fn cat_impl(
 
     let _ = ctx.register_table("source", unified_table_provider)?;
 
-    let effective_sql_query = sql_query.unwrap_or("SELECT * FROM source ORDER BY timestamp");
-    debug!("Executing SQL query: {}", effective_sql_query);
-
-    let df = ctx.sql(effective_sql_query).await.map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to execute SQL query '{}': {}",
-            effective_sql_query,
-            e
-        )
-    })?;
-
-    let stream = df.execute_stream().await?;
-
-    // Use consolidated output handler
-    handle_stream_output(stream, display, sql_query, output, path).await?;
-
-    Ok(())
-}
-
-/// Cat a host filesystem file through a format provider — no pond required.
-///
-/// Pipeline: host file → decompress → format_provider → MemTable → DataFusion → output
-///
-/// Used by `pond cat host+oteljson:///path/to/file.json` (and csv, excelhtml, etc.)
-#[allow(clippy::print_stdout)]
-async fn cat_host_impl(
-    path: &str,
-    display: &str,
-    output: Option<&mut String>,
-    sql_query: Option<&str>,
-) -> Result<()> {
-    let url = provider::Url::parse(path)
-        .map_err(|e| anyhow::anyhow!("Invalid host URL '{}': {}", path, e))?;
-
-    debug!(
-        "cat_host_impl processing URL: {} (scheme={})",
-        url,
-        url.scheme()
-    );
-
-    let table_provider = provider::create_memtable_from_host_url(&url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read host file '{}': {}", path, e))?;
-
-    let ctx = datafusion::prelude::SessionContext::new();
-    let _ = ctx
-        .register_table("source", table_provider)
-        .map_err(|e| anyhow::anyhow!("Failed to register table: {}", e))?;
-
     let effective_sql_query = sql_query.unwrap_or("SELECT * FROM source");
     debug!("Executing SQL query: {}", effective_sql_query);
 
@@ -381,6 +338,13 @@ async fn cat_host_impl(
     })?;
 
     let stream = df.execute_stream().await?;
+
+    // Deregister "source" now that the execution plan holds its own
+    // Arc to the table provider -- prevents stale bindings from
+    // leaking into later queries within the same session
+    let _ = ctx.deregister_table("source");
+
+    // Use consolidated output handler
     handle_stream_output(stream, display, sql_query, output, path).await?;
 
     Ok(())
@@ -495,7 +459,7 @@ mod tests {
 
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
-            let ship_context = ShipContext::new(Some(&pond_path), init_args.clone());
+            let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize the pond
             init_command(&ship_context, None, None).await?;
@@ -519,22 +483,15 @@ mod tests {
             let test_content = self.test_content.clone();
             let filename = filename.to_string();
 
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec!["test".to_string(), "write".to_string()]),
-                |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        root.write_file_path_from_slice(&filename, test_content.as_bytes())
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                    root.write_file_path_from_slice(&filename, test_content.as_bytes())
+                        .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await
@@ -551,45 +508,34 @@ mod tests {
 
             let filename = filename.to_string();
 
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec![
                     "test".to_string(),
                     "write_table".to_string(),
                 ]),
-                |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        // Create Arrow RecordBatch from our test data
-                        let batch = record_batch!(
-                            (
-                                "timestamp",
-                                Utf8,
-                                ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]
-                            ),
-                            ("value", Float64, [42.0_f64, 43.5_f64])
-                        )
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!("Arrow error: {}", e)),
-                            ))
-                        })?;
+                    // Create Arrow RecordBatch from our test data
+                    let batch = record_batch!(
+                        (
+                            "timestamp",
+                            Utf8,
+                            ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]
+                        ),
+                        ("value", Float64, [42.0_f64, 43.5_f64])
+                    )
+                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
 
-                        // Write as parquet table using ParquetExt
-                        root.create_table_from_batch(
-                            &filename,
-                            &batch,
-                            tinyfs::EntryType::TablePhysicalVersion,
-                        )
-                        .await
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                    // Write as parquet table using ParquetExt
+                    root.create_table_from_batch(
+                        &filename,
+                        &batch,
+                        tinyfs::EntryType::TablePhysicalVersion,
+                    )
+                    .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await
@@ -606,38 +552,27 @@ mod tests {
 
             let filename = filename.to_string();
 
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec![
                     "test".to_string(),
                     "write_series".to_string(),
                 ]),
-                |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        // Create Arrow RecordBatch with temporal data for series using proper timestamp type
-                        let batch = record_batch!(
-                            ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]), // 2024-01-01 timestamps in milliseconds
-                            ("value", Float64, [42.0_f64, 43.5_f64])
-                        )
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!("Arrow error: {}", e)),
-                            ))
-                        })?;
+                    // Create Arrow RecordBatch with temporal data for series using proper timestamp type
+                    let batch = record_batch!(
+                        ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]), // 2024-01-01 timestamps in milliseconds
+                        ("value", Float64, [42.0_f64, 43.5_f64])
+                    )
+                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
 
-                        // Write as file:series using ParquetExt with temporal metadata extraction
-                        let _ = root
-                            .create_series_from_batch(&filename, &batch, Some("timestamp"))
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                    // Write as file:series using ParquetExt with temporal metadata extraction
+                    let _ = root
+                        .create_series_from_batch(&filename, &batch, Some("timestamp"))
+                        .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await
@@ -649,7 +584,7 @@ mod tests {
         /// Create ShipContext for cat command
         fn cat_context(&self, filename: &str) -> ShipContext {
             let cat_args = vec!["pond".to_string(), "cat".to_string(), filename.to_string()];
-            ShipContext::new(Some(self.pond_path.clone()), cat_args)
+            ShipContext::pond_only(Some(self.pond_path.clone()), cat_args)
         }
 
         /// Create expected DataFusion output for our test data using the same formatting path
@@ -753,7 +688,7 @@ mod tests {
             "Cat command DataFusion output should exactly match baseline formatting"
         );
 
-        debug!("✅ DataFusion SQL output matches baseline!");
+        debug!("[OK] DataFusion SQL output matches baseline!");
 
         Ok(())
     }
@@ -773,7 +708,7 @@ mod tests {
             "--sql".to_string(),
             "SELECT timestamp, value * 2 as doubled_value FROM source WHERE value > 42".to_string(),
         ];
-        let cat_context = ShipContext::new(Some(setup.pond_path.clone()), cat_args);
+        let cat_context = ShipContext::pond_only(Some(setup.pond_path.clone()), cat_args);
         let mut output_buffer = String::new();
 
         cat_command(
@@ -805,7 +740,7 @@ mod tests {
             "Output should contain filtered row count"
         );
 
-        debug!("✅ SQL query filtering and computation works!");
+        debug!("[OK] SQL query filtering and computation works!");
 
         Ok(())
     }
@@ -1251,6 +1186,217 @@ mod tests {
             output_buffer.contains("Summary: 2 total rows"),
             "Output should contain row count"
         );
+
+        Ok(())
+    }
+
+    // --- Host filesystem cat tests (via hostmount) ---
+
+    /// Test cat of a raw text file on the host filesystem via host+file:// URL
+    #[tokio::test]
+    async fn test_cat_host_raw_file() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let file_path = temp_dir.path().join("hello.txt");
+        std::fs::write(&file_path, "Hello from the host filesystem!\n")?;
+
+        // Create a ShipContext with no pond, just host root
+        let ship_context = ShipContext::new(
+            None::<&std::path::Path>,
+            Some(temp_dir.path()),
+            Vec::new(),
+            vec!["pond".to_string(), "cat".to_string()],
+        );
+
+        let url = format!("host+file:///{}", "hello.txt");
+        let mut output_buffer = String::new();
+
+        cat_command(
+            &ship_context,
+            &url,
+            "raw",
+            Some(&mut output_buffer),
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+        assert_eq!(
+            output_buffer, "Hello from the host filesystem!\n",
+            "Host cat should stream raw bytes for data files"
+        );
+
+        Ok(())
+    }
+
+    /// Test cat of a CSV file on the host filesystem via host+csv:// URL
+    #[tokio::test]
+    async fn test_cat_host_csv_file() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let csv_content = "name,value\nalpha,1\nbeta,2\ngamma,3\n";
+        let file_path = temp_dir.path().join("data.csv");
+        std::fs::write(&file_path, csv_content)?;
+
+        let ship_context = ShipContext::new(
+            None::<&std::path::Path>,
+            Some(temp_dir.path()),
+            Vec::new(),
+            vec!["pond".to_string(), "cat".to_string()],
+        );
+
+        let url = format!("host+csv:///{}", "data.csv");
+        let mut output_buffer = String::new();
+
+        cat_command(
+            &ship_context,
+            &url,
+            "table",
+            Some(&mut output_buffer),
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+        // Verify the table output contains expected data
+        assert!(
+            output_buffer.contains("alpha"),
+            "Output should contain 'alpha'. Got:\n{}",
+            output_buffer
+        );
+        assert!(
+            output_buffer.contains("beta"),
+            "Output should contain 'beta'"
+        );
+        assert!(
+            output_buffer.contains("gamma"),
+            "Output should contain 'gamma'"
+        );
+        assert!(
+            output_buffer.contains("Summary: 3 total rows"),
+            "Output should show 3 rows. Got:\n{}",
+            output_buffer
+        );
+
+        Ok(())
+    }
+
+    /// Test cat of a CSV file on the host filesystem with SQL query
+    #[tokio::test]
+    async fn test_cat_host_csv_file_with_sql() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let csv_content = "name,value\nalpha,10\nbeta,20\ngamma,30\n";
+        let file_path = temp_dir.path().join("data.csv");
+        std::fs::write(&file_path, csv_content)?;
+
+        let ship_context = ShipContext::new(
+            None::<&std::path::Path>,
+            Some(temp_dir.path()),
+            Vec::new(),
+            vec!["pond".to_string(), "cat".to_string()],
+        );
+
+        let url = format!("host+csv:///{}", "data.csv");
+        let mut output_buffer = String::new();
+
+        cat_command(
+            &ship_context,
+            &url,
+            "table",
+            Some(&mut output_buffer),
+            None,
+            None,
+            Some("SELECT name, value FROM source WHERE value > 15"),
+        )
+        .await?;
+
+        // Should only contain beta and gamma (value > 15)
+        assert!(
+            !output_buffer.contains("alpha"),
+            "Output should NOT contain 'alpha' (filtered out). Got:\n{}",
+            output_buffer
+        );
+        assert!(
+            output_buffer.contains("beta"),
+            "Output should contain 'beta'"
+        );
+        assert!(
+            output_buffer.contains("gamma"),
+            "Output should contain 'gamma'"
+        );
+        assert!(
+            output_buffer.contains("Summary: 2 total rows"),
+            "Output should show 2 rows. Got:\n{}",
+            output_buffer
+        );
+
+        Ok(())
+    }
+
+    /// Test cat of a host file with absolute path (no -d flag)
+    #[tokio::test]
+    async fn test_cat_host_absolute_path() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let file_path = temp_dir.path().join("abs_test.txt");
+        std::fs::write(&file_path, "absolute path test\n")?;
+
+        // No host_root -- host URLs use absolute paths
+        let ship_context = ShipContext::new(
+            None::<&std::path::Path>,
+            None::<&std::path::Path>,
+            Vec::new(),
+            vec!["pond".to_string(), "cat".to_string()],
+        );
+
+        let url = format!("host+file://{}", file_path.display());
+        let mut output_buffer = String::new();
+
+        cat_command(
+            &ship_context,
+            &url,
+            "raw",
+            Some(&mut output_buffer),
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+        assert_eq!(
+            output_buffer, "absolute path test\n",
+            "Host cat with absolute path should work"
+        );
+
+        Ok(())
+    }
+
+    /// Test cat of a nonexistent host file gives a clear error
+    #[tokio::test]
+    async fn test_cat_host_nonexistent_file() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+
+        let ship_context = ShipContext::new(
+            None::<&std::path::Path>,
+            Some(temp_dir.path()),
+            Vec::new(),
+            vec!["pond".to_string(), "cat".to_string()],
+        );
+
+        let url = "host+file:///does_not_exist.txt";
+        let mut output_buffer = String::new();
+
+        let result = cat_command(
+            &ship_context,
+            url,
+            "raw",
+            Some(&mut output_buffer),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err(), "Cat of nonexistent host file should error");
 
         Ok(())
     }

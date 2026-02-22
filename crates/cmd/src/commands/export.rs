@@ -14,8 +14,8 @@ use tinyfs::{EntryType, Error as TinyFsError, NodePath, Visitor};
 
 // Re-export shared export types from provider crate
 pub use provider::export::{
-    ExportOutput, ExportSet, TemplateSchema, count_export_set_files, discover_exported_files,
-    extract_timestamps_from_path, merge_export_sets, print_export_set, read_parquet_schema,
+    ExportOutput, ExportSet, TemplateSchema, discover_exported_files, extract_timestamps_from_path,
+    print_export_set, read_parquet_schema,
 };
 
 // TODO: the timestamps are confusingly local and/or UTC. do not trust the
@@ -71,13 +71,13 @@ pub async fn export_command(
 
     // Log parsed timestamp information if time ranges are provided
     if start_time_str.is_some() || end_time_str.is_some() {
-        debug!("🕐 Temporal filtering enabled:");
+        debug!("[TIME] Temporal filtering enabled:");
 
         if let Some(start_str) = &start_time_str {
             match parse_timestamp_seconds(start_str) {
                 Ok(start_seconds) => {
                     log::info!(
-                        "Export start time: '{}' → {} seconds (UTC)",
+                        "Export start time: '{}' -> {} seconds (UTC)",
                         start_str,
                         start_seconds
                     );
@@ -102,7 +102,7 @@ pub async fn export_command(
             match parse_timestamp_seconds(end_str) {
                 Ok(end_seconds) => {
                     log::info!(
-                        "Export end time: '{}' → {} seconds (UTC)",
+                        "Export end time: '{}' -> {} seconds (UTC)",
                         end_str,
                         end_seconds
                     );
@@ -130,22 +130,8 @@ pub async fn export_command(
 
 /// Core export engine - handles business logic without UI concerns
 ///
-/// MULTI-STAGE EXPORT PIPELINE IMPLEMENTATION:
-///
-/// This function implements a sophisticated multi-stage export pipeline where:
-/// 1. Each pattern represents a "stage" that can export files or generate templates
-/// 2. Stage N can use the export results from Stage N-1 as context for template processing
-/// 3. Each target within a stage gets target-specific filtered context based on its captures
-///
-/// KEY ARCHITECTURAL FEATURES:
-/// - Stage-to-stage handoff: Each stage only sees results from the previous stage (not all previous stages)
-/// - Per-target context filtering: Targets with captures ["A", "B"] only see export data matching that path
-/// - Clear separation: Stage discovery → Context setup → Target processing → Result handoff
-///
-/// EXAMPLE FLOW:
-/// Stage 1: Export parquet files from `/sensors/*.series` → Results: {temp: files, pressure: files}
-/// Stage 2: Process template `/templates/*.tmpl` with captures ["temp"] → Gets only temp-related export context
-///
+/// Processes each pattern independently, exporting matching pond files
+/// to the output directory with optional temporal partitioning.
 async fn export_pond_data(
     ship_context: &ShipContext,
     patterns: &[String],
@@ -159,151 +145,50 @@ async fn export_pond_data(
     // Create output directory
     std::fs::create_dir_all(output_dir)?;
 
-    // Open transaction for all operations with CLI variables
+    // Open transaction for all operations
     let mut ship = ship_context.open_pond().await?;
 
-    // Pass CLI template variables to the transaction
-    let template_variables = ship_context.template_variables.clone();
-
     let mut stx_guard = ship
-        .begin_write(
-            &steward::PondUserMetadata::new(vec!["export".to_string()])
-                .with_vars(template_variables),
-        )
+        .begin_write(&steward::PondUserMetadata::new(vec!["export".to_string()]))
         .await?;
-    let tx_guard = stx_guard.transaction_guard()?;
 
-    // Track results from previous stage to pass as context to next stage
-    let mut previous_stage_results = ExportSet::Empty;
+    // Process each pattern independently
+    for pattern in patterns.iter() {
+        log::info!("[EXPORT] Processing pattern '{}'", pattern);
 
-    // Multi-stage export pipeline: each stage processes a pattern and can use previous stage results
-    for (stage_idx, pattern) in patterns.iter().enumerate() {
+        // Find all files matching this pattern
+        let export_targets = discover_export_targets(&stx_guard, pattern.clone()).await?;
         log::info!(
-            "🎯 STAGE {}: Processing pattern '{}'",
-            stage_idx + 1,
+            "[SEARCH] Found {} targets matching pattern '{}'",
+            export_targets.len(),
             pattern
         );
 
-        // Find all files matching this stage's pattern
-        let export_targets = discover_export_targets(tx_guard, pattern.clone()).await?;
-        log::info!(
-            "🔍 STAGE {}: Found {} targets matching pattern",
-            stage_idx + 1,
-            export_targets.len()
-        );
-
-        // Determine context from previous stage (Stage 1 has no context, Stage 2+ uses previous results)
-        let previous_stage_context = if stage_idx == 0 {
-            None
-        } else {
-            Some(&previous_stage_results)
-        };
-
-        // Add previous stage export data to transaction state for template access
-        if let Some(export_data) = previous_stage_context {
-            let export_json = serde_json::to_value(export_data)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize export data: {}", e))?;
-            let state = tx_guard.state()?;
-            state
-                .add_export_data(export_json.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to add export data: {}", e))?;
-            log::debug!(
-                "� STAGE {}: Made previous stage results available to templates",
-                stage_idx + 1
-            );
-        } else {
-            log::debug!(
-                "� STAGE {}: No previous stage data (first stage)",
-                stage_idx + 1
-            );
-        }
-
-        // Process each individual target found by this stage's pattern
-        let mut current_stage_export_set = ExportSet::Empty;
-
+        // Process each individual target
         for target in export_targets {
             log::debug!(
-                "� STAGE {}: Processing target '{}' (captures: {:?})",
-                stage_idx + 1,
+                "[EXPORT] Processing target '{}' (captures: {:?})",
                 target.pond_path,
                 target.captures
             );
 
-            // FIXED: Create target-specific context filtered by this target's captures
-            // This ensures each target gets the right subset of previous stage data
-            let target_specific_context = if let Some(prev_stage_data) = previous_stage_context {
-                // Filter previous stage data to only include entries matching this target's captures
-                // This allows templates to access only the relevant export data based on pattern matching
-                let filtered_data = prev_stage_data.filter_by_captures(&target.captures);
-
-                // Only provide context if the filtered result is not empty
-                match filtered_data {
-                    ExportSet::Empty => {
-                        log::debug!(
-                            "🔍 STAGE {}: No matching previous stage data for target '{}' with captures {:?}",
-                            stage_idx + 1,
-                            target.pond_path,
-                            target.captures
-                        );
-                        None
-                    }
-                    filtered => {
-                        log::debug!(
-                            "🎯 STAGE {}: Filtered previous stage data for target '{}' using captures {:?}",
-                            stage_idx + 1,
-                            target.pond_path,
-                            target.captures
-                        );
-                        Some(filtered)
-                    }
-                }
-            } else {
-                None
-            };
-
-            // CORE EXPORT: This is where each target gets exported (parquet files, templates, etc.)
-            let (target_metadata, target_schema) = export_target(
-                tx_guard,
+            let (target_metadata, _target_schema) = export_target(
+                &mut stx_guard,
                 &target,
                 output_dir,
                 &temporal_parts,
-                target_specific_context.as_ref(), // Per-target filtered context
                 export_range.clone(),
             )
             .await?;
 
-            // Build ExportSet with this target's specific schema (preserves per-target schemas)
-            let target_export_set =
-                ExportSet::construct_with_schema(target_metadata.clone(), target_schema);
-
-            // Merge this target's results into the stage's accumulated ExportSet
-            current_stage_export_set =
-                merge_export_sets(current_stage_export_set, target_export_set);
-
-            // Also add to summary for reporting (this still needs the old format)
             export_summary.add_export_results(pattern, target_metadata.clone());
 
             log::debug!(
-                "✅ STAGE {}: Target '{}' exported {} files",
-                stage_idx + 1,
+                "[OK] Target '{}' exported {} files",
                 target.pond_path,
                 target_metadata.len()
             );
         }
-
-        // Stage completed - results are already accumulated in current_stage_export_set
-        let stage_result_count = count_export_set_files(&current_stage_export_set);
-        log::info!(
-            "📊 STAGE {}: Completed with {} export results",
-            stage_idx + 1,
-            stage_result_count
-        );
-
-        // FIXED: Pass only current stage results to next stage (not accumulated history)
-        // This ensures Stage N+1 only sees Stage N results, not all previous stages
-        previous_stage_results = current_stage_export_set;
-
-        log::debug!("🔄 STAGE {}: Results ready for next stage", stage_idx + 1);
     }
 
     // Commit transaction
@@ -331,18 +216,18 @@ fn print_export_results(output_dir: &str, export_summary: &ExportSummary) {
     // Count total files (matches original behavior)
     let total_files = count_exported_files(output_dir);
 
-    debug!("📁 Files exported to: {}", output_dir);
+    debug!("[DIR] Files exported to: {}", output_dir);
 
     // Show detailed export results (matches original behavior)
     if !export_summary.pattern_results.is_empty() {
-        debug!("\n📊 Export Context Summary:");
+        debug!("\n[TBL] Export Context Summary:");
         debug!("========================");
-        debug!("📁 Output Directory: {}", output_dir);
-        debug!("📄 Total Files Exported: {}", total_files);
-        debug!("📋 Metadata by Pattern:");
+        debug!("[DIR] Output Directory: {}", output_dir);
+        debug!("[FILE] Total Files Exported: {}", total_files);
+        debug!("[LIST] Metadata by Pattern:");
 
         for (pattern, export_set) in &export_summary.pattern_results {
-            debug!("  🎯 Pattern: {}", pattern);
+            debug!("  [STAGE] Pattern: {}", pattern);
             print_export_set(export_set, "    ");
         }
     } else {
@@ -385,7 +270,7 @@ fn validate_export_inputs(patterns: &[String], output_dir: &str, temporal: &str)
     // Validate temporal partitioning options (skip if empty - used for non-temporal exports)
     if temporal.trim().is_empty() {
         log::debug!("  No temporal partitioning (non-temporal export)");
-        log::debug!("✅ Input validation passed");
+        log::debug!("[OK] Input validation passed");
         log::debug!("  {} patterns to process", patterns.len());
         return Ok(());
     }
@@ -421,7 +306,7 @@ fn validate_export_inputs(patterns: &[String], output_dir: &str, temporal: &str)
         }
     }
 
-    log::debug!("✅ Input validation passed");
+    log::debug!("[OK] Input validation passed");
     log::debug!("  {} patterns to process", patterns.len());
     log::debug!("  {} temporal partition levels", temporal_parts.len());
 
@@ -448,17 +333,17 @@ fn parse_temporal_parts(temporal: &str) -> Vec<String> {
 
 /// Discover all pond files matching the export patterns
 async fn discover_export_targets(
-    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    tx: &steward::Transaction<'_>,
     pattern: String,
 ) -> Result<Vec<ExportTarget>> {
-    let fs = &*tx_guard;
+    let fs = &**tx;
     let root = fs.root().await?;
 
-    log::debug!("🔍 Processing pattern: {}", pattern);
+    log::debug!("[SEARCH] Processing pattern: {}", pattern);
 
     // Use our custom visitor to collect export targets
     let mut visitor = ExportTargetVisitor::new(&pattern);
-    log::debug!("🔍 Starting TinyFS pattern matching for: {}", pattern);
+    log::debug!("[SEARCH] Starting TinyFS pattern matching for: {}", pattern);
     let result = root
         .visit_with_visitor(&pattern, &mut visitor)
         .await
@@ -467,7 +352,7 @@ async fn discover_export_targets(
     match result {
         Ok(targets) => {
             log::debug!(
-                "  ✅ Found {} matches for pattern '{}'",
+                "  [OK] Found {} matches for pattern '{}'",
                 targets.len(),
                 &pattern
             );
@@ -482,7 +367,7 @@ async fn discover_export_targets(
             Ok(targets)
         }
         Err(e) => {
-            log::debug!("  ❌ Pattern '{}' failed: {}", &pattern, e);
+            log::debug!("  [ERR] Pattern '{}' failed: {}", &pattern, e);
             Err(e)
         }
     }
@@ -533,7 +418,7 @@ impl Visitor<ExportTarget> for ExportTargetVisitor {
         let node_id = node.id();
 
         debug!(
-            "🔍 TinyFS visitor called: path={}, node_id={:?}, captures={:?}",
+            "[SEARCH] TinyFS visitor called: path={}, node_id={:?}, captures={:?}",
             pond_path, node_id, captured
         );
 
@@ -566,11 +451,10 @@ impl Visitor<ExportTarget> for ExportTargetVisitor {
 
 /// Export a single file from pond to external directory
 async fn export_target(
-    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     target: &ExportTarget,
     output_dir: &str,
     temporal_parts: &[String],
-    export_set: Option<&ExportSet>, // Template context from previous export stage
     export_range: ExportRange,
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!("Exporting {} ({:?})", target.pond_path, target.file_type);
@@ -601,7 +485,7 @@ async fn export_target(
         | EntryType::TableDynamic
         | EntryType::TablePhysicalVersion => {
             export_queryable_file(
-                tx_guard,
+                tx,
                 target,
                 output_path.to_str().expect("utf8"),
                 temporal_parts,
@@ -611,14 +495,7 @@ async fn export_target(
             .await
         }
         EntryType::FilePhysicalVersion | EntryType::FileDynamic => {
-            export_raw_file(
-                tx_guard,
-                target,
-                output_path.to_str().expect("utf8"),
-                output_dir,
-                export_set,
-            )
-            .await
+            export_raw_file(tx, target, output_path.to_str().expect("utf8"), output_dir).await
         }
         _ => Err(anyhow::anyhow!(
             "Unsupported file type: {:?}. Supported types: FileSeries, FileTable, FileData",
@@ -632,7 +509,7 @@ async fn export_target(
 
 /// Export queryable files (FileSeries/FileTable) with DataFusion and temporal partitioning
 async fn export_queryable_file(
-    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     target: &ExportTarget,
     output_file_path: &str,
     temporal_parts: &[String],
@@ -640,11 +517,11 @@ async fn export_queryable_file(
     export_range: ExportRange,
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     log::debug!(
-        "🔍 export_queryable_file START: target={}, output_path={}",
+        "[SEARCH] export_queryable_file START: target={}, output_path={}",
         target.pond_path,
         output_file_path
     );
-    let root = tx_guard.root().await?;
+    let root = tx.root().await?;
 
     // Build SQL query with temporal partitioning columns
     let temporal_columns = temporal_parts
@@ -670,23 +547,23 @@ async fn export_queryable_file(
             .as_nanos()
     );
 
-    // Build user-visible SQL query (using "series" name)
+    // Build user-visible SQL query (using "source" name)
     let user_sql_query = if temporal_columns.is_empty() {
-        "SELECT * FROM series".to_string()
+        "SELECT * FROM source".to_string()
     } else {
-        format!("SELECT *, {} FROM series", temporal_columns)
+        format!("SELECT *, {} FROM source", temporal_columns)
     };
 
     // Translate user query to use unique table name
-    let sql_query = user_sql_query.replace("series", &unique_table_name);
+    let sql_query = user_sql_query.replace("source", &unique_table_name);
 
-    log::debug!("🔍 User query: {}", user_sql_query);
-    log::debug!("🔍 Executing translated query: {}", sql_query);
-    log::debug!("🔍 Unique table name: {}", unique_table_name);
+    log::debug!("[SEARCH] User query: {}", user_sql_query);
+    log::debug!("[SEARCH] Executing translated query: {}", sql_query);
+    log::debug!("[SEARCH] Unique table name: {}", unique_table_name);
 
     // Execute direct COPY query with partitioning - no need for MemTable!
     let export_path = std::path::Path::new(output_file_path);
-    log::debug!("  📂 Exporting to: {}", export_path.display());
+    log::debug!("  [DIR] Exporting to: {}", export_path.display());
 
     // Create output directory
     std::fs::create_dir_all(export_path).map_err(|e| {
@@ -704,13 +581,14 @@ async fn export_queryable_file(
         &unique_table_name,
         export_path,
         temporal_parts,
-        tx_guard,
+        &tx.provider_context()
+            .map_err(|e| anyhow::anyhow!("Failed to get provider context: {}", e))?,
         export_range,
     )
     .await?;
 
     log::debug!(
-        "  ✅ Successfully exported {} rows to {}",
+        "  [OK] Successfully exported {} rows to {}",
         total_rows,
         export_path.display()
     );
@@ -721,7 +599,7 @@ async fn export_queryable_file(
     let base_output_path = std::path::Path::new(base_output_dir);
     let exported_files = discover_exported_files(export_path, base_output_path)?;
     log::debug!(
-        "📄 Discovered {} exported files for {}",
+        "[FILE] Discovered {} exported files for {}",
         exported_files.len(),
         target.output_name
     );
@@ -735,14 +613,14 @@ async fn export_queryable_file(
         )
     })?;
     log::debug!(
-        "📊 Read schema with {} fields from exported parquet files",
+        "[TBL] Read schema with {} fields from exported parquet files",
         schema.fields.len()
     );
 
     // Create ExportOutput entries for each discovered file
     let mut results = Vec::new();
     for file_info in exported_files {
-        log::debug!("📄 Adding exported file: {}", file_info.file.display());
+        log::debug!("[FILE] Adding exported file: {}", file_info.file.display());
         results.push((target.captures.clone(), file_info));
     }
 
@@ -764,29 +642,26 @@ async fn execute_direct_copy_query(
     unique_table_name: &str,
     export_path: &std::path::Path,
     temporal_parts: &[String],
-    tx: &mut tlogfs::TransactionGuard<'_>,
+    provider_context: &tinyfs::ProviderContext,
     export_range: ExportRange,
 ) -> Result<usize> {
     use tinyfs::Lookup;
 
     log::debug!(
-        "🔍 execute_direct_copy_query START: pond_path={}, table_name={}, export_path={}",
+        "[SEARCH] execute_direct_copy_query START: pond_path={}, table_name={}, export_path={}",
         pond_path,
         unique_table_name,
         export_path.display()
     );
 
-    // Get SessionContext from transaction
-    let ctx = tx
-        .session_context()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get session context: {}", e))?;
+    // Get SessionContext from provider context
+    let ctx = &provider_context.datafusion_session;
     log::debug!(
-        "🔍 EXPORT: Got SessionContext {:p} for pond_path={}",
-        std::sync::Arc::as_ptr(&ctx),
+        "[SEARCH] EXPORT: Got SessionContext {:p} for pond_path={}",
+        std::sync::Arc::as_ptr(ctx),
         pond_path
     );
-    log::debug!("🔍 Got session context");
+    log::debug!("[SEARCH] Got session context");
 
     // Register the file as a table (same logic as execute_sql_on_file_with_table_name)
     let (_, lookup_result) = tinyfs_wd
@@ -820,10 +695,8 @@ async fn execute_direct_copy_query(
                     let queryable_file = file_guard.as_queryable();
 
                     if let Some(queryable_file) = queryable_file {
-                        let state = tx.state()?;
-                        let provider_context = state.as_provider_context();
                         let table_provider = queryable_file
-                            .as_table_provider(node_id, &provider_context)
+                            .as_table_provider(node_id, provider_context)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to get table provider: {}", e))?;
 
@@ -843,7 +716,7 @@ async fn execute_direct_copy_query(
                         // RESTORED: Schema validation for non-nullable timestamps
                         let schema = table_provider.schema();
                         log::debug!(
-                            "🔍 SCHEMA VALIDATION for '{}': Schema has {} fields",
+                            "[SEARCH] SCHEMA VALIDATION for '{}': Schema has {} fields",
                             pond_path,
                             schema.fields().len()
                         );
@@ -851,7 +724,7 @@ async fn execute_direct_copy_query(
                         // Log all field information for debugging
                         for (i, field) in schema.fields().iter().enumerate() {
                             log::debug!(
-                                "🔍   Field {}: name='{}', data_type={:?}, nullable={}",
+                                "[SEARCH]   Field {}: name='{}', data_type={:?}, nullable={}",
                                 i,
                                 field.name(),
                                 field.data_type(),
@@ -861,14 +734,14 @@ async fn execute_direct_copy_query(
 
                         if let Ok(timestamp_field) = schema.field_with_name("timestamp") {
                             log::debug!(
-                                "🔍 TIMESTAMP FIELD: name='{}', data_type={:?}, nullable={}",
+                                "[SEARCH] TIMESTAMP FIELD: name='{}', data_type={:?}, nullable={}",
                                 timestamp_field.name(),
                                 timestamp_field.data_type(),
                                 timestamp_field.is_nullable()
                             );
 
                             if timestamp_field.is_nullable() {
-                                log::error!("❌ NULLABLE TIMESTAMP DETECTED in '{}'", pond_path);
+                                log::error!("[ERR] NULLABLE TIMESTAMP DETECTED in '{}'", pond_path);
                                 return Err(anyhow::anyhow!(
                                     "FileSeries schema violation in '{}': timestamp column is nullable. \
                                     FileSeries must have non-nullable timestamp columns for temporal partitioning. \
@@ -878,10 +751,10 @@ async fn execute_direct_copy_query(
                                 ));
                             }
                             log::debug!(
-                                "✅ Timestamp column is non-nullable - schema validation passed"
+                                "[OK] Timestamp column is non-nullable - schema validation passed"
                             );
                         } else {
-                            log::error!("❌ NO TIMESTAMP COLUMN found in '{}'", pond_path);
+                            log::error!("[ERR] NO TIMESTAMP COLUMN found in '{}'", pond_path);
                             return Err(anyhow::anyhow!(
                                 "FileSeries schema error in '{}': no timestamp column found",
                                 pond_path
@@ -909,7 +782,7 @@ async fn execute_direct_copy_query(
                     }
 
                     // Build COPY command with subquery - no MemTable needed!
-                    let mut translated_query = user_sql_query.replace("series", unique_table_name);
+                    let mut translated_query = user_sql_query.replace("source", unique_table_name);
 
                     // Add temporal filtering WHERE clauses if time ranges are specified
                     if export_range.start_seconds.is_some() || export_range.end_seconds.is_some() {
@@ -919,7 +792,7 @@ async fn execute_direct_copy_query(
                             where_clauses
                                 .push(format!("timestamp >= CAST({} AS TIMESTAMP)", start_seconds));
                             log::debug!(
-                                "  🕐 Adding start time filter: timestamp >= CAST({} AS TIMESTAMP)",
+                                "  [TIME] Adding start time filter: timestamp >= CAST({} AS TIMESTAMP)",
                                 start_seconds
                             );
                         }
@@ -928,7 +801,7 @@ async fn execute_direct_copy_query(
                             where_clauses
                                 .push(format!("timestamp <= CAST({} AS TIMESTAMP)", end_seconds));
                             log::debug!(
-                                "  🕐 Adding end time filter: timestamp <= CAST({} AS TIMESTAMP)",
+                                "  [TIME] Adding end time filter: timestamp <= CAST({} AS TIMESTAMP)",
                                 end_seconds
                             );
                         }
@@ -960,7 +833,7 @@ async fn execute_direct_copy_query(
                             }
                         }
 
-                        log::debug!("  📊 Temporal filtered query: {}", translated_query);
+                        log::debug!("  [TBL] Temporal filtered query: {}", translated_query);
                     }
 
                     let mut copy_sql = format!(
@@ -975,7 +848,7 @@ async fn execute_direct_copy_query(
                             .push_str(&format!(" PARTITIONED BY ({})", temporal_parts.join(", ")));
                     }
 
-                    log::debug!("  🚀 Executing direct COPY: {}", copy_sql);
+                    log::debug!("  [GO] Executing direct COPY: {}", copy_sql);
 
                     // Execute the COPY command directly
                     let df = ctx
@@ -990,9 +863,13 @@ async fn execute_direct_copy_query(
                     // Extract row count from results
                     let total_rows: usize = results.iter().map(|batch| batch.num_rows()).sum();
                     log::debug!(
-                        "    ✅ DataFusion direct COPY completed: {} total rows exported",
+                        "    [OK] DataFusion direct COPY completed: {} total rows exported",
                         total_rows
                     );
+
+                    // Deregister the table to prevent stale bindings
+                    let _ = ctx
+                        .deregister_table(datafusion::sql::TableReference::bare(unique_table_name));
 
                     Ok(total_rows)
                 }
@@ -1008,18 +885,17 @@ async fn execute_direct_copy_query(
 
 /// Export raw data files (FileData) without temporal partitioning
 async fn export_raw_file(
-    tx_guard: &mut tlogfs::TransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     target: &ExportTarget,
     output_file_path: &str,
     base_output_dir: &str,
-    _export_set: Option<&ExportSet>, // Template context (unused for raw files)
 ) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
     use tokio::io::AsyncReadExt;
 
     let output_path = std::path::Path::new(output_file_path);
 
     // Read file content from pond
-    let data_wd = tx_guard.root().await?;
+    let data_wd = tx.root().await?;
     let (_parent_wd, lookup_result) = data_wd.resolve_path(&target.pond_path).await?;
 
     match lookup_result {
@@ -1031,7 +907,7 @@ async fn export_raw_file(
 
                 // Export as raw data
                 std::fs::write(output_path, &content)?;
-                log::debug!("  💾 Exported raw data: {}", output_path.display());
+                log::debug!("  [SAVE] Exported raw data: {}", output_path.display());
 
                 // Try to discover any temporal information from the output path structure
                 // Compute relative path from base output directory to include captures

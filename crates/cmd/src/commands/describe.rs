@@ -46,7 +46,7 @@ where
 
 /// Describe a provider URL (e.g., "oteljson:///otel/file.json" or "excelhtml:///data/*.htm")
 async fn describe_provider_url(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     _ship_context: &ShipContext,
     url: &str,
 ) -> Result<String> {
@@ -109,7 +109,7 @@ async fn describe_provider_url(
 
         for field_info in &schema_info.fields {
             output.push_str(&format!(
-                "  • {}: {}\n",
+                "  * {}: {}\n",
                 field_info.name, field_info.data_type
             ));
         }
@@ -124,7 +124,7 @@ async fn describe_provider_url(
 
 /// Implementation of describe command
 async fn describe_command_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     ship_context: &ShipContext,
     pattern: &str,
 ) -> Result<String> {
@@ -159,7 +159,7 @@ async fn describe_command_impl(
     output.push_str(&format!("Files found: {}\n\n", files.len()));
 
     for file_info in files {
-        output.push_str(&format!("📄 {}\n", file_info.path));
+        output.push_str(&format!("[FILE] {}\n", file_info.path));
         output.push_str(&format!("   Type: {:?}\n", file_info.metadata.entry_type));
 
         match file_info.metadata.entry_type {
@@ -171,7 +171,7 @@ async fn describe_command_impl(
                             .push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
                         for field_info in schema_info.fields {
                             output.push_str(&format!(
-                                "     • {}: {}\n",
+                                "     * {}: {}\n",
                                 field_info.name, field_info.data_type
                             ));
                         }
@@ -262,7 +262,7 @@ async fn describe_command_impl(
                             .push_str(&format!("   Schema: {} fields\n", schema_info.field_count));
                         for field_info in schema_info.fields {
                             output.push_str(&format!(
-                                "     • {}: {}\n",
+                                "     * {}: {}\n",
                                 field_info.name, field_info.data_type
                             ));
                         }
@@ -343,15 +343,14 @@ async fn describe_file_series_schema(ship_context: &ShipContext, path: &str) -> 
 
 /// Implementation of file series schema description
 async fn describe_file_series_schema_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     path: &str,
 ) -> Result<SchemaInfo> {
     let fs = &**tx;
     let root = fs.root().await?;
 
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let state = tx.transaction_guard()?.state()?;
-    let schema = tlogfs::get_file_schema(&root, path, &state)
+    let schema = tlogfs::get_file_schema(&root, path, &tx.provider_context()?)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
 
@@ -378,15 +377,14 @@ async fn describe_file_table_schema(ship_context: &ShipContext, path: &str) -> R
 
 /// Implementation of file table schema description
 async fn describe_file_table_schema_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     path: &str,
 ) -> Result<SchemaInfo> {
     let fs = &**tx;
     let root = fs.root().await?;
 
     // Use tlogfs get_file_schema API - works for both static and dynamic files
-    let state = tx.transaction_guard()?.state()?;
-    let schema = tlogfs::get_file_schema(&root, path, &state)
+    let schema = tlogfs::get_file_schema(&root, path, &tx.provider_context()?)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get schema for '{}': {}", path, e))?;
 
@@ -440,7 +438,7 @@ pub struct VersionStats {
 
 /// Get detailed statistics for all versions of a file series
 async fn describe_file_series_versions(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     path: &str,
 ) -> Result<Vec<VersionStats>> {
     let fs = &**tx;
@@ -465,12 +463,9 @@ async fn describe_file_series_versions(
 
     let mut version_stats = Vec::new();
 
-    // Get state and session context for querying
-    let state = tx.transaction_guard()?.state()?;
+    // Get session context and provider context for querying
+    let provider_context = tx.provider_context()?;
     let session_ctx = tx.session_context().await?;
-
-    // Get ProviderContext from state
-    let provider_context = state.as_provider_context();
 
     for version_info in versions {
         // Create table provider for this specific version
@@ -673,8 +668,9 @@ mod tests {
             // Initialize the pond using init_command
             let ship_context = ShipContext {
                 pond_path: Some(pond_path.clone()),
+                host_root: None,
+                mount_specs: Vec::new(),
                 original_args: vec!["pond".to_string(), "init".to_string()],
-                template_variables: std::collections::HashMap::new(),
             };
             init_command(&ship_context, None, None).await?;
 
@@ -733,28 +729,19 @@ mod tests {
             // Write directly to pond using transact
             let pond_path = pond_path.to_string();
             let mut ship = self.ship_context.open_pond().await?;
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec!["test".to_string()]),
-                |_tx, fs| {
-                    let batch = batch.clone();
-                    let pond_path = pond_path.clone();
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        root.create_table_from_batch(
-                            &pond_path,
-                            &batch,
-                            tinyfs::EntryType::TablePhysicalVersion,
-                        )
-                        .await
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                    root.create_table_from_batch(
+                        &pond_path,
+                        &batch,
+                        tinyfs::EntryType::TablePhysicalVersion,
+                    )
+                    .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await?;
@@ -803,25 +790,16 @@ mod tests {
             // Write directly to pond using transact
             let pond_path = pond_path.to_string();
             let mut ship = self.ship_context.open_pond().await?;
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec!["test".to_string()]),
-                |_tx, fs| {
-                    let batch = batch.clone();
-                    let pond_path = pond_path.clone();
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async |fs| {
+                    let root = fs.root().await?;
 
-                        let _ = root
-                            .create_series_from_batch(&pond_path, &batch, Some("timestamp"))
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                    let _ = root
+                        .create_series_from_batch(&pond_path, &batch, Some("timestamp"))
+                        .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await?;
@@ -834,9 +812,8 @@ mod tests {
             let host_file = self.create_host_file("temp.txt", content).await?;
             copy_command(
                 &self.ship_context,
-                &[host_file.to_string_lossy().to_string()],
+                &[format!("host:///{}", host_file.display())],
                 pond_path,
-                "data",
                 &CopyOptions::default(),
             )
             .await?;
@@ -876,11 +853,11 @@ mod tests {
 
         let output = setup.describe_output("users.parquet").await?;
 
-        assert!(output.contains("📄 /users.parquet"));
+        assert!(output.contains("[FILE] /users.parquet"));
         assert!(output.contains("Type: TablePhysicalVersion"));
         let output = setup.describe_output("users.parquet").await?;
 
-        assert!(output.contains("📄 /users.parquet"));
+        assert!(output.contains("[FILE] /users.parquet"));
         assert!(output.contains("Type: TablePhysicalVersion"));
         assert!(output.contains("Format: Parquet table"));
         // Schema parsing might fail in tests, so be more flexible
@@ -902,7 +879,7 @@ mod tests {
 
         let output = setup.describe_output("sensors.parquet").await?;
 
-        assert!(output.contains("📄 /sensors.parquet"));
+        assert!(output.contains("[FILE] /sensors.parquet"));
         assert!(output.contains("Type: TablePhysicalSeries"));
         assert!(output.contains("Format: Parquet series"));
         // Schema parsing might fail in tests, so be more flexible
@@ -929,9 +906,9 @@ mod tests {
         let output = setup.describe_output("**/*").await?;
 
         assert!(output.contains("Files found: 3"));
-        assert!(output.contains("📄 /readme.txt"));
-        assert!(output.contains("📄 /series1.parquet"));
-        assert!(output.contains("📄 /table1.parquet"));
+        assert!(output.contains("[FILE] /readme.txt"));
+        assert!(output.contains("[FILE] /series1.parquet"));
+        assert!(output.contains("[FILE] /table1.parquet"));
 
         // Check that different types are described correctly
         assert!(output.contains("Type: TablePhysicalVersion"));

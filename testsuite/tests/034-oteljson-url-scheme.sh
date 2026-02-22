@@ -40,7 +40,7 @@ echo ""
 echo "=== Copying OtelJSON file into pond as raw data ==="
 
 pond mkdir -p /ingest
-pond copy host:///var/log/testapp/metrics.json /ingest/metrics.json --format=data
+pond copy host:///var/log/testapp/metrics.json /ingest/metrics.json
 
 echo "✓ Stored as data entry type"
 pond describe /ingest/metrics.json

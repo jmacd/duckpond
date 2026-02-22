@@ -17,7 +17,7 @@ use tinyfs::{EntryType, FileID, NodeID, PartID};
 /// Extended attributes - immutable metadata set at file creation
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ExtendedAttributes {
-    /// Simple key → String value mapping
+    /// Simple key -> String value mapping
     pub attributes: HashMap<String, String>,
 }
 
@@ -764,10 +764,10 @@ impl OplogEntry {
     ///
     /// | Entry Type            | Verification                                     |
     /// |-----------------------|--------------------------------------------------|
-    /// | FilePhysicalVersion   | `blake3(content) == stored_blake3` ✓            |
+    /// | FilePhysicalVersion   | `blake3(content) == stored_blake3` [OK]            |
     /// | FilePhysicalSeries    | **SKIPPED** - see below                          |
-    /// | TablePhysicalVersion  | `blake3(content) == stored_blake3` ✓            |
-    /// | TablePhysicalSeries   | `blake3(content) == stored_blake3` ✓            |
+    /// | TablePhysicalVersion  | `blake3(content) == stored_blake3` [OK]            |
+    /// | TablePhysicalSeries   | `blake3(content) == stored_blake3` [OK]            |
     /// | DirectoryPhysical     | None stored - returns content directly           |
     /// | Symlink               | None stored - returns content directly           |
     ///

@@ -6,9 +6,9 @@
 //!
 //! Given a set of resolutions (from a temporal-reduce factory) and display
 //! parameters (target pixel width), computes the right temporal partition
-//! level for each resolution so that the ≤ 2 file invariant holds.
+//! level for each resolution so that the <= 2 file invariant holds.
 //!
-//! # The ≤ 2 File Invariant
+//! # The <= 2 File Invariant
 //!
 //! For any viewport width, the chart viewer picks the finest resolution
 //! where at most 2 parquet files cover the visible time range.  This
@@ -20,25 +20,25 @@
 //! For each resolution `R` (a duration like 1h, 6h, 24h):
 //!
 //! 1. The maximum viewport width where `R` is appropriate is
-//!    `max_viewport = R × target_points`.  Beyond this, the resolution
-//!    produces more points than the screen has pixels — the viewer will
+//!    `max_viewport = R x target_points`.  Beyond this, the resolution
+//!    produces more points than the screen has pixels -- the viewer will
 //!    switch to a coarser resolution.
 //!
-//! 2. For ≤ 2 files: `partition_width ≥ max_viewport / 2`.
+//! 2. For <= 2 files: `partition_width >= max_viewport / 2`.
 //!
 //! 3. Quantize upward to the nearest standard temporal partition level
 //!    (minute, hour, day, month, quarter, year).
 //!
 //! The coarsest resolution's partition must accommodate `max_width` (the
-//! widest possible viewport — typically the full data span).
+//! widest possible viewport -- typically the full data span).
 
 use std::collections::BTreeMap;
 
 /// Display parameters that drive partition computation.
 #[derive(Debug, Clone)]
 pub struct DisplayConfig {
-    /// Target number of data points per screen width (≈ pixels).
-    /// Typical value: 1000–2000.
+    /// Target number of data points per screen width (~= pixels).
+    /// Typical value: 1000-2000.
     pub target_points: u64,
 }
 
@@ -74,10 +74,10 @@ pub struct ResolutionPartition {
 ///
 /// # Arguments
 ///
-/// * `resolutions` — Resolution strings from the temporal-reduce config
+/// * `resolutions` -- Resolution strings from the temporal-reduce config
 ///   (e.g., `["1h", "2h", "4h", "12h", "24h"]`)
-/// * `display` — Display parameters (target_points)
-/// * `max_width_secs` — Maximum viewport width in seconds (typically the
+/// * `display` -- Display parameters (target_points)
+/// * `max_width_secs` -- Maximum viewport width in seconds (typically the
 ///   data span, or a configured maximum)
 pub fn compute_partitions(
     resolutions: &[String],
@@ -106,7 +106,7 @@ pub fn compute_partitions(
         // Beyond this, it produces more points than target_points.
         //
         // For the coarsest resolution (last), use max_width_secs as the
-        // upper bound — it must handle the widest possible view.
+        // upper bound -- it must handle the widest possible view.
         let max_viewport = if i == parsed.len() - 1 {
             // Coarsest resolution: must handle max_width
             max_width_secs.max(res_secs * tp)
@@ -116,7 +116,7 @@ pub fn compute_partitions(
             res_secs * tp
         };
 
-        // For ≤ 2 files: partition_width >= max_viewport / 2
+        // For <= 2 files: partition_width >= max_viewport / 2
         let min_partition_width = max_viewport / 2;
 
         // Quantize upward to standard temporal partition level
@@ -137,14 +137,14 @@ pub fn compute_partitions(
         );
     }
 
-    // Check coarsest resolution can handle max_width in ≤ 2 files
+    // Check coarsest resolution can handle max_width in <= 2 files
     if let Some((coarsest_str, _)) = parsed.last()
         && let Some(plan) = result.get(coarsest_str)
         && plan.partition_width_secs * 2 < max_width_secs
     {
         warnings.push(format!(
             "Coarsest resolution '{}' with partition {:?} ({}s) cannot cover \
-                     max_width ({}s) in ≤ 2 files. Consider adding a coarser resolution.",
+                     max_width ({}s) in <= 2 files. Consider adding a coarser resolution.",
             coarsest_str, plan.temporal, plan.partition_width_secs, max_width_secs,
         ));
     }
@@ -177,12 +177,12 @@ fn quantize_partition(min_width_secs: u64) -> (Vec<String>, u64) {
     // The temporal keys are the coarsest level plus all parent levels.
     //
     // Temporal hierarchy (DataFusion PARTITIONED BY):
-    //   ["year"]                    → one file per year  (31.5M sec)
-    //   ["year", "quarter"]        → one file per quarter (7.8M sec)
-    //   ["year", "month"]          → one file per month   (2.6M sec)
-    //   ["year", "month", "day"]   → one file per day     (86.4K sec)
-    //   ["year", "month", "day", "hour"]   → one file per hour (3.6K sec)
-    //   ["year", "month", "day", "hour", "minute"] → per minute (60 sec)
+    //   ["year"]                    -> one file per year  (31.5M sec)
+    //   ["year", "quarter"]        -> one file per quarter (7.8M sec)
+    //   ["year", "month"]          -> one file per month   (2.6M sec)
+    //   ["year", "month", "day"]   -> one file per day     (86.4K sec)
+    //   ["year", "month", "day", "hour"]   -> one file per hour (3.6K sec)
+    //   ["year", "month", "day", "hour", "minute"] -> per minute (60 sec)
 
     // Partition specs with their approximate widths, from finest to coarsest
     let specs: &[(Vec<&str>, u64)] = &[
@@ -200,7 +200,7 @@ fn quantize_partition(min_width_secs: u64) -> (Vec<String>, u64) {
         }
     }
 
-    // Nothing wide enough — use year (coarsest available)
+    // Nothing wide enough -- use year (coarsest available)
     (vec!["year".to_string()], 31_536_000)
 }
 
@@ -308,7 +308,7 @@ fn format_duration_secs(secs: u64) -> String {
     }
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+// --- Tests -------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_quantize_partition() {
-        // 30 seconds → minute (60s)
+        // 30 seconds -> minute (60s)
         assert_eq!(
             quantize_partition(30),
             (
@@ -338,7 +338,7 @@ mod tests {
             )
         );
 
-        // 1800 seconds (30 min) → hour (3600s)
+        // 1800 seconds (30 min) -> hour (3600s)
         assert_eq!(
             quantize_partition(1800),
             (
@@ -350,7 +350,7 @@ mod tests {
             )
         );
 
-        // 43200 seconds (12h) → day (86400s)
+        // 43200 seconds (12h) -> day (86400s)
         assert_eq!(
             quantize_partition(43200),
             (
@@ -362,7 +362,7 @@ mod tests {
             )
         );
 
-        // 1_000_000 seconds (~11.5 days) → month (2.6M s)
+        // 1_000_000 seconds (~11.5 days) -> month (2.6M s)
         assert_eq!(
             quantize_partition(1_000_000),
             (
@@ -374,7 +374,7 @@ mod tests {
             )
         );
 
-        // 5_000_000 seconds (~58 days) → quarter (7.8M s)
+        // 5_000_000 seconds (~58 days) -> quarter (7.8M s)
         assert_eq!(
             quantize_partition(5_000_000),
             (
@@ -386,7 +386,7 @@ mod tests {
             )
         );
 
-        // 10_000_000 seconds (~116 days) → year (31.5M s)
+        // 10_000_000 seconds (~116 days) -> year (31.5M s)
         assert_eq!(
             quantize_partition(10_000_000),
             (
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(partitions.len(), 5);
 
         // 1h: max_viewport = 3600 * 1500 = 5,400,000s (~62.5 days)
-        //     min_partition = 2,700,000s → month (2,592,000)... but that's < 2.7M
+        //     min_partition = 2,700,000s -> month (2,592,000)... but that's < 2.7M
         //     so it goes to quarter (7,776,000)
         let p1h = &partitions["1h"];
         println!(
@@ -431,7 +431,7 @@ mod tests {
 
         // 24h (coarsest): must handle 1 year
         //   max_viewport = max(365*86400, 86400*1500) = max(31.5M, 129.6M) = 129.6M
-        //   min_partition = 64.8M → year (31.5M)... but 31.5M < 64.8M!
+        //   min_partition = 64.8M -> year (31.5M)... but 31.5M < 64.8M!
         //   year is the coarsest we have, so it picks year.
         //   Warning should fire: 2*31.5M = 63M < 129.6M
         let p24h = &partitions["24h"];
@@ -483,10 +483,10 @@ mod tests {
         }
         println!("Warnings: {:?}", warnings);
 
-        // 1h with 44 days: max_viewport = 3600*1500 = 5.4M sec, min_partition = 2.7M → quarter
-        // 6h: max_viewport = 21600*1500 = 32.4M → min_partition = 16.2M → year
+        // 1h with 44 days: max_viewport = 3600*1500 = 5.4M sec, min_partition = 2.7M -> quarter
+        // 6h: max_viewport = 21600*1500 = 32.4M -> min_partition = 16.2M -> year
         // 1d (coarsest): max(44*86400, 86400*1500) = max(3.8M, 129.6M) = 129.6M
-        //   min_partition = 64.8M → year
+        //   min_partition = 64.8M -> year
         assert_eq!(partitions.len(), 3);
     }
 
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_validate_resolutions() {
-        // 5 years of data with only 1h and 24h — big gap
+        // 5 years of data with only 1h and 24h -- big gap
         let resolutions = vec!["1h".to_string(), "24h".to_string()];
         let display = DisplayConfig {
             target_points: 1500,

@@ -9,7 +9,6 @@
 
 use crate::{FileID, PersistenceLayer};
 use datafusion::execution::context::SessionContext;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Result type for tinyfs context operations
@@ -19,7 +18,6 @@ pub type Result<T> = std::result::Result<T, crate::Error>;
 ///
 /// This struct provides factories with:
 /// - Direct access to DataFusion SessionContext for SQL execution
-/// - Template variable management for CLI expansion  
 /// - Table provider caching for performance optimization
 /// - tinyfs Persistence layer for creating transaction guards
 ///
@@ -29,12 +27,12 @@ pub struct ProviderContext {
     /// DataFusion session for SQL execution (direct access, no async needed)
     pub datafusion_session: Arc<SessionContext>,
 
-    /// Template variables for Tera CLI expansion
-    pub template_variables: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
-
     /// Table provider cache for performance
-    pub table_provider_cache:
-        Arc<std::sync::Mutex<HashMap<String, Arc<dyn datafusion::catalog::TableProvider>>>>,
+    pub table_provider_cache: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, Arc<dyn datafusion::catalog::TableProvider>>,
+        >,
+    >,
 
     /// TinyFS persistence layer for transaction management
     pub persistence: Arc<dyn PersistenceLayer>,
@@ -44,32 +42,13 @@ impl ProviderContext {
     /// Create a new provider context from concrete values
     pub fn new(
         datafusion_session: Arc<SessionContext>,
-        template_variables: HashMap<String, serde_json::Value>,
         persistence: Arc<dyn PersistenceLayer>,
     ) -> Self {
         Self {
             datafusion_session,
-            template_variables: Arc::new(std::sync::Mutex::new(template_variables)),
-            table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            table_provider_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             persistence,
         }
-    }
-
-    /// Get template variables snapshot
-    pub fn get_template_variables(&self) -> Result<HashMap<String, serde_json::Value>> {
-        self.template_variables
-            .lock()
-            .map(|guard| guard.clone())
-            .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))
-    }
-
-    /// Set template variables
-    pub fn set_template_variables(&self, vars: HashMap<String, serde_json::Value>) -> Result<()> {
-        *self
-            .template_variables
-            .lock()
-            .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))? = vars;
-        Ok(())
     }
 
     /// Get cached TableProvider by cache key
@@ -129,15 +108,10 @@ impl ProviderContext {
     /// let context = ProviderContext::new_for_testing(persistence);
     /// ```
     pub fn new_for_testing(persistence: Arc<dyn PersistenceLayer>) -> Self {
-        use std::collections::HashMap;
-
         // Create default DataFusion session
         let datafusion_session = Arc::new(SessionContext::new());
 
-        // Empty template variables (tests don't typically need CLI expansion)
-        let template_variables = HashMap::new();
-
-        Self::new(datafusion_session, template_variables, persistence)
+        Self::new(datafusion_session, persistence)
     }
 }
 
@@ -240,7 +214,6 @@ mod tests {
     use crate::ProviderContext;
     use crate::memory::persistence::MemoryPersistence;
     use datafusion::execution::context::SessionContext;
-    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -249,7 +222,7 @@ mod tests {
         // Create a provider context with memory persistence
         let persistence = MemoryPersistence::default();
         let session = Arc::new(SessionContext::new());
-        let context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
+        let context = ProviderContext::new(session, Arc::new(persistence));
 
         // Begin a transaction using the guard pattern
         let guard = context
@@ -276,7 +249,7 @@ mod tests {
         // Create a provider context
         let persistence = MemoryPersistence::default();
         let session = Arc::new(SessionContext::new());
-        let context = ProviderContext::new(session, HashMap::new(), Arc::new(persistence));
+        let context = ProviderContext::new(session, Arc::new(persistence));
 
         // Get filesystem directly (no guard - for cases where guard isn't needed)
         let fs = context.filesystem();

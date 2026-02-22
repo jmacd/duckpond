@@ -88,7 +88,7 @@ async fn test_parquet_file_size_estimation() -> Result<(), Box<dyn std::error::E
         assert_eq!(large_data.len(), read_data.len());
 
         if file_size >= LARGE_FILE_THRESHOLD {
-            debug!("🎯 Found a dataset size that triggers large file storage!");
+            debug!("[STAGE] Found a dataset size that triggers large file storage!");
             break;
         }
     }
@@ -123,7 +123,7 @@ async fn test_guaranteed_large_parquet_file() -> Result<(), Box<dyn std::error::
     let content = wd.read_file_path_to_vec(test_path).await?;
     let file_size = content.len();
 
-    debug!("🎯 GUARANTEED LARGE FILE TEST");
+    debug!("[STAGE] GUARANTEED LARGE FILE TEST");
     debug!("Dataset size: {} records", record_count);
     debug!(
         "Parquet file size: {} bytes ({:.2} KiB)",
@@ -157,7 +157,7 @@ async fn test_guaranteed_large_parquet_file() -> Result<(), Box<dyn std::error::
     assert_eq!(large_data[10000], read_data[10000]);
     assert_eq!(large_data[19999], read_data[19999]);
 
-    debug!("✅ Large Parquet file test successful!");
+    debug!("[OK] Large Parquet file test successful!");
     debug!(
         "   Large file storage working correctly with {} KiB file",
         file_size / 1024

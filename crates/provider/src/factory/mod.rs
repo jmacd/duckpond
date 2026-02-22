@@ -7,7 +7,6 @@ pub mod dynamic_dir;
 pub mod logfile_ingest;
 pub mod sql_derived;
 pub mod synthetic_timeseries;
-pub mod template;
 pub mod temporal_reduce;
 pub mod test_factory;
 pub mod timeseries_join;

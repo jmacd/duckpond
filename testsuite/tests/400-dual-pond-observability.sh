@@ -65,8 +65,8 @@ if pond mknod logfile-ingest /etc/system.d/20-logs --config-path /tmp/logfile-in
 else
     echo "⚠ logfile-ingest factory not available - trying manual copy"
     # Fallback: manually copy the log file
-    pond copy /var/log/duckpond/app.json /logs/app.json
-    echo "✓ Manually copied logs"
+    pond copy host:///var/log/duckpond/app.json /logs/app.json
+    echo "OK: Manually copied logs"
 fi
 
 #############################
@@ -125,7 +125,7 @@ cat > /tmp/observation.json << EOF
 }
 EOF
 
-POND=/pond2 pond copy /tmp/observation.json /observations/pond1-status.json
+POND=/pond2 pond copy host:///tmp/observation.json /observations/pond1-status.json
 echo "✓ Stored observation"
 
 #############################

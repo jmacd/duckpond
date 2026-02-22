@@ -19,9 +19,6 @@ pub mod show;
 pub mod temporal;
 
 #[cfg(test)]
-mod template_test;
-
-#[cfg(test)]
 mod replicate_test_simple;
 
 pub use cat::cat_command;

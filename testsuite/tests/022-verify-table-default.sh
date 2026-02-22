@@ -37,7 +37,7 @@ echo "=== Expected: Only 2 rows (25.0 and 30.0), not all 3 ==="
 
 echo ""
 echo "=== Verify --format=data still works for raw files ==="
-pond copy host:///tmp/data.csv /data/raw.csv --format=data
+pond copy host:///tmp/data.csv /data/raw.csv
 pond describe /data/raw.csv
 
 echo ""

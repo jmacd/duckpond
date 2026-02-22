@@ -421,7 +421,7 @@ impl WD {
     /// Remove an entry from this directory by name.
     ///
     /// Returns `Ok(())` if the entry was found and removed, `Err(NotFound)` otherwise.
-    /// The removed node is dropped — this is a destructive unlink.
+    /// The removed node is dropped -- this is a destructive unlink.
     pub async fn remove_entry(&self, name: &str) -> Result<()> {
         let _node = self
             .dref
@@ -785,7 +785,7 @@ impl WD {
                 WildcardComponent::Wildcard { .. } => {
                     let all_entries = self.get_entries().await?;
                     debug!(
-                        "🔍 Wildcard pattern: got {} total entries from directory {}",
+                        "[SEARCH] Wildcard pattern: got {} total entries from directory {}",
                         all_entries.len(),
                         self.id()
                     );
@@ -796,7 +796,7 @@ impl WD {
                         .filter(|entry| pattern[0].match_component(&entry.name).is_some())
                         .collect();
                     debug!(
-                        "🔍 Wildcard pattern: {} entries matched name pattern",
+                        "[SEARCH] Wildcard pattern: {} entries matched name pattern",
                         matching_entries.len()
                     );
 
@@ -805,7 +805,7 @@ impl WD {
                         if let Some(wildcard_captures) = pattern[0].match_component(&entry.name)
                             && let Some(child) = self.dref.get(&entry.name).await?
                         {
-                            debug!("🔍 Wildcard pattern: loaded child '{}'", entry.name);
+                            debug!("[SEARCH] Wildcard pattern: loaded child '{}'", entry.name);
                             // Add all captures from this wildcard component
                             let captures_count = wildcard_captures.len();
                             captured.extend(wildcard_captures);
@@ -898,7 +898,7 @@ impl WD {
         T: Send,
     {
         debug!(
-            "🔍 visit_match_with_visitor: child={}, pattern.len()={}",
+            "[SEARCH] visit_match_with_visitor: child={}, pattern.len()={}",
             child.id(),
             pattern.len()
         );
@@ -1073,83 +1073,6 @@ impl WD {
             .shutdown()
             .await
             .map_err(|e| Error::Other(format!("Failed to shutdown writer: {}", e)))?;
-        Ok(())
-    }
-
-    /// Export a queryable file (series/table) as a parquet file on disk.
-    ///
-    /// Uses DataFusion `COPY TO` internally — the caller does not need to
-    /// know about DataFusion at all.
-    ///
-    /// # Arguments
-    /// * `pond_path` - Path to a series/table file in the pond
-    /// * `output_path` - Destination path on the local filesystem
-    /// * `provider_ctx` - Provider context (carries the DataFusion session)
-    pub async fn copy_to_parquet<P: AsRef<Path>>(
-        &self,
-        pond_path: &str,
-        output_path: P,
-        provider_ctx: &crate::ProviderContext,
-    ) -> Result<()> {
-        let output_path = output_path.as_ref();
-
-        // Resolve pond path to file node
-        let (_, lookup) = self.resolve_path(pond_path).await?;
-        let node_path = match lookup {
-            Lookup::Found(np) => np,
-            _ => return Err(Error::not_found(pond_path)),
-        };
-
-        let file_handle = node_path.as_file().await?;
-        let file_arc = file_handle.handle.get_file().await;
-        let file_guard = file_arc.lock().await;
-
-        let queryable = file_guard
-            .as_queryable()
-            .ok_or_else(|| Error::Other(format!("'{}' is not a queryable file", pond_path)))?;
-
-        let table_provider = queryable
-            .as_table_provider(node_path.id(), provider_ctx)
-            .await?;
-        drop(file_guard);
-
-        // Register with a unique name and COPY TO parquet
-        let ctx = &provider_ctx.datafusion_session;
-        let table_name = format!(
-            "_export_{}",
-            output_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("data")
-        );
-
-        let _ = ctx
-            .register_table(
-                datafusion::sql::TableReference::bare(table_name.as_str()),
-                table_provider,
-            )
-            .map_err(|e| Error::Other(format!("register table: {}", e)))?;
-
-        let copy_sql = format!(
-            "COPY (SELECT * FROM \"{}\") TO '{}' STORED AS PARQUET",
-            table_name,
-            output_path.to_string_lossy()
-        );
-
-        let df = ctx
-            .sql(&copy_sql)
-            .await
-            .map_err(|e| Error::Other(format!("COPY '{}': {}", pond_path, e)))?;
-        let _ = df
-            .collect()
-            .await
-            .map_err(|e| Error::Other(format!("COPY '{}': {}", pond_path, e)))?;
-
-        // Deregister to keep the session clean
-        let _ = ctx
-            .deregister_table(datafusion::sql::TableReference::bare(table_name.as_str()))
-            .map_err(|e| Error::Other(format!("deregister table: {}", e)))?;
-
         Ok(())
     }
 

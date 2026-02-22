@@ -139,7 +139,7 @@ impl TableProvider for TemporalFilteredListingTable {
             let field_count = schema.fields().len();
             let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             let field_names_str = field_names.join(", ");
-            debug!("🔍 TemporalFilteredListingTable.schema() FIRST CALL - caching {field_count} fields: [{field_names_str}]");
+            debug!("[SEARCH] TemporalFilteredListingTable.schema() FIRST CALL - caching {field_count} fields: [{field_names_str}]");
             schema
         }).clone()
     }
@@ -166,17 +166,19 @@ impl TableProvider for TemporalFilteredListingTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        debug!("🚨 TemporalFilteredListingTable.scan() called - temporal filtering is active!");
+        debug!(
+            "[ALERT] TemporalFilteredListingTable.scan() called - temporal filtering is active!"
+        );
 
         // Convert from milliseconds to seconds for HydroVu data
         let min_seconds = self.min_time / 1000;
         let max_seconds = self.max_time / 1000;
 
-        debug!("⚡ Temporal filtering range: {min_seconds} to {max_seconds} (seconds)");
+        debug!("[FAST] Temporal filtering range: {min_seconds} to {max_seconds} (seconds)");
 
         // Check if we actually need to apply temporal filtering
         if self.min_time == i64::MIN && self.max_time == i64::MAX {
-            debug!("⚡ No temporal bounds - delegating to base ListingTable");
+            debug!("[FAST] No temporal bounds - delegating to base ListingTable");
             return self
                 .listing_table
                 .scan(state, projection, filters, limit)
@@ -188,7 +190,7 @@ impl TableProvider for TemporalFilteredListingTable {
 
         if is_empty_projection {
             debug!(
-                "📊 Empty projection detected (COUNT query) - need to include timestamp for filtering"
+                "[TBL] Empty projection detected (COUNT query) - need to include timestamp for filtering"
             );
 
             // For temporal filtering with empty projection, we need to:
@@ -208,7 +210,7 @@ impl TableProvider for TemporalFilteredListingTable {
                     )
                 })?;
 
-            debug!("🔍 Found timestamp column at index {timestamp_col_index}");
+            debug!("[SEARCH] Found timestamp column at index {timestamp_col_index}");
 
             // Scan with timestamp column included
             let timestamp_projection = vec![timestamp_col_index];
@@ -225,7 +227,7 @@ impl TableProvider for TemporalFilteredListingTable {
             let empty_projection: Vec<(Arc<dyn PhysicalExpr>, String)> = vec![];
             let projection_exec = ProjectionExec::try_new(empty_projection, filtered_plan)?;
 
-            debug!("✅ Temporal filtering applied successfully for COUNT query");
+            debug!("[OK] Temporal filtering applied successfully for COUNT query");
             return Ok(Arc::new(projection_exec));
         }
 
@@ -239,7 +241,7 @@ impl TableProvider for TemporalFilteredListingTable {
         let filtered_plan =
             self.apply_temporal_filter_to_plan(base_plan, min_seconds, max_seconds)?;
 
-        debug!("✅ Temporal filtering applied successfully");
+        debug!("[OK] Temporal filtering applied successfully");
         Ok(filtered_plan)
     }
 }

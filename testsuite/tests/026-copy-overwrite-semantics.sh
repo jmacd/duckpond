@@ -5,17 +5,7 @@
 # EXPECTED: Second copy should succeed and the file should contain the new content.
 #
 set -e
-
-check() {
-  if eval "$1"; then
-    echo "  ✓ $2"
-  else
-    echo "  ✗ $2"
-    FAIL=1
-  fi
-}
-
-FAIL=0
+source check.sh
 
 echo "=== Experiment: Copy Overwrite Semantics ==="
 echo ""
@@ -42,6 +32,4 @@ pond copy host:///tmp/test-overwrite.md /etc/site/page.md
 V3=$(pond cat /etc/site/page.md)
 check 'echo "$V3" | grep -q "version3"' "third copy overwrites with version3"
 
-echo ""
-echo "=== Results: ==="
-exit $FAIL
+check_finish

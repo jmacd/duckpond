@@ -2,13 +2,17 @@
 # Run all integration tests and report results
 #
 # Usage:
-#   ./run-all.sh           # Run all tests
+#   ./run-all.sh           # Run all tests (rebuilds image first)
 #   ./run-all.sh --stop    # Stop on first failure
+#   ./run-all.sh --no-rebuild  # Skip rebuild (use existing image)
+#   ./run-all.sh --skip-browser # Skip slow browser/Puppeteer tests
 #
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STOP_ON_FAILURE=false
+NO_REBUILD=false
+SKIP_BROWSER=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -17,11 +21,21 @@ while [[ $# -gt 0 ]]; do
             STOP_ON_FAILURE=true
             shift
             ;;
+        --no-rebuild|-n)
+            NO_REBUILD=true
+            shift
+            ;;
+        --skip-browser|-B)
+            SKIP_BROWSER=true
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [--stop]"
+            echo "Usage: $0 [--stop] [--no-rebuild] [--skip-browser]"
             echo ""
             echo "Options:"
-            echo "  --stop, -s    Stop on first failure"
+            echo "  --stop, -s           Stop on first failure"
+            echo "  --no-rebuild, -n     Skip rebuild (use existing image)"
+            echo "  --skip-browser, -B   Skip slow browser/Puppeteer tests (REQUIRES: host)"
             exit 0
             ;;
         *)
@@ -30,6 +44,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Build once upfront (not per-test)
+if [[ "${NO_REBUILD}" == "false" ]]; then
+    echo "=== Building test image ==="
+    "${SCRIPT_DIR}/build-image.sh" --quiet
+    echo ""
+fi
 
 # Find all tests
 TESTS=$(ls "$SCRIPT_DIR/tests/"*.sh 2>/dev/null | sort)
@@ -56,14 +77,19 @@ for test in $TESTS; do
     # Tests marked '# REQUIRES: host' run directly on the host (not in Docker).
     # They need tools like Node.js/Puppeteer that aren't in the test container.
     if head -25 "$test" | grep -q '# REQUIRES: host'; then
-        runner=(bash "$test")
+        if [[ "${SKIP_BROWSER}" == "true" ]]; then
+            echo "  (skipped — browser test, use without --skip-browser to include)"
+            echo ""
+            continue
+        fi
+        runner=(bash "$test" "--no-rebuild")
         echo "  (host-only test — running locally)"
     # Tests marked '# REQUIRES: compose' need docker compose (e.g., MinIO for S3).
     elif head -25 "$test" | grep -q '# REQUIRES: compose'; then
-        runner=("$SCRIPT_DIR/run-test.sh" "--compose" "$test")
+        runner=("$SCRIPT_DIR/run-test.sh" "--no-rebuild" "--compose" "$test")
         echo "  (compose test — starting MinIO)"
     else
-        runner=("$SCRIPT_DIR/run-test.sh" "$test")
+        runner=("$SCRIPT_DIR/run-test.sh" "--no-rebuild" "$test")
     fi
 
     if "${runner[@]}" > /tmp/test-output-$$.txt 2>&1; then

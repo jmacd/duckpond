@@ -30,7 +30,7 @@ impl TestSetup {
 
         // Create ship context for initialization
         let init_args = vec!["pond".to_string(), "init".to_string()];
-        let ship_context = ShipContext::new(Some(&pond_path), init_args);
+        let ship_context = ShipContext::pond_only(Some(&pond_path), init_args);
 
         // Initialize pond
         init_command(&ship_context, None, None).await?;
@@ -74,32 +74,24 @@ impl TestSetup {
         let args = vec!["test".to_string(), description.to_string()];
         let description_owned = description.to_string();
 
-        ship.transact(&steward::PondUserMetadata::new(args), move |_tx, fs| {
+        ship.write_transaction(&steward::PondUserMetadata::new(args), async move |fs| {
             let desc = description_owned.clone();
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            let root = fs.root().await?;
 
-                // Create /test directory if it doesn't exist
-                if !root.exists("/test").await {
-                    _ = root.create_dir_path("/test").await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                }
+            // Create /test directory if it doesn't exist
+            if !root.exists("/test").await {
+                _ = root.create_dir_path("/test").await?;
+            }
 
-                // Create a simple file to make this a write transaction
-                _ = tinyfs::async_helpers::convenience::create_file_path(
-                    &root,
-                    &format!("/test/{}.txt", desc),
-                    format!("Test data for {}", desc).as_bytes(),
-                )
-                .await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+            // Create a simple file to make this a write transaction
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &root,
+                &format!("/test/{}.txt", desc),
+                format!("Test data for {}", desc).as_bytes(),
+            )
+            .await?;
 
-                Ok(())
-            })
+            Ok(())
         })
         .await?;
 
@@ -644,7 +636,7 @@ repeat_count: 1
     );
 
     println!(
-        "✓ Record counts: {} pending, {} started, {} completed, {} failed",
+        "[OK] Record counts: {} pending, {} started, {} completed, {} failed",
         pending_count, started_count, completed_count, failed_count
     );
 
@@ -686,7 +678,7 @@ repeat_count: 1
         "Execution sequences should be 1, 2, 3"
     );
 
-    println!("✓ Pending records have correct factory details and sequencing");
+    println!("[OK] Pending records have correct factory details and sequencing");
 
     // ========================================================================
     // VERIFY FAILED RECORD (Error message and duration captured)
@@ -726,7 +718,7 @@ repeat_count: 1
         "Failed record should be for execution_seq=2 (middle factory)"
     );
 
-    println!("✓ Failed record has error_message and duration_ms");
+    println!("[OK] Failed record has error_message and duration_ms");
     println!("  Error: {}", error_msg);
     println!("  Duration: {} ms", failed_record.duration_ms.unwrap());
 
@@ -766,7 +758,7 @@ repeat_count: 1
         "Factories 1 and 3 should have completed successfully"
     );
 
-    println!("✓ Completed records (exec_seq 1, 3) have duration_ms, no errors");
+    println!("[OK] Completed records (exec_seq 1, 3) have duration_ms, no errors");
 
     // ========================================================================
     // VERIFY POND CONTROL COMMAND WORKS
@@ -786,7 +778,7 @@ repeat_count: 1
         .await
         .expect("pond control incomplete should not fail");
 
-    println!("\n✅ Independent execution test PASSED");
+    println!("\n[OK] Independent execution test PASSED");
     println!("   - 3 factories executed independently");
     println!("   - 1 failure did not block other factories");
     println!("   - Control table captured all lifecycle events");
@@ -1059,26 +1051,16 @@ async fn test_version_visibility_post_commit_sees_committed_data() {
     let content_clone = test_content.to_string();
     let path_clone = test_file_path.to_string();
 
-    ship.transact(&steward::PondUserMetadata::new(args), move |_tx, fs| {
+    ship.write_transaction(&steward::PondUserMetadata::new(args), async move |fs| {
         let content = content_clone.clone();
         let path = path_clone.clone();
-        Box::pin(async move {
-            let root = fs
-                .root()
-                .await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        let root = fs.root().await?;
 
-            // Write the test file with known content
-            _ = tinyfs::async_helpers::convenience::create_file_path(
-                &root,
-                &path,
-                content.as_bytes(),
-            )
-            .await
-            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        // Write the test file with known content
+        _ = tinyfs::async_helpers::convenience::create_file_path(&root, &path, content.as_bytes())
+            .await?;
 
-            Ok(())
-        })
+        Ok(())
     })
     .await
     .expect("Failed to write test data");
@@ -1175,7 +1157,7 @@ expected_content: "{}"
     // If we got here, the factory successfully read and verified the content
     // This proves that post-commit factories see data committed at txn_seq+1
     println!(
-        "✅ Version visibility test PASSED: Post-commit factory successfully read data committed in parent transaction"
+        "[OK] Version visibility test PASSED: Post-commit factory successfully read data committed in parent transaction"
     );
 }
 
@@ -1289,7 +1271,7 @@ async fn test_transaction_completion_records_written() {
         "write transaction should have 'data_committed' record"
     );
 
-    println!("\n✅ Transaction completion records test PASSED");
+    println!("\n[OK] Transaction completion records test PASSED");
     println!("   - All transactions have 'begin' records");
     println!("   - Write transactions have 'data_committed' records");
 
@@ -1319,7 +1301,7 @@ async fn test_replica_preserves_transaction_sequences() {
     // Part 1: Verify that create_pond() records transaction #1
     println!("\n--- Part 1: Normal pond creation ---");
     let normal_path = temp_dir.path().join("normal_pond");
-    let normal_context = ShipContext::new(
+    let normal_context = ShipContext::pond_only(
         Some(normal_path.clone()),
         vec!["pond".to_string(), "init".to_string()],
     );
@@ -1371,7 +1353,7 @@ async fn test_replica_preserves_transaction_sequences() {
     // Part 2: Verify that create_pond_for_restoration() does NOT record transaction #1
     println!("\n--- Part 2: Restoration-ready pond creation ---");
     let replica_path = temp_dir.path().join("replica_pond");
-    let replica_context = ShipContext::new(
+    let replica_context = ShipContext::pond_only(
         Some(replica_path.clone()),
         vec!["pond".to_string(), "init".to_string()],
     );
@@ -1423,29 +1405,22 @@ async fn test_replica_preserves_transaction_sequences() {
 
     // Simulate restoring the first bundle with "pond init" command
     // This should create transaction #1, not #2
-    replica_ship
-        .transact(
-            &steward::PondUserMetadata::new(vec!["pond".to_string(), "init".to_string()]),
-            |tx: &steward::StewardTransactionGuard<'_>, _fs: &tinyfs::FS| {
-                Box::pin(async move {
-                    // Initialize root directory (what the first bundle contains)
-                    let state = tx.state().map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                            tinyfs::Error::Other(format!("Failed to get state: {}", e)),
-                        ))
-                    })?;
-
-                    state
-                        .initialize_root_directory()
-                        .await
-                        .map_err(steward::StewardError::DataInit)?;
-
-                    Ok(())
-                })
-            },
-        )
+    let tx = replica_ship
+        .begin_write(&steward::PondUserMetadata::new(vec![
+            "pond".to_string(),
+            "init".to_string(),
+        ]))
         .await
-        .expect("Failed to restore first bundle");
+        .expect("Failed to begin transaction");
+
+    tx.as_pond()
+        .expect("test requires a pond transaction")
+        .initialize_root_directory()
+        .await
+        .map_err(steward::StewardError::DataInit)
+        .expect("Failed to initialize root directory");
+
+    _ = tx.commit().await.expect("Failed to commit");
 
     let after_restore_seq = replica_ship
         .control_table()
@@ -1484,7 +1459,7 @@ async fn test_replica_preserves_transaction_sequences() {
 
     drop(replica_ship);
 
-    println!("\n✅ Replica transaction sequence preservation test PASSED");
+    println!("\n[OK] Replica transaction sequence preservation test PASSED");
     println!("   - create_pond() creates txn_seq=1 (normal initialization)");
     println!("   - create_pond_for_restoration() creates txn_seq=0 (no initial transaction)");
     println!("   - First bundle restoration creates txn_seq=1 (not txn_seq=2 - bug fixed!)");

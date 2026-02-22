@@ -69,7 +69,7 @@ echo "$TEST_CONTENT" > /tmp/testfile.txt
 ORIGINAL_B3SUM=$(b3sum /tmp/testfile.txt | cut -d' ' -f1)
 echo "✓ Original file BLAKE3: $ORIGINAL_B3SUM"
 
-pond copy /tmp/testfile.txt /data/testfile.txt
+pond copy host:///tmp/testfile.txt /data/testfile.txt
 echo "✓ Test file copied to pond"
 
 # Create a JSON file
@@ -80,7 +80,7 @@ cat > /tmp/config.json << 'EOF'
   "enabled": true
 }
 EOF
-pond copy /tmp/config.json /data/config.json
+pond copy host:///tmp/config.json /data/config.json
 echo "✓ Config file copied to pond"
 
 #############################

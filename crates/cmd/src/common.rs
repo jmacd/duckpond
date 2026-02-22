@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
@@ -20,34 +19,43 @@ use tinyfs::EntryType;
 pub struct ShipContext {
     /// Optional pond path override (None means use POND env var)
     pub pond_path: Option<PathBuf>,
+    /// Optional host directory root for host+ URL operations.
+    /// When Some, host+ URL paths are resolved relative to this directory.
+    /// When None, host+ URLs use absolute paths only.
+    pub host_root: Option<PathBuf>,
+    /// Overlay mount specifications for factory nodes on hostmount
+    pub mount_specs: Vec<tinyfs::hostmount::MountSpec>,
     /// Original command line arguments for transaction metadata
     pub original_args: Vec<String>,
-    /// Template variables from CLI (-v key=value flags)
-    pub template_variables: HashMap<String, String>,
 }
 
 impl ShipContext {
     /// Create a new ShipContext from CLI parsing
     #[must_use]
-    pub fn new<P: AsRef<Path>>(pond_path: Option<P>, original_args: Vec<String>) -> Self {
+    pub fn new<P: AsRef<Path>, Q: AsRef<Path>>(
+        pond_path: Option<P>,
+        host_root: Option<Q>,
+        mount_specs: Vec<tinyfs::hostmount::MountSpec>,
+        original_args: Vec<String>,
+    ) -> Self {
         Self {
             pond_path: pond_path.map(|p| p.as_ref().to_path_buf()),
+            host_root: host_root.map(|p| p.as_ref().to_path_buf()),
+            mount_specs,
             original_args,
-            template_variables: HashMap::new(),
         }
     }
 
-    /// Create a new ShipContext with template variables from CLI parsing
+    /// Create a ShipContext for pond-only operations (no host root).
+    /// Only used in test code -- production always has a host root from CLI args.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_variables(
-        pond_path: Option<PathBuf>,
-        original_args: Vec<String>,
-        template_variables: HashMap<String, String>,
-    ) -> Self {
+    pub fn pond_only<P: AsRef<Path>>(pond_path: Option<P>, original_args: Vec<String>) -> Self {
         Self {
-            pond_path,
+            pond_path: pond_path.map(|p| p.as_ref().to_path_buf()),
+            host_root: None,
+            mount_specs: Vec::new(),
             original_args,
-            template_variables,
         }
     }
 
@@ -57,17 +65,17 @@ impl ShipContext {
     }
 
     /// Create a Ship for an existing pond (read-only operations)
-    pub async fn open_pond(&self) -> Result<steward::Ship> {
+    pub async fn open_pond(&self) -> Result<steward::Steward> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Ship::open_pond(&pond_path)
+        steward::Steward::open_pond(&pond_path)
             .await
             .map_err(|e| anyhow!("Failed to initialize ship: {}", e))
     }
 
     /// Initialize a new pond (for init command only)
-    pub async fn create_pond(&self) -> Result<steward::Ship> {
+    pub async fn create_pond(&self) -> Result<steward::Steward> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Ship::create_pond(&pond_path)
+        steward::Steward::create_pond(&pond_path)
             .await
             .map_err(|e| anyhow!("Failed to initialize pond: {}", e))
     }
@@ -83,11 +91,102 @@ impl ShipContext {
     pub async fn create_pond_for_restoration(
         &self,
         preserve_metadata: steward::PondMetadata,
-    ) -> Result<steward::Ship> {
+    ) -> Result<steward::Steward> {
         let pond_path = self.resolve_pond_path()?;
-        steward::Ship::create_pond_for_restoration(&pond_path, preserve_metadata)
+        steward::Steward::create_pond_for_restoration(&pond_path, preserve_metadata)
             .await
             .map_err(|e| anyhow!("Failed to create pond for restoration: {}", e))
+    }
+
+    /// Open a host filesystem steward for host+ URL operations.
+    ///
+    /// The root path is determined by:
+    /// 1. `-d <dir>` flag (if provided)
+    /// 2. Otherwise defaults to `/` (absolute paths only)
+    ///
+    /// This creates a lightweight HostSteward that provides read-only
+    /// filesystem access without any Delta Lake or transaction overhead.
+    /// If `--hostmount` specs were provided, they are passed through to
+    /// the steward for overlay processing.
+    pub fn open_host(&self) -> Result<steward::Steward> {
+        let root_path = if let Some(ref dir) = self.host_root {
+            // Convert relative -d paths to absolute
+            if dir.is_absolute() {
+                dir.clone()
+            } else {
+                env::current_dir()
+                    .map_err(|e| anyhow!("Failed to get current directory: {}", e))?
+                    .join(dir)
+            }
+        } else {
+            PathBuf::from("/")
+        };
+
+        debug!("Opening host steward at root: {:?}", root_path);
+        Ok(steward::Steward::open_host(
+            root_path,
+            self.mount_specs.clone(),
+        ))
+    }
+}
+
+/// Result of classifying a CLI argument as pond or host-targeted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetContext {
+    /// Argument targets the pond filesystem (default).
+    /// The string is the pond-local path/pattern.
+    Pond(String),
+    /// Argument targets the host filesystem via `host+` prefix.
+    /// The string is the host path/pattern (extracted from the URL).
+    Host(String),
+}
+
+/// Classify a CLI argument string as pond or host-targeted.
+///
+/// Uses `provider::Url::parse` for proper URL classification when the
+/// argument looks like a URL (contains `://`). Falls back to string-level
+/// detection for bare paths and glob patterns that may not survive URL
+/// parsing (e.g., `**/*` with no scheme).
+///
+/// # Examples
+///
+/// ```text
+/// "**/*"                          -> Pond("**/*")
+/// "/data/file.csv"                -> Pond("/data/file.csv")
+/// "host+file:///tmp/data/**/*"    -> Host("/tmp/data/**/*")
+/// "host+csv:///tmp/data.csv"      -> Host("/tmp/data.csv")
+/// "csv:///pond/data.csv"          -> Pond("csv:///pond/data.csv")
+///     ```
+#[must_use]
+pub fn classify_target(arg: &str) -> TargetContext {
+    // If the argument contains "://", parse it as a proper URL.
+    // This handles both `host+scheme:///path` and `scheme:///path`.
+    if arg.contains("://") {
+        match provider::Url::parse(arg) {
+            Ok(url) => {
+                if url.is_host() {
+                    let path = url.path();
+                    if path.is_empty() {
+                        TargetContext::Host("/".to_string())
+                    } else {
+                        TargetContext::Host(path.to_string())
+                    }
+                } else {
+                    // Non-host URL (e.g., csv:///path) -- stays in pond context
+                    TargetContext::Pond(arg.to_string())
+                }
+            }
+            Err(_) => {
+                // URL parse failed -- treat as pond path
+                TargetContext::Pond(arg.to_string())
+            }
+        }
+    } else if let Some(rest) = arg.strip_prefix("host+") {
+        // `host+` without `://` -- bare host path
+        TargetContext::Host(rest.to_string())
+    } else {
+        // Bare path or glob pattern -- pond context
+        TargetContext::Pond(arg.to_string())
     }
 }
 
@@ -172,13 +271,13 @@ impl FileInfo {
     #[must_use]
     pub fn format_duckpond_style(&self) -> String {
         let type_symbol = match self.metadata.entry_type {
-            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "📁",
-            EntryType::Symlink => "🔗",
+            EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "[DIR]",
+            EntryType::Symlink => "[LINK]",
             EntryType::FilePhysicalVersion
             | EntryType::FilePhysicalSeries
-            | EntryType::FileDynamic => "📄",
-            EntryType::TablePhysicalVersion => "📊",
-            EntryType::TablePhysicalSeries | EntryType::TableDynamic => "📈",
+            | EntryType::FileDynamic => "[FILE]",
+            EntryType::TablePhysicalVersion => "[TBL]",
+            EntryType::TablePhysicalSeries | EntryType::TableDynamic => "[SER]",
         };
 
         let size_str = if self.metadata.entry_type.is_directory() {
@@ -369,5 +468,61 @@ mod tests {
 
         let cwd = env::current_dir().unwrap();
         assert_eq!(result, cwd.join("../sibling/pond"));
+    }
+
+    // --- classify_target tests ---
+
+    #[test]
+    fn test_classify_bare_glob_is_pond() {
+        assert_eq!(classify_target("**/*"), TargetContext::Pond("**/*".into()));
+    }
+
+    #[test]
+    fn test_classify_absolute_path_is_pond() {
+        assert_eq!(
+            classify_target("/data/file.csv"),
+            TargetContext::Pond("/data/file.csv".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_host_file_url() {
+        assert_eq!(
+            classify_target("host+file:///tmp/data/**/*"),
+            TargetContext::Host("/tmp/data/**/*".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_host_csv_url() {
+        assert_eq!(
+            classify_target("host+csv:///tmp/data.csv"),
+            TargetContext::Host("/tmp/data.csv".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_host_empty_path() {
+        assert_eq!(
+            classify_target("host+file:///"),
+            TargetContext::Host("/".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_host_no_scheme_separator() {
+        // host+ without :// -- bare path after host+
+        assert_eq!(
+            classify_target("host+somepath"),
+            TargetContext::Host("somepath".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_pond_url_no_host_prefix() {
+        assert_eq!(
+            classify_target("csv:///pond/data.csv"),
+            TargetContext::Pond("csv:///pond/data.csv".into())
+        );
     }
 }

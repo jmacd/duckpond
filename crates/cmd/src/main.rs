@@ -7,7 +7,6 @@ use clap::{Parser, Subcommand};
 use common::ShipContext;
 use panic_alloc::PanicOnLargeAlloc;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 mod commands;
 mod common;
@@ -55,22 +54,6 @@ enum ControlCommand {
     },
 }
 
-/// Parse a single key-value pair
-fn parse_key_value<T, U>(
-    s: &str,
-) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
-where
-    T: FromStr,
-    T::Err: std::error::Error + Send + Sync + 'static,
-    U: FromStr,
-    U::Err: std::error::Error + Send + Sync + 'static,
-{
-    let pos = s
-        .find('=')
-        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
-    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
-}
-
 #[derive(Parser)]
 #[command(author, version, about = "DuckPond - A very small data lake")]
 #[command(name = "pond")]
@@ -79,9 +62,16 @@ struct Cli {
     #[arg(long, global = true)]
     pond: Option<PathBuf>,
 
-    /// Template variables in key=value format (can be repeated)
-    #[arg(long = "var", short = 'v', global = true, value_parser = parse_key_value::<String, String>)]
-    variables: Vec<(String, String)>,
+    /// Host directory root for host+ URL operations (defaults to none;
+    /// when set, host+ paths are resolved relative to this directory)
+    #[arg(short = 'd', long = "directory", global = true)]
+    directory: Option<PathBuf>,
+
+    /// Mount factory definitions onto host filesystem paths.
+    /// Format: <mount_path>=host+<factory>:///<config_path>
+    /// Example: --hostmount /reduced=host+dyndir:///reduce.yaml
+    #[arg(long = "hostmount", global = true)]
+    hostmount: Vec<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -146,17 +136,18 @@ enum Commands {
     },
     /// Copy files into or out of the pond
     ///
-    /// Copy IN (host → pond): pond copy file1.csv file2.csv /dest/path --format=table
-    /// Copy OUT (pond → host): pond copy '/pattern/**/*.series' host:///output/dir
+    /// Copy IN (host -> pond): pond copy host:///file.csv /dest/path
+    ///   Entry type is encoded in the source URL:
+    ///     host:///file.csv              -> raw data (default)
+    ///     host+table:///file.parquet    -> queryable parquet table
+    ///     host+series:///file.parquet   -> time-series parquet
+    /// Copy OUT (pond -> host): pond copy '/pattern/**/*.series' host:///output/dir
     Copy {
-        /// Source paths: host files (copy IN) or pond paths/patterns (copy OUT)
+        /// Source paths: host URLs (copy IN) or pond paths/patterns (copy OUT)
         #[arg(required = true)]
         sources: Vec<String>,
-        /// Destination: pond path (copy IN) or host://path (copy OUT)
+        /// Destination: pond path (copy IN) or host:///path (copy OUT)
         dest: String,
-        /// Format for copying IN [possible values: data, table, series] (ignored for copy OUT)
-        #[arg(long, default_value = "data")]
-        format: String,
         /// Strip a leading path prefix from pond paths when copying OUT.
         /// e.g. --strip-prefix=/hydrovu copies /hydrovu/devices/123/foo.series
         /// to <dest>/devices/123/foo.series instead of <dest>/hydrovu/devices/123/foo.series
@@ -253,14 +244,21 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     log::debug!("CLI parsed successfully");
 
-    // Create the ship context with global variables
-    let ship_context = if cli.variables.is_empty() {
-        ShipContext::new(cli.pond.as_ref(), original_args.clone())
-    } else {
-        let variables_map: std::collections::HashMap<String, String> =
-            cli.variables.into_iter().collect();
-        ShipContext::with_variables(cli.pond.clone(), original_args.clone(), variables_map)
-    };
+    // Parse hostmount specs
+    let mount_specs: Vec<tinyfs::hostmount::MountSpec> = cli
+        .hostmount
+        .iter()
+        .map(|s| tinyfs::hostmount::MountSpec::parse(s))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("Invalid --hostmount: {}", e))?;
+
+    // Create the ship context
+    let ship_context = ShipContext::new(
+        cli.pond.as_ref(),
+        cli.directory.as_ref(),
+        mount_specs,
+        original_args.clone(),
+    );
 
     let result = match cli.command {
         Commands::Init {
@@ -327,11 +325,10 @@ async fn main() -> Result<()> {
         Commands::Copy {
             sources,
             dest,
-            format,
             strip_prefix,
         } => {
             let options = commands::CopyOptions { strip_prefix };
-            commands::copy_command(&ship_context, &sources, &dest, &format, &options).await
+            commands::copy_command(&ship_context, &sources, &dest, &options).await
         }
         Commands::Mkdir { path, parents } => {
             commands::mkdir_command(&ship_context, &path, parents).await

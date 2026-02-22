@@ -239,7 +239,7 @@ async fn execute_remote(
                 // This happens when 'pond run' is used manually - the push/pull already
                 // runs automatically as a post-commit factory
                 log::info!(
-                    "ℹ️  Remote {} runs automatically after each commit.",
+                    "[INFO]  Remote {} runs automatically after each commit.",
                     if matches!(cmd, RemoteCommand::Push) {
                         "push"
                     } else {
@@ -319,7 +319,7 @@ async fn execute_push(
     mut remote_table: RemoteTable,
     context: &FactoryContext,
 ) -> Result<(), RemoteError> {
-    log::info!("📤 PUSH: Backing up to remote");
+    log::info!("[EXPORT] PUSH: Backing up to remote");
 
     // Get local Delta table from context
     let state = extract_tlogfs_state(context)?;
@@ -355,7 +355,7 @@ async fn execute_push(
     }
 
     if missing_versions.is_empty() {
-        log::info!("   ✓ All transactions already backed up");
+        log::info!("   [OK] All transactions already backed up");
         return Ok(());
     }
 
@@ -371,7 +371,7 @@ async fn execute_push(
     // Back up each missing transaction
     for version in missing_versions {
         log::info!(
-            "   📦 Backing up transaction {} (version {})...",
+            "   [PKG] Backing up transaction {} (version {})...",
             version,
             version
         );
@@ -447,7 +447,7 @@ async fn execute_push(
         }
 
         log::info!(
-            "      ✓ Transaction {} backed up ({} files)",
+            "      [OK] Transaction {} backed up ({} files)",
             version,
             new_files.len()
         );
@@ -482,7 +482,7 @@ async fn execute_push(
 
     if !large_files_to_backup.is_empty() {
         log::info!(
-            "   📦 Backing up {} large files...",
+            "   [PKG] Backing up {} large files...",
             large_files_to_backup.len()
         );
 
@@ -507,10 +507,10 @@ async fn execute_push(
                 .await?;
         }
 
-        log::info!("      ✓ Large files backed up");
+        log::info!("      [OK] Large files backed up");
     }
 
-    log::info!("   ✓ Push complete");
+    log::info!("   [OK] Push complete");
     Ok(())
 }
 
@@ -519,7 +519,7 @@ async fn execute_pull(
     remote_table: RemoteTable,
     context: &FactoryContext,
 ) -> Result<(), RemoteError> {
-    log::info!("🔽 PULL: Syncing from remote");
+    log::info!("[DOWN] PULL: Syncing from remote");
 
     let pond_metadata = context
         .pond_metadata
@@ -590,7 +590,7 @@ async fn execute_pull(
                 })?;
 
             log::debug!(
-                "      ✓ Pulled {} bytes to {}",
+                "      [OK] Pulled {} bytes to {}",
                 byte_len,
                 large_file_fs_path.display()
             );
@@ -622,11 +622,11 @@ async fn execute_pull(
                     RemoteError::TableOperation(format!("Failed to write {}: {}", original_path, e))
                 })?;
 
-            log::debug!("      ✓ Pulled {} bytes", byte_len);
+            log::debug!("      [OK] Pulled {} bytes", byte_len);
         }
     }
 
-    log::info!("   ✓ Pull complete");
+    log::info!("   [OK] Pull complete");
     Ok(())
 }
 
@@ -636,7 +636,7 @@ async fn execute_replicate(
     config: RemoteConfig,
     context: &FactoryContext,
 ) -> Result<(), RemoteError> {
-    log::info!("🔄 REPLICATE: Generate replication config");
+    log::info!("[SYNC] REPLICATE: Generate replication config");
 
     let pond_metadata = context.pond_metadata.as_ref().ok_or_else(|| {
         RemoteError::TableOperation("Replicate requires pond metadata".to_string())
@@ -661,7 +661,7 @@ async fn execute_list_files(
     remote_table: RemoteTable,
     txn_id: Option<i64>,
 ) -> Result<(), RemoteError> {
-    log::debug!("📋 LIST FILES");
+    log::debug!("[LIST] LIST FILES");
 
     // List all files - we don't filter by txn_id anymore
     let _ = txn_id; // Unused now
@@ -691,7 +691,7 @@ async fn execute_verify(
     remote_table: RemoteTable,
     bundle_id: Option<String>,
 ) -> Result<(), RemoteError> {
-    log::debug!("✓ VERIFY: Checking backup integrity");
+    log::debug!("[OK] VERIFY: Checking backup integrity");
 
     if let Some(id) = bundle_id {
         // Verify specific bundle - need to find files with this bundle_id
@@ -713,7 +713,7 @@ async fn execute_verify(
             remote_table
                 .read_file(&bundle_id, &file_path, pond_txn_id, &mut output)
                 .await?;
-            log::debug!("   ✓ {} OK ({} bytes)", file_path, output.len());
+            log::debug!("   [OK] {} OK ({} bytes)", file_path, output.len());
         }
     } else {
         // Verify all bundles
@@ -734,12 +734,12 @@ async fn execute_verify(
                     verified += 1;
                 }
                 Err(e) => {
-                    log::error!("   ✗ Failed to verify {}: {}", &bundle_id[..16], e);
+                    log::error!("   [FAIL] Failed to verify {}: {}", &bundle_id[..16], e);
                 }
             }
         }
 
-        log::debug!("   ✓ Verified {}/{} bundles", verified, total_files);
+        log::debug!("   [OK] Verified {}/{} bundles", verified, total_files);
     }
 
     Ok(())
@@ -760,7 +760,7 @@ async fn execute_show(
     pattern: &str,
     show_script: bool,
 ) -> Result<(), RemoteError> {
-    log::info!("📋 SHOW: Storage details for pattern '{}'", pattern);
+    log::info!("[LIST] SHOW: Storage details for pattern '{}'", pattern);
 
     // List all files from remote
     let files = remote_table.list_files("").await?;
@@ -881,18 +881,18 @@ fn generate_verification_script(
         format!("delta_scan('{}')", local_path)
     };
 
-    println!("╔════════════════════════════════════════════════════════════════════════════════╗");
-    println!("║  BACKUP VERIFICATION SCRIPTS                                                   ║");
-    println!("║  Each section below is a standalone, copy-pastable script.                     ║");
-    println!("╚════════════════════════════════════════════════════════════════════════════════╝");
+    println!("+================================================================================+");
+    println!("|  BACKUP VERIFICATION SCRIPTS                                                   |");
+    println!("|  Each section below is a standalone, copy-pastable script.                     |");
+    println!("+================================================================================+");
     println!();
 
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ===============================================================================
     // SECTION 1: Environment Setup
-    // ═══════════════════════════════════════════════════════════════════════════════
-    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
-    println!("│ 1. ENVIRONMENT SETUP (run first)                                              │");
-    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    // ===============================================================================
+    println!("+--------------------------------------------------------------------------------+");
+    println!("| 1. ENVIRONMENT SETUP (run first)                                              |");
+    println!("+--------------------------------------------------------------------------------+");
     println!();
 
     if is_s3 {
@@ -929,12 +929,12 @@ fn generate_verification_script(
     }
     println!();
 
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ===============================================================================
     // SECTION 2: List all files with DuckDB
-    // ═══════════════════════════════════════════════════════════════════════════════
-    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
-    println!("│ 2. LIST ALL BACKED UP FILES (DuckDB)                                          │");
-    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    // ===============================================================================
+    println!("+--------------------------------------------------------------------------------+");
+    println!("| 2. LIST ALL BACKED UP FILES (DuckDB)                                          |");
+    println!("+--------------------------------------------------------------------------------+");
     println!();
     println!("```bash");
     println!("duckdb -c \"");
@@ -950,13 +950,13 @@ fn generate_verification_script(
     println!("```");
     println!();
 
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ===============================================================================
     // SECTION 3: Extract and verify specific files
-    // ═══════════════════════════════════════════════════════════════════════════════
-    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
-    println!("│ 3. EXTRACT FILES FROM BACKUP                                                  │");
-    println!("│    Reassembles chunked data from storage to local filesystem                  │");
-    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    // ===============================================================================
+    println!("+--------------------------------------------------------------------------------+");
+    println!("| 3. EXTRACT FILES FROM BACKUP                                                  |");
+    println!("|    Reassembles chunked data from storage to local filesystem                  |");
+    println!("+--------------------------------------------------------------------------------+");
     println!();
 
     // Show examples for first few files
@@ -966,7 +966,7 @@ fn generate_verification_script(
         let safe_filename = path.replace(['/', '='], "_");
         let output_path = format!("/tmp/extracted_{}", safe_filename);
 
-        println!("# ── File: {} ({}) ──", path, format_size(*size));
+        println!("# -- File: {} ({}) --", path, format_size(*size));
         println!();
         println!("```bash");
         println!("# Extract to: {}", output_path);
@@ -996,20 +996,20 @@ fn generate_verification_script(
         println!();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ===============================================================================
     // SECTION 4: Verify with BLAKE3
-    // ═══════════════════════════════════════════════════════════════════════════════
-    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
-    println!("│ 4. VERIFY BLAKE3 CHECKSUMS                                                    │");
-    println!("│    Compare extracted file hash against stored root_hash                       │");
-    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    // ===============================================================================
+    println!("+--------------------------------------------------------------------------------+");
+    println!("| 4. VERIFY BLAKE3 CHECKSUMS                                                    |");
+    println!("|    Compare extracted file hash against stored root_hash                       |");
+    println!("+--------------------------------------------------------------------------------+");
     println!();
 
     for (bundle_id, path, pond_txn_id, _size) in &example_files {
         let safe_filename = path.replace(['/', '='], "_");
         let output_path = format!("/tmp/extracted_{}", safe_filename);
 
-        println!("# ── Verify: {} ──", path);
+        println!("# -- Verify: {} --", path);
         println!();
         println!("```bash");
         println!("# Step 1: Get the expected root_hash from backup");
@@ -1048,21 +1048,21 @@ fn generate_verification_script(
         println!("echo \"Expected: $EXPECTED_HASH\"");
         println!("echo \"Actual:   $ACTUAL_HASH\"");
         println!("if [ \"$EXPECTED_HASH\" = \"$ACTUAL_HASH\" ]; then");
-        println!("  echo \"✓ BLAKE3 MATCH - File verified!\"");
+        println!("  echo \"[OK] BLAKE3 MATCH - File verified!\"");
         println!("else");
-        println!("  echo \"✗ BLAKE3 MISMATCH - File may be corrupted!\"");
+        println!("  echo \"[FAIL] BLAKE3 MISMATCH - File may be corrupted!\"");
         println!("  exit 1");
         println!("fi");
         println!("```");
         println!();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ===============================================================================
     // SECTION 5: Alternative verification with SHA256
-    // ═══════════════════════════════════════════════════════════════════════════════
-    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
-    println!("│ 5. ALTERNATIVE: VERIFY WITH SHA256 (if b3sum not available)                   │");
-    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    // ===============================================================================
+    println!("+--------------------------------------------------------------------------------+");
+    println!("| 5. ALTERNATIVE: VERIFY WITH SHA256 (if b3sum not available)                   |");
+    println!("+--------------------------------------------------------------------------------+");
     println!();
 
     if let Some((_, path, _, _)) = example_files.first() {
@@ -1081,12 +1081,12 @@ fn generate_verification_script(
         println!();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ===============================================================================
     // SECTION 6: Full extraction script
-    // ═══════════════════════════════════════════════════════════════════════════════
-    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
-    println!("│ 6. EXTRACT ALL FILES (complete script)                                        │");
-    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    // ===============================================================================
+    println!("+--------------------------------------------------------------------------------+");
+    println!("| 6. EXTRACT ALL FILES (complete script)                                        |");
+    println!("+--------------------------------------------------------------------------------+");
     println!();
     println!("```bash");
     println!("#!/bin/bash");
@@ -1145,12 +1145,12 @@ fn generate_verification_script(
     println!("```");
     println!();
 
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ===============================================================================
     // SECTION 7: Tool installation
-    // ═══════════════════════════════════════════════════════════════════════════════
-    println!("┌────────────────────────────────────────────────────────────────────────────────┐");
-    println!("│ 7. TOOL INSTALLATION                                                          │");
-    println!("└────────────────────────────────────────────────────────────────────────────────┘");
+    // ===============================================================================
+    println!("+--------------------------------------------------------------------------------+");
+    println!("| 7. TOOL INSTALLATION                                                          |");
+    println!("+--------------------------------------------------------------------------------+");
     println!();
     println!("```bash");
     println!("# Install DuckDB");
@@ -1414,7 +1414,7 @@ pub async fn apply_parquet_files_from_remote(
                 })?;
 
             log::debug!(
-                "  ✓ Restored large file to {}",
+                "  [OK] Restored large file to {}",
                 large_file_fs_path.display()
             );
         } else {
@@ -1430,7 +1430,7 @@ pub async fn apply_parquet_files_from_remote(
                     ))
                 })?;
 
-            log::debug!("  ✓ Restored {}", path);
+            log::debug!("  [OK] Restored {}", path);
         }
     }
 
@@ -1440,7 +1440,7 @@ pub async fn apply_parquet_files_from_remote(
         .await
         .map_err(|e| RemoteError::TableOperation(format!("Failed to reload local table: {}", e)))?;
 
-    log::info!("  ✓ Transaction {} restored", txn_seq);
+    log::info!("  [OK] Transaction {} restored", txn_seq);
     Ok(())
 }
 
@@ -1534,11 +1534,11 @@ pub async fn restore_large_files_from_remote(
                 ))
             })?;
 
-        log::debug!("      ✓ Restored {} bytes", byte_len);
+        log::debug!("      [OK] Restored {} bytes", byte_len);
         restored += 1;
     }
 
-    log::debug!("   ✓ Restored {} large files", restored);
+    log::debug!("   [OK] Restored {} large files", restored);
     Ok(restored)
 }
 

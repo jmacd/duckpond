@@ -23,6 +23,14 @@ SUBDIR_OUTPUT="/tmp/test-output-subdir"
 PORT=4174
 VITE_PID=""
 
+# Forward --no-rebuild to run-test.sh calls
+RUN_TEST_EXTRA_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-rebuild|-n) RUN_TEST_EXTRA_ARGS+=("--no-rebuild") ;;
+    esac
+done
+
 start_vite() {
     local site_root="$1"
     local base_path="${2:-/}"
@@ -104,7 +112,7 @@ run_browser_tests() {
 # ── Stage 1: Generate root site via test 201 ────────────────
 
 echo "=== Stage 1: Generating root site via test 201 ==="
-bash "${TESTSUITE_DIR}/run-test.sh" --output "${ROOT_OUTPUT}" 201
+bash "${TESTSUITE_DIR}/run-test.sh" "${RUN_TEST_EXTRA_ARGS[@]}" --output "${ROOT_OUTPUT}" 201
 
 if [[ ! -f "${ROOT_OUTPUT}/index.html" ]]; then
     echo "ERROR: Root site generation failed — no index.html in ${ROOT_OUTPUT}"
@@ -134,6 +142,7 @@ docker run --rm \
     -e RUST_LOG=info \
     -v "${SUBDIR_OUTPUT}:/output" \
     -v "${TESTSUITE_DIR}/tests/205-sitegen-base-url.sh:/test/run.sh:ro" \
+    -v "${TESTSUITE_DIR}/testdata:/data:ro" \
     duckpond-test:latest \
     -c "/bin/bash /test/run.sh && cp -r /tmp/sitegen-subdir/* /output/" > /tmp/test-202-subdir.log 2>&1
 

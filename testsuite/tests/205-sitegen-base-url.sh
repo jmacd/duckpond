@@ -5,6 +5,7 @@
 #           Layout asset references (style.css, chart.js) stay at "/" since
 #           Vite handles base path rewriting for those.
 set -e
+source check.sh
 
 echo "=== Experiment: Sitegen base_url ==="
 
@@ -114,7 +115,7 @@ echo "✓ Data pipeline created"
 echo ""
 echo "--- Step 2: Create pages ---"
 
-pond mkdir -p /etc/site
+pond mkdir -p /site
 
 cat > /tmp/index.md << 'MD'
 ---
@@ -152,9 +153,9 @@ cat > /tmp/sidebar.md << 'MD'
 {{ nav_list collection="params" base="/params" /}}
 MD
 
-pond copy host:///tmp/index.md /etc/site/index.md
-pond copy host:///tmp/data.md /etc/site/data.md
-pond copy host:///tmp/sidebar.md /etc/site/sidebar.md
+pond copy host:///tmp/index.md /site/index.md
+pond copy host:///tmp/data.md /site/data.md
+pond copy host:///tmp/sidebar.md /site/sidebar.md
 echo "✓ Pages loaded"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -180,7 +181,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "params"
     type: static
     slug: "params"
@@ -188,21 +189,21 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "params"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site-root.yaml --config-path /tmp/site-root.yaml
+pond mknod sitegen /site-root.yaml --config-path /tmp/site-root.yaml
 
 ROOT_DIR=/tmp/sitegen-root
 rm -rf "${ROOT_DIR}"
 mkdir -p "${ROOT_DIR}"
-pond run /etc/site-root.yaml build "${ROOT_DIR}"
+pond run /site-root.yaml build "${ROOT_DIR}"
 echo "✓ Root site generated"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -228,7 +229,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "params"
     type: static
     slug: "params"
@@ -236,21 +237,21 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "params"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site-subdir.yaml --config-path /tmp/site-subdir.yaml
+pond mknod sitegen /site-subdir.yaml --config-path /tmp/site-subdir.yaml
 
 SUB_DIR=/tmp/sitegen-subdir
 rm -rf "${SUB_DIR}"
 mkdir -p "${SUB_DIR}"
-pond run /etc/site-subdir.yaml build "${SUB_DIR}"
+pond run /site-subdir.yaml build "${SUB_DIR}"
 echo "✓ Subdir site generated"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -260,28 +261,8 @@ echo "✓ Subdir site generated"
 echo ""
 echo "=== VERIFICATION ==="
 
-PASS=0
-FAIL=0
-
-check_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ $2 — expected: '$3'"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_not_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✗ $2 — found unwanted: '$3'"
-    FAIL=$((FAIL + 1))
-  else
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  fi
-}
+echo ""
+echo "--- Verification ---"
 
 # ── Root site checks (base_url: "/") ────────────────────────
 
@@ -363,31 +344,6 @@ echo "--- Both sites have same file structure ---"
 
 ROOT_FILES=$(cd "${ROOT_DIR}" && find . -name '*.html' | sort)
 SUB_FILES=$(cd "${SUB_DIR}" && find . -name '*.html' | sort)
-if [ "${ROOT_FILES}" = "${SUB_FILES}" ]; then
-  echo "  ✓ HTML file structure matches"
-  PASS=$((PASS + 1))
-else
-  echo "  ✗ HTML file structure differs"
-  echo "    Root: ${ROOT_FILES}"
-  echo "    Sub:  ${SUB_FILES}"
-  FAIL=$((FAIL + 1))
-fi
+check '[ "${ROOT_FILES}" = "${SUB_FILES}" ]'  "HTML file structure matches"
 
-echo ""
-echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
-
-if [ "${FAIL}" -gt 0 ]; then
-  echo ""
-  echo "DEBUG: Root index.html sidebar:"
-  grep -E 'href=|src=' "${ROOT_DIR}/index.html" | head -20
-  echo ""
-  echo "DEBUG: Subdir index.html sidebar:"
-  grep -E 'href=|src=' "${SUB_DIR}/index.html" | head -20
-  echo ""
-  echo "DEBUG: Subdir params/Temperature.html breadcrumbs:"
-  grep -i 'breadcrumb' "${SUB_DIR}/params/Temperature.html" | head -10
-  exit 1
-fi
-
-echo ""
-echo "=== Test 205 PASSED ==="
+check_finish

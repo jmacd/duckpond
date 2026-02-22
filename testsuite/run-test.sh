@@ -307,9 +307,17 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     FAILED_COUNT=$(grep -c '^  ✗' "${LOG_FILE}" 2>/dev/null) || FAILED_COUNT=0
 
     if [[ ${EXIT_CODE} -eq 0 ]]; then
-        echo "=== PASSED ${PASSED}/${TOTAL} checks ==="
+        if [[ ${TOTAL} -gt 0 ]]; then
+            echo "=== PASSED ${PASSED}/${TOTAL} checks ==="
+        else
+            echo "=== PASSED ==="
+        fi
     else
-        echo "=== FAILED (exit: ${EXIT_CODE}) — ${PASSED}/${TOTAL} checks passed ==="
+        if [[ ${TOTAL} -gt 0 ]]; then
+            echo "=== FAILED (exit: ${EXIT_CODE}) — ${PASSED}/${TOTAL} checks passed ==="
+        else
+            echo "=== FAILED (exit: ${EXIT_CODE}) ==="
+        fi
         # Show only the failing lines
         grep '^  ✗' "${LOG_FILE}" 2>/dev/null | sed 's/^/  /'
         # Show the last few lines for context on crashes/errors

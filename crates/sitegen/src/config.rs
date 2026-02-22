@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Site configuration — parsed from `/etc/site.yaml` inside the pond.
+//! Site configuration -- parsed from `site.yaml` (pond or host filesystem).
 
 use serde::{Deserialize, Serialize};
 
@@ -21,18 +21,20 @@ use serde::{Deserialize, Serialize};
 ///   - name: "home"
 ///     type: static
 ///     slug: ""
-///     page: "/etc/site/index.md"
+///     page: "/site/index.md"
 ///     routes: [...]
 ///
 /// partials:
-///   sidebar: "/etc/site/sidebar.md"
+///   sidebar: "/site/sidebar.md"
 ///
 /// static:
-///   - pattern: "/etc/static/*"
+///   - pattern: "/static/*"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteConfig {
     pub site: SiteMeta,
+    #[serde(default)]
+    pub content: Vec<ContentStage>,
     #[serde(default)]
     pub exports: Vec<ExportStage>,
     #[serde(default)]
@@ -55,6 +57,19 @@ fn default_base_url() -> String {
     "/".to_string()
 }
 
+/// A content stage: globs markdown data files in the pond and reads
+/// their frontmatter for metadata (title, weight, slug).
+///
+/// Content stages are resolved before route expansion. A `content` route
+/// references a stage by name, producing one page per matched file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentStage {
+    /// Name referenced by content routes (e.g., "pages")
+    pub name: String,
+    /// Pond glob pattern matching data files (e.g., "/pages/*.md")
+    pub pattern: String,
+}
+
 /// An export stage: runs `pond export` internally to produce data files
 /// that become template context.
 ///
@@ -75,7 +90,7 @@ pub struct ExportStage {
     /// Pond glob pattern (e.g., "/reduced/single_param/*/*.series")
     pub pattern: String,
     /// Target data points per screen width for partition sizing.
-    /// Typical value: 1000–2000. Default: 1500.
+    /// Typical value: 1000-2000. Default: 1500.
     /// Controls how parquet files are temporally partitioned per resolution.
     #[serde(default = "default_target_points")]
     pub target_points: u64,
@@ -93,14 +108,17 @@ pub struct RouteConfig {
     /// "static" or "template"
     #[serde(rename = "type")]
     pub route_type: RouteType,
-    /// URL slug — may contain `$0`, `$1` for template routes
+    /// URL slug -- may contain `$0`, `$1` for template routes
     pub slug: String,
-    /// Pond path to markdown page (e.g., "/etc/site/index.md")
+    /// Path to markdown page (e.g., "/site/index.md")
     #[serde(default)]
     pub page: Option<String>,
     /// For template routes: which export stage provides data
     #[serde(default)]
     pub export: Option<String>,
+    /// For content routes: which content stage provides pages
+    #[serde(default)]
+    pub content: Option<String>,
     /// Nested child routes
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
@@ -112,6 +130,7 @@ pub struct RouteConfig {
 pub enum RouteType {
     Static,
     Template,
+    Content,
 }
 
 /// Static asset to copy verbatim.
@@ -138,13 +157,13 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
     routes:
       - name: "param"
         type: template
         slug: "$0"
         export: "params"
-        page: "/etc/site/param.md"
+        page: "/site/param.md"
 "#;
         let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
         assert_eq!(config.site.title, "Test Site");
@@ -155,6 +174,35 @@ routes:
         assert_eq!(config.routes.len(), 1);
         assert_eq!(config.routes[0].routes.len(), 1);
         assert_eq!(config.routes[0].routes[0].route_type, RouteType::Template);
+    }
+
+    #[test]
+    fn parse_content_config() {
+        let yaml = r#"
+site:
+  title: "Caspar Water"
+
+content:
+  - name: "pages"
+    pattern: "/pages/*.md"
+
+routes:
+  - name: "home"
+    type: static
+    slug: ""
+    page: "/site/index.md"
+    routes:
+      - name: "pages"
+        type: content
+        slug: ""
+        content: "pages"
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert_eq!(config.content.len(), 1);
+        assert_eq!(config.content[0].name, "pages");
+        assert_eq!(config.content[0].pattern, "/pages/*.md");
+        assert_eq!(config.routes[0].routes[0].route_type, RouteType::Content);
+        assert_eq!(config.routes[0].routes[0].content.as_deref(), Some("pages"));
     }
 
     #[test]

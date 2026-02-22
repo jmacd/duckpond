@@ -9,9 +9,9 @@
 //! at configuration time.
 //!
 //! Example: With scope "Vulink" and time_column "timestamp", transforms:
-//!   - `timestamp` → `timestamp` (unchanged)
-//!   - `WaterTemp` → `Vulink.WaterTemp`
-//!   - `DO.mg/L` → `Vulink.DO.mg/L`
+//!   - `timestamp` -> `timestamp` (unchanged)
+//!   - `WaterTemp` -> `Vulink.WaterTemp`
+//!   - `DO.mg/L` -> `Vulink.DO.mg/L`
 //!
 //! This is implemented using ColumnRenameTableProvider with a scope-specific rename function.
 

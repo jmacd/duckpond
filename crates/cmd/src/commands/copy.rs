@@ -5,7 +5,6 @@
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 
 /// Direction of copy operation
@@ -17,111 +16,164 @@ enum CopyDirection {
     Out,
 }
 
-/// Parse a path to check if it has the "host://" prefix
-/// Returns (is_host_path, cleaned_path)
-fn parse_host_path(path: &str) -> (bool, String) {
-    if let Some(stripped) = path.strip_prefix("host://") {
-        (true, stripped.to_string())
+/// Parsed source for copy IN operations.
+/// Extracted from source URLs like `host:///path`, `host+table:///path`, etc.
+#[derive(Debug, Clone)]
+struct CopySource {
+    /// Absolute path on host filesystem
+    host_path: String,
+    /// Entry type to store in pond (derived from URL entry_type suffix)
+    entry_type: tinyfs::EntryType,
+}
+
+/// Check if a CLI argument targets the host filesystem.
+/// Recognizes both `host+scheme:///path` and `host:///path` forms.
+fn is_host_target(s: &str) -> bool {
+    s.starts_with("host+") || s.starts_with("host:///")
+}
+
+/// Parse a source URL into host path and entry type.
+///
+/// Supports:
+/// - `host:///path`            -> data (FilePhysicalVersion)
+/// - `host+file:///path`       -> data (FilePhysicalVersion)
+/// - `host+table:///path`      -> table (TablePhysicalVersion)
+/// - `host+series:///path`     -> series (TablePhysicalSeries)
+fn parse_copy_source(source: &str) -> Result<CopySource> {
+    // Normalize host:///path to host+file:///path for URL parsing
+    let url_str = if let Some(rest) = source.strip_prefix("host:///") {
+        format!("host+file:///{}", rest)
     } else {
-        (false, path.to_string())
+        source.to_string()
+    };
+
+    let url = provider::Url::parse(&url_str)
+        .map_err(|e| anyhow!("Invalid source URL '{}': {}", source, e))?;
+
+    if !url.is_host() {
+        return Err(anyhow!(
+            "Source '{}' must target host filesystem. Use host:///path for data, \
+             host+table:///path for parquet tables, or host+series:///path for time-series.",
+            source
+        ));
+    }
+
+    let host_path = url.path().to_string();
+    let entry_type = match url.entry_type() {
+        Some("table") => tinyfs::EntryType::TablePhysicalVersion,
+        Some("series") => tinyfs::EntryType::TablePhysicalSeries,
+        _ => tinyfs::EntryType::FilePhysicalVersion,
+    };
+
+    Ok(CopySource {
+        host_path,
+        entry_type,
+    })
+}
+
+/// Extract the host filesystem path from a destination URL.
+/// Supports `host:///path` form.
+fn extract_host_dest_path(dest: &str) -> Result<String> {
+    if let Some(path) = dest.strip_prefix("host://") {
+        Ok(path.to_string())
+    } else if dest.starts_with("host+") {
+        let url = provider::Url::parse(dest)
+            .map_err(|e| anyhow!("Invalid destination URL '{}': {}", dest, e))?;
+        Ok(url.path().to_string())
+    } else {
+        Err(anyhow!(
+            "Destination '{}' does not have host:// prefix",
+            dest
+        ))
     }
 }
 
-/// Determine copy direction based on sources and destination
-/// - If dest has "host://" → copying OUT (pond → host), sources must NOT have "host://"
-/// - If sources have "host://" → copying IN (host → pond), dest must NOT have "host://"
-/// - Require explicit and consistent use of "host://" prefix
+/// Determine copy direction based on sources and destination.
+///
+/// - If dest has host:// prefix -> copying OUT (pond -> host)
+/// - If sources have host:// or host+ prefix -> copying IN (host -> pond)
+/// - Both or neither is an error.
 fn determine_copy_direction(sources: &[String], dest: &str) -> Result<CopyDirection> {
-    let (dest_is_host, _) = parse_host_path(dest);
-
-    // Check if any source has host:// prefix
-    let sources_have_host = sources.iter().any(|s| parse_host_path(s).0);
+    let dest_is_host = is_host_target(dest);
+    let sources_have_host = sources.iter().any(|s| is_host_target(s));
 
     match (dest_is_host, sources_have_host) {
         (true, true) => Err(anyhow!(
-            "Invalid copy: cannot use 'host://' prefix on both sources and destination"
+            "Invalid copy: cannot use host:// prefix on both sources and destination"
         )),
-        (true, false) => {
-            // Copy OUT: pond → host
-            Ok(CopyDirection::Out)
-        }
+        (true, false) => Ok(CopyDirection::Out),
         (false, true) => {
-            // Copy IN: host → pond
-            // Verify ALL sources have host:// prefix for consistency
+            // Verify ALL sources have host prefix for consistency
             for source in sources {
-                if !parse_host_path(source).0 {
+                if !is_host_target(source) {
                     return Err(anyhow!(
-                        "Invalid copy: when copying from host, ALL sources must have 'host://' prefix"
+                        "Invalid copy: when copying from host, ALL sources must have host:// or host+ prefix"
                     ));
                 }
             }
             Ok(CopyDirection::In)
         }
-        (false, false) => {
-            // Backward compatibility: assume copy IN if no host:// anywhere
-            // But warn that this is deprecated behavior
-            log::warn!(
-                "Copying without 'host://' prefix is deprecated. Use 'host://' on sources when copying IN."
-            );
-            Ok(CopyDirection::In)
-        }
+        (false, false) => Err(anyhow!(
+            "Copy requires host:// or host+ prefix on either sources or destination.\n\
+             Copy IN:  pond copy host:///path/file.csv /dest\n\
+             Copy OUT: pond copy /pond/path host:///output/dir\n\
+             Entry types: host+table:///path (parquet table), host+series:///path (time-series)"
+        )),
     }
 }
 
-async fn get_entry_type_for_file(format: &str) -> Result<tinyfs::EntryType> {
-    match format {
-        "data" => Ok(tinyfs::EntryType::FilePhysicalVersion),
-        "table" => Ok(tinyfs::EntryType::TablePhysicalVersion),
-        "series" => Ok(tinyfs::EntryType::TablePhysicalSeries),
-        _ => Err(anyhow!("Invalid format '{}'", format)),
-    }
-}
-
-// STREAMING COPY: Copy multiple files to directory using proper context
+/// Copy multiple source files into a destination directory.
+///
+/// Reads through `source_wd` (tinyfs hostmount) and writes to `dest_wd` (tinyfs pond).
 async fn copy_files_to_directory(
-    sources: &[String],
+    sources: &[CopySource],
+    source_wd: &tinyfs::WD,
     dest_wd: &tinyfs::WD,
-    format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for source in sources {
-        // Strip host:// prefix if present (for copy IN with explicit host:// prefix)
-        let (_is_host, clean_source) = parse_host_path(source);
-        log::debug!(
-            "parse_host_path: source='{}' -> clean_source='{}'",
-            source,
-            clean_source
-        );
-
         // Extract filename from source path
-        let source_filename = std::path::Path::new(&clean_source)
+        let source_filename = std::path::Path::new(&source.host_path)
             .file_name()
             .ok_or("Invalid file path")?
             .to_str()
             .ok_or("Invalid filename")?;
 
-        copy_single_file_to_directory_with_name(&clean_source, dest_wd, source_filename, format)
-            .await?;
+        copy_single_file(
+            source_wd,
+            &source.host_path,
+            dest_wd,
+            source_filename,
+            source.entry_type,
+        )
+        .await?;
     }
     Ok(())
 }
 
-// Copy a single file to a directory using the provided working directory context
-async fn copy_single_file_to_directory_with_name(
-    file_path: &str,
+/// Copy a single file from source WD to destination WD.
+///
+/// Reads through `source_wd` (tinyfs layer) -- for host sources this means
+/// reading through the hostmount persistence layer, not direct tokio::fs.
+async fn copy_single_file(
+    source_wd: &tinyfs::WD,
+    source_path: &str,
     dest_wd: &tinyfs::WD,
     filename: &str,
-    format: &str,
+    entry_type: tinyfs::EntryType,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::fs::File;
     use tokio::io::AsyncWriteExt;
 
-    // Determine entry type based on format flag
-    let entry_type = get_entry_type_for_file(format).await?;
     let entry_type_str = format!("{:?}", entry_type);
 
     log::debug!(
-        "copy_single_file_to_directory source_path: {file_path}, dest_filename: {filename}, format: {format}, entry_type: {entry_type_str}"
+        "copy_single_file source_path: {source_path}, dest_filename: {filename}, entry_type: {entry_type_str}"
     );
+
+    // Open source reader through tinyfs (hostmount or tlogfs)
+    let mut source_reader = source_wd
+        .async_reader_path(source_path)
+        .await
+        .map_err(|e| format!("Failed to open source '{}': {}", source_path, e))?;
 
     // For table and series files, we need to validate it's actually a parquet file
     // Table files: store as-is, Series files: also infer temporal bounds after writing
@@ -129,33 +181,29 @@ async fn copy_single_file_to_directory_with_name(
         || entry_type == tinyfs::EntryType::TablePhysicalVersion
     {
         // Check if this is actually a parquet file by reading just the magic bytes
-        let mut file = File::open(file_path)
-            .await
-            .map_err(|e| format!("Failed to open source file '{}': {}", file_path, e))?;
-
         let mut magic = [0u8; 4];
         use tokio::io::AsyncReadExt;
-        let _ = file
+        let _ = source_reader
             .read_exact(&mut magic)
             .await
-            .map_err(|e| format!("Failed to read magic bytes from '{}': {}", file_path, e))?;
+            .map_err(|e| format!("Failed to read magic bytes from '{}': {}", source_path, e))?;
 
         if &magic != b"PAR1" {
             return Err(format!(
                 "File '{}' is not a valid parquet file (missing PAR1 magic bytes). \
-                Use --format=data for non-parquet files like CSV. \
-                To query CSV files, use 'pond cat csv:///path' with the csv:// URL scheme.",
-                file_path
+                Use host:///path (without +table or +series) for non-parquet files. \
+                To query CSV files, use 'pond cat host+csv:///path' with the csv:// URL scheme.",
+                source_path
             )
             .into());
         }
 
         // Rewind to beginning for streaming copy
         use tokio::io::AsyncSeekExt;
-        let _ = file
+        let _ = source_reader
             .seek(std::io::SeekFrom::Start(0))
             .await
-            .map_err(|e| format!("Failed to rewind file: {}", e))?;
+            .map_err(|e| format!("Failed to rewind source reader: {}", e))?;
 
         // Create writer and stream the file content efficiently
         let mut dest_writer = dest_wd
@@ -164,7 +212,7 @@ async fn copy_single_file_to_directory_with_name(
             .map_err(|e| format!("Failed to create destination writer: {}", e))?;
 
         // Stream the file bytes without loading into memory
-        let _ = tokio::io::copy(&mut file, &mut dest_writer)
+        let _ = tokio::io::copy(&mut source_reader, &mut dest_writer)
             .await
             .map_err(|e| format!("Failed to stream file content: {}", e))?;
 
@@ -190,18 +238,14 @@ async fn copy_single_file_to_directory_with_name(
                 .map_err(|e| format!("Failed to complete file write: {}", e))?;
         }
     } else {
-        // Non-series files: unified streaming copy
-        let mut source_file = File::open(file_path)
-            .await
-            .map_err(|e| format!("Failed to open source file '{}': {}", file_path, e))?;
-
+        // Non-table files: unified streaming copy through tinyfs
         let mut dest_writer = dest_wd
             .async_writer_path_with_type(filename, entry_type)
             .await
             .map_err(|e| format!("Failed to create destination writer: {}", e))?;
 
-        // Stream copy with 64KB buffer for memory efficiency
-        _ = tokio::io::copy(&mut source_file, &mut dest_writer)
+        // Stream copy through tinyfs readers/writers
+        _ = tokio::io::copy(&mut source_reader, &mut dest_writer)
             .await
             .map_err(|e| format!("Failed to stream file content: {}", e))?;
 
@@ -211,143 +255,133 @@ async fn copy_single_file_to_directory_with_name(
             .map_err(|e| format!("Failed to complete file write: {}", e))?;
     }
 
-    log::debug!("Copied {file_path} to directory as {filename}");
+    log::debug!("Copied {source_path} to directory as {filename}");
     Ok(())
 }
 
-/// Recursively copy directory from host filesystem to pond, preserving structure
-/// Uses dual traversal: readdir on host paired with in_path on pond WD
+/// Recursively copy directory from host filesystem to pond, preserving structure.
+///
+/// Both sides go through tinyfs: the host side uses hostmount persistence,
+/// the pond side uses tlogfs persistence. This is the Phase 3B-2 dual-steward
+/// pattern -- two tinyfs instances open simultaneously.
 async fn copy_directory_recursive(
     ship_context: &ShipContext,
-    host_base_dir: &str,
+    host_source_path: &str,
     pond_dest: &str,
 ) -> Result<()> {
-    use std::path::Path;
-    use tokio::fs;
+    // Phase 3B-2: Open BOTH host and pond stewards concurrently
+    let mut host_ship = ship_context.open_host()?;
+    let host_tx = host_ship
+        .begin_read(&steward::PondUserMetadata::new(vec![
+            "copy-recursive-source".to_string(),
+        ]))
+        .await
+        .map_err(|e| anyhow!("Failed to begin host transaction: {}", e))?;
+    let host_root = host_tx.root().await?;
 
-    let mut ship = ship_context.open_pond().await?;
-    let host_base = Path::new(host_base_dir).to_path_buf();
+    // Navigate to the source directory in the hostmount
+    let host_source_wd = host_root
+        .open_dir_path(host_source_path)
+        .await
+        .map_err(|e| anyhow!("Source '{}' is not a directory: {}", host_source_path, e))?;
+
+    let mut pond_ship = ship_context.open_pond().await?;
     let pond_dest = pond_dest.to_string();
 
-    ship.transact(
-        &steward::PondUserMetadata::new(vec!["copy-recursive".to_string()]),
-        |_tx, fs| {
-            Box::pin(async move {
-                let root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+    pond_ship
+        .write_transaction(
+            &steward::PondUserMetadata::new(vec!["copy-recursive".to_string()]),
+            async |fs| {
+                let root = fs.root().await?;
 
                 // Navigate to or create destination directory
                 let dest_wd = if pond_dest != "/" {
                     let clean_dest = pond_dest.trim_end_matches('/');
-                    root.create_dir_path(clean_dest).await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?
+                    root.create_dir_path(clean_dest).await?
                 } else {
                     root
                 };
 
-                // Dual traversal helper
+                // Dual traversal helper: reads from host WD, writes to pond WD
                 fn copy_dir_contents<'a>(
-                    host_path: &'a Path,
+                    host_wd: &'a tinyfs::WD,
                     pond_wd: tinyfs::WD,
                 ) -> Pin<
                     Box<dyn Future<Output = Result<(u32, u32), steward::StewardError>> + Send + 'a>,
                 > {
                     Box::pin(async move {
+                        use futures::StreamExt;
                         let mut dir_count = 0u32;
                         let mut file_count = 0u32;
 
-                        let mut entries = fs::read_dir(host_path).await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!(
-                                    "Failed to read directory {:?}: {}",
-                                    host_path, e
-                                )),
+                        // List entries through hostmount tinyfs (not tokio::fs::read_dir)
+                        let mut entries_stream = host_wd.entries().await.map_err(|e| {
+                            tinyfs::Error::Other(format!(
+                                "Failed to list host directory entries: {}",
+                                e
                             ))
                         })?;
 
-                        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!("Failed to read entry: {}", e)),
-                            ))
-                        })? {
-                            let host_entry_path = entry.path();
-                            let entry_name = entry.file_name();
-                            let name_str = entry_name.to_string_lossy().to_string();
-
-                            let metadata = entry.metadata().await.map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                    tinyfs::Error::Other(format!("Failed to get metadata: {}", e)),
-                                ))
+                        while let Some(entry_result) = entries_stream.next().await {
+                            let entry = entry_result.map_err(|e| {
+                                tinyfs::Error::Other(format!("Failed to read entry: {}", e))
                             })?;
 
-                            if metadata.is_dir() {
-                                // Create directory in pond and recurse
-                                let name_for_closure = name_str.clone();
-                                let child_wd = pond_wd
-                                    .in_path(&name_str, |parent_wd, lookup| async move {
+                            let name = &entry.name;
+
+                            if entry.entry_type.is_directory() {
+                                // Navigate into subdirectory on host side
+                                let host_child_wd =
+                                    host_wd.open_dir_path(name).await.map_err(|e| {
+                                        tinyfs::Error::Other(format!(
+                                            "Failed to open host subdirectory '{}': {}",
+                                            name, e
+                                        ))
+                                    })?;
+
+                                // Create or open directory in pond
+                                let name_for_lookup = name.clone();
+                                let child_pond_wd = pond_wd
+                                    .in_path(name, |parent_wd, lookup| async move {
                                         match lookup {
-                                            tinyfs::Lookup::NotFound(_, name) => {
-                                                // Create directory and return WD for it
-                                                parent_wd.create_dir_path(&name).await
+                                            tinyfs::Lookup::NotFound(_, ref name) => {
+                                                parent_wd.create_dir_path(name).await
                                             }
                                             tinyfs::Lookup::Found(_) => {
-                                                // Directory already exists, open it as WD
-                                                parent_wd.open_dir_path(&name_for_closure).await
+                                                parent_wd.open_dir_path(&name_for_lookup).await
                                             }
                                             tinyfs::Lookup::Empty(_) => {
                                                 Err(tinyfs::Error::empty_path())
                                             }
                                         }
                                     })
-                                    .await
-                                    .map_err(|e| {
-                                        steward::StewardError::DataInit(
-                                            tlogfs::TLogFSError::TinyFS(e),
-                                        )
-                                    })?;
+                                    .await?;
 
                                 dir_count += 1;
 
                                 // Recurse into subdirectory
                                 let (sub_dirs, sub_files) =
-                                    copy_dir_contents(&host_entry_path, child_wd).await?;
+                                    copy_dir_contents(&host_child_wd, child_pond_wd).await?;
                                 dir_count += sub_dirs;
                                 file_count += sub_files;
-                            } else if metadata.is_file() {
-                                // Copy file into pond at this level
-                                let source_path_str =
-                                    host_entry_path.to_str().ok_or_else(|| {
-                                        steward::StewardError::DataInit(
-                                            tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                                                "Invalid UTF-8 in path".to_string(),
-                                            )),
-                                        )
-                                    })?;
-
-                                // Infer format from file extension
-                                let format = if name_str.ends_with(".series") {
-                                    "series"
-                                } else if name_str.ends_with(".table") {
-                                    "table"
+                            } else if entry.entry_type.is_file() {
+                                // Copy file: read from host WD, write to pond WD
+                                let entry_type = if name.ends_with(".series") {
+                                    tinyfs::EntryType::TablePhysicalSeries
+                                } else if name.ends_with(".table") {
+                                    tinyfs::EntryType::TablePhysicalVersion
                                 } else {
-                                    "data"
+                                    tinyfs::EntryType::FilePhysicalVersion
                                 };
 
-                                copy_single_file_to_directory_with_name(
-                                    source_path_str,
-                                    &pond_wd,
-                                    &name_str,
-                                    format,
-                                )
-                                .await
-                                .map_err(|e| {
-                                    steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                        tinyfs::Error::Other(format!("Failed to copy file: {}", e)),
-                                    ))
-                                })?;
+                                copy_single_file(host_wd, name, &pond_wd, name, entry_type)
+                                    .await
+                                    .map_err(|e| {
+                                        tinyfs::Error::Other(format!(
+                                            "Failed to copy file '{}': {}",
+                                            name, e
+                                        ))
+                                    })?;
 
                                 file_count += 1;
                             }
@@ -357,136 +391,135 @@ async fn copy_directory_recursive(
                     })
                 }
 
-                let (dirs, files) = copy_dir_contents(&host_base, dest_wd).await?;
+                let (dirs, files) = copy_dir_contents(&host_source_wd, dest_wd).await?;
                 log::info!(
                     "Recursively copied {} directories and {} files from {:?} to {:?}",
                     dirs,
                     files,
-                    host_base,
+                    host_source_path,
                     pond_dest
                 );
                 Ok(())
-            })
-        },
-    )
-    .await
-    .map_err(|e| anyhow!("Recursive copy failed: {}", e))
+            },
+        )
+        .await
+        .map_err(|e| anyhow!("Recursive copy failed: {}", e))?;
+
+    // Commit host transaction (no-op for hostmount)
+    let _ = host_tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit host transaction: {}", e))?;
+
+    Ok(())
 }
 
 /// Copy files INTO the pond from host filesystem
 ///
-/// This function handles the original copy behavior: host → pond
+/// Phase 3B-2: Dual-steward pattern. Opens BOTH a host steward (for reading
+/// source files through hostmount tinyfs) and a pond steward (for writing
+/// to the pond through tlogfs tinyfs). All I/O goes through the tinyfs layer.
+///
+/// Source URLs encode the entry type:
+/// - `host:///path` or `host+file:///path` -> raw data
+/// - `host+table:///path` -> queryable parquet table
+/// - `host+series:///path` -> time-series parquet with temporal bounds
+///
 /// Uses scoped transactions for automatic commit/rollback handling.
-async fn copy_in(
-    ship_context: &ShipContext,
-    sources: &[String],
-    dest: &str,
-    format: &str,
-) -> Result<()> {
-    let mut ship = ship_context.open_pond().await?;
-
-    // Add a unique marker to verify we're running the right code
-    log::debug!("COPY_IN: scoped-transaction-v2.0");
+async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> Result<()> {
+    log::debug!("COPY_IN: dual-steward-v4.0");
 
     // Validate arguments
     if sources.is_empty() {
         return Err(anyhow!("At least one source file must be specified"));
     }
 
+    // Parse all source URLs to get host paths and entry types
+    let parsed_sources: Vec<CopySource> = sources
+        .iter()
+        .map(|s| parse_copy_source(s))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Phase 3B-2: Open host steward for reading sources through hostmount
+    let mut host_ship = ship_context.open_host()?;
+    let host_tx = host_ship
+        .begin_read(&steward::PondUserMetadata::new(vec![
+            "copy-in-source".to_string(),
+        ]))
+        .await
+        .map_err(|e| anyhow!("Failed to begin host transaction: {}", e))?;
+    let host_root = host_tx.root().await?;
+
     // Check if we have a single source that is a directory on the host
-    if sources.len() == 1 {
-        let (is_host, host_path) = parse_host_path(&sources[0]);
-        if is_host {
-            let host_path_buf = PathBuf::from(&host_path);
-            if tokio::fs::metadata(&host_path_buf)
+    // Do this via hostmount tinyfs, not tokio::fs::metadata
+    if parsed_sources.len() == 1 {
+        let source_path = &parsed_sources[0].host_path;
+        if host_root.open_dir_path(source_path).await.is_ok() {
+            // Commit host_tx before delegating (copy_directory_recursive opens its own)
+            let _ = host_tx
+                .commit()
                 .await
-                .ok()
-                .map(|m| m.is_dir())
-                .unwrap_or(false)
-            {
-                // This is a recursive directory copy from host to pond
-                log::info!(
-                    "Detected directory copy from host: {} → {}",
-                    host_path,
-                    dest
-                );
-                return copy_directory_recursive(ship_context, &host_path, dest).await;
-            }
+                .map_err(|e| anyhow!("Failed to commit host transaction: {}", e))?;
+
+            log::info!(
+                "Detected directory copy from host: {} -> {}",
+                source_path,
+                dest
+            );
+            return copy_directory_recursive(ship_context, source_path, dest).await;
         }
     }
 
-    // Clone data needed inside the closure
-    let sources = sources.to_vec();
+    // Open pond steward for writing
+    let mut pond_ship = ship_context.open_pond().await?;
     let dest = dest.to_string();
-    let format = format.to_string();
 
-    // Use scoped transaction for the copy operation
-    ship.transact(
+    // Use scoped write transaction on the pond side
+    pond_ship.write_transaction(
         &steward::PondUserMetadata::new(vec!["copy".to_string(), dest.clone()]),
-        |_tx, fs| Box::pin(async move {
-            let root = fs.root().await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        async |pond_fs| {
+            let pond_root = pond_fs.root().await?;
 
-            let copy_result = root.resolve_copy_destination(&dest).await;
+            let copy_result = pond_root.resolve_copy_destination(&dest).await;
             match copy_result {
                 Ok((dest_wd, dest_type)) => {
                     match dest_type {
                         tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
-                            // Destination is a directory (either explicit with / or existing) - copy files into it
-                            copy_files_to_directory(&sources, &dest_wd, &format).await
-                                .map_err(|e| steward::StewardError::DataInit(
-                                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Copy to directory failed: {}", e)))
-                                ))
+                            // Destination is a directory - copy files into it
+                            copy_files_to_directory(&parsed_sources, &host_root, &dest_wd).await
+                                .map_err(|e| tinyfs::Error::Other(format!("Copy to directory failed: {}", e)))?;
+                            Ok(())
                         }
                         tinyfs::CopyDestination::ExistingFile => {
-                            // Destination is an existing file — overwrite it (Unix cp semantics).
-                            // For single-source, write a new version via async_writer_path_with_type;
-                            // reads always return the latest version, so the old content is superseded.
-                            if sources.len() == 1 {
-                                let source = &sources[0];
-                                let (_is_host, clean_source) = parse_host_path(source);
-                                // Extract filename from destination path
+                            // Destination is an existing file -- overwrite it (Unix cp semantics).
+                            if parsed_sources.len() == 1 {
+                                let source = &parsed_sources[0];
                                 let dest_filename = std::path::Path::new(dest.as_str())
                                     .file_name()
                                     .and_then(|f| f.to_str())
                                     .unwrap_or(&dest);
-                                copy_single_file_to_directory_with_name(&clean_source, &dest_wd, dest_filename, &format).await
-                                    .map_err(|e| steward::StewardError::DataInit(
-                                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to overwrite file: {}", e)))
-                                    ))?;
+                                copy_single_file(&host_root, &source.host_path, &dest_wd, dest_filename, source.entry_type).await
+                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to overwrite file: {}", e)))?;
                                 log::info!("Overwrote {}", &dest);
                                 Ok(())
                             } else {
-                                Err(steward::StewardError::DataInit(
-                                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                                        format!("When copying multiple files, destination '{}' must be a directory", &dest)
-                                    ))
-                                ))
+                                Err(tinyfs::Error::Other(
+                                    format!("When copying multiple files, destination '{}' must be a directory", &dest)
+                                ).into())
                             }
                         }
                         tinyfs::CopyDestination::NewPath(name) => {
                             // Destination doesn't exist
-                            if sources.len() == 1 {
-                                // Single file to non-existent destination - use format flag only
-                                let source = &sources[0];
-
-                                // Strip host:// prefix if present
-                                let (_is_host, clean_source) = parse_host_path(source);
-
-                                // Use the same logic as directory copying, just with the specific filename
-                                copy_single_file_to_directory_with_name(&clean_source, &dest_wd, &name, &format).await
-                                    .map_err(|e| steward::StewardError::DataInit(
-                                        tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to copy file: {}", e)))
-                                    ))?;
-
-                                log::debug!("Copied {source} to {name}");
+                            if parsed_sources.len() == 1 {
+                                let source = &parsed_sources[0];
+                                copy_single_file(&host_root, &source.host_path, &dest_wd, &name, source.entry_type).await
+                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to copy file: {}", e)))?;
+                                log::debug!("Copied {} to {}", source.host_path, name);
                                 Ok(())
                             } else {
-                                Err(steward::StewardError::DataInit(
-                                    tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                                        format!("When copying multiple files, destination '{}' must be an existing directory", &dest)
-                                    ))
-                                ))
+                                Err(tinyfs::Error::Other(
+                                    format!("When copying multiple files, destination '{}' must be an existing directory", &dest)
+                                ).into())
                             }
                         }
                     }
@@ -494,36 +527,36 @@ async fn copy_in(
                 Err(e) => {
                     // Check if this is a trailing slash case where we need to create a directory
                     if dest.ends_with('/') {
-                        // Directory doesn't exist but user wants to copy into directory
-                        // Create the directory first
                         let clean_dest = dest.trim_end_matches('/');
-                        _ = root.create_dir_path(clean_dest).await
-                            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-                        // Now resolve the destination again (should work now)
-                        let (dest_wd, _) = root.resolve_copy_destination(clean_dest).await
-                            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-
-                        // Copy files to the newly created directory
-                        copy_files_to_directory(&sources, &dest_wd, &format).await
-                            .map_err(|e| steward::StewardError::DataInit(
-                                tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Copy to created directory failed: {}", e)))
-                            ))
+                        _ = pond_root.create_dir_path(clean_dest).await?;
+                        let (dest_wd, _) = pond_root.resolve_copy_destination(clean_dest).await?;
+                        copy_files_to_directory(&parsed_sources, &host_root, &dest_wd).await
+                            .map_err(|e| tinyfs::Error::Other(format!("Copy to created directory failed: {}", e)))?;
+                        Ok(())
                     } else {
-                        Err(steward::StewardError::DataInit(
-                            tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(format!("Failed to resolve destination '{}': {}", &dest, e)))
-                        ))
+                        Err(tinyfs::Error::Other(format!("Failed to resolve destination '{}': {}", &dest, e)).into())
                     }
                 }
             }
-        })
+        }
     ).await.map_err(|e| anyhow!("Copy operation failed: {}", e))?;
 
-    log::info!("✅ File(s) copied into pond successfully");
+    // Commit host transaction (no-op for hostmount)
+    let _ = host_tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit host transaction: {}", e))?;
+
+    log::info!("[OK] File(s) copied into pond successfully");
     Ok(())
 }
 
 /// Copy files OUT of the pond to host filesystem
+///
+/// Phase 3B: Dual-steward pattern. Opens BOTH a pond steward (for reading
+/// source files through tlogfs tinyfs) and a host steward (for writing
+/// destination files through hostmount tinyfs). All I/O goes through the
+/// tinyfs layer.
 ///
 /// Supports glob patterns and maintains directory structure.
 async fn copy_out(
@@ -533,50 +566,58 @@ async fn copy_out(
     options: &CopyOptions,
 ) -> Result<()> {
     use crate::common::FileInfoVisitor;
-    use tokio::fs;
 
     // Parse the host:// prefix from destination
-    let (_is_host, host_dest) = parse_host_path(dest);
+    let host_dest = extract_host_dest_path(dest)?;
 
-    log::debug!("COPY_OUT: sources={:?}, dest={}", sources, host_dest);
+    log::debug!(
+        "COPY_OUT: dual-steward, sources={:?}, dest={}",
+        sources,
+        host_dest
+    );
 
-    let mut ship = ship_context.open_pond().await?;
+    // Phase 3B: Open host steward for writing destination files through hostmount
+    let mut host_ship = ship_context.open_host()?;
+    let host_tx = host_ship
+        .begin_write(&steward::PondUserMetadata::new(vec![
+            "copy-out-dest".to_string(),
+        ]))
+        .await
+        .map_err(|e| anyhow!("Failed to begin host transaction: {}", e))?;
+    let host_root = host_tx.root().await?;
 
-    // Use read transaction to access pond
-    let tx = ship
+    // Open pond steward for reading source files
+    let mut pond_ship = ship_context.open_pond().await?;
+    let pond_tx = pond_ship
         .begin_read(&steward::PondUserMetadata::new(vec![
             "copy-out".to_string(),
             dest.to_string(),
         ]))
         .await
-        .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
+        .map_err(|e| anyhow!("Failed to begin pond transaction: {}", e))?;
+    let pond_root = (*pond_tx).root().await?;
+    let provider_ctx = pond_tx.provider_context()?;
 
     // Collect all matching files from all patterns
     let mut all_files = Vec::new();
 
-    {
-        let fs = &*tx;
-        let root = fs.root().await?;
+    for pattern in sources {
+        let mut visitor = FileInfoVisitor::new(true); // Show all files
+        let results = pond_root
+            .visit_with_visitor(pattern, &mut visitor)
+            .await
+            .map_err(|e| anyhow!("Failed to match pattern '{}': {}", pattern, e))?;
 
-        for pattern in sources {
-            let mut visitor = FileInfoVisitor::new(true); // Show all files
-            let results = root
-                .visit_with_visitor(pattern, &mut visitor)
-                .await
-                .map_err(|e| anyhow!("Failed to match pattern '{}': {}", pattern, e))?;
-
-            log::debug!("Pattern '{}' matched {} files", pattern, results.len());
-            all_files.extend(results);
-        }
+        log::debug!("Pattern '{}' matched {} files", pattern, results.len());
+        all_files.extend(results);
     }
 
-    // Commit transaction before exporting
-    _ = tx
-        .commit()
-        .await
-        .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
-
     if all_files.is_empty() {
+        _ = pond_tx.commit().await?;
+        let _ = host_tx
+            .commit()
+            .await
+            .map_err(|e| anyhow!("Failed to commit host transaction: {}", e))?;
         return Err(anyhow!("No files matched the specified patterns"));
     }
 
@@ -614,66 +655,74 @@ async fn copy_out(
         } else {
             pond_path.trim_start_matches('/').to_string()
         };
-        let output_path = std::path::Path::new(&host_dest).join(&relative_path);
+        let output_path = format!("{}/{}", host_dest.trim_end_matches('/'), relative_path);
 
-        // Create parent directories
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)
+        // Create parent directories on host through tinyfs
+        if let Some(parent) = std::path::Path::new(&output_path).parent()
+            && parent != std::path::Path::new("")
+            && parent != std::path::Path::new("/")
+        {
+            _ = host_root
+                .create_dir_all(parent)
                 .await
                 .map_err(|e| anyhow!("Failed to create directory {:?}: {}", parent, e))?;
         }
 
-        log::debug!("Exporting {} to {:?}", file_info.path, output_path);
+        log::debug!("Exporting {} to {}", file_info.path, output_path);
 
         // Determine export method based on file type
         if file_info.metadata.entry_type.is_series_file()
             || file_info.metadata.entry_type.is_table_file()
         {
-            // Export as parquet using DataFusion (like cat --format=raw)
-            export_queryable_file_as_parquet(ship_context, &file_info.path, &output_path).await?;
+            // Export as parquet via DataFusion SQL -> AsyncArrowWriter -> host tinyfs
+            export_queryable_file_as_parquet(
+                &pond_root,
+                &host_root,
+                &file_info.path,
+                &output_path,
+                &provider_ctx,
+            )
+            .await?;
         } else {
-            // Export raw bytes
-            export_raw_file(ship_context, &file_info.path, &output_path).await?;
+            // Export raw bytes: pond reader -> host writer
+            export_raw_file(&pond_root, &host_root, &file_info.path, &output_path).await?;
         }
     }
 
-    log::info!("✅ {} file(s) exported successfully", file_count);
+    // Commit both transactions
+    _ = pond_tx.commit().await?;
+    let _ = host_tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit host transaction: {}", e))?;
+
+    log::info!("[OK] {} file(s) exported successfully", file_count);
     Ok(())
 }
 
 /// Export a file:series or file:table as parquet
+///
+/// Uses AsyncArrowWriter to stream RecordBatches from DataFusion SQL
+/// directly to the host filesystem through hostmount tinyfs.
 async fn export_queryable_file_as_parquet(
-    ship_context: &ShipContext,
+    pond_root: &tinyfs::WD,
+    host_root: &tinyfs::WD,
     pond_path: &str,
-    output_path: &std::path::Path,
+    host_output_path: &str,
+    provider_ctx: &tinyfs::ProviderContext,
 ) -> Result<()> {
     use datafusion::physical_plan::SendableRecordBatchStream;
     use futures::stream::StreamExt;
-    use parquet::arrow::ArrowWriter;
-    use std::fs::File;
+    use parquet::arrow::AsyncArrowWriter;
+    use tokio::io::AsyncWriteExt;
 
-    let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship
-        .begin_read(&steward::PondUserMetadata::new(vec![
-            "export".to_string(),
-            pond_path.to_string(),
-        ]))
-        .await?;
+    // Use default SELECT * query sorted by timestamp
+    let sql_query = "SELECT * FROM source ORDER BY timestamp";
 
-    let stream: SendableRecordBatchStream = {
-        let fs = &*tx;
-        let root = fs.root().await?;
-
-        // Use default SELECT * query sorted by timestamp
-        let sql_query = "SELECT * FROM series ORDER BY timestamp";
-
-        tlogfs::execute_sql_on_file(&root, pond_path, sql_query, tx.transaction_guard()?)
+    let stream: SendableRecordBatchStream =
+        tlogfs::execute_sql_on_file(pond_root, pond_path, sql_query, provider_ctx)
             .await
-            .map_err(|e| anyhow!("Failed to execute SQL query on '{}': {}", pond_path, e))?
-    };
-
-    // Commit transaction
-    _ = tx.commit().await?;
+            .map_err(|e| anyhow!("Failed to execute SQL query on '{}': {}", pond_path, e))?;
 
     // Get the first batch to determine schema
     let mut stream = stream;
@@ -681,25 +730,37 @@ async fn export_queryable_file_as_parquet(
         Some(Ok(batch)) => batch,
         Some(Err(e)) => return Err(anyhow!("Failed to read first batch: {}", e)),
         None => {
-            log::debug!("Empty file, creating empty parquet");
-            // Create empty parquet file
-            _ = tokio::fs::File::create(output_path).await?;
+            log::debug!("Empty file, creating empty output");
+            // Create empty file on host through tinyfs
+            let mut writer = host_root
+                .async_writer_path(host_output_path)
+                .await
+                .map_err(|e| {
+                    anyhow!("Failed to create output file '{}': {}", host_output_path, e)
+                })?;
+            writer
+                .shutdown()
+                .await
+                .map_err(|e| anyhow!("Failed to finalize empty file: {}", e))?;
             return Ok(());
         }
     };
 
     let schema = first_batch.schema();
 
-    // Create parquet writer
-    let file = File::create(output_path)
-        .map_err(|e| anyhow!("Failed to create output file {:?}: {}", output_path, e))?;
+    // Create async parquet writer on host filesystem through tinyfs
+    let host_writer = host_root
+        .async_writer_path(host_output_path)
+        .await
+        .map_err(|e| anyhow!("Failed to create output file '{}': {}", host_output_path, e))?;
 
-    let mut writer = ArrowWriter::try_new(file, schema, None)
+    let mut writer = AsyncArrowWriter::try_new(host_writer, schema, None)
         .map_err(|e| anyhow!("Failed to create parquet writer: {}", e))?;
 
     // Write first batch
     writer
         .write(&first_batch)
+        .await
         .map_err(|e| anyhow!("Failed to write batch to parquet: {}", e))?;
 
     // Stream remaining batches
@@ -707,61 +768,59 @@ async fn export_queryable_file_as_parquet(
         let batch = batch_result.map_err(|e| anyhow!("Failed to read batch from stream: {}", e))?;
         writer
             .write(&batch)
+            .await
             .map_err(|e| anyhow!("Failed to write batch to parquet: {}", e))?;
     }
 
     _ = writer
         .close()
+        .await
         .map_err(|e| anyhow!("Failed to close parquet writer: {}", e))?;
 
-    log::debug!("Exported parquet file to {:?}", output_path);
+    log::debug!("Exported parquet file to {}", host_output_path);
     Ok(())
 }
 
 /// Export a regular file as raw bytes
+///
+/// Streams raw bytes from the pond through tinyfs reader to the host
+/// filesystem through tinyfs writer. No intermediate buffering.
 async fn export_raw_file(
-    ship_context: &ShipContext,
+    pond_root: &tinyfs::WD,
+    host_root: &tinyfs::WD,
     pond_path: &str,
-    output_path: &std::path::Path,
+    host_output_path: &str,
 ) -> Result<()> {
-    use tokio::io::copy;
+    use tokio::io::AsyncWriteExt;
 
-    let mut ship = ship_context.open_pond().await?;
-    let tx = ship
-        .begin_read(&steward::PondUserMetadata::new(vec![
-            "export".to_string(),
-            pond_path.to_string(),
-        ]))
-        .await?;
-
-    let mut reader = {
-        let fs = &*tx;
-        let root = fs.root().await?;
-
-        root.async_reader_path(pond_path)
-            .await
-            .map_err(|e| anyhow!("Failed to open file '{}': {}", pond_path, e))?
-    };
-
-    _ = tx.commit().await?;
-
-    // Create output file and stream content
-    let mut output_file = tokio::fs::File::create(output_path)
+    let mut reader = pond_root
+        .async_reader_path(pond_path)
         .await
-        .map_err(|e| anyhow!("Failed to create output file {:?}: {}", output_path, e))?;
+        .map_err(|e| anyhow!("Failed to open file '{}': {}", pond_path, e))?;
 
-    _ = copy(&mut reader, &mut output_file)
+    let mut writer = host_root
+        .async_writer_path(host_output_path)
+        .await
+        .map_err(|e| anyhow!("Failed to create output file '{}': {}", host_output_path, e))?;
+
+    // Stream content from pond to host through tinyfs
+    _ = tokio::io::copy(&mut reader, &mut writer)
         .await
         .map_err(|e| anyhow!("Failed to copy file content: {}", e))?;
 
-    log::debug!("Exported raw file to {:?}", output_path);
+    writer
+        .shutdown()
+        .await
+        .map_err(|e| anyhow!("Failed to complete file write: {}", e))?;
+
+    log::debug!("Exported raw file to {}", host_output_path);
     Ok(())
 }
 
 /// Options for copy operations.
 ///
 /// Uses `Default` so callers only specify what they care about.
-/// New flags go here — existing callers never break.
+/// New flags go here -- existing callers never break.
 #[derive(Debug, Default)]
 pub struct CopyOptions {
     /// Strip a leading path prefix from pond paths when copying OUT.
@@ -773,13 +832,17 @@ pub struct CopyOptions {
 /// Main copy command dispatcher
 ///
 /// Determines copy direction and dispatches to appropriate handler:
-/// - If dest has "host://" prefix → copy OUT (pond → host)
-/// - Otherwise → copy IN (host → pond)
+/// - If dest has "host://" prefix -> copy OUT (pond -> host)
+/// - If sources have "host://" or "host+" prefix -> copy IN (host -> pond)
+///
+/// Entry type for copy IN is determined by the source URL:
+/// - `host:///path` -> data (raw bytes)
+/// - `host+table:///path` -> queryable parquet table
+/// - `host+series:///path` -> time-series parquet with temporal bounds
 pub async fn copy_command(
     ship_context: &ShipContext,
     sources: &[String],
     dest: &str,
-    format: &str,
     options: &CopyOptions,
 ) -> Result<()> {
     // Validate arguments
@@ -792,19 +855,14 @@ pub async fn copy_command(
 
     match direction {
         CopyDirection::In => {
-            log::debug!("Copy direction: IN (host → pond)");
+            log::debug!("Copy direction: IN (host -> pond)");
             if options.strip_prefix.is_some() {
                 log::warn!("--strip-prefix is ignored when copying in (only applies to copy out)");
             }
-            copy_in(ship_context, sources, dest, format).await
+            copy_in(ship_context, sources, dest).await
         }
         CopyDirection::Out => {
-            log::debug!("Copy direction: OUT (pond → host)");
-            if !format.is_empty() && format != "data" {
-                log::warn!(
-                    "--format flag is ignored when copying out (format determined by source file type)"
-                );
-            }
+            log::debug!("Copy direction: OUT (pond -> host)");
             copy_out(ship_context, sources, dest, options).await
         }
     }
@@ -851,7 +909,7 @@ mod tests {
 
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
-            let ship_context = ShipContext::new(Some(&pond_path), init_args.clone());
+            let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize the pond
             init_command(&ship_context, None, None).await?;
@@ -918,15 +976,8 @@ mod tests {
         }
 
         /// Copy files into the pond with default options
-        async fn copy_in(&self, sources: Vec<String>, dest: &str, format: &str) -> Result<()> {
-            copy_command(
-                &self.ship_context,
-                &sources,
-                dest,
-                format,
-                &CopyOptions::default(),
-            )
-            .await
+        async fn copy_in(&self, sources: Vec<String>, dest: &str) -> Result<()> {
+            copy_command(&self.ship_context, &sources, dest, &CopyOptions::default()).await
         }
 
         /// Copy files out of the pond with default options
@@ -935,7 +986,6 @@ mod tests {
                 &self.ship_context,
                 &patterns,
                 &format!("host://{}", host_dest),
-                "data",
                 &CopyOptions::default(),
             )
             .await
@@ -1016,9 +1066,8 @@ mod tests {
         // Copy to pond as data file
         setup
             .copy_in(
-                vec![host_file.to_string_lossy().to_string()],
+                vec![format!("host:///{}", host_file.display())],
                 "copied_test.txt",
-                "data",
             )
             .await?;
 
@@ -1052,12 +1101,11 @@ mod tests {
             .create_host_series_parquet_file("test_series.parquet")
             .await?;
 
-        // Copy to pond as series file
+        // Copy to pond as series file (entry type encoded in URL)
         setup
             .copy_in(
-                vec![host_file.to_string_lossy().to_string()],
+                vec![format!("host+series:///{}", host_file.display())],
                 "copied_series.parquet",
-                "series",
             )
             .await?;
 
@@ -1157,9 +1205,8 @@ mod tests {
         // Copy to pond as data file (CSV is raw data, not a parquet table)
         setup
             .copy_in(
-                vec![host_file.to_string_lossy().to_string()],
+                vec![format!("host:///{}", host_file.display())],
                 "copied_data.csv",
-                "data",
             )
             .await?;
 
@@ -1198,12 +1245,11 @@ mod tests {
         setup
             .copy_in(
                 vec![
-                    file1.to_string_lossy().to_string(),
-                    file2.to_string_lossy().to_string(),
-                    file3.to_string_lossy().to_string(),
+                    format!("host:///{}", file1.display()),
+                    format!("host:///{}", file2.display()),
+                    format!("host:///{}", file3.display()),
                 ],
                 "uploaded/",
-                "data",
             )
             .await?;
 
@@ -1238,12 +1284,11 @@ mod tests {
         // Create CSV file and copy as data format (not table, since CSV isn't parquet)
         let host_file = setup.create_host_csv_file("test.csv").await?;
 
-        // Copy with data format (CSV files should use data format)
+        // Copy as data (CSV files are stored as raw bytes)
         setup
             .copy_in(
-                vec![host_file.to_string_lossy().to_string()],
+                vec![format!("host:///{}", host_file.display())],
                 "formatted_as_data.csv",
-                "data",
             )
             .await?;
 
@@ -1262,38 +1307,27 @@ mod tests {
             let mut ship = steward::Ship::open_pond(&self.pond_path).await?;
 
             let path = path.to_string();
-            ship.transact(
+            ship.write_transaction(
                 &steward::PondUserMetadata::new(vec![
                     "test".to_string(),
                     "create_series".to_string(),
                 ]),
-                move |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
+                async move |fs| {
+                    let root = fs.root().await?;
 
-                        // Create Arrow RecordBatch with temporal data using record_batch! macro
-                        let batch = record_batch!(
-                            ("timestamp", Int64, [1000_i64, 2000_i64, 3000_i64]),
-                            ("value", Float64, [10.5_f64, 20.5_f64, 30.5_f64])
-                        )
-                        .map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
-                                tinyfs::Error::Other(format!("Arrow error: {}", e)),
-                            ))
-                        })?;
+                    // Create Arrow RecordBatch with temporal data using record_batch! macro
+                    let batch = record_batch!(
+                        ("timestamp", Int64, [1000_i64, 2000_i64, 3000_i64]),
+                        ("value", Float64, [10.5_f64, 20.5_f64, 30.5_f64])
+                    )
+                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
 
-                        // Write as file:series using ParquetExt with temporal metadata extraction
-                        let _ = root
-                            .create_series_from_batch(&path, &batch, Some("timestamp"))
-                            .await
-                            .map_err(|e| {
-                                steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                            })?;
+                    // Write as file:series using ParquetExt with temporal metadata extraction
+                    let _ = root
+                        .create_series_from_batch(&path, &batch, Some("timestamp"))
+                        .await?;
 
-                        Ok(())
-                    })
+                    Ok(())
                 },
             )
             .await?;
@@ -1307,12 +1341,11 @@ mod tests {
         let setup = TestSetup::new().await?;
         let opts = CopyOptions::default();
 
-        // Test copying non-existent file
+        // Test copying non-existent file (with host prefix)
         let result = copy_command(
             &setup.ship_context,
-            &["/nonexistent/file.txt".to_string()],
+            &["host:///nonexistent/file.txt".to_string()],
             "should_fail.txt",
-            "data",
             &opts,
         )
         .await;
@@ -1322,20 +1355,22 @@ mod tests {
         );
 
         // Test copying with empty sources
-        let result = copy_command(&setup.ship_context, &[], "should_fail.txt", "data", &opts).await;
+        let result = copy_command(&setup.ship_context, &[], "should_fail.txt", &opts).await;
         assert!(result.is_err(), "Should fail with empty sources");
 
-        // Test copying with invalid format
+        // Test copying without host prefix (no direction can be determined)
         let host_file = setup.create_host_text_file("test.txt", "test").await?;
         let result = copy_command(
             &setup.ship_context,
             &[host_file.to_string_lossy().to_string()],
             "test.txt",
-            "invalid_format",
             &opts,
         )
         .await;
-        assert!(result.is_err(), "Should fail with invalid format");
+        assert!(
+            result.is_err(),
+            "Should fail without host:// prefix on source or dest"
+        );
 
         Ok(())
     }
@@ -1352,9 +1387,8 @@ mod tests {
         // Copy to new filename (not directory)
         setup
             .copy_in(
-                vec![host_file.to_string_lossy().to_string()],
+                vec![format!("host:///{}", host_file.display())],
                 "renamed_file.txt",
-                "data",
             )
             .await?;
 
@@ -1376,21 +1410,13 @@ mod tests {
 
         // Create directories first
         let mut ship = steward::Ship::open_pond(&setup.pond_path).await?;
-        ship.transact(
+        ship.write_transaction(
             &steward::PondUserMetadata::new(vec!["test".to_string(), "setup".to_string()]),
-            |_tx, fs| {
-                Box::pin(async move {
-                    let root = fs.root().await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                    _ = root.create_dir_path("/data").await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                    _ = root.create_dir_path("/data/nested").await.map_err(|e| {
-                        steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                    })?;
-                    Ok(())
-                })
+            async |fs| {
+                let root = fs.root().await?;
+                _ = root.create_dir_path("/data").await?;
+                _ = root.create_dir_path("/data/nested").await?;
+                Ok(())
             },
         )
         .await?;
@@ -1438,7 +1464,7 @@ mod tests {
 
             assert!(row_count > 0, "Exported parquet file should contain data");
             log::debug!(
-                "✅ Verified exported file: {:?} ({} rows)",
+                "[OK] Verified exported file: {:?} ({} rows)",
                 exported_file,
                 row_count
             );
@@ -1503,19 +1529,17 @@ mod tests {
         // Create a parquet series file
         setup.create_parquet_series_in_pond("/test.series").await?;
 
-        // Try to copy out WITHOUT host:// prefix - should fail or be treated as copy IN
-        // This should be treated as copy IN and fail because /test.series is not a host file
+        // Try to copy without host:// prefix on either side - should fail
         let result = copy_command(
             &setup.ship_context,
             &["/test.series".to_string()],
             "/tmp/output",
-            "data",
             &CopyOptions::default(),
         )
         .await;
         assert!(
             result.is_err(),
-            "Should fail when copying pond path to pond path without host:// prefix"
+            "Should fail when neither source nor dest has host:// prefix"
         );
 
         Ok(())
@@ -1529,21 +1553,13 @@ mod tests {
         // Create directories first
         let mut ship1 = steward::Ship::open_pond(&setup1.pond_path).await?;
         ship1
-            .transact(
+            .write_transaction(
                 &steward::PondUserMetadata::new(vec!["test".to_string(), "setup".to_string()]),
-                |_tx, fs| {
-                    Box::pin(async move {
-                        let root = fs.root().await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
-                        _ = root.create_dir_path("/data").await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
-                        _ = root.create_dir_path("/data/subdir").await.map_err(|e| {
-                            steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e))
-                        })?;
-                        Ok(())
-                    })
+                async |fs| {
+                    let root = fs.root().await?;
+                    _ = root.create_dir_path("/data").await?;
+                    _ = root.create_dir_path("/data/subdir").await?;
+                    Ok(())
                 },
             )
             .await?;
@@ -1589,11 +1605,7 @@ mod tests {
 
         // Copy the entire directory structure back into the new pond
         setup2
-            .copy_in(
-                vec![format!("host://{}/data", output_path)],
-                "/imported",
-                "data",
-            )
+            .copy_in(vec![format!("host://{}/data", output_path)], "/imported")
             .await?;
 
         // Step 3: Verify all files exist in second pond with correct structure
@@ -1617,16 +1629,84 @@ mod tests {
             assert_eq!(&content[0..4], b"PAR1", "Should be valid parquet file");
 
             log::debug!(
-                "✅ Round-trip verified for: {} ({} bytes)",
+                "[OK] Round-trip verified for: {} ({} bytes)",
                 imported_path,
                 content.len()
             );
         }
 
         log::info!(
-            "✅ Round-trip test complete: {} files copied OUT and IN successfully",
+            "[OK] Round-trip test complete: {} files copied OUT and IN successfully",
             test_files.len()
         );
+        Ok(())
+    }
+
+    /// Test: pond copy -d /tmp host:///file.txt /
+    /// Verifies that the -d flag (host_root) makes host paths relative to the root.
+    /// With -d set to the host_files_dir, `host:///file.txt` resolves to
+    /// `host_files_dir/file.txt`.
+    #[tokio::test]
+    async fn test_copy_with_directory_flag() -> Result<()> {
+        // Create a temporary directory for the test pond
+        let temp_dir = TempDir::new()?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pond_path = temp_dir.path().join(format!("test_pond_{}", timestamp));
+        let host_files_dir = temp_dir.path().join("host_files");
+        tokio::fs::create_dir_all(&host_files_dir).await?;
+
+        // Create a file in the host_files_dir
+        let content = "Hello from -d flag test!\n";
+        let file_path = host_files_dir.join("file.txt");
+        let mut f = File::create(&file_path).await?;
+        f.write_all(content.as_bytes()).await?;
+        f.shutdown().await?;
+
+        // Create ShipContext WITH host_root set (simulates -d flag)
+        let init_args = vec!["pond".to_string(), "init".to_string()];
+        let ship_context = ShipContext::new(
+            Some(&pond_path),
+            Some(&host_files_dir), // -d host_files_dir
+            Vec::new(),
+            init_args.clone(),
+        );
+
+        // Initialize the pond
+        init_command(&ship_context, None, None).await?;
+
+        // Copy using relative path: host:///file.txt resolves to host_files_dir/file.txt
+        copy_command(
+            &ship_context,
+            &["host:///file.txt".to_string()],
+            "/",
+            &CopyOptions::default(),
+        )
+        .await?;
+
+        // Verify the file exists in the pond
+        let mut ship = steward::Ship::open_pond(&pond_path).await?;
+        let tx = ship
+            .begin_read(&steward::PondUserMetadata::new(vec!["verify".to_string()]))
+            .await?;
+        let fs = &*tx;
+        let root = fs.root().await?;
+
+        let mut pond_content = Vec::new();
+        {
+            let mut reader = root.async_reader_path("/file.txt").await?;
+            _ = reader.read_to_end(&mut pond_content).await?;
+        }
+        _ = tx.commit().await?;
+
+        assert_eq!(
+            String::from_utf8(pond_content)?,
+            content,
+            "File content should match original"
+        );
+
         Ok(())
     }
 }

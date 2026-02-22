@@ -20,10 +20,6 @@ pub struct PondUserMetadata {
 
     /// Original CLI arguments that created this transaction
     pub args: Vec<String>,
-
-    /// Key/value parameters (e.g., from -v CLI flags or environment)
-    #[serde(default)]
-    pub vars: HashMap<String, String>,
 }
 
 impl PondUserMetadata {
@@ -31,15 +27,8 @@ impl PondUserMetadata {
     pub fn new(args: Vec<String>) -> Self {
         Self {
             txn_id: uuid7::uuid7(),
-            vars: HashMap::new(),
             args,
         }
-    }
-
-    #[must_use]
-    pub fn with_vars(mut self, vars: HashMap<String, String>) -> Self {
-        self.vars = vars;
-        self
     }
 }
 
@@ -100,18 +89,13 @@ mod tests {
 
     #[test]
     fn test_metadata_roundtrip() {
-        let mut vars = HashMap::new();
-        _ = vars.insert("user".to_string(), "admin".to_string());
-        _ = vars.insert("host".to_string(), "prod1".to_string());
-
         let original = PondTxnMetadata::new(
             4,
             PondUserMetadata::new(vec![
                 "mknod".to_string(),
                 "hydrovu".to_string(),
                 "/etc/hydrovu".to_string(),
-            ])
-            .with_vars(vars.clone()),
+            ]),
         );
 
         let delta_metadata = original.to_delta_metadata();
@@ -123,12 +107,9 @@ mod tests {
 
     #[test]
     fn test_metadata_format() {
-        let mut vars = HashMap::new();
-        _ = vars.insert("env".to_string(), "test".to_string());
-
         let metadata = PondTxnMetadata::new(
             5,
-            PondUserMetadata::new(vec!["mkdir".to_string(), "/etc".to_string()]).with_vars(vars),
+            PondUserMetadata::new(vec!["mkdir".to_string(), "/etc".to_string()]),
         );
 
         let delta_metadata = metadata.to_delta_metadata();
@@ -139,6 +120,5 @@ mod tests {
         // txn_id is now under 'user' after refactoring
         assert!(pond_txn["user"]["txn_id"].is_string());
         assert_eq!(pond_txn["txn_seq"], 5);
-        assert_eq!(pond_txn["user"]["vars"]["env"], "test");
     }
 }

@@ -282,7 +282,7 @@ impl Drop for OpLogFileWriter {
             if total_written > 0 {
                 // PANIC on data loss - this is a programming error that MUST be fixed
                 panic!(
-                    "🚨 DATA LOSS: OpLogFileWriter dropped without shutdown()! \
+                    "[ALERT] DATA LOSS: OpLogFileWriter dropped without shutdown()! \
                     {} bytes of data were written but will NOT be persisted to Delta Lake. \
                     You MUST call writer.shutdown().await? before dropping the writer. \
                     Pattern: writer.write_all(...).await?; writer.flush().await?; writer.shutdown().await?;",
@@ -292,7 +292,7 @@ impl Drop for OpLogFileWriter {
 
             // Even if no data was written, warn about improper shutdown
             log::warn!(
-                "⚠️  OpLogFileWriter dropped without shutdown() - no data was written, \
+                "[WARN]  OpLogFileWriter dropped without shutdown() - no data was written, \
                 but this indicates improper AsyncWrite usage. \
                 Always call writer.shutdown().await? even for empty files."
             );

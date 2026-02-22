@@ -154,9 +154,9 @@ async fn show_recent_transactions(
         .map_err(|e| anyhow!("Failed to collect query results: {}", e))?;
 
     // Print header
-    println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
-    println!("║                        RECENT TRANSACTIONS                                 ║");
-    println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
+    println!("\n+===========================================================================+");
+    println!("|                        RECENT TRANSACTIONS                                 |");
+    println!("+===========================================================================+\n");
 
     if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
         println!("No transactions found.\n");
@@ -210,22 +210,22 @@ async fn show_recent_transactions(
             .unwrap_or_else(|| "N/A".to_string());
 
         println!(
-            "┌─ Transaction {} ({}) ─────────────────────────────",
+            "+- Transaction {} ({}) -----------------------------",
             txn.txn_seq, txn.transaction_type
         );
-        println!("│  Status       : {}", status);
-        println!("│  UUID         : {}", txn.txn_id);
-        println!("│  Started      : {}", started_at);
-        println!("│  Ended        : {}", ended_at);
-        println!("│  Duration     : {}", duration_str);
-        println!("│  Command      : {}", cli_args);
+        println!("|  Status       : {}", status);
+        println!("|  UUID         : {}", txn.txn_id);
+        println!("|  Started      : {}", started_at);
+        println!("|  Ended        : {}", ended_at);
+        println!("|  Duration     : {}", duration_str);
+        println!("|  Command      : {}", cli_args);
 
         // Show error if present
         if let Some(error) = &txn.error_message {
-            println!("│  Error        : {}", truncate_error(error));
+            println!("|  Error        : {}", truncate_error(error));
         }
 
-        println!("└────────────────────────────────────────────────────────────────");
+        println!("+----------------------------------------------------------------");
         println!();
     }
 
@@ -280,12 +280,12 @@ async fn show_transaction_detail(
         .await
         .map_err(|e| anyhow!("Failed to collect query results: {}", e))?;
 
-    println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
+    println!("\n+===========================================================================+");
     println!(
-        "║                     TRANSACTION DETAIL: {}                                   ║",
+        "|                     TRANSACTION DETAIL: {}                                   |",
         txn_seq
     );
-    println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
+    println!("+===========================================================================+\n");
 
     if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
         println!("Transaction {} not found.\n", txn_seq);
@@ -314,7 +314,7 @@ async fn show_transaction_detail(
         // Section header for post-commit tasks
         if is_post_commit && !in_post_commit {
             in_post_commit = true;
-            println!("\n═══ POST-COMMIT TASKS ═══════════════════════════════════════════════\n");
+            println!("\n=== POST-COMMIT TASKS ===============================================\n");
         }
 
         match record_type {
@@ -330,14 +330,14 @@ async fn show_transaction_detail(
                 };
 
                 println!(
-                    "┌─ BEGIN {} Transaction ──────────────────────────────────",
+                    "+- BEGIN {} Transaction ----------------------------------",
                     txn_type
                 );
-                println!("│  Sequence     : {}", current_txn_seq);
-                println!("│  UUID         : {}", txn_id);
-                println!("│  Timestamp    : {}", timestamp);
-                println!("│  Command      : {}", cli_args);
-                println!("└────────────────────────────────────────────────────────────────");
+                println!("|  Sequence     : {}", current_txn_seq);
+                println!("|  UUID         : {}", txn_id);
+                println!("|  Timestamp    : {}", timestamp);
+                println!("|  Command      : {}", cli_args);
+                println!("+----------------------------------------------------------------");
             }
             "data_committed" => {
                 let version = detail.data_fs_version.unwrap_or(0);
@@ -346,7 +346,7 @@ async fn show_transaction_detail(
                     .map(|d| format!("{}ms", d))
                     .unwrap_or_else(|| "N/A".to_string());
                 println!(
-                    "│  ✓ DATA COMMITTED at {} (version {}, duration: {})",
+                    "|  [OK] DATA COMMITTED at {} (version {}, duration: {})",
                     timestamp, version, duration
                 );
             }
@@ -355,7 +355,10 @@ async fn show_transaction_detail(
                     .duration_ms
                     .map(|d| format!("{}ms", d))
                     .unwrap_or_else(|| "N/A".to_string());
-                println!("│  ✓ COMPLETED at {} (duration: {})", timestamp, duration);
+                println!(
+                    "|  [OK] COMPLETED at {} (duration: {})",
+                    timestamp, duration
+                );
             }
             "failed" => {
                 let duration = detail
@@ -366,24 +369,24 @@ async fn show_transaction_detail(
                     .error_message
                     .as_deref()
                     .unwrap_or("<no error message>");
-                println!("│  ✗ FAILED at {} (duration: {})", timestamp, duration);
-                println!("│  Error: {}", error);
+                println!("|  [FAIL] FAILED at {} (duration: {})", timestamp, duration);
+                println!("|  Error: {}", error);
             }
             "post_commit_pending" => {
                 let _exec_seq = detail.execution_seq.unwrap_or(0);
                 let factory = detail.factory_name.as_deref().unwrap_or("<unknown>");
                 let config = detail.config_path.as_deref().unwrap_or("<unknown>");
                 println!(
-                    "┌─ POST-COMMIT TASK #{} PENDING ──────────────────────────────",
+                    "+- POST-COMMIT TASK #{} PENDING ------------------------------",
                     _exec_seq
                 );
-                println!("│  Factory      : {}", factory);
-                println!("│  Config       : {}", config);
-                println!("│  Timestamp    : {}", timestamp);
+                println!("|  Factory      : {}", factory);
+                println!("|  Config       : {}", config);
+                println!("|  Timestamp    : {}", timestamp);
             }
             "post_commit_started" => {
                 let _exec_seq = detail.execution_seq.unwrap_or(0);
-                println!("│  ▶ STARTED at {}", timestamp);
+                println!("|  [RUN] STARTED at {}", timestamp);
             }
             "post_commit_completed" => {
                 let _exec_seq = detail.execution_seq.unwrap_or(0);
@@ -391,8 +394,11 @@ async fn show_transaction_detail(
                     .duration_ms
                     .map(|d| format!("{}ms", d))
                     .unwrap_or_else(|| "N/A".to_string());
-                println!("│  ✓ COMPLETED at {} (duration: {})", timestamp, duration);
-                println!("└────────────────────────────────────────────────────────────────");
+                println!(
+                    "|  [OK] COMPLETED at {} (duration: {})",
+                    timestamp, duration
+                );
+                println!("+----------------------------------------------------------------");
             }
             "post_commit_failed" => {
                 let _exec_seq = detail.execution_seq.unwrap_or(0);
@@ -404,12 +410,12 @@ async fn show_transaction_detail(
                     .error_message
                     .as_deref()
                     .unwrap_or("<no error message>");
-                println!("│  ✗ FAILED at {} (duration: {})", timestamp, duration);
-                println!("│  Error: {}", error);
-                println!("└────────────────────────────────────────────────────────────────");
+                println!("|  [FAIL] FAILED at {} (duration: {})", timestamp, duration);
+                println!("|  Error: {}", error);
+                println!("+----------------------------------------------------------------");
             }
             _ => {
-                println!("│  {} at {}", record_type, timestamp);
+                println!("|  {} at {}", record_type, timestamp);
             }
         }
     }
@@ -433,7 +439,7 @@ async fn execute_sync(
     // Control table automatically sees latest Delta commits via DataFusion
     control_table.print_banner();
 
-    log::info!("🔄 Executing manual sync operation...");
+    log::info!("[SYNC] Executing manual sync operation...");
 
     // Open pond to read factory configuration
     let mut ship = ship_context.open_pond().await?;
@@ -446,7 +452,7 @@ async fn execute_sync(
     match execute_sync_impl(&mut tx, control_table, config).await {
         Ok(()) => {
             _ = tx.commit().await?;
-            log::info!("✓ Sync operation completed");
+            log::info!("[OK] Sync operation completed");
             Ok(())
         }
         Err(e) => Err(tx.abort(&e).await.into()),
@@ -455,7 +461,7 @@ async fn execute_sync(
 
 /// Implementation of sync operation
 async fn execute_sync_impl(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     control_table: &mut steward::ControlTable,
     config_base64: Option<String>,
 ) -> Result<()> {
@@ -469,8 +475,7 @@ async fn execute_sync_impl(
         let pond_metadata = control_table.get_pond_metadata().clone();
 
         // Create factory context
-        let state = tx.state()?;
-        let provider_context = state.as_provider_context();
+        let provider_context = tx.provider_context()?;
         let factory_context = provider::FactoryContext::with_metadata(
             provider_context,
             tinyfs::FileID::root(),
@@ -500,9 +505,8 @@ async fn execute_sync_impl(
     let remote_path = "/etc/system.d/1-backup"; // Standard location
     log::info!("Looking for remote factory at: {}", remote_path);
 
-    // Get filesystem root
-    let fs = tinyfs::FS::new(tx.state()?).await?;
-    let root = fs.root().await?;
+    // Get filesystem root (guard derefs to FS)
+    let root = tx.root().await?;
 
     // Resolve the factory config path
     let (_parent_wd, lookup_result) = root
@@ -525,7 +529,6 @@ async fn execute_sync_impl(
 
     // Get the factory name from the oplog
     let factory_name = tx
-        .state()?
         .get_factory_for_node(node_id)
         .await
         .with_context(|| format!("Failed to get factory for: {}", remote_path))?
@@ -559,8 +562,7 @@ async fn execute_sync_impl(
     let pond_metadata = control_table.get_pond_metadata().clone();
 
     // Create factory context for ControlWriter mode
-    let state = tx.state()?;
-    let provider_context = state.as_provider_context();
+    let provider_context = tx.provider_context()?;
     let factory_context =
         provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
 
@@ -584,9 +586,9 @@ async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -
     // Control table automatically sees latest Delta commits via DataFusion
     control_table.print_banner();
 
-    println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
-    println!("║                      INCOMPLETE OPERATIONS                                 ║");
-    println!("╚═══════════════════════════════════════════════════════════════════════════╝\n");
+    println!("\n+===========================================================================+");
+    println!("|                      INCOMPLETE OPERATIONS                                 |");
+    println!("+===========================================================================+\n");
 
     // Use existing method from control table
     let incomplete = control_table
@@ -603,27 +605,27 @@ async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -
 
     for (txn_meta, data_fs_version) in incomplete {
         println!(
-            "┌─ Transaction {} ────────────────────────────────────────────",
+            "+- Transaction {} --------------------------------------------",
             txn_meta.txn_seq
         );
-        println!("│  UUID         : {}", txn_meta.user.txn_id);
-        println!("│  Status       : ⚠️  Incomplete (crashed during execution)");
+        println!("|  UUID         : {}", txn_meta.user.txn_id);
+        println!("|  Status       : [WARN]  Incomplete (crashed during execution)");
 
         if data_fs_version > 0 {
             println!(
-                "│  Data Version : {} (data was committed before crash)",
+                "|  Data Version : {} (data was committed before crash)",
                 data_fs_version
             );
         } else {
-            println!("│  Data Version : N/A (crashed before data commit)");
+            println!("|  Data Version : N/A (crashed before data commit)");
         }
 
         // Display command from metadata
         if !txn_meta.user.args.is_empty() {
-            println!("│  Command      : {}", txn_meta.user.args.join(" "));
+            println!("|  Command      : {}", txn_meta.user.args.join(" "));
         }
 
-        println!("└────────────────────────────────────────────────────────────────");
+        println!("+----------------------------------------------------------------");
         println!();
     }
 
@@ -710,7 +712,7 @@ async fn set_pond_config(
         .await
         .map_err(|e| anyhow!("Failed to set setting: {}", e))?;
 
-    println!("✓ Set '{}' = '{}'", key, value);
+    println!("[OK] Set '{}' = '{}'", key, value);
     Ok(())
 }
 

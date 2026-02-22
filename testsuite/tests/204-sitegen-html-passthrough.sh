@@ -8,6 +8,7 @@
 # rendered verbatim, which is needed for pages that embed Leaflet maps
 # or other client-side JS.
 set -e
+source check.sh
 
 echo "=== Experiment: Sitegen HTML Pass-Through ==="
 
@@ -105,7 +106,7 @@ echo "✓ Data pipeline created"
 echo ""
 echo "--- Step 2: Create pages with embedded HTML ---"
 
-pond mkdir -p /etc/site
+pond mkdir -p /site
 
 # Index page with inline script block — the key test case
 cat > /tmp/index.md << 'HTMLMD'
@@ -162,9 +163,9 @@ cat > /tmp/sidebar.md << 'MD'
 {{ nav_list collection="params" base="/params" /}}
 MD
 
-pond copy host:///tmp/index.md /etc/site/index.md
-pond copy host:///tmp/data.md /etc/site/data.md
-pond copy host:///tmp/sidebar.md /etc/site/sidebar.md
+pond copy host:///tmp/index.md /site/index.md
+pond copy host:///tmp/data.md /site/data.md
+pond copy host:///tmp/sidebar.md /site/sidebar.md
 echo "✓ Pages loaded"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -189,7 +190,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/site/index.md"
   - name: "params"
     type: static
     slug: "params"
@@ -197,20 +198,20 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/site/data.md"
         export: "params"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/site/sidebar.md"
 
 static_assets: []
 YAML
 
-pond mknod sitegen /etc/site.yaml --config-path /tmp/site.yaml
+pond mknod sitegen /site.yaml --config-path /tmp/site.yaml
 
 rm -rf "${OUTDIR}"
 mkdir -p "${OUTDIR}"
-pond run /etc/site.yaml build "${OUTDIR}"
+pond run /site.yaml build "${OUTDIR}"
 echo "✓ Sitegen complete"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -220,28 +221,8 @@ echo "✓ Sitegen complete"
 echo ""
 echo "=== VERIFICATION ==="
 
-PASS=0
-FAIL=0
-
-check_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ $2"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-check_not_contains() {
-  if grep -qF "$3" "$1" 2>/dev/null; then
-    echo "  ✗ $2 (found unwanted: '$3')"
-    FAIL=$((FAIL + 1))
-  else
-    echo "  ✓ $2"
-    PASS=$((PASS + 1))
-  fi
-}
+echo ""
+echo "--- Verification ---"
 
 INDEX="${OUTDIR}/index.html"
 
@@ -267,18 +248,7 @@ check_contains "$INDEX" "link tag preserved" '<link rel="stylesheet"'
 
 echo ""
 echo "--- Markdown still renders ---"
-check_contains "$INDEX" "h1 rendered" '<h1>Test Page</h1>'
+check_contains "$INDEX" "h1 rendered" '<h1 id="test-page">Test Page</h1>'
 check_contains "$INDEX" "paragraph rendered" '<p>Some markdown content here.</p>'
 
-echo ""
-echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
-
-if [ "${FAIL}" -gt 0 ]; then
-  echo ""
-  echo "DEBUG: Rendered index.html around script block:"
-  grep -B 2 -A 20 '<script' "${INDEX}" || echo "(no script tag found)"
-  exit 1
-fi
-
-echo ""
-echo "=== Test 204 PASSED ==="
+check_finish

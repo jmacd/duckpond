@@ -38,16 +38,16 @@ where
 }
 
 async fn show_filesystem_transactions(
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
     mode: &str,
 ) -> Result<String, steward::StewardError> {
-    // Get data persistence from the transaction guard
-    let persistence = tx
-        .data_persistence()
-        .map_err(steward::StewardError::DataInit)?;
+    // Get the pond-specific guard for commit history and store path
+    let pond = tx
+        .as_pond()
+        .expect("show command requires a pond transaction");
 
     // Get commit history from the filesystem
-    let commit_history = persistence
+    let commit_history = pond
         .get_commit_history(None)
         .await
         .map_err(steward::StewardError::DataInit)?;
@@ -56,8 +56,12 @@ async fn show_filesystem_transactions(
         return Ok("No transactions found in this filesystem.".to_string());
     }
 
-    // Get pond path from persistence for control table access (clone to avoid borrow issues)
-    let store_path = persistence.store_path().to_string_lossy().to_string();
+    // Get store path for display purposes
+    let store_path = pond
+        .store_path()
+        .map_err(steward::StewardError::DataInit)?
+        .to_string_lossy()
+        .to_string();
     let pond_path = std::path::Path::new(&store_path)
         .parent()
         .ok_or_else(|| steward::StewardError::Dyn("Invalid store path".into()))?
@@ -82,14 +86,17 @@ async fn show_brief_mode(
     commit_history: &[deltalake::kernel::CommitInfo],
     store_path: &str,
     _pond_path: &std::path::Path,
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
 
     let mut output = String::new();
 
-    // Access control table through transaction guard (uses Ship's cached instance)
-    let control_table = tx.control_table();
+    // Access control table through pond-specific guard (uses Ship's cached instance)
+    let control_table = tx
+        .as_pond()
+        .expect("show command requires a pond transaction")
+        .control_table();
 
     control_table.print_banner();
 
@@ -256,13 +263,13 @@ async fn show_brief_mode(
     // Format the output
     output.push('\n');
     output.push_str(
-        "╔════════════════════════════════════════════════════════════════════════════╗\n",
+        "+============================================================================+\n",
     );
     output.push_str(
-        "║                            POND SUMMARY                                    ║\n",
+        "|                            POND SUMMARY                                    |\n",
     );
     output.push_str(
-        "╚════════════════════════════════════════════════════════════════════════════╝\n",
+        "+============================================================================+\n",
     );
     output.push('\n');
 
@@ -277,7 +284,7 @@ async fn show_brief_mode(
     output.push('\n');
 
     output.push_str("  Storage Statistics\n");
-    output.push_str("  ──────────────────\n");
+    output.push_str("  ------------------\n");
     output.push_str(&format!("  Parquet Files      : {}\n", total_parquet_files));
     output.push_str(&format!(
         "  Total Size         : {}\n",
@@ -292,7 +299,7 @@ async fn show_brief_mode(
 
     // Show all partitions with detailed breakdown
     output.push_str("  Partitions (by row count)\n");
-    output.push_str("  ─────────────────────────\n");
+    output.push_str("  -------------------------\n");
     for (part_id, stats) in partition_vec.iter() {
         let path_display = stats.path_name.as_deref().unwrap_or("<unknown>");
 
@@ -393,14 +400,17 @@ async fn show_detailed_mode(
     _commit_history: &[deltalake::kernel::CommitInfo],
     _store_path: &str,
     _pond_path: &std::path::Path,
-    tx: &mut steward::StewardTransactionGuard<'_>,
+    tx: &mut steward::Transaction<'_>,
 ) -> Result<String, steward::StewardError> {
     use std::collections::HashMap;
 
     let mut output = String::new();
 
-    // Access control table through transaction guard (uses Ship's cached instance)
-    let control_table = tx.control_table();
+    // Access control table through pond-specific guard (uses Ship's cached instance)
+    let control_table = tx
+        .as_pond()
+        .expect("show command requires a pond transaction")
+        .control_table();
 
     control_table.print_banner();
 
@@ -771,7 +781,7 @@ fn format_operations_from_batches(
             // Convert directory entries to strings
             let entry_strings: Vec<String> = dir_entries
                 .iter()
-                .map(|entry| format!("{} → {}", entry.name, format_node_id(&entry.child_node_id)))
+                .map(|entry| format!("{} -> {}", entry.name, format_node_id(&entry.child_node_id)))
                 .collect();
 
             // Group by partition (directory) - use PartID for grouping
@@ -865,7 +875,7 @@ mod tests {
 
             // Create ship context for initialization
             let init_args = vec!["pond".to_string(), "init".to_string()];
-            let ship_context = ShipContext::new(Some(pond_path.clone()), init_args.clone());
+            let ship_context = ShipContext::pond_only(Some(pond_path.clone()), init_args.clone());
 
             // Initialize pond
             init_command(&ship_context, None, None)
@@ -921,27 +931,22 @@ mod tests {
 
         // Add a transaction with some file operations
         let args = vec!["test_command".to_string(), "test_arg".to_string()];
-        ship.transact(&steward::PondUserMetadata::new(args), |_tx, fs| {
-            Box::pin(async move {
-                let data_root = fs
-                    .root()
-                    .await
-                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                _ = tinyfs::async_helpers::convenience::create_file_path(
-                    &data_root,
-                    "/example.txt",
-                    b"test content for show",
-                )
-                .await
-                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
-                Ok(())
-            })
+        ship.write_transaction(&steward::PondUserMetadata::new(args), async |fs| {
+            let data_root = fs.root().await?;
+            _ = tinyfs::async_helpers::convenience::create_file_path(
+                &data_root,
+                "/example.txt",
+                b"test content for show",
+            )
+            .await?;
+            Ok(())
         })
         .await
         .expect("Failed to execute test transaction");
 
         // Create ship context for show command
-        let ship_context = ShipContext::new(Some(pond_path.clone()), vec!["test".to_string()]);
+        let ship_context =
+            ShipContext::pond_only(Some(pond_path.clone()), vec!["test".to_string()]);
 
         // Capture show command output
         let mut captured_output = String::new();

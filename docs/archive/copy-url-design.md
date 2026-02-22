@@ -18,19 +18,20 @@ how to decode it, and what entry type to create.
 ## URL Grammar
 
 ```
-[format[+compression][+entrytype]:]//[host]/path
+[host+][format[+compression][+entrytype]]:///path
 ```
 
 **Segments** (all optional, order-independent per category):
 
 | Position | Values | Meaning |
-|----------|--------|---------|
+|----------|--------|--------|
+| host | `host+` prefix | Read from host filesystem (vs pond-internal path) |
 | format | `csv`, `oteljson`, `excelhtml`, ... | How to parse bytes into Arrow batches |
 | compression | `gzip`, `zstd`, `bzip2` | How to decompress the byte stream |
 | entrytype | `table`, `series` | What pond entry type to create (default: `data`) |
-| host literal | `host` | Read from host filesystem (vs pond-internal path) |
 
-The `host` token occupies the **authority** position in the URL (the part between `://` and the path).
+The `host` token is always a **prefix** on the scheme (`host+csv`, `host+table`).
+This is consistent with the existing `pond cat host+csv:///path` syntax.
 
 ## Examples
 
@@ -39,37 +40,35 @@ The `host` token occupies the **authority** position in the URL (the part betwee
 | `copy host:///tmp/f.csv /data/` | yes | — | — | `data` (raw bytes) |
 | `copy host+table:///tmp/f.parquet /data/` | yes | — | — | `table` (validated PAR1) |
 | `copy host+series:///tmp/f.parquet /data/` | yes | — | — | `series` (PAR1 + temporal) |
-| `copy oteljson://host/f.json /data/` | yes | — | oteljson→Arrow | `table` (implied) |
-| `copy oteljson+zstd://host/f.json.zst /data/` | yes | zstd | oteljson→Arrow | `table` (implied) |
-| `copy csv+gzip://host/f.csv.gz /data/` | yes | gzip | csv→Arrow | `table` (implied) |
-| `copy csv+gzip+series://host/f.csv.gz /data/` | yes | gzip | csv→Arrow | `series` |
+| `copy host+oteljson:///tmp/f.json /data/` | yes | — | oteljson→Arrow | `table` (implied) |
+| `copy host+oteljson+zstd:///tmp/f.json.zst /data/` | yes | zstd | oteljson→Arrow | `table` (implied) |
+| `copy host+csv+gzip:///tmp/f.csv.gz /data/` | yes | gzip | csv→Arrow | `table` (implied) |
+| `copy host+csv+gzip+series:///tmp/f.csv.gz /data/` | yes | gzip | csv→Arrow | `series` |
 
 ## Key Design Decisions
 
-### 1. Where `host` goes: authority position
+### 1. Where `host` goes: prefix position
 
-Two options were considered:
+**Decision**: `host` is always a **prefix** on the scheme: `host+csv:///path`,
+`host+table:///path`, `host+oteljson+gzip:///path`.
 
-- **Authority** (`csv://host/path`): Natural URL reading — "csv file on host at path".
-  The authority says *where*, which is semantically correct. We already reject non-empty
-  host in `provider::Url`, so there's no conflict.
-- **Scheme suffix** (`csv+host:///path`): Consistent with `+compression`, but `host` isn't
-  a compression or format — it's a location. Reads oddly.
+This is consistent with the existing `pond cat host+csv:///path` syntax introduced
+before this design. An earlier version of this document proposed putting `host` in
+the URL authority position (`csv://host/path`), but that was rejected in favor of
+prefix consistency — one syntax for "host file" everywhere.
 
-**Decision**: Use the authority position for `host` when a format scheme is present.
+`provider::Url` already has an `is_host` flag that strips the `host+` prefix before
+parsing. The remaining scheme segments (`csv+gzip`, `table`, `series`) are parsed
+normally.
 
-This reconciles with the existing `host:///path` syntax:
-
-| URL | scheme | authority | path | Meaning |
-|-----|--------|-----------|------|---------|
-| `host:///tmp/f.csv` | `host` | (empty) | `/tmp/f.csv` | Raw copy from host (current) |
-| `host+table:///tmp/f.parquet` | `host+table` | (empty) | `/tmp/f.parquet` | Copy from host as validated table |
-| `host+series:///tmp/f.parquet` | `host+series` | (empty) | `/tmp/f.parquet` | Copy from host as time-series |
-| `csv://host/data.csv` | `csv` | `host` | `/data.csv` | Parse CSV from host, store as table |
-| `oteljson+zstd://host/metrics.json` | `oteljson+zstd` | `host` | `/metrics.json` | Decompress+parse from host |
-
-**Rule**: `host` as a **scheme** means "raw copy from host filesystem". Format providers
-(`csv`, `oteljson`) use `host` in the **authority** to indicate host filesystem source.
+| URL | is_host | format | compression | entry_type | path |
+|-----|---------|--------|-------------|------------|------|
+| `host:///tmp/f.csv` | yes | `host` | — | — | `/tmp/f.csv` |
+| `host+table:///tmp/f.parquet` | yes | `file` | — | `table` | `/tmp/f.parquet` |
+| `host+series:///tmp/f.parquet` | yes | `file` | — | `series` | `/tmp/f.parquet` |
+| `host+csv:///tmp/data.csv` | yes | `csv` | — | `table` (implied) | `/tmp/data.csv` |
+| `host+oteljson+zstd:///tmp/f.json` | yes | `oteljson` | `zstd` | `table` (implied) | `/tmp/f.json` |
+| `host+csv+gzip+series:///tmp/f.csv.gz` | yes | `csv` | `gzip` | `series` | `/tmp/f.csv.gz` |
 
 ### 2. Implicit entry type when a format provider is involved
 
@@ -93,9 +92,9 @@ remains a simple prefix. No changes needed here for now.
 
 - Parse source URLs through `provider::Url::parse()`
 - Extend `provider::Url` with:
-  - `is_host()` — returns true when authority == `"host"` or scheme == `"host"`
-  - `host_path()` — returns the resolved host filesystem path
-  - `entry_type_override()` — parses `+table`/`+series` suffixes
+  - `is_host()` — returns true when `host+` prefix is present (already exists)
+  - `entry_type()` — returns parsed `+table`/`+series` suffix
+  - `host_path()` — returns the URL path for host filesystem resolution
 
 ### 5. Suffix classification in `provider::Url`
 
@@ -103,21 +102,22 @@ Currently `provider::Url` splits the scheme on `+` and recognizes compression su
 With this design, we parse multiple `+` segments into categories:
 
 ```
-oteljson+zstd+series → format=oteljson, compression=zstd, entry_type=series
-host+table           → format=host,     compression=none, entry_type=table
-csv+gzip             → format=csv,      compression=gzip, entry_type=table (implied)
+host+oteljson+zstd+series → is_host=true, format=oteljson, compression=zstd, entry_type=series
+host+table                → is_host=true, format=file,     compression=none, entry_type=table
+host+csv+gzip             → is_host=true, format=csv,      compression=gzip, entry_type=table (implied)
+csv+gzip                  → is_host=false, format=csv,     compression=gzip, entry_type=table (implied)
 ```
 
-The `Url` struct would gain an `entry_type` field:
+The `host+` prefix is stripped first (already implemented). Then the remaining scheme
+segments are split on `+` and classified. The `Url` struct gains an `entry_type` field:
 
 ```rust
 pub struct Url {
-    format_scheme: String,              // "csv", "oteljson", "host", "file", etc.
+    inner: url::Url,
+    format_scheme: String,              // "csv", "oteljson", "file", etc.
     compression: Option<String>,        // "gzip", "zstd", "bzip2"
     entry_type: Option<String>,         // "table", "series"
-    host: String,                       // "host" or empty
-    path: String,
-    query: HashMap<String, String>,
+    is_host: bool,                      // true when host+ prefix was present
 }
 ```
 
@@ -134,11 +134,10 @@ matter, but the convention is `format+compression+entrytype`.
 - Add `entry_type()`, `is_host()`, `host_path()` accessors
 - Unit tests for all combinations
 
-### Phase 2: Recognize `host` authority in `provider::Url`
+### Phase 2: ~~Recognize `host` authority~~ (Cancelled)
 
-- Allow `host` as a non-empty authority (currently rejected)
-- `is_host()` returns true for both scheme=`host` and authority=`host`
-- `host_path()` returns the resolved filesystem path
+~~Authority-based `host` was rejected in favor of prefix-only `host+`.~~
+`is_host()` already works via the `host+` prefix. No authority parsing needed.
 
 ### Phase 3: Refactor `pond copy` to use `provider::Url`
 
@@ -183,10 +182,12 @@ There is no concept of source location (`host`) in the URL, no entry type suffix
 no chaining of multiple providers. The `host` position (URL authority) is currently
 rejected with an error.
 
-This means the positional grammar described in this design (`source+format+compression+entrytype`)
+This means the multi-segment parsing (`[host+]format+compression+entrytype`)
 is **new work** — it extends the current single-split parsing into a multi-segment parser
-with ordered positions. The existing `pond cat` behavior will continue to work unchanged
-since it only uses format+compression, which are the two middle positions.
+with classified positions. The `host+` prefix is already handled (stripped before parsing).
+The remaining work is classifying `+table`/`+series` as entry type suffixes alongside
+the existing `+gzip`/`+zstd` compression suffixes. The existing `pond cat` behavior
+will continue to work unchanged.
 
 ## Risks & Open Questions
 
@@ -200,7 +201,7 @@ Is `table` a compression or entry type? Solved by classification: known compress
 When a format provider produces a table, how does the user specify which column is the
 timestamp for `+series`? Options:
 
-- Query parameter: `csv+series://host/f.csv?timestamp_column=ts`
+- Query parameter: `host+csv+series:///f.csv?timestamp_column=ts`
 - Auto-detect: first timestamp-typed column
 - Design decision needed before Phase 4
 
@@ -213,5 +214,5 @@ Out of scope for this design but the URL model supports it later.
 
 ### Recursive directory copy with format
 
-`copy oteljson://host/logs/ /data/` — should the format apply to every file in the
+`copy host+oteljson:///logs/ /data/` — should the format apply to every file in the
 directory? Probably yes, but needs error handling for files that don't parse.

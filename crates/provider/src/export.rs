@@ -4,7 +4,7 @@
 
 //! Shared export logic for writing pond series/tables as Hive-partitioned parquet.
 //!
-//! This module contains the reusable core of `pond export` — the DataFusion
+//! This module contains the reusable core of `pond export` -- the DataFusion
 //! `COPY TO ... PARTITIONED BY` pipeline, output scanning, and temporal bounds
 //! extraction. It is used by both the CLI `export` command and the `sitegen`
 //! factory.
@@ -177,7 +177,7 @@ pub fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
             }
             ExportSet::Map(base_map)
         }
-        // Incompatible variants — prefer the non-empty one
+        // Incompatible variants -- prefer the non-empty one
         (base, _) => base,
     }
 }
@@ -188,7 +188,7 @@ pub fn merge_export_sets(base: ExportSet, other: ExportSet) -> ExportSet {
 
 /// Export a queryable pond file (series/table) to Hive-partitioned parquet.
 ///
-/// This is the shared core of `pond export` — registers the file as a
+/// This is the shared core of `pond export` -- registers the file as a
 /// DataFusion table, runs `COPY TO ... PARTITIONED BY`, scans the output
 /// directory, and extracts temporal bounds from the Hive partition paths.
 ///
@@ -396,7 +396,7 @@ pub fn discover_exported_files(export_path: &Path, base_path: &Path) -> Result<V
 /// Extract start/end timestamps from Hive-style partition path components.
 ///
 /// e.g. `Temperature/res=1h/year=2025/month=7/data.parquet`
-/// → `(Some(1751328000), Some(1753920000))`  (2025-07-01 → 2025-08-01)
+/// -> `(Some(1751328000), Some(1753920000))`  (2025-07-01 -> 2025-08-01)
 pub fn extract_timestamps_from_path(relative_path: &Path) -> Result<(Option<i64>, Option<i64>)> {
     let components = relative_path.components();
     let mut temporal_parts = HashMap::new();
@@ -440,10 +440,10 @@ pub fn extract_timestamps_from_path(relative_path: &Path) -> Result<(Option<i64>
     }
 
     // Fill defaults for missing temporal parts.
-    // Quarter → derive month from quarter value (start of quarter).
+    // Quarter -> derive month from quarter value (start of quarter).
     if temporal_parts.contains_key("quarter") && !temporal_parts.contains_key("month") {
         let q = *temporal_parts.get("quarter").expect("checked");
-        let start_month = (q - 1) * 3 + 1; // Q1→1, Q2→4, Q3→7, Q4→10
+        let start_month = (q - 1) * 3 + 1; // Q1->1, Q2->4, Q3->7, Q4->10
         _ = temporal_parts.insert("month", start_month);
     }
     if !temporal_parts.contains_key("month") {
@@ -655,10 +655,10 @@ pub fn transform_arrow_to_template_schema(
 /// Parse field name into components.
 ///
 /// Supported formats (most specific to least):
-///   4+ parts: `"instrument.name.unit.agg"` → full decomposition
-///   3 parts:  `"name.unit.agg"` → no instrument
-///   2 parts:  `"name.agg"` → no instrument, no unit
-///   1 part:   `"name"` → bare field name (no aggregation)
+///   4+ parts: `"instrument.name.unit.agg"` -> full decomposition
+///   3 parts:  `"name.unit.agg"` -> no instrument
+///   2 parts:  `"name.agg"` -> no instrument, no unit
+///   1 part:   `"name"` -> bare field name (no aggregation)
 pub fn parse_field_name(field_name: &str) -> Result<TemplateField> {
     if field_name == "timestamp.count" {
         return Ok(TemplateField {
@@ -738,7 +738,7 @@ pub fn print_export_set(export_set: &ExportSet, indent: &str) {
             log::debug!("{}(no files)", indent);
         }
         ExportSet::Files(leaf) => {
-            log::debug!("{}📄 {} exported files:", indent, leaf.files.len());
+            log::debug!("{}[FILE] {} exported files:", indent, leaf.files.len());
             for file_output in &leaf.files {
                 let start_str = file_output
                     .start_time
@@ -751,7 +751,7 @@ pub fn print_export_set(export_set: &ExportSet, indent: &str) {
                     .map(|dt| format!("{}", dt.format("%Y-%m-%d %H:%M:%S")))
                     .unwrap_or_else(|| "N/A".to_string());
                 log::debug!(
-                    "{}  📄 {} (🕐 {} → {})",
+                    "{}  [FILE] {} ([TIME] {} -> {})",
                     indent,
                     file_output.file.display(),
                     start_str,
@@ -760,9 +760,9 @@ pub fn print_export_set(export_set: &ExportSet, indent: &str) {
             }
         }
         ExportSet::Map(map) => {
-            log::debug!("{}🗂️  {} capture groups:", indent, map.len());
+            log::debug!("{}[IDX]  {} capture groups:", indent, map.len());
             for (key, nested_set) in map {
-                log::debug!("{}  📁 '{}' wildcard capture:", indent, key);
+                log::debug!("{}  [DIR] '{}' wildcard capture:", indent, key);
                 print_export_set(nested_set, &format!("{}    ", indent));
             }
         }
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_extract_timestamps_year_quarter() {
-        // quarter=3 → month=7 (July), advance by 3 months → October
+        // quarter=3 -> month=7 (July), advance by 3 months -> October
         let path = PathBuf::from("pumps/data/res=6h/year=2025/quarter=3/data.parquet");
         let (start, end) = extract_timestamps_from_path(&path).unwrap();
 
@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn test_extract_timestamps_year_quarter_q4() {
-        // quarter=4 → month=10 (October), advance by 3 months → January next year
+        // quarter=4 -> month=10 (October), advance by 3 months -> January next year
         let path = PathBuf::from("pumps/data/res=6h/year=2025/quarter=4/data.parquet");
         let (start, end) = extract_timestamps_from_path(&path).unwrap();
 

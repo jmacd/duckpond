@@ -11,11 +11,11 @@
 //! - TemporalFilteredListingTable integration
 //!
 //! **Current Status:**
-//! - ✅ Temporal bounds storage/retrieval works
-//! - ✅ CachingPersistence passthrough works
-//! - ❌ MemoryFile::as_table_provider() not implemented (returns error)
-//! - ❌ No ProviderContext test helper yet
-//! - ❌ No Parquet data generation utilities
+//! - [OK] Temporal bounds storage/retrieval works
+//! - [OK] CachingPersistence passthrough works
+//! - [ERR] MemoryFile::as_table_provider() not implemented (returns error)
+//! - [ERR] No ProviderContext test helper yet
+//! - [ERR] No Parquet data generation utilities
 //!
 //! **Action Items:**
 //! 1. Implement MemoryFile::as_table_provider() to support Parquet data
@@ -27,7 +27,7 @@ use tinyfs::{CachingPersistence, FileID, MemoryPersistence, NodeID, PartID, Pers
 
 #[tokio::test]
 async fn test_memory_persistence_temporal_bounds() {
-    // ✅ This test works - temporal bounds storage is implemented
+    // [OK] This test works - temporal bounds storage is implemented
     let persistence = MemoryPersistence::default();
 
     // Create FileID using UUID-based constructor
@@ -56,7 +56,7 @@ async fn test_memory_persistence_temporal_bounds() {
 
 #[tokio::test]
 async fn test_memory_persistence_caching_passthrough() {
-    // ✅ This test works - CachingPersistence passes through to inner layer
+    // [OK] This test works - CachingPersistence passes through to inner layer
     let base = MemoryPersistence::default();
     let caching = CachingPersistence::new(base.clone());
 
@@ -78,7 +78,7 @@ async fn test_memory_persistence_caching_passthrough() {
 
 #[tokio::test]
 async fn test_memory_fs_create_read_file() {
-    // ✅ This test verifies basic FS operations work
+    // [OK] This test verifies basic FS operations work
     use tinyfs::async_helpers::convenience;
     use tinyfs::memory::new_fs;
 
@@ -105,7 +105,7 @@ async fn test_memory_fs_create_read_file() {
 
 #[tokio::test]
 async fn test_memory_file_queryable_interface() {
-    // ✅ IMPLEMENTATION COMPLETE
+    // [OK] IMPLEMENTATION COMPLETE
     //
     // MemoryFile::as_table_provider() now implements the QueryableFile interface
     // using the same ObjectStore-based pattern as tlogfs:
@@ -127,7 +127,7 @@ async fn test_memory_file_queryable_interface() {
 
 #[tokio::test]
 async fn test_temporal_filtered_listing_table_with_memory() {
-    // ✅ Tests the new store_file_version() API for MemoryPersistence
+    // [OK] Tests the new store_file_version() API for MemoryPersistence
     use utilities::test_helpers::generate_parquet_with_timestamps;
 
     let persistence = MemoryPersistence::default();
@@ -167,7 +167,7 @@ async fn test_temporal_filtered_listing_table_with_memory() {
 
 #[tokio::test]
 async fn test_parquet_data_generation() {
-    // ✅ Using consolidated test helpers from utilities crate
+    // [OK] Using consolidated test helpers from utilities crate
     use utilities::test_helpers::{
         SensorBatchBuilder, generate_parquet_with_sensor_data, generate_parquet_with_timestamps,
         generate_simple_table_parquet,

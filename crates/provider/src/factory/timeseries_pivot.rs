@@ -123,11 +123,11 @@ impl TimeseriesPivotFile {
 
         // Register each matched input with its pattern
         for (alias, path) in matched_inputs {
-            // Convert filesystem path to series:// URL
+            // Convert filesystem path to file+series:// URL (canonical entry type form)
             let url_str = if path.starts_with('/') {
-                format!("series://{}", path)
+                format!("file+series://{}", path)
             } else {
-                format!("series:///{}", path)
+                format!("file+series:///{}", path)
             };
             // Parse path as URL - if it fails, skip this entry
             if let Ok(url) = crate::Url::parse(&url_str) {
@@ -235,7 +235,7 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
         context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
         log::debug!(
-            "🔍 TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
+            "[SEARCH] TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
             self.config.pattern,
             self.config.columns.len()
         );
@@ -244,7 +244,7 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
         let matched_inputs = self.resolve_pattern().await?;
 
         log::debug!(
-            "📋 TIMESERIES-PIVOT: Pattern matched {} inputs: {:?}",
+            "[LIST] TIMESERIES-PIVOT: Pattern matched {} inputs: {:?}",
             matched_inputs.len(),
             matched_inputs.iter().map(|(a, _)| a).collect::<Vec<_>>()
         );
@@ -258,7 +258,7 @@ impl tinyfs::QueryableFile for TimeseriesPivotFile {
         // Generate SQL - SqlDerivedFile will handle missing columns gracefully
         let (sql, patterns) = self.generate_pivot_sql(&matched_inputs);
 
-        log::debug!("📝 TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
+        log::debug!("[NOTE] TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
 
         // Build scope_prefixes map for each table
         let mut scope_prefixes = HashMap::new();
@@ -368,7 +368,6 @@ register_dynamic_factory!(
 mod tests {
     use super::*;
     use datafusion::execution::context::SessionContext;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tinyfs::{FileID, MemoryPersistence, ProviderContext};
 
@@ -388,7 +387,7 @@ mod tests {
         let session = Arc::new(SessionContext::new());
         let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
             .expect("Failed to register TinyFS object store");
-        ProviderContext::new(session, HashMap::new(), Arc::new(persistence))
+        ProviderContext::new(session, Arc::new(persistence))
     }
 
     // Helper to create a TimeseriesPivotFile for SQL generation testing

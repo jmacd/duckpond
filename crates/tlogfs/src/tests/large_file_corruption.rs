@@ -9,7 +9,7 @@
 //!
 //! ## Background
 //!
-//! Large files (≥64KB) are stored as chunked parquet files in `_large_files/`.
+//! Large files (>=64KB) are stored as chunked parquet files in `_large_files/`.
 //! Each chunk (default 16MB) has its own SeriesOutboard for verification.
 //! Corruption in one chunk should not affect reading other chunks.
 //!
@@ -212,7 +212,7 @@ async fn test_large_file_corruption_detected() -> Result<(), Box<dyn std::error:
     .await?;
     tx.commit_test().await?;
 
-    debug!("✅ Large file stored successfully");
+    debug!("[OK] Large file stored successfully");
 
     // Find the blake3 hash by reading the file metadata
     let tx2 = persistence.begin_test().await?;
@@ -256,7 +256,7 @@ async fn test_large_file_corruption_detected() -> Result<(), Box<dyn std::error:
     corrupt_chunk_data(&parquet_path, location, corruption_offset, 1024)?;
 
     debug!(
-        "✅ Corrupted chunk_data at offset {} within data column",
+        "[OK] Corrupted chunk_data at offset {} within data column",
         corruption_offset
     );
 

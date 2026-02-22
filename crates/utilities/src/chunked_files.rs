@@ -43,7 +43,7 @@ pub const CHUNK_SIZE_MAX: usize = 64 * 1024 * 1024;
 
 /// BLAKE3 block size: 16KB (chunk_log=4)
 /// Each block produces one leaf hash in the Merkle tree.
-/// Outboard overhead = (blocks - 1) * 64 bytes ≈ 0.39%
+/// Outboard overhead = (blocks - 1) * 64 bytes ~= 0.39%
 pub const BLAKE3_BLOCK_SIZE: usize = 16 * 1024;
 
 /// Result of chunked write operation

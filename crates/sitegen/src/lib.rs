@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! # Sitegen — Static site generator for DuckPond
+//! # Sitegen -- Static site generator for DuckPond
 //!
 //! Replaces the Tera-based TemplateFactory with a Markdown + Maud pipeline.
 //! Uses pulldown-cmark for markdown rendering and Maud for HTML layouts.
