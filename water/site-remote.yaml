@@ -1,0 +1,42 @@
+# Sitegen config for remote deployment.
+#
+# Same structure as site.yaml but references pond paths for content and
+# site templates (copied into the pond by setup-remote.sh).
+factory: sitegen
+
+site:
+  title: "Caspar Water"
+  base_url: "/"
+
+content:
+  - name: "pages"
+    pattern: "/content/*.md"
+
+exports:
+  - name: "metrics"
+    pattern: "/reduced/*/*/*.series"
+
+routes:
+  - name: "home"
+    type: static
+    slug: ""
+    page: "/site/index.md"
+    routes:
+      - name: "pages"
+        type: content
+        slug: ""
+        content: "pages"
+      - name: "data"
+        type: static
+        slug: "data"
+        routes:
+          - name: "metric-detail"
+            type: template
+            slug: "$0"
+            page: "/site/data.md"
+            export: "metrics"
+
+partials:
+  sidebar: "/site/sidebar.md"
+
+static_assets: []
