@@ -26,8 +26,9 @@ scp content/*.md ${HOST}:${REMOTE_CONFIG}/content/
 
 # Update site templates and content in the pond
 # (config is mounted at /config inside container)
-${EXE} copy host:///config/site /site --overwrite
-${EXE} copy host:///config/content /content --overwrite
+# Update site templates and content in the pond
+${EXE} copy host:///config/site /site
+${EXE} copy host:///config/content /content
 
 # Recreate factory nodes with --overwrite
 ${EXE} mknod logfile-ingest /etc/ingest --overwrite --config-path /config/ingest.yaml

@@ -29,7 +29,7 @@ scp site/index.md site/data.md site/sidebar.md ${HOST}:${REMOTE_CONFIG}/site/
 scp content/*.md ${HOST}:${REMOTE_CONFIG}/content/
 
 # Wipe the podman volume for a clean start
-ssh ${HOST} "podman volume rm -f pond-water && podman volume create pond-water"
+ssh ${HOST} "podman volume rm pond-water 2>/dev/null; podman volume create pond-water"
 
 # Initialize the pond
 ${EXE} init

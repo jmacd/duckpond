@@ -7,7 +7,7 @@
 #
 
 HOST=jmacd@linux.local
-IMAGE=ghcr.io/jmacd/duckpond/duckpond:pr-52-amd64
+IMAGE=${DUCKPOND_IMAGE:-duckpond:latest-amd64}
 VOLUME=pond-water
 
 # Remote paths

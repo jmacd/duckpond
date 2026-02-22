@@ -1,7 +1,8 @@
 # Temporal-reduce configuration for Caspar Water metrics (remote deployment).
 #
-# This version reads from the ingested oteljson series at /ingest/casparwater.json
+# This version reads from the ingested oteljson series at /ingest/casparwater*.json
 # (populated by logfile-ingest from the rotating logs on the remote host).
+# The glob pattern matches both the active file and all archived rotations.
 #
 # Dynamic-dir containing five temporal-reduce factories, one per instrument:
 #   - Well depth (Opto 22 / GRV-R7)
@@ -15,7 +16,7 @@ entries:
   - name: "well-depth"
     factory: "temporal-reduce"
     config:
-      in_pattern: "oteljson:///ingest/casparwater.json"
+      in_pattern: "oteljson:///ingest/casparwater*.json"
       out_pattern: "data"
       time_column: "timestamp"
       resolutions: [1m, 10m, 1h, 6h, 1d]
@@ -34,7 +35,7 @@ entries:
   - name: "tank-level"
     factory: "temporal-reduce"
     config:
-      in_pattern: "oteljson:///ingest/casparwater.json"
+      in_pattern: "oteljson:///ingest/casparwater*.json"
       out_pattern: "data"
       time_column: "timestamp"
       resolutions: [1m, 10m, 1h, 6h, 1d]
@@ -53,7 +54,7 @@ entries:
   - name: "system-pressure"
     factory: "temporal-reduce"
     config:
-      in_pattern: "oteljson:///ingest/casparwater.json"
+      in_pattern: "oteljson:///ingest/casparwater*.json"
       out_pattern: "data"
       time_column: "timestamp"
       resolutions: [1m, 10m, 1h, 6h, 1d]
@@ -72,7 +73,7 @@ entries:
   - name: "chlorine-level"
     factory: "temporal-reduce"
     config:
-      in_pattern: "oteljson:///ingest/casparwater.json"
+      in_pattern: "oteljson:///ingest/casparwater*.json"
       out_pattern: "data"
       time_column: "timestamp"
       resolutions: [1m, 10m, 1h, 6h, 1d]
@@ -91,7 +92,7 @@ entries:
   - name: "ph"
     factory: "temporal-reduce"
     config:
-      in_pattern: "oteljson:///ingest/casparwater.json"
+      in_pattern: "oteljson:///ingest/casparwater*.json"
       out_pattern: "data"
       time_column: "timestamp"
       resolutions: [1m, 10m, 1h, 6h, 1d]

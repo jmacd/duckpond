@@ -42,6 +42,22 @@
 //! - `res=1d.series` - 1 day aggregated data
 //!
 //! Each file contains time-bucketed aggregations using SQL GROUP BY operations.
+//!
+//! ## Multi-file glob patterns
+//!
+//! When `in_pattern` contains a glob (e.g., `oteljson:///ingest/casparwater*.json`)
+//! that matches multiple files all mapping to the same `out_pattern`, the factory
+//! delegates to `SqlDerivedFile` which expands the glob and creates a UNION ALL
+//! across all matching files.  This allows temporal-reduce to aggregate across
+//! many rotated log files or ingested data fragments in a single pass.
+//!
+//! **Caveat -- schema inference shortcut:** The column schema is discovered from
+//! one arbitrary representative file (the first match).  This works well when
+//! all matched files share the same schema, which is the common case for
+//! rotating log files.  If the files have **different schemas** (e.g., columns
+//! added or renamed over time), schema discovery may be incomplete or incorrect.
+//! Use `timeseries-join` for heterogeneous-schema merging, which performs proper
+//! per-file schema discovery and alignment.
 
 use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use crate::register_dynamic_factory;
@@ -131,7 +147,12 @@ pub struct TemporalReduceConfig {
 pub struct TemporalReduceSqlFile {
     config: TemporalReduceConfig,
     duration: Duration,
-    source_path: String, // For SQL pattern reference
+    source_path: String, // Representative source file for schema discovery (no wildcards)
+    /// URL to use as the SqlDerived pattern source.  When the in_pattern glob
+    /// matched multiple files that map to the same output, this is the original
+    /// glob URL so that SqlDerivedFile can expand/UNION all matching files.
+    /// For single-match cases this equals source_url().
+    pattern_url: String,
     context: crate::FactoryContext,
     // Lazy-initialized actual SQL file
     inner: Arc<tokio::sync::Mutex<Option<SqlDerivedFile>>>,
@@ -148,12 +169,14 @@ impl TemporalReduceSqlFile {
         duration: Duration,
         _source_node: Node,
         source_path: String,
+        pattern_url: String,
         context: crate::FactoryContext,
     ) -> Self {
         Self {
             config,
             duration,
             source_path,
+            pattern_url,
             context,
             inner: Arc::new(tokio::sync::Mutex::new(None)),
             discovered_columns: Arc::new(tokio::sync::Mutex::new(None)),
@@ -364,18 +387,17 @@ impl TemporalReduceSqlFile {
             log::debug!(
                 "[SEARCH] TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern '{}' -> '{}'",
                 pattern_name,
-                self.source_path
+                self.pattern_url
             );
 
-            // Convert source_path to URL preserving the original in_pattern scheme.
-            // Previously this hardcoded series://, which broke format providers like
-            // oteljson://, csv://, excelhtml:// -- the SqlDerivedFile needs the correct
-            // scheme to route through the format provider instead of assuming Parquet.
-            let source_url_str = self.source_url();
-            let source_url = crate::Url::parse(&source_url_str).map_err(|e| {
+            // Use the pattern_url for the SqlDerived source.  When the in_pattern
+            // glob matched multiple files mapping to the same output, pattern_url
+            // retains the glob so SqlDerivedFile can expand and UNION ALL the
+            // matching files.  For single-match cases it is the concrete file URL.
+            let source_url = crate::Url::parse(&self.pattern_url).map_err(|e| {
                 tinyfs::Error::Other(format!(
-                    "Invalid source path URL '{}': {}",
-                    source_url_str, e
+                    "Invalid pattern URL '{}': {}",
+                    self.pattern_url, e
                 ))
             })?;
 
@@ -735,20 +757,24 @@ impl TemporalReduceDirectory {
         site_name: String,
         source_path: String,
         source_node: Node,
+        pattern_url: String,
     ) -> Node {
         let site_directory = TemporalReduceSiteDirectory::new(
             site_name.clone(),
             source_path.clone(),
             source_node,
+            pattern_url,
             self.config.clone(),
             self.context.clone(),
             self.parsed_resolutions.clone(),
         );
 
         // Create deterministic FileID for this site directory
+        // Use site_name + in_pattern (not source_path) so the ID is stable
+        // regardless of which representative file was picked.
         let mut id_bytes = Vec::new();
         id_bytes.extend_from_slice(site_name.as_bytes());
-        id_bytes.extend_from_slice(source_path.as_bytes());
+        id_bytes.extend_from_slice(self.config.in_pattern.to_string().as_bytes());
         id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
         // Use this temporal reduce directory's NodeID as the PartID for children
         let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
@@ -771,20 +797,42 @@ impl Directory for TemporalReduceDirectory {
         // Discover all source files first
         let source_files = self.discover_source_files().await?;
 
-        // Group source files by output_name - reuse same logic as entries()
-        let mut sites = HashMap::new();
+        // Group source files by output_name, collecting all paths per output.
+        // The first path is used as the representative (for schema discovery).
+        let mut sites: HashMap<String, Vec<String>> = HashMap::new();
         for (source_path, output_name) in source_files {
-            _ = sites.insert(output_name, source_path);
+            sites.entry(output_name).or_default().push(source_path);
         }
 
         // Look for the requested site directory name
-        if let Some(source_path) = sites.get(name) {
-            // Get the source node for this site
-            let source_node = self.get_source_node_by_path(source_path).await?;
+        if let Some(source_paths) = sites.get(name) {
+            let representative_path = &source_paths[0];
+
+            // Get the source node for this site (any representative file works)
+            let source_node = self.get_source_node_by_path(representative_path).await?;
+
+            // Build the pattern URL.  When multiple source files map to the
+            // same output name, use the original in_pattern glob so that
+            // SqlDerivedFile expands and UNIONs all matching files.  When
+            // there is a 1:1 mapping, use the concrete source URL.
+            let pattern_url = if source_paths.len() > 1 {
+                self.config.in_pattern.to_string()
+            } else {
+                let scheme = self.config.in_pattern.full_scheme();
+                if representative_path.starts_with('/') {
+                    format!("{}://{}", scheme, representative_path)
+                } else {
+                    format!("{}:///{}", scheme, representative_path)
+                }
+            };
 
             // Create the site directory using shared helper
-            let node_ref =
-                self.create_site_directory_node(name.to_string(), source_path.clone(), source_node);
+            let node_ref = self.create_site_directory_node(
+                name.to_string(),
+                representative_path.clone(),
+                source_node,
+                pattern_url,
+            );
 
             return Ok(Some(node_ref));
         }
@@ -811,10 +859,10 @@ impl Directory for TemporalReduceDirectory {
         // Discover all source files - fail fast on error
         let source_files = self.discover_source_files().await?;
 
-        // Group source files by output_name to create directory structure
-        let mut sites = HashMap::new();
+        // Group source files by output_name, collecting all paths per output
+        let mut sites: HashMap<String, Vec<String>> = HashMap::new();
         for (source_path, output_name) in source_files {
-            _ = sites.insert(output_name, source_path);
+            sites.entry(output_name).or_default().push(source_path);
         }
 
         // Create DirectoryEntry for each unique output_name (site)
@@ -861,6 +909,8 @@ pub struct TemporalReduceSiteDirectory {
     site_name: String,
     source_path: String,
     source_node: Node,
+    /// URL to use as the SqlDerived pattern source (may contain glob for multi-file cases).
+    pattern_url: String,
     config: TemporalReduceConfig,
     context: crate::FactoryContext,
     parsed_resolutions: Vec<(String, Duration)>,
@@ -872,6 +922,7 @@ impl TemporalReduceSiteDirectory {
         site_name: String,
         source_path: String,
         source_node: Node,
+        pattern_url: String,
         config: TemporalReduceConfig,
         context: crate::FactoryContext,
         parsed_resolutions: Vec<(String, Duration)>,
@@ -880,6 +931,7 @@ impl TemporalReduceSiteDirectory {
             site_name,
             source_path,
             source_node,
+            pattern_url,
             config,
             context,
             parsed_resolutions,
@@ -901,6 +953,7 @@ impl TemporalReduceSiteDirectory {
             duration,
             self.source_node.clone(),
             self.source_path.clone(),
+            self.pattern_url.clone(),
             self.context.clone(),
         );
 
@@ -923,9 +976,11 @@ impl Directory for TemporalReduceSiteDirectory {
             let filename = format!("res={}.series", res_str);
 
             // Create deterministic FileID for this entry - note: we already have the EntryType from dir_entry below
+            // Use pattern_url (not source_path) so the ID is stable regardless
+            // of which representative file was picked from a multi-file glob.
             let mut id_bytes = Vec::new();
             id_bytes.extend_from_slice(self.site_name.as_bytes());
-            id_bytes.extend_from_slice(self.source_path.as_bytes());
+            id_bytes.extend_from_slice(self.pattern_url.as_bytes());
             id_bytes.extend_from_slice(res_str.as_bytes());
             id_bytes.extend_from_slice(filename.as_bytes());
             id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
@@ -955,9 +1010,11 @@ impl Directory for TemporalReduceSiteDirectory {
                 let sql_file = self.create_temporal_sql_file(*duration).await?;
 
                 // Create deterministic FileID for this temporal-reduce entry
+                // Use pattern_url (not source_path) so the ID is stable regardless
+                // of which representative file was picked from a multi-file glob.
                 let mut id_bytes = Vec::new();
                 id_bytes.extend_from_slice(self.site_name.as_bytes());
-                id_bytes.extend_from_slice(self.source_path.as_bytes());
+                id_bytes.extend_from_slice(self.pattern_url.as_bytes());
                 id_bytes.extend_from_slice(res_str.as_bytes());
                 id_bytes.extend_from_slice(filename.as_bytes());
                 id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
@@ -1416,6 +1473,7 @@ mod tests {
 
         let make_file = |scheme: &str, path: &str| {
             let in_pattern = crate::Url::parse(&format!("{}://{}", scheme, path)).unwrap();
+            let pattern_url = in_pattern.to_string();
             let config = TemporalReduceConfig {
                 in_pattern,
                 out_pattern: "out".to_string(),
@@ -1429,6 +1487,7 @@ mod tests {
                 Duration::from_secs(3600),
                 node_path.node.clone(),
                 path.to_string(),
+                pattern_url,
                 test_context(&provider_context, FileID::root()),
             )
         };

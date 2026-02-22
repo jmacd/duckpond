@@ -732,6 +732,18 @@ Output column names are `original_column.agg_type` — e.g.
 - Each resolution file (`res=1h.series`, etc.) is an independent
   `TableDynamic` node backed by `SqlDerivedFile`.
 - The directory structure is **read-only**.
+- When `in_pattern` matches multiple files mapping to the same
+  `out_pattern`, all files are joined via UNION ALL inside
+  `SqlDerivedFile`.  This supports rotating-log-file ingestion where
+  many data fragments share the same schema.
+
+**Caveat — schema inference:** Schema discovery reads one arbitrary
+representative file from the glob match.  This works correctly when all
+matched files share the same schema (common for rotating log files).
+If files have **different schemas** (columns added/removed over time),
+the inferred schema may be incomplete.  Use `timeseries-join` for
+heterogeneous-schema sources that require per-file schema discovery and
+column alignment.
 
 **Usage:**
 
