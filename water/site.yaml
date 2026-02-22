@@ -8,7 +8,9 @@ content:
   - name: "pages"
     pattern: "/content/*.md"
 
-exports: []
+exports:
+  - name: "metrics"
+    pattern: "/reduced/*/*/*.series"
 
 routes:
   - name: "home"
@@ -20,6 +22,15 @@ routes:
         type: content
         slug: ""
         content: "pages"
+      - name: "data"
+        type: static
+        slug: "data"
+        routes:
+          - name: "metric-detail"
+            type: template
+            slug: "$0"
+            page: "/site/data.md"
+            export: "metrics"
 
 partials:
   sidebar: "/site/sidebar.md"
