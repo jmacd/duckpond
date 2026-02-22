@@ -10,10 +10,8 @@ Duckpond is built by the [Caspar Water System](https://github.com/jmacd/caspar.w
 Duckpond writes timeseries data into an applicaton-level file system,
 then assembles them for export using DataFusion.  A sibling project
 [Noyo Blue Economy](https://github.com/jmacd/noyo-blue-econ) shows how
-to combine this output within [Observable
-Framework](https://observablehq.com/framework/) markdown.
-
-Warning! Work-in-progress. This works and needs testing! :-)
+to use this system to create a public portal for sharing water quality
+data.
 
 ![Caspar, California Duck Pond](./caspar_duckpond.jpg)
 
