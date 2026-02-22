@@ -13,7 +13,7 @@ then assembles them for export using DataFusion.  A sibling project
 to use this system to create a public portal for sharing water quality
 data.
 
-![Caspar, California Duck Pond](./caspar_duckpond.jpg)
+![Caspar Duck Pond](./caspar_duckpond.jpg)
 
 ## Resource categories
 
