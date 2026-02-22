@@ -596,7 +596,10 @@ mod tests {
     #[test]
     fn test_scheme_registry_classify_builtins() {
         assert_eq!(SchemeRegistry::classify("file"), Some(SchemeKind::Builtin));
-        assert_eq!(SchemeRegistry::classify("series"), Some(SchemeKind::Builtin));
+        assert_eq!(
+            SchemeRegistry::classify("series"),
+            Some(SchemeKind::Builtin)
+        );
         assert_eq!(SchemeRegistry::classify("table"), Some(SchemeKind::Builtin));
         assert_eq!(SchemeRegistry::classify("data"), Some(SchemeKind::Builtin));
     }

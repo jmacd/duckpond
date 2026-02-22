@@ -123,7 +123,10 @@ impl ShipContext {
         };
 
         debug!("Opening host steward at root: {:?}", root_path);
-        Ok(steward::Steward::open_host(root_path, self.mount_specs.clone()))
+        Ok(steward::Steward::open_host(
+            root_path,
+            self.mount_specs.clone(),
+        ))
     }
 }
 

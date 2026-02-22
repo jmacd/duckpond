@@ -69,20 +69,15 @@ impl HostSteward {
         &mut self,
         meta: &PondUserMetadata,
     ) -> Result<HostTransaction, StewardError> {
-        let hostmount =
-            tinyfs::hostmount::HostmountPersistence::new(self.root_path.clone())?;
+        let hostmount = tinyfs::hostmount::HostmountPersistence::new(self.root_path.clone())?;
 
         let persistence_arc: Arc<dyn PersistenceLayer> = if self.mount_specs.is_empty() {
             Arc::new(hostmount)
         } else {
             // Process mount specs into overlay entries
-            let root_overlays =
-                Self::process_mount_specs(&hostmount, &self.mount_specs).await?;
+            let root_overlays = Self::process_mount_specs(&hostmount, &self.mount_specs).await?;
 
-            log::debug!(
-                "[HOST] Created {} overlay mounts",
-                root_overlays.len()
-            );
+            log::debug!("[HOST] Created {} overlay mounts", root_overlays.len());
 
             Arc::new(tinyfs::hostmount::OverlayPersistence::new(
                 hostmount,
@@ -149,20 +144,14 @@ impl HostSteward {
             let config_path = format!("/{}", spec.config_path);
             let config_bytes = {
                 let root = temp_fs.root().await.map_err(|e| {
+                    StewardError::ControlTable(format!("Failed to open hostmount root: {}", e))
+                })?;
+                let mut reader = root.async_reader_path(&config_path).await.map_err(|e| {
                     StewardError::ControlTable(format!(
-                        "Failed to open hostmount root: {}",
-                        e
+                        "Failed to open config file '{}': {}",
+                        spec.config_path, e
                     ))
                 })?;
-                let mut reader = root
-                    .async_reader_path(&config_path)
-                    .await
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!(
-                            "Failed to open config file '{}': {}",
-                            spec.config_path, e
-                        ))
-                    })?;
 
                 let mut buffer = Vec::new();
                 use tokio::io::AsyncReadExt;
@@ -186,12 +175,11 @@ impl HostSteward {
 
             // Compute deterministic FileID for the mount point
             let mount_id_bytes = format!("hostmount:{}:{}", mount_name, factory_name);
-            let parent_part_id =
-                tinyfs::PartID::from_node_id(tinyfs::FileID::root().node_id());
+            let parent_part_id = tinyfs::PartID::from_node_id(tinyfs::FileID::root().node_id());
 
             // Determine if the factory creates directories or files
-            let creates_directory =
-                FactoryRegistry::factory_creates_directory(&factory_name).map_err(|e| {
+            let creates_directory = FactoryRegistry::factory_creates_directory(&factory_name)
+                .map_err(|e| {
                     StewardError::ControlTable(format!(
                         "Factory '{}' not found: {}",
                         factory_name, e
@@ -219,10 +207,8 @@ impl HostSteward {
                     ))
                 })?;
 
-                let node = tinyfs::Node::new(
-                    child_file_id,
-                    tinyfs::NodeType::Directory(dir_handle),
-                );
+                let node =
+                    tinyfs::Node::new(child_file_id, tinyfs::NodeType::Directory(dir_handle));
                 _ = root_overlays.insert(mount_name, node);
             } else {
                 let entry_type = tinyfs::EntryType::TableDynamic;
@@ -233,23 +219,17 @@ impl HostSteward {
                 );
                 let factory_context =
                     tinyfs::FactoryContext::new(provider_context.clone(), child_file_id);
-                let file_handle = FactoryRegistry::create_file(
-                    &factory_name,
-                    &config_bytes,
-                    factory_context,
-                )
-                .await
-                .map_err(|e| {
-                    StewardError::ControlTable(format!(
-                        "Failed to create factory file for mount '{}': {}",
-                        spec.mount_path, e
-                    ))
-                })?;
+                let file_handle =
+                    FactoryRegistry::create_file(&factory_name, &config_bytes, factory_context)
+                        .await
+                        .map_err(|e| {
+                            StewardError::ControlTable(format!(
+                                "Failed to create factory file for mount '{}': {}",
+                                spec.mount_path, e
+                            ))
+                        })?;
 
-                let node = tinyfs::Node::new(
-                    child_file_id,
-                    tinyfs::NodeType::File(file_handle),
-                );
+                let node = tinyfs::Node::new(child_file_id, tinyfs::NodeType::File(file_handle));
                 _ = root_overlays.insert(mount_name, node);
             }
 

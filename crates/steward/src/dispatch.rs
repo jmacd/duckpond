@@ -65,7 +65,10 @@ impl Steward {
     /// If mount specs are provided, the host filesystem will be overlaid
     /// with factory-mounted nodes at the specified paths.
     #[must_use]
-    pub fn open_host(root_path: std::path::PathBuf, mount_specs: Vec<tinyfs::hostmount::MountSpec>) -> Self {
+    pub fn open_host(
+        root_path: std::path::PathBuf,
+        mount_specs: Vec<tinyfs::hostmount::MountSpec>,
+    ) -> Self {
         Steward::Host(HostSteward::new(root_path, mount_specs))
     }
 

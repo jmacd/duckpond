@@ -12,11 +12,11 @@
 //! the host, factory nodes are created via `FactoryRegistry`, and overlay
 //! entries are stored for injection into the root directory.
 
+use crate::NodeMetadata;
 use crate::error::Result;
 use crate::node::{FileID, Node, NodeType};
 use crate::persistence::{FileVersionInfo, PersistenceLayer};
 use crate::transaction_guard::TransactionState;
-use crate::NodeMetadata;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;

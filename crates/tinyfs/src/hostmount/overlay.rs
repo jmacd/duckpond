@@ -42,10 +42,7 @@ impl OverlayDirectory {
     /// with the specified overlay entries.
     #[must_use]
     pub fn new(host_dir: HostDirectory, overlays: HashMap<String, Node>) -> Self {
-        Self {
-            host_dir,
-            overlays,
-        }
+        Self { host_dir, overlays }
     }
 
     /// Create a Handle for this overlay directory.
@@ -68,10 +65,7 @@ impl Directory for OverlayDirectory {
     async fn get(&self, name: &str) -> Result<Option<Node>> {
         // Overlay entries take precedence over host entries
         if let Some(overlay_node) = self.overlays.get(name) {
-            log::debug!(
-                "OverlayDirectory::get - returning overlay entry '{}'",
-                name
-            );
+            log::debug!("OverlayDirectory::get - returning overlay entry '{}'", name);
             return Ok(Some(overlay_node.clone()));
         }
 
@@ -111,8 +105,7 @@ impl Directory for OverlayDirectory {
         let host_entries: Vec<Result<DirectoryEntry>> = host_stream.collect().await;
 
         // Collect overlay entry names for shadowing check
-        let overlay_names: std::collections::HashSet<&String> =
-            self.overlays.keys().collect();
+        let overlay_names: std::collections::HashSet<&String> = self.overlays.keys().collect();
 
         // Filter out host entries that are shadowed by overlays
         let mut merged: Vec<Result<DirectoryEntry>> = host_entries

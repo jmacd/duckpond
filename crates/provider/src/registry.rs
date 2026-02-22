@@ -263,17 +263,11 @@ impl SchemeRegistry {
             let name = factory.name;
 
             if BUILTIN_SCHEMES.contains(&name) {
-                conflicts.push(format!(
-                    "factory '{}' conflicts with builtin scheme",
-                    name
-                ));
+                conflicts.push(format!("factory '{}' conflicts with builtin scheme", name));
             }
 
             if crate::FormatRegistry::get_provider(name).is_some() {
-                conflicts.push(format!(
-                    "factory '{}' conflicts with format provider",
-                    name
-                ));
+                conflicts.push(format!("factory '{}' conflicts with format provider", name));
             }
         }
 
