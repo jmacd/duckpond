@@ -358,3 +358,109 @@ In `crates/cmd/src/main.rs`:
    `/ingest/casparwater-sample.json`. With hostmount overlay, the file
    already exists at `./water/casparwater-sample.json` on the host. The
    `in_pattern` in `reduce.yaml` just points to it directly. No ingest needed.
+
+---
+
+## Implementation Record
+
+All phases (1--4) have been implemented and validated. Phase 5 (alias
+registration in SchemeRegistry) was handled inline via `resolve_factory_alias()`
+in `host.rs` rather than modifying the SchemeRegistry.
+
+### Files Created
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `crates/tinyfs/src/hostmount/overlay.rs` | 324 | `OverlayDirectory` (merges host entries + factory nodes), `MountSpec` parser with unit tests |
+| `crates/tinyfs/src/hostmount/overlay_persistence.rs` | 152 | `OverlayPersistence` wrapping `HostmountPersistence`; intercepts `load_node(root)` to return `OverlayDirectory` |
+| `testsuite/tests/304-hostmount-overlay-dyndir.sh` | 204 | End-to-end test: CSV on host, dynamic-dir with sql-derived-table children, listing, querying, SQL through overlay (15 checks) |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `crates/tinyfs/src/hostmount/mod.rs` | Added `pub mod overlay` and `mod overlay_persistence`; exported `MountSpec`, `OverlayDirectory`, `OverlayPersistence` |
+| `crates/steward/src/host.rs` | `HostSteward` stores `Vec<MountSpec>`; `begin()` reads config files, creates factory nodes via `FactoryRegistry`, wraps persistence with `OverlayPersistence` when mounts are present; `resolve_factory_alias()` maps `dyndir` to `dynamic-dir` |
+| `crates/steward/src/dispatch.rs` | `Steward::open_host()` accepts `Vec<MountSpec>` parameter |
+| `crates/cmd/src/main.rs` | Added `--hostmount` repeatable global CLI flag; parses mount specs and passes to `ShipContext` |
+| `crates/cmd/src/common.rs` | `ShipContext` gained `mount_specs: Vec<MountSpec>` field; `open_host()` passes specs to `Steward::open_host()` |
+| `crates/cmd/src/commands/cat.rs` | Updated 6 test call sites for new `ShipContext` signature |
+| `crates/cmd/src/commands/copy.rs` | Updated 1 test call site |
+| `crates/cmd/src/commands/describe.rs` | Updated 1 test call site |
+| `crates/cmd/tests/test_executable_factory.rs` | Updated 1 test call site |
+| `water/reduce.yaml` | Changed all 5 `in_pattern` values from `oteljson:///ingest/casparwater-sample.json` to `oteljson:///casparwater-sample.json`; added usage documentation |
+| `water/render.sh` | Added `--hostmount /reduced=host+dyndir:///reduce.yaml` to the `pond run` command |
+| `water/render-data.sh` | Updated for new `reduce.yaml` paths (copies sample to pond root instead of ingesting into `/ingest/`); marked as legacy |
+
+### Architecture Decisions Made
+
+**D1: Depth-1 mounts only (for now).** The `MountTree` multi-depth resolution
+described in the design was deferred. `process_mount_specs()` rejects nested
+mounts like `/data/live` with a clear error. All current use cases require
+only root-level mounts (`/reduced`).
+
+**D2: Temporary FS for config reading.** `HostSteward::process_mount_specs()`
+creates a temporary `HostmountPersistence` + `FS` to read config files and
+build factory nodes. The factory nodes' `ProviderContext` points to this
+separate persistence, which is a second `HostmountPersistence` backed by the
+same host directory. This means factory nodes can see all host files but not
+other overlay mounts. Cross-mount references (factory A depends on factory B's
+output) would require the overlay-aware persistence, which is a future
+enhancement.
+
+**D3: Factory alias resolved in steward.** Rather than registering `dyndir` in
+the `SchemeRegistry`, `resolve_factory_alias()` in `host.rs` maps `dyndir` to
+`dynamic-dir`. This keeps the change local and avoids touching the provider
+crate's scheme infrastructure.
+
+**D4: Single YAML for both modes.** The `reduce.yaml` config is identical
+between pond mode (`pond mknod dynamic-dir /reduced --config-path reduce.yaml`)
+and host mode (`--hostmount /reduced=host+dyndir:///reduce.yaml`). The only
+constraint is that `in_pattern` paths must resolve in both contexts. Changing
+from `oteljson:///ingest/casparwater-sample.json` to
+`oteljson:///casparwater-sample.json` makes the config work with the host
+filesystem layout where the sample JSON sits at the root.
+
+### Test Results
+
+- **Unit tests:** `cargo test -p tinyfs --lib -- hostmount` (31 pass, including
+  `MountSpec` parsing tests)
+- **Integration tests:** `cargo test -p cmd --lib` (104 pass), `cargo test -p
+  steward -p tinyfs` (172 pass) -- all existing tests pass with the new
+  `mount_specs` parameter
+- **Testsuite:** `./run-test.sh 304` passes 15/15 checks
+- **End-to-end:** `water/render.sh --no-open` produces 16 HTML pages, 20
+  Parquet data files, all 5 instruments with 3 resolutions each. Peak memory
+  259 MB, ~3 minutes on debug build
+
+### Open Questions Resolved
+
+**Q2 (site.yaml paths):** Confirmed -- sitegen export pattern
+`/reduced/*/*/*.series` resolves through the overlay. The `/reduced` directory
+is found via `OverlayDirectory::get("reduced")`, which returns the factory
+`DynamicDirDirectory`. From there, the temporal-reduce children produce the
+three-level `<name>/data/res=*.series` hierarchy that the glob matches.
+
+**Q4 (logfile-ingest):** Eliminated entirely. The sample JSON file exists on
+the host filesystem; `reduce.yaml` points to it directly via
+`oteljson:///casparwater-sample.json`. No ingest, no `/ingest/` directory, no
+logfile-ingest factory needed.
+
+### Resulting Workflow
+
+The full Caspar Water site with live data charts now builds with one command,
+no pond:
+
+```bash
+cd water && ./render.sh
+```
+
+Which expands to:
+
+```bash
+pond run \
+  -d ./water \
+  --hostmount /reduced=host+dyndir:///reduce.yaml \
+  host+sitegen:///site.yaml \
+  build ./dist
+```
