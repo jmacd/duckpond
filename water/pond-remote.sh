@@ -18,8 +18,15 @@ REMOTE_OUTPUT=/home/jmacd/water-site-output
 # Ensure mount points exist
 ssh ${HOST} "mkdir -p ${REMOTE_CONFIG} ${REMOTE_OUTPUT}"
 
+# Use -ti only when stdin is a terminal (interactive use).
+# Scripts and pipes need non-interactive mode to avoid blocking on TTY input.
+TTY_FLAG=""
+if [ -t 0 ]; then
+    TTY_FLAG="-ti"
+fi
+
 ssh ${HOST} \
-    podman run --pull=never -ti --rm \
+    podman run --pull=never ${TTY_FLAG} --rm \
     -v "${VOLUME}:/pond" \
     -v "${REMOTE_CONFIG}:/config:ro" \
     -v "${REMOTE_DATA}:/data:ro" \
