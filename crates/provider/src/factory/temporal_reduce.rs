@@ -52,10 +52,10 @@
 //! many rotated log files or ingested data fragments in a single pass.
 //!
 //! **Caveat -- schema inference shortcut:** The column schema is discovered from
-//! one arbitrary representative file (the first match).  This works well when
-//! all matched files share the same schema, which is the common case for
-//! rotating log files.  If the files have **different schemas** (e.g., columns
-//! added or renamed over time), schema discovery may be incomplete or incorrect.
+//! the lexicographically last matching file (the newest for timestamped names).
+//! This works well when columns are only added over time (the newest file has
+//! the most complete schema).  If files have **incompatible schemas** (e.g.,
+//! columns renamed or removed), schema discovery may be incorrect.
 //! Use `timeseries-join` for heterogeneous-schema merging, which performs proper
 //! per-file schema discovery and alignment.
 
@@ -798,7 +798,10 @@ impl Directory for TemporalReduceDirectory {
         let source_files = self.discover_source_files().await?;
 
         // Group source files by output_name, collecting all paths per output.
-        // The first path is used as the representative (for schema discovery).
+        // The last path (lexicographically) is used as the representative for
+        // schema discovery.  For rotating log files with timestamps in the
+        // filename this picks the newest file, which has the most complete
+        // schema (columns are only ever added over time).
         let mut sites: HashMap<String, Vec<String>> = HashMap::new();
         for (source_path, output_name) in source_files {
             sites.entry(output_name).or_default().push(source_path);
@@ -806,7 +809,10 @@ impl Directory for TemporalReduceDirectory {
 
         // Look for the requested site directory name
         if let Some(source_paths) = sites.get(name) {
-            let representative_path = &source_paths[0];
+            // Use the lexicographically last path as the schema representative.
+            // For timestamped filenames (casparwater-2022-*.json, ...-2025-*.json)
+            // this picks the newest file with the most complete schema.
+            let representative_path = source_paths.iter().max().unwrap_or(&source_paths[0]);
 
             // Get the source node for this site (any representative file works)
             let source_node = self.get_source_node_by_path(representative_path).await?;

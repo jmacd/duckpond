@@ -737,13 +737,13 @@ Output column names are `original_column.agg_type` — e.g.
   `SqlDerivedFile`.  This supports rotating-log-file ingestion where
   many data fragments share the same schema.
 
-**Caveat — schema inference:** Schema discovery reads one arbitrary
-representative file from the glob match.  This works correctly when all
-matched files share the same schema (common for rotating log files).
-If files have **different schemas** (columns added/removed over time),
-the inferred schema may be incomplete.  Use `timeseries-join` for
-heterogeneous-schema sources that require per-file schema discovery and
-column alignment.
+**Caveat — schema inference:** Schema discovery reads the lexicographically
+last matching file (the newest for timestamped filenames like rotating logs).
+This works correctly when columns are only added over time — the newest file
+has the most complete schema.  If files have **incompatible schemas** (columns
+renamed or removed), the inferred schema may be incorrect.  Use
+`timeseries-join` for heterogeneous-schema sources that require per-file
+schema discovery and column alignment.
 
 **Usage:**
 

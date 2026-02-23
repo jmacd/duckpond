@@ -1,6 +1,6 @@
 dist/
 export/
-.pond-data/
+pond/
 systemlogs*
 casparwater*
 data/
