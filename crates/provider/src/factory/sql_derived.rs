@@ -928,7 +928,10 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                     );
                     let fs = self.context.context.filesystem();
                     let fs_arc = Arc::new(fs);
-                    let provider_api = crate::Provider::new(fs_arc);
+                    let provider_api = crate::Provider::with_context(
+                        fs_arc,
+                        Arc::new(self.context.context.clone()),
+                    );
                     let datafusion_ctx = datafusion::prelude::SessionContext::new();
 
                     if queryable_files.len() == 1 {
@@ -964,61 +967,119 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                             }
                         }
                     } else {
-                        // Multiple files: create table provider for each, then UNION BY NAME
-                        let mut table_providers = Vec::new();
-                        for node_path in &queryable_files {
-                            let file_url = format!("{}://{}", scheme, node_path.path().display());
-                            match provider_api
-                                .create_table_provider(&file_url, &datafusion_ctx)
-                                .await
-                            {
-                                Ok(tp) => table_providers.push(tp),
-                                Err(e) => {
-                                    log::error!(
-                                        "[ERR] SQL-DERIVED: Format provider failed for '{}': {}",
-                                        file_url,
-                                        e
-                                    );
-                                    return Err(tinyfs::Error::Other(format!(
-                                        "Format provider failed: {}",
-                                        e
-                                    )));
+                        // Multiple files: use glob cache if available, else UNION BY NAME
+                        let cache_dir = self.context.context.cache_dir().map(std::path::Path::to_path_buf);
+
+                        if let Some(ref cache_dir) = cache_dir {
+                            // --- Glob cache path: cache each file, symlink into glob dir, single ListingTable ---
+                            let format_provider = crate::FormatRegistry::get_provider(scheme)
+                                .ok_or_else(|| {
+                                    tinyfs::Error::Other(format!("Unknown format: {}", scheme))
+                                })?;
+
+                            let pat_hash = crate::format_cache::pattern_hash(
+                                &pattern.to_string(),
+                            );
+                            let glob_dir = crate::format_cache::cache_glob_dir(
+                                cache_dir, scheme, &pat_hash,
+                            );
+                            crate::format_cache::reset_glob_dir(&glob_dir)
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+                            for node_path in &queryable_files {
+                                let file_url_str = format!("{}://{}", scheme, node_path.path().display());
+                                let file_url = crate::Url::parse(&file_url_str)
+                                    .map_err(|e: crate::error::Error| tinyfs::Error::Other(e.to_string()))?;
+
+                                let (node_id, versions) = provider_api
+                                    .ensure_url_cached(
+                                        &file_url,
+                                        format_provider.as_ref(),
+                                        cache_dir,
+                                    )
+                                    .await
+                                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+                                let _ = crate::format_cache::ensure_glob_symlinks(
+                                    cache_dir, scheme, &node_id, &versions, &glob_dir,
+                                )
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            }
+
+                            let provider = crate::format_cache::listing_table_from_glob_cache(
+                                &glob_dir,
+                                &datafusion_ctx,
+                            )
+                            .await
+                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+                            debug!(
+                                "[OK] SQL-DERIVED: Glob cache ListingTable for {} files (pattern '{}')",
+                                queryable_files.len(),
+                                pattern_name
+                            );
+
+                            if let Some(wrapper) = &self.config.provider_wrapper {
+                                wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                            } else {
+                                provider
+                            }
+                        } else {
+                            // --- Fallback: no cache, UNION BY NAME ---
+                            let mut table_providers = Vec::new();
+                            for node_path in &queryable_files {
+                                let file_url = format!("{}://{}", scheme, node_path.path().display());
+                                match provider_api
+                                    .create_table_provider(&file_url, &datafusion_ctx)
+                                    .await
+                                {
+                                    Ok(tp) => table_providers.push(tp),
+                                    Err(e) => {
+                                        log::error!(
+                                            "[ERR] SQL-DERIVED: Format provider failed for '{}': {}",
+                                            file_url,
+                                            e
+                                        );
+                                        return Err(tinyfs::Error::Other(format!(
+                                            "Format provider failed: {}",
+                                            e
+                                        )));
+                                    }
                                 }
                             }
-                        }
 
-                        // UNION BY NAME using SQL
-                        let temp_ctx = datafusion::prelude::SessionContext::new();
-                        for (i, tp) in table_providers.iter().enumerate() {
-                            _ = temp_ctx
-                                .register_table(format!("t{}", i), tp.clone())
+                            let temp_ctx = datafusion::prelude::SessionContext::new();
+                            for (i, tp) in table_providers.iter().enumerate() {
+                                _ = temp_ctx
+                                    .register_table(format!("t{}", i), tp.clone())
+                                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            }
+                            let union_sql = (0..table_providers.len())
+                                .map(|i| format!("SELECT * FROM t{}", i))
+                                .collect::<Vec<_>>()
+                                .join(" UNION ALL BY NAME ");
+
+                            let df = temp_ctx
+                                .sql(&union_sql)
+                                .await
                                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                        }
-                        let union_sql = (0..table_providers.len())
-                            .map(|i| format!("SELECT * FROM t{}", i))
-                            .collect::<Vec<_>>()
-                            .join(" UNION ALL BY NAME ");
-
-                        let df = temp_ctx
-                            .sql(&union_sql)
-                            .await
-                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                        let batches = df
-                            .collect()
-                            .await
-                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                        let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
-                            tinyfs::Error::Other("No batches in union".to_string())
-                        })?;
-                        let mem_table =
-                            datafusion::datasource::MemTable::try_new(schema, vec![batches])
+                            let batches = df
+                                .collect()
+                                .await
                                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                        let provider: Arc<dyn TableProvider> = Arc::new(mem_table);
+                            let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
+                                tinyfs::Error::Other("No batches in union".to_string())
+                            })?;
+                            let mem_table =
+                                datafusion::datasource::MemTable::try_new(schema, vec![batches])
+                                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            let provider: Arc<dyn TableProvider> = Arc::new(mem_table);
 
-                        if let Some(wrapper) = &self.config.provider_wrapper {
-                            wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
-                        } else {
-                            provider
+                            if let Some(wrapper) = &self.config.provider_wrapper {
+                                wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                            } else {
+                                provider
+                            }
                         }
                     }
                 } else if queryable_files.len() == 1 {

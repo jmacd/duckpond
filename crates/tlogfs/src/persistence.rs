@@ -109,6 +109,8 @@ pub struct State {
     txn_state: Arc<TinyFsTransactionState>,
     /// Options for large file storage (compression, etc.)
     large_file_options: crate::large_files::LargeFileOptions,
+    /// Format provider cache directory ({POND}/cache/), computed from data path
+    cache_dir: Option<PathBuf>,
 }
 
 // Re-export TableProviderKey from provider for backward compatibility
@@ -471,6 +473,10 @@ impl OpLogPersistence {
         .await?;
         let session_context = inner_state.session_context.clone();
 
+        // Compute the format provider cache directory: {POND}/cache/
+        // self.path is {POND}/data, so parent is {POND}
+        let cache_dir = self.path.parent().map(|pond_root| pond_root.join("cache"));
+
         let state = State {
             inner: Arc::new(Mutex::new(inner_state)),
             object_store: Arc::new(tokio::sync::OnceCell::new()),
@@ -478,6 +484,7 @@ impl OpLogPersistence {
             table_provider_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             txn_state: self.txn_state.clone(),
             large_file_options: self.large_file_options.clone(),
+            cache_dir,
         };
 
         // Complete SessionContext setup with ObjectStore registration
@@ -737,10 +744,16 @@ impl State {
     #[must_use]
     pub fn as_provider_context(&self) -> provider::ProviderContext {
         // Create provider context with State as the persistence layer
-        provider::ProviderContext::new(
+        let ctx = provider::ProviderContext::new(
             self.session_context.clone(),
             Arc::new(self.clone()) as Arc<dyn PersistenceLayer>,
-        )
+        );
+        // Attach cache_dir if available (tlogfs has a real filesystem)
+        if let Some(ref cache_dir) = self.cache_dir {
+            ctx.with_cache_dir(cache_dir.clone())
+        } else {
+            ctx
+        }
     }
 }
 
@@ -1149,6 +1162,7 @@ impl InnerState {
                 cache_manager::CacheManagerConfig,
                 cache_unit::{DefaultFileStatisticsCache, DefaultListFilesCache},
             },
+            memory_pool::FairSpillPool,
             runtime_env::RuntimeEnvBuilder,
         };
 
@@ -1160,24 +1174,61 @@ impl InnerState {
             .with_files_statistics_cache(Some(file_stats_cache))
             .with_list_files_cache(Some(list_files_cache));
 
+        // Use FairSpillPool instead of GreedyMemoryPool: divides memory fairly
+        // among all spillable consumers, triggering spill-to-disk instead of OOM
+        // when any consumer exceeds its fair share.
+        let pool = Arc::new(FairSpillPool::new(512 * 1024 * 1024));
+
         let runtime_env = RuntimeEnvBuilder::new()
             .with_cache_manager(cache_config)
-            .with_memory_limit(512 * 1024 * 1024, 1.0) // 512 MiB memory limit for query execution
+            .with_memory_pool(pool)
             .build_arc()
             .map_err(|e| {
                 TLogFSError::ArrowMessage(format!("Failed to create runtime environment: {}", e))
             })?;
 
-        let session_config = SessionConfig::default()
+        let mut session_config = SessionConfig::default()
             .with_target_partitions(2) // Limit parallelism to reduce memory pressure
             .with_information_schema(true);
+
+        // Enable late-materialization filter pushdown in Parquet reader.
+        // Filters are evaluated during decode: timestamp column decoded first,
+        // non-matching rows skipped before decoding remaining columns.
+        // Critical for time-scoped queries (WHERE timestamp >= cutoff).
+        session_config
+            .options_mut()
+            .execution
+            .parquet
+            .pushdown_filters = true;
+        session_config
+            .options_mut()
+            .execution
+            .parquet
+            .reorder_filters = true;
+
+        // Per-version cache files have non-overlapping time ranges.
+        // This enables bin-packing that groups files with non-overlapping
+        // statistics into ordered streams, eliminating merge-sort.
+        session_config
+            .options_mut()
+            .execution
+            .split_file_groups_by_statistics = true;
+
+        // Read Parquet footer in a single I/O (last 64KB) instead of two
+        // separate reads (8-byte footer length, then metadata).
+        session_config
+            .options_mut()
+            .execution
+            .parquet
+            .metadata_size_hint = Some(64 * 1024);
+
         let ctx = Arc::new(SessionContext::new_with_config_rt(
             session_config,
             runtime_env,
         ));
 
         debug!(
-            "[LIST] ENABLED DataFusion caching: file statistics + list files caches with 512 MiB memory limit, parallelism=2"
+            "[LIST] ENABLED DataFusion: FairSpillPool 512 MiB, pushdown_filters, reorder_filters, split_file_groups_by_statistics, metadata_size_hint=64KB, parallelism=2"
         );
 
         // Register the fundamental delta_table for direct DeltaTable queries

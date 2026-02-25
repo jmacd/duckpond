@@ -268,61 +268,11 @@ async fn cat_impl(
     // Use DataFusion context from ProviderContext (has TinyFS object store registered)
     let ctx = provider_context.datafusion_session.as_ref().clone();
 
-    // Collect table providers for all matches
-    let mut table_providers = Vec::new();
-    let match_count = provider
-        .for_each_match(&url, |table_provider, file_path| {
-            debug!("Matched file: {}", file_path);
-            table_providers.push(table_provider);
-            async { Ok(()) }
-        })
+    // Create unified table provider (glob-cache for external formats, UNION fallback otherwise)
+    let unified_table_provider = provider
+        .create_provider_for_url(&url, &ctx)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e))?;
-
-    debug!("Matched {} file(s) for pattern: {}", match_count, url);
-
-    // Create unified table provider
-    let unified_table_provider = if table_providers.len() == 1 {
-        table_providers
-            .into_iter()
-            .next()
-            .expect("table_providers has exactly one element")
-    } else {
-        // Multiple files - UNION ALL BY NAME
-        let temp_ctx = datafusion::prelude::SessionContext::new();
-        for (i, tp) in table_providers.iter().enumerate() {
-            let _ = temp_ctx
-                .register_table(format!("t{}", i), tp.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to register table t{}: {}", i, e))?;
-        }
-
-        let union_sql = (0..table_providers.len())
-            .map(|i| format!("SELECT * FROM t{}", i))
-            .collect::<Vec<_>>()
-            .join(" UNION ALL BY NAME ");
-
-        debug!("Executing union query: {}", union_sql);
-
-        let df = temp_ctx
-            .sql(&union_sql)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to execute union query: {}", e))?;
-
-        let batches = df
-            .collect()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to collect union batches: {}", e))?;
-
-        let schema = batches
-            .first()
-            .map(|b| b.schema())
-            .ok_or_else(|| anyhow::anyhow!("No batches in union result"))?;
-
-        let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
-            .map_err(|e| anyhow::anyhow!("Failed to create MemTable from union: {}", e))?;
-
-        std::sync::Arc::new(mem_table) as std::sync::Arc<dyn datafusion::catalog::TableProvider>
-    };
 
     let _ = ctx.register_table("source", unified_table_provider)?;
 

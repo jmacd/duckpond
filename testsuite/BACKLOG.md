@@ -81,3 +81,19 @@ cd /Volumes/sourcecode/src/duckpond/tests
 docker-compose up -d minio
 docker-compose run --rm duckpond
 ```
+
+## BUG: `host+table:///path.parquet` fails with "not queryable"
+
+`pond cat host+table:///path/to/file.parquet` errors:
+```
+Invalid URL: File '...' is not queryable (type: FilePhysicalVersion)
+```
+
+**Root cause:** `host+table://` parses as builtin scheme `table`, which routes
+to `create_builtin_table_provider()`. That resolves the path through `HostmountPersistence`,
+which maps all regular files as `FilePhysicalVersion` (raw data). The queryable check
+fails because the entry type metadata isn't set — it's just a file on disk.
+
+**Fix:** When `url.is_host()` and scheme is `table`/`series`, bypass the tinyfs
+metadata path and read the file directly as Parquet (validate PAR1 magic, create
+a DataFusion `ParquetExec` or `MemTable` from the bytes).

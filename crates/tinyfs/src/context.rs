@@ -9,6 +9,7 @@
 
 use crate::{FileID, PersistenceLayer};
 use datafusion::execution::context::SessionContext;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Result type for tinyfs context operations
@@ -36,6 +37,10 @@ pub struct ProviderContext {
 
     /// TinyFS persistence layer for transaction management
     pub persistence: Arc<dyn PersistenceLayer>,
+
+    /// Format provider cache directory ({POND}/cache/), if available.
+    /// None for in-memory persistence (tests).
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl ProviderContext {
@@ -48,7 +53,14 @@ impl ProviderContext {
             datafusion_session,
             table_provider_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             persistence,
+            cache_dir: None,
         }
+    }
+
+    /// Create a provider context with a format cache directory
+    pub fn with_cache_dir(mut self, cache_dir: PathBuf) -> Self {
+        self.cache_dir = Some(cache_dir);
+        self
     }
 
     /// Get cached TableProvider by cache key
@@ -112,6 +124,12 @@ impl ProviderContext {
         let datafusion_session = Arc::new(SessionContext::new());
 
         Self::new(datafusion_session, persistence)
+    }
+
+    /// Return the format provider cache directory, if available.
+    #[must_use]
+    pub fn cache_dir(&self) -> Option<&Path> {
+        self.cache_dir.as_deref()
     }
 }
 
