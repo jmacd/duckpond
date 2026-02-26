@@ -152,7 +152,7 @@ pub async fn listing_table_from_cache(
     cache_dir: &Path,
     scheme: &str,
     node_id: &tinyfs::NodeID,
-    ctx: &SessionContext,
+    _ctx: &SessionContext,
 ) -> Result<Arc<dyn TableProvider>> {
     let dir = cache_node_dir(cache_dir, scheme, node_id);
     let dir_url = format!("file://{}/", dir.display());
@@ -161,10 +161,14 @@ pub async fn listing_table_from_cache(
     let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
         .with_file_extension(".parquet");
 
+    // Merge schemas from all cached parquet versions.  Format providers like
+    // oteljson produce variable schemas (columns appear/disappear across
+    // lines), so even a single file's cached versions can differ.
+    let merged_schema = merge_parquet_schemas_in_dir(&dir).await?;
+
     let config = ListingTableConfig::new(table_url)
         .with_listing_options(listing_options)
-        .infer_schema(&ctx.state())
-        .await?;
+        .with_schema(merged_schema);
 
     let table = ListingTable::try_new(config)?;
     Ok(Arc::new(table))
@@ -255,7 +259,7 @@ pub fn reset_glob_dir(glob_dir: &Path) -> Result<()> {
 /// is handled by `ListingTable`'s schema adapter.
 pub async fn listing_table_from_glob_cache(
     glob_dir: &Path,
-    ctx: &SessionContext,
+    _ctx: &SessionContext,
 ) -> Result<Arc<dyn TableProvider>> {
     let dir_url = format!("file://{}/", glob_dir.display());
 
@@ -263,13 +267,62 @@ pub async fn listing_table_from_glob_cache(
     let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
         .with_file_extension(".parquet");
 
+    // Merge schemas from ALL parquet files in the glob directory.
+    // DataFusion's infer_schema only samples a subset of files, which loses
+    // columns that appear in later files (e.g., sensors added over time).
+    // This is the glob-cache equivalent of UNION ALL BY NAME's schema merge.
+    let merged_schema = merge_parquet_schemas_in_dir(glob_dir).await?;
+
     let config = ListingTableConfig::new(table_url)
         .with_listing_options(listing_options)
-        .infer_schema(&ctx.state())
-        .await?;
+        .with_schema(merged_schema);
 
     let table = ListingTable::try_new(config)?;
     Ok(Arc::new(table))
+}
+
+/// Read the Arrow schema from every `.parquet` file under `dir` and merge
+/// them via `Schema::try_merge`.  This gives UNION-ALL-BY-NAME semantics:
+/// columns that appear in any file are present in the result, and files
+/// missing a column will produce NULLs when read through the ListingTable.
+async fn merge_parquet_schemas_in_dir(dir: &Path) -> Result<SchemaRef> {
+    use arrow::datatypes::Schema;
+
+    let mut schemas = Vec::new();
+    let mut entries = tokio::fs::read_dir(dir).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "parquet") {
+            let file = tokio::fs::File::open(&path).await?;
+            let reader =
+                parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(
+                    file,
+                )
+                .await
+                .map_err(|e| {
+                    crate::error::Error::Arrow(format!(
+                        "Failed to read parquet metadata from '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+            schemas.push(reader.schema().as_ref().clone());
+        }
+    }
+
+    if schemas.is_empty() {
+        return Err(crate::error::Error::Arrow(format!(
+            "No parquet files found in glob cache dir '{}'",
+            dir.display()
+        )));
+    }
+
+    let merged = Schema::try_merge(schemas).map_err(|e| {
+        crate::error::Error::Arrow(format!("Failed to merge parquet schemas: {}", e))
+    })?;
+
+    Ok(Arc::new(merged))
 }
 
 #[cfg(test)]
@@ -567,5 +620,128 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(cnt, 2); // One row from each node
+    }
+
+    /// Verify that listing_table_from_glob_cache merges schemas across files
+    /// with different columns (UNION ALL BY NAME semantics).  This catches the
+    /// bug where schema inference from a single file drops columns that only
+    /// exist in later files (e.g., sensors added over time).
+    #[tokio::test]
+    async fn test_listing_table_glob_cache_schema_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path();
+
+        // File 1: schema has (timestamp, sensor_a)
+        let schema1 = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Int64, false),
+            Field::new("sensor_a", DataType::Utf8, true),
+        ]));
+
+        // File 2: schema has (timestamp, sensor_a, sensor_b)
+        let schema2 = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Int64, false),
+            Field::new("sensor_a", DataType::Utf8, true),
+            Field::new("sensor_b", DataType::Utf8, true),
+        ]));
+
+        let node1 = test_node_id();
+        let node2 = test_node_id();
+        let v1 = test_version(1, "hash_merge_a");
+        let v2 = test_version(1, "hash_merge_b");
+
+        // Write file 1 with schema1
+        let batch1 = RecordBatch::try_new(
+            schema1.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![100])),
+                Arc::new(StringArray::from(vec![Some("a1")])),
+            ],
+        )
+        .unwrap();
+        let stream1: Pin<
+            Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+        > = Box::pin(futures::stream::once({
+            let b = batch1;
+            async move { Ok(b) }
+        }));
+        let _ = cache_write_version(cache_dir, "csv", &node1, &v1, schema1.clone(), stream1)
+            .await
+            .unwrap();
+
+        // Write file 2 with schema2
+        let batch2 = RecordBatch::try_new(
+            schema2.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![200])),
+                Arc::new(StringArray::from(vec![Some("a2")])),
+                Arc::new(StringArray::from(vec![Some("b2")])),
+            ],
+        )
+        .unwrap();
+        let stream2: Pin<
+            Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+        > = Box::pin(futures::stream::once({
+            let b = batch2;
+            async move { Ok(b) }
+        }));
+        let _ = cache_write_version(cache_dir, "csv", &node2, &v2, schema2.clone(), stream2)
+            .await
+            .unwrap();
+
+        // Create glob dir with symlinks to both nodes
+        let glob_dir = tmp.path().join("merge_glob");
+        std::fs::create_dir_all(&glob_dir).unwrap();
+        let _ =
+            ensure_glob_symlinks(cache_dir, "csv", &node1, &[v1.clone()], &glob_dir).unwrap();
+        let _ =
+            ensure_glob_symlinks(cache_dir, "csv", &node2, &[v2.clone()], &glob_dir).unwrap();
+
+        // Build listing table -- should have merged schema with all 3 columns
+        let ctx = SessionContext::new();
+        let table = listing_table_from_glob_cache(&glob_dir, &ctx)
+            .await
+            .unwrap();
+
+        let table_schema = table.schema();
+        let field_names: Vec<&str> = table_schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(
+            field_names.contains(&"timestamp"),
+            "merged schema must contain timestamp"
+        );
+        assert!(
+            field_names.contains(&"sensor_a"),
+            "merged schema must contain sensor_a"
+        );
+        assert!(
+            field_names.contains(&"sensor_b"),
+            "merged schema must contain sensor_b (from second file)"
+        );
+
+        // Query the data -- sensor_b should be NULL for file 1's row
+        let _ = ctx.register_table("source", table).unwrap();
+        let df = ctx
+            .sql("SELECT timestamp, sensor_a, sensor_b FROM source ORDER BY timestamp")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches.len(), 1);
+
+        use arrow::array::Array;
+
+        let ts_col = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(ts_col.value(0), 100);
+        assert_eq!(ts_col.value(1), 200);
+
+        let sb_col = batches[0]
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(sb_col.is_null(0), "sensor_b should be NULL for file 1");
+        assert_eq!(sb_col.value(1), "b2");
     }
 }

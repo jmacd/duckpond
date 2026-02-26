@@ -308,6 +308,13 @@ pub async fn export_series_to_parquet(
         .await
         .map_err(|e| anyhow::anyhow!("COPY stream failed for '{}': {}", pond_path, e))?;
 
+    // Deregister the export table to release Arc references (ViewTable,
+    // ListingTable) held by the SessionContext.  Without this, every export
+    // keeps its source table alive for the lifetime of the transaction.
+    let _ = ctx.deregister_table(
+        datafusion::sql::TableReference::bare(unique_table_name.as_str()),
+    );
+
     // Scan output directory for exported files
     let exported_files = discover_exported_files(export_dir, base_output_dir)?;
     log::debug!(

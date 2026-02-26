@@ -42,7 +42,7 @@ scp "${TARBALL}" "${HOST}:/tmp/duckpond-amd64.tar"
 
 echo ""
 echo "=== Loading into podman on ${HOST} ==="
-ssh "${HOST}" "podman load -i /tmp/duckpond-amd64.tar && podman tag docker.io/library/${LOCAL_TAG} ${LOCAL_TAG} && rm /tmp/duckpond-amd64.tar"
+ssh "${HOST}" "podman load -i /tmp/duckpond-amd64.tar && rm /tmp/duckpond-amd64.tar"
 
 echo ""
 echo "=== Done ==="

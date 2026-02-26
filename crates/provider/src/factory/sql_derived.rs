@@ -775,27 +775,24 @@ impl SqlDerivedFile {
 
     /// Generate deterministic table name for caching based on SQL query, pattern config, and file content
     ///
-    /// This enables DataFusion table provider and query plan caching by ensuring the same
-    /// SQL query + pattern + underlying files always get the same table name.
-    async fn generate_deterministic_table_name(
-        &self,
-        pattern_name: &str,
+    /// Generate a data-only table name for the source ListingTable.
+    ///
+    /// Unlike `generate_deterministic_table_name`, this does NOT include the
+    /// SQL query in the hash.  All SqlDerivedFile instances that share the same
+    /// source pattern URL and resolved files will produce the same name, allowing
+    /// the expensive ListingTable/glob construction to happen once and be reused
+    /// across nodes with different SQL queries (e.g., 25 temporal-reduce nodes
+    /// sharing the same 89 source files but with different GROUP BY intervals).
+    fn generate_data_table_name(
         pattern_url: &crate::Url,
         queryable_files: &[tinyfs::NodePath],
-    ) -> Result<String, tinyfs::Error> {
+    ) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
 
-        // Hash the pattern name
-        pattern_name.hash(&mut hasher);
-
-        // Hash the SQL query content
-        let sql_query = self.get_effective_sql_query();
-        sql_query.hash(&mut hasher);
-
-        // Hash the pattern URL string
+        // Hash the pattern URL string (determines which files)
         pattern_url.to_string().hash(&mut hasher);
 
         // Hash the file IDs (sorted for deterministic ordering)
@@ -808,7 +805,7 @@ impl SqlDerivedFile {
         file_ids.hash(&mut hasher);
 
         let hash_value = hasher.finish();
-        Ok(format!("{:016x}", hash_value))
+        format!("sql_derived_data_{:016x}", hash_value).to_lowercase()
     }
 }
 
@@ -896,23 +893,41 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
             );
 
             if !queryable_files.is_empty() {
-                // Generate deterministic table name based on content for caching
-                // This enables DataFusion table provider and query plan caching
-                let deterministic_name = self
-                    .generate_deterministic_table_name(pattern_name, pattern, &queryable_files)
-                    .await
-                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-                // CRITICAL: DataFusion converts table names to lowercase, so we must register with lowercase names
-                // to avoid case-sensitivity mismatches between registration and SQL queries
+                // Generate data-only table name for the source ListingTable.
+                // This name depends ONLY on the pattern URL and resolved files,
+                // NOT on the SQL query.  When multiple SqlDerivedFile instances
+                // share the same source files (e.g., 25 temporal-reduce nodes over
+                // the same 89 oteljson files), they reuse the one registered table
+                // instead of each building an expensive ListingTable + glob.
                 let unique_table_name =
-                    format!("sql_derived_{}_{}", pattern_name, deterministic_name).to_lowercase();
+                    Self::generate_data_table_name(pattern, &queryable_files);
                 debug!(
-                    "Generated deterministic table name: '{}' for pattern '{}' (hash: {})",
-                    unique_table_name, pattern_name, deterministic_name
+                    "Generated data table name: '{}' for pattern '{}'",
+                    unique_table_name, pattern
                 );
 
                 _ = table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
 
+                // Check if this source data table is already registered in the
+                // SessionContext.  All SqlDerivedFile instances that share the
+                // same source files will produce the same data table name, so
+                // only the first caller does the expensive construction.
+                let table_already_registered = matches!(
+                    ctx.catalog("datafusion")
+                        .expect("registered")
+                        .schema("public")
+                        .expect("defined")
+                        .table(&unique_table_name)
+                        .await,
+                    Ok(Some(_))
+                );
+
+                if table_already_registered {
+                    debug!(
+                        "[GO] SQL-DERIVED: Data table '{}' already registered, skipping construction",
+                        unique_table_name
+                    );
+                } else {
                 // Check if this pattern uses a format provider
                 let scheme = pattern.scheme();
                 let is_format_provider = matches!(scheme, "csv" | "excelhtml" | "oteljson");
@@ -1207,20 +1222,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         provider
                     }
                 };
-                // Register the ListingTable as the provider
-                let table_exists = matches!(
-                    ctx.catalog("datafusion")
-                        .expect("registered")
-                        .schema("public")
-                        .expect("defined")
-                        .table(&unique_table_name)
-                        .await,
-                    Ok(Some(_))
-                );
-
-                if table_exists {
-                    debug!("Table '{unique_table_name}' already exists, skipping registration");
-                } else {
+                // Register the source data table
                     debug!(
                         "[SEARCH] SQL-DERIVED: Registering table '{}' (pattern: '{}') with DataFusion...",
                         unique_table_name, pattern_name
@@ -1296,7 +1298,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         "[OK] SQL-DERIVED: Successfully registered table '{}' (user pattern: '{}') in SessionContext",
                         unique_table_name, pattern_name
                     );
-                }
+                } // end if !table_already_registered
             }
         }
 
