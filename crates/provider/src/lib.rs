@@ -11,6 +11,7 @@ pub mod transform;
 
 mod error;
 mod format;
+pub mod format_cache;
 mod format_registry;
 mod provider_api;
 mod sql_transform;
