@@ -1,7 +1,8 @@
 # Experiment framework ignores
 
-# Temporary binary copied for Docker build
+# Temporary files copied for Docker build
 pond
+duckpond-emergency
 
 # Active experiment (work in progress)
 active/

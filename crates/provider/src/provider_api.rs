@@ -112,17 +112,17 @@ impl Provider {
             .ok_or_else(|| Error::InvalidUrl(format!("Unknown format: {}", scheme)))?;
 
         // Try cache path if ProviderContext with cache_dir is available
-        if let Some(ref provider_context) = self.provider_context {
-            if let Some(cache_dir) = provider_context.cache_dir() {
-                return self
-                    .create_cached_table_from_url(
-                        &url,
-                        format_provider.as_ref(),
-                        cache_dir,
-                        &provider_context.datafusion_session,
-                    )
-                    .await;
-            }
+        if let Some(ref provider_context) = self.provider_context
+            && let Some(cache_dir) = provider_context.cache_dir()
+        {
+            return self
+                .create_cached_table_from_url(
+                    &url,
+                    format_provider.as_ref(),
+                    cache_dir,
+                    &provider_context.datafusion_session,
+                )
+                .await;
         }
 
         // No cache available -- fall back to MemTable
@@ -295,9 +295,10 @@ impl Provider {
 
         // Resolve URL path to FileID
         let root = self.fs.root().await?;
-        let (_, lookup_result) = root.resolve_path(path).await.map_err(|e| {
-            Error::InvalidUrl(format!("Failed to resolve path '{}': {}", path, e))
-        })?;
+        let (_, lookup_result) = root
+            .resolve_path(path)
+            .await
+            .map_err(|e| Error::InvalidUrl(format!("Failed to resolve path '{}': {}", path, e)))?;
 
         let node_path = match lookup_result {
             Lookup::Found(np) => np,
@@ -364,8 +365,7 @@ impl Provider {
                     Box::pin(std::io::Cursor::new(bytes));
 
                 // Apply decompression if needed
-                let reader =
-                    crate::format::compression::decompress(reader, url.compression())?;
+                let reader = crate::format::compression::decompress(reader, url.compression())?;
 
                 // Parse through format provider
                 let (schema, stream) = format_provider.open_stream(reader, url).await?;
@@ -407,86 +407,72 @@ impl Provider {
         let scheme = url.scheme();
 
         // For external formats with cache: glob-cache path
-        if !matches!(scheme, "file" | "series" | "table" | "data") {
-            if let Some(ref provider_context) = self.provider_context {
-                if let Some(cache_dir) = provider_context.cache_dir() {
-                    let format_provider = FormatRegistry::get_provider(scheme)
-                        .ok_or_else(|| {
-                            Error::InvalidUrl(format!("Unknown format: {}", scheme))
-                        })?;
+        if !matches!(scheme, "file" | "series" | "table" | "data")
+            && let Some(ref provider_context) = self.provider_context
+            && let Some(cache_dir) = provider_context.cache_dir()
+        {
+            let format_provider = FormatRegistry::get_provider(scheme)
+                .ok_or_else(|| Error::InvalidUrl(format!("Unknown format: {}", scheme)))?;
 
-                    // Expand pattern via TinyFS
-                    let root = self.fs.root().await?;
-                    let matches = root.collect_matches(path).await.map_err(|e| {
-                        Error::InvalidUrl(format!(
-                            "Pattern expansion failed for '{}': {}",
-                            path, e
-                        ))
-                    })?;
+            // Expand pattern via TinyFS
+            let root = self.fs.root().await?;
+            let matches = root.collect_matches(path).await.map_err(|e| {
+                Error::InvalidUrl(format!("Pattern expansion failed for '{}': {}", path, e))
+            })?;
 
-                    if matches.is_empty() {
-                        return Err(Error::InvalidUrl(format!(
-                            "No files match pattern: {}",
-                            url_str
-                        )));
-                    }
+            if matches.is_empty() {
+                return Err(Error::InvalidUrl(format!(
+                    "No files match pattern: {}",
+                    url_str
+                )));
+            }
 
-                    if matches.len() == 1 {
-                        // Single match -- per-node ListingTable
-                        let (node_path, _) = &matches[0];
-                        let file_url_str =
-                            format!("{}://{}", scheme, node_path.path().display());
-                        return self.create_table_provider(&file_url_str, ctx).await;
-                    }
+            if matches.len() == 1 {
+                // Single match -- per-node ListingTable
+                let (node_path, _) = &matches[0];
+                let file_url_str = format!("{}://{}", scheme, node_path.path().display());
+                return self.create_table_provider(&file_url_str, ctx).await;
+            }
 
-                    // Multi-file: cache each, symlink into glob dir, ListingTable
-                    let pat_hash = crate::format_cache::pattern_hash(url_str);
-                    let glob_dir =
-                        crate::format_cache::cache_glob_dir(cache_dir, scheme, &pat_hash);
-                    crate::format_cache::reset_glob_dir(&glob_dir)?;
+            // Multi-file: cache each, symlink into glob dir, ListingTable
+            let pat_hash = crate::format_cache::pattern_hash(url_str);
+            let glob_dir = crate::format_cache::cache_glob_dir(cache_dir, scheme, &pat_hash);
+            crate::format_cache::reset_glob_dir(&glob_dir)?;
 
-                    for (node_path, _) in &matches {
-                        let file_url_str =
-                            format!("{}://{}", scheme, node_path.path().display());
-                        let file_url = Url::parse(&file_url_str)?;
+            for (node_path, _) in &matches {
+                let file_url_str = format!("{}://{}", scheme, node_path.path().display());
+                let file_url = Url::parse(&file_url_str)?;
 
-                        let (node_id, versions) = self
-                            .ensure_url_cached(
-                                &file_url,
-                                format_provider.as_ref(),
-                                cache_dir,
-                            )
-                            .await?;
-
-                        let _ = crate::format_cache::ensure_glob_symlinks(
-                            cache_dir, scheme, &node_id, &versions, &glob_dir,
-                        )?;
-                    }
-
-                    let provider = crate::format_cache::listing_table_from_glob_cache(
-                        &glob_dir, ctx,
-                    )
+                let (node_id, versions) = self
+                    .ensure_url_cached(&file_url, format_provider.as_ref(), cache_dir)
                     .await?;
 
-                    log::debug!(
-                        "[OK] Glob cache ListingTable for {} files (pattern '{}')",
-                        matches.len(),
-                        url_str,
-                    );
-
-                    return Ok(provider);
-                }
+                let _ = crate::format_cache::ensure_glob_symlinks(
+                    cache_dir, scheme, &node_id, &versions, &glob_dir,
+                )?;
             }
+
+            let provider =
+                crate::format_cache::listing_table_from_glob_cache(&glob_dir, ctx).await?;
+
+            log::debug!(
+                "[OK] Glob cache ListingTable for {} files (pattern '{}')",
+                matches.len(),
+                url_str,
+            );
+
+            return Ok(provider);
         }
 
         // Fallback: individual providers + UNION ALL BY NAME
         let mut table_providers = Vec::new();
-        let _ = self.for_each_match(url_str, |tp, file_path| {
-            log::debug!("Matched file: {}", file_path);
-            table_providers.push(tp);
-            async { Ok(()) }
-        })
-        .await?;
+        let _ = self
+            .for_each_match(url_str, |tp, file_path| {
+                log::debug!("Matched file: {}", file_path);
+                table_providers.push(tp);
+                async { Ok(()) }
+            })
+            .await?;
 
         if table_providers.len() == 1 {
             return Ok(table_providers.into_iter().next().expect("len == 1"));
@@ -511,9 +497,10 @@ impl Provider {
 
         let df = temp_ctx.sql(&union_sql).await?;
         let batches = df.collect().await?;
-        let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
-            Error::SessionContext("No batches in union result".to_string())
-        })?;
+        let schema = batches
+            .first()
+            .map(|b| b.schema())
+            .ok_or_else(|| Error::SessionContext("No batches in union result".to_string()))?;
         let mem_table = MemTable::try_new(schema, vec![batches])?;
         Ok(Arc::new(mem_table))
     }

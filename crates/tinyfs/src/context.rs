@@ -58,6 +58,7 @@ impl ProviderContext {
     }
 
     /// Create a provider context with a format cache directory
+    #[must_use]
     pub fn with_cache_dir(mut self, cache_dir: PathBuf) -> Self {
         self.cache_dir = Some(cache_dir);
         self

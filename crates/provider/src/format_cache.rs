@@ -25,9 +25,9 @@ use datafusion::datasource::listing::{
 use datafusion::execution::context::SessionContext;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
-use parquet::arrow::AsyncArrowWriter;
-use futures::stream::Stream;
 use futures::StreamExt;
+use futures::stream::Stream;
+use parquet::arrow::AsyncArrowWriter;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -39,11 +39,8 @@ type Result<T> = std::result::Result<T, crate::error::Error>;
 /// Directory for a file's cached format conversions.
 ///
 /// Returns `{cache_dir}/{scheme}_{node_id}/`
-pub fn cache_node_dir(
-    cache_dir: &Path,
-    scheme: &str,
-    node_id: &tinyfs::NodeID,
-) -> PathBuf {
+#[must_use]
+pub fn cache_node_dir(cache_dir: &Path, scheme: &str, node_id: &tinyfs::NodeID) -> PathBuf {
     cache_dir.join(format!("{}_{}", scheme, node_id))
 }
 
@@ -54,6 +51,7 @@ pub fn cache_node_dir(
 /// # Panics
 /// Panics if `version.blake3` is `None` -- format providers only operate on
 /// file data, which always has a blake3 hash.
+#[must_use]
 pub fn cache_version_path(
     cache_dir: &Path,
     scheme: &str,
@@ -64,15 +62,14 @@ pub fn cache_version_path(
         .blake3
         .as_deref()
         .expect("blake3 must be Some for file data versions -- format cache requires content hash");
-    cache_node_dir(cache_dir, scheme, node_id).join(format!(
-        "v{}_{}.parquet",
-        version.version, blake3
-    ))
+    cache_node_dir(cache_dir, scheme, node_id)
+        .join(format!("v{}_{}.parquet", version.version, blake3))
 }
 
 /// Check which versions are missing from the cache.
 ///
 /// Returns the subset of versions whose cached Parquet files do not exist on disk.
+#[must_use]
 pub fn find_uncached_versions(
     cache_dir: &Path,
     scheme: &str,
@@ -100,7 +97,9 @@ pub async fn cache_write_version(
     node_id: &tinyfs::NodeID,
     version: &FileVersionInfo,
     schema: SchemaRef,
-    stream: Pin<Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>>,
+    stream: Pin<
+        Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+    >,
 ) -> Result<PathBuf> {
     let dir = cache_node_dir(cache_dir, scheme, node_id);
     tokio::fs::create_dir_all(&dir).await?;
@@ -113,9 +112,7 @@ pub async fn cache_write_version(
     let file = tokio::fs::File::create(&tmp_path).await?;
 
     let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(
-            parquet::basic::ZstdLevel::default(),
-        ))
+        .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
         .build();
     let mut writer = AsyncArrowWriter::try_new(file, schema, Some(props))
         .map_err(|e| crate::error::Error::Arrow(e.to_string()))?;
@@ -136,10 +133,7 @@ pub async fn cache_write_version(
     // Atomic rename: .tmp -> final
     tokio::fs::rename(&tmp_path, &final_path).await?;
 
-    log::debug!(
-        "[SAVE] Format cache: wrote {}",
-        final_path.display()
-    );
+    log::debug!("[SAVE] Format cache: wrote {}", final_path.display());
 
     Ok(final_path)
 }
@@ -158,8 +152,8 @@ pub async fn listing_table_from_cache(
     let dir_url = format!("file://{}/", dir.display());
 
     let table_url = ListingTableUrl::parse(&dir_url)?;
-    let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
-        .with_file_extension(".parquet");
+    let listing_options =
+        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
 
     // Merge schemas from all cached parquet versions.  Format providers like
     // oteljson produce variable schemas (columns appear/disappear across
@@ -177,11 +171,13 @@ pub async fn listing_table_from_cache(
 /// Directory for a glob-scoped unified cache (all files matching a pattern).
 ///
 /// Returns `{cache_dir}/{scheme}_glob_{pattern_hash}/`
+#[must_use]
 pub fn cache_glob_dir(cache_dir: &Path, scheme: &str, pattern_hash: &str) -> PathBuf {
     cache_dir.join(format!("{}_glob_{}", scheme, pattern_hash))
 }
 
 /// Compute a deterministic hash for a glob pattern string.
+#[must_use]
 pub fn pattern_hash(pattern: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -222,8 +218,7 @@ pub fn ensure_glob_symlinks(
         if !link_name.exists() {
             #[cfg(unix)]
             {
-                std::os::unix::fs::symlink(&source, &link_name)
-                    .map_err(crate::error::Error::Io)?;
+                std::os::unix::fs::symlink(&source, &link_name).map_err(crate::error::Error::Io)?;
             }
             #[cfg(not(unix))]
             {
@@ -264,8 +259,8 @@ pub async fn listing_table_from_glob_cache(
     let dir_url = format!("file://{}/", glob_dir.display());
 
     let table_url = ListingTableUrl::parse(&dir_url)?;
-    let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
-        .with_file_extension(".parquet");
+    let listing_options =
+        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet");
 
     // Merge schemas from ALL parquet files in the glob directory.
     // DataFusion's infer_schema only samples a subset of files, which loses
@@ -295,10 +290,7 @@ async fn merge_parquet_schemas_in_dir(dir: &Path) -> Result<SchemaRef> {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "parquet") {
             let file = tokio::fs::File::open(&path).await?;
-            let reader =
-                parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(
-                    file,
-                )
+            let reader = parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(file)
                 .await
                 .map_err(|e| {
                     crate::error::Error::Arrow(format!(
@@ -425,8 +417,9 @@ mod tests {
         let schema = test_schema();
         let batch = test_batch(&schema, &[1000, 2000, 3000], &["a", "b", "c"]);
 
-        let stream: Pin<Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>> =
-            Box::pin(futures::stream::once(async move { Ok(batch) }));
+        let stream: Pin<
+            Box<dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send>,
+        > = Box::pin(futures::stream::once(async move { Ok(batch) }));
 
         let path = cache_write_version(cache_dir, "oteljson", &node_id, &version, schema, stream)
             .await
@@ -454,17 +447,16 @@ mod tests {
             let batch = test_batch(&schema, &[i * 1000], &[&format!("val{}", i)]);
             let stream: Pin<
                 Box<
-                    dyn Stream<
-                            Item = std::result::Result<RecordBatch, crate::error::Error>,
-                        > + Send,
+                    dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send,
                 >,
             > = Box::pin(futures::stream::once({
                 let batch = batch;
                 async move { Ok(batch) }
             }));
-            let _ = cache_write_version(cache_dir, "csv", &node_id, &version, schema.clone(), stream)
-                .await
-                .unwrap();
+            let _ =
+                cache_write_version(cache_dir, "csv", &node_id, &version, schema.clone(), stream)
+                    .await
+                    .unwrap();
         }
 
         // Build ListingTable and verify
@@ -528,9 +520,7 @@ mod tests {
             let batch = test_batch(&schema, &[1000], &["x"]);
             let stream: Pin<
                 Box<
-                    dyn Stream<
-                            Item = std::result::Result<RecordBatch, crate::error::Error>,
-                        > + Send,
+                    dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send,
                 >,
             > = Box::pin(futures::stream::once({
                 let batch = batch;
@@ -581,30 +571,42 @@ mod tests {
             let batch = test_batch(&schema, &ts, &val);
             let stream: Pin<
                 Box<
-                    dyn Stream<
-                            Item = std::result::Result<RecordBatch, crate::error::Error>,
-                        > + Send,
+                    dyn Stream<Item = std::result::Result<RecordBatch, crate::error::Error>> + Send,
                 >,
             > = Box::pin(futures::stream::once({
                 let batch = batch;
                 async move { Ok(batch) }
             }));
-            let _ = cache_write_version(
-                cache_dir, "csv", node_id, version, schema.clone(), stream,
-            )
-            .await
-            .unwrap();
+            let _ = cache_write_version(cache_dir, "csv", node_id, version, schema.clone(), stream)
+                .await
+                .unwrap();
         }
 
         // Create glob dir, symlink both nodes' versions in
         let glob_dir = tmp.path().join("my_glob");
         std::fs::create_dir_all(&glob_dir).unwrap();
-        let _ = ensure_glob_symlinks(cache_dir, "csv", &node1, &[v1.clone()], &glob_dir).unwrap();
-        let _ = ensure_glob_symlinks(cache_dir, "csv", &node2, &[v2.clone()], &glob_dir).unwrap();
+        let _ = ensure_glob_symlinks(
+            cache_dir,
+            "csv",
+            &node1,
+            std::slice::from_ref(&v1),
+            &glob_dir,
+        )
+        .unwrap();
+        let _ = ensure_glob_symlinks(
+            cache_dir,
+            "csv",
+            &node2,
+            std::slice::from_ref(&v2),
+            &glob_dir,
+        )
+        .unwrap();
 
         // Build listing table over glob dir
         let ctx = SessionContext::new();
-        let table = listing_table_from_glob_cache(&glob_dir, &ctx).await.unwrap();
+        let table = listing_table_from_glob_cache(&glob_dir, &ctx)
+            .await
+            .unwrap();
 
         let table_schema = table.schema();
         assert_eq!(table_schema.fields().len(), 2);
@@ -691,10 +693,22 @@ mod tests {
         // Create glob dir with symlinks to both nodes
         let glob_dir = tmp.path().join("merge_glob");
         std::fs::create_dir_all(&glob_dir).unwrap();
-        let _ =
-            ensure_glob_symlinks(cache_dir, "csv", &node1, &[v1.clone()], &glob_dir).unwrap();
-        let _ =
-            ensure_glob_symlinks(cache_dir, "csv", &node2, &[v2.clone()], &glob_dir).unwrap();
+        let _ = ensure_glob_symlinks(
+            cache_dir,
+            "csv",
+            &node1,
+            std::slice::from_ref(&v1),
+            &glob_dir,
+        )
+        .unwrap();
+        let _ = ensure_glob_symlinks(
+            cache_dir,
+            "csv",
+            &node2,
+            std::slice::from_ref(&v2),
+            &glob_dir,
+        )
+        .unwrap();
 
         // Build listing table -- should have merged schema with all 3 columns
         let ctx = SessionContext::new();
@@ -703,7 +717,11 @@ mod tests {
             .unwrap();
 
         let table_schema = table.schema();
-        let field_names: Vec<&str> = table_schema.fields().iter().map(|f| f.name().as_str()).collect();
+        let field_names: Vec<&str> = table_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
         assert!(
             field_names.contains(&"timestamp"),
             "merged schema must contain timestamp"

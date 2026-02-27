@@ -395,10 +395,7 @@ impl TemporalReduceSqlFile {
             // retains the glob so SqlDerivedFile can expand and UNION ALL the
             // matching files.  For single-match cases it is the concrete file URL.
             let source_url = crate::Url::parse(&self.pattern_url).map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "Invalid pattern URL '{}': {}",
-                    self.pattern_url, e
-                ))
+                tinyfs::Error::Other(format!("Invalid pattern URL '{}': {}", self.pattern_url, e))
             })?;
 
             let sql_config = SqlDerivedConfig {
