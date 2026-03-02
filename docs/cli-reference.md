@@ -13,8 +13,10 @@
 | `pond cat` | Read file contents | `pond cat host+csv:///tmp/data.csv --format=table` |
 | `pond describe` | Show file schema | `pond describe /data/*.csv` |
 | `pond mknod` | Create factory nodes | `pond mknod --config f.yaml /path` |
-| `pond run` | Execute factory nodes | `pond run /etc/system.d/20-foo collect` |
-| `pond control` | Query transaction history | `pond control recent` |
+| `pond run` | Execute factory nodes | `pond run 20-foo collect` |
+| `pond log` | View transaction history | `pond log --limit 20` |
+| `pond sync` | Sync with remote storage | `pond sync` |
+| `pond config` | Show/set pond configuration | `pond config` |
 
 ## Environment
 
@@ -289,7 +291,8 @@ pond mknod --config /path/to/config.yaml /destination/path
 
 # Specific factory types
 pond mknod sql-derived-table /derived/view --config-path filter.yaml
-pond mknod remote /etc/system.d/10-remote --config-path remote.yaml
+pond mknod remote /system/run/1-backup --config-path backup.yaml
+pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
 ```
 
 See [Factory Types](#factory-types) for configuration options.
@@ -301,35 +304,122 @@ See [Factory Types](#factory-types) for configuration options.
 Execute a factory node's commands.
 
 ```bash
-# Run data collection
-pond run /etc/system.d/20-hydrovu collect
+# Run data collection (full path)
+pond run /system/etc/20-hydrovu collect
+
+# Short name resolution (tries /system/run/ then /system/etc/)
+pond run 20-hydrovu collect
 
 # Push to remote backup
-pond run /etc/system.d/10-remote push
+pond run /system/run/1-backup push
 
 # Pull from remote
-pond run /etc/system.d/10-remote pull
+pond run /system/run/1-backup pull
+
+# Build site
+pond run /system/etc/90-sitegen build ./dist
+```
+
+Short names (without a leading `/`) are resolved by checking `/system/run/{name}`
+then `/system/etc/{name}`. The first path that exists wins. If neither exists,
+falls back to `/system/run/{name}` (which will produce a clear error downstream).
+
+---
+
+### pond log
+
+View transaction history and audit trail.
+
+```bash
+# Recent transactions (default: last 10)
+pond log
+pond log --limit 20
+
+# Transaction details
+pond log --txn-seq 42
+
+# Show incomplete operations (for recovery)
+pond log --incomplete
 ```
 
 ---
 
-### pond control
+### pond sync
 
-Query the pond's transaction history and configuration.
+Sync with remote storage (retry pushes, pull new bundles).
+`pond sync` only operates on remote factories in `/system/run/`.
 
 ```bash
-# Recent transactions
-pond control recent
-pond control recent --limit 20
+# Sync all remote factories in /system/run/
+pond sync
 
-# Transaction details
-pond control detail --txn-seq 42
+# Sync a specific factory by short name
+pond sync 1-backup
 
-# SQL query on control table
-pond control --sql "SELECT txn_seq, cli_args FROM control_table ORDER BY txn_seq DESC LIMIT 5"
+# Sync by full path
+pond sync /system/run/1-backup
 
+# Recovery mode with base64 config
+pond sync --config <base64-encoded-config>
+```
+
+---
+
+### pond config
+
+Show or set pond configuration (ID, factory modes, metadata, settings).
+
+```bash
 # Show configuration
-pond control show-config
+pond config
+
+# Set a configuration value
+pond config set <key> <value>
+```
+
+> **Note:** `pond control` is still available as a hidden alias for backward compatibility.
+
+---
+
+## Factory Filesystem Conventions
+
+Factory nodes live under `/system/` in two directories that determine their
+auto-execution behavior:
+
+| Directory | Purpose | Post-commit | Examples |
+|-----------|---------|------------|----------|
+| `/system/run/` | Auto-executing factories | Yes (default: `push`) | `remote` (backup) |
+| `/system/etc/` | Manually triggered or passive | No | `hydrovu`, `sitegen`, `column-rename` |
+| `/system/site/` | Static content (templates) | No | Markdown page templates |
+
+**Post-commit auto-execution:** After every write transaction, the steward
+scans `/system/run/*` and executes each factory with its configured mode
+(default: `push`). Only factories that support the mode will succeed --
+this is why `hydrovu` and `sitegen` must NOT be placed in `/system/run/`.
+
+**Short name resolution:** `pond run` resolves bare names (no leading `/`)
+by checking `/system/run/{name}` then `/system/etc/{name}`. `pond sync`
+only looks in `/system/run/` since it only operates on remote factories.
+
+**Naming convention:** Use numeric prefixes for ordering:
+`1-backup`, `10-hrename`, `20-hydrovu`, `90-sitegen`.
+
+**Setup pattern:**
+```bash
+pond mkdir -p /system/run
+pond mkdir -p /system/etc
+pond mkdir -p /system/site
+
+# Auto-executing (remote backup)
+pond mknod remote /system/run/1-backup --config-path backup.yaml
+
+# Manually triggered
+pond mknod column-rename /system/etc/10-hrename --config-path hrename.yaml
+pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
+pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
+
+# Static content
+pond copy host:///path/to/templates /system/site --overwrite
 ```
 
 ---
@@ -539,7 +629,7 @@ config:
 | `scope` | no | Prefix added to every non-timestamp column: `Scope.Column`. If omitted, columns keep their original names. |
 | `range.begin` | no | ISO 8601 start time — rows before this are excluded. |
 | `range.end` | no | ISO 8601 end time — rows after this are excluded. |
-| `transforms` | no | List of paths to table-transform factories applied to this input before joining (e.g. `["/etc/hydro_rename"]`). |
+| `transforms` | no | List of paths to table-transform factories applied to this input before joining (e.g. `["/system/etc/10-hrename"]`). |
 
 **Behaviour:**
 
@@ -611,7 +701,7 @@ config:
     - "AT500_Bottom.DO.mg/L"
   time_column: "timestamp"            # optional, default: "timestamp"
   transforms:                         # optional
-    - "/etc/hydro_rename"
+    - "/system/etc/10-hrename"
 ```
 
 **Config fields:**
@@ -912,7 +1002,9 @@ layout: data
 **Build command:**
 
 ```bash
-pond run /site.yaml build ./dist
+pond run /system/etc/90-sitegen build ./dist
+# or using short name:
+pond run 90-sitegen build ./dist
 ```
 
 This single command: reads the site config → runs export stages (auto-partitions
@@ -933,19 +1025,19 @@ python3 -m http.server 8000 -d ./dist
 
 ```bash
 # Store templates in the pond
-pond copy host:///path/to/site /site
+pond copy host:///path/to/templates /system/site --overwrite
 
 # Create the sitegen factory node
-pond mknod sitegen /site.yaml --config-path /path/to/site.yaml
+pond mknod sitegen /system/etc/90-sitegen --config-path /path/to/site.yaml
 
 # Build the site
-pond run /site.yaml build ./dist
+pond run 90-sitegen build ./dist
 
 # Update templates without recreating the factory
-pond copy host:///path/to/site /site --overwrite
+pond copy host:///path/to/templates /system/site --overwrite
 
 # Update factory config
-pond mknod sitegen /site.yaml --overwrite --config-path /path/to/site.yaml
+pond mknod sitegen /system/etc/90-sitegen --overwrite --config-path /path/to/site.yaml
 ```
 
 **Notes:**
@@ -985,7 +1077,7 @@ rules:
 
 ```bash
 # Create the transform node
-pond mknod column-rename /etc/hydro_rename --config-path hrename.yaml
+pond mknod column-rename /system/etc/10-hrename --config-path hrename.yaml
 
 # Reference it from other factories via transforms field
 ```
@@ -995,7 +1087,7 @@ pond mknod column-rename /etc/hydro_rename --config-path hrename.yaml
 inputs:
   - pattern: "series:///data/readings"
     scope: "Station"
-    transforms: ["/etc/hydro_rename"]
+    transforms: ["/system/etc/10-hrename"]
 ```
 
 **Notes:**
@@ -1026,21 +1118,21 @@ allow_http: true  # Required for non-HTTPS endpoints
 **Commands:**
 ```bash
 # Push local pond to remote backup
-pond run /etc/system.d/10-remote push
+pond run /system/run/1-backup push
 
 # Pull from remote (restore)
-pond run /etc/system.d/10-remote pull
+pond run /system/run/1-backup pull
 
 # Verify backup integrity
-pond run /etc/system.d/10-remote verify
+pond run /system/run/1-backup verify
 
 # List files in remote storage
-pond run /etc/system.d/10-remote list-files
+pond run /system/run/1-backup list-files
 
 # Show files with verification script (for external tool validation)
-pond run /etc/system.d/10-remote show           # All files
-pond run /etc/system.d/10-remote show "/data/*" # Pattern match
-pond run /etc/system.d/10-remote show --script  # Generate copy-pastable scripts
+pond run /system/run/1-backup show           # All files
+pond run /system/run/1-backup show "/data/*" # Pattern match
+pond run /system/run/1-backup show --script  # Generate copy-pastable scripts
 ```
 
 #### Emergency Recovery (duckpond-emergency)
@@ -1110,14 +1202,14 @@ pond_path: /logs/app
 **Usage:**
 ```bash
 # Create the factory node
-pond mknod logfile-ingest /etc/system.d/10-logs --config-path ingest.yaml
+pond mknod logfile-ingest /system/etc/10-ingest --config-path ingest.yaml
 
-# Run ingestion (push mode)
-pond run /etc/system.d/10-logs
-pond run /etc/system.d/10-logs push   # explicit
+# Run ingestion
+pond run /system/etc/10-ingest
+pond run 10-ingest              # short name works too
 
 # Verify checksums (b3sum format)
-pond run /etc/system.d/10-logs b3sum
+pond run 10-ingest b3sum
 ```
 
 **Behavior:**
@@ -1213,7 +1305,7 @@ temporal-reduce (/reduced)
     → /reduced/single_site/NorthDock/res={1h,6h,1d}.series
     → /reduced/single_param/Temperature/res={1h,6h,1d}.series
 
-sitegen (/site.yaml)
+sitegen (/system/etc/90-sitegen)
     → dist/ (HTML + Parquet, served as static site)
 ```
 
@@ -1223,13 +1315,22 @@ sitegen (/site.yaml)
 **Setup pattern:**
 ```bash
 pond init
-pond copy host:///path/to/site  /site              # Markdown templates
+pond mkdir -p /system/run
+pond mkdir -p /system/etc
+pond mkdir -p /system/site
+pond copy host:///path/to/templates /system/site    # Markdown templates
+pond mknod column-rename /system/etc/10-hrename --config-path hrename.yaml
 pond mknod dynamic-dir /combined --config-path combine.yaml
 pond mknod dynamic-dir /singled  --config-path single.yaml
 pond mknod dynamic-dir /reduced  --config-path reduce.yaml
-pond mknod sitegen /site.yaml --config-path site.yaml
-pond mknod column-rename /etc/hydro_rename --config-path hrename.yaml
-pond run /site.yaml build ./dist
+pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
+pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
+pond mknod remote /system/run/1-backup --config-path backup.yaml
+
+# Operational cycle:
+pond run 20-hydrovu collect              # Collect data
+pond run 90-sitegen build ./dist         # Build site
+# Backup runs automatically on post-commit (remote in /system/run/)
 ```
 
 ### Single-Source (Septic)
@@ -1239,13 +1340,13 @@ scopes (BME280 environment sensor + Orenco Modbus registers) at different sample
 There's no need for join/pivot — the `oteljson://` URL scheme provides a single wide table.
 
 ```
-logfile-ingest (/etc/ingest)
+logfile-ingest (/system/etc/10-ingest)
     → /ingest/septicstation.json         (raw OTelJSON Lines file)
 
 temporal-reduce (/reduced)                using oteljson:// URL scheme
     → /reduced/septic/res={1h,6h,1d}.series
 
-sitegen (/site.yaml)
+sitegen (/system/etc/90-sitegen)
     → dist/ (HTML + Parquet)
 ```
 
@@ -1270,18 +1371,20 @@ config:
 **Setup pattern:**
 ```bash
 pond init
-pond mkdir -p /etc/system.d
+pond mkdir -p /system/run
+pond mkdir -p /system/etc
+pond mkdir -p /system/site
 pond mkdir -p /ingest
-pond copy host:///path/to/site /site
-pond mknod logfile-ingest /etc/ingest --config-path ingest.yaml
-pond mknod remote /etc/system.d/1-backup --config-path backup.yaml
+pond copy host:///path/to/templates /system/site
+pond mknod logfile-ingest /system/etc/10-ingest --config-path ingest.yaml
+pond mknod remote /system/run/1-backup --config-path backup.yaml
 pond mknod temporal-reduce /reduced --config-path reduce.yaml
-pond mknod sitegen /site.yaml --config-path site.yaml
+pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
 
 # Operational cycle:
-pond run /etc/ingest                        # ingest new log data
-pond run /site.yaml build ./dist        # build site (reduce is dynamic)
-pond run /etc/system.d/1-backup push        # backup to S3
+pond run 10-ingest                          # ingest new log data
+pond run 90-sitegen build ./dist            # build site (reduce is dynamic)
+# Backup runs automatically on post-commit (remote in /system/run/)
 ```
 
 **Notes on single-source pipelines:**
@@ -1371,7 +1474,7 @@ For one-off exploration, use `--sql` with `LIMIT` to reduce output.
 
 **Cause**: Dynamic factories are re-computed on every read, but they read from their
 source which may itself be cached or stale.
-**Fix**: For logfile-ingest sources, run `pond run /etc/ingest` first to ingest new data.
+**Fix**: For logfile-ingest sources, run `pond run 10-ingest` first to ingest new data.
 The dynamic factory chain (temporal-reduce → sitegen) will then see the updated source.
 
 ### temporal-reduce columns not found

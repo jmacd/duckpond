@@ -39,9 +39,10 @@ enum RemoteCommand {
     /// Outputs a command to create a replica pond with this remote config.
     Replicate,
 
-    /// List backed up files
+    /// List backed up files (hidden: use 'show' instead)
     ///
     /// Shows files available in remote storage.
+    #[command(hide = true)]
     ListFiles {
         /// Transaction ID to list files for
         #[arg(long)]
@@ -247,7 +248,7 @@ async fn execute_remote(
                     }
                 );
                 log::info!("   No manual execution needed - your data is already synchronized.");
-                log::info!("   To check backup status, use: pond run <path> list-files");
+                log::info!("   To check backup status, use: pond run <path> show");
                 return Ok(());
             }
             _ => {

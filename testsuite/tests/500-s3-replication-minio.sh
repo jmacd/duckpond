@@ -9,8 +9,8 @@
 #
 # EXPECTED:
 #   - MinIO serves as S3-compatible storage
-#   - pond run /etc/system.d/10-remote push uploads to S3
-#   - pond run /etc/system.d/10-remote pull downloads to replica
+#   - pond run /system/run/10-remote push uploads to S3
+#   - pond run /system/run/10-remote pull downloads to replica
 #
 # NOTE: This experiment requires the MinIO container or binary
 #       If running standalone, MinIO must be started separately
@@ -87,8 +87,8 @@ pond init
 echo "✓ Pond1 initialized"
 
 pond mkdir /data
-pond mkdir /etc
-pond mkdir /etc/system.d
+pond mkdir /system
+pond mkdir /system/run
 
 # Create test data
 echo "Creating test data..."
@@ -125,7 +125,7 @@ compression_level: 3
 EOF
 fi
 
-pond mknod remote /etc/system.d/10-remote --config-path /tmp/remote-config.yaml
+pond mknod remote /system/run/10-remote --config-path /tmp/remote-config.yaml
 echo "✓ Remote backup configured"
 
 #############################
@@ -135,7 +135,7 @@ echo "✓ Remote backup configured"
 echo ""
 echo "=== Pushing Pond1 to remote ==="
 
-pond run /etc/system.d/10-remote push
+pond run /system/run/10-remote push
 echo "✓ Push complete"
 
 # Verify backup exists
@@ -159,11 +159,11 @@ export POND=/pond2
 pond init
 echo "✓ Pond2 initialized"
 
-pond mkdir /etc
-pond mkdir /etc/system.d
+pond mkdir /system
+pond mkdir /system/run
 
 # Configure Pond2 to pull from same remote
-pond mknod remote /etc/system.d/10-remote --config-path /tmp/remote-config.yaml
+pond mknod remote /system/run/10-remote --config-path /tmp/remote-config.yaml
 echo "✓ Remote configured for Pond2"
 
 #############################
@@ -173,7 +173,7 @@ echo "✓ Remote configured for Pond2"
 echo ""
 echo "=== Pulling to Pond2 (Replica) ==="
 
-pond run /etc/system.d/10-remote pull
+pond run /system/run/10-remote pull
 echo "✓ Pull complete"
 
 #############################

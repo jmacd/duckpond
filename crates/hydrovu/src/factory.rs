@@ -25,7 +25,7 @@ enum HydroVuCommand {
     /// Fetches sensor data from configured devices and stores it in the pond.
     /// Devices with `active: false` in the config are skipped.
     ///
-    /// Example: pond run /etc/system.d/20-hydrovu collect
+    /// Example: pond run /system/run/20-hydrovu collect
     Collect,
 
     /// Archive active series data

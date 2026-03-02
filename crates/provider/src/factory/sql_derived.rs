@@ -899,10 +899,27 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                 // share the same source files (e.g., 25 temporal-reduce nodes over
                 // the same 89 oteljson files), they reuse the one registered table
                 // instead of each building an expensive ListingTable + glob.
-                let unique_table_name = Self::generate_data_table_name(pattern, &queryable_files);
+                //
+                // IMPORTANT: When provider_wrapper (e.g., null_padding) or
+                // scope_prefixes are configured, the wrapping differs per consumer
+                // (each timeseries-pivot node pads different columns).  In that
+                // case the table name must be unique per consumer so that each
+                // gets its own wrapped provider.  We append the consumer's
+                // node_id to prevent caching collisions.
+                let data_table_name = Self::generate_data_table_name(pattern, &queryable_files);
+                let has_per_consumer_wrapping =
+                    self.config.provider_wrapper.is_some() || self.config.scope_prefixes.is_some();
+                let unique_table_name = if has_per_consumer_wrapping {
+                    // Strip hyphens from the UUID so the table name is a
+                    // valid bare SQL identifier (hyphens break SQL parsing).
+                    let node_id_hex = id.node_id().to_string().replace('-', "");
+                    format!("{}_{}", data_table_name, node_id_hex)
+                } else {
+                    data_table_name
+                };
                 debug!(
-                    "Generated data table name: '{}' for pattern '{}'",
-                    unique_table_name, pattern
+                    "Generated data table name: '{}' for pattern '{}' (per-consumer wrapping: {})",
+                    unique_table_name, pattern, has_per_consumer_wrapping
                 );
 
                 _ = table_mappings.insert(pattern_name.clone(), unique_table_name.clone());
@@ -911,6 +928,10 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                 // SessionContext.  All SqlDerivedFile instances that share the
                 // same source files will produce the same data table name, so
                 // only the first caller does the expensive construction.
+                //
+                // When per-consumer wrapping is active, the name includes the
+                // node_id so the check will always miss -- each consumer
+                // constructs its own wrapped table.
                 let table_already_registered = matches!(
                     ctx.catalog("datafusion")
                         .expect("registered")

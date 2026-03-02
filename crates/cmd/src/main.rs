@@ -20,7 +20,7 @@ use sitegen as _;
 #[global_allocator]
 static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);
 
-/// Control table subcommands
+/// Control table subcommands (hidden -- use `pond log`, `pond sync`, `pond config` instead)
 #[derive(Debug, Subcommand)]
 enum ControlCommand {
     /// Show recent transactions with summary status
@@ -47,6 +47,18 @@ enum ControlCommand {
     ShowConfig,
     /// Set a configuration value
     SetConfig {
+        /// Configuration key
+        key: String,
+        /// Configuration value
+        value: String,
+    },
+}
+
+/// Config subcommands
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Set a configuration value
+    Set {
         /// Configuration key
         key: String,
         /// Configuration value
@@ -84,7 +96,7 @@ enum Commands {
         /// Initialize from remote backup (path to restore config YAML)
         #[arg(long)]
         from_backup: Option<PathBuf>,
-        /// Initialize from base64-encoded replication config (from 'pond run /etc/system.d/10-remote replicate')
+        /// Initialize from base64-encoded replication config (from 'pond run /system/run/10-remote replicate')
         #[arg(long, conflicts_with = "from_backup")]
         config: Option<String>,
     },
@@ -96,8 +108,34 @@ enum Commands {
         #[arg(long, short = 'm', default_value = "brief")]
         mode: String,
     },
-    /// Query control table for transaction status, post-commit execution, or manual replica sync
-    /// Control table operations and pond configuration
+    /// View transaction history and audit trail
+    Log {
+        /// Number of recent transactions to show
+        #[arg(long, default_value = "10")]
+        limit: usize,
+        /// Show detailed lifecycle for a specific transaction sequence number
+        #[arg(long, conflicts_with = "incomplete")]
+        txn_seq: Option<i64>,
+        /// Show incomplete operations (for recovery)
+        #[arg(long, conflicts_with = "txn_seq")]
+        incomplete: bool,
+    },
+    /// Sync with remote storage (retry pushes, pull new bundles)
+    Sync {
+        /// Factory name or full path (e.g., "1-backup" or "/system/run/1-backup").
+        /// If omitted, syncs all remote factories in /system/run/.
+        name: Option<String>,
+        /// Base64-encoded remote config for recovery (use same as pond init --config)
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Show or set pond configuration
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+    },
+    /// (Hidden) Legacy control table interface -- use `pond log`, `pond sync`, `pond config`
+    #[command(hide = true)]
     Control {
         #[command(subcommand)]
         command: ControlCommand,
@@ -276,6 +314,32 @@ async fn main() -> Result<()> {
         // Read-only commands that use ShipContext for consistency
         Commands::Show { mode } => {
             commands::show_command(&ship_context, &mode, print_handler).await
+        }
+        Commands::Log {
+            limit,
+            txn_seq,
+            incomplete,
+        } => {
+            let control_mode = if let Some(seq) = txn_seq {
+                commands::control::ControlMode::Detail { txn_seq: seq }
+            } else if incomplete {
+                commands::control::ControlMode::Incomplete
+            } else {
+                commands::control::ControlMode::Recent { limit }
+            };
+            commands::control_command(&ship_context, control_mode).await
+        }
+        Commands::Sync { name, config } => {
+            commands::sync_command(&ship_context, name, config).await
+        }
+        Commands::Config { command } => {
+            let control_mode = match command {
+                Some(ConfigCommand::Set { key, value }) => {
+                    commands::control::ControlMode::SetConfig { key, value }
+                }
+                None => commands::control::ControlMode::ShowConfig,
+            };
+            commands::control_command(&ship_context, control_mode).await
         }
         Commands::Control { command } => {
             let control_mode = match command {

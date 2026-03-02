@@ -110,10 +110,10 @@ active_pattern: /var/log/syslog
 pond_path: /logs/system
 EOF
 
-pond mkdir -p /etc/system.d
+pond mkdir -p /system/run
 pond mkdir -p /logs/system
 
-pond mknod logfile-ingest /etc/system.d/10-syslog --config-path /tmp/syslog-ingest.yaml
+pond mknod logfile-ingest /system/run/10-syslog --config-path /tmp/syslog-ingest.yaml
 echo "✓ Created logfile-ingest factory node"
 
 #############################
@@ -123,7 +123,7 @@ echo "✓ Created logfile-ingest factory node"
 echo ""
 echo "=== Step 4: First ingest run ==="
 
-pond run /etc/system.d/10-syslog 2>&1 | tee /tmp/run1.log
+pond run /system/run/10-syslog 2>&1 | tee /tmp/run1.log
 
 # Count lines in pond
 POND_LINES_1=$(pond cat /logs/system/syslog 2>/dev/null | wc -l)
@@ -160,7 +160,7 @@ echo "Host syslog now has ${NEW_HOST_LINES} lines (+${EXPECTED_NEW} new)"
 echo ""
 echo "=== Step 6: Second ingest run (detect appends) ==="
 
-RUST_LOG=provider::factory::logfile_ingest=debug,info pond run /etc/system.d/10-syslog 2>&1 | tee /tmp/run2.log
+RUST_LOG=provider::factory::logfile_ingest=debug,info pond run /system/run/10-syslog 2>&1 | tee /tmp/run2.log
 
 POND_LINES_2=$(pond cat /logs/system/syslog 2>/dev/null | wc -l)
 POND_ADDED=$((POND_LINES_2 - POND_LINES_1))

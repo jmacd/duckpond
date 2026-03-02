@@ -57,8 +57,8 @@ pond init 2>&1 | grep -v "^\[" || true
 echo "✓ Pond initialized"
 
 pond mkdir /data 2>&1 | grep -v "^\[" || true
-pond mkdir /etc 2>&1 | grep -v "^\[" || true
-pond mkdir /etc/system.d 2>&1 | grep -v "^\[" || true
+pond mkdir /system 2>&1 | grep -v "^\[" || true
+pond mkdir /system/run 2>&1 | grep -v "^\[" || true
 
 # Create test file with KNOWN content so we can verify extraction
 TEST_CONTENT="This is a test file for emergency recovery verification.
@@ -103,7 +103,7 @@ cat > /tmp/remote-config.yaml << EOF
 url: "file://${BACKUP_PATH}"
 EOF
 
-pond mknod remote /etc/system.d/10-remote --config-path /tmp/remote-config.yaml 2>&1 | grep -v "^\[" || true
+pond mknod remote /system/run/10-remote --config-path /tmp/remote-config.yaml 2>&1 | grep -v "^\[" || true
 echo "✓ Remote backup configured at $BACKUP_PATH"
 
 # Verify backup was pushed (happens automatically on mknod)
@@ -112,7 +112,7 @@ if [ -d "$BACKUP_PATH/_delta_log" ]; then
     echo "✓ Backup pushed successfully"
 else
     echo "⚠ Backup may not have been pushed yet, doing manual push"
-    pond run /etc/system.d/10-remote push 2>&1 | grep -v "^\[" || true
+    pond run /system/run/10-remote push 2>&1 | grep -v "^\[" || true
 fi
 
 #############################
@@ -240,7 +240,7 @@ fi
 echo ""
 echo "=== Cross-checking with pond verify ==="
 
-pond run /etc/system.d/10-remote verify 2>&1 | grep -v "^\[" || true
+pond run /system/run/10-remote verify 2>&1 | grep -v "^\[" || true
 echo "✓ Pond verify passed"
 
 #############################

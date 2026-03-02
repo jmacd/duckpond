@@ -88,15 +88,15 @@ active_pattern: /var/log/testapp/metrics.json
 pond_path: /logs/septic
 EOF
 
-pond mkdir -p /etc/system.d
+pond mkdir -p /system/run
 pond mkdir -p /logs/septic
 
-pond mknod logfile-ingest /etc/system.d/10-ingest --config-path /tmp/ingest.yaml
+pond mknod logfile-ingest /system/run/10-ingest --config-path /tmp/ingest.yaml
 
 echo "✓ Created logfile-ingest factory"
 
 # Run ingest
-RUST_LOG=info pond run /etc/system.d/10-ingest 2>&1 | grep -E "complete|error" || true
+RUST_LOG=info pond run /system/run/10-ingest 2>&1 | grep -E "complete|error" || true
 
 echo ""
 echo "=== Verify ingested files ==="

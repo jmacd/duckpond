@@ -252,10 +252,10 @@ struct TransactionRecordSummary {
 async fn test_post_commit_single_factory_success() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
 
-    // Create /etc/system.d directory
-    mkdir_command(&setup.ship_context, "/etc/system.d", true)
+    // Create /system/run directory
+    mkdir_command(&setup.ship_context, "/system/run", true)
         .await
-        .expect("Failed to create system.d");
+        .expect("Failed to create /system/run");
 
     // Create a test factory config that will succeed
     setup
@@ -279,7 +279,7 @@ repeat_count: 1
     mknod_command(
         &setup.ship_context,
         "test-executor",
-        "/etc/system.d/10-test",
+        "/system/run/10-test",
         &setup.config_path("test-factory.yaml"),
         false,
     )
@@ -340,7 +340,7 @@ repeat_count: 1
     );
     assert_eq!(
         pending_record.config_path.as_deref(),
-        Some("/etc/system.d/10-test")
+        Some("/system/run/10-test")
     );
     assert_eq!(pending_record.execution_seq, Some(1));
 
@@ -364,10 +364,10 @@ repeat_count: 1
 async fn test_post_commit_multiple_factories_all_succeed() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
 
-    // Create /etc/system.d directory
-    mkdir_command(&setup.ship_context, "/etc/system.d", true)
+    // Create /system/run directory
+    mkdir_command(&setup.ship_context, "/system/run", true)
         .await
-        .expect("Failed to create system.d");
+        .expect("Failed to create /system/run");
 
     // Set factory mode early to prevent error logs
     setup
@@ -395,7 +395,7 @@ repeat_count: 1
         mknod_command(
             &setup.ship_context,
             "test-executor",
-            &format!("/etc/system.d/{:02}-test-{}", i * 10, i),
+            &format!("/system/run/{:02}-test-{}", i * 10, i),
             &setup.config_path(&config_filename),
             false,
         )
@@ -487,10 +487,10 @@ repeat_count: 1
 async fn test_post_commit_independent_execution_with_failure() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
 
-    // Create /etc/system.d directory
-    mkdir_command(&setup.ship_context, "/etc/system.d", true)
+    // Create /system/run directory
+    mkdir_command(&setup.ship_context, "/system/run", true)
         .await
-        .expect("Failed to create system.d");
+        .expect("Failed to create /system/run");
 
     // Set factory mode early to prevent error logs
     setup
@@ -513,7 +513,7 @@ repeat_count: 1
     mknod_command(
         &setup.ship_context,
         "test-executor",
-        "/etc/system.d/10-success",
+        "/system/run/10-success",
         &setup.config_path("test-success-1.yaml"),
         false,
     )
@@ -536,7 +536,7 @@ fail: true
     mknod_command(
         &setup.ship_context,
         "test-executor",
-        "/etc/system.d/20-fail",
+        "/system/run/20-fail",
         &setup.config_path("test-fail.yaml"),
         false,
     )
@@ -558,7 +558,7 @@ repeat_count: 1
     mknod_command(
         &setup.ship_context,
         "test-executor",
-        "/etc/system.d/30-success",
+        "/system/run/30-success",
         &setup.config_path("test-success-2.yaml"),
         false,
     )
@@ -919,9 +919,9 @@ async fn test_parent_txn_seq_execution_seq_identity() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
 
     // Create multiple post-commit factories
-    mkdir_command(&setup.ship_context, "/etc/system.d", true)
+    mkdir_command(&setup.ship_context, "/system/run", true)
         .await
-        .expect("Failed to create system.d");
+        .expect("Failed to create /system/run");
 
     for i in 1..=3 {
         let config_filename = format!("identity-test-{}.yaml", i);
@@ -942,7 +942,7 @@ repeat_count: 1
         mknod_command(
             &setup.ship_context,
             "test-executor",
-            &format!("/etc/system.d/{:02}-identity-{}", i * 10, i),
+            &format!("/system/run/{:02}-identity-{}", i * 10, i),
             &setup.config_path(&config_filename),
             false,
         )
@@ -1028,10 +1028,10 @@ repeat_count: 1
 async fn test_version_visibility_post_commit_sees_committed_data() {
     let setup = TestSetup::new().await.expect("Failed to create test setup");
 
-    // Create /etc/system.d and /data directories
-    mkdir_command(&setup.ship_context, "/etc/system.d", true)
+    // Create /system/run and /data directories
+    mkdir_command(&setup.ship_context, "/system/run", true)
         .await
-        .expect("Failed to create system.d");
+        .expect("Failed to create /system/run");
 
     mkdir_command(&setup.ship_context, "/data", true)
         .await
@@ -1091,7 +1091,7 @@ expected_content: "{}"
     mknod_command(
         &setup.ship_context,
         "test-executor",
-        "/etc/system.d/10-visibility-reader",
+        "/system/run/10-visibility-reader",
         &setup.config_path("visibility-reader.yaml"),
         false,
     )
@@ -1151,7 +1151,7 @@ expected_content: "{}"
     );
     assert_eq!(
         pending_record.config_path.as_deref(),
-        Some("/etc/system.d/10-visibility-reader")
+        Some("/system/run/10-visibility-reader")
     );
 
     // If we got here, the factory successfully read and verified the content

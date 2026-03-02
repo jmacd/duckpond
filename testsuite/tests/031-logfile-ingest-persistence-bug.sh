@@ -54,9 +54,9 @@ pond init
 
 echo ""
 echo "=== Creating logfile-ingest factory node ==="
-pond mkdir -p /etc/system.d
+pond mkdir -p /system/run
 pond mkdir -p /logs/app
-pond mknod logfile-ingest /etc/system.d/10-logs --config-path /tmp/ingest.yaml
+pond mknod logfile-ingest /system/run/10-logs --config-path /tmp/ingest.yaml
 
 echo ""
 echo "=== Pond structure after mknod ==="
@@ -71,7 +71,7 @@ echo "=============================================="
 echo "=== FIRST RUN ==="
 echo "=============================================="
 
-RUST_LOG=provider::factory::logfile_ingest=debug,info pond run /etc/system.d/10-logs 2>&1 | tee /tmp/run1.log
+RUST_LOG=provider::factory::logfile_ingest=debug,info pond run /system/run/10-logs 2>&1 | tee /tmp/run1.log
 
 echo ""
 echo "--- First run: key messages ---"
@@ -109,7 +109,7 @@ echo "=== Expected: 'unchanged (${HOST_SIZE} bytes)' ==="
 echo "=== Bug symptom: 'was 0, now ${HOST_SIZE}' ==="
 echo "=============================================="
 
-RUST_LOG=provider::factory::logfile_ingest=debug,info pond run /etc/system.d/10-logs 2>&1 | tee /tmp/run2.log
+RUST_LOG=provider::factory::logfile_ingest=debug,info pond run /system/run/10-logs 2>&1 | tee /tmp/run2.log
 
 echo ""
 echo "--- Second run: key messages ---"

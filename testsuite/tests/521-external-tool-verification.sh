@@ -55,8 +55,8 @@ pond init
 echo "✓ Pond initialized"
 
 pond mkdir /data
-pond mkdir /etc
-pond mkdir /etc/system.d
+pond mkdir /system
+pond mkdir /system/run
 
 # Create a test file with known content
 TEST_CONTENT="Hello, this is test data for verification.
@@ -97,11 +97,11 @@ cat > /tmp/remote-config.yaml << EOF
 url: "file://${BACKUP_PATH}"
 EOF
 
-pond mknod remote /etc/system.d/10-remote --config-path /tmp/remote-config.yaml
+pond mknod remote /system/run/10-remote --config-path /tmp/remote-config.yaml
 echo "✓ Remote backup configured at $BACKUP_PATH"
 
 # Manual push (auto-push already happened, but let's be explicit)
-pond run /etc/system.d/10-remote push 2>/dev/null || true
+pond run /system/run/10-remote push 2>/dev/null || true
 echo "✓ Backup pushed"
 
 #############################
@@ -113,12 +113,12 @@ echo "=== Testing show command ==="
 
 # Basic show
 echo "--- Basic show output ---"
-pond run /etc/system.d/10-remote show
+pond run /system/run/10-remote show
 
 # Show with script
 echo ""
 echo "--- Saving verification script ---"
-pond run /etc/system.d/10-remote show -- --script > /tmp/verify-script.txt 2>/dev/null
+pond run /system/run/10-remote show -- --script > /tmp/verify-script.txt 2>/dev/null
 echo "✓ Verification script saved to /tmp/verify-script.txt"
 echo "  Script size: $(wc -c < /tmp/verify-script.txt) bytes"
 
@@ -223,7 +223,7 @@ LIMIT 5;
 
 echo ""
 echo "=== Running built-in verify command ==="
-pond run /etc/system.d/10-remote verify
+pond run /system/run/10-remote verify
 echo "✓ Built-in verify passed"
 
 #############################

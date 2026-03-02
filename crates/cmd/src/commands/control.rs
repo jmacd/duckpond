@@ -432,125 +432,278 @@ async fn show_transaction_detail(
 /// - pull mode factory: Pulls new bundles and applies them
 async fn execute_sync(
     ship_context: &ShipContext,
-    control_table: &mut steward::ControlTable,
+    _control_table: &mut steward::ControlTable,
     config: Option<String>,
 ) -> Result<()> {
-    // Reload control table to see latest commits
-    // Control table automatically sees latest Delta commits via DataFusion
+    // Delegate to sync_command with no name (legacy: syncs hardcoded path)
+    sync_command(ship_context, None, config).await
+}
+
+/// Resolve a factory short name or path to a full pond path.
+///
+/// - Full paths (starting with `/`) are returned as-is
+/// - Short names are resolved to `/system/run/{name}` (auto-executing factories)
+///   or `/system/etc/{name}` (manually-triggered factories)
+///
+/// For `pond sync`, only `/system/run/` is scanned, so the fallback
+/// to `/system/etc/` only matters for `pond run` short names.
+fn resolve_factory_path(name: &str) -> String {
+    if name.starts_with('/') {
+        name.to_string()
+    } else {
+        // pond sync only looks in /system/run/ anyway;
+        // pond run will try both at runtime via resolve_short_factory_name().
+        format!("/system/run/{}", name)
+    }
+}
+
+/// System directories where factory nodes live.
+///
+/// - `/system/run/`  -- auto-executing on post-commit (remote push/pull)
+/// - `/system/etc/`  -- manually triggered or passive (hydrovu, sitegen, column-rename)
+pub const SYSTEM_RUN_DIR: &str = "/system/run";
+pub const SYSTEM_ETC_DIR: &str = "/system/etc";
+
+/// Resolve a bare factory name against `/system/run/` then `/system/etc/`.
+/// Returns the first path that exists, or falls back to `/system/run/{name}`.
+pub async fn resolve_short_factory_name(ship_context: &ShipContext, name: &str) -> Result<String> {
+    if name.starts_with('/') {
+        return Ok(name.to_string());
+    }
+
+    let mut ship = ship_context.open_pond().await?;
+    let tx = ship
+        .begin_read(&steward::PondUserMetadata::new(vec![
+            "resolve-factory".to_string(),
+        ]))
+        .await?;
+
+    let root = tx.root().await?;
+
+    // Try /system/run/ first (auto-executing), then /system/etc/ (manual)
+    for dir in &[SYSTEM_RUN_DIR, SYSTEM_ETC_DIR] {
+        let candidate = format!("{}/{}", dir, name);
+        if root.resolve_path(&candidate).await.is_ok() {
+            _ = tx.commit().await?;
+            log::info!("Resolved short name '{}' -> '{}'", name, candidate);
+            return Ok(candidate);
+        }
+    }
+
+    _ = tx.commit().await?;
+    // Fall back to /system/run/ (will produce a clear error downstream)
+    let fallback = format!("{}/{}", SYSTEM_RUN_DIR, name);
+    log::info!(
+        "Short name '{}' not found, defaulting to '{}'",
+        name,
+        fallback
+    );
+    Ok(fallback)
+}
+
+/// Sync with remote storage: retry pushes, pull new bundles.
+///
+/// - If `config` is provided, use it directly (recovery mode, no pond needed).
+/// - If `name` is provided, sync just that factory (short name or full path).
+/// - If neither, scan `/system/run/` for all remote factories and sync each.
+pub async fn sync_command(
+    ship_context: &ShipContext,
+    name: Option<String>,
+    config: Option<String>,
+) -> Result<()> {
+    // Recovery mode: --config with base64 encoded config
+    if let Some(config_value) = config {
+        let mut ship = ship_context.open_pond().await?;
+        let control_table = ship.control_table_mut();
+        control_table.print_banner();
+
+        log::info!("[SYNC] Executing recovery sync with --config...");
+
+        let mut ship2 = ship_context.open_pond().await?;
+        let mut tx = ship2
+            .begin_read(&steward::PondUserMetadata::new(vec!["sync".to_string()]))
+            .await?;
+
+        match execute_sync_with_config(&mut tx, control_table, config_value).await {
+            Ok(()) => {
+                _ = tx.commit().await?;
+                log::info!("[OK] Recovery sync completed");
+                return Ok(());
+            }
+            Err(e) => return Err(tx.abort(&e).await.into()),
+        }
+    }
+
+    // Determine which factories to sync
+    let factory_paths = if let Some(ref n) = name {
+        vec![resolve_factory_path(n)]
+    } else {
+        // Scan /system/run/ for all remote factories
+        discover_syncable_factories(ship_context).await?
+    };
+
+    if factory_paths.is_empty() {
+        log::info!("[SYNC] No remote factories found in /system/run/");
+        println!("No remote factories found in /system/run/");
+        return Ok(());
+    }
+
+    // Sync each factory
+    for path in &factory_paths {
+        log::info!("[SYNC] Syncing factory: {}", path);
+        sync_single_factory(ship_context, path).await?;
+    }
+
+    log::info!(
+        "[OK] Sync completed for {} factory(ies)",
+        factory_paths.len()
+    );
+    Ok(())
+}
+
+/// Discover all syncable (remote) factories in /system/run/
+async fn discover_syncable_factories(ship_context: &ShipContext) -> Result<Vec<String>> {
+    let mut ship = ship_context.open_pond().await?;
+    let tx = ship
+        .begin_read(&steward::PondUserMetadata::new(vec![
+            "sync-discover".to_string(),
+        ]))
+        .await?;
+
+    let root = tx.root().await?;
+
+    // Use collect_matches to find all entries in /system/run/*
+    let matches = match root.collect_matches("/system/run/*").await {
+        Ok(m) => m,
+        Err(_) => {
+            _ = tx.commit().await?;
+            return Ok(vec![]);
+        }
+    };
+
+    // Check each entry to see if it's a remote factory
+    let mut factory_paths = Vec::new();
+    for (node_path, _captures) in &matches {
+        let path = node_path.path().to_string_lossy().to_string();
+        let node_id = node_path.id();
+        if let Ok(Some(factory_name)) = tx.get_factory_for_node(node_id).await
+            && factory_name == "remote"
+        {
+            factory_paths.push(path);
+        }
+    }
+
+    _ = tx.commit().await?;
+    Ok(factory_paths)
+}
+
+/// Sync a single factory by its full path
+async fn sync_single_factory(ship_context: &ShipContext, factory_path: &str) -> Result<()> {
+    let mut ship = ship_context.open_pond().await?;
+    let control_table = ship.control_table_mut();
     control_table.print_banner();
 
-    log::info!("[SYNC] Executing manual sync operation...");
-
-    // Open pond to read factory configuration
-    let mut ship = ship_context.open_pond().await?;
-
-    // Start a read transaction to access the factory config
-    let mut tx = ship
+    let mut ship2 = ship_context.open_pond().await?;
+    let mut tx = ship2
         .begin_read(&steward::PondUserMetadata::new(vec!["sync".to_string()]))
         .await?;
 
-    match execute_sync_impl(&mut tx, control_table, config).await {
+    match execute_sync_for_path(&mut tx, control_table, factory_path).await {
         Ok(()) => {
             _ = tx.commit().await?;
-            log::info!("[OK] Sync operation completed");
+            log::info!("[OK] Sync completed for: {}", factory_path);
             Ok(())
         }
         Err(e) => Err(tx.abort(&e).await.into()),
     }
 }
 
-/// Implementation of sync operation
-async fn execute_sync_impl(
+/// Execute sync using base64 recovery config
+async fn execute_sync_with_config(
     tx: &mut steward::Transaction<'_>,
     control_table: &mut steward::ControlTable,
-    config_base64: Option<String>,
+    encoded: String,
 ) -> Result<()> {
-    // If --config provided, use it directly (recovery case)
-    if let Some(encoded) = config_base64 {
-        log::info!("Using remote config from --config argument");
-        let repl_config = remote::ReplicationConfig::from_base64(&encoded)
-            .map_err(|e| anyhow!("Failed to decode base64 config: {}", e))?;
+    log::info!("Using remote config from --config argument");
+    let repl_config = remote::ReplicationConfig::from_base64(&encoded)
+        .map_err(|e| anyhow!("Failed to decode base64 config: {}", e))?;
 
-        let config = repl_config.remote;
-        let pond_metadata = control_table.get_pond_metadata().clone();
+    let config = repl_config.remote;
+    let pond_metadata = control_table.get_pond_metadata().clone();
 
-        // Create factory context
-        let provider_context = tx.provider_context()?;
-        let factory_context = provider::FactoryContext::with_metadata(
-            provider_context,
-            tinyfs::FileID::root(),
-            pond_metadata,
-        );
+    let provider_context = tx.provider_context()?;
+    let factory_context = provider::FactoryContext::with_metadata(
+        provider_context,
+        tinyfs::FileID::root(),
+        pond_metadata,
+    );
 
-        // Serialize config to bytes
-        let config_str = serde_yaml::to_string(&config)
-            .map_err(|e| anyhow!("Failed to serialize remote config: {}", e))?;
-        let config_bytes = config_str.as_bytes().to_vec();
+    let config_str = serde_yaml::to_string(&config)
+        .map_err(|e| anyhow!("Failed to serialize remote config: {}", e))?;
+    let config_bytes = config_str.as_bytes().to_vec();
 
-        // Execute the remote factory in ControlWriter mode with "pull" arg
-        let args = vec!["pull".to_string()];
-        FactoryRegistry::execute::<tlogfs::TLogFSError>(
-            "remote",
-            &config_bytes,
-            factory_context,
-            ExecutionContext::control_writer(args),
-        )
-        .await
-        .map_err(|e| anyhow!("Remote factory execution failed: {}", e))?;
+    let args = vec!["pull".to_string()];
+    FactoryRegistry::execute::<tlogfs::TLogFSError>(
+        "remote",
+        &config_bytes,
+        factory_context,
+        ExecutionContext::control_writer(args),
+    )
+    .await
+    .map_err(|e| anyhow!("Remote factory execution failed: {}", e))?;
 
-        return Ok(());
-    }
+    Ok(())
+}
 
-    // Normal case: Look for remote factory node at known path
-    let remote_path = "/etc/system.d/1-backup"; // Standard location
-    log::info!("Looking for remote factory at: {}", remote_path);
+/// Execute sync for a specific factory path
+async fn execute_sync_for_path(
+    tx: &mut steward::Transaction<'_>,
+    control_table: &mut steward::ControlTable,
+    factory_path: &str,
+) -> Result<()> {
+    log::info!("Looking for remote factory at: {}", factory_path);
 
-    // Get filesystem root (guard derefs to FS)
     let root = tx.root().await?;
 
-    // Resolve the factory config path
     let (_parent_wd, lookup_result) = root
-        .resolve_path(&remote_path)
+        .resolve_path(factory_path)
         .await
-        .with_context(|| format!("Failed to resolve path: {}", remote_path))?;
+        .with_context(|| format!("Failed to resolve path: {}", factory_path))?;
 
     let config_node = match lookup_result {
         tinyfs::Lookup::Found(node) => node,
         tinyfs::Lookup::NotFound(_, _) => {
-            return Err(anyhow!("Factory configuration not found: {}", remote_path));
+            return Err(anyhow!("Factory configuration not found: {}", factory_path));
         }
         tinyfs::Lookup::Empty(_) => {
-            return Err(anyhow!("Invalid path: {}", remote_path));
+            return Err(anyhow!("Invalid path: {}", factory_path));
         }
     };
 
-    // Get node ID
     let node_id = config_node.id();
 
-    // Get the factory name from the oplog
     let factory_name = tx
         .get_factory_for_node(node_id)
         .await
-        .with_context(|| format!("Failed to get factory for: {}", remote_path))?
+        .with_context(|| format!("Failed to get factory for: {}", factory_path))?
         .ok_or_else(|| {
             anyhow!(
                 "Factory configuration has no associated factory: {}",
-                remote_path
+                factory_path
             )
         })?;
 
-    // Read the configuration file contents
     let config_bytes = {
         let mut reader = root
-            .async_reader_path(&remote_path)
+            .async_reader_path(factory_path)
             .await
-            .with_context(|| format!("Failed to open file: {}", remote_path))?;
+            .with_context(|| format!("Failed to open file: {}", factory_path))?;
 
         let mut buffer = Vec::new();
         _ = reader
             .read_to_end(&mut buffer)
             .await
-            .with_context(|| format!("Failed to read file: {}", remote_path))?;
+            .with_context(|| format!("Failed to read file: {}", factory_path))?;
         buffer
     };
 

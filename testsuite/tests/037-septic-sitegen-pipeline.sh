@@ -40,7 +40,7 @@ pond init
 echo ""
 echo "--- Step 1: Create directory structure ---"
 
-pond mkdir -p /etc/system.d
+pond mkdir -p /system/run
 pond mkdir -p /ingest
 
 echo "✓ Directories created"

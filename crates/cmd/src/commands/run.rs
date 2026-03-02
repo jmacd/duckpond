@@ -28,7 +28,16 @@ pub async fn run_command(
 
     match target {
         TargetContext::Host(_) => run_host_command(ship_context, config_path, extra_args).await,
-        TargetContext::Pond(_) => run_pond_command(ship_context, config_path, extra_args).await,
+        TargetContext::Pond(ref path) => {
+            // Short name resolution: bare names (no leading /) resolve
+            // to /system/run/{name} or /system/etc/{name}
+            let resolved = if !path.starts_with('/') {
+                super::control::resolve_short_factory_name(ship_context, path).await?
+            } else {
+                path.clone()
+            };
+            run_pond_command(ship_context, &resolved, extra_args).await
+        }
     }
 }
 

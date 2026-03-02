@@ -15,9 +15,11 @@ cargo build
 
 ${EXE} init
 
-${EXE} mkdir -p /etc/system.d
+${EXE} mkdir -p /system/run
 
-${EXE} copy host://${NOYO}/site /etc/site
+${EXE} mkdir -p /system/etc
+
+${EXE} copy host://${NOYO}/site /system/site
 
 ${EXE} mkdir -p /laketech
 
@@ -29,9 +31,9 @@ if [ -d "${NOYO}/hydrovu" ]; then
   ${EXE} copy host://${NOYO}/hydrovu /hydrovu
 fi
 
-${EXE} mknod remote /etc/system.d/1-backup --config-path ${NOYO}/backup.yaml
+${EXE} mknod remote /system/run/1-backup --config-path ${NOYO}/backup.yaml
 
-${EXE} mknod hydrovu /etc/hydrovu --config-path ${NOYO}/hydrovu.yaml
+${EXE} mknod hydrovu /system/etc/20-hydrovu --config-path ${NOYO}/hydrovu.yaml
 
 ${EXE} mknod dynamic-dir /combined --config-path ${NOYO}/combine.yaml
 
@@ -39,6 +41,6 @@ ${EXE} mknod dynamic-dir /singled --config-path ${NOYO}/single.yaml
 
 ${EXE} mknod dynamic-dir /reduced --config-path ${NOYO}/reduce.yaml
 
-${EXE} mknod sitegen /etc/site.yaml --config-path ${NOYO}/site.yaml
+${EXE} mknod sitegen /system/etc/90-sitegen --config-path ${NOYO}/site.yaml
 
-${EXE} mknod column-rename /etc/hydro_rename --config-path ${NOYO}/hrename.yaml
+${EXE} mknod column-rename /system/etc/10-hrename --config-path ${NOYO}/hrename.yaml

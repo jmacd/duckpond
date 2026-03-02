@@ -4,8 +4,8 @@
 # DESCRIPTION:
 #   - Create a pond with files of various sizes
 #   - Push to remote backup (local or MinIO)
-#   - Use 'pond run /etc/system.d/10-remote show' to list files
-#   - Use 'pond run /etc/system.d/10-remote show --script' to generate verification script
+#   - Use 'pond run /system/run/10-remote show' to list files
+#   - Use 'pond run /system/run/10-remote show --script' to generate verification script
 #   - Run the generated verification script to prove files are accessible with external tools
 #
 # EXPECTED:
@@ -33,8 +33,8 @@ pond init
 echo "✓ Pond initialized"
 
 pond mkdir /data
-pond mkdir /etc
-pond mkdir /etc/system.d
+pond mkdir /system
+pond mkdir /system/run
 
 # Create test files of various sizes
 echo "Creating test data files..."
@@ -125,7 +125,7 @@ EOF
     echo "✓ Configured local filesystem remote"
 fi
 
-pond mknod remote /etc/system.d/10-remote --config-path /tmp/remote-config.yaml
+pond mknod remote /system/run/10-remote --config-path /tmp/remote-config.yaml
 echo "✓ Remote backup node created"
 
 #############################
@@ -134,7 +134,7 @@ echo "✓ Remote backup node created"
 
 echo ""
 echo "=== Pushing to remote backup ==="
-pond run /etc/system.d/10-remote push
+pond run /system/run/10-remote push
 echo "✓ Push complete"
 
 #############################
@@ -143,7 +143,7 @@ echo "✓ Push complete"
 
 echo ""
 echo "=== Testing 'show' command (summary) ==="
-pond run /etc/system.d/10-remote show
+pond run /system/run/10-remote show
 
 #############################
 # TEST SHOW COMMAND (PATTERN)
@@ -151,7 +151,7 @@ pond run /etc/system.d/10-remote show
 
 echo ""
 echo "=== Testing 'show' with pattern '_delta_log/*' ==="
-pond run /etc/system.d/10-remote show '_delta_log/*'
+pond run /system/run/10-remote show '_delta_log/*'
 
 #############################
 # TEST SHOW COMMAND (SCRIPT)
@@ -159,7 +159,7 @@ pond run /etc/system.d/10-remote show '_delta_log/*'
 
 echo ""
 echo "=== Testing 'show --script' command ==="
-pond run /etc/system.d/10-remote show -- --script > /tmp/verify-script.sh
+pond run /system/run/10-remote show -- --script > /tmp/verify-script.sh
 
 echo "Generated verification script:"
 head -50 /tmp/verify-script.sh
@@ -182,7 +182,7 @@ echo "✓ DuckDB available: $(duckdb --version 2>&1 | head -1)"
 # Determine table path
 if [[ "$USE_S3" == "true" ]]; then
     # For S3, we need the full path including pond-id
-    POND_ID=$(pond control show-config 2>/dev/null | grep 'pond_id' | awk '{print $2}' || echo "")
+    POND_ID=$(pond config 2>/dev/null | grep 'pond_id' | awk '{print $2}' || echo "")
     if [[ -n "$POND_ID" ]]; then
         TABLE_PATH="s3://${BUCKET_NAME}/pond-${POND_ID}"
     else
@@ -233,7 +233,7 @@ echo "✓ DuckDB verification successful"
 
 echo ""
 echo "=== Running built-in verify command ==="
-pond run /etc/system.d/10-remote verify
+pond run /system/run/10-remote verify
 echo "✓ Verify command passed"
 
 #############################

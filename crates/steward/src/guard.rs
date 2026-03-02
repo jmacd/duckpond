@@ -375,7 +375,7 @@ impl<'a> StewardTransactionGuard<'a> {
     }
 
     /// Run post-commit factories after a successful write transaction
-    /// This discovers and executes factories from /etc/system.d/* in order
+    /// This discovers and executes factories from /system/run/* in order
     /// Only runs factories configured with "push" mode (skips "pull" mode factories)
     async fn run_post_commit_factories(&mut self) {
         debug!("Starting post-commit factory discovery and execution");
@@ -404,7 +404,7 @@ impl<'a> StewardTransactionGuard<'a> {
             let factory_mode = match self.control_table.get_factory_mode(&config.factory_name) {
                 Some(mode) => mode,
                 None => {
-                    // Default to "push" mode for post-commit factories in /etc/system.d/
+                    // Default to "push" mode for post-commit factories in /system/run/
                     info!(
                         "Factory '{}' has no mode configured, defaulting to 'push' (automatic execution)",
                         config.factory_name
@@ -574,12 +574,12 @@ impl<'a> StewardTransactionGuard<'a> {
         info!("Post-commit factory execution complete");
     }
 
-    /// Discover post-commit factory configurations from /etc/system.d/*
+    /// Discover post-commit factory configurations from /system/run/*
     /// Returns factory configs sorted by config_path
     async fn discover_post_commit_factories(
         &self,
     ) -> Result<Vec<PostCommitFactoryConfig>, StewardError> {
-        debug!("Discovering post-commit factories from /etc/system.d/*");
+        debug!("Discovering post-commit factories from /system/run/*");
 
         // Post-commit discovery happens AFTER the transaction is committed
         // We need a NEW read transaction to see the committed data
@@ -613,32 +613,32 @@ impl<'a> StewardTransactionGuard<'a> {
             .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        // Check if /etc/system.d exists before trying to match
+        // Check if /system/run exists before trying to match
         debug!(
-            "Checking for /etc/system.d directory at txn_seq={}",
+            "Checking for /system/run directory at txn_seq={}",
             self.txn_meta.txn_seq
         );
-        match root.resolve_path("/etc/system.d").await {
+        match root.resolve_path("/system/run").await {
             Ok((_wd, _lookup)) => {
-                debug!("Resolved /etc/system.d");
+                debug!("Resolved /system/run");
             }
             Err(e) => {
-                debug!("Failed to resolve /etc/system.d: {}", e);
+                debug!("Failed to resolve /system/run: {}", e);
                 // Commit the discovery transaction before returning
                 _ = discovery_tx.commit().await;
                 return Ok(Vec::new());
             }
         }
 
-        // Use collect_matches to find all configs in /etc/system.d/*
+        // Use collect_matches to find all configs in /system/run/*
         // Returns Vec<(NodePath, Vec<String>)> where first element is path, second is captures
-        debug!("Looking for configs matching /etc/system.d/*");
+        debug!("Looking for configs matching /system/run/*");
         let matches = root
-            .collect_matches("/etc/system.d/*")
+            .collect_matches("/system/run/*")
             .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        debug!("Found {} matches for /etc/system.d/*", matches.len());
+        debug!("Found {} matches for /system/run/*", matches.len());
 
         let mut factory_configs = Vec::new();
 

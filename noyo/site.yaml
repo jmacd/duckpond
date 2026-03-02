@@ -14,7 +14,7 @@ routes:
   - name: "home"
     type: static
     slug: ""
-    page: "/etc/site/index.md"
+    page: "/system/site/index.md"
   - name: "params"
     type: static
     slug: "params"
@@ -22,7 +22,7 @@ routes:
       - name: "param-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/system/site/data.md"
         export: "params"
   - name: "sites"
     type: static
@@ -31,10 +31,10 @@ routes:
       - name: "site-detail"
         type: template
         slug: "$0"
-        page: "/etc/site/data.md"
+        page: "/system/site/data.md"
         export: "sites"
 
 partials:
-  sidebar: "/etc/site/sidebar.md"
+  sidebar: "/system/site/sidebar.md"
 
 static_assets: []

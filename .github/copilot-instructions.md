@@ -120,11 +120,28 @@ Factories create computed filesystem objects. Two kinds:
 - **Dynamic nodes** (read-time computation): `sql-derived-table`, `sql-derived-series`,
   `temporal-reduce`, `dynamic-dir`, `timeseries-join`, `timeseries-pivot`,
   `column-rename`, `template`, `sitegen`. Created with `pond mknod`.
-  Their content is computed on every read — no stored data.
+  Their content is computed on every read -- no stored data.
 
 - **Executable factories** (run-time side effects): `hydrovu`, `remote`.
   Created with `pond mknod`, executed with `pond run <path> <command>`.
   They write real data into the pond (`table:series` entries, backup bundles, etc.)
+
+### Factory Filesystem Conventions
+
+Factory nodes live under `/system/` in directories that determine their behavior:
+
+| Directory | Purpose | Post-commit auto-exec | Examples |
+|-----------|---------|----------------------|----------|
+| `/system/run/` | Auto-executing factories | Yes (default: `push`) | `remote` (backup) |
+| `/system/etc/` | Manually triggered or passive | No | `hydrovu`, `sitegen`, `column-rename` |
+| `/system/site/` | Static content (templates) | No | Markdown page templates |
+
+After every write transaction, the steward scans `/system/run/*` and executes each
+factory with its configured mode (default: `push`). Only factories that support
+that mode belong in `/system/run/`. Do NOT put `hydrovu` or `sitegen` there.
+
+`pond run` resolves bare names by checking `/system/run/{name}` then `/system/etc/{name}`.
+`pond sync` only looks in `/system/run/` (remote factories only).
 
 ### The Transaction Model
 
@@ -142,7 +159,7 @@ a running transaction. Pass `&mut tx` to helpers instead.
 - Table name is always `source` (e.g., `SELECT * FROM source WHERE ...`)
 - DataFusion SQL dialect (Apache Arrow types)
 - `pond cat --sql "..."` for ad-hoc queries
-- `pond control --sql "..."` for control table queries
+- `pond log` for transaction history, `pond sync` for remote sync, `pond config` for settings
 
 ### TinyFS Data API (Parquet/Arrow Layer)
 
@@ -360,6 +377,9 @@ text-based editing tools and cause silent file corruption.
 | `create_dir_path` is safe for idempotent init | It errors on `AlreadyExists`; use `create_dir_all` for factories/`--overwrite` |
 | Need new tinyfs primitive for data transform | Compose existing pieces: table provider → stream → ArrowWriter → tinyfs write |
 | Rename compacts a multi-version series | Rename only changes the name; versions are preserved. Read via DataFusion + write fresh for compaction |
+| Shared table name is fine for wrapped consumers | When `provider_wrapper`/`scope_prefixes` differ per consumer, each needs a unique table name (node_id suffix) to avoid caching collisions |
+| Put all factories in `/system/run/` | Only auto-executing factories (remote) go in `/system/run/`; hydrovu, sitegen, column-rename go in `/system/etc/` |
+| `pond sync` works on any factory | `pond sync` only operates on remote factories in `/system/run/` |
 
 ---
 
@@ -382,3 +402,6 @@ When a test completes, classify and act:
 - **LARGE_FILE_THRESHOLD = 64KB**: Files >64KB stored externally in `_large_files/`
 - **Transaction Guard**: Only ONE active transaction per operation (enforced by panic)
 - **Table name in SQL**: Always `source` (e.g., `SELECT * FROM source WHERE ...`)
+- **SYSTEM_RUN_DIR = `/system/run`**: Auto-executing factories (post-commit)
+- **SYSTEM_ETC_DIR = `/system/etc`**: Manually triggered factories
+- **Post-commit default mode**: `push` (for remote factories in `/system/run/`)

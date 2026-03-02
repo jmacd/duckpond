@@ -161,13 +161,13 @@ mod integration_tests {
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                // Create /etc/system.d/ directory structure
+                // Create /system/run/ directory structure
                 _ = root
-                    .create_dir_path("/etc")
+                    .create_dir_path("/system")
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
                 _ = root
-                    .create_dir_path("/etc/system.d")
+                    .create_dir_path("/system/run")
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
 
@@ -178,7 +178,7 @@ mod integration_tests {
                 // Create config file with factory association
                 let config_node = root
                     .create_dynamic_path(
-                        "/etc/system.d/logfile-ingest.yaml",
+                        "/system/run/logfile-ingest.yaml",
                         tinyfs::EntryType::FileDynamic,
                         "logfile-ingest",
                         config_yaml.as_bytes().to_vec(),
