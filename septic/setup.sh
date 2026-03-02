@@ -35,7 +35,7 @@ ssh ${HOST} "podman volume rm -f pond-data && podman volume create pond-data"
 ${EXE} init
 
 # Create directory structure
-${EXE} mkdir -p /etc/system.d
+${EXE} mkdir -p /system/run
 ${EXE} mkdir -p /ingest
 
 # Copy site templates into the pond
@@ -46,7 +46,7 @@ ${EXE} copy host:///config/site /etc/site
 # (ingest reads from /data which is the host data dir mounted into container)
 ${EXE} mknod logfile-ingest /etc/ingest --config-path /config/ingest.yaml
 
-${EXE} mknod remote /etc/system.d/1-backup --config-path /config/backup.yaml
+${EXE} mknod remote /system/run/1-backup --config-path /config/backup.yaml
 
 ${EXE} mknod dynamic-dir /reduced --config-path /config/reduce.yaml
 

@@ -142,7 +142,7 @@ a running transaction. Pass `&mut tx` to helpers instead.
 - Table name is always `source` (e.g., `SELECT * FROM source WHERE ...`)
 - DataFusion SQL dialect (Apache Arrow types)
 - `pond cat --sql "..."` for ad-hoc queries
-- `pond control --sql "..."` for control table queries
+- `pond log` for transaction history, `pond sync` for remote sync, `pond config` for settings
 
 ### TinyFS Data API (Parquet/Arrow Layer)
 

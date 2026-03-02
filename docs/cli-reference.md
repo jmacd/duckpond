@@ -13,8 +13,10 @@
 | `pond cat` | Read file contents | `pond cat host+csv:///tmp/data.csv --format=table` |
 | `pond describe` | Show file schema | `pond describe /data/*.csv` |
 | `pond mknod` | Create factory nodes | `pond mknod --config f.yaml /path` |
-| `pond run` | Execute factory nodes | `pond run /etc/system.d/20-foo collect` |
-| `pond control` | Query transaction history | `pond control recent` |
+| `pond run` | Execute factory nodes | `pond run 20-foo collect` |
+| `pond log` | View transaction history | `pond log --limit 20` |
+| `pond sync` | Sync with remote storage | `pond sync` |
+| `pond config` | Show/set pond configuration | `pond config` |
 
 ## Environment
 
@@ -289,7 +291,7 @@ pond mknod --config /path/to/config.yaml /destination/path
 
 # Specific factory types
 pond mknod sql-derived-table /derived/view --config-path filter.yaml
-pond mknod remote /etc/system.d/10-remote --config-path remote.yaml
+pond mknod remote /system/run/10-remote --config-path remote.yaml
 ```
 
 See [Factory Types](#factory-types) for configuration options.
@@ -302,35 +304,68 @@ Execute a factory node's commands.
 
 ```bash
 # Run data collection
-pond run /etc/system.d/20-hydrovu collect
+pond run /system/run/20-hydrovu collect
 
 # Push to remote backup
-pond run /etc/system.d/10-remote push
+pond run /system/run/10-remote push
 
 # Pull from remote
-pond run /etc/system.d/10-remote pull
+pond run /system/run/10-remote pull
 ```
 
 ---
 
-### pond control
+### pond log
 
-Query the pond's transaction history and configuration.
+View transaction history and audit trail.
 
 ```bash
-# Recent transactions
-pond control recent
-pond control recent --limit 20
+# Recent transactions (default: last 10)
+pond log
+pond log --limit 20
 
 # Transaction details
-pond control detail --txn-seq 42
+pond log --txn-seq 42
 
-# SQL query on control table
-pond control --sql "SELECT txn_seq, cli_args FROM control_table ORDER BY txn_seq DESC LIMIT 5"
-
-# Show configuration
-pond control show-config
+# Show incomplete operations (for recovery)
+pond log --incomplete
 ```
+
+---
+
+### pond sync
+
+Sync with remote storage (retry pushes, pull new bundles).
+
+```bash
+# Sync all remote factories in /system/run/
+pond sync
+
+# Sync a specific factory by short name
+pond sync 1-backup
+
+# Sync by full path
+pond sync /system/run/1-backup
+
+# Recovery mode with base64 config
+pond sync --config <base64-encoded-config>
+```
+
+---
+
+### pond config
+
+Show or set pond configuration (ID, factory modes, metadata, settings).
+
+```bash
+# Show configuration
+pond config
+
+# Set a configuration value
+pond config set <key> <value>
+```
+
+> **Note:** `pond control` is still available as a hidden alias for backward compatibility.
 
 ---
 
@@ -1026,21 +1061,21 @@ allow_http: true  # Required for non-HTTPS endpoints
 **Commands:**
 ```bash
 # Push local pond to remote backup
-pond run /etc/system.d/10-remote push
+pond run /system/run/10-remote push
 
 # Pull from remote (restore)
-pond run /etc/system.d/10-remote pull
+pond run /system/run/10-remote pull
 
 # Verify backup integrity
-pond run /etc/system.d/10-remote verify
+pond run /system/run/10-remote verify
 
 # List files in remote storage
-pond run /etc/system.d/10-remote list-files
+pond run /system/run/10-remote list-files
 
 # Show files with verification script (for external tool validation)
-pond run /etc/system.d/10-remote show           # All files
-pond run /etc/system.d/10-remote show "/data/*" # Pattern match
-pond run /etc/system.d/10-remote show --script  # Generate copy-pastable scripts
+pond run /system/run/10-remote show           # All files
+pond run /system/run/10-remote show "/data/*" # Pattern match
+pond run /system/run/10-remote show --script  # Generate copy-pastable scripts
 ```
 
 #### Emergency Recovery (duckpond-emergency)
@@ -1110,14 +1145,14 @@ pond_path: /logs/app
 **Usage:**
 ```bash
 # Create the factory node
-pond mknod logfile-ingest /etc/system.d/10-logs --config-path ingest.yaml
+pond mknod logfile-ingest /system/run/10-logs --config-path ingest.yaml
 
 # Run ingestion (push mode)
-pond run /etc/system.d/10-logs
-pond run /etc/system.d/10-logs push   # explicit
+pond run /system/run/10-logs
+pond run /system/run/10-logs push   # explicit
 
 # Verify checksums (b3sum format)
-pond run /etc/system.d/10-logs b3sum
+pond run /system/run/10-logs b3sum
 ```
 
 **Behavior:**
@@ -1270,18 +1305,18 @@ config:
 **Setup pattern:**
 ```bash
 pond init
-pond mkdir -p /etc/system.d
+pond mkdir -p /system/run
 pond mkdir -p /ingest
 pond copy host:///path/to/site /site
 pond mknod logfile-ingest /etc/ingest --config-path ingest.yaml
-pond mknod remote /etc/system.d/1-backup --config-path backup.yaml
+pond mknod remote /system/run/1-backup --config-path backup.yaml
 pond mknod temporal-reduce /reduced --config-path reduce.yaml
 pond mknod sitegen /site.yaml --config-path site.yaml
 
 # Operational cycle:
 pond run /etc/ingest                        # ingest new log data
 pond run /site.yaml build ./dist        # build site (reduce is dynamic)
-pond run /etc/system.d/1-backup push        # backup to S3
+pond run /system/run/1-backup push        # backup to S3
 ```
 
 **Notes on single-source pipelines:**

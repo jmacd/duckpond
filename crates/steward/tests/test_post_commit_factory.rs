@@ -35,9 +35,9 @@ async fn test_post_commit_factory_execution() -> Result<()> {
 
     let root1 = tx1.root().await?;
 
-    // Create /etc first, then /etc/system.d/ directory
-    _ = root1.create_dir_path("/etc").await?;
-    _ = root1.create_dir_path("/etc/system.d").await?;
+    // Create /system first, then /system/run/ directory
+    _ = root1.create_dir_path("/system").await?;
+    _ = root1.create_dir_path("/system/run").await?;
 
     // Create a test-executor factory config
     let config_yaml = r#"message: "Post-commit execution test"
@@ -48,7 +48,7 @@ repeat_count: 3
     // Note: Executable factories use FileDynamic, config is the file content
     let factory_node = root1
         .create_dynamic_path(
-            "/etc/system.d/test-post-commit.yaml",
+            "/system/run/test-post-commit.yaml",
             tinyfs::EntryType::FileDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
@@ -81,44 +81,44 @@ repeat_count: 3
         .await?;
     let verify_root = verify_tx.root().await?;
 
-    // Check /etc exists
-    match verify_root.resolve_path("/etc").await {
-        Ok(_) => debug!("[OK] /etc exists"),
-        Err(e) => debug!("[FAIL] /etc does NOT exist: {}", e),
+    // Check /system exists
+    match verify_root.resolve_path("/system").await {
+        Ok(_) => debug!("[OK] /system exists"),
+        Err(e) => debug!("[FAIL] /system does NOT exist: {}", e),
     }
 
-    // Check /etc/system.d exists
-    match verify_root.resolve_path("/etc/system.d").await {
-        Ok(_) => debug!("[OK] /etc/system.d exists"),
-        Err(e) => debug!("[FAIL] /etc/system.d does NOT exist: {}", e),
+    // Check /system/run exists
+    match verify_root.resolve_path("/system/run").await {
+        Ok(_) => debug!("[OK] /system/run exists"),
+        Err(e) => debug!("[FAIL] /system/run does NOT exist: {}", e),
     }
 
     // Try to resolve the specific file
     match verify_root
-        .resolve_path("/etc/system.d/test-post-commit.yaml")
+        .resolve_path("/system/run/test-post-commit.yaml")
         .await
     {
         Ok((_, lookup)) => match lookup {
             tinyfs::Lookup::Found(_) => {
-                debug!("[OK] /etc/system.d/test-post-commit.yaml EXISTS via resolve_path!")
+                debug!("[OK] /system/run/test-post-commit.yaml EXISTS via resolve_path!")
             }
             tinyfs::Lookup::NotFound(_, _) => debug!(
-                "[FAIL] /etc/system.d/test-post-commit.yaml not found (path resolved but file doesn't exist)"
+                "[FAIL] /system/run/test-post-commit.yaml not found (path resolved but file doesn't exist)"
             ),
             tinyfs::Lookup::Empty(_) => {
-                debug!("[FAIL] /etc/system.d/test-post-commit.yaml empty path")
+                debug!("[FAIL] /system/run/test-post-commit.yaml empty path")
             }
         },
         Err(e) => debug!(
-            "[FAIL] Failed to resolve /etc/system.d/test-post-commit.yaml: {}",
+            "[FAIL] Failed to resolve /system/run/test-post-commit.yaml: {}",
             e
         ),
     }
 
-    // Check for files in /etc/system.d
-    let matches = verify_root.collect_matches("/etc/system.d/*").await?;
+    // Check for files in /system/run
+    let matches = verify_root.collect_matches("/system/run/*").await?;
     debug!(
-        "[OK] Found {} file(s) in /etc/system.d/ via collect_matches",
+        "[OK] Found {} file(s) in /system/run/ via collect_matches",
         matches.len()
     );
     for (node_path, captures) in &matches {
@@ -223,8 +223,8 @@ async fn test_post_commit_not_triggered_by_read_transaction() -> Result<()> {
 
     let root1 = tx1.root().await?;
 
-    _ = root1.create_dir_path("/etc").await?;
-    _ = root1.create_dir_path("/etc/system.d").await?;
+    _ = root1.create_dir_path("/system").await?;
+    _ = root1.create_dir_path("/system/run").await?;
 
     let config_yaml = r#"message: "Should not execute on read"
 repeat_count: 1
@@ -233,7 +233,7 @@ repeat_count: 1
     // Create dynamic file using high-level path-based API
     let factory_node = root1
         .create_dynamic_path(
-            "/etc/system.d/test-no-execute.yaml",
+            "/system/run/test-no-execute.yaml",
             tinyfs::EntryType::FileDynamic,
             "test-executor",
             config_yaml.as_bytes().to_vec(),
@@ -258,7 +258,7 @@ repeat_count: 1
         async |fs| {
             let root = fs.root().await?;
             // Just read something - no writes
-            let _ = root.resolve_path("/etc/system.d").await?;
+            let _ = root.resolve_path("/system/run").await?;
             Ok(())
         },
     )
@@ -294,8 +294,8 @@ async fn test_post_commit_multiple_factories_ordered() -> Result<()> {
 
     let root1 = tx1.root().await?;
 
-    _ = root1.create_dir_path("/etc").await?;
-    _ = root1.create_dir_path("/etc/system.d").await?;
+    _ = root1.create_dir_path("/system").await?;
+    _ = root1.create_dir_path("/system/run").await?;
 
     // Create configs with names that will sort alphabetically
     let configs = vec![
@@ -315,7 +315,7 @@ repeat_count: 1
         // Create dynamic file using high-level path-based API
         let factory_node = root1
             .create_dynamic_path(
-                format!("/etc/system.d/{}", filename),
+                format!("/system/run/{}", filename),
                 tinyfs::EntryType::FileDynamic,
                 "test-executor",
                 config_yaml.as_bytes().to_vec(),

@@ -1,0 +1,801 @@
+# Cross-Pond Import: Design
+
+## Overview
+
+Every pond writes a `pond_id` column (its own UUID) into every OpLog
+record and every remote bundle record. This is a required, non-nullable
+field that every pond always writes for itself.
+
+When importing data from another pond, we literally copy its parquet
+files (reassembled from its backup bundles) into the local Delta Lake
+table. The foreign files already contain the foreign pond's UUID in
+their `pond_id` column. They fit right in -- just add them as Delta
+Lake `add` actions. No deserialization, no re-writing, no transformation.
+
+The `(pond_id, txn_seq)` composite key is globally unique. The
+UUID-based `node_id` and `part_id` fields are already globally unique
+(UUID v7). Together, this makes cross-pond data coexistence
+structurally sound.
+
+Import is not a new command. It is an extension of the existing remote
+factory. A remote factory created via `pond mknod` can be configured to
+point at a foreign pond's backup and name a path in the local pond
+where the foreign content is permanently mounted. The factory's `pull`
+subcommand downloads foreign partitions, adds them to the local Delta
+table, and links them at the configured mount point.
+
+---
+
+## Motivating Example
+
+The `septic` system runs on a BeaglePlay. Its pond ingests sensor data
+and backs up to S3:
+
+```
+Septic pond (BeaglePlay):
+/ingest/
+  septicstation.json.series   (raw OTelJSON sensor data)
+/reduced/
+  pumps/
+  cycle-times/
+  flow-totals/
+  ...                         (temporal-reduce aggregations)
+/system/
+  run/
+    1-backup                  (remote factory, pushes to s3://septic-dev)
+```
+
+The septic pond pushes its backup to `s3://septic-dev`. We want a
+central "dashboard" pond that imports the septic data and runs site
+generation across multiple data sources:
+
+```
+Central pond (server):
+/sources/
+  septic/                      <-- mount point, linked to septic's /ingest/
+    septicstation.json.series   (from septic pond, read-only)
+  weather/                     <-- another imported source
+    ...
+/reduced/                      (local temporal-reduce over imported data)
+/system/
+  run/
+    1-backup                   (backs up this pond, including imports)
+    10-septic                  (remote factory, imports from s3://septic-dev)
+    11-weather                 (remote factory, imports from another backup)
+  site.yaml                    (sitegen reading from /reduced/)
+```
+
+Setup for the central pond:
+
+```bash
+pond init
+
+# Own backup
+pond mknod remote /system/run/1-backup --config-path backup.yaml
+
+# Import septic data at /sources/septic
+pond mknod remote /system/run/10-septic --config-path septic-import.yaml
+
+# The mknod post-create function:
+# 1. Opens the foreign backup at s3://septic-dev
+# 2. Identifies the partition(s) for the configured source path (/ingest)
+# 3. Downloads the parquet files via ChunkedReader (BLAKE3 verified)
+# 4. Adds them to the local Delta table as `add` actions
+# 5. Creates /sources/septic/ linking to the imported partition
+#
+# On subsequent pulls, only new/changed partitions are downloaded.
+```
+
+The `septic-import.yaml` config:
+
+```yaml
+# Foreign pond's backup location
+url: "s3://septic-dev"
+region: "auto"
+endpoint: "{{ env(name='R2_ENDPOINT') }}"
+access_key: "{{ env(name='R2_KEY') }}"
+secret_key: "{{ env(name='R2_SECRET') }}"
+
+# Cross-pond import configuration
+import:
+  # Path in the foreign pond to import
+  source_path: "/ingest"
+  # Path in this pond where imported content is mounted
+  mount_path: "/sources/septic"
+```
+
+---
+
+## Schema Changes
+
+### OpLog (tlogfs parquet rows)
+
+Add a `pond_id: Utf8` column (non-nullable) to `OplogEntry`. Every
+record carries the UUID of the pond that created it.
+
+- For locally-created records, this is the local pond's UUID.
+- For imported records (literal parquet file copies), this is the
+  foreign pond's UUID -- already present in the file, no transformation.
+
+The column is provenance information. tlogfs treats it as opaque; it
+does not interpret the value. Its purpose is to scope `txn_seq` so
+that `(pond_id, txn_seq)` is globally unique.
+
+### Remote bundle (chunked file rows)
+
+Add a `pond_id: Utf8` column (non-nullable) to `ChunkedFileRecord`.
+Every backed-up file carries the UUID of the pond that created it.
+
+### Remote bundle_id partitions
+
+The `bundle_id` format changes from `FILE-META-{date}-{txn_seq}` to
+`FILE-META-{pond_id}-{date}-{txn_seq}`, using the full pond UUID.
+This prevents collisions if two ponds share a backup location and
+makes provenance visible at the partition level.
+
+### Delta commit metadata
+
+The `PondTxnMetadata` struct gains a `pond_id` field. This is
+redundant with the per-row `pond_id` column but convenient for quick
+inspection of Delta commits without scanning rows.
+
+### Control table (steward)
+
+Already has `pond_id` in metadata records. No schema change needed,
+but import operations are tracked as new record types (see below).
+
+---
+
+## Write Path
+
+`OpLogPersistence` receives the local `pond_id` at creation/open time:
+
+```
+OpLogPersistence::create(path, pond_id)
+OpLogPersistence::open(path, pond_id)
+```
+
+The persistence layer stores `pond_id` and stamps it into every
+`OplogEntry` at write time. Callers never need to think about it.
+tlogfs remains identity-agnostic in that it does not interpret the
+value -- it simply writes it as a column.
+
+For import, the normal write path is bypassed entirely. Foreign
+parquet files are added to the local Delta table as raw `add` actions.
+The `pond_id` column in those files already contains the foreign
+pond's UUID.
+
+---
+
+## Import Mechanism
+
+### Source
+
+Import reads from a foreign pond's backup bundles. The data is stored
+as chunked records in a remote Delta Lake table. The import process:
+
+1. Reassembles chunks via `ChunkedReader` (BLAKE3 verified)
+2. Writes the reassembled parquet file to the local object store
+3. Adds it to the local Delta log as an `add` action
+
+### Granularity
+
+Import operates on whole partitions. A partition corresponds to one
+directory and all its direct children. Importing a directory means
+importing its entire partition, including records from all transaction
+sequences accumulated in that partition.
+
+Importing a directory tree (with nested subdirectories) means importing
+multiple partitions -- one per directory in the tree.
+
+### Schema Compatibility
+
+The foreign pond's OpLog must have the same schema as the local pond's
+OpLog, including the `pond_id` column. Ponds created before this
+column was added cannot participate in cross-pond import. A validation
+step checks schema compatibility before importing.
+
+### Version Tracking
+
+How to indicate which version of the foreign pond wrote a given bundle
+is deferred for now. The initial implementation imports the latest
+available state.
+
+---
+
+## Mount Points
+
+Imported content is permanently mounted at a named path in the local
+pond. The mount point is configured in the remote factory's YAML and
+created by the factory's post-create function during `mknod`.
+
+### Lifecycle
+
+1. `pond mknod remote /system/run/10-septic --config-path septic-import.yaml`
+   - The factory validates the config
+   - The post-create function:
+     a. Creates the mount path (e.g., `/sources/septic/`) via `create_dir_all`
+     b. Opens the foreign backup via `RemoteTable`
+     c. Identifies the partitions for the configured `source_path`
+     d. Downloads them (ChunkedReader, BLAKE3 verified)
+     e. Adds the parquet files to the local Delta table
+     f. Links the imported partition's directory entry at the mount path
+
+2. On subsequent `pull` operations (via post-commit factory execution
+   or manual `pond run`), the factory:
+   a. Checks which foreign partitions have changed since last pull
+   b. Downloads new/updated parquet files
+   c. Adds them to the local Delta table
+   d. The mount point continues to reference the same partition UUIDs;
+      new content appears automatically because the partition data
+      is updated in place
+
+### Mount Point Properties
+
+- **Permanent**: the path exists as a real directory in the pond
+- **Read-only**: the local pond cannot add files to imported directories
+- **Managed by the factory**: the remote factory instance owns the
+  mount point and is responsible for keeping it in sync
+- **Transparent**: other factories (temporal-reduce, sitegen) can read
+  from the mount point using ordinary pond paths, e.g.,
+  `series:///sources/septic/septicstation.json`
+
+### Interaction with Other Factories
+
+This is the key benefit. Because imported data lives at a real path
+in the pond, it integrates naturally with the rest of the factory
+pipeline:
+
+```yaml
+# reduce.yaml in the central pond -- reads from imported data
+entries:
+  - name: "pumps"
+    factory: "temporal-reduce"
+    config:
+      in_pattern: "oteljson:///sources/septic/septicstation.json"
+      out_pattern: "data"
+      time_column: "timestamp"
+      resolutions: [1h, 6h, 1d]
+      aggregations:
+        - type: "avg"
+          columns: ["orenco_RT_Pump1_Amps", ...]
+```
+
+```yaml
+# site.yaml in the central pond -- exports from local reductions
+exports:
+  - name: "metrics"
+    pattern: "/reduced/*/*/*.series"
+```
+
+The septic pond no longer needs to run sitegen or temporal-reduce.
+It only ingests raw data and pushes its backup. The central pond
+handles aggregation and site generation across all data sources.
+
+---
+
+## txn_seq Semantics
+
+The `txn_seq` values in imported records are the foreign pond's
+transaction numbers, scoped by `pond_id`. The local pond's `txn_seq`
+monotonicity is unaffected -- it governs only the Delta commit
+sequence, not the values inside imported rows.
+
+`txn_seq` is primarily used by the control table and steward layer,
+and appears in debugging commands like `pond show`. The import does
+not interfere with these uses because:
+
+- Delta commit metadata is always local (carries the local `txn_seq`)
+- The `begin_write()` invariant (`txn_seq == last_txn_seq + 1`)
+  governs Delta commits, not row contents
+- Backup push scans Delta commit logs for new `add` actions, which
+  naturally includes imported files in the commit that performed
+  the import
+
+---
+
+## Remote Factory Extension
+
+Import is handled by the existing remote factory. The factory config
+gains an optional `import` section that distinguishes cross-pond
+import from self-backup/replication.
+
+### Configuration
+
+When the `import` section is present, the factory operates in import
+mode. When absent, it operates in the existing push/pull modes.
+
+```yaml
+# Self-backup (existing behavior, no import section)
+url: "s3://my-backup"
+compression_level: 3
+
+# Cross-pond import (new behavior)
+url: "s3://septic-dev"
+import:
+  source_path: "/ingest"
+  mount_path: "/sources/septic"
+```
+
+A pond can have multiple remote factories: one for its own backup
+(mode `push`) and one or more for foreign imports (mode `import`).
+
+### Factory Mode
+
+The existing factory mode mechanism distinguishes the uses:
+
+- Mode `push` -- back up this pond to its own remote (existing)
+- Mode `pull` -- replicate this pond from its own remote (existing)
+- Mode `import` -- import content from a foreign pond's remote (new)
+
+Import-mode factories run `pull` automatically via post-commit factory
+execution, or manually via `pond run`.
+
+### Re-import Detection
+
+The control table tracks import operations, recording which foreign
+pond and which partitions have been imported. On subsequent pulls,
+the factory queries the control table to determine what has already
+been imported and only downloads new or updated partitions.
+
+Partition UUIDs are globally unique (UUID v7), so there is no
+collision risk. The check is per-partition: "do I already have
+partition `part_id=xyz` from `pond_id=pond-B`?"
+
+---
+
+## Impact on Backup
+
+When the local pond pushes to its own backup, imported parquet files
+are included. They appear as `add` actions in the Delta commit that
+performed the import, and the push mechanism backs up all new `add`
+actions.
+
+This means Pond A's backup contains a copy of data that originally
+came from Pond B. A third pond restoring from Pond A's backup gets
+Pond B's data transitively. The `pond_id` column preserves
+provenance, so there is no identity confusion.
+
+This is the correct default. The backup should be a complete,
+self-contained copy. Optimizations (e.g., referencing the original
+foreign backup instead of copying) are deferred -- they would
+interact with Delta Lake `vacuum` operations and create fragile
+cross-backup dependencies.
+
+---
+
+## Implementation Phases
+
+### Phase 1: Schema Foundation
+
+- Add `pond_id: Utf8` (non-nullable) to `OplogEntry` in tlogfs
+- Add `pond_id: Utf8` (non-nullable) to `ChunkedFileRecord` in remote
+- Add `pond_id` field to `PondTxnMetadata`
+- Update `bundle_id` format to `FILE-META-{pond_id}-{date}-{txn_seq}`
+- Pass `pond_id` into `OpLogPersistence::create()` and `open()`
+- Stamp `pond_id` into every record at write time
+- Build and test; all existing functionality works unchanged
+
+### Phase 2: Cross-Pond Import via Remote Factory
+
+- Extend remote factory config with optional `import` section
+- Add `import` factory mode
+- Implement `mknod` post-create function for import factories:
+  - Create mount path via `create_dir_all`
+  - Open foreign backup, identify partitions for source path
+  - Download parquet files, add to local Delta table
+  - Link imported directory at mount path
+- Track imports in control table
+- Imported content is read-only at the mount path
+
+### Phase 3: Incremental Sync
+
+- On subsequent pulls, query control table for already-imported
+  partitions
+- Download only new or updated partitions from foreign backup
+- Mount point data updates in place (same partition UUIDs, new
+  parquet files added to them)
+
+---
+
+## Administrative Reference
+
+This section describes the end-state user experience for managing
+ponds, remote backups, cross-pond imports, and the identifiers that
+tie them together.
+
+### Identifiers
+
+| Identifier | Format | Scope | Purpose |
+|-----------|--------|-------|---------|
+| `pond_id` | UUID v7 | Global | Unique identity of a pond, assigned at `pond init`, preserved across replicas |
+| `txn_seq` | Integer (1, 2, 3, ...) | Per-pond | Monotonically increasing transaction sequence within one pond |
+| `(pond_id, txn_seq)` | Composite | Global | Uniquely identifies one transaction across all ponds |
+| `node_id` | UUID v7 | Global | Identity of a file, directory, or symlink |
+| `part_id` | UUID v7 | Global | Identity of a directory's partition in the Delta table |
+| `txn_id` | UUID v7 | Global | Identity of one transaction execution (links control + data tables) |
+| `bundle_id` | String | Per-backup | Partition key in the remote backup table (e.g., `FILE-META-{pond_id}-{date}-{txn_seq}`) |
+
+**Key invariant:** `pond_id` scopes `txn_seq`. Two ponds can both
+have `txn_seq=5`, but `(pond-A, 5)` and `(pond-B, 5)` are distinct.
+All other identifiers (`node_id`, `part_id`, `txn_id`) are UUID v7
+and globally unique without scoping.
+
+### pond config
+
+Displays the pond's identity, factory modes, and settings.
+
+```
+$ pond config
+
+Pond Configuration
+==================
+
+Pond ID:        019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00
+Created:        2025-11-15 09:23:01 UTC
+Created by:     dave@beagleplay
+
+Factory Modes:
+--------------
+  remote:              push
+
+Settings:
+---------
+  (none configured)
+```
+
+After cross-pond import, a pond with both self-backup and imports:
+
+```
+$ pond config
+
+Pond Configuration
+==================
+
+Pond ID:        019603b2-8d55-7f9f-9b4c-6f3ea052b100
+Created:        2026-01-10 14:00:00 UTC
+Created by:     ops@dashboard
+
+Factory Modes:
+--------------
+  remote:              push
+
+Remote Factories:
+-----------------
+  /system/run/1-backup       mode: push     -> s3://dashboard-backup
+  /system/run/10-septic      mode: import   -> s3://septic-dev
+  /system/run/11-weather     mode: import   -> s3://weather-backup
+
+Imports:
+--------
+  /sources/septic/             from pond 019503a1-7c44-... via /system/run/10-septic
+  /sources/weather/            from pond 018f02c3-9e11-... via /system/run/11-weather
+
+Settings:
+---------
+  (none configured)
+```
+
+The `Remote Factories` section lists every remote factory node found
+under `/system/run/`, showing its mode and target URL. The `Imports`
+section lists every active mount point, the foreign `pond_id` it
+sources from, and the factory that manages it.
+
+### pond log
+
+Transaction history shows `pond_id` context when relevant:
+
+```
+$ pond log --limit 5
+
++- Transaction 12 (write) ----------------------------------------
+|  Status       : COMPLETED
+|  UUID         : 019703c4-ae66-7f0a-bc5d-7g4fb163c200
+|  Command      : copy host+series:///var/log/sensors.csv /ingest/sensors.csv
++----------------------------------------------------------------
+
++- Transaction 13 (write) ----------------------------------------
+|  Status       : COMPLETED
+|  UUID         : 019703c5-bf77-7f1b-cd6e-8h5gc274d300
+|  Command      : internal post-commit-factory
+|  Post-commit  : 1-backup (push) -> OK
+|  Post-commit  : 10-septic (import/pull) -> OK, 2 partitions updated
++----------------------------------------------------------------
+```
+
+Import-related post-commit tasks show the number of partitions
+updated from the foreign pond. If no new data is available, the
+import reports "up to date".
+
+### pond log --txn-seq N
+
+Transaction detail includes import metadata when the transaction
+performed an import:
+
+```
+$ pond log --txn-seq 13
+
++- BEGIN write Transaction ----------------------------------------
+|  Sequence     : 13
+|  UUID         : 019703c5-bf77-7f1b-cd6e-8h5gc274d300
+|  Command      : internal post-commit-factory
++----------------------------------------------------------------
+|  [OK] DATA COMMITTED at 2026-01-15 09:00:01 UTC (version 13, duration: 12ms)
+
+=== POST-COMMIT TASKS ============================================
+
++- POST-COMMIT TASK #1 PENDING -----------------------------------
+|  Factory      : remote
+|  Config       : /system/run/1-backup
+|  [RUN] STARTED at 2026-01-15 09:00:01 UTC
+|  [OK] COMPLETED at 2026-01-15 09:00:03 UTC (duration: 2100ms)
++----------------------------------------------------------------
+
++- POST-COMMIT TASK #2 PENDING -----------------------------------
+|  Factory      : remote
+|  Config       : /system/run/10-septic
+|  Mode         : import
+|  Source Pond   : 019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00
+|  [RUN] STARTED at 2026-01-15 09:00:03 UTC
+|  [OK] COMPLETED at 2026-01-15 09:00:05 UTC (duration: 1800ms)
+|  Imported     : 2 partitions, 48 files, 12.3 MB
++----------------------------------------------------------------
+```
+
+### pond sync
+
+Manual sync triggers all remote factories based on their mode. With
+imports, `sync` pulls new data from foreign ponds:
+
+```bash
+# Sync all remote factories (push own backup, pull imports)
+pond sync
+
+# Sync with explicit config (recovery)
+pond sync --config=<base64>
+```
+
+Output during sync:
+
+```
+[SYNC] Executing manual sync operation...
+[SYNC] /system/run/1-backup (mode: push)
+   [OK] All transactions already backed up
+[SYNC] /system/run/10-septic (mode: import)
+   Source pond: 019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00
+   Remote has 45 transactions (local has through 42)
+   Importing 3 new transactions...
+      [OK] Imported partition 019503a1-... (2 files, 1.2 MB)
+   [OK] Import complete
+[OK] Sync operation completed
+```
+
+### pond run (remote factory commands)
+
+The existing `pond run` commands work unchanged for self-backup. New
+behavior appears for import-mode factories:
+
+```bash
+# Self-backup factory (mode: push)
+pond run /system/run/1-backup push           # Push to own backup
+pond run /system/run/1-backup verify         # Verify own backup
+pond run /system/run/1-backup show           # List own backed-up files
+pond run /system/run/1-backup replicate      # Generate replica config
+
+# Import factory (mode: import)
+pond run /system/run/10-septic pull          # Pull new data from foreign pond
+pond run /system/run/10-septic show          # List files in foreign backup
+pond run /system/run/10-septic verify        # Verify foreign backup integrity
+pond run /system/run/10-septic status        # Show import sync status
+```
+
+The `status` subcommand (new) shows the state of the import:
+
+```
+$ pond run /system/run/10-septic status
+
+Import Status: /system/run/10-septic
+==========================================
+
+Source Backup   : s3://septic-dev
+Source Pond ID  : 019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00
+Mount Path      : /sources/septic/
+Source Path     : /ingest/
+
+Sync Status:
+  Remote transactions : 45
+  Local imported      : 42
+  Behind by           : 3 transactions
+
+Imported Partitions:
+  part_id=019503a1-8e55-...   /ingest/   (38 files, 4.2 MB)
+
+Last Import     : 2026-01-15 09:00:05 UTC (txn_seq 13)
+```
+
+### pond show
+
+The `pond show` summary includes imported data:
+
+```
+$ pond show
+
++============================================================================+
+|                            POND SUMMARY                                    |
++============================================================================+
+
+  Pond ID              : 019603b2-8d55-7f9f-9b4c-6f3ea052b100
+  Transactions         : 13
+  Delta Lake Version   : 13
+
+  Storage Statistics
+  ------------------
+  Parquet Files        : 28
+  Total Size           : 18.4 MB
+  Partitions           : 6
+
+  Data Provenance
+  ---------------
+  Local (this pond)    : 5 partitions, 16.1 MB
+  Imported             : 1 partition, 2.3 MB (from 1 foreign pond)
+
+  Partitions (by row count)
+  -------------------------
+
+  019603b2-9e66  /
+    4 rows (1 dir, 2 files, 1 versions)
+
+  019603b2-af77  /system/run
+    12 rows (1 dir, 3 files, 8 versions)
+
+  019503a1-8e55  /sources/septic/  [imported from 019503a1-7c44...]
+    142 rows (1 dir, 1 files, 38 versions)
+```
+
+Imported partitions are annotated with `[imported from <pond_id>]` so
+the operator can distinguish local from foreign data at a glance.
+
+### pond list / pond describe
+
+List and describe commands work transparently on imported content.
+Foreign files appear at their mount path as if they were local:
+
+```
+$ pond list '/sources/septic/*'
+
+/sources/septic/septicstation.json.series
+
+$ pond describe '/sources/septic/*'
+
+[FILE] /sources/septic/septicstation.json.series
+   Type: TablePhysicalSeries
+   Schema: 26 fields
+   Format: Parquet
+   Versions: 38
+   Timestamp Column: timestamp
+   Temporal Range: 2025-11-15 00:00:00 .. 2026-01-15 08:55:00
+   Provenance: pond 019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00
+```
+
+The `Provenance` line appears only for imported files. Local files
+omit it (the reader already knows they belong to this pond).
+
+### pond cat
+
+Querying imported data works identically to querying local data:
+
+```bash
+# SQL over imported series
+pond cat /sources/septic/septicstation.json.series \
+  --sql "SELECT timestamp, orenco_RT_Pump1_Amps FROM source ORDER BY timestamp DESC LIMIT 5" \
+  --format=table
+
+# Factory configs can reference imported paths
+# In reduce.yaml:
+#   in_pattern: "oteljson:///sources/septic/septicstation.json"
+```
+
+### pond mknod (creating import factories)
+
+Creating an import factory triggers immediate first import:
+
+```bash
+$ pond mknod remote /system/run/10-septic --config-path septic-import.yaml
+
+[INIT] Creating remote factory at /system/run/10-septic
+[INIT] Config: import mode
+   Source backup : s3://septic-dev
+   Source path   : /ingest/
+   Mount path    : /sources/septic/
+[INIT] Opening foreign backup...
+   Foreign pond  : 019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00
+   Available transactions: 42
+[INIT] Creating mount point /sources/septic/
+[INIT] Importing partitions...
+   Downloading partition 019503a1-8e55-... (38 files, 4.2 MB)
+   Adding to local Delta table...
+   Linking at /sources/septic/
+[OK] Import factory created. Mount point: /sources/septic/
+[OK] Factory mode set to 'import'
+```
+
+The config YAML:
+
+```yaml
+# septic-import.yaml
+url: "s3://septic-dev"
+region: "auto"
+endpoint: "{{ env(name='R2_ENDPOINT') }}"
+access_key: "{{ env(name='R2_KEY') }}"
+secret_key: "{{ env(name='R2_SECRET') }}"
+
+import:
+  source_path: "/ingest"
+  mount_path: "/sources/septic"
+```
+
+A single pond can have many import factories. Each one is a separate
+`mknod` with its own config pointing to a different foreign backup
+and mounting at a different path. The self-backup factory
+(`/system/run/1-backup`) is independent and has no `import` section.
+
+### Replicas vs Imports
+
+These are distinct concepts that share the remote factory:
+
+| | Replica | Import |
+|---|---------|--------|
+| **Purpose** | Full copy of the same pond | Subset of a foreign pond |
+| **pond_id** | Same as source (preserved) | Different (each pond has its own) |
+| **Created by** | `pond init --config=<base64>` | `pond mknod remote ... --config-path import.yaml` |
+| **Mode** | `pull` | `import` |
+| **Scope** | Entire pond | Specific path(s) |
+| **Mount point** | N/A (full mirror) | Named path (e.g., `/sources/septic/`) |
+| **Read/Write** | Read-only (replica) | Read-only (imported paths) |
+| **Local writes** | Not allowed | Allowed (outside mount points) |
+| **Backup** | Source pushes, replica pulls | Local pond backs up everything including imports |
+
+### Error Conditions
+
+The administrative commands report clear errors:
+
+```
+# Foreign backup unreachable
+$ pond sync
+[SYNC] /system/run/10-septic (mode: import)
+   [ERR] Cannot reach s3://septic-dev: connection refused
+   Skipping import (mount point /sources/septic/ retains last synced data)
+
+# Schema mismatch (foreign pond lacks pond_id column)
+$ pond mknod remote /system/run/10-old --config-path old-import.yaml
+[ERR] Foreign pond at s3://old-backup is not compatible:
+      Missing required column 'pond_id' in OpLog schema.
+      Cross-pond import requires both ponds to have the pond_id column.
+
+# Mount path conflict
+$ pond mknod remote /system/run/10-dup --config-path dup.yaml
+[ERR] Mount path /sources/septic/ is already managed by /system/run/10-septic.
+      Each mount path can only be managed by one import factory.
+
+# Write to imported path
+$ pond copy host:///tmp/data.csv /sources/septic/extra.csv
+[ERR] Cannot write to /sources/septic/: path is an import mount point
+      managed by /system/run/10-septic. Imported paths are read-only.
+```
+
+### Log Prefixes
+
+Remote and import operations use consistent ASCII log prefixes:
+
+| Prefix | Meaning |
+|--------|---------|
+| `[EXPORT]` | Pushing data to remote backup |
+| `[DOWN]` | Pulling data from remote |
+| `[SYNC]` | Manual or automatic sync operation |
+| `[INIT]` | Factory initialization / first import |
+| `[PKG]` | Packaging data (chunking, hashing) |
+| `[OK]` | Operation completed successfully |
+| `[ERR]` | Error condition |
+| `[WARN]` | Warning (non-fatal) |
+| `[SKIP]` | Skipping (already up to date) |
+| `[INFO]` | Informational message |

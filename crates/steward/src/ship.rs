@@ -504,7 +504,7 @@ impl Ship {
 
         // If this was a write transaction that committed data, run post-commit factories
         if is_write && commit_result.is_some() {
-            // TODO: Discover and execute post-commit factories from /etc/system.d/*
+            // TODO: Discover and execute post-commit factories from /system/run/*
             // This happens AFTER the guard is consumed, so we have full access to self
             debug!("Post-commit processing would run here for write transaction");
         }

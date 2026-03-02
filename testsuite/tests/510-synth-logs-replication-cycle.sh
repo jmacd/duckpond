@@ -191,7 +191,7 @@ pond init
 echo "✓ Pond1 initialized"
 
 pond mkdir -p /data/metrics
-pond mkdir -p /etc/system.d
+pond mkdir -p /system/run
 
 # Create logfile-ingest configuration
 cat > /tmp/metrics-ingest.yaml << EOF
@@ -204,7 +204,7 @@ echo "--- Logfile-ingest config ---"
 cat /tmp/metrics-ingest.yaml
 
 # Create logfile-ingest factory node
-pond mknod logfile-ingest /etc/system.d/20-metrics-ingest --config-path /tmp/metrics-ingest.yaml
+pond mknod logfile-ingest /system/run/20-metrics-ingest --config-path /tmp/metrics-ingest.yaml
 echo "✓ Created logfile-ingest node"
 
 #############################
@@ -214,7 +214,7 @@ echo "✓ Created logfile-ingest node"
 echo ""
 echo "=== Phase 3: Ingest Data to Pond1 ==="
 
-RUST_LOG=info pond run /etc/system.d/20-metrics-ingest 2>&1 | tee /tmp/ingest1.log
+RUST_LOG=info pond run /system/run/20-metrics-ingest 2>&1 | tee /tmp/ingest1.log
 
 echo ""
 echo "--- Ingested files ---"
@@ -258,7 +258,7 @@ fi
 echo "--- Remote config ---"
 cat /tmp/remote-config.yaml
 
-pond mknod remote /etc/system.d/10-remote --config-path /tmp/remote-config.yaml
+pond mknod remote /system/run/10-remote --config-path /tmp/remote-config.yaml
 echo "✓ Remote backup configured"
 
 #############################
@@ -268,7 +268,7 @@ echo "✓ Remote backup configured"
 echo ""
 echo "=== Phase 5: Push to S3 ==="
 
-RUST_LOG=info pond run /etc/system.d/10-remote push 2>&1 | tee /tmp/push1.log
+RUST_LOG=info pond run /system/run/10-remote push 2>&1 | tee /tmp/push1.log
 echo "✓ Push complete"
 
 # Verify backup exists
@@ -285,7 +285,7 @@ fi
 echo ""
 echo "=== Phase 6: Generate Replicate Command ==="
 
-REPLICATE_CMD=$(pond run /etc/system.d/10-remote replicate 2>&1)
+REPLICATE_CMD=$(pond run /system/run/10-remote replicate 2>&1)
 echo "Replicate command:"
 echo "${REPLICATE_CMD}"
 
@@ -309,7 +309,7 @@ echo "=== Phase 7: Setup Pond2 (Replica) ==="
 export POND=/pond2
 
 # Initialize using the replicate config
-# This automatically creates /etc/system.d/10-remote and restores all transactions
+# This automatically creates /system/run/10-remote and restores all transactions
 pond init ${REPLICATE_CONFIG}
 echo "✓ Pond2 initialized from replicate config"
 
@@ -320,7 +320,7 @@ echo "✓ Pond2 initialized from replicate config"
 echo ""
 echo "=== Phase 8: Pull to Replica ==="
 
-RUST_LOG=info pond run /etc/system.d/10-remote pull 2>&1 | tee /tmp/pull1.log
+RUST_LOG=info pond run /system/run/10-remote pull 2>&1 | tee /tmp/pull1.log
 echo "✓ Pull complete"
 
 #############################
@@ -387,18 +387,18 @@ echo "Total lines on host after append: ${TOTAL_HOST_LINES_R2}"
 echo ""
 echo "--- Re-running logfile-ingest ---"
 export POND=/pond1
-RUST_LOG=info pond run /etc/system.d/20-metrics-ingest 2>&1 | tee /tmp/ingest2.log
+RUST_LOG=info pond run /system/run/20-metrics-ingest 2>&1 | tee /tmp/ingest2.log
 
 # Push to S3
 echo ""
 echo "--- Pushing round 2 ---"
-pond run /etc/system.d/10-remote push 2>&1 | tee /tmp/push2.log
+pond run /system/run/10-remote push 2>&1 | tee /tmp/push2.log
 
 # Pull to Pond2
 echo ""
 echo "--- Pulling to replica ---"
 export POND=/pond2
-pond run /etc/system.d/10-remote pull 2>&1 | tee /tmp/pull2.log
+pond run /system/run/10-remote pull 2>&1 | tee /tmp/pull2.log
 
 # Verify
 echo ""
@@ -432,11 +432,11 @@ generate_csv_data "${SYNTH_LOGS_DIR}/metrics.log" ${NEXT_START_R3} ${APPEND_ROWS
 
 # Re-ingest, push, pull
 export POND=/pond1
-pond run /etc/system.d/20-metrics-ingest 2>&1 | tee /tmp/ingest3.log
-pond run /etc/system.d/10-remote push 2>&1 | tee /tmp/push3.log
+pond run /system/run/20-metrics-ingest 2>&1 | tee /tmp/ingest3.log
+pond run /system/run/10-remote push 2>&1 | tee /tmp/push3.log
 
 export POND=/pond2
-pond run /etc/system.d/10-remote pull 2>&1 | tee /tmp/pull3.log
+pond run /system/run/10-remote pull 2>&1 | tee /tmp/pull3.log
 
 # Final verification
 echo ""

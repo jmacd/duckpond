@@ -30,8 +30,8 @@ echo "✓ Pond1 initialized at ${POND}"
 
 # Create log directory structure
 pond mkdir /logs
-pond mkdir /etc
-pond mkdir /etc/system.d
+pond mkdir /system
+pond mkdir /system/run
 
 # Generate some sample logs to ingest
 mkdir -p /var/log/duckpond
@@ -56,12 +56,12 @@ EOF
 # Create the logfile-ingest node
 # Note: This may fail if factory not implemented - that's a valid test result!
 echo "Creating logfile-ingest factory node..."
-if pond mknod logfile-ingest /etc/system.d/20-logs --config-path /tmp/logfile-ingest.yaml; then
+if pond mknod logfile-ingest /system/run/20-logs --config-path /tmp/logfile-ingest.yaml; then
     echo "✓ Logfile-ingest node created"
     
     # Run the ingestion
     echo "Running log ingestion..."
-    pond run /etc/system.d/20-logs ingest || echo "Note: ingest command may have different name"
+    pond run /system/run/20-logs ingest || echo "Note: ingest command may have different name"
 else
     echo "⚠ logfile-ingest factory not available - trying manual copy"
     # Fallback: manually copy the log file
@@ -93,7 +93,7 @@ echo "=== Observing Pond1 from Pond2 ==="
 # Query Pond1's control table for recent transactions
 echo ""
 echo "--- Pond1 Transaction History ---"
-POND=/pond1 pond control recent --limit 10
+POND=/pond1 pond log --limit 10
 
 # Query with SQL to get structured data
 echo ""
@@ -115,13 +115,13 @@ echo ""
 echo "--- Storing observation in Pond2 ---"
 
 # Export Pond1's control data and import to Pond2
-POND=/pond1 pond control recent --limit 10 > /tmp/pond1-history.txt
+POND=/pond1 pond log --limit 10 > /tmp/pond1-history.txt
 cat > /tmp/observation.json << EOF
 {
     "observed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "observed_pond": "/pond1",
     "observer_pond": "/pond2",
-    "transactions_observed": $(POND=/pond1 pond control recent --limit 1 2>/dev/null | grep -c txn || echo 0)
+    "transactions_observed": $(POND=/pond1 pond log --limit 1 2>/dev/null | grep -c txn || echo 0)
 }
 EOF
 
@@ -160,7 +160,7 @@ echo "=== Cron Configuration (for reference) ==="
 
 cat << 'CRON_EXAMPLE'
 # To run log ingestion every minute (add to /etc/cron.d/experiment):
-* * * * * root POND=/pond1 /usr/local/bin/pond run /etc/system.d/20-logs ingest >> /var/log/duckpond/cron.log 2>&1
+* * * * * root POND=/pond1 /usr/local/bin/pond run /system/run/20-logs ingest >> /var/log/duckpond/cron.log 2>&1
 
 # To run observation every 5 minutes:
 */5 * * * * root /experiment/observe-pond1.sh >> /var/log/duckpond/observer.log 2>&1

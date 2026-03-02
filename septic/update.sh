@@ -30,7 +30,7 @@ ${EXE} copy host:///config/site /etc/site --overwrite
 # Recreate factory nodes with --overwrite
 ${EXE} mknod logfile-ingest /etc/ingest --overwrite --config-path /config/ingest.yaml
 
-${EXE} mknod remote /etc/system.d/1-backup --overwrite --config-path /config/backup.yaml
+${EXE} mknod remote /system/run/1-backup --overwrite --config-path /config/backup.yaml
 
 ${EXE} mknod dynamic-dir /reduced --overwrite --config-path /config/reduce.yaml
 
