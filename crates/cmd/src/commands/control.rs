@@ -504,7 +504,10 @@ pub async fn sync_command(
         sync_single_factory(ship_context, path).await?;
     }
 
-    log::info!("[OK] Sync completed for {} factory(ies)", factory_paths.len());
+    log::info!(
+        "[OK] Sync completed for {} factory(ies)",
+        factory_paths.len()
+    );
     Ok(())
 }
 
