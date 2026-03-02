@@ -462,7 +462,7 @@ pub async fn sync_command(
     config: Option<String>,
 ) -> Result<()> {
     // Recovery mode: --config with base64 encoded config
-    if config.is_some() {
+    if let Some(config_value) = config {
         let mut ship = ship_context.open_pond().await?;
         let control_table = ship.control_table_mut();
         control_table.print_banner();
@@ -474,7 +474,7 @@ pub async fn sync_command(
             .begin_read(&steward::PondUserMetadata::new(vec!["sync".to_string()]))
             .await?;
 
-        match execute_sync_with_config(&mut tx, control_table, config.unwrap()).await {
+        match execute_sync_with_config(&mut tx, control_table, config_value).await {
             Ok(()) => {
                 _ = tx.commit().await?;
                 log::info!("[OK] Recovery sync completed");
@@ -536,10 +536,10 @@ async fn discover_syncable_factories(ship_context: &ShipContext) -> Result<Vec<S
     for (node_path, _captures) in &matches {
         let path = node_path.path().to_string_lossy().to_string();
         let node_id = node_path.id();
-        if let Ok(Some(factory_name)) = tx.get_factory_for_node(node_id).await {
-            if factory_name == "remote" {
-                factory_paths.push(path);
-            }
+        if let Ok(Some(factory_name)) = tx.get_factory_for_node(node_id).await
+            && factory_name == "remote"
+        {
+            factory_paths.push(path);
         }
     }
 
