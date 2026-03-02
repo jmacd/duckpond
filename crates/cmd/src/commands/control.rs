@@ -442,13 +442,63 @@ async fn execute_sync(
 /// Resolve a factory short name or path to a full pond path.
 ///
 /// - Full paths (starting with `/`) are returned as-is
-/// - Short names are resolved to `/system/run/{name}`
+/// - Short names are resolved to `/system/run/{name}` (auto-executing factories)
+///   or `/system/etc/{name}` (manually-triggered factories)
+///
+/// For `pond sync`, only `/system/run/` is scanned, so the fallback
+/// to `/system/etc/` only matters for `pond run` short names.
 fn resolve_factory_path(name: &str) -> String {
     if name.starts_with('/') {
         name.to_string()
     } else {
+        // pond sync only looks in /system/run/ anyway;
+        // pond run will try both at runtime via resolve_short_factory_name().
         format!("/system/run/{}", name)
     }
+}
+
+/// System directories where factory nodes live.
+///
+/// - `/system/run/`  -- auto-executing on post-commit (remote push/pull)
+/// - `/system/etc/`  -- manually triggered or passive (hydrovu, sitegen, column-rename)
+pub const SYSTEM_RUN_DIR: &str = "/system/run";
+pub const SYSTEM_ETC_DIR: &str = "/system/etc";
+
+/// Resolve a bare factory name against `/system/run/` then `/system/etc/`.
+/// Returns the first path that exists, or falls back to `/system/run/{name}`.
+pub async fn resolve_short_factory_name(ship_context: &ShipContext, name: &str) -> Result<String> {
+    if name.starts_with('/') {
+        return Ok(name.to_string());
+    }
+
+    let mut ship = ship_context.open_pond().await?;
+    let tx = ship
+        .begin_read(&steward::PondUserMetadata::new(vec![
+            "resolve-factory".to_string(),
+        ]))
+        .await?;
+
+    let root = tx.root().await?;
+
+    // Try /system/run/ first (auto-executing), then /system/etc/ (manual)
+    for dir in &[SYSTEM_RUN_DIR, SYSTEM_ETC_DIR] {
+        let candidate = format!("{}/{}", dir, name);
+        if root.resolve_path(&candidate).await.is_ok() {
+            _ = tx.commit().await?;
+            log::info!("Resolved short name '{}' -> '{}'", name, candidate);
+            return Ok(candidate);
+        }
+    }
+
+    _ = tx.commit().await?;
+    // Fall back to /system/run/ (will produce a clear error downstream)
+    let fallback = format!("{}/{}", SYSTEM_RUN_DIR, name);
+    log::info!(
+        "Short name '{}' not found, defaulting to '{}'",
+        name,
+        fallback
+    );
+    Ok(fallback)
 }
 
 /// Sync with remote storage: retry pushes, pull new bundles.

@@ -19,7 +19,7 @@ rm -rf ${OUTDIR}
 mkdir -p ${OUTDIR}
 
 # Sitegen: exports data + renders HTML in one step
-${EXE} run /etc/site.yaml build ${OUTDIR}
+${EXE} run /system/etc/90-sitegen build ${OUTDIR}
 
 echo Now, run:
 echo npx vite ${OUTDIR} --port 4174 --open

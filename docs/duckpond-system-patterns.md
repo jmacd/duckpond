@@ -556,6 +556,49 @@ impl NodeTable {
 
 The fix is always to register fundamental tables ONCE in the State constructor.
 
+### SQL-Derived Table Name Caching (Per-Consumer Wrapping)
+
+**CRITICAL LESSON (Mar 2025)**: When multiple `SqlDerivedFile` consumers share the
+same source files, the data table (ListingTable/multi-URL) is registered once and
+reused by name. The table name is generated from the pattern URL + resolved file IDs
+(see `generate_data_table_name`).
+
+**The problem occurs when `provider_wrapper` or `scope_prefixes` are configured** (e.g.,
+`null_padding` in `timeseries-pivot`). These wrappings differ per consumer -- each
+timeseries-pivot node pads different columns and scopes column names differently.
+If they all share the same table name, only the FIRST consumer's wrapping is applied,
+causing downstream SQL to reference columns that don't exist.
+
+**Example failure**: Four timeseries-pivot nodes (DO, Salinity, Temperature, Tide) all
+reference `series:///combined/*`. Without per-consumer table names, only DO's
+null_padding wrapping was applied. Salinity's query then failed with:
+`No field named silver."Silver.AT500_Bottom.Salinity.psu"`.
+
+**Solution**: When `provider_wrapper` or `scope_prefixes` are configured, append the
+consumer's `node_id` (hex, hyphens stripped) to the table name:
+
+```rust
+let has_per_consumer_wrapping = config.provider_wrapper.is_some()
+    || config.scope_prefixes.is_some();
+let unique_table_name = if has_per_consumer_wrapping {
+    // Strip hyphens so the name is a valid bare SQL identifier
+    let node_id_hex = id.node_id().to_string().replace('-', "");
+    format!("{}_{}", data_table_name, node_id_hex)
+} else {
+    data_table_name
+};
+```
+
+This preserves caching for consumers WITHOUT wrapping (e.g., 25 `temporal-reduce`
+nodes sharing the same 89 source files) while ensuring each wrapped consumer gets
+its own independently-wrapped table.
+
+**Rules:**
+- Table names with hyphens break SQL parsing (interpreted as subtraction) -- always strip
+- Caching is by table name string, NOT by consumer identity
+- The `table_already_registered` check compares against the DataFusion catalog
+- If the table is already registered, construction is skipped entirely
+
 ## Critical Pattern #4: NodeID/PartID Relationship Rules
 
 ### The NodeID/PartID Architectural Constraint
