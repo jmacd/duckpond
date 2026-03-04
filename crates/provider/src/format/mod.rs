@@ -21,6 +21,7 @@ use tokio::io::AsyncRead;
 pub mod compression;
 pub mod csv;
 pub mod excelhtml;
+pub mod jsonlogs;
 pub mod oteljson;
 
 /// Format provider trait - converts file data to Arrow RecordBatches
