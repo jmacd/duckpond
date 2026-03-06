@@ -5,9 +5,44 @@ layout: page
 section: About
 ---
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ## Political
 
-Caspar Water System is regulated by a number of public agencies, including the California Water Board, the California Public Utilities Commission, the California Coastal Commission, and the Mendocino County Department of Health.
+Caspar Water System is regulated by a number of public agencies,
+including the California Water Board, the California Public Utilities
+Commission, the California Coastal Commission, and the Mendocino
+County Department of Health.
 
 The California Coastal Commission is updating its Local Coastal Plan in 2025, through a process in which it seeks feedback from communities about land use and zoning practices along the coast. The coastal plan was last updated 40 years ago. The existing section on Caspar reads:
 
