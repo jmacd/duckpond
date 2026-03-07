@@ -5,15 +5,21 @@ layout: page
 section:
 ---
 
-Things are good in Caspar. We have beaches, state parks, a
-demonstration forest, historic lighthouse, and .... Close to the
-village, close to the town.  Highly scenic, we say.
+Things are good in Caspar. We have beaches, state parks, a forest, a
+historic lighthouse, redwood trees. We're close to the village, close
+to the town.  Close to the village, close to the town, and highly
+scenic in every direction.
 
-Caspar was built around a lumber mill, ____ and there is a village
-still standing. It had an inn, ... they built houses, worker housing,
-developed logging roads, buried water pipes, all things a proper old
-village should have. But what we have today isn't quite that, it's
-more of a village in name.
+Caspar was built around a lumber mill, and there is a small village
+still standing. It had a company store, a grocer, an inn, a post
+office, a church, a livery, and a school house. There was worker
+housing, and nice houses for company officers, with farms and orchards
+nearby.
+
+They developed a town, with train tracks, logging roads, and infrastructure 
+developed logging roads, buried water pipes, all things a
+proper old village should have. But what we have today isn't quite
+that, it's more of a village in name.
 
 Caspar has had a string of bad luck. First, the lumber mill closed. A
 small residential neighborhood, around 16 houses housing for senior
