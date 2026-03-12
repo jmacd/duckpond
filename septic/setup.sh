@@ -37,6 +37,7 @@ ${EXE} init
 # Create directory structure
 ${EXE} mkdir -p /system/run
 ${EXE} mkdir -p /ingest
+${EXE} mkdir -p /etc
 
 # Copy site templates into the pond
 # (config is mounted at /config inside container)
