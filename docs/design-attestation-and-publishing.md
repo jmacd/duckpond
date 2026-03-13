@@ -200,6 +200,32 @@ Verifier:  Anyone with the verifier key and access to tiles
 Arbiter:   Regulatory body, community, legal system
 ```
 
+**Device-level claim (for regulated systems):**
+
+```
+Claim:     "I, ${device_id}, am the registered sensor at
+            ${installation_location}, and this data batch
+            contains unmodified readings from my sensors."
+Statement: Device-signed data batch
+Claimant:  Monitoring device (identified by TPM-backed key)
+Believer:  Pond operator (imports device data)
+Verifier:  Anyone with the device certificate (issued by authority)
+Arbiter:   State water board (registration authority)
+```
+
+**Authority-level claim (for the registration authority):**
+
+```
+Claim:     "I, ${authority}, certify that device ${device_id}
+            was inspected and registered at ${location} on
+            ${date}, operated by ${operator}."
+Statement: Device certificate (signed note)
+Claimant:  State water board (identified by authority key)
+Believer:  Public, other regulators, operators
+Verifier:  Anyone with the authority's public key
+Arbiter:   Federal EPA, courts, public accountability
+```
+
 ### Ecosystem Projects
 
 | Project | What it is | Relationship to DuckPond |
@@ -1249,15 +1275,17 @@ data that differs from what was attested (tlog inclusion proofs).
 ### What Can't Be Proven
 
 The attestation chain proves data integrity and provenance, but
-does NOT prove:
+does NOT prove (see also "What Device Attestation Adds" in the
+Regulatory Compliance section for how device attestation narrows
+some of these gaps):
 
 - **Sensor accuracy**: a miscalibrated sensor produces authentic
   garbage. The attestation proves the garbage is exactly the garbage
   the sensor produced.
 - **Sensor existence**: the attestation does not prove a physical
   sensor exists. A pond operator could generate synthetic data and
-  attest to it. External auditing (site visits, independent
-  measurements) is needed for physical truth.
+  attest to it. Device attestation with authority-issued certificates
+  narrows this gap (see Regulatory Compliance section).
 - **Completeness**: the attestation proves what IS in the log, not
   what SHOULD be in the log. If a sensor was offline for a day, the
   attestation faithfully reflects the gap -- but can't prove whether
@@ -1626,6 +1654,464 @@ operational burden.
 
 ---
 
+## Regulatory Compliance and Device Attestation
+
+This section addresses the end-to-end trust problem for regulated
+water systems: from the sensor device on a well pump or chlorine
+injector, through the data pipeline, to the monthly compliance
+report submitted to the state water board. The goal is a system
+where every link in the chain is cryptographically attested, and
+the state agency has tools to verify compliance without trusting
+the operator's assertions alone.
+
+### The Regulatory Context
+
+Under the Safe Drinking Water Act (SDWA) and state primacy agency
+rules, public water systems must:
+
+- **Monitor** regulated parameters at specified frequencies
+  (coliform bacteria monthly, chlorine residual daily/weekly,
+  turbidity continuously for surface water, plus ~15 other chemical
+  and radiological parameters at various frequencies)
+- **Report** results to the state primacy agency (e.g., California
+  State Water Resources Control Board, Oregon Health Authority)
+- **Publish** annual Consumer Confidence Reports (CCRs) to customers
+- **Retain records** for regulatory audit (typically 5-12 years)
+
+Current reporting is largely paper-based or via state-specific
+electronic data portals (e.g., Ohio eDWR, EPA SDWIS). There is
+no cryptographic verification -- the state trusts that the operator
+is reporting truthfully. An operator who wanted to misreport could
+simply submit different numbers.
+
+**DuckPond's opportunity**: provide a tool that makes it *harder
+to lie than to tell the truth* -- where the default workflow
+produces a verifiable chain from sensor to report, and tampering
+requires breaking cryptographic proofs.
+
+### Acceptance Test
+
+The acceptance criterion for this design is concrete:
+
+> A small water company (e.g., 125 connections) operates DuckPond
+> on a BeaglePlay at each well site. The system continuously
+> collects chlorine residual, pH, turbidity, pressure, flow rate,
+> temperature, and ~10 additional parameters at one-minute
+> intervals. At month-end, `pond report --month 2026-03` generates
+> a signed compliance report containing:
+>
+> 1. Summary statistics per parameter (min, max, mean, P95)
+> 2. Any exceedance events with timestamps
+> 3. Total water production (gallons)
+> 4. A tlog checkpoint proving the underlying data is append-only
+>    and untampered
+> 5. An Ed25519 signature from the operator's attested signing key
+> 6. Device attestation certificates for each sensor node
+>
+> The state water board can verify this report using `pond verify`
+> or a web-based verifier, without accessing the raw data, and be
+> assured that the operator did not fabricate or alter readings.
+
+### Trust Chain: Sensor to Report
+
+The verification problem has four layers, each requiring different
+cryptographic machinery:
+
+```
+Layer 4: REPORT ATTESTATION
+  "This report accurately summarizes the data"
+  --> Operator signs the report with Ed25519 key
+  --> Report embeds tlog checkpoint reference
+  --> Verifier can check: report matches attested data
+
+Layer 3: DATA ATTESTATION (existing tlog design)
+  "This data is append-only and unmodified"
+  --> Per-partition tlog with signed checkpoints
+  --> Inclusion proofs for any record
+  --> Consistency proofs between reports
+
+Layer 2: PIPELINE ATTESTATION
+  "This data traveled from the device to the pond unmodified"
+  --> Cross-pond import with signed partition checkpoints
+  --> BLAKE3 content hashes end-to-end
+  --> Git timestamps as independent timeline
+
+Layer 1: DEVICE ATTESTATION
+  "This data came from THIS specific registered sensor"
+  --> Device identity bound to hardware root of trust
+  --> Device registered with authority (state water board)
+  --> Each data batch signed by device key
+```
+
+Layers 2-4 are addressed by the existing design. Layer 1 -- device
+attestation -- is the new capability described here.
+
+### Device Identity and Hardware Roots of Trust
+
+A monitoring device (e.g., BeaglePlay running DuckPond at a well
+site) needs a cryptographic identity that is:
+
+- **Bound to hardware**: the private key cannot be extracted and
+  used on a different device
+- **Verifiable**: a remote party can confirm the key belongs to
+  a specific physical device
+- **Registered**: the state water board has a record mapping
+  the device's public key to a specific meter/sensor installation
+
+**Hardware options for embedded Linux devices:**
+
+| Platform | Root of Trust | Key Storage | Rust Support |
+|----------|--------------|-------------|-------------|
+| TI AM625 (BeaglePlay) | TI Foundational Security (TIFS) HSM | On-chip secure enclave | Via OP-TEE + PKCS#11 |
+| External TPM 2.0 chip | TPM Endorsement Key | TPM non-volatile storage | `tss-esapi` crate (Apache-2.0) |
+| Secure Element (e.g., ATECC608) | Factory-provisioned key | Tamper-resistant IC | `cryptoauthlib` FFI bindings |
+| Software-only (dev/Tier 1) | None (file on disk) | Filesystem | `ed25519-dalek` |
+
+**Recommended approach**: For production Tier 3 deployments, use
+an external TPM 2.0 chip connected via I2C or SPI. The BeaglePlay
+has mikroBUS and Grove expansion headers suitable for this. The
+`tss-esapi` crate (from the Parsec project, Apache-2.0 licensed)
+provides safe Rust bindings to TPM 2.0 via `tpm2-tss`.
+
+For Tier 1/2, software keys are acceptable (the device is under
+the operator's physical control and the primary threat is
+data tampering, not device impersonation).
+
+### Device Attestation Flow
+
+```
+PROVISIONING (one-time, at installation):
+
+  1. Device generates Ed25519 keypair in TPM/secure enclave
+     (key material never leaves hardware)
+
+  2. Device produces a Certificate Signing Request (CSR)
+     containing:
+     - Device public key
+     - Device serial number / hardware ID
+     - Installation location (GPS or address)
+     - Sensor type and calibration date
+
+  3. Water system operator signs the CSR with their
+     operator key (the pond's Ed25519 key)
+
+  4. Operator submits the device registration to the
+     state water board registration authority
+
+  5. Registration authority issues a device certificate:
+     - Binds device public key to a registered meter ID
+     - Signed by the authority's key
+     - Includes validity period and sensor class
+
+  6. Device certificate stored on device and in operator's
+     pond (as metadata in the device's partition)
+
+OPERATION (continuous):
+
+  1. Device collects sensor readings at configured interval
+
+  2. Device signs each data batch with its device key
+     (the key bound to hardware)
+
+  3. Data batch includes:
+     - Sensor readings (Parquet table:series)
+     - Timestamp range
+     - Device certificate reference
+     - BLAKE3 hash of the batch content
+     - Device signature over the above
+
+  4. Data batch is written to the device's local pond
+     partition and replicated to the central pond via
+     the remote factory (cross-pond import)
+
+  5. Central pond verifies device signature on import
+     (Layer 2 pipeline attestation)
+
+REPORTING (monthly or as required):
+
+  1. `pond report` aggregates data from all device partitions
+
+  2. Report includes device attestation chain:
+     - For each sensor: device certificate + sample of
+       device-signed batches
+     - Operator attestation: tlog checkpoint covering
+       the reporting period
+     - Operator signature on the report
+
+  3. State water board verifies:
+     - Device certificates are valid (signed by authority)
+     - Device signatures on data batches are valid
+     - Operator tlog checkpoint is consistent with
+       previous submissions
+     - Report statistics match the attested data
+```
+
+### The State Water Board as Registration Authority
+
+The state water board (or its delegate) operates as a lightweight
+certificate authority for water monitoring devices. This is NOT a
+full X.509 PKI -- it is a purpose-built registration system using
+the same Ed25519 + signed-note primitives as the rest of DuckPond.
+
+**Authority infrastructure (what the water board runs):**
+
+```
+Registration Authority Pond
+|
++-- /devices/
+|   +-- {device-id}/
+|       +-- registration.json     (device metadata, location, class)
+|       +-- certificate.signed    (signed note: authority vouches for device)
+|       +-- calibration-history/  (calibration records)
+|
++-- /operators/
+|   +-- {operator-id}/
+|       +-- registration.json     (operator metadata, system ID, permit #)
+|       +-- public-key.pem        (operator's verifier key)
+|       +-- devices/              (symlinks to registered devices)
+|
++-- /reports/
+|   +-- {operator-id}/
+|       +-- {period}/
+|           +-- submission.signed (the operator's signed report)
+|           +-- verification.log  (authority's verification results)
+|
++-- /authority/
+    +-- signing-key              (authority's Ed25519 key, HSM-backed)
+    +-- device-registry.tlog     (transparency log of all registrations)
+    +-- revocations/             (revoked device certificates)
+```
+
+**Key insight**: The registration authority itself uses a
+transparency log for device registrations. This means:
+
+- All device registrations are append-only and auditable
+- An operator can verify their devices are correctly registered
+- A third party can audit the full registry
+- Revocations are logged (a revoked device can't be silently
+  un-revoked)
+
+**The authority's tlog is structurally identical to a partition
+tlog.** The same `tlog_tiles` + `signed_note` code runs on both
+sides. DuckPond is the tool for both the operator AND the regulator.
+
+### Device Certificate Format
+
+A device certificate is a signed note (C2SP signed-note format):
+
+```
+caspar-well-1.device.casparwater.org
+device_type: chlorine_analyzer
+device_serial: HV-2024-0847
+installation: well_1_chlorine
+location: 38.9847,-123.7891
+calibrated: 2026-01-15
+operator: casparwater.org
+operator_key: ed25519:abc123...
+registered: 2026-01-20
+valid_until: 2027-01-20
+sensor_class: continuous_online
+
+-- ca.waterboard.ca.gov <base64(keyID || authority_signature)>
+-- casparwater.org <base64(keyID || operator_cosignature)>
+```
+
+The certificate carries two signatures:
+1. The registration authority (state water board) vouching for
+   the device's registration
+2. The operator co-signing to confirm the device is theirs
+
+### What Device Attestation Adds to "What Can't Be Proven"
+
+The existing "What Can't Be Proven" section (above) lists four
+limitations. Device attestation addresses two of them partially:
+
+| Limitation | Without device attestation | With device attestation |
+|-----------|--------------------------|----------------------|
+| Sensor existence | Cannot prove a physical sensor exists | The device certificate, signed by the authority after a site inspection, proves a sensor WAS installed. It does not prove the sensor is STILL installed or functioning. |
+| Sensor accuracy | Cannot prove sensor is calibrated | The device certificate records the calibration date. Combined with calibration history in the authority's registry, there is a verifiable calibration chain. Still cannot prove accuracy between calibrations. |
+| Completeness | Cannot prove data isn't missing | Unchanged. A device that goes offline produces a gap. The tlog faithfully records the gap. |
+| Timeliness | Timestamps come from device clock | With TPM-backed attestation, the device clock can be cross-referenced against NTP and the tlog append order. Still not proof of correct time, but more anchors. |
+
+**Device attestation does NOT make these problems fully solvable.**
+It narrows the trust gap from "the operator says they have sensors"
+to "the authority inspected and registered sensors, and the sensors
+are signing data with hardware-bound keys." The remaining gap
+(calibration drift, sensor failure, clock skew) requires physical
+auditing, which is outside the scope of cryptographic systems.
+
+### The Operator-Authority Relationship
+
+Both sides run DuckPond. Both sides benefit from the same tooling:
+
+```
+OPERATOR (small water company)          AUTHORITY (state water board)
+|                                       |
+| pond (on BeaglePlay at well)          | pond (registration authority)
+| +-- /sensors/chlorine/                | +-- /devices/{dev-id}/
+| |   (table:series, signed by device)  | |   (device certificate, calibration)
+| +-- /sensors/flow/                    | +-- /operators/{op-id}/
+| |   (table:series, signed by device)  | |   (operator registration, public key)
+| +-- /system/etc/remote/              | +-- /reports/{op-id}/{period}/
+| |   (replicate to central)            | |   (submitted reports, verification)
+| +-- /reports/                         | +-- /authority/
+|     (generated compliance reports)    |     (signing key, device registry tlog)
+|                                       |
+| pond attest                           | pond verify --submission {report}
+| pond report --month 2026-03           | pond device register {csr}
+| pond run remote push                  | pond device revoke {device-id}
+|                                       | pond device list --operator {op-id}
+```
+
+**New CLI commands for the authority role:**
+
+| Command | Role | Purpose |
+|---------|------|---------|
+| `pond device register` | Authority | Register a device, issue certificate |
+| `pond device revoke` | Authority | Revoke a device certificate |
+| `pond device list` | Both | List registered devices |
+| `pond device inspect` | Both | Show device certificate and status |
+| `pond report generate` | Operator | Generate compliance report for a period |
+| `pond report submit` | Operator | Submit report to authority |
+| `pond report verify` | Authority | Verify a submitted report |
+
+### Report Generation
+
+`pond report generate --month 2026-03` produces a signed compliance
+report by querying the pond's time-series data:
+
+```sql
+-- Example: monthly chlorine summary (one of ~16 parameters)
+SELECT
+  date_trunc('day', timestamp) as date,
+  min(value) as min_cl2,
+  max(value) as max_cl2,
+  avg(value) as mean_cl2,
+  approx_percentile(value, 0.95) as p95_cl2,
+  count(*) as sample_count,
+  count(CASE WHEN value < 0.2 THEN 1 END) as below_minimum
+FROM source
+WHERE timestamp >= '2026-03-01' AND timestamp < '2026-04-01'
+GROUP BY date_trunc('day', timestamp)
+ORDER BY date
+```
+
+The report includes:
+1. Summary statistics per parameter per day
+2. Exceedance events (readings outside regulatory limits)
+3. Total production/consumption volumes
+4. Data completeness metrics (expected vs actual readings)
+5. Device attestation references (certificate + sample signatures)
+6. Tlog checkpoint for the reporting period
+7. Operator signature over the entire report
+
+The report format is a signed note containing structured data
+(likely CBOR or JSON), with the tlog checkpoint embedded as a
+cross-reference.
+
+### Rust Crate Stack for Device Attestation
+
+| Crate | License | Purpose |
+|-------|---------|---------|
+| `tss-esapi` | Apache-2.0 | TPM 2.0 ESAPI bindings (Parsec project) |
+| `tss-esapi-sys` | Apache-2.0 | Low-level FFI to `tpm2-tss` C library |
+| `ed25519-dalek` | BSD-3 | Software Ed25519 for non-TPM devices |
+| `signature` | Apache-2.0/MIT | Trait abstraction (`dyn Signer`) |
+| `x509-cert` | Apache-2.0/MIT | X.509 certificate handling (if needed) |
+| `der` | Apache-2.0/MIT | ASN.1 DER encoding/decoding |
+
+**Note**: The `tss-esapi` crate requires the `tpm2-tss` C library
+to be installed on the target system. For cross-compilation to ARM
+(BeaglePlay), the `tss-esapi-sys` crate supports bundled builds.
+This is a compile-time dependency, not a runtime service.
+
+### Tiered Device Attestation
+
+Like key management, device attestation has tiers:
+
+**Tier 1 -- Software identity (personal/dev)**:
+- Device generates Ed25519 keypair in a file
+- No hardware binding (key can be copied to another device)
+- Suitable for development and personal monitoring
+- Provides data integrity but not device identity
+
+**Tier 2 -- Platform identity (small organization)**:
+- Device uses TI AM625's TIFS secure enclave or OP-TEE
+- Key generated in Trusted Execution Environment
+- Key is bound to the specific SoC (harder to extract)
+- No external attestation of device identity
+
+**Tier 3 -- Certified identity (regulated utility)**:
+- External TPM 2.0 chip with Endorsement Key (EK)
+- Device key generated in TPM (non-exportable)
+- TPM vendor certificate proves key is in genuine TPM
+- State water board registers TPM-backed device key
+- Full attestation chain: TPM vendor --> device --> operator --> authority
+
+### Open Questions (Device Attestation)
+
+**Q9: Device Certificate Format**
+
+Should device certificates use the C2SP signed-note format (as
+shown above) or standard X.509 certificates? Signed notes are
+simpler and consistent with the rest of the design. X.509 is
+the industry standard for device PKI and has broader tooling
+support.
+
+**Proposed**: Start with signed-note format for consistency.
+Add X.509 export capability for interoperability with existing
+water board systems that expect standard certificates.
+
+**Q10: Authority Infrastructure Scope**
+
+How much of the registration authority infrastructure should
+DuckPond implement? Options:
+
+A. **Minimal**: `pond device register` and `pond device verify`
+   commands. The authority manages certificates as signed notes
+   in their own pond. No central server.
+
+B. **Moderate**: Add a device registry tlog. The authority runs
+   a DuckPond instance with a transparency log of all registered
+   devices. Operators can verify their registrations.
+
+C. **Full**: Authority runs a web service with REST API for
+   device registration, revocation checking (OCSP-like), and
+   certificate distribution. Operators interact programmatically.
+
+**Proposed**: Start with **A**, design for **B**. The beauty of
+using DuckPond for both sides is that the authority's device
+registry IS a pond, and it gets all the same attestation properties.
+A full web service (C) may be needed eventually but should not
+be a prerequisite.
+
+**Q11: Offline Device Operation**
+
+Water monitoring devices may lose connectivity for hours or days
+(rural well sites, cellular dead zones). How does device attestation
+work offline?
+
+**Proposed**: Device signs data batches locally using its TPM-backed
+key. Batches accumulate in the device's local pond. When connectivity
+resumes, batches are replicated to the central pond with their
+device signatures intact. The central pond verifies signatures
+on import. The tlog faithfully records the temporal gap in
+replication (not in data collection).
+
+**Q12: Calibration Verification**
+
+Can the calibration chain be integrated into the device attestation?
+
+**Proposed**: The authority's device record includes a calibration
+history (dates, standards used, results). Each calibration event
+is appended to the device's tlog in the authority's registry.
+An expired calibration does not revoke the device certificate but
+flags a warning in report verification. This mirrors current
+regulatory practice where overdue calibration is a compliance
+finding, not a data rejection.
+
+---
+
 ## Implementation Phases
 
 The pragmatic approach: three core phases to get the basic loop
@@ -1704,6 +2190,18 @@ static page. Requires a Bluesky account and app password stored
 securely (not in the pond). Summary text + link facet + embed card.
 Simple API call -- no PDS needed.
 
+**Device Attestation** -- `pond device register` for the authority
+role, device key generation via `tss-esapi` for TPM-backed devices.
+Device-signed data batches with hardware-bound keys. Device
+certificates in C2SP signed-note format. See the Regulatory
+Compliance and Device Attestation section for the full design.
+
+**Compliance Reporting** -- `pond report generate --month 2026-03`
+aggregates time-series data into regulatory compliance reports.
+Reports embed tlog checkpoint references and device attestation
+chains. `pond report verify` for the authority role to validate
+submissions. SQL-based parameter aggregation using DataFusion.
+
 **Delta Lake Integration** -- Store partition tlog checkpoints in
 Delta commit metadata. Record BLAKE3 hash of each parquet file in
 Delta `add` action tags. Extend `pond verify` to walk the Delta log
@@ -1722,6 +2220,12 @@ consistency. A neighbor or regulator could run a witness. Note: for
 a single-writer system like DuckPond, Git already serves as a
 partial witness (GitHub maintains an independent append-only history
 of the published tiles).
+
+**Authority Device Registry** -- The state water board runs a
+DuckPond instance as a device registration authority. Device
+registrations are logged in a transparency log (same tlog-tiles
+infrastructure). Operators can verify their devices are correctly
+registered. Revocations are logged and auditable.
 
 **AT Proto PDS** -- DuckPond acts as a minimal Personal Data Server.
 Register a `did:web` DID, serve pond content as AT Proto records,
