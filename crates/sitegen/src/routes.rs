@@ -320,6 +320,7 @@ mod tests {
             }],
             partials: BTreeMap::new(),
             static_assets: vec![],
+            sidebar: vec![],
         }
     }
 
@@ -466,6 +467,7 @@ mod tests {
             }],
             partials: BTreeMap::new(),
             static_assets: vec![],
+            sidebar: vec![],
         };
 
         let exports = BTreeMap::new();

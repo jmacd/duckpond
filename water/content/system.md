@@ -2,7 +2,7 @@
 title: System Design
 weight: 20
 layout: page
-section: About
+section: Main
 ---
 
 ## System Design

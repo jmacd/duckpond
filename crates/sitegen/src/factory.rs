@@ -620,6 +620,7 @@ fn generate_site(
             current_path: current_path.clone(),
             breadcrumbs: job.breadcrumbs.clone(),
             base_url: config.site.base_url.clone(),
+            sidebar_sections: config.sidebar.clone(),
         });
 
         // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
@@ -692,6 +693,7 @@ fn render_partial(
                 current_path: current_path.to_string(),
                 breadcrumbs: vec![],
                 base_url: config.site.base_url.clone(),
+                sidebar_sections: config.sidebar.clone(),
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);

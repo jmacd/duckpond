@@ -2,7 +2,7 @@
 title: Down with Red-Black Trees
 weight: 70
 layout: page
-section: Computer
+section: Blog
 ---
 
 Balanced trees an essential data structure that we learn early in a

@@ -2,7 +2,7 @@
 title: Water
 weight: 10
 layout: page
-section: About
+section: Main
 ---
 
 ## Water

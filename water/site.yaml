@@ -37,3 +37,6 @@ partials:
 
 static:
   - pattern: "/img/logo.svg"
+
+sidebar:
+  - "Main"

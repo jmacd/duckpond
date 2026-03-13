@@ -2,7 +2,7 @@
 title: Political
 weight: 60
 layout: page
-section: About
+section: Main
 ---
 
 

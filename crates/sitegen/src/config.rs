@@ -43,6 +43,11 @@ pub struct SiteConfig {
     pub partials: std::collections::BTreeMap<String, String>,
     #[serde(rename = "static", default)]
     pub static_assets: Vec<StaticAsset>,
+    /// Ordered list of sidebar section names.
+    /// When present, `content_nav` renders a flat pill list filtered to
+    /// these sections, in this order. Pages opt in via frontmatter `section:`.
+    #[serde(default)]
+    pub sidebar: Vec<String>,
 }
 
 /// Site-wide metadata.

@@ -66,6 +66,9 @@ pub struct ShortcodeContext {
     pub breadcrumbs: Vec<(String, String)>,
     /// Base URL prefix for all generated links (e.g., "/noyo-harbor/")
     pub base_url: String,
+    /// Ordered sidebar section names from site.yaml.
+    /// When non-empty, `content_nav` renders flat pills in this order.
+    pub sidebar_sections: Vec<String>,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -284,10 +287,13 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
 
 /// Render a navigation list for content pages (ordered by weight).
 ///
-/// Pages are grouped by their `section` frontmatter field. Each section
-/// becomes a collapsible `<details>` element. Pages without a section
-/// appear as top-level items. A section is auto-opened if it contains
-/// the current page.
+/// When `sidebar_sections` is defined in site.yaml, renders a flat pill
+/// list: only pages whose `section` matches one of those names are shown,
+/// in the order the sections appear in the config, then by weight within
+/// each section. No section headings, no expand/collapse.
+///
+/// When `sidebar_sections` is empty, falls back to the grouped/collapsible
+/// rendering with section headings.
 fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
     let pages = match ctx.content_pages.get(content_name) {
         Some(pages) => pages,
@@ -325,8 +331,27 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         )
     };
 
+    // -- Flat pill mode: sidebar sections defined in site.yaml --
+    if !ctx.sidebar_sections.is_empty() {
+        let mut html = String::from("<ul>\n");
+        for section_name in &ctx.sidebar_sections {
+            // Collect pages matching this section, sorted by weight (already sorted)
+            for page in pages {
+                if page.hidden {
+                    continue;
+                }
+                if page.section.as_deref() == Some(section_name) {
+                    html.push_str(&render_li(page, "  "));
+                }
+            }
+        }
+        html.push_str("</ul>");
+        return html;
+    }
+
+    // -- Grouped/collapsible mode (legacy fallback) --
+
     // Group pages by section, preserving weight order.
-    // We use a Vec of (section_name, pages) to preserve first-seen order.
     let mut sections: Vec<(Option<String>, Vec<&ContentPage>)> = Vec::new();
     for page in pages {
         if page.hidden {
@@ -340,9 +365,6 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         }
     }
 
-    // Determine which section to expand. Exactly one section is expanded at
-    // all times: the one containing the active page, or the first section if
-    // no page matches (e.g., home/index page).
     let active_section: Option<Option<String>> =
         sections.iter().find_map(|(key, section_pages)| {
             if section_pages
@@ -354,14 +376,12 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                 None
             }
         });
-    // Fall back to the first section when no page is active.
     let expanded_section = active_section.or_else(|| sections.first().map(|(k, _)| k.clone()));
 
     let mut html = String::from("<nav class=\"nav-list\">\n");
     for (section, section_pages) in &sections {
         match section {
             None => {
-                // Top-level items (no section grouping)
                 html.push_str("<ul>\n");
                 for page in section_pages {
                     html.push_str(&render_li(page, "  "));
@@ -369,7 +389,6 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                 html.push_str("</ul>\n");
             }
             Some(section_name) => {
-                // Expand only the one section that should be open.
                 let expanded = expanded_section.as_ref() == Some(section);
                 let class = if expanded {
                     "nav-section expanded"
@@ -475,6 +494,7 @@ mod tests {
                 ("Temperature".to_string(), "/params/Temperature".to_string()),
             ],
             base_url: "/".to_string(),
+            sidebar_sections: vec![],
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -531,6 +551,7 @@ mod tests {
             current_path: "/params/Temperature.html".to_string(),
             breadcrumbs: vec![],
             base_url: "/".to_string(),
+            sidebar_sections: vec![],
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -585,6 +606,7 @@ mod tests {
             current_path: "/water.html".to_string(),
             breadcrumbs: vec![],
             base_url: "/".to_string(),
+            sidebar_sections: vec![],
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -655,6 +677,7 @@ mod tests {
             current_path: "/water.html".to_string(),
             breadcrumbs: vec![],
             base_url: "/".to_string(),
+            sidebar_sections: vec![],
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -750,6 +773,7 @@ mod tests {
             current_path: "/".to_string(),
             breadcrumbs: vec![],
             base_url: "/".to_string(),
+            sidebar_sections: vec![],
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([

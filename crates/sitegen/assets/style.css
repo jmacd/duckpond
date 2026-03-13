@@ -71,17 +71,16 @@ a:hover { color: var(--accent); }
   left: 0; top: 0;
   width: var(--sidebar-width);
   height: 100vh;
-  background: var(--bg-sidebar);
-  padding: 1.25rem 0;
+  background: transparent;
+  padding: 1.25rem 0.75rem;
   overflow-y: auto;
   z-index: 100;
-  border-right: 1px solid var(--border);
 }
 
 .sidebar h2 {
   font-size: 1rem;
   font-weight: 700;
-  padding: 0 1.25rem;
+  padding: 0 0.5rem;
   margin: 0 0 1rem;
   color: var(--accent);
   letter-spacing: -0.01em;
@@ -98,7 +97,7 @@ a:hover { color: var(--accent); }
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--fg-muted);
-  padding: 0.75rem 1.25rem 0.35rem;
+  padding: 0.75rem 0.5rem 0.35rem;
   margin: 0;
 }
 
@@ -107,26 +106,30 @@ a:hover { color: var(--accent); }
   margin: 0; padding: 0;
 }
 
+.sidebar li {
+  margin-bottom: 4px;
+}
+
 .sidebar a {
   display: block;
-  padding: 0.3rem 1.25rem;
-  color: var(--fg-secondary);
+  padding: 0.5rem 0.75rem;
+  background: rgba(50, 210, 180, 0.85);
+  color: var(--fg);
   text-decoration: none;
-  font-size: 0.875rem;
-  transition: background 0.15s, color 0.15s;
-  border-left: 3px solid transparent;
+  font-size: 0.9rem;
+  font-weight: 500;
+  border-radius: 5px;
+  transition: background 0.2s;
 }
 
 .sidebar a:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
+  background: rgba(200, 220, 215, 0.9);
 }
 
 .sidebar li.active a {
-  background: var(--accent-wash);
-  color: var(--accent);
-  border-left-color: var(--accent-light);
-  font-weight: 600;
+  background: rgba(100, 100, 100, 0.9);
+  color: #ffffff;
+  font-weight: 700;
 }
 
 /* ── Nav sections (collapsible) ─────────────────────────────── */
@@ -152,6 +155,11 @@ main {
   min-width: 0;
   padding: 2.5rem 3rem;
   max-width: calc(var(--max-width) + var(--sidebar-width) + 6rem);
+  background: rgba(50, 200, 250, 0.9);
+  border-radius: 8px;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+  margin-right: 1rem;
 }
 
 main h1 {

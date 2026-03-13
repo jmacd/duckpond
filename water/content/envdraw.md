@@ -2,7 +2,7 @@
 title: Learning Scheme with EnvDraw
 weight: 60
 layout: page
-section: Computer
+section: Blog
 ---
 
 I was a high-school nerd who had run out of math classes, so my senior

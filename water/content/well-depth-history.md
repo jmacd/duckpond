@@ -2,6 +2,7 @@
 title: Well Depth History
 weight: 45
 layout: page
+hidden: true
 section: Technical
 ---
 
