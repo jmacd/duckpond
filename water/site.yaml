@@ -36,7 +36,7 @@ partials:
   sidebar: "/site/sidebar.md"
 
 static:
-  - pattern: "/img/logo.svg"
+  - pattern: "/img/*"
 
 sidebar:
   - "Political"

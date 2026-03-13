@@ -135,17 +135,25 @@ async fn execute(
                 }
             }
 
-            // Collect static assets
+            // Collect static assets via glob, including binary files.
+            // Each pattern is glob-expanded; matched files are read as raw
+            // bytes and written to the output preserving their path structure.
+            let mut static_assets: BTreeMap<String, Vec<u8>> = BTreeMap::new();
             for asset in &config.static_assets {
-                if !file_cache.contains_key(&asset.pattern) {
-                    match root.read_file_path_to_vec(&asset.pattern).await {
-                        Ok(data) => {
-                            if let Ok(text) = String::from_utf8(data) {
-                                file_cache.insert(asset.pattern.clone(), text);
+                let matches = root.collect_matches(&asset.pattern).await?;
+                if matches.is_empty() {
+                    warn!("No files matched static pattern '{}'", asset.pattern);
+                }
+                for (node_path, _captures) in &matches {
+                    let path_str = node_path.path.to_string_lossy().to_string();
+                    if !static_assets.contains_key(&path_str) {
+                        match root.read_file_path_to_vec(&path_str).await {
+                            Ok(data) => {
+                                static_assets.insert(path_str, data);
                             }
-                        }
-                        Err(e) => {
-                            warn!("Cannot read static asset '{}': {}", asset.pattern, e);
+                            Err(e) => {
+                                warn!("Cannot read static asset '{}': {}", path_str, e);
+                            }
                         }
                     }
                 }
@@ -162,8 +170,8 @@ async fn execute(
             generate_site(&config, &exports, &content, &read_pond_file, &output_path)
                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
-            // Copy static assets from pond
-            copy_static_assets(&config, &read_pond_file, &output_path)?;
+            // Copy static assets to output, preserving directory structure
+            copy_static_assets(&static_assets, &output_path)?;
 
             // Write built-in assets (style.css, chart.js)
             write_builtin_assets(&output_path)?;
@@ -449,36 +457,25 @@ fn slug_from_path(path: &str) -> String {
         .to_string()
 }
 
-/// Copy static assets from pond to output directory.
+/// Copy static assets to the output directory, preserving path structure.
+///
+/// Each key in `assets` is a pond path like "/img/photo.jpg". The leading
+/// "/" is stripped so the file is written to `output_dir/img/photo.jpg`.
 fn copy_static_assets(
-    config: &SiteConfig,
-    read_pond_file: &dyn Fn(&str) -> Result<String, String>,
+    assets: &BTreeMap<String, Vec<u8>>,
     output_dir: &Path,
 ) -> Result<(), tinyfs::Error> {
-    for asset in &config.static_assets {
-        // For static assets, read from pond and write to output
-        // The pattern is a literal path like "/static/style.css"
-        match read_pond_file(&asset.pattern) {
-            Ok(content) => {
-                // Use the filename as the output path. Static assets are
-                // written flat into the output directory.
-                let filename = Path::new(&asset.pattern)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&asset.pattern);
-                let out_path = output_dir.join(filename);
-                if let Some(parent) = out_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e)))?;
-                }
-                std::fs::write(&out_path, content.as_bytes())
-                    .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", out_path, e)))?;
-                debug!("copied static asset: {}", filename);
-            }
-            Err(e) => {
-                warn!("Cannot read static asset '{}': {}", asset.pattern, e);
-            }
+    for (path, data) in assets {
+        // Strip leading slash to get a relative path
+        let rel = path.strip_prefix('/').unwrap_or(path);
+        let out_path = output_dir.join(rel);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e)))?;
         }
+        std::fs::write(&out_path, data)
+            .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", out_path, e)))?;
+        debug!("copied static asset: {}", rel);
     }
     Ok(())
 }
