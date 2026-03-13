@@ -876,6 +876,10 @@ site:
   title: "My Dashboard"
   base_url: "/"                       # Use "/subdir/" for non-root deploy
 
+content:
+  - name: "pages"
+    pattern: "/content/*.md"          # Glob for content pages
+
 exports:
   - name: "params"
     pattern: "/reduced/single_param/*/*.series"
@@ -889,29 +893,29 @@ routes:
     type: static
     slug: ""                          # Root: /index.html
     page: "/site/index.md"
-  - name: "params"
-    type: static
-    slug: "params"                    # /params/index.html (if page given)
     routes:
-      - name: "param-detail"
-        type: template
-        slug: "$0"                    # /params/Temperature.html, etc.
-        page: "/site/data.md"
-        export: "params"              # Links to export stage by name
-  - name: "sites"
-    type: static
-    slug: "sites"
-    routes:
-      - name: "site-detail"
-        type: template
-        slug: "$0"                    # /sites/NorthDock.html, etc.
-        page: "/site/data.md"
-        export: "sites"
+      - name: "pages"
+        type: content
+        slug: ""                      # One page per content file
+        content: "pages"
+      - name: "params"
+        type: static
+        slug: "params"
+        routes:
+          - name: "param-detail"
+            type: template
+            slug: "$0"                # /params/Temperature.html, etc.
+            page: "/site/data.md"
+            export: "params"
 
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []                     # Extra files to copy (optional)
+static:                               # Extra files to copy (text only)
+  - pattern: "/img/logo.svg"
+
+sidebar:                              # Ordered sidebar sections (flat pills)
+  - "Main"                            # Only pages with section: Main appear
 ```
 
 **Config fields:**
@@ -920,10 +924,19 @@ static_assets: []                     # Extra files to copy (optional)
 |-------|----------|-------------|
 | `site.title` | yes | Site title, used in HTML `<title>` and layout |
 | `site.base_url` | yes | Base URL path: `"/"` for root, `"/myapp/"` for subdirectory |
-| `exports` | yes | List of data export stages (see below) |
+| `content` | no | List of content stages -- glob markdown files for metadata-driven pages |
+| `exports` | no | List of data export stages (see below) |
 | `routes` | yes | Hierarchical route tree |
 | `partials` | no | Named Markdown partials (e.g., sidebar) |
-| `static_assets` | no | List of patterns for static files to copy |
+| `static` | no | List of patterns for static files to copy (text files only) |
+| `sidebar` | no | Ordered list of section names for flat sidebar rendering |
+
+**Content fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Name referenced by `content:` in routes and `content_nav` shortcode |
+| `pattern` | yes | Glob pattern matching markdown files (e.g., `"/content/*.md"`) |
 
 **Export fields:**
 
@@ -939,6 +952,7 @@ static_assets: []                     # Extra files to copy (optional)
 |------|----------|---------------|------------------|
 | `static` | One page at that path | No | Literal slug (empty = root) |
 | `template` | One page per unique `$0` value | Yes | `$0` expands from matched captures |
+| `content` | One page per content file | No | Uses slug from frontmatter |
 
 **Behaviour:**
 
@@ -951,7 +965,8 @@ static_assets: []                     # Extra files to copy (optional)
 
 | Layout | Purpose |
 |--------|---------|
-| `default` | Full-width content (home pages, text content) |
+| `default` | Full-width content (home pages, hero sections) |
+| `page` | Sidebar + article wrapper for content pages |
 | `data` | Sidebar + chart area with JS chart infrastructure |
 
 **Shortcodes** (used in Markdown templates):
@@ -963,6 +978,10 @@ static_assets: []                     # Extra files to copy (optional)
 | `{{ chart /}}` | Chart container + DuckDB-WASM chart renderer | Data pages |
 | `{{ breadcrumb /}}` | Breadcrumb navigation from route hierarchy | Data pages |
 | `{{ nav_list collection="name" base="/path" /}}` | Navigation list from export collection | Sidebar |
+| `{{ content_nav content="pages" /}}` | Navigation from content pages (see below) | Sidebar |
+| `{{ base_url /}}` | Site base URL from config | Links in sidebar |
+| `{{ site_title /}}` | Site title from config | Sidebar header |
+| `{{ figure src="..." caption="..." float="right" /}}` | Figure with optional float | Content pages |
 
 ⚠️ **Shortcode syntax**: Use self-closing `{{ name /}}` form. Attributes use
 `key="value"` syntax: `{{ nav_list collection="params" base="/params" /}}`.
@@ -983,21 +1002,73 @@ layout: data
 {{ chart /}}
 ```
 
+**Content page frontmatter:**
+
+Content pages use YAML frontmatter to control navigation and rendering:
+
+```yaml
+---
+title: Water                          # Page title (shown in nav + <title>)
+weight: 10                            # Sort order (lower = higher in nav)
+layout: page                          # Layout: default, page, or data
+section: Main                         # Sidebar section (must match site.yaml sidebar list)
+hidden: true                          # Optional: render page but hide from nav
+slug: custom-url                      # Optional: override URL slug (default: filename)
+---
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `title` | filename | Page title |
+| `weight` | 100 | Sort priority within section (lower = first) |
+| `layout` | `default` | HTML layout template |
+| `section` | none | Sidebar section name -- must match a `sidebar:` entry to appear |
+| `hidden` | `false` | If true, page is generated but excluded from navigation |
+| `slug` | filename | URL slug override |
+
+**Sidebar rendering with `content_nav`:**
+
+The `{{ content_nav content="pages" /}}` shortcode renders sidebar navigation
+from content page frontmatter. It has two modes:
+
+**Flat mode** (when `sidebar:` is defined in site.yaml):
+
+Renders a flat `<ul>` of pill-style links. Only pages whose `section:` matches
+one of the listed sidebar sections appear. Order follows the `sidebar:` list
+(section order), then `weight:` within each section.
+
+```yaml
+# site.yaml
+sidebar:
+  - "Main"          # 9 core pages
+```
+
+```yaml
+# content/water.md frontmatter
+section: Main       # Appears in sidebar
+weight: 10          # First in the list
+```
+
+```yaml
+# content/envdraw.md frontmatter
+section: Blog       # "Blog" not in sidebar list, so NOT shown in sidebar
+weight: 60          # Reachable via Blog page content instead
+```
+
+**Grouped mode** (when `sidebar:` is absent):
+
+Falls back to collapsible section groups. Pages are grouped by `section:`,
+with expand/collapse behaviour. The section containing the current page
+is auto-expanded.
+
 **Markdown templates — example sidebar (`sidebar.md`):**
 
 ```markdown
-## My Dashboard
-
-- [Home](/)
-
-### By Parameter
-
-{{ nav_list collection="params" base="/params" /}}
-
-### By Site
-
-{{ nav_list collection="sites" base="/sites" /}}
+{{ content_nav content="pages" /}}
 ```
+
+That single shortcode generates the entire sidebar from frontmatter metadata.
+Pages without a matching `section:` or with `hidden: true` are excluded.
 
 **Build command:**
 
@@ -1041,11 +1112,13 @@ pond mknod sitegen /system/etc/90-sitegen --overwrite --config-path /path/to/sit
 ```
 
 **Notes:**
-- The generated site uses DuckDB-WASM to load Parquet files client-side — no server needed.
+- The generated site uses DuckDB-WASM to load Parquet files client-side -- no server needed.
 - Charts use Observable Plot for rendering.
-- Vendor JS is loaded from CDN — no Node.js build toolchain required.
-- All CSS and JS is bundled into the HTML layouts (Maud code in `crates/sitegen`).
-- The site is fully self-contained after build — deploy to any static host.
+- Vendor JS is loaded from CDN -- no Node.js build toolchain required.
+- Built-in CSS (`style.css`) and JS (`chart.js`) are compiled into the binary via `include_str!()` and written to the output directory automatically.
+- Google Fonts (Inter) are loaded via preconnect links in all layouts.
+- The `static:` config copies text files from the pond to the output root (binary files like images must use filename-only paths; SVG works since it is text).
+- The site is fully self-contained after build -- deploy to any static host.
 
 ---
 
