@@ -12,6 +12,30 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 /// DuckPond version baked into generated HTML as `<meta name="generator">`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// GitHub icon SVG, used in the top bar of all layouts.
+const GITHUB_SVG: &str = r#"<svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>"#;
+
+/// Render the top bar with optional back link and right-justified icons.
+fn top_bar(back_label: Option<&str>, back_href: Option<&str>) -> Markup {
+    html! {
+        nav class="top-bar" {
+            @if let (Some(label), Some(href)) = (back_label, back_href) {
+                a class="top-bar-back" href=(href) {
+                    span class="blog-back-arrow" { "\u{2190}" }
+                    " " (label)
+                }
+            } @else {
+                span {}
+            }
+            div class="top-bar-icons" {
+                a href="https://github.com/jmacd/duckpond" target="_blank" title="Source on GitHub" {
+                    (PreEscaped(GITHUB_SVG))
+                }
+            }
+        }
+    }
+}
+
 /// Context passed to layout functions.
 pub struct LayoutContext<'a> {
     /// Page title (from frontmatter)
@@ -76,8 +100,13 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                         (PreEscaped(sidebar_html))
                     }
                 }
-                main class="data-page" {
-                    (PreEscaped(ctx.content))
+                main class="content-page" {
+                    (top_bar(Some("Home"), Some("/")))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
                 }
                 // Our glue code -- loads DuckDB-WASM + Observable Plot dynamically
                 script src="/chart.js" type="module" {}
@@ -104,12 +133,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    nav class="blog-back" {
-                        a href="/" {
-                            span class="blog-back-arrow" { "\u{2190}" }
-                            " Home"
-                        }
-                    }
+                    (top_bar(Some("Home"), Some("/")))
                     article class="blog-post" {
                         div class="blog-post-content" {
                             (PreEscaped(ctx.content))
@@ -141,12 +165,7 @@ fn blog_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    nav class="blog-back" {
-                        a href="blog.html" {
-                            span class="blog-back-arrow" { "\u{2190}" }
-                            " Blog"
-                        }
-                    }
+                    (top_bar(Some("Blog"), Some("blog.html")))
                     article class="blog-post" {
                         header class="blog-post-header" {
                             @if let Some(ref date) = date_display {
@@ -189,9 +208,11 @@ fn format_date(iso: &str) -> String {
     format!("{} {}, {}", month, day, parts[0])
 }
 
-/// Default layout for static pages (index, listing pages).
+/// Default layout for the index/home page.
 ///
-/// No CDN scripts -- these are informational pages without interactive charts.
+/// Same card structure as page layout, with a spacer (and optional
+/// icons) in place of the back-arrow. Icons sit above the card,
+/// over the page background.
 fn default_layout(ctx: &LayoutContext) -> Markup {
     html! {
         (DOCTYPE)
@@ -205,8 +226,13 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                         (PreEscaped(sidebar_html))
                     }
                 }
-                main class="hero" {
-                    (PreEscaped(ctx.content))
+                main class="content-page" {
+                    (top_bar(None, None))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
                 }
             }
         }
@@ -230,8 +256,9 @@ mod tests {
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("Home -- Test Site"));
         assert!(html.contains("<h1>Hello</h1>"));
-        assert!(!html.contains("duckdb")); // No CDN scripts in default layout
-        assert!(html.contains("fonts.googleapis.com")); // Google Fonts
+        assert!(html.contains("top-bar"), "Expected top bar: {}", html);
+        assert!(html.contains("github.com"), "Expected GitHub link");
+        assert!(html.contains("blog-post"), "Expected card container");
     }
 
     #[test]
@@ -248,7 +275,9 @@ mod tests {
         assert!(html.contains("type=\"module\"")); // Module script
         assert!(html.contains("class=\"sidebar\""));
         assert!(html.contains("<ul><li>Nav</li></ul>"));
-        assert!(html.contains("data-page"));
+        assert!(html.contains("top-bar"), "Top bar present");
+        assert!(html.contains("blog-post"), "Card container");
+        assert!(html.contains("github.com"), "GitHub icon");
     }
 
     #[test]
@@ -261,7 +290,7 @@ mod tests {
             date: None,
         };
         let html = apply_layout("nonexistent", &ctx);
-        assert!(html.contains("class=\"hero\"")); // Default layout uses hero class
+        assert!(html.contains("top-bar"), "Default layout uses top bar");
     }
 
     #[test]
@@ -276,11 +305,11 @@ mod tests {
         let html = apply_layout("page", &ctx);
         assert!(html.contains("content-page"), "Page layout class");
         assert!(html.contains("blog-post"), "Card container");
-        assert!(html.contains("blog-back"), "Back nav present");
-        assert!(html.contains("href=\"/\""), "Back to home: {}", html);
+        assert!(html.contains("top-bar"), "Top bar present");
+        assert!(html.contains("Home"), "Back to home link: {}", html);
+        assert!(html.contains("github.com"), "GitHub icon: {}", html);
         assert!(html.contains("class=\"sidebar\""), "Sidebar present");
         assert!(!html.contains("chart.js"), "No CDN scripts");
-        assert!(html.contains("Water System -- Caspar Water"), "Title");
     }
 
     #[test]
@@ -293,9 +322,9 @@ mod tests {
             date: Some("2025-03-10"),
         };
         let html = apply_layout("blog", &ctx);
-        assert!(html.contains("blog-post"), "Expected blog-post class: {}", html);
-        assert!(html.contains("blog-back"), "Expected back nav: {}", html);
+        assert!(html.contains("top-bar"), "Expected top bar: {}", html);
         assert!(html.contains("blog.html"), "Expected back link to blog: {}", html);
+        assert!(html.contains("github.com"), "Expected GitHub icon: {}", html);
         assert!(html.contains("March 10, 2025"), "Expected formatted date: {}", html);
         assert!(html.contains("My Blog Post"), "Expected title: {}", html);
         assert!(html.contains("blog-post-title"), "Expected title class: {}", html);

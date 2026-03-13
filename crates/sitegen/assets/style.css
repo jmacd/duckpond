@@ -16,7 +16,7 @@
   --green-wash: #ecfdf5;
 
   /* Surfaces */
-  --bg: #f5f2ed;
+  --bg: #f7f6f3;
   --bg-sidebar: #f0f7ff;
   --bg-card: #f8fafc;
   --bg-hover: #f1f5f9;
@@ -406,7 +406,7 @@ tr:hover td {
 
 .chart-container {
   margin-bottom: 2rem;
-  background: var(--bg-card);
+  background: #f3f4f6;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 1.25rem;
@@ -433,45 +433,6 @@ tr:hover td {
 #map {
   width: 100%;
   z-index: 0;
-}
-
-/* ── Hero (index page) ──────────────────────────────────────── */
-
-.hero {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  background: var(--accent-wash);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 2rem 2.5rem;
-  box-shadow: var(--shadow-sm);
-  max-width: var(--max-width);
-}
-
-.hero h1 {
-  font-size: clamp(2rem, 5vw, 2.75rem);
-  font-weight: 900;
-  line-height: 1.15;
-  letter-spacing: -0.03em;
-  color: var(--accent);
-}
-
-.hero h2 {
-  font-size: 1.2rem;
-  font-weight: 500;
-  color: var(--fg-muted);
-  margin-top: 0.25rem;
-}
-
-.hero p {
-  color: var(--fg-secondary);
-  line-height: 1.75;
-  max-width: 640px;
-}
-
-.hero ul {
-  color: var(--fg-secondary);
 }
 
 /* ── Blog grid ──────────────────────────────────────────────── */
@@ -552,13 +513,16 @@ tr:hover td {
   color: var(--fg-secondary);
 }
 
-/* ── Blog post (individual article) ─────────────────────────── */
+/* ── Top bar (back link + icons, above card) ────────────────── */
 
-.blog-back {
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 1.25rem;
 }
 
-.blog-back a {
+.top-bar-back {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -569,13 +533,30 @@ tr:hover td {
   transition: color 0.15s;
 }
 
-.blog-back a:hover {
+.top-bar-back:hover {
   color: var(--accent);
 }
 
 .blog-back-arrow {
   font-size: 1.1rem;
   line-height: 1;
+}
+
+.top-bar-icons {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.top-bar-icons a {
+  color: var(--fg-muted);
+  transition: color 0.15s;
+  display: flex;
+  align-items: center;
+}
+
+.top-bar-icons a:hover {
+  color: var(--accent);
 }
 
 .blog-post {
