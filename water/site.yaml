@@ -35,4 +35,5 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
+static:
+  - pattern: "/img/logo.svg"

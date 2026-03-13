@@ -42,6 +42,20 @@ pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
     markup.into_string()
 }
 
+/// Common `<head>` elements shared by all layouts.
+fn common_head(ctx: &LayoutContext) -> Markup {
+    html! {
+        meta charset="utf-8";
+        meta name="viewport" content="width=device-width, initial-scale=1";
+        meta name="generator" content=(format!("DuckPond v{}", VERSION));
+        title { (ctx.title) " -- " (ctx.site_title) }
+        link rel="preconnect" href="https://fonts.googleapis.com";
+        link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
+        link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap";
+        link rel="stylesheet" href="/style.css";
+    }
+}
+
 /// Layout for data pages (parameter/site detail pages).
 ///
 /// Includes CDN scripts for DuckDB-WASM and Observable Plot,
@@ -51,11 +65,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
         (DOCTYPE)
         html lang="en" {
             head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " -- " (ctx.site_title) }
-                link rel="stylesheet" href="/style.css";
+                (common_head(ctx))
             }
             body {
                 @if let Some(sidebar_html) = ctx.sidebar {
@@ -82,11 +92,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
         (DOCTYPE)
         html lang="en" {
             head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " -- " (ctx.site_title) }
-                link rel="stylesheet" href="/style.css";
+                (common_head(ctx))
             }
             body {
                 @if let Some(sidebar_html) = ctx.sidebar {
@@ -115,11 +121,7 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
         (DOCTYPE)
         html lang="en" {
             head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " -- " (ctx.site_title) }
-                link rel="stylesheet" href="/style.css";
+                (common_head(ctx))
             }
             body {
                 @if let Some(sidebar_html) = ctx.sidebar {
@@ -152,6 +154,7 @@ mod tests {
         assert!(html.contains("Home -- Test Site"));
         assert!(html.contains("<h1>Hello</h1>"));
         assert!(!html.contains("duckdb")); // No CDN scripts in default layout
+        assert!(html.contains("fonts.googleapis.com")); // Google Fonts
     }
 
     #[test]
