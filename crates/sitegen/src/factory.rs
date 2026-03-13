@@ -390,6 +390,9 @@ async fn run_content_stages(
                     slug: None,
                     hidden: false,
                     section: None,
+                    date: None,
+                    summary: None,
+                    image: None,
                 }
             } else {
                 serde_yaml::from_str(&fm_yaml).map_err(|e| {
@@ -413,6 +416,9 @@ async fn run_content_stages(
                 hidden: fm.hidden,
                 section: fm.section,
                 source_path: path_str,
+                date: fm.date,
+                summary: fm.summary,
+                image: fm.image,
             });
         }
 
@@ -540,6 +546,15 @@ struct Frontmatter {
     /// Navigation section for grouping (e.g., "About", "Blog").
     #[serde(default)]
     section: Option<String>,
+    /// Publication date (ISO 8601, e.g. "2024-06-15").
+    #[serde(default)]
+    date: Option<String>,
+    /// Short summary for blog card display.
+    #[serde(default)]
+    summary: Option<String>,
+    /// Image URL for blog card hero image.
+    #[serde(default)]
+    image: Option<String>,
 }
 
 fn default_layout() -> String {
@@ -600,6 +615,9 @@ fn generate_site(
                 slug: None,
                 hidden: false,
                 section: None,
+                date: None,
+                summary: None,
+                image: None,
             }
         } else {
             serde_yaml::from_str(&fm_yaml).map_err(|e| {
@@ -644,6 +662,7 @@ fn generate_site(
                 site_title: &config.site.title,
                 content: &content_html,
                 sidebar: sidebar_html.as_deref(),
+                date: fm.date.as_deref(),
             },
         );
 

@@ -1,8 +1,10 @@
 ---
 title: Down with Red-Black Trees
 weight: 70
-layout: page
+layout: blog
 section: Blog
+date: "2025-01-20"
+summary: "Balanced trees are essential, but do we really need Red-Black Trees? A case for simpler alternatives in the CS curriculum."
 ---
 
 Balanced trees an essential data structure that we learn early in a

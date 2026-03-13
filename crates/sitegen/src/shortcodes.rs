@@ -156,6 +156,17 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
+    // {{ blog_grid content="pages" section="Blog" /}}
+    // Renders a responsive card grid of blog posts filtered by section.
+    {
+        let c = ctx.clone();
+        shortcodes.register("blog_grid", move |args: &ShortcodeArgs| {
+            let content_name = args.get_str("content").unwrap_or("");
+            let section = args.get_str("section").unwrap_or("");
+            render_blog_grid(&c, content_name, section)
+        });
+    }
+
     shortcodes
 }
 
@@ -178,6 +189,7 @@ pub fn preprocess_variables(content: &str) -> String {
         .replace("site-title", "site_title")
         .replace("content-nav", "content_nav")
         .replace("base-url", "base_url")
+        .replace("blog-grid", "blog_grid")
 }
 
 // ---------------------------------------------------------------------------
@@ -331,18 +343,13 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         )
     };
 
-    // -- Flat pill mode: sidebar sections defined in site.yaml --
+    // -- Explicit order mode: sidebar lists page titles in display order --
     if !ctx.sidebar_sections.is_empty() {
         let mut html = String::from("<ul>\n");
-        for section_name in &ctx.sidebar_sections {
-            // Collect pages matching this section, sorted by weight (already sorted)
-            for page in pages {
-                if page.hidden {
-                    continue;
-                }
-                if page.section.as_deref() == Some(section_name) {
-                    html.push_str(&render_li(page, "  "));
-                }
+        for entry in &ctx.sidebar_sections {
+            // Match by title only. Each entry names exactly one page.
+            if let Some(page) = pages.iter().find(|p| !p.hidden && p.title == *entry) {
+                html.push_str(&render_li(page, "  "));
             }
         }
         html.push_str("</ul>");
@@ -451,6 +458,125 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Format an ISO 8601 date string (e.g. "2024-06-15") for display.
+///
+/// Returns a human-readable date like "June 15, 2024".
+/// Falls back to the raw string if parsing fails.
+fn format_date(iso: &str) -> String {
+    let parts: Vec<&str> = iso.split('-').collect();
+    if parts.len() != 3 {
+        return iso.to_string();
+    }
+    let month = match parts[1] {
+        "01" => "January",
+        "02" => "February",
+        "03" => "March",
+        "04" => "April",
+        "05" => "May",
+        "06" => "June",
+        "07" => "July",
+        "08" => "August",
+        "09" => "September",
+        "10" => "October",
+        "11" => "November",
+        "12" => "December",
+        _ => return iso.to_string(),
+    };
+    let day = parts[2].trim_start_matches('0');
+    format!("{} {}, {}", month, day, parts[0])
+}
+
+/// Render a blog card grid for content pages matching a section.
+///
+/// Shortcode: `{{ blog_grid content="pages" section="Blog" /}}`
+///
+/// Filters content pages by section name, sorts by date descending
+/// (undated posts come last, sorted by weight), and renders a
+/// responsive card grid with optional hero image, date, and summary.
+fn render_blog_grid(ctx: &ShortcodeContext, content_name: &str, section: &str) -> String {
+    let pages = match ctx.content_pages.get(content_name) {
+        Some(pages) => pages,
+        None => return format!("<!-- blog_grid: unknown content '{}' -->", content_name),
+    };
+
+    // Filter to matching section, exclude hidden
+    let mut posts: Vec<&ContentPage> = pages
+        .iter()
+        .filter(|p| !p.hidden && p.section.as_deref() == Some(section))
+        .collect();
+
+    if posts.is_empty() {
+        return format!("<!-- blog_grid: no posts in section '{}' -->", section);
+    }
+
+    // Sort by date descending (newest first); undated posts go last, ordered by weight
+    posts.sort_by(|a, b| {
+        match (&b.date, &a.date) {
+            (Some(bd), Some(ad)) => bd.cmp(ad),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.weight.cmp(&b.weight),
+        }
+    });
+
+    let base = ctx.base_url.trim_end_matches('/');
+
+    let page_href = |slug: &str| -> String {
+        if base.is_empty() || base == "/" {
+            format!("/{}.html", slug)
+        } else {
+            format!("{}/{}.html", base, slug)
+        }
+    };
+
+    let mut html = String::from("<div class=\"blog-grid\">\n");
+
+    for post in &posts {
+        let href = page_href(&post.slug);
+        html.push_str("  <a class=\"blog-card\" href=\"");
+        html.push_str(&href);
+        html.push_str("\">\n");
+
+        // Hero image
+        if let Some(ref img) = post.image {
+            html.push_str("    <div class=\"blog-card-image\">");
+            html.push_str(&format!(
+                "<img src=\"{}\" alt=\"{}\">",
+                html_escape(img),
+                html_escape(&post.title)
+            ));
+            html.push_str("</div>\n");
+        }
+
+        html.push_str("    <div class=\"blog-card-body\">\n");
+
+        // Date
+        if let Some(ref date) = post.date {
+            html.push_str("      <time class=\"blog-card-date\">");
+            html.push_str(&format_date(date));
+            html.push_str("</time>\n");
+        }
+
+        // Title
+        html.push_str("      <h3 class=\"blog-card-title\">");
+        html.push_str(&html_escape(&post.title));
+        html.push_str("</h3>\n");
+
+        // Summary
+        if let Some(ref summary) = post.summary {
+            html.push_str("      <p class=\"blog-card-summary\">");
+            html.push_str(&html_escape(summary));
+            html.push_str("</p>\n");
+        }
+
+        html.push_str("    </div>\n");
+        html.push_str("  </a>\n");
+    }
+
+    html.push_str("</div>");
+    html
 }
 
 #[cfg(test)]
@@ -579,6 +705,9 @@ mod tests {
                 hidden: false,
                 section: None,
                 source_path: "/content/water.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
             },
             ContentPage {
                 title: "History".to_string(),
@@ -587,6 +716,9 @@ mod tests {
                 hidden: false,
                 section: None,
                 source_path: "/content/history.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
             },
             ContentPage {
                 title: "Hidden Page".to_string(),
@@ -595,6 +727,9 @@ mod tests {
                 hidden: true,
                 section: None,
                 source_path: "/content/hidden.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
             },
         ];
         let ctx = ShortcodeContext {
@@ -650,6 +785,9 @@ mod tests {
                 hidden: false,
                 section: Some("About".to_string()),
                 source_path: "/content/water.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
             },
             ContentPage {
                 title: "History".to_string(),
@@ -658,6 +796,9 @@ mod tests {
                 hidden: false,
                 section: Some("About".to_string()),
                 source_path: "/content/history.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
             },
             ContentPage {
                 title: "Blog".to_string(),
@@ -666,6 +807,9 @@ mod tests {
                 hidden: false,
                 section: Some("Blog".to_string()),
                 source_path: "/content/blog.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
             },
         ];
         let ctx = ShortcodeContext {
@@ -760,6 +904,72 @@ mod tests {
     }
 
     #[test]
+    fn test_render_content_nav_explicit_order() {
+        let pages = vec![
+            ContentPage {
+                title: "Water".to_string(),
+                slug: "water".to_string(),
+                weight: 10,
+                hidden: false,
+                section: Some("Main".to_string()),
+                source_path: "/content/water.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
+            },
+            ContentPage {
+                title: "Blog".to_string(),
+                slug: "blog".to_string(),
+                weight: 20,
+                hidden: false,
+                section: Some("Main".to_string()),
+                source_path: "/content/blog.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
+            },
+            ContentPage {
+                title: "History".to_string(),
+                slug: "history".to_string(),
+                weight: 30,
+                hidden: false,
+                section: Some("Main".to_string()),
+                source_path: "/content/history.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
+            },
+        ];
+        // Sidebar lists titles in explicit order: Blog, History, Water
+        let ctx = ShortcodeContext {
+            captures: vec![],
+            datafiles: vec![],
+            collections: BTreeMap::new(),
+            content_pages: BTreeMap::from([("pages".to_string(), pages)]),
+            site_title: String::new(),
+            current_path: "/blog.html".to_string(),
+            breadcrumbs: vec![],
+            base_url: "/".to_string(),
+            sidebar_sections: vec![
+                "Blog".to_string(),
+                "History".to_string(),
+                "Water".to_string(),
+            ],
+        };
+        let html = render_content_nav(&ctx, "pages");
+        // All three present
+        assert!(html.contains("Blog"), "Blog present: {}", html);
+        assert!(html.contains("History"), "History present: {}", html);
+        assert!(html.contains("Water"), "Water present: {}", html);
+        // Blog appears before History, History before Water (config order, not weight)
+        let blog_pos = html.find("Blog").unwrap();
+        let history_pos = html.find("History").unwrap();
+        let water_pos = html.find("Water").unwrap();
+        assert!(blog_pos < history_pos, "Blog before History");
+        assert!(history_pos < water_pos, "History before Water");
+    }
+
+    #[test]
     fn test_render_figure() {
         use crate::markdown::ShortcodeArgs;
         use std::collections::HashMap;
@@ -798,5 +1008,138 @@ mod tests {
             "Expected caption: {}",
             html
         );
+    }
+
+    #[test]
+    fn test_render_blog_grid() {
+        let pages = vec![
+            ContentPage {
+                title: "Old Post".to_string(),
+                slug: "old-post".to_string(),
+                weight: 10,
+                hidden: false,
+                section: Some("Blog".to_string()),
+                source_path: "/content/old-post.md".to_string(),
+                date: Some("2024-01-15".to_string()),
+                summary: Some("An older post".to_string()),
+                image: None,
+            },
+            ContentPage {
+                title: "New Post".to_string(),
+                slug: "new-post".to_string(),
+                weight: 20,
+                hidden: false,
+                section: Some("Blog".to_string()),
+                source_path: "/content/new-post.md".to_string(),
+                date: Some("2025-03-10".to_string()),
+                summary: Some("A newer post".to_string()),
+                image: Some("/img/hero.jpg".to_string()),
+            },
+            ContentPage {
+                title: "Not a Blog".to_string(),
+                slug: "about".to_string(),
+                weight: 5,
+                hidden: false,
+                section: Some("Main".to_string()),
+                source_path: "/content/about.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
+            },
+            ContentPage {
+                title: "Hidden Blog".to_string(),
+                slug: "hidden-blog".to_string(),
+                weight: 30,
+                hidden: true,
+                section: Some("Blog".to_string()),
+                source_path: "/content/hidden-blog.md".to_string(),
+                date: Some("2025-02-01".to_string()),
+                summary: None,
+                image: None,
+            },
+        ];
+        let ctx = ShortcodeContext {
+            captures: vec![],
+            datafiles: vec![],
+            collections: BTreeMap::new(),
+            content_pages: BTreeMap::from([("pages".to_string(), pages)]),
+            site_title: String::new(),
+            current_path: "/blog.html".to_string(),
+            breadcrumbs: vec![],
+            base_url: "/".to_string(),
+            sidebar_sections: vec![],
+        };
+
+        let html = render_blog_grid(&ctx, "pages", "Blog");
+
+        // Grid wrapper
+        assert!(
+            html.contains("class=\"blog-grid\""),
+            "Expected blog-grid class: {}",
+            html
+        );
+        // New post appears (newest first)
+        assert!(
+            html.contains("New Post"),
+            "Expected New Post: {}",
+            html
+        );
+        // Old post appears
+        assert!(
+            html.contains("Old Post"),
+            "Expected Old Post: {}",
+            html
+        );
+        // New post should appear before Old post (date descending)
+        let new_pos = html.find("New Post").unwrap();
+        let old_pos = html.find("Old Post").unwrap();
+        assert!(
+            new_pos < old_pos,
+            "New post should appear before old post (date desc)"
+        );
+        // Non-blog page excluded
+        assert!(
+            !html.contains("Not a Blog"),
+            "Non-blog page should be excluded: {}",
+            html
+        );
+        // Hidden page excluded
+        assert!(
+            !html.contains("Hidden Blog"),
+            "Hidden page should be excluded: {}",
+            html
+        );
+        // Hero image present for new post
+        assert!(
+            html.contains("/img/hero.jpg"),
+            "Expected hero image: {}",
+            html
+        );
+        // Date formatted
+        assert!(
+            html.contains("March 10, 2025"),
+            "Expected formatted date: {}",
+            html
+        );
+        // Summary present
+        assert!(
+            html.contains("A newer post"),
+            "Expected summary: {}",
+            html
+        );
+        // Links are correct
+        assert!(
+            html.contains("href=\"/new-post.html\""),
+            "Expected correct href: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn test_format_date() {
+        assert_eq!(format_date("2025-03-10"), "March 10, 2025");
+        assert_eq!(format_date("1995-06-15"), "June 15, 1995");
+        assert_eq!(format_date("2024-01-01"), "January 1, 2024");
+        assert_eq!(format_date("bad-date"), "bad-date");
     }
 }

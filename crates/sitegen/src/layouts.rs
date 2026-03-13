@@ -22,6 +22,8 @@ pub struct LayoutContext<'a> {
     pub content: &'a str,
     /// Rendered sidebar HTML (from sidebar partial, if any)
     pub sidebar: Option<&'a str>,
+    /// Publication date for blog posts (ISO 8601, e.g. "2024-06-15")
+    pub date: Option<&'a str>,
 }
 
 /// Apply a named layout to rendered content.
@@ -37,6 +39,7 @@ pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
     let markup = match name {
         "data" => data_layout(ctx),
         "page" => page_layout(ctx),
+        "blog" => blog_layout(ctx),
         _ => default_layout(ctx),
     };
     markup.into_string()
@@ -83,10 +86,10 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
     }
 }
 
-/// Layout for content pages (articles, documentation, blog posts).
+/// Layout for content pages (articles, documentation, blog index).
 ///
-/// Sidebar navigation + article wrapper, no CDN scripts.
-/// Content is wrapped in `<article>` for semantic HTML.
+/// Sidebar navigation + card-wrapped article with back-to-home link.
+/// Content is wrapped in a card container matching the blog post style.
 fn page_layout(ctx: &LayoutContext) -> Markup {
     html! {
         (DOCTYPE)
@@ -101,16 +104,89 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    article {
-                        (PreEscaped(ctx.content))
+                    nav class="blog-back" {
+                        a href="/" {
+                            span class="blog-back-arrow" { "\u{2190}" }
+                            " Home"
+                        }
                     }
-                }
-                script {
-                    (PreEscaped(r#"document.querySelectorAll('.nav-section-title').forEach(function(t){t.addEventListener('click',function(){var s=t.parentElement;if(s.classList.contains('expanded'))return;document.querySelectorAll('.nav-section.expanded').forEach(function(e){e.classList.remove('expanded')});s.classList.add('expanded')})})"#))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+/// Layout for individual blog posts.
+///
+/// Renders the post inside a card container matching the blog grid card
+/// aesthetic: lighter background, rounded edges, date/title header, with
+/// a back-arrow link to the blog index.
+fn blog_layout(ctx: &LayoutContext) -> Markup {
+    let date_display = ctx.date.map(format_date);
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                (common_head(ctx))
+            }
+            body {
+                @if let Some(sidebar_html) = ctx.sidebar {
+                    nav class="sidebar" {
+                        (PreEscaped(sidebar_html))
+                    }
+                }
+                main class="content-page" {
+                    nav class="blog-back" {
+                        a href="blog.html" {
+                            span class="blog-back-arrow" { "\u{2190}" }
+                            " Blog"
+                        }
+                    }
+                    article class="blog-post" {
+                        header class="blog-post-header" {
+                            @if let Some(ref date) = date_display {
+                                time class="blog-post-date" { (date) }
+                            }
+                            h1 class="blog-post-title" { (ctx.title) }
+                        }
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Format an ISO 8601 date string for display (e.g. "2024-06-15" -> "June 15, 2024").
+fn format_date(iso: &str) -> String {
+    let parts: Vec<&str> = iso.split('-').collect();
+    if parts.len() != 3 {
+        return iso.to_string();
+    }
+    let month = match parts[1] {
+        "01" => "January",
+        "02" => "February",
+        "03" => "March",
+        "04" => "April",
+        "05" => "May",
+        "06" => "June",
+        "07" => "July",
+        "08" => "August",
+        "09" => "September",
+        "10" => "October",
+        "11" => "November",
+        "12" => "December",
+        _ => return iso.to_string(),
+    };
+    let day = parts[2].trim_start_matches('0');
+    format!("{} {}, {}", month, day, parts[0])
 }
 
 /// Default layout for static pages (index, listing pages).
@@ -148,6 +224,7 @@ mod tests {
             site_title: "Test Site",
             content: "<h1>Hello</h1>",
             sidebar: None,
+            date: None,
         };
         let html = apply_layout("default", &ctx);
         assert!(html.contains("<!DOCTYPE html>"));
@@ -164,6 +241,7 @@ mod tests {
             site_title: "Noyo Harbor",
             content: "<p>Chart here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
+            date: None,
         };
         let html = apply_layout("data", &ctx);
         assert!(html.contains("chart.js")); // Glue code present
@@ -180,6 +258,7 @@ mod tests {
             site_title: "Site",
             content: "<p>Content</p>",
             sidebar: None,
+            date: None,
         };
         let html = apply_layout("nonexistent", &ctx);
         assert!(html.contains("class=\"hero\"")); // Default layout uses hero class
@@ -192,12 +271,50 @@ mod tests {
             site_title: "Caspar Water",
             content: "<h1>Water</h1><p>Info</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
+            date: None,
         };
         let html = apply_layout("page", &ctx);
-        assert!(html.contains("content-page")); // Page layout class
-        assert!(html.contains("<article>")); // Wrapped in article
-        assert!(html.contains("class=\"sidebar\"")); // Sidebar present
-        assert!(!html.contains("chart.js")); // No CDN scripts
-        assert!(html.contains("Water System -- Caspar Water")); // Title
+        assert!(html.contains("content-page"), "Page layout class");
+        assert!(html.contains("blog-post"), "Card container");
+        assert!(html.contains("blog-back"), "Back nav present");
+        assert!(html.contains("href=\"/\""), "Back to home: {}", html);
+        assert!(html.contains("class=\"sidebar\""), "Sidebar present");
+        assert!(!html.contains("chart.js"), "No CDN scripts");
+        assert!(html.contains("Water System -- Caspar Water"), "Title");
+    }
+
+    #[test]
+    fn test_blog_layout() {
+        let ctx = LayoutContext {
+            title: "My Blog Post",
+            site_title: "Test Blog",
+            content: "<p>Post content here</p>",
+            sidebar: Some("<ul><li>Nav</li></ul>"),
+            date: Some("2025-03-10"),
+        };
+        let html = apply_layout("blog", &ctx);
+        assert!(html.contains("blog-post"), "Expected blog-post class: {}", html);
+        assert!(html.contains("blog-back"), "Expected back nav: {}", html);
+        assert!(html.contains("blog.html"), "Expected back link to blog: {}", html);
+        assert!(html.contains("March 10, 2025"), "Expected formatted date: {}", html);
+        assert!(html.contains("My Blog Post"), "Expected title: {}", html);
+        assert!(html.contains("blog-post-title"), "Expected title class: {}", html);
+        assert!(html.contains("Post content here"), "Expected content: {}", html);
+        assert!(html.contains("class=\"sidebar\""), "Expected sidebar: {}", html);
+        assert!(!html.contains("chart.js"), "No CDN scripts in blog layout");
+    }
+
+    #[test]
+    fn test_blog_layout_no_date() {
+        let ctx = LayoutContext {
+            title: "Undated Post",
+            site_title: "Blog",
+            content: "<p>No date</p>",
+            sidebar: None,
+            date: None,
+        };
+        let html = apply_layout("blog", &ctx);
+        assert!(html.contains("blog-post"), "Expected blog-post: {}", html);
+        assert!(!html.contains("blog-post-date"), "No date element expected: {}", html);
     }
 }

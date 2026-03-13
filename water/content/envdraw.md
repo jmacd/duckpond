@@ -1,8 +1,11 @@
 ---
 title: Learning Scheme with EnvDraw
 weight: 60
-layout: page
+layout: blog
 section: Blog
+date: "1995-06-15"
+summary: "From a high-school nerd running out of math classes to building a self-diagramming metacircular evaluator for UC Berkeley's CS61A. Thirty years later, reborn in WebAssembly."
+image: "https://jmacd.github.io/envdraw/envdraw-screenshot.png"
 ---
 
 I was a high-school nerd who had run out of math classes, so my senior

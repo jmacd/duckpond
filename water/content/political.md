@@ -1,6 +1,6 @@
 ---
 title: Political
-weight: 60
+weight: 10
 layout: page
 section: Main
 ---

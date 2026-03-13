@@ -39,4 +39,12 @@ static:
   - pattern: "/img/logo.svg"
 
 sidebar:
-  - "Main"
+  - "Political"
+  - "Blog"
+  - "History"
+  - "Water"
+  - "System Design"
+  - "Monitoring"
+  - "Software"
+  - "Operator"
+  - "Thanks"
