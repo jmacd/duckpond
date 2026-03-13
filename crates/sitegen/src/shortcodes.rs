@@ -327,8 +327,8 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         }
     };
 
-    // Render a single <li> for a page
-    let render_li = |page: &ContentPage, indent: &str| -> String {
+    // Render a single <li> for a page, with an optional display label override.
+    let render_li = |page: &ContentPage, label: &str, indent: &str| -> String {
         let href = page_href(&page.slug);
         let is_active = ctx.current_path == href;
         let li_class = if is_active { " class=\"active\"" } else { "" };
@@ -339,17 +339,22 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         };
         format!(
             "{}<li{}><a href=\"{}\"{}>{}</a></li>\n",
-            indent, li_class, href, aria, page.title
+            indent, li_class, href, aria, label
         )
     };
 
-    // -- Explicit order mode: sidebar lists page titles in display order --
+    // -- Explicit order mode: sidebar lists display labels in order --
+    // Each entry is a short label (e.g. "History") that matches pages whose
+    // title contains that label (e.g. "Our History"). The label itself is
+    // displayed in the sidebar, not the full page title.
     if !ctx.sidebar_sections.is_empty() {
         let mut html = String::from("<ul>\n");
         for entry in &ctx.sidebar_sections {
-            // Match by title only. Each entry names exactly one page.
-            if let Some(page) = pages.iter().find(|p| !p.hidden && p.title == *entry) {
-                html.push_str(&render_li(page, "  "));
+            if let Some(page) = pages
+                .iter()
+                .find(|p| !p.hidden && p.title.contains(entry.as_str()))
+            {
+                html.push_str(&render_li(page, entry, "  "));
             }
         }
         html.push_str("</ul>");
@@ -391,7 +396,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
             None => {
                 html.push_str("<ul>\n");
                 for page in section_pages {
-                    html.push_str(&render_li(page, "  "));
+                    html.push_str(&render_li(page, &page.title, "  "));
                 }
                 html.push_str("</ul>\n");
             }
@@ -407,7 +412,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                     class, section_name
                 ));
                 for page in section_pages {
-                    html.push_str(&render_li(page, "    "));
+                    html.push_str(&render_li(page, &page.title, "    "));
                 }
                 html.push_str("  </ul>\n</div>\n");
             }
@@ -929,7 +934,8 @@ mod tests {
                 image: None,
             },
             ContentPage {
-                title: "History".to_string(),
+                // Page title is longer than sidebar label
+                title: "Our History".to_string(),
                 slug: "history".to_string(),
                 weight: 30,
                 hidden: false,
@@ -940,7 +946,8 @@ mod tests {
                 image: None,
             },
         ];
-        // Sidebar lists titles in explicit order: Blog, History, Water
+        // Sidebar labels: short names that match within page titles.
+        // "History" matches "Our History", displayed as "History".
         let ctx = ShortcodeContext {
             captures: vec![],
             datafiles: vec![],
@@ -957,10 +964,12 @@ mod tests {
             ],
         };
         let html = render_content_nav(&ctx, "pages");
-        // All three present
-        assert!(html.contains("Blog"), "Blog present: {}", html);
-        assert!(html.contains("History"), "History present: {}", html);
-        assert!(html.contains("Water"), "Water present: {}", html);
+        // All three present with sidebar label text (not page title)
+        assert!(html.contains(">Blog<"), "Blog present: {}", html);
+        assert!(html.contains(">History<"), "History label: {}", html);
+        assert!(html.contains(">Water<"), "Water present: {}", html);
+        // "Our History" should NOT appear -- sidebar label overrides
+        assert!(!html.contains("Our History"), "Label override: {}", html);
         // Blog appears before History, History before Water (config order, not weight)
         let blog_pos = html.find("Blog").unwrap();
         let history_pos = html.find("History").unwrap();
