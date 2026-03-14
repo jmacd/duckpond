@@ -292,6 +292,7 @@ mod tests {
             site: SiteMeta {
                 title: "Test".to_string(),
                 base_url: "/test/".to_string(),
+                site_url: None,
             },
             content: vec![],
             exports: vec![ExportStage {
@@ -327,6 +328,7 @@ mod tests {
             partials: BTreeMap::new(),
             static_assets: vec![],
             sidebar: vec![],
+            feed: None,
         }
     }
 
@@ -457,6 +459,7 @@ mod tests {
             site: SiteMeta {
                 title: "Test".to_string(),
                 base_url: "/".to_string(),
+                site_url: None,
             },
             content: vec![],
             exports: vec![],
@@ -480,6 +483,7 @@ mod tests {
             partials: BTreeMap::new(),
             static_assets: vec![],
             sidebar: vec![],
+            feed: None,
         };
 
         let exports = BTreeMap::new();

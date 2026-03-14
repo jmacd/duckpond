@@ -49,6 +49,10 @@ pub struct SiteConfig {
     /// Pages not listed are excluded from the sidebar.
     #[serde(default)]
     pub sidebar: Vec<String>,
+    /// RSS feed configuration. If present, an RSS feed is generated.
+    /// Requires `site.site_url` to be set for absolute link generation.
+    #[serde(default)]
+    pub feed: Option<FeedConfig>,
 }
 
 /// Site-wide metadata.
@@ -57,6 +61,28 @@ pub struct SiteMeta {
     pub title: String,
     #[serde(default = "default_base_url")]
     pub base_url: String,
+    /// Canonical site URL for RSS feed links (e.g., "https://casparwater.org").
+    /// Required for RSS feed generation; if absent, feed is skipped.
+    #[serde(default)]
+    pub site_url: Option<String>,
+}
+
+/// RSS feed configuration (optional section in site.yaml).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedConfig {
+    /// Content section to include in the feed (default: "Blog").
+    #[serde(default = "default_feed_section")]
+    pub section: String,
+    /// Which content stage provides pages (default: first content stage).
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Channel description (default: site title).
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+fn default_feed_section() -> String {
+    "Blog".to_string()
 }
 
 fn default_base_url() -> String {
@@ -224,5 +250,51 @@ exports:
 "#;
         let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
         assert_eq!(config.exports[0].target_points, 2000);
+    }
+
+    #[test]
+    fn parse_minimal_config_no_site_url() {
+        let yaml = r#"
+site:
+  title: "Test"
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert!(config.site.site_url.is_none());
+        assert!(config.feed.is_none());
+    }
+
+    #[test]
+    fn parse_config_with_site_url_and_feed() {
+        let yaml = r#"
+site:
+  title: "Test Blog"
+  site_url: "https://example.com"
+
+feed:
+  section: "Updates"
+  description: "Latest updates"
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert_eq!(config.site.site_url.as_deref(), Some("https://example.com"));
+        let feed = config.feed.expect("feed config");
+        assert_eq!(feed.section, "Updates");
+        assert_eq!(feed.description.as_deref(), Some("Latest updates"));
+        assert!(feed.content.is_none());
+    }
+
+    #[test]
+    fn parse_feed_defaults() {
+        let yaml = r#"
+site:
+  title: "Test"
+  site_url: "https://example.com"
+
+feed: {}
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        let feed = config.feed.expect("feed config");
+        assert_eq!(feed.section, "Blog");
+        assert!(feed.content.is_none());
+        assert!(feed.description.is_none());
     }
 }

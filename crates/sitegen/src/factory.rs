@@ -570,6 +570,14 @@ fn generate_site(
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
     output_dir: &Path,
 ) -> Result<(), GenerateError> {
+    // Compute feed URL if site_url is configured
+    let feed_url = if config.site.site_url.is_some() {
+        let base = config.site.base_url.trim_end_matches('/');
+        Some(format!("{}/feed.xml", base))
+    } else {
+        None
+    };
+
     // Expand the route tree into page jobs
     let jobs = routes::expand_routes(config, exports, content);
     info!("Route expansion: {} pages to generate", jobs.len());
@@ -660,6 +668,7 @@ fn generate_site(
                 content: &content_html,
                 sidebar: sidebar_html.as_deref(),
                 date: fm.date.as_deref(),
+                feed_url: feed_url.as_deref(),
             },
         );
 
@@ -675,12 +684,139 @@ fn generate_site(
         debug!("wrote {}", job.output_path);
     }
 
+    // Generate RSS feed if site_url is configured
+    if config.site.site_url.is_some() {
+        generate_feed(config, content, output_dir)?;
+    } else {
+        info!("RSS feed skipped: site.site_url not configured");
+    }
+
     info!(
         "Site generation complete: {} pages to {:?}",
         jobs.len(),
         output_dir
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// RSS Feed Generation
+// ---------------------------------------------------------------------------
+
+/// Generate an RSS 2.0 feed from blog content pages.
+///
+/// Filters content pages by section (default "Blog"), sorts by date
+/// descending, and writes `feed.xml` to the output directory.
+fn generate_feed(
+    config: &SiteConfig,
+    content: &BTreeMap<String, ContentContext>,
+    output_dir: &Path,
+) -> Result<(), GenerateError> {
+    let site_url = config
+        .site
+        .site_url
+        .as_deref()
+        .ok_or_else(|| GenerateError("RSS feed requires site.site_url".to_string()))?
+        .trim_end_matches('/');
+
+    let feed_config = config.feed.as_ref();
+    let section = feed_config
+        .map(|f| f.section.as_str())
+        .unwrap_or("Blog");
+    let description = feed_config
+        .and_then(|f| f.description.as_deref())
+        .unwrap_or(&config.site.title);
+
+    // Find the content stage to use
+    let content_name = feed_config
+        .and_then(|f| f.content.as_deref())
+        .or_else(|| content.keys().next().map(|s| s.as_str()));
+
+    let pages = match content_name {
+        Some(name) => match content.get(name) {
+            Some(ctx) => &ctx.pages,
+            None => {
+                warn!("RSS feed: content stage '{}' not found, skipping", name);
+                return Ok(());
+            }
+        },
+        None => {
+            warn!("RSS feed: no content stages configured, skipping");
+            return Ok(());
+        }
+    };
+
+    // Filter to the target section, exclude hidden pages, require dates
+    let mut blog_posts: Vec<&ContentPage> = pages
+        .iter()
+        .filter(|p| !p.hidden)
+        .filter(|p| p.section.as_deref() == Some(section))
+        .filter(|p| p.date.is_some())
+        .collect();
+
+    // Sort by date descending (newest first)
+    blog_posts.sort_by(|a, b| b.date.cmp(&a.date));
+
+    let base = config.site.base_url.trim_end_matches('/');
+    let feed_link = format!("{}{}/feed.xml", site_url, base);
+
+    let items: Vec<rss::Item> = blog_posts
+        .iter()
+        .map(|page| {
+            let link = format!("{}{}/{}.html", site_url, base, page.slug);
+            let pub_date = page
+                .date
+                .as_deref()
+                .and_then(iso_date_to_rfc2822);
+
+            let mut item = rss::Item::default();
+            item.set_title(page.title.clone());
+            item.set_link(link.clone());
+            item.set_guid(rss::Guid {
+                value: link,
+                permalink: true,
+            });
+            if let Some(ref summary) = page.summary {
+                item.set_description(summary.clone());
+            }
+            if let Some(date) = pub_date {
+                item.set_pub_date(date);
+            }
+            item
+        })
+        .collect();
+
+    let channel = rss::Channel {
+        title: config.site.title.clone(),
+        link: site_url.to_string(),
+        description: description.to_string(),
+        items,
+        ..Default::default()
+    };
+
+    let feed_path = output_dir.join("feed.xml");
+    let xml = channel.to_string();
+    std::fs::write(&feed_path, xml.as_bytes())
+        .map_err(|e| GenerateError(format!("write {:?}: {}", feed_path, e)))?;
+
+    info!(
+        "RSS feed: {} items written to feed.xml (section='{}')",
+        blog_posts.len(),
+        section
+    );
+    let _ = feed_link;
+    Ok(())
+}
+
+/// Convert an ISO 8601 date (YYYY-MM-DD) to RFC 2822 format for RSS pubDate.
+///
+/// Uses noon UTC as the time component since blog posts only have date precision.
+fn iso_date_to_rfc2822(iso: &str) -> Option<String> {
+    let date = chrono::NaiveDate::parse_from_str(iso, "%Y-%m-%d").ok()?;
+    let datetime = date
+        .and_hms_opt(12, 0, 0)?;
+    let utc = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(datetime, chrono::Utc);
+    Some(utc.to_rfc2822())
 }
 
 // ---------------------------------------------------------------------------
@@ -807,5 +943,144 @@ mod tests {
         assert!(fm.hidden);
         assert!(fm.slug.is_none());
         assert_eq!(fm.layout, "default");
+    }
+
+    #[test]
+    fn test_iso_date_to_rfc2822() {
+        let result = iso_date_to_rfc2822("2025-03-10").unwrap();
+        assert!(result.contains("10 Mar 2025"), "Expected RFC 2822: {}", result);
+        assert!(result.contains("12:00:00"), "Expected noon: {}", result);
+    }
+
+    #[test]
+    fn test_iso_date_to_rfc2822_invalid() {
+        assert!(iso_date_to_rfc2822("not-a-date").is_none());
+        assert!(iso_date_to_rfc2822("").is_none());
+    }
+
+    #[test]
+    fn test_generate_feed() {
+        use crate::config::{FeedConfig, SiteMeta};
+        use tempfile::TempDir;
+
+        let output_dir = TempDir::new().unwrap();
+        let config = SiteConfig {
+            site: SiteMeta {
+                title: "Test Blog".to_string(),
+                base_url: "/".to_string(),
+                site_url: Some("https://example.com".to_string()),
+            },
+            content: vec![],
+            exports: vec![],
+            routes: vec![],
+            partials: BTreeMap::new(),
+            static_assets: vec![],
+            sidebar: vec![],
+            feed: Some(FeedConfig {
+                section: "Blog".to_string(),
+                content: Some("pages".to_string()),
+                description: Some("A test blog".to_string()),
+            }),
+        };
+
+        let mut content = BTreeMap::new();
+        content.insert(
+            "pages".to_string(),
+            ContentContext {
+                pages: vec![
+                    ContentPage {
+                        title: "First Post".to_string(),
+                        slug: "first-post".to_string(),
+                        weight: 100,
+                        hidden: false,
+                        section: Some("Blog".to_string()),
+                        source_path: "/content/first-post.md".to_string(),
+                        date: Some("2025-01-15".to_string()),
+                        summary: Some("My first post".to_string()),
+                        image: None,
+                    },
+                    ContentPage {
+                        title: "Second Post".to_string(),
+                        slug: "second-post".to_string(),
+                        weight: 100,
+                        hidden: false,
+                        section: Some("Blog".to_string()),
+                        source_path: "/content/second-post.md".to_string(),
+                        date: Some("2025-02-20".to_string()),
+                        summary: None,
+                        image: None,
+                    },
+                    ContentPage {
+                        title: "Hidden Post".to_string(),
+                        slug: "hidden".to_string(),
+                        weight: 100,
+                        hidden: true,
+                        section: Some("Blog".to_string()),
+                        source_path: "/content/hidden.md".to_string(),
+                        date: Some("2025-03-01".to_string()),
+                        summary: None,
+                        image: None,
+                    },
+                    ContentPage {
+                        title: "Not Blog".to_string(),
+                        slug: "about".to_string(),
+                        weight: 100,
+                        hidden: false,
+                        section: Some("Main".to_string()),
+                        source_path: "/content/about.md".to_string(),
+                        date: None,
+                        summary: None,
+                        image: None,
+                    },
+                ],
+            },
+        );
+
+        generate_feed(&config, &content, output_dir.path()).unwrap();
+
+        let feed_path = output_dir.path().join("feed.xml");
+        assert!(feed_path.exists(), "feed.xml should be created");
+
+        let xml = std::fs::read_to_string(&feed_path).unwrap();
+        assert!(xml.contains("<title>Test Blog</title>"), "Channel title: {}", xml);
+        assert!(xml.contains("https://example.com"), "Channel link: {}", xml);
+        assert!(xml.contains("A test blog"), "Channel description: {}", xml);
+        assert!(xml.contains("First Post"), "First post title: {}", xml);
+        assert!(xml.contains("Second Post"), "Second post title: {}", xml);
+        assert!(!xml.contains("Hidden Post"), "Hidden post excluded: {}", xml);
+        assert!(!xml.contains("Not Blog"), "Non-blog excluded: {}", xml);
+        assert!(xml.contains("first-post.html"), "First post link: {}", xml);
+        assert!(xml.contains("My first post"), "First post summary: {}", xml);
+        // Second Post should appear before First Post (date desc)
+        let second_pos = xml.find("Second Post").unwrap();
+        let first_pos = xml.find("First Post").unwrap();
+        assert!(second_pos < first_pos, "Newest post should be first");
+    }
+
+    #[test]
+    fn test_generate_feed_no_site_url() {
+        use crate::config::SiteMeta;
+        use tempfile::TempDir;
+
+        let output_dir = TempDir::new().unwrap();
+        let config = SiteConfig {
+            site: SiteMeta {
+                title: "Test".to_string(),
+                base_url: "/".to_string(),
+                site_url: None,
+            },
+            content: vec![],
+            exports: vec![],
+            routes: vec![],
+            partials: BTreeMap::new(),
+            static_assets: vec![],
+            sidebar: vec![],
+            feed: None,
+        };
+        let content = BTreeMap::new();
+
+        // Should error because site_url is missing
+        let result = generate_feed(&config, &content, output_dir.path());
+        assert!(result.is_err());
     }
 }

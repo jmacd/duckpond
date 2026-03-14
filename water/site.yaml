@@ -3,6 +3,7 @@ factory: sitegen
 site:
   title: "Caspar Water"
   base_url: "/"
+  site_url: "https://casparwater.us"
 
 content:
   - name: "pages"

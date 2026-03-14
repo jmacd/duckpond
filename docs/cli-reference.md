@@ -1120,6 +1120,37 @@ pond mknod sitegen /system/etc/90-sitegen --overwrite --config-path /path/to/sit
 - The `static:` config copies text files from the pond to the output root (binary files like images must use filename-only paths; SVG works since it is text).
 - The site is fully self-contained after build -- deploy to any static host.
 
+**RSS Feed:**
+
+Sitegen can generate an RSS 2.0 feed (`feed.xml`) from blog content pages.
+To enable, add `site_url` to the site config:
+
+```yaml
+site:
+  title: "My Site"
+  base_url: "/"
+  site_url: "https://example.com"   # Required for RSS (absolute URLs)
+```
+
+When `site_url` is set, sitegen automatically:
+- Generates `feed.xml` in the output directory
+- Adds an RSS icon to the top bar (next to the GitHub icon)
+- Adds `<link rel="alternate" type="application/rss+xml">` autodiscovery to all pages
+
+By default, the feed includes all non-hidden content pages with `section: "Blog"`
+and a `date:` field, sorted newest-first.
+
+Optional `feed:` section for customization:
+
+```yaml
+feed:
+  section: "Blog"                # Section to include (default: "Blog")
+  content: "pages"               # Content stage name (default: first stage)
+  description: "Latest updates"  # Channel description (default: site title)
+```
+
+If `site_url` is not set, RSS generation is silently skipped.
+
 ---
 
 ### column-rename

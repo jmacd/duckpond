@@ -65,6 +65,7 @@ Maudit has built-in integration with Maud as one of its templating options, but 
 site:
   title: "Noyo Harbor Blue Economy"
   base_url: "/"
+  site_url: "https://example.com"             # Required for RSS feed generation
 
 # Export stages - specify what data to export and how
 # These run first, producing file manifests with auto-computed temporal partitioning

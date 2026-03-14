@@ -31,3 +31,7 @@ chrono.workspace = true
 humantime = { workspace = true }
 pulldown-cmark.workspace = true
 maud.workspace = true
+rss.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
