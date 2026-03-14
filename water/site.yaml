@@ -12,6 +12,8 @@ content:
 exports:
   - name: "metrics"
     pattern: "/reduced/*/*/*.series"
+  - name: "analysis"
+    pattern: "/analysis/*"
 
 routes:
   - name: "home"
@@ -32,6 +34,15 @@ routes:
             slug: "$0"
             page: "/site/data.md"
             export: "metrics"
+      - name: "analysis"
+        type: static
+        slug: "analysis"
+        routes:
+          - name: "analysis-detail"
+            type: template
+            slug: "$0"
+            page: "/site/analysis.md"
+            export: "analysis"
 
 partials:
   sidebar: "/site/sidebar.md"

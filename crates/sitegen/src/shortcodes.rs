@@ -101,6 +101,15 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
+    // {{ overlay_chart }} -- emit overlay chart container for pump cycle analysis.
+    // Client-side overlay.js renders drawdown/recovery overlays and Horner plots.
+    {
+        let c = ctx.clone();
+        shortcodes.register("overlay_chart", move |_args: &ShortcodeArgs| {
+            render_overlay_chart(&c.datafiles)
+        });
+    }
+
     // {{ nav_list collection="params" base="/params" /}} -- link list for a collection
     {
         let c = ctx.clone();
@@ -190,6 +199,7 @@ pub fn preprocess_variables(content: &str) -> String {
         .replace("content-nav", "content_nav")
         .replace("base-url", "base_url")
         .replace("blog-grid", "blog_grid")
+        .replace("overlay-chart", "overlay_chart")
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +250,39 @@ fn render_chart(datafiles: &[ExportedFile]) -> String {
     format!(
         "<div class=\"chart-container\" id=\"chart\">\
          <script type=\"application/json\" class=\"chart-data\">{}</script>\
+         </div>",
+        json
+    )
+}
+
+/// Render an overlay chart container for pump cycle analysis.
+///
+/// Similar to render_chart but uses a different container ID and CSS class
+/// so that overlay.js picks it up instead of chart.js.
+fn render_overlay_chart(datafiles: &[ExportedFile]) -> String {
+    if datafiles.is_empty() {
+        return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
+    }
+
+    let files_json: Vec<serde_json::Value> = datafiles
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "path": f.path,
+                "file": f.file,
+                "captures": f.captures,
+                "temporal": f.temporal,
+                "start_time": f.start_time,
+                "end_time": f.end_time,
+            })
+        })
+        .collect();
+
+    let json = serde_json::to_string(&files_json).unwrap_or_else(|_| "[]".to_string());
+
+    format!(
+        "<div class=\"chart-container\" id=\"overlay-chart\">\
+         <script type=\"application/json\" class=\"overlay-data\">{}</script>\
          </div>",
         json
     )

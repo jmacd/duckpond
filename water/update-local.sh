@@ -25,6 +25,7 @@ EOF
 # Recreate factory nodes with --overwrite
 ${CARGO} mknod logfile-ingest /etc/ingest --overwrite --config-path "${INGEST_CFG}"
 ${CARGO} mknod dynamic-dir /reduced --overwrite --config-path ${SCRIPTS}/reduce-remote.yaml
+${CARGO} mknod dynamic-dir /analysis --overwrite --config-path ${SCRIPTS}/analysis-remote.yaml
 ${CARGO} mknod sitegen /etc/site.yaml --overwrite --config-path ${SCRIPTS}/site.yaml
 
 rm -f "${INGEST_CFG}"

@@ -270,6 +270,16 @@ impl FileInfo {
     /// Format in DuckPond-specific style showing meaningful metadata
     #[must_use]
     pub fn format_duckpond_style(&self) -> String {
+        self.format_with_options(false)
+    }
+
+    /// Format with full entry type name shown
+    #[must_use]
+    pub fn format_long_style(&self) -> String {
+        self.format_with_options(true)
+    }
+
+    fn format_with_options(&self, long: bool) -> String {
         let type_symbol = match self.metadata.entry_type {
             EntryType::DirectoryPhysical | EntryType::DirectoryDynamic => "[DIR]",
             EntryType::Symlink => "[LINK]",
@@ -278,6 +288,23 @@ impl FileInfo {
             | EntryType::FileDynamic => "[FILE]",
             EntryType::TablePhysicalVersion => "[TBL]",
             EntryType::TablePhysicalSeries | EntryType::TableDynamic => "[SER]",
+        };
+
+        let entry_type_str = if long {
+            let name = match self.metadata.entry_type {
+                EntryType::DirectoryPhysical => "directory",
+                EntryType::DirectoryDynamic => "dynamic-directory",
+                EntryType::Symlink => "symlink",
+                EntryType::FilePhysicalVersion => "data",
+                EntryType::FilePhysicalSeries => "data:series",
+                EntryType::FileDynamic => "data:dynamic",
+                EntryType::TablePhysicalVersion => "table",
+                EntryType::TablePhysicalSeries => "table:series",
+                EntryType::TableDynamic => "table:dynamic",
+            };
+            format!(" {:<17}", name)
+        } else {
+            String::new()
         };
 
         let size_str = if self.metadata.entry_type.is_directory() {
@@ -306,8 +333,9 @@ impl FileInfo {
         };
 
         format!(
-            "{} {:>8} {:>8} {} {} {}{}\n",
-            type_symbol, size_str, node_id_str, version_str, time_str, self.path, symlink_part
+            "{}{} {:>8} {:>8} {} {} {}{}\n",
+            type_symbol, entry_type_str, size_str, node_id_str, version_str, time_str, self.path,
+            symlink_part
         )
     }
 }

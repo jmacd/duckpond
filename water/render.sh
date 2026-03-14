@@ -25,6 +25,7 @@ mkdir -p "${OUTDIR}"
 pond run \
   -d "${SCRIPT_DIR}" \
   --hostmount "/reduced=host+dyndir:///reduce.yaml" \
+  --hostmount "/analysis=host+dyndir:///analysis.yaml" \
   host+sitegen:///site.yaml \
   build "${OUTDIR}"
 

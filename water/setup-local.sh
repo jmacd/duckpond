@@ -51,6 +51,7 @@ ${CARGO} copy host:///${SCRIPTS}/content /content
 # Install factory nodes
 ${CARGO} mknod logfile-ingest /etc/ingest --config-path "${INGEST_CFG}"
 ${CARGO} mknod dynamic-dir /reduced --config-path ${SCRIPTS}/reduce-remote.yaml
+${CARGO} mknod dynamic-dir /analysis --config-path ${SCRIPTS}/analysis-remote.yaml
 ${CARGO} mknod sitegen /etc/site.yaml --config-path ${SCRIPTS}/site.yaml
 
 rm -f "${INGEST_CFG}"

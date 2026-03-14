@@ -123,6 +123,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 }
                 // Our glue code -- loads DuckDB-WASM + Observable Plot dynamically
                 script src="/chart.js" type="module" {}
+                script src="/overlay.js" type="module" {}
             }
         }
     }

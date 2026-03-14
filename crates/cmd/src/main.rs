@@ -148,6 +148,9 @@ enum Commands {
         /// Show all files including hidden ones
         #[arg(short, long)]
         all: bool,
+        /// Show full entry type names (e.g., table:series, table:dynamic)
+        #[arg(short, long)]
+        long: bool,
     },
     /// Describe file schemas and types
     Describe {
@@ -159,8 +162,9 @@ enum Commands {
     Cat {
         /// File path to read
         path: String,
-        /// Output format [default: raw] [possible values: raw, table]
-        #[arg(long, default_value = "raw")]
+        /// Output format [default: auto] [possible values: auto, raw, table]
+        /// auto: table for queryable types when stdout is a TTY, raw otherwise
+        #[arg(long, default_value = "auto")]
         format: String,
         /// Time range start (Unix timestamp in milliseconds, optional)
         #[arg(long)]
@@ -171,6 +175,9 @@ enum Commands {
         /// SQL query to execute on the file:series data
         #[arg(long = "sql", visible_alias = "query")]
         query: Option<String>,
+        /// Show pattern resolution and schema without executing the query
+        #[arg(long)]
+        explain: bool,
     },
     /// Copy files into or out of the pond
     ///
@@ -360,8 +367,8 @@ async fn main() -> Result<()> {
             };
             commands::control_command(&ship_context, control_mode).await
         }
-        Commands::List { pattern, all } => {
-            commands::list_command(&ship_context, &pattern, all, print_handler).await
+        Commands::List { pattern, all, long } => {
+            commands::list_command(&ship_context, &pattern, all, long, print_handler).await
         }
         Commands::Describe { pattern } => {
             commands::describe_command(&ship_context, &pattern, print_handler).await
@@ -372,6 +379,7 @@ async fn main() -> Result<()> {
             time_start,
             time_end,
             query,
+            explain,
         } => {
             commands::cat_command(
                 &ship_context,
@@ -381,6 +389,7 @@ async fn main() -> Result<()> {
                 time_start,
                 time_end,
                 query.as_deref(),
+                explain,
             )
             .await
         }

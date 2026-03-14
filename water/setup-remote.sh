@@ -23,9 +23,10 @@ ssh ${HOST} "mkdir -p ${REMOTE_CONFIG}/site ${REMOTE_CONFIG}/content"
 scp \
     ingest.yaml \
     reduce-remote.yaml \
+    analysis-remote.yaml \
     site-remote.yaml \
     ${HOST}:${REMOTE_CONFIG}/
-scp site/index.md site/data.md site/sidebar.md ${HOST}:${REMOTE_CONFIG}/site/
+scp site/index.md site/data.md site/analysis.md site/sidebar.md ${HOST}:${REMOTE_CONFIG}/site/
 scp content/*.md ${HOST}:${REMOTE_CONFIG}/content/
 
 # Wipe the podman volume for a clean start
@@ -48,6 +49,8 @@ ${EXE} copy host:///config/content /content
 ${EXE} mknod logfile-ingest /etc/ingest --config-path /config/ingest.yaml
 
 ${EXE} mknod dynamic-dir /reduced --config-path /config/reduce-remote.yaml
+
+${EXE} mknod dynamic-dir /analysis --config-path /config/analysis-remote.yaml
 
 ${EXE} mknod sitegen /etc/site.yaml --config-path /config/site-remote.yaml
 

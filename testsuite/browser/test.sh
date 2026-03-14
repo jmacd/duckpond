@@ -163,5 +163,29 @@ start_vite "${SUBDIR_OUTPUT}" "/myapp/"
 run_browser_tests "http://localhost:${PORT}" "/myapp/" "${SUBDIR_OUTPUT}"
 stop_vite
 
+# ── Stage 5: Generate overlay site via test 305, run browser tests ───
+
+echo ""
+echo "=== Stage 5: Generating overlay analysis site via test 305 ==="
+
+OVERLAY_OUTPUT="/tmp/test-output-overlay"
+rm -rf "${OVERLAY_OUTPUT}"
+mkdir -p "${OVERLAY_OUTPUT}"
+
+bash "${TESTSUITE_DIR}/run-test.sh" "${RUN_TEST_EXTRA_ARGS[@]}" --output "${OVERLAY_OUTPUT}" 305
+
+if [[ ! -f "${OVERLAY_OUTPUT}/analysis/pump-cycles.html" ]]; then
+    echo "ERROR: Overlay site generation failed — no pump-cycles.html"
+    exit 1
+fi
+echo "  ✓ Overlay site generated in ${OVERLAY_OUTPUT}"
+
+echo ""
+echo "=== Stage 6: Browser tests (overlay) ==="
+
+start_vite "${OVERLAY_OUTPUT}" "/"
+run_browser_tests "http://localhost:${PORT}" "/" "${OVERLAY_OUTPUT}"
+stop_vite
+
 echo ""
 echo "=== All browser tests PASSED ==="

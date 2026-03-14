@@ -487,8 +487,13 @@ fn copy_static_assets(
 fn write_builtin_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
     static STYLE_CSS: &str = include_str!("../assets/style.css");
     static CHART_JS: &str = include_str!("../assets/chart.js");
+    static OVERLAY_JS: &str = include_str!("../assets/overlay.js");
 
-    for (name, content) in [("style.css", STYLE_CSS), ("chart.js", CHART_JS)] {
+    for (name, content) in [
+        ("style.css", STYLE_CSS),
+        ("chart.js", CHART_JS),
+        ("overlay.js", OVERLAY_JS),
+    ] {
         let path = output_dir.join(name);
         std::fs::write(&path, content.as_bytes())
             .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", path, e)))?;
