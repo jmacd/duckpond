@@ -224,21 +224,36 @@ entries:
           WHERE EXTRACT(EPOCH FROM (timestamp - event_start)) <= 7200
             AND static_depth BETWEEN 40.0 AND 50.0
             AND (start_gap_s IS NULL OR start_gap_s < 300)
+        ),
+        per_event AS (
+          SELECT
+            CAST(pump_event_id AS INT) as pump_event_id,
+            MIN(timestamp) as timestamp,
+            CAST(EXTRACT(MONTH FROM MIN(event_start)) AS INT) as month,
+            CAST(EXTRACT(DOY FROM MIN(event_start)) AS INT) as day_of_year,
+            SUM(CASE WHEN is_draw THEN 1 ELSE 0 END) * 60.0 as draw_duration_s,
+            SUM(CASE WHEN NOT is_draw THEN 1 ELSE 0 END) * 60.0 as recovery_duration_s,
+            COUNT(*) * 60.0 as total_duration_s,
+            MAX(depth_at_start - depth) as max_drawdown,
+            MIN(depth_at_start) as depth_at_start,
+            MIN(static_depth) as static_depth,
+            MIN(depth) as min_depth,
+            CAST(COUNT(*) AS INT) as num_points
+          FROM capped
+          GROUP BY pump_event_id
+          HAVING SUM(CASE WHEN is_draw THEN 1 ELSE 0 END) >= 20
+        ),
+        with_interval AS (
+          SELECT pe.*,
+            EXTRACT(EPOCH FROM (
+              LEAD(pe.timestamp) OVER (ORDER BY pe.timestamp) - pe.timestamp
+            )) as inter_pump_s
+          FROM per_event pe
         )
-        SELECT
-          CAST(pump_event_id AS INT) as pump_event_id,
-          MIN(timestamp) as timestamp,
-          CAST(EXTRACT(MONTH FROM MIN(event_start)) AS INT) as month,
-          CAST(EXTRACT(DOY FROM MIN(event_start)) AS INT) as day_of_year,
-          SUM(CASE WHEN is_draw THEN 1 ELSE 0 END) * 60.0 as draw_duration_s,
-          SUM(CASE WHEN NOT is_draw THEN 1 ELSE 0 END) * 60.0 as recovery_duration_s,
-          COUNT(*) * 60.0 as total_duration_s,
-          MAX(depth_at_start - depth) as max_drawdown,
-          MIN(depth_at_start) as depth_at_start,
-          MIN(static_depth) as static_depth,
-          MIN(depth) as min_depth,
-          CAST(COUNT(*) AS INT) as num_points
-        FROM capped
-        GROUP BY pump_event_id
-        HAVING SUM(CASE WHEN is_draw THEN 1 ELSE 0 END) >= 20
-        ORDER BY MIN(timestamp)
+        SELECT wi.*,
+          CASE WHEN inter_pump_s > 0
+            THEN draw_duration_s / inter_pump_s
+            ELSE NULL
+          END as duty_cycle
+        FROM with_interval wi
+        ORDER BY timestamp
