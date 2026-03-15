@@ -197,8 +197,9 @@
     let data;
     try {
       const result = await conn.query(`
-        SELECT pump_event_id, month, elapsed_s, drawdown, phase
+        SELECT pump_event_id, month, elapsed_s, depth, static_depth, phase
         FROM (${unionSql})
+        WHERE depth > 30 AND depth < 50
         ORDER BY pump_event_id, elapsed_s
       `);
       data = result.toArray();
@@ -218,17 +219,38 @@
 
     // Convert data types and add color column for Plot z-channel rendering.
     // Pre-computing color avoids per-event loops -- O(n) instead of O(n*m).
-    const rows = data.map((d) => {
+    const rows = [];
+    const seenEvents = new Set();
+    for (const d of data) {
+      const event = Number(d.pump_event_id);
       const month = Number(d.month);
-      return {
-        event: Number(d.pump_event_id),
+      const color = monthColor(month);
+      const staticDepth = Number(d.static_depth);
+
+      // Insert a synthetic pre-pump point at the static water level
+      if (!seenEvents.has(event) && staticDepth > 0) {
+        seenEvents.add(event);
+        rows.push({
+          event,
+          month,
+          color,
+          elapsed_min: -1,
+          depth: staticDepth,
+          drawdown: 0,
+          phase: "static",
+        });
+      }
+
+      rows.push({
+        event,
         month,
-        color: monthColor(month),
+        color,
         elapsed_min: Number(d.elapsed_s) / 60.0,
-        drawdown: Number(d.drawdown),
+        depth: Number(d.depth),
+        drawdown: staticDepth - Number(d.depth),
         phase: String(d.phase),
-      };
-    });
+      });
+    }
 
     // Find unique events and their months
     const eventMonths = new Map();
@@ -258,6 +280,8 @@
     header.className = "overlay-header";
     header.innerHTML =
       `<h3>Pump Cycle Overlay (${numEvents} cycles)</h3>` +
+      `<p class="chart-subtitle">Each line starts at its pre-pump static water level. ` +
+      `Seasonal variation visible in starting depth.</p>` +
       `<div class="overlay-legend">` +
       monthsPresent
         .map(
@@ -276,18 +300,19 @@
       style: { background: "transparent", color: "var(--fg)" },
       x: {
         label: "Elapsed time (minutes)",
-        domain: [0, maxMin],
+        domain: [-2, maxMin],
         grid: true,
       },
       y: {
-        label: "Drawdown (m)",
+        label: "Well depth (m)",
+        domain: [30, 45],
         grid: true,
       },
       color: { type: "identity" },
       marks: [
         Plot.line(rows, {
           x: "elapsed_min",
-          y: "drawdown",
+          y: "depth",
           z: "event",
           stroke: "color",
           strokeWidth: 0.8,
