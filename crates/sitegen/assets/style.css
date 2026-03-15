@@ -8,6 +8,13 @@
   --sidebar-width: 260px;
   --max-width: 960px;
 
+  /* Spacing: shared inset keeps sidebar and content top-aligned */
+  --page-inset: 2.5rem;
+
+  /* Radii: shared between nav buttons, cards, and containers */
+  --radius: 8px;
+  --radius-sm: 4px;
+
   /* Palette: ocean blue + coastal green */
   --accent: #0c4a6e;
   --accent-light: #0284c7;
@@ -46,7 +53,7 @@
 html {
   font: 16px/1.7 var(--font-sans);
   background: var(--bg);
-  background-image: url('/logo.svg');
+  background-image: url('/img/logo.svg');
   background-repeat: repeat;
   background-size: 1500px auto;
   color: var(--fg);
@@ -57,7 +64,8 @@ html {
 
 body {
   margin: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
   min-height: 100vh;
 }
 
@@ -67,12 +75,11 @@ a:hover { color: var(--accent); }
 /* ── Sidebar ────────────────────────────────────────────────── */
 
 .sidebar {
-  position: fixed;
-  left: 0; top: 0;
-  width: var(--sidebar-width);
+  position: sticky;
+  top: 0;
   height: 100vh;
   background: transparent;
-  padding: 1.25rem 0.75rem;
+  padding: var(--page-inset) 1.25rem;
   overflow-y: auto;
   z-index: 100;
 }
@@ -118,7 +125,7 @@ a:hover { color: var(--accent); }
   text-decoration: none;
   font-size: 1.3rem;
   font-weight: 400;
-  border-radius: 5px;
+  border-radius: var(--radius);
   transition: background 0.2s;
 }
 
@@ -130,6 +137,39 @@ a:hover { color: var(--accent); }
   background: rgba(140, 130, 120, 0.9);
   color: #ffffff;
   font-weight: 700;
+}
+
+/* ── Sub-navigation (nested under sidebar entries) ─────────── */
+
+.sidebar .subnav {
+  display: none;
+  margin: 4px 0 0 0;
+  padding: 0;
+}
+
+.sidebar .subnav.expanded {
+  display: block;
+}
+
+.sidebar .subnav li {
+  margin-bottom: 3px;
+}
+
+.sidebar .subnav a {
+  font-size: 0.85rem;
+  padding: 0.4rem 0.75rem 0.4rem 1.25rem;
+  background: rgba(50, 250, 200, 0.55);
+  border-radius: var(--radius-sm);
+}
+
+.sidebar .subnav a:hover {
+  background: rgba(200, 200, 200, 0.8);
+}
+
+.sidebar .subnav li.active a {
+  background: rgba(160, 150, 140, 0.85);
+  color: #ffffff;
+  font-weight: 600;
 }
 
 /* ── Nav sections (collapsible) ─────────────────────────────── */
@@ -150,16 +190,10 @@ a:hover { color: var(--accent); }
 /* ── Main content ───────────────────────────────────────────── */
 
 main {
-  margin-left: var(--sidebar-width);
-  flex: 1;
   min-width: 0;
-  padding: 2.5rem 3rem;
-  max-width: calc(var(--max-width) + var(--sidebar-width) + 6rem);
+  padding: var(--page-inset) 3rem;
+  max-width: calc(var(--max-width) + 6rem);
   background: transparent;
-  border-radius: 8px;
-  margin-top: 1rem;
-  margin-bottom: 1rem;
-  margin-right: 1rem;
 }
 
 main h1 {
@@ -213,7 +247,7 @@ main h3 {
   padding: 0.75rem 1.25rem;
   border-left: 3px solid var(--accent-light);
   background: var(--accent-wash);
-  border-radius: 0 6px 6px 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
   color: var(--fg-secondary);
 }
 
@@ -224,7 +258,7 @@ main h3 {
 .content-page img {
   max-width: 100%;
   height: auto;
-  border-radius: 8px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow-md);
   margin: 1rem 0;
 }
@@ -234,14 +268,14 @@ main h3 {
   font-size: 0.875em;
   background: var(--bg-card);
   padding: 0.15em 0.4em;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--accent);
 }
 
 .content-page pre {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 1rem 1.25rem;
   overflow-x: auto;
   font-size: 0.875rem;
@@ -337,7 +371,7 @@ tr:hover td {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--fg-secondary);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 0.8rem;
   font-weight: 500;
@@ -361,7 +395,7 @@ tr:hover td {
   border: 1px solid var(--accent-light);
   background: transparent;
   color: var(--accent-light);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 0.8rem;
   font-weight: 500;
@@ -408,7 +442,7 @@ tr:hover td {
   margin-bottom: 2rem;
   background: #f3f4f6;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 1.25rem;
   min-height: 200px;
 }
@@ -422,7 +456,7 @@ tr:hover td {
   padding: 2rem;
   text-align: center;
   background: var(--accent-wash);
-  border-radius: 8px;
+  border-radius: var(--radius);
   margin: 1rem 0;
   color: var(--fg-muted);
   font-size: 0.9rem;
@@ -449,7 +483,7 @@ tr:hover td {
   flex-direction: column;
   background: var(--accent-wash);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius);
   overflow: hidden;
   text-decoration: none;
   color: inherit;
@@ -562,7 +596,7 @@ tr:hover td {
 .blog-post {
   background: var(--accent-wash);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 2rem 2.5rem;
   box-shadow: var(--shadow-sm);
   max-width: var(--max-width);
@@ -615,14 +649,14 @@ tr:hover td {
   font-size: 0.875em;
   background: var(--bg-card);
   padding: 0.15em 0.4em;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--accent);
 }
 
 .blog-post-content img {
   max-width: 100%;
   height: auto;
-  border-radius: 8px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow-md);
   margin: 1rem 0;
 }
@@ -650,13 +684,18 @@ h3:hover .anchor {
 /* ── Responsive ─────────────────────────────────────────────── */
 
 @media (max-width: 768px) {
+  body {
+    grid-template-columns: 1fr;
+  }
   .sidebar {
+    position: fixed;
+    left: 0; top: 0;
+    width: var(--sidebar-width);
     transform: translateX(-100%);
     transition: transform 0.3s;
   }
   .sidebar.open { transform: translateX(0); }
   main {
-    margin-left: 0;
     padding: 1.5rem;
   }
 }

@@ -43,12 +43,13 @@ pub struct SiteConfig {
     pub partials: std::collections::BTreeMap<String, String>,
     #[serde(rename = "static", default)]
     pub static_assets: Vec<StaticAsset>,
-    /// Ordered list of sidebar entries (page titles or section names).
+    /// Ordered list of sidebar entries.
+    /// Each entry is either a plain string (matched by page title substring)
+    /// or a map with `label` and `children` for hierarchical navigation.
     /// When present, `content_nav` renders pages in this exact order.
-    /// Each entry is matched by page title first, then by section name.
     /// Pages not listed are excluded from the sidebar.
     #[serde(default)]
-    pub sidebar: Vec<String>,
+    pub sidebar: Vec<SidebarEntry>,
     /// RSS feed configuration. If present, an RSS feed is generated.
     /// Requires `site.site_url` to be set for absolute link generation.
     #[serde(default)]
@@ -169,6 +170,59 @@ pub enum RouteType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaticAsset {
     pub pattern: String,
+}
+
+/// A sidebar entry: either a simple label or a label with sub-navigation children.
+///
+/// Simple entries are plain strings matched by page title substring.
+/// Entries with children render a parent link plus nested sub-items
+/// that expand when the parent or any child is the current page.
+///
+/// ```yaml
+/// sidebar:
+///   - "Political"                    # simple
+///   - label: "Monitoring"            # with children
+///     children:
+///       - label: "Well Depth"
+///         href: "/data/well-depth.html"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SidebarEntry {
+    /// Label with nested sub-navigation items.
+    WithChildren {
+        label: String,
+        children: Vec<SidebarChild>,
+    },
+    /// Simple label matched by page title substring.
+    Simple(String),
+}
+
+impl SidebarEntry {
+    /// The display label for this entry.
+    pub fn label(&self) -> &str {
+        match self {
+            SidebarEntry::Simple(s) => s,
+            SidebarEntry::WithChildren { label, .. } => label,
+        }
+    }
+
+    /// Children, if any.
+    pub fn children(&self) -> &[SidebarChild] {
+        match self {
+            SidebarEntry::Simple(_) => &[],
+            SidebarEntry::WithChildren { children, .. } => children,
+        }
+    }
+}
+
+/// A child item in a sidebar entry with sub-navigation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SidebarChild {
+    /// Display label
+    pub label: String,
+    /// Direct URL path (e.g., "/data/well-depth.html")
+    pub href: String,
 }
 
 #[cfg(test)]
@@ -296,5 +350,33 @@ feed: {}
         assert_eq!(feed.section, "Blog");
         assert!(feed.content.is_none());
         assert!(feed.description.is_none());
+    }
+
+    #[test]
+    fn parse_sidebar_mixed_entries() {
+        let yaml = r#"
+site:
+  title: "Test"
+
+sidebar:
+  - "Political"
+  - "Blog"
+  - label: "Monitoring"
+    children:
+      - label: "Well Depth"
+        href: "/data/well-depth.html"
+      - label: "Tank Level"
+        href: "/data/tank-level.html"
+  - "Thanks"
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert_eq!(config.sidebar.len(), 4);
+        assert_eq!(config.sidebar[0].label(), "Political");
+        assert!(config.sidebar[0].children().is_empty());
+        assert_eq!(config.sidebar[2].label(), "Monitoring");
+        assert_eq!(config.sidebar[2].children().len(), 2);
+        assert_eq!(config.sidebar[2].children()[0].label, "Well Depth");
+        assert_eq!(config.sidebar[2].children()[0].href, "/data/well-depth.html");
+        assert_eq!(config.sidebar[3].label(), "Thanks");
     }
 }

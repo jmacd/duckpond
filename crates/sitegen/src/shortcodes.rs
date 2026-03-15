@@ -11,6 +11,7 @@
 //! Uses our own shortcode parser (in `crate::markdown`) with closures that
 //! capture an `Arc<ShortcodeContext>` with DuckPond data.
 
+use crate::config::SidebarEntry;
 use crate::markdown::{ShortcodeArgs, Shortcodes};
 use crate::routes::ContentPage;
 use std::collections::BTreeMap;
@@ -66,9 +67,10 @@ pub struct ShortcodeContext {
     pub breadcrumbs: Vec<(String, String)>,
     /// Base URL prefix for all generated links (e.g., "/noyo-harbor/")
     pub base_url: String,
-    /// Ordered sidebar section names from site.yaml.
-    /// When non-empty, `content_nav` renders flat pills in this order.
-    pub sidebar_sections: Vec<String>,
+    /// Ordered sidebar entries from site.yaml.
+    /// When non-empty, `content_nav` renders pills in this order,
+    /// with optional sub-navigation for entries that have children.
+    pub sidebar_sections: Vec<SidebarEntry>,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -342,10 +344,9 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
 
 /// Render a navigation list for content pages (ordered by weight).
 ///
-/// When `sidebar_sections` is defined in site.yaml, renders a flat pill
-/// list: only pages whose `section` matches one of those names are shown,
-/// in the order the sections appear in the config, then by weight within
-/// each section. No section headings, no expand/collapse.
+/// When `sidebar_sections` is defined in site.yaml, renders pills in the
+/// configured order. Entries with `children` render sub-navigation items
+/// that expand when the parent page or any child is the current page.
 ///
 /// When `sidebar_sections` is empty, falls back to the grouped/collapsible
 /// rendering with section headings.
@@ -387,17 +388,65 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
     };
 
     // -- Explicit order mode: sidebar lists display labels in order --
-    // Each entry is a short label (e.g. "History") that matches pages whose
-    // title contains that label (e.g. "Our History"). The label itself is
-    // displayed in the sidebar, not the full page title.
+    // Entries may be simple labels or labels with children (sub-nav).
     if !ctx.sidebar_sections.is_empty() {
         let mut html = String::from("<ul>\n");
         for entry in &ctx.sidebar_sections {
+            let label = entry.label();
+            let children = entry.children();
+
             if let Some(page) = pages
                 .iter()
-                .find(|p| !p.hidden && p.title.contains(entry.as_str()))
+                .find(|p| !p.hidden && p.title.contains(label))
             {
-                html.push_str(&render_li(page, entry, "  "));
+                let parent_href = page_href(&page.slug);
+                let parent_active = ctx.current_path == parent_href;
+
+                // A child is active if the current path matches any child href.
+                let child_active = children
+                    .iter()
+                    .any(|c| ctx.current_path == c.href);
+
+                let is_active = parent_active || child_active;
+                let li_class = if is_active { " class=\"active\"" } else { "" };
+                let aria = if parent_active {
+                    " aria-current=\"page\""
+                } else {
+                    ""
+                };
+
+                if children.is_empty() {
+                    html.push_str(&format!(
+                        "  <li{}><a href=\"{}\"{}>{}</a></li>\n",
+                        li_class, parent_href, aria, label
+                    ));
+                } else {
+                    html.push_str(&format!(
+                        "  <li{}><a href=\"{}\"{}>{}</a>\n",
+                        li_class, parent_href, aria, label
+                    ));
+                    // Sub-nav is visible when parent or child is active
+                    let sub_class = if is_active {
+                        "subnav expanded"
+                    } else {
+                        "subnav"
+                    };
+                    html.push_str(&format!("    <ul class=\"{}\">\n", sub_class));
+                    for child in children {
+                        let c_active = ctx.current_path == child.href;
+                        let c_class = if c_active { " class=\"active\"" } else { "" };
+                        let c_aria = if c_active {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        };
+                        html.push_str(&format!(
+                            "      <li{}><a href=\"{}\"{}>{}</a></li>\n",
+                            c_class, child.href, c_aria, child.label
+                        ));
+                    }
+                    html.push_str("    </ul>\n  </li>\n");
+                }
             }
         }
         html.push_str("</ul>");
@@ -1001,9 +1050,9 @@ mod tests {
             breadcrumbs: vec![],
             base_url: "/".to_string(),
             sidebar_sections: vec![
-                "Blog".to_string(),
-                "History".to_string(),
-                "Water".to_string(),
+                SidebarEntry::Simple("Blog".to_string()),
+                SidebarEntry::Simple("History".to_string()),
+                SidebarEntry::Simple("Water".to_string()),
             ],
         };
         let html = render_content_nav(&ctx, "pages");
@@ -1019,6 +1068,113 @@ mod tests {
         let water_pos = html.find("Water").unwrap();
         assert!(blog_pos < history_pos, "Blog before History");
         assert!(history_pos < water_pos, "History before Water");
+    }
+
+    #[test]
+    fn test_render_content_nav_with_children() {
+        use crate::config::SidebarChild;
+
+        let pages = vec![
+            ContentPage {
+                title: "Blog".to_string(),
+                slug: "blog".to_string(),
+                weight: 10,
+                hidden: false,
+                section: Some("Main".to_string()),
+                source_path: "/content/blog.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
+            },
+            ContentPage {
+                title: "Monitoring".to_string(),
+                slug: "monitoring".to_string(),
+                weight: 20,
+                hidden: false,
+                section: Some("Main".to_string()),
+                source_path: "/content/monitoring.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
+            },
+        ];
+
+        // When on the monitoring page, children should be expanded
+        let ctx = ShortcodeContext {
+            captures: vec![],
+            datafiles: vec![],
+            collections: BTreeMap::new(),
+            content_pages: BTreeMap::from([("pages".to_string(), pages.clone())]),
+            site_title: String::new(),
+            current_path: "/monitoring.html".to_string(),
+            breadcrumbs: vec![],
+            base_url: "/".to_string(),
+            sidebar_sections: vec![
+                SidebarEntry::Simple("Blog".to_string()),
+                SidebarEntry::WithChildren {
+                    label: "Monitoring".to_string(),
+                    children: vec![
+                        SidebarChild {
+                            label: "Well Depth".to_string(),
+                            href: "/data/well-depth.html".to_string(),
+                        },
+                        SidebarChild {
+                            label: "Tank Level".to_string(),
+                            href: "/data/tank-level.html".to_string(),
+                        },
+                    ],
+                },
+            ],
+        };
+        let html = render_content_nav(&ctx, "pages");
+        assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
+        assert!(html.contains(">Well Depth<"), "Child present: {}", html);
+        assert!(html.contains(">Tank Level<"), "Child present: {}", html);
+        assert!(
+            html.contains("subnav expanded"),
+            "Expanded when parent active: {}",
+            html
+        );
+        // Blog should not have subnav
+        assert!(
+            html.contains("<li class=\"active\"><a href=\"/monitoring.html\""),
+            "Parent is active: {}",
+            html
+        );
+
+        // When on a child page, parent + children should be expanded
+        let ctx_child = ShortcodeContext {
+            current_path: "/data/well-depth.html".to_string(),
+            ..ctx.clone()
+        };
+        let html2 = render_content_nav(&ctx_child, "pages");
+        assert!(
+            html2.contains("subnav expanded"),
+            "Expanded when child active: {}",
+            html2
+        );
+        assert!(
+            html2.contains("<li class=\"active\"><a href=\"/data/well-depth.html\""),
+            "Child is active: {}",
+            html2
+        );
+
+        // When on blog page, subnav should be collapsed
+        let ctx_blog = ShortcodeContext {
+            current_path: "/blog.html".to_string(),
+            ..ctx.clone()
+        };
+        let html3 = render_content_nav(&ctx_blog, "pages");
+        assert!(
+            html3.contains("class=\"subnav\""),
+            "Collapsed when neither active: {}",
+            html3
+        );
+        assert!(
+            !html3.contains("subnav expanded"),
+            "Not expanded: {}",
+            html3
+        );
     }
 
     #[test]
