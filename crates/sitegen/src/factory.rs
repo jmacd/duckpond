@@ -727,9 +727,7 @@ fn generate_feed(
         .trim_end_matches('/');
 
     let feed_config = config.feed.as_ref();
-    let section = feed_config
-        .map(|f| f.section.as_str())
-        .unwrap_or("Blog");
+    let section = feed_config.map(|f| f.section.as_str()).unwrap_or("Blog");
     let description = feed_config
         .and_then(|f| f.description.as_deref())
         .unwrap_or(&config.site.title);
@@ -771,10 +769,7 @@ fn generate_feed(
         .iter()
         .map(|page| {
             let link = format!("{}{}/{}.html", site_url, base, page.slug);
-            let pub_date = page
-                .date
-                .as_deref()
-                .and_then(iso_date_to_rfc2822);
+            let pub_date = page.date.as_deref().and_then(iso_date_to_rfc2822);
 
             let mut item = rss::Item::default();
             item.set_title(page.title.clone());
@@ -820,8 +815,7 @@ fn generate_feed(
 /// Uses noon UTC as the time component since blog posts only have date precision.
 fn iso_date_to_rfc2822(iso: &str) -> Option<String> {
     let date = chrono::NaiveDate::parse_from_str(iso, "%Y-%m-%d").ok()?;
-    let datetime = date
-        .and_hms_opt(12, 0, 0)?;
+    let datetime = date.and_hms_opt(12, 0, 0)?;
     let utc = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(datetime, chrono::Utc);
     Some(utc.to_rfc2822())
 }
@@ -955,7 +949,11 @@ mod tests {
     #[test]
     fn test_iso_date_to_rfc2822() {
         let result = iso_date_to_rfc2822("2025-03-10").unwrap();
-        assert!(result.contains("10 Mar 2025"), "Expected RFC 2822: {}", result);
+        assert!(
+            result.contains("10 Mar 2025"),
+            "Expected RFC 2822: {}",
+            result
+        );
         assert!(result.contains("12:00:00"), "Expected noon: {}", result);
     }
 
@@ -1049,12 +1047,20 @@ mod tests {
         assert!(feed_path.exists(), "feed.xml should be created");
 
         let xml = std::fs::read_to_string(&feed_path).unwrap();
-        assert!(xml.contains("<title>Test Blog</title>"), "Channel title: {}", xml);
+        assert!(
+            xml.contains("<title>Test Blog</title>"),
+            "Channel title: {}",
+            xml
+        );
         assert!(xml.contains("https://example.com"), "Channel link: {}", xml);
         assert!(xml.contains("A test blog"), "Channel description: {}", xml);
         assert!(xml.contains("First Post"), "First post title: {}", xml);
         assert!(xml.contains("Second Post"), "Second post title: {}", xml);
-        assert!(!xml.contains("Hidden Post"), "Hidden post excluded: {}", xml);
+        assert!(
+            !xml.contains("Hidden Post"),
+            "Hidden post excluded: {}",
+            xml
+        );
         assert!(!xml.contains("Not Blog"), "Non-blog excluded: {}", xml);
         assert!(xml.contains("first-post.html"), "First post link: {}", xml);
         assert!(xml.contains("My first post"), "First post summary: {}", xml);

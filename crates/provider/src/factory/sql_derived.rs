@@ -946,8 +946,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                 } else {
                     // Check if this pattern uses a format provider
                     let scheme = pattern.scheme();
-                    let is_format_provider =
-                        crate::FormatRegistry::get_provider(scheme).is_some();
+                    let is_format_provider = crate::FormatRegistry::get_provider(scheme).is_some();
 
                     // Create table provider
                     let listing_table_provider = if is_format_provider {

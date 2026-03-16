@@ -109,11 +109,7 @@ fn create_schema(keys: &[String]) -> SchemaRef {
 /// - Strings are stored directly (without surrounding quotes)
 /// - Numbers, booleans, nulls are stored as their JSON text
 /// - Nested objects/arrays are stored as compact JSON strings
-fn build_record_batch(
-    schema: SchemaRef,
-    rows: &[Value],
-    keys: &[String],
-) -> Result<RecordBatch> {
+fn build_record_batch(schema: SchemaRef, rows: &[Value], keys: &[String]) -> Result<RecordBatch> {
     let num_rows = rows.len();
 
     let columns: Vec<Arc<dyn arrow::array::Array>> = keys

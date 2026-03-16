@@ -434,9 +434,13 @@ mod tests {
             .expect("Failed to create pond file");
 
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "*.nonexistent", false, false, |output| {
-            results.push(output.to_string())
-        })
+        list_command(
+            &setup.ship_context,
+            "*.nonexistent",
+            false,
+            false,
+            |output| results.push(output.to_string()),
+        )
         .await
         .expect("List command failed");
 

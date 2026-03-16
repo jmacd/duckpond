@@ -189,8 +189,7 @@ impl HostSteward {
             tinyfs::hostmount::OverlayPersistence::new(overlay_hostmount, phase1_overlays),
         );
         let overlay_session = Arc::new(SessionContext::new());
-        let overlay_provider_context =
-            ProviderContext::new(overlay_session, overlay_persistence);
+        let overlay_provider_context = ProviderContext::new(overlay_session, overlay_persistence);
 
         // Phase 2: Recreate factory nodes with the full overlay context.
         // Now each factory can resolve paths to sibling overlays.
@@ -228,17 +227,14 @@ impl HostSteward {
                 );
                 let factory_context =
                     tinyfs::FactoryContext::new(provider_context.clone(), child_file_id);
-                let dir_handle = FactoryRegistry::create_directory(
-                    factory_name,
-                    config_bytes,
-                    factory_context,
-                )
-                .map_err(|e| {
-                    StewardError::ControlTable(format!(
-                        "Failed to create factory directory for mount '/{}': {}",
-                        mount_name, e
-                    ))
-                })?;
+                let dir_handle =
+                    FactoryRegistry::create_directory(factory_name, config_bytes, factory_context)
+                        .map_err(|e| {
+                            StewardError::ControlTable(format!(
+                                "Failed to create factory directory for mount '/{}': {}",
+                                mount_name, e
+                            ))
+                        })?;
 
                 let node =
                     tinyfs::Node::new(child_file_id, tinyfs::NodeType::Directory(dir_handle));

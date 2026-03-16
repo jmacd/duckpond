@@ -334,7 +334,13 @@ impl FileInfo {
 
         format!(
             "{}{} {:>8} {:>8} {} {} {}{}\n",
-            type_symbol, entry_type_str, size_str, node_id_str, version_str, time_str, self.path,
+            type_symbol,
+            entry_type_str,
+            size_str,
+            node_id_str,
+            version_str,
+            time_str,
+            self.path,
             symlink_part
         )
     }

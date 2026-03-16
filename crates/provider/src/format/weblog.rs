@@ -98,11 +98,7 @@ fn parse_request(req: &str) -> (Option<String>, Option<String>, Option<String>) 
             Some(parts[1].to_string()),
             Some(parts[2].to_string()),
         ),
-        2 => (
-            Some(parts[0].to_string()),
-            Some(parts[1].to_string()),
-            None,
-        ),
+        2 => (Some(parts[0].to_string()), Some(parts[1].to_string()), None),
         1 if !parts[0].is_empty() => (Some(parts[0].to_string()), None, None),
         _ => (None, None, None),
     }
@@ -110,17 +106,11 @@ fn parse_request(req: &str) -> (Option<String>, Option<String>, Option<String>) 
 
 /// Normalize a CLF field: `-` becomes None.
 fn dash_to_none(s: &str) -> Option<String> {
-    if s == "-" {
-        None
-    } else {
-        Some(s.to_string())
-    }
+    if s == "-" { None } else { Some(s.to_string()) }
 }
 
 /// Read all lines, parse each, skip malformed lines with a warning.
-async fn read_all_lines(
-    reader: Pin<Box<dyn AsyncRead + Send>>,
-) -> Result<Vec<LogEntry>> {
+async fn read_all_lines(reader: Pin<Box<dyn AsyncRead + Send>>) -> Result<Vec<LogEntry>> {
     let mut reader = BufReader::new(reader);
     let mut entries = Vec::new();
     let mut line = String::new();
@@ -221,28 +211,21 @@ async fn read_all_lines(
 fn build_record_batch(schema: SchemaRef, entries: &[LogEntry]) -> Result<RecordBatch> {
     let timestamps: Vec<i64> = entries.iter().map(|e| e.timestamp_us).collect();
     let remote_addrs: Vec<&str> = entries.iter().map(|e| e.remote_addr.as_str()).collect();
-    let remote_users: Vec<Option<&str>> = entries
-        .iter()
-        .map(|e| e.remote_user.as_deref())
-        .collect();
+    let remote_users: Vec<Option<&str>> =
+        entries.iter().map(|e| e.remote_user.as_deref()).collect();
     let methods: Vec<Option<&str>> = entries.iter().map(|e| e.method.as_deref()).collect();
     let paths: Vec<Option<&str>> = entries.iter().map(|e| e.path.as_deref()).collect();
     let protocols: Vec<Option<&str>> = entries.iter().map(|e| e.protocol.as_deref()).collect();
     let statuses: Vec<u16> = entries.iter().map(|e| e.status).collect();
     let body_bytes: Vec<u64> = entries.iter().map(|e| e.body_bytes_sent).collect();
-    let referers: Vec<Option<&str>> = entries
-        .iter()
-        .map(|e| e.http_referer.as_deref())
-        .collect();
+    let referers: Vec<Option<&str>> = entries.iter().map(|e| e.http_referer.as_deref()).collect();
     let user_agents: Vec<Option<&str>> = entries
         .iter()
         .map(|e| e.http_user_agent.as_deref())
         .collect();
 
     let columns: Vec<Arc<dyn arrow::array::Array>> = vec![
-        Arc::new(
-            TimestampMicrosecondArray::from(timestamps).with_timezone("UTC"),
-        ),
+        Arc::new(TimestampMicrosecondArray::from(timestamps).with_timezone("UTC")),
         Arc::new(StringArray::from(remote_addrs)),
         Arc::new(StringArray::from(remote_users)),
         Arc::new(StringArray::from(methods)),
@@ -512,8 +495,7 @@ mod tests {
     #[tokio::test]
     async fn test_dash_body_bytes() {
         // Some servers log `-` for body_bytes_sent when response has no body
-        let line =
-            r#"10.0.0.1 - - [15/Mar/2025:12:00:00 +0000] "HEAD / HTTP/1.1" 204 -"#;
+        let line = r#"10.0.0.1 - - [15/Mar/2025:12:00:00 +0000] "HEAD / HTTP/1.1" 204 -"#;
         let reader = make_reader(line);
         let url = Url::parse("weblog:///test.log").unwrap();
         let provider = WeblogProvider::new();

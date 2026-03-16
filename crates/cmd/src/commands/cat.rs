@@ -421,9 +421,10 @@ async fn explain_impl(
     println!("\nSQL:    {}", effective_sql);
 
     // Show the logical plan
-    let df = ctx.sql(effective_sql).await.map_err(|e| {
-        anyhow::anyhow!("Failed to parse SQL query '{}': {}", effective_sql, e)
-    })?;
+    let df = ctx
+        .sql(effective_sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse SQL query '{}': {}", effective_sql, e))?;
 
     let output_schema = df.schema();
     println!("\nOutput: {} fields", output_schema.fields().len());

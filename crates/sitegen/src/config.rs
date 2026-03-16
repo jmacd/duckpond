@@ -376,7 +376,10 @@ sidebar:
         assert_eq!(config.sidebar[2].label(), "Monitoring");
         assert_eq!(config.sidebar[2].children().len(), 2);
         assert_eq!(config.sidebar[2].children()[0].label, "Well Depth");
-        assert_eq!(config.sidebar[2].children()[0].href, "/data/well-depth.html");
+        assert_eq!(
+            config.sidebar[2].children()[0].href,
+            "/data/well-depth.html"
+        );
         assert_eq!(config.sidebar[3].label(), "Thanks");
     }
 }

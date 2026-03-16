@@ -395,17 +395,12 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
             let label = entry.label();
             let children = entry.children();
 
-            if let Some(page) = pages
-                .iter()
-                .find(|p| !p.hidden && p.title.contains(label))
-            {
+            if let Some(page) = pages.iter().find(|p| !p.hidden && p.title.contains(label)) {
                 let parent_href = page_href(&page.slug);
                 let parent_active = ctx.current_path == parent_href;
 
                 // A child is active if the current path matches any child href.
-                let child_active = children
-                    .iter()
-                    .any(|c| ctx.current_path == c.href);
+                let child_active = children.iter().any(|c| ctx.current_path == c.href);
 
                 let is_active = parent_active || child_active;
                 let li_class = if is_active { " class=\"active\"" } else { "" };
@@ -609,13 +604,11 @@ fn render_blog_grid(ctx: &ShortcodeContext, content_name: &str, section: &str) -
     }
 
     // Sort by date descending (newest first); undated posts go last, ordered by weight
-    posts.sort_by(|a, b| {
-        match (&b.date, &a.date) {
-            (Some(bd), Some(ad)) => bd.cmp(ad),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.weight.cmp(&b.weight),
-        }
+    posts.sort_by(|a, b| match (&b.date, &a.date) {
+        (Some(bd), Some(ad)) => bd.cmp(ad),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.weight.cmp(&b.weight),
     });
 
     let base = ctx.base_url.trim_end_matches('/');
@@ -1287,17 +1280,9 @@ mod tests {
             html
         );
         // New post appears (newest first)
-        assert!(
-            html.contains("New Post"),
-            "Expected New Post: {}",
-            html
-        );
+        assert!(html.contains("New Post"), "Expected New Post: {}", html);
         // Old post appears
-        assert!(
-            html.contains("Old Post"),
-            "Expected Old Post: {}",
-            html
-        );
+        assert!(html.contains("Old Post"), "Expected Old Post: {}", html);
         // New post should appear before Old post (date descending)
         let new_pos = html.find("New Post").unwrap();
         let old_pos = html.find("Old Post").unwrap();
@@ -1330,11 +1315,7 @@ mod tests {
             html
         );
         // Summary present
-        assert!(
-            html.contains("A newer post"),
-            "Expected summary: {}",
-            html
-        );
+        assert!(html.contains("A newer post"), "Expected summary: {}", html);
         // Links are correct
         assert!(
             html.contains("href=\"/new-post.html\""),

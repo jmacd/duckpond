@@ -343,17 +343,45 @@ mod tests {
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("top-bar"), "Expected top bar: {}", html);
-        assert!(html.contains("blog.html"), "Expected back link to blog: {}", html);
-        assert!(html.contains("github.com"), "Expected GitHub icon: {}", html);
-        assert!(html.contains("March 10, 2025"), "Expected formatted date: {}", html);
+        assert!(
+            html.contains("blog.html"),
+            "Expected back link to blog: {}",
+            html
+        );
+        assert!(
+            html.contains("github.com"),
+            "Expected GitHub icon: {}",
+            html
+        );
+        assert!(
+            html.contains("March 10, 2025"),
+            "Expected formatted date: {}",
+            html
+        );
         assert!(html.contains("My Blog Post"), "Expected title: {}", html);
-        assert!(html.contains("blog-post-title"), "Expected title class: {}", html);
-        assert!(html.contains("Post content here"), "Expected content: {}", html);
-        assert!(html.contains("class=\"sidebar\""), "Expected sidebar: {}", html);
+        assert!(
+            html.contains("blog-post-title"),
+            "Expected title class: {}",
+            html
+        );
+        assert!(
+            html.contains("Post content here"),
+            "Expected content: {}",
+            html
+        );
+        assert!(
+            html.contains("class=\"sidebar\""),
+            "Expected sidebar: {}",
+            html
+        );
         assert!(!html.contains("chart.js"), "No CDN scripts in blog layout");
         assert!(html.contains("RSS Feed"), "Expected RSS icon: {}", html);
         assert!(html.contains("/feed.xml"), "Expected feed link: {}", html);
-        assert!(html.contains("application/rss+xml"), "Expected RSS autodiscovery: {}", html);
+        assert!(
+            html.contains("application/rss+xml"),
+            "Expected RSS autodiscovery: {}",
+            html
+        );
     }
 
     #[test]
@@ -368,6 +396,10 @@ mod tests {
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("blog-post"), "Expected blog-post: {}", html);
-        assert!(!html.contains("blog-post-date"), "No date element expected: {}", html);
+        assert!(
+            !html.contains("blog-post-date"),
+            "No date element expected: {}",
+            html
+        );
     }
 }
