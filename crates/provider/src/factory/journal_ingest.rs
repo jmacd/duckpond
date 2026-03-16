@@ -47,9 +47,8 @@ fn parse_command(ctx: ExecutionContext) -> Result<JournalCommand, tinyfs::Error>
         .chain(ctx.args().iter().cloned())
         .collect();
 
-    JournalCommand::try_parse_from(args_with_prog_name).map_err(|e| {
-        tinyfs::Error::Other(format!("Command parse error: {}", e))
-    })
+    JournalCommand::try_parse_from(args_with_prog_name)
+        .map_err(|e| tinyfs::Error::Other(format!("Command parse error: {}", e)))
 }
 
 /// Configuration for the journal ingestion factory
@@ -122,7 +121,11 @@ async fn read_cursor(
             if trimmed.is_empty() {
                 Ok(None)
             } else {
-                debug!("Read cursor: {}...{}", &trimmed[..16.min(trimmed.len())], &trimmed[trimmed.len().saturating_sub(8)..]);
+                debug!(
+                    "Read cursor: {}...{}",
+                    &trimmed[..16.min(trimmed.len())],
+                    &trimmed[trimmed.len().saturating_sub(8)..]
+                );
                 Ok(Some(trimmed))
             }
         }
@@ -146,7 +149,11 @@ async fn write_cursor(
     root.write_file_path_from_slice(&cursor_path, cursor.as_bytes())
         .await?;
 
-    debug!("Wrote cursor: {}...{}", &cursor[..16.min(cursor.len())], &cursor[cursor.len().saturating_sub(8)..]);
+    debug!(
+        "Wrote cursor: {}...{}",
+        &cursor[..16.min(cursor.len())],
+        &cursor[cursor.len().saturating_sub(8)..]
+    );
     Ok(())
 }
 
@@ -155,10 +162,7 @@ async fn collect_journal_entries(
     config: &JournalIngestConfig,
     cursor: Option<&str>,
 ) -> Result<Vec<String>, tinyfs::Error> {
-    let mut cmd_args = vec![
-        "--output=json".to_string(),
-        "--no-pager".to_string(),
-    ];
+    let mut cmd_args = vec!["--output=json".to_string(), "--no-pager".to_string()];
 
     if let Some(cursor_val) = cursor {
         cmd_args.push(format!("--after-cursor={}", cursor_val));
@@ -229,7 +233,7 @@ fn group_entries(
         // Determine destination filename
         let filename = determine_filename(&parsed, collect_kernel);
 
-        let _ = groups.entry(filename).or_default().push(line.as_str());
+        groups.entry(filename).or_default().push(line.as_str());
     }
 
     if skipped > 0 {
@@ -242,12 +246,11 @@ fn group_entries(
 /// Determine the output filename for a journal entry
 fn determine_filename(entry: &Value, collect_kernel: bool) -> String {
     // Check for kernel transport first (when collect_kernel is enabled)
-    if collect_kernel {
-        if let Some(transport) = entry.get("_TRANSPORT").and_then(|v| v.as_str()) {
-            if transport == "kernel" {
-                return KERNEL_FILENAME.to_string();
-            }
-        }
+    if collect_kernel
+        && let Some(transport) = entry.get("_TRANSPORT").and_then(|v| v.as_str())
+        && transport == "kernel"
+    {
+        return KERNEL_FILENAME.to_string();
     }
 
     // Group by _SYSTEMD_UNIT if present
@@ -413,7 +416,11 @@ pub async fn execute(
     // Step 1: Read cursor from pond
     let cursor = read_cursor(&context, &config.pond_path).await?;
     if let Some(ref c) = cursor {
-        info!("Resuming from cursor: {}...{}", &c[..16.min(c.len())], &c[c.len().saturating_sub(8)..]);
+        info!(
+            "Resuming from cursor: {}...{}",
+            &c[..16.min(c.len())],
+            &c[c.len().saturating_sub(8)..]
+        );
     } else {
         info!("No cursor found -- collecting all available journal entries");
     }
@@ -503,7 +510,8 @@ mod tests {
 
     #[test]
     fn test_validate_config_yaml() {
-        let yaml = b"pond_path: logs/watershop\njournalctl_command: journalctl\ncollect_kernel: true\n";
+        let yaml =
+            b"pond_path: logs/watershop\njournalctl_command: journalctl\ncollect_kernel: true\n";
         let result = validate_config(yaml);
         assert!(result.is_ok());
     }

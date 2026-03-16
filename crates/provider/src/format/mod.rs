@@ -23,6 +23,7 @@ pub mod csv;
 pub mod excelhtml;
 pub mod jsonlogs;
 pub mod oteljson;
+pub mod weblog;
 
 /// Format provider trait - converts file data to Arrow RecordBatches
 ///

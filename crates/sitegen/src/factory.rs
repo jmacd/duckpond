@@ -146,10 +146,12 @@ async fn execute(
                 }
                 for (node_path, _captures) in &matches {
                     let path_str = node_path.path.to_string_lossy().to_string();
-                    if !static_assets.contains_key(&path_str) {
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        static_assets.entry(path_str.clone())
+                    {
                         match root.read_file_path_to_vec(&path_str).await {
                             Ok(data) => {
-                                static_assets.insert(path_str, data);
+                                entry.insert(data);
                             }
                             Err(e) => {
                                 warn!("Cannot read static asset '{}': {}", path_str, e);
