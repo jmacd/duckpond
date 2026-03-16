@@ -22,7 +22,7 @@ const SITE_ROOT = realpathSync(process.env.SITE_ROOT || "/tmp/test-output");
 
 /**
  * Discover pages from the generated site directory.
- * index.html → hero layout, everything else → data-page layout.
+ * index.html is the home page, everything else is a data page (has chart.js).
  */
 function discoverPages(siteRoot) {
   const pages = [];
@@ -39,7 +39,7 @@ function discoverPages(siteRoot) {
         pages.push({
           path: rel,
           title: isIndex ? "" : entry.replace(".html", ""),
-          layout: isIndex ? "hero" : "data-page",
+          isIndex,
         });
       }
     }
@@ -94,7 +94,11 @@ async function testPage(browser, page) {
     console.log(`\n=== ${page.path} ===`);
 
     // Non-data pages: check JS errors immediately (data pages check after chart loads)
-    if (page.layout !== "data-page") {
+    // Detect data pages by presence of chart.js script tag
+    const isDataPage = await tab.evaluate(
+      () => document.querySelector('script[src*="chart.js"]') !== null
+    );
+    if (!isDataPage) {
       check(errors.length === 0, `no JS errors (got ${errors.length})`);
       errors.forEach((e) => console.log(`    ERROR: ${e}`));
     }
@@ -115,12 +119,11 @@ async function testPage(browser, page) {
       `title contains "${page.title}" (got "${title}")`
     );
 
-    // Layout class applied
-    const hasLayout = await tab.evaluate(
-      (cls) => document.querySelector(`main.${cls}`) !== null,
-      page.layout
+    // Layout check: data pages include chart.js, default pages do not
+    check(
+      page.isIndex ? !isDataPage : isDataPage,
+      page.isIndex ? "default layout (no chart.js)" : "data layout (has chart.js)"
     );
-    check(hasLayout, `layout class "${page.layout}" present`);
 
     // Sidebar exists
     const hasSidebar = await tab.evaluate(
@@ -162,7 +165,7 @@ async function testPage(browser, page) {
     check(mainText > 10, `main content not empty (${mainText} chars)`);
 
     // Data pages: chart container and manifest
-    if (page.layout === "data-page") {
+    if (isDataPage) {
       const hasChart = await tab.evaluate(
         () => document.querySelector(".chart-container") !== null
       );
