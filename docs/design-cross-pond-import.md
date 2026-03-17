@@ -101,7 +101,7 @@ import:
   # Path in the foreign pond to import
   source_path: "/ingest"
   # Path in this pond where imported content is mounted
-  mount_path: "/sources/septic"
+  local_path: "/sources/septic"
 ```
 
 ---
@@ -314,7 +314,7 @@ compression_level: 3
 url: "s3://septic-dev"
 import:
   source_path: "/ingest"
-  mount_path: "/sources/septic"
+  local_path: "/sources/septic"
 ```
 
 A pond can have multiple remote factories: one for its own backup
@@ -731,7 +731,7 @@ secret_key: "{{ env(name='R2_SECRET') }}"
 
 import:
   source_path: "/ingest"
-  mount_path: "/sources/septic"
+  local_path: "/sources/septic"
 ```
 
 A single pond can have many import factories. Each one is a separate
@@ -996,6 +996,79 @@ factories, or a different mechanism would be needed.
 **Decision needed:** Import factories in `/system/run/`
 (auto-pull on every commit) or `/system/etc/` (manual sync only)?
 If `/system/etc/`, how does `pond sync` find them?
+
+---
+
+## Decisions
+
+The following decisions were made during Phase 1 implementation
+(2026-03-17) and apply to Phase 2 and beyond.
+
+### Q1: Read-only on import paths -> Convention only
+
+No enforcement. The `pond_id` column makes coexistence structurally
+sound. Local writes alongside imported data are technically safe.
+Enforcement can be added later if mixed-provenance directories prove
+confusing in practice.
+
+### Q2: Provenance display -> Always show
+
+Provenance appears in `describe`, `show`, and `list --long` whenever
+a file or partition has a foreign `pond_id`. Local files omit the
+provenance line (no noise). No opt-in flag needed.
+
+### Q3: Terminology -> "import path", config field `local_path`
+
+Use "import path" instead of "mount point" to avoid collision with
+hostmount overlays. The config field is `import.local_path` (not
+`local_path`):
+
+```yaml
+import:
+  source_path: "/ingest"
+  local_path: "/sources/septic"
+```
+
+### Q4: Directory ownership -> Convention only
+
+No factory ownership metadata. The import factory creates a directory
+entry pointing at the imported partition's root, but does not "own"
+it in an enforced sense. Follows from Q1.
+
+### Q5: Credentials -> Ship with current handling
+
+Current template-in-YAML approach (env vars expanded at `mknod` time)
+is acceptable. Same risk as self-backup credentials. Security
+improvements apply uniformly to all factory configs later.
+
+### Q6: Restore with imports -> Deferred
+
+The control table is backed up with the pond (it's a Delta table in
+the pond directory), so restore gets import state. Edge cases
+(replicas continuing to pull, reconciliation) deferred until import
+is working end-to-end.
+
+### Q7: Import factory placement -> Operator's choice
+
+No default placement. The operator chooses:
+- `/system/run/` for auto-pull on every commit
+- `/system/etc/` for manual-only (`pond run` / `pond sync`)
+
+Docs note the tradeoff. No changes to `pond sync` scanning logic.
+
+---
+
+## Phase 1 Implementation Status
+
+Phase 1 (Schema Foundation) was implemented on 2026-03-17:
+
+- `pond_id: Utf8` added to `OplogEntry` (non-nullable, stamped at
+  commit time by persistence layer) -- DONE
+- `pond_id: Utf8` added to `ChunkedFileRecord` -- DONE
+- `pond_id` added to `PondTxnMetadata` (in Delta commit metadata) -- DONE
+- `bundle_id` format changed to `FILE-META-{pond_id}-{date}-{txn_seq}` -- DONE
+- `pond_id` threaded through `OpLogPersistence::create/open` -- DONE
+- All existing tests pass -- DONE
 
 ---
 
