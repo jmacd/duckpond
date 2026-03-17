@@ -182,10 +182,13 @@ impl SimpleReplicationTest {
         let last_write_seq = control_table.get_last_write_sequence().await?;
 
         // Get commit history from data persistence
-        let persistence =
-            tlogfs::OpLogPersistence::open(&format!("{}/data", pond_path.to_string_lossy()))
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to open data persistence: {}", e))?;
+        let pond_id = control_table.get_pond_metadata().pond_id.to_string();
+        let persistence = tlogfs::OpLogPersistence::open(
+            &format!("{}/data", pond_path.to_string_lossy()),
+            pond_id,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to open data persistence: {}", e))?;
 
         let commit_history = persistence
             .get_commit_history(None) // Get all commits

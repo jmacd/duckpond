@@ -65,6 +65,9 @@ pub struct ChunkedFileRecord {
     pub original_path: String,
     /// Type of file
     pub file_type: String, // Stored as string in Delta Lake
+    /// Pond identity UUID - identifies which pond created this record.
+    /// Used for cross-pond import to track data provenance.
+    pub pond_id: String,
 
     // === Chunk information ===
     /// Chunk sequence number (0, 1, 2, ...)
@@ -96,6 +99,7 @@ impl ChunkedFileRecord {
             // File identity
             Field::new("pond_txn_id", DataType::Int64, false),
             Field::new("path", DataType::Utf8, false),
+            Field::new("pond_id", DataType::Utf8, false),
             // Chunk information
             Field::new("chunk_id", DataType::Int64, false),
             Field::new("chunk_hash", DataType::Utf8, false),
@@ -142,15 +146,15 @@ impl ChunkedFileRecord {
     }
 
     /// Generate bundle_id for a transaction file (parquet or Delta log)
-    /// Format: "FILE-META-{YYYY-MM-DD}-{txn_seq}"
+    /// Format: "FILE-META-{pond_id}-{YYYY-MM-DD}-{txn_seq}"
     ///
     /// All files in a transaction share this bundle_id for partitioning.
     /// Individual files are distinguished by the path column.
-    /// Date and txn_seq enable chronological grouping and transaction identification.
+    /// Pond_id, date, and txn_seq enable chronological grouping and cross-pond identification.
     #[must_use]
-    pub fn transaction_bundle_id(txn_seq: i64) -> String {
+    pub fn transaction_bundle_id(pond_id: &str, txn_seq: i64) -> String {
         let now = chrono::Utc::now();
-        format!("FILE-META-{}-{}", now.format("%Y-%m-%d"), txn_seq)
+        format!("FILE-META-{}-{}-{}", pond_id, now.format("%Y-%m-%d"), txn_seq)
     }
 
     /// Generate a large file bundle_id
@@ -211,9 +215,10 @@ mod tests {
     #[test]
     fn test_transaction_bundle_id() {
         let txn_seq = 42;
-        let bundle_id = ChunkedFileRecord::transaction_bundle_id(txn_seq);
-        // Should be in format FILE-META-YYYY-MM-DD-42
-        assert!(bundle_id.starts_with("FILE-META-"));
+        let pond_id = "019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00";
+        let bundle_id = ChunkedFileRecord::transaction_bundle_id(pond_id, txn_seq);
+        // Should be in format FILE-META-{pond_id}-YYYY-MM-DD-42
+        assert!(bundle_id.starts_with("FILE-META-019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00-"));
         assert!(bundle_id.ends_with("-42"));
         assert!(ChunkedFileRecord::is_transaction_bundle_id(&bundle_id));
         assert!(!ChunkedFileRecord::is_transaction_bundle_id(

@@ -50,6 +50,8 @@ pub struct RemoteTable {
     table: DeltaTable,
     /// Shared SessionContext for queries
     session_context: Arc<SessionContext>,
+    /// Pond identity UUID for cross-pond import provenance
+    pond_id: String,
 }
 
 impl RemoteTable {
@@ -149,6 +151,7 @@ impl RemoteTable {
             path: path_or_url.to_string(),
             table,
             session_context,
+            pond_id: String::new(),
         })
     }
 
@@ -221,6 +224,7 @@ impl RemoteTable {
             path: path_or_url.to_string(),
             table,
             session_context,
+            pond_id: String::new(),
         })
     }
 
@@ -256,6 +260,12 @@ impl RemoteTable {
         &self.session_context
     }
 
+    /// Set the pond identity UUID for cross-pond import provenance tracking.
+    /// Called by the factory after opening the table.
+    pub fn set_pond_id(&mut self, pond_id: String) {
+        self.pond_id = pond_id;
+    }
+
     /// Get the table path
     #[must_use]
     pub fn path(&self) -> &str {
@@ -285,7 +295,8 @@ impl RemoteTable {
         reader: R,
     ) -> Result<()> {
         let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader)
-            .with_bundle_id(bundle_id.to_string());
+            .with_bundle_id(bundle_id.to_string())
+            .with_pond_id(self.pond_id.clone());
 
         writer.write_to_table(&mut self.table).await?;
 
@@ -325,7 +336,8 @@ impl RemoteTable {
         path: impl Into<String>,
         reader: R,
     ) -> Result<String> {
-        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader);
+        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader)
+            .with_pond_id(self.pond_id.clone());
 
         let bundle_id = writer.write_to_table(&mut self.table).await?;
 
@@ -807,9 +819,10 @@ impl RemoteTable {
     /// Returns error if query fails
     pub async fn list_transaction_files(
         &self,
+        pond_id: &str,
         txn_seq: i64,
     ) -> Result<Vec<(String, String, String, i64, i64)>> {
-        let bundle_id = crate::schema::ChunkedFileRecord::transaction_bundle_id(txn_seq);
+        let bundle_id = crate::schema::ChunkedFileRecord::transaction_bundle_id(pond_id, txn_seq);
 
         let df = self
             .session_context

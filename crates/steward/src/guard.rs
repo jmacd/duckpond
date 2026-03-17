@@ -585,11 +585,14 @@ impl<'a> StewardTransactionGuard<'a> {
         // We need a NEW read transaction to see the committed data
         // This is a separate operation, not part of the original write transaction
         let data_path = crate::get_data_path(Path::new(&self.pond_path));
-        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path)
+        let pond_id = self
+            .control_table
+            .pond_metadata()
+            .pond_id
+            .to_string();
+        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path, pond_id)
             .await
             .map_err(StewardError::DataInit)?;
-
-        // Open a read transaction for discovery
         // Use the CURRENT txn_seq (the one we just committed), not +1
         // Read transactions must use the last write sequence
         let discovery_metadata = PondTxnMetadata::new(
@@ -747,7 +750,12 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Reload OpLogPersistence for a fresh read transaction
         let data_path = crate::get_data_path(&self.pond_path);
-        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path)
+        let pond_id = self
+            .control_table
+            .pond_metadata()
+            .pond_id
+            .to_string();
+        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path, pond_id)
             .await
             .map_err(StewardError::DataInit)?;
 

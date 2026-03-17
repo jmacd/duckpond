@@ -810,6 +810,7 @@ mod tests {
         // Initialize pond (creates root directory)
         let mut persistence = tlogfs::OpLogPersistence::create(
             store_path.to_str().unwrap(),
+            uuid7::uuid7().to_string(),
             tlogfs::PondUserMetadata::new(vec!["test_init".to_string()]),
         )
         .await?;
@@ -891,7 +892,9 @@ mod tests {
 
         // Now check versions using list_file_versions
         // Read transactions use last_write_sequence (which is 2 after the commit above)
-        let mut persistence2 = tlogfs::OpLogPersistence::open(store_path.to_str().unwrap()).await?;
+        let pond_id = persistence.pond_id().to_string();
+        let mut persistence2 =
+            tlogfs::OpLogPersistence::open(store_path.to_str().unwrap(), pond_id).await?;
         let txn_meta2 = tlogfs::PondTxnMetadata::new(
             2, // Use last_write_sequence from the previous commit
             tlogfs::PondUserMetadata::new(vec!["test_check_versions".to_string()]),

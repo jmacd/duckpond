@@ -104,8 +104,8 @@ fn find_chunk_data_locations(parquet_path: &PathBuf) -> std::io::Result<Vec<Chun
 
     let mut locations = Vec::new();
 
-    // chunk_data is column index 6 in our schema
-    const CHUNK_DATA_COLUMN: usize = 6;
+    // chunk_data is column index 7 in our schema (after pond_id at position 3)
+    const CHUNK_DATA_COLUMN: usize = 7;
 
     for rg_idx in 0..num_row_groups {
         let row_group = metadata.row_group(rg_idx);

@@ -291,9 +291,10 @@ async fn execute_remote(
         storage_options.keys().collect::<Vec<_>>()
     );
 
-    let remote_table =
+    let mut remote_table =
         RemoteTable::open_or_create_with_storage_options(&path, true, storage_options.clone())
             .await?;
+    remote_table.set_pond_id(pond_id.clone());
 
     match cmd {
         RemoteCommand::Push => execute_push(remote_table, &context).await,
@@ -402,7 +403,7 @@ async fn execute_push(
 
         // Back up parquet files with transaction bundle_id
         let transaction_bundle_id =
-            crate::schema::ChunkedFileRecord::transaction_bundle_id(version);
+            crate::schema::ChunkedFileRecord::transaction_bundle_id(&pond_id, version);
 
         for (path, size) in &new_files {
             log::debug!("      Backing up: {} ({} bytes)", path, size);
@@ -1357,12 +1358,13 @@ pub async fn apply_parquet_files_from_remote(
     remote_table: &crate::RemoteTable,
     local_table: &mut deltalake::DeltaTable,
     pond_path: &std::path::Path,
+    pond_id: &str,
     txn_seq: i64,
 ) -> Result<(), RemoteError> {
     log::info!("Restoring transaction {} from remote backup", txn_seq);
 
     // Phase 1: Query for all files in this transaction (efficient partition query)
-    let files = remote_table.list_transaction_files(txn_seq).await?;
+    let files = remote_table.list_transaction_files(pond_id, txn_seq).await?;
 
     if files.is_empty() {
         log::warn!("No files found for transaction {}", txn_seq);

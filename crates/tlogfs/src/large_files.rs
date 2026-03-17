@@ -573,9 +573,9 @@ impl ParquetFileReader {
                 return Err(std::io::Error::other("Empty parquet file"));
             }
 
-            // Get total_size from column 7
+            // Get total_size from column 8 (after pond_id insertion at position 3)
             let total_sizes = batch
-                .column(7)
+                .column(8)
                 .as_any()
                 .downcast_ref::<arrow_array::Int64Array>()
                 .ok_or_else(|| std::io::Error::other("Invalid total_size column type"))?;
@@ -630,7 +630,7 @@ async fn load_chunk_from_parquet(
             .map_err(|e| std::io::Error::other(format!("Failed to read batch: {}", e)))?;
 
         let chunk_ids = batch
-            .column(3)
+            .column(4)
             .as_any()
             .downcast_ref::<arrow_array::Int64Array>()
             .ok_or_else(|| std::io::Error::other("Invalid chunk_id column type"))?;
@@ -639,19 +639,19 @@ async fn load_chunk_from_parquet(
             if chunk_ids.value(row) == chunk_id {
                 // Load chunk data, hash, and outboard for verification
                 let chunk_hashes = batch
-                    .column(4)
+                    .column(5)
                     .as_any()
                     .downcast_ref::<arrow_array::StringArray>()
                     .ok_or_else(|| std::io::Error::other("Invalid chunk_hash column type"))?;
 
                 let chunk_outboards = batch
-                    .column(5)
+                    .column(6)
                     .as_any()
                     .downcast_ref::<arrow_array::BinaryArray>()
                     .ok_or_else(|| std::io::Error::other("Invalid chunk_outboard column type"))?;
 
                 let chunk_datas = batch
-                    .column(6)
+                    .column(7)
                     .as_any()
                     .downcast_ref::<arrow_array::BinaryArray>()
                     .ok_or_else(|| std::io::Error::other("Invalid chunk_data column type"))?;

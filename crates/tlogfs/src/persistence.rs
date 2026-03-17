@@ -42,6 +42,10 @@ pub struct OpLogPersistence {
     pub(crate) txn_state: Arc<TinyFsTransactionState>,
     /// Options for large file storage (compression, etc.)
     large_file_options: crate::large_files::LargeFileOptions,
+    /// Pond identity UUID - stamped into every OplogEntry at commit time.
+    /// For locally-created records, this is the local pond's UUID.
+    /// Set at create/open time and never changes.
+    pub(crate) pond_id: String,
 }
 
 /// In-memory directory state during a transaction
@@ -132,14 +136,21 @@ impl OpLogPersistence {
         self.last_txn_seq
     }
 
+    /// Get the pond identity UUID
+    #[must_use]
+    pub fn pond_id(&self) -> &str {
+        &self.pond_id
+    }
+
     /// Creates a new OpLogPersistence instance with a new table and initializes root
     pub async fn create<P: AsRef<Path>>(
         path: P,
+        pond_id: String,
         metadata: PondUserMetadata,
     ) -> Result<Self, TLogFSError> {
         debug!("create called with path: {:?}", path.as_ref());
 
-        Self::open_or_create(path, true, Some(metadata)).await
+        Self::open_or_create(path, pond_id, true, Some(metadata)).await
     }
 
     /// Test-only helper: Create a new pond with synthetic metadata.
@@ -147,6 +158,7 @@ impl OpLogPersistence {
     pub async fn create_test(path: &str) -> Result<Self, TLogFSError> {
         Self::create(
             path,
+            uuid7::uuid7().to_string(),
             PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
         )
         .await
@@ -158,6 +170,7 @@ impl OpLogPersistence {
     pub async fn create_test_uncompressed(path: &str) -> Result<Self, TLogFSError> {
         let mut persistence = Self::create(
             path,
+            uuid7::uuid7().to_string(),
             PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
         )
         .await?;
@@ -175,17 +188,17 @@ impl OpLogPersistence {
     }
 
     /// Opens an existing OpLogPersistence instance
-    pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self, TLogFSError> {
+    pub async fn open<P: AsRef<Path>>(path: P, pond_id: String) -> Result<Self, TLogFSError> {
         debug!("open called with path: {:?}", path.as_ref());
 
-        Self::open_or_create(path, false, None).await
+        Self::open_or_create(path, pond_id, false, None).await
     }
 
     /// Create an empty Delta table structure for restoration
     /// This creates the table schema but does NOT initialize the root directory.
     /// Used when restoring from bundles - the first bundle will write transaction #1
     /// which initializes the root directory.
-    pub async fn create_empty<P: AsRef<Path>>(path: P) -> Result<Self, TLogFSError> {
+    pub async fn create_empty<P: AsRef<Path>>(path: P, pond_id: String) -> Result<Self, TLogFSError> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         debug!(
             "Creating empty table structure for restoration at: {}",
@@ -195,7 +208,7 @@ impl OpLogPersistence {
         // Create the Delta table structure
         let config: HashMap<String, Option<String>> = vec![(
             "delta.dataSkippingStatsColumns".to_string(),
-            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,pond_id".to_string())
         )]
         .into_iter()
         .collect();
@@ -224,12 +237,14 @@ impl OpLogPersistence {
             last_txn_seq: 0, // No transactions yet - bundles will provide them
             txn_state: Arc::new(TinyFsTransactionState::new()),
             large_file_options: Default::default(),
+            pond_id,
         })
     }
 
     /// @@@ UNCLEAR this should not be public
     pub async fn open_or_create<P: AsRef<Path>>(
         path: P,
+        pond_id: String,
         create_new: bool,
         root_metadata: Option<PondUserMetadata>,
     ) -> Result<Self, TLogFSError> {
@@ -270,7 +285,7 @@ impl OpLogPersistence {
                 let config: HashMap<String, Option<String>> = vec![(
                     "delta.dataSkippingStatsColumns".to_string(),
 		    // @@@ Awful
-                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,pond_id".to_string())
                 )]
                 .into_iter()
                 .collect();
@@ -302,6 +317,7 @@ impl OpLogPersistence {
             last_txn_seq: 0, // Will be updated below
             txn_state: Arc::new(TinyFsTransactionState::new()),
             large_file_options: Default::default(),
+            pond_id,
         };
 
         // Initialize root directory ONLY when creating a new pond
@@ -518,15 +534,19 @@ impl OpLogPersistence {
     /// Commit a transaction with metadata and return the committed version
     pub(crate) async fn commit(
         &mut self,
-        metadata: PondTxnMetadata,
+        mut metadata: PondTxnMetadata,
     ) -> Result<Option<()>, TLogFSError> {
+        // Stamp pond_id into commit metadata
+        let pond_id = self.pond_id.clone();
+        metadata.pond_id = pond_id.clone();
+
         let new_seq = metadata.txn_seq;
         self.fs = None;
         let res = self
             .state
             .take()
             .ok_or(TLogFSError::Missing)?
-            .commit_impl(metadata, self.table.clone())
+            .commit_impl(metadata, self.table.clone(), pond_id)
             .await?;
 
         // Reload the table from disk to pick up the committed changes
@@ -694,8 +714,13 @@ impl State {
         &mut self,
         metadata: PondTxnMetadata,
         table: DeltaTable,
+        pond_id: String,
     ) -> Result<Option<()>, TLogFSError> {
-        self.inner.lock().await.commit_impl(metadata, table).await
+        self.inner
+            .lock()
+            .await
+            .commit_impl(metadata, table, pond_id)
+            .await
     }
 
     /// Create an async reader for a file without loading entire content into memory
@@ -1945,6 +1970,7 @@ impl InnerState {
         &mut self,
         metadata: PondTxnMetadata,
         table: DeltaTable,
+        pond_id: String,
     ) -> Result<Option<()>, TLogFSError> {
         // Check if transaction is poisoned (failed write)
         if self.poisoned {
@@ -1956,11 +1982,16 @@ impl InnerState {
 
         self.flush_directory_operations().await?;
 
-        let records = std::mem::take(&mut self.records);
+        let mut records = std::mem::take(&mut self.records);
 
         if records.is_empty() {
             debug!("Committing read-only transaction");
             return Ok(None);
+        }
+
+        // Stamp pond_id into every record before serialization
+        for record in &mut records {
+            record.pond_id = pond_id.clone();
         }
 
         let count = records.len();

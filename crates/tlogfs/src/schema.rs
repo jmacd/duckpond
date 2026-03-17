@@ -277,6 +277,12 @@ pub struct OplogEntry {
     /// This links OpLog records to transaction sequences for chronological ordering
     pub txn_seq: i64,
 
+    /// Pond identity - UUID of the pond that created this record.
+    /// For locally-created records, this is the local pond's UUID.
+    /// For imported records (cross-pond import), this is the foreign pond's UUID.
+    /// Stamped by the persistence layer at commit time; callers do not set this.
+    pub pond_id: String,
+
     /// Bao-tree outboard data for blake3 verified streaming
     ///
     /// ALWAYS non-null for FilePhysicalVersion and FilePhysicalSeries entries.
@@ -334,6 +340,7 @@ impl ForArrow for OplogEntry {
             Arc::new(Field::new("factory", DataType::Utf8, true)), // Factory type for dynamic files/directories
             Arc::new(Field::new("format", DataType::Utf8, false)), // Storage format - required field
             Arc::new(Field::new("txn_seq", DataType::Int64, false)), // Transaction sequence number from Steward (required)
+            Arc::new(Field::new("pond_id", DataType::Utf8, false)), // Pond identity UUID (required, non-nullable)
             Arc::new(Field::new("bao_outboard", DataType::Binary, true)), // Bao-tree outboard for verified streaming
         ]
     }
@@ -381,6 +388,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Small files use inline storage
             txn_seq,
+            pond_id: String::new(),
             bao_outboard: None,
         }
     }
@@ -421,6 +429,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Large files use inline format (content is external)
             txn_seq,
+            pond_id: String::new(),
             bao_outboard: None,
         }
     }
@@ -459,6 +468,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::Inline, // Symlinks and small metadata use inline storage
             txn_seq,
+            pond_id: String::new(),
             bao_outboard: None,
         }
     }
@@ -515,6 +525,7 @@ impl OplogEntry {
             factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Small FileSeries use inline storage
             txn_seq,
+            pond_id: String::new(),
             bao_outboard: None,
         }
     }
@@ -559,6 +570,7 @@ impl OplogEntry {
             factory: None,                 // Physical file, no factory
             format: StorageFormat::Inline, // Large FileSeries use inline format (content is external)
             txn_seq,
+            pond_id: String::new(),
             bao_outboard: None,
         }
     }
@@ -663,6 +675,7 @@ impl OplogEntry {
             factory: Some(factory_type.to_string()), // Factory type identifier
             format: StorageFormat::Inline,           // Config is always inline
             txn_seq,
+            pond_id: String::new(),
             bao_outboard: None,
         }
     }
@@ -863,6 +876,7 @@ impl OplogEntry {
             factory: None,
             format: StorageFormat::FullDir, // Full directory snapshot
             txn_seq,
+            pond_id: String::new(),
             bao_outboard: None,
         }
     }

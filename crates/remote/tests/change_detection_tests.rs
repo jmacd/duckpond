@@ -30,6 +30,7 @@ async fn test_detect_changes_from_commit() -> Result<(), Box<dyn std::error::Err
 
     let mut persistence = OpLogPersistence::create(
         &pond_path,
+        uuid7::uuid7().to_string(),
         PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
     )
     .await?;
@@ -80,6 +81,7 @@ async fn test_detect_changes_multiple_commits() -> Result<(), Box<dyn std::error
 
     let mut persistence = OpLogPersistence::create(
         &pond_path,
+        uuid7::uuid7().to_string(),
         PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
     )
     .await?;

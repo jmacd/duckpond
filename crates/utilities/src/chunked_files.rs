@@ -77,6 +77,8 @@ pub struct ChunkedWriter<R> {
     reader: R,
     chunk_size: usize,
     bundle_id_override: Option<String>,
+    /// Pond identity UUID for cross-pond import provenance
+    pond_id: String,
     /// Starting cumulative offset (for FilePhysicalSeries with prior versions)
     starting_offset: u64,
     /// Previous version's SeriesOutboard (for continuing cumulative hash)
@@ -98,6 +100,7 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
             reader,
             chunk_size: CHUNK_SIZE_DEFAULT,
             bundle_id_override: None,
+            pond_id: String::new(),
             starting_offset: 0,
             prev_series_outboard: None,
         }
@@ -140,6 +143,13 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
     #[must_use]
     pub fn with_bundle_id(mut self, bundle_id: String) -> Self {
         self.bundle_id_override = Some(bundle_id);
+        self
+    }
+
+    /// Set pond identity UUID for cross-pond import provenance tracking.
+    #[must_use]
+    pub fn with_pond_id(mut self, pond_id: String) -> Self {
+        self.pond_id = pond_id;
         self
     }
 
@@ -298,6 +308,7 @@ impl<R: AsyncRead + Unpin> ChunkedWriter<R> {
                 &bundle_id,
                 &self.path,
                 self.pond_txn_id,
+                &self.pond_id,
                 &root_hash_hex,
                 total_size,
                 &schema,
@@ -430,6 +441,7 @@ pub fn arrow_schema() -> Arc<Schema> {
         Field::new("bundle_id", DataType::Utf8, false),
         Field::new("pond_txn_id", DataType::Int64, false),
         Field::new("path", DataType::Utf8, false),
+        Field::new("pond_id", DataType::Utf8, false),
         Field::new("chunk_id", DataType::Int64, false),
         Field::new("chunk_hash", DataType::Utf8, false),
         Field::new("chunk_outboard", DataType::Binary, false),
@@ -445,6 +457,7 @@ fn create_batch(
     bundle_id: &str,
     path: &str,
     pond_txn_id: i64,
+    pond_id: &str,
     root_hash: &str,
     total_size: u64,
     schema: &Arc<Schema>,
@@ -454,6 +467,7 @@ fn create_batch(
     let mut bundle_ids = Vec::with_capacity(num_chunks);
     let mut pond_txn_ids = Vec::with_capacity(num_chunks);
     let mut paths = Vec::with_capacity(num_chunks);
+    let mut pond_ids = Vec::with_capacity(num_chunks);
     let mut chunk_ids = Vec::with_capacity(num_chunks);
     let mut chunk_hashes = Vec::with_capacity(num_chunks);
     let mut chunk_outboards = Vec::with_capacity(num_chunks);
@@ -465,6 +479,7 @@ fn create_batch(
         bundle_ids.push(bundle_id.to_string());
         pond_txn_ids.push(pond_txn_id);
         paths.push(path.to_string());
+        pond_ids.push(pond_id.to_string());
         chunk_ids.push(*chunk_id);
         chunk_hashes.push(chunk_hash.to_hex().to_string());
         chunk_outboards.push(outboard.clone());
@@ -479,6 +494,7 @@ fn create_batch(
             Arc::new(StringArray::from(bundle_ids)),
             Arc::new(Int64Array::from(pond_txn_ids)),
             Arc::new(StringArray::from(paths)),
+            Arc::new(StringArray::from(pond_ids)),
             Arc::new(Int64Array::from(chunk_ids)),
             Arc::new(StringArray::from(chunk_hashes)),
             Arc::new(BinaryArray::from(
