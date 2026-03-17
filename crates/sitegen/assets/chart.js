@@ -360,8 +360,8 @@
   }
 
   const palette = [
-    "var(--accent-color)", "#f472b6", "#34d399", "#fbbf24",
-    "#a78bfa", "#fb923c", "#22d3ee", "#e879f9",
+    "#0284c7", "#059669", "#d97706", "#7c3aed",
+    "#db2777", "#0891b2", "#ea580c", "#4f46e5",
   ];
 
   // ── Brush-to-zoom ─────────────────────────────────────────────────────────
@@ -500,16 +500,16 @@
       const header = document.createElement("div");
       header.style.cssText = "display:flex; align-items:baseline; gap:1rem; margin-bottom:0.5rem;";
       header.innerHTML =
-        `<h3 style="margin:0; font-size:1.1rem; color:var(--fg-primary)">${title}</h3>` +
+        `<h3 style="margin:0; font-size:1.1rem; color:var(--fg)">${title}</h3>` +
         `<span style="font-size:0.8rem; color:var(--fg-muted)">${legendItems.map(l =>
-          `<span style="color:${l.color}">●</span> ${l.label}`
+          `<span style="color:${l.color}">&#9679;</span> ${l.label}`
         ).join("&emsp;")}</span>`;
 
       const plot = Plot.plot({
         width,
         height: 300,
         marginLeft,
-        style: { background: "transparent", color: "var(--fg-primary)" },
+        style: { background: "transparent", color: "var(--fg)" },
         x: {
           type: "time",
           label: "Date",

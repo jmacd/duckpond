@@ -23,9 +23,11 @@ scp \
     ${HOST}:${REMOTE_CONFIG}/
 scp site/index.md site/data.md site/sidebar.md ${HOST}:${REMOTE_CONFIG}/site/
 
-# Update site templates in the pond
+# Update site templates in the pond (copy individual files into existing dir)
 # (config is mounted at /config inside container)
-${EXE} copy host:///config/site /etc/site --overwrite
+for f in index.md data.md sidebar.md; do
+    ${EXE} copy host:///config/site/${f} /etc/site/${f}
+done
 
 # Recreate factory nodes with --overwrite
 ${EXE} mknod logfile-ingest /etc/ingest --overwrite --config-path /config/ingest.yaml

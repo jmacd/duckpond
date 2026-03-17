@@ -31,6 +31,7 @@ pub async fn list_command<F>(
     ship_context: &ShipContext,
     pattern: &str,
     show_all: bool,
+    long: bool,
     mut handler: F,
 ) -> Result<()>
 where
@@ -101,7 +102,11 @@ where
     file_results.sort_by(|a, b| a.path.cmp(&b.path));
 
     for file_info in file_results {
-        handler(&file_info.format_duckpond_style());
+        if long {
+            handler(&file_info.format_long_style());
+        } else {
+            handler(&file_info.format_duckpond_style());
+        }
     }
 
     Ok(())
@@ -213,7 +218,7 @@ mod tests {
             .expect("Failed to create pond file");
 
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "test.txt", false, |output| {
+        list_command(&setup.ship_context, "test.txt", false, false, |output| {
             results.push(output.to_string())
         })
         .await
@@ -256,7 +261,7 @@ mod tests {
 
         // First, let's try listing all files to see what's actually there
         let mut all_results = Vec::new();
-        list_command(&setup.ship_context, "*", false, |output| {
+        list_command(&setup.ship_context, "*", false, false, |output| {
             all_results.push(output.to_string())
         })
         .await
@@ -265,7 +270,7 @@ mod tests {
         debug!("All files found with '*': {:?}", all_results);
 
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "file*", false, |output| {
+        list_command(&setup.ship_context, "file*", false, false, |output| {
             results.push(output.to_string())
         })
         .await
@@ -300,7 +305,7 @@ mod tests {
             .expect("Failed to create nested pond file");
 
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "testdir", false, |output| {
+        list_command(&setup.ship_context, "testdir", false, false, |output| {
             results.push(output.to_string())
         })
         .await
@@ -356,7 +361,7 @@ mod tests {
             .expect("Failed to create root pond file");
 
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "**/*.txt", false, |output| {
+        list_command(&setup.ship_context, "**/*.txt", false, false, |output| {
             results.push(output.to_string())
         })
         .await
@@ -392,7 +397,7 @@ mod tests {
 
         // Test without show_all - should only see visible file
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "*", false, |output| {
+        list_command(&setup.ship_context, "*", false, false, |output| {
             results.push(output.to_string())
         })
         .await
@@ -403,7 +408,7 @@ mod tests {
 
         // Test with show_all - should see both files
         let mut results_all = Vec::new();
-        list_command(&setup.ship_context, "*", true, |output| {
+        list_command(&setup.ship_context, "*", true, false, |output| {
             results_all.push(output.to_string())
         })
         .await
@@ -429,9 +434,13 @@ mod tests {
             .expect("Failed to create pond file");
 
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "*.nonexistent", false, |output| {
-            results.push(output.to_string())
-        })
+        list_command(
+            &setup.ship_context,
+            "*.nonexistent",
+            false,
+            false,
+            |output| results.push(output.to_string()),
+        )
         .await
         .expect("List command failed");
 
@@ -488,7 +497,7 @@ mod tests {
 
         // Test "pond list /" - should list root entries only (not recurse)
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "/", false, |output| {
+        list_command(&setup.ship_context, "/", false, false, |output| {
             results.push(output.to_string())
         })
         .await
@@ -532,7 +541,7 @@ mod tests {
 
         // Test "pond list /data/" - should list directory contents
         let mut results = Vec::new();
-        list_command(&setup.ship_context, "/data/", false, |output| {
+        list_command(&setup.ship_context, "/data/", false, false, |output| {
             results.push(output.to_string())
         })
         .await

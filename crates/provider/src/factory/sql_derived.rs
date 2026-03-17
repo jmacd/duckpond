@@ -436,7 +436,7 @@ impl SqlDerivedFile {
         };
 
         // Allow: exact match, "file" scheme (uses EntryType), or format providers
-        let is_format_provider = matches!(scheme, "csv" | "excelhtml" | "oteljson");
+        let is_format_provider = crate::FormatRegistry::get_provider(scheme).is_some();
         if scheme != expected_scheme && scheme != "file" && !is_format_provider {
             return Err(tinyfs::Error::Other(format!(
                 "URL scheme '{}' doesn't match entry_type {:?} (expected '{}', 'file', or format provider)",
@@ -688,21 +688,17 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
 
         // Validate scheme is recognized (no fallback for unknown schemes)
         let scheme = pattern_url.scheme();
-        const KNOWN_SCHEMES: &[&str] = &[
-            "file",
-            "series",
-            "table",
-            "data",
-            "csv",
-            "excelhtml",
-            "oteljson",
-        ];
-        if !KNOWN_SCHEMES.contains(&scheme) {
+        const BUILTIN_SCHEMES: &[&str] = &["file", "series", "table", "data"];
+        let is_known = BUILTIN_SCHEMES.contains(&scheme)
+            || crate::FormatRegistry::get_provider(scheme).is_some();
+        if !is_known {
+            let mut known: Vec<&str> = BUILTIN_SCHEMES.to_vec();
+            known.extend(crate::FormatRegistry::list_providers());
             return Err(tinyfs::Error::Other(format!(
                 "Unknown URL scheme '{}' in pattern '{}'. Known schemes: {}",
                 scheme,
                 pattern_url,
-                KNOWN_SCHEMES.join(", ")
+                known.join(", ")
             )));
         }
     }
@@ -950,7 +946,7 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                 } else {
                     // Check if this pattern uses a format provider
                     let scheme = pattern.scheme();
-                    let is_format_provider = matches!(scheme, "csv" | "excelhtml" | "oteljson");
+                    let is_format_provider = crate::FormatRegistry::get_provider(scheme).is_some();
 
                     // Create table provider
                     let listing_table_provider = if is_format_provider {

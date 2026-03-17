@@ -1,8 +1,8 @@
 ---
 title: System Design
-weight: 20
+weight: 50
 layout: page
-section: About
+section: Main
 ---
 
 ## System Design

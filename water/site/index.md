@@ -3,8 +3,6 @@ title: Caspar Water
 layout: default
 ---
 
-# Caspar Water
-
 Welcome to the Caspar Water Company website. Caspar Water is a small water system serving the historic village of Caspar on the Mendocino coast of California.
 
 ## Public Data Portal
@@ -20,5 +18,3 @@ We publish our water system monitoring data for transparency and community aware
 | [**pH**](/data/ph.html) | Treated water pH |
 
 See the [Well Depth History](/well-depth-history.html) page for an annotated multi-year timeline showing leaks, repairs, and seasonal patterns.
-
-Use the sidebar to navigate our pages.

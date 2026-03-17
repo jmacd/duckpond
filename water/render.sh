@@ -25,6 +25,7 @@ mkdir -p "${OUTDIR}"
 pond run \
   -d "${SCRIPT_DIR}" \
   --hostmount "/reduced=host+dyndir:///reduce.yaml" \
+  --hostmount "/analysis=host+dyndir:///analysis.yaml" \
   host+sitegen:///site.yaml \
   build "${OUTDIR}"
 
@@ -35,12 +36,8 @@ find "${OUTDIR}" -name '*.html' | sort | sed 's|^|  |'
 
 # Open in browser unless --no-open
 if [[ "$1" != "--no-open" ]]; then
-    BROWSER_DIR="${REPO_ROOT}/testsuite/browser"
-    if [[ -f "${BROWSER_DIR}/package.json" ]]; then
-        echo ""
-        echo "=== Opening in browser ==="
-        (cd "${BROWSER_DIR}" && SITE_ROOT="${OUTDIR}" npx vite --port 4175 --open)
-    else
-        open "${OUTDIR}/index.html"
-    fi
+    echo ""
+    echo "=== Opening in browser ==="
+    open "http://localhost:4175/"
+    (cd "${OUTDIR}" && python3 -m http.server 4175)
 fi

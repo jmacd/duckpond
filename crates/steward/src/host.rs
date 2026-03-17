@@ -105,24 +105,27 @@ impl HostSteward {
 
     /// Process mount specs by reading config files and creating factory nodes.
     ///
-    /// Currently supports only depth-1 mounts (e.g., `/reduced`).
-    /// Returns a map of root-level overlay entries: name -> Node.
+    /// Uses two-phase construction so that factories see sibling overlays:
+    ///   Phase 1: Create factory nodes with temporary (bare host) context.
+    ///   Phase 2: Build OverlayPersistence from Phase 1 results, then
+    ///            recreate all factory nodes with the full overlay context.
+    ///
+    /// This enables cross-overlay references (e.g., an analysis factory
+    /// reading from a sibling reduce factory via series:///reduced/...).
     async fn process_mount_specs(
         hostmount: &tinyfs::hostmount::HostmountPersistence,
         specs: &[MountSpec],
     ) -> Result<HashMap<String, tinyfs::Node>, StewardError> {
-        let mut root_overlays: HashMap<String, tinyfs::Node> = HashMap::new();
-
-        // We need a temporary FS + ProviderContext to read config files
-        // and create factory nodes. The factory nodes will then be injected
-        // into the overlay, which creates the real FS.
+        // We need a temporary FS + ProviderContext to read config files.
         let temp_persistence: Arc<dyn PersistenceLayer> = Arc::new(
             tinyfs::hostmount::HostmountPersistence::new(hostmount.root_path().to_path_buf())?,
         );
         let temp_fs = FS::from_arc(temp_persistence.clone());
         let temp_session = Arc::new(SessionContext::new());
-        let provider_context = ProviderContext::new(temp_session, temp_persistence);
+        let temp_provider_context = ProviderContext::new(temp_session, temp_persistence);
 
+        // Read all config files from host filesystem (only needs temp context)
+        let mut spec_configs: Vec<(String, String, Vec<u8>)> = Vec::new();
         for spec in specs {
             if spec.remaining_path().is_some() {
                 return Err(StewardError::ControlTable(format!(
@@ -132,15 +135,15 @@ impl HostSteward {
             }
 
             let mount_name = spec.root_component().to_string();
+            let factory_name = resolve_factory_alias(&spec.factory_name);
 
             log::debug!(
                 "[HOST] Processing mount: {} -> factory={}, config={}",
                 spec.mount_path,
-                spec.factory_name,
+                factory_name,
                 spec.config_path
             );
 
-            // Read config file from host filesystem
             let config_path = format!("/{}", spec.config_path);
             let config_bytes = {
                 let root = temp_fs.root().await.map_err(|e| {
@@ -170,15 +173,44 @@ impl HostSteward {
                 spec.config_path
             );
 
-            // Resolve factory name aliases
-            let factory_name = resolve_factory_alias(&spec.factory_name);
+            spec_configs.push((mount_name, factory_name, config_bytes));
+        }
 
-            // Compute deterministic FileID for the mount point
+        // Phase 1: Create factory nodes with temporary context.
+        // These nodes let us build the OverlayPersistence structure.
+        let phase1_overlays =
+            Self::create_overlay_nodes(&spec_configs, &temp_provider_context).await?;
+
+        // Build the OverlayPersistence with Phase 1 nodes so we can
+        // create a ProviderContext that sees ALL mounts.
+        let overlay_hostmount =
+            tinyfs::hostmount::HostmountPersistence::new(hostmount.root_path().to_path_buf())?;
+        let overlay_persistence: Arc<dyn PersistenceLayer> = Arc::new(
+            tinyfs::hostmount::OverlayPersistence::new(overlay_hostmount, phase1_overlays),
+        );
+        let overlay_session = Arc::new(SessionContext::new());
+        let overlay_provider_context = ProviderContext::new(overlay_session, overlay_persistence);
+
+        // Phase 2: Recreate factory nodes with the full overlay context.
+        // Now each factory can resolve paths to sibling overlays.
+        let final_overlays =
+            Self::create_overlay_nodes(&spec_configs, &overlay_provider_context).await?;
+
+        Ok(final_overlays)
+    }
+
+    /// Create overlay nodes from spec configs using the given provider context.
+    async fn create_overlay_nodes(
+        spec_configs: &[(String, String, Vec<u8>)],
+        provider_context: &ProviderContext,
+    ) -> Result<HashMap<String, tinyfs::Node>, StewardError> {
+        let mut root_overlays: HashMap<String, tinyfs::Node> = HashMap::new();
+
+        for (mount_name, factory_name, config_bytes) in spec_configs {
             let mount_id_bytes = format!("hostmount:{}:{}", mount_name, factory_name);
             let parent_part_id = tinyfs::PartID::from_node_id(tinyfs::FileID::root().node_id());
 
-            // Determine if the factory creates directories or files
-            let creates_directory = FactoryRegistry::factory_creates_directory(&factory_name)
+            let creates_directory = FactoryRegistry::factory_creates_directory(factory_name)
                 .map_err(|e| {
                     StewardError::ControlTable(format!(
                         "Factory '{}' not found: {}",
@@ -195,21 +227,18 @@ impl HostSteward {
                 );
                 let factory_context =
                     tinyfs::FactoryContext::new(provider_context.clone(), child_file_id);
-                let dir_handle = FactoryRegistry::create_directory(
-                    &factory_name,
-                    &config_bytes,
-                    factory_context,
-                )
-                .map_err(|e| {
-                    StewardError::ControlTable(format!(
-                        "Failed to create factory directory for mount '{}': {}",
-                        spec.mount_path, e
-                    ))
-                })?;
+                let dir_handle =
+                    FactoryRegistry::create_directory(factory_name, config_bytes, factory_context)
+                        .map_err(|e| {
+                            StewardError::ControlTable(format!(
+                                "Failed to create factory directory for mount '/{}': {}",
+                                mount_name, e
+                            ))
+                        })?;
 
                 let node =
                     tinyfs::Node::new(child_file_id, tinyfs::NodeType::Directory(dir_handle));
-                _ = root_overlays.insert(mount_name, node);
+                _ = root_overlays.insert(mount_name.clone(), node);
             } else {
                 let entry_type = tinyfs::EntryType::TableDynamic;
                 let child_file_id = tinyfs::FileID::from_content(
@@ -220,23 +249,23 @@ impl HostSteward {
                 let factory_context =
                     tinyfs::FactoryContext::new(provider_context.clone(), child_file_id);
                 let file_handle =
-                    FactoryRegistry::create_file(&factory_name, &config_bytes, factory_context)
+                    FactoryRegistry::create_file(factory_name, config_bytes, factory_context)
                         .await
                         .map_err(|e| {
                             StewardError::ControlTable(format!(
-                                "Failed to create factory file for mount '{}': {}",
-                                spec.mount_path, e
+                                "Failed to create factory file for mount '/{}': {}",
+                                mount_name, e
                             ))
                         })?;
 
                 let node = tinyfs::Node::new(child_file_id, tinyfs::NodeType::File(file_handle));
-                _ = root_overlays.insert(mount_name, node);
+                _ = root_overlays.insert(mount_name.clone(), node);
             }
 
             log::info!(
-                "[HOST] Mounted factory '{}' at '{}'",
+                "[HOST] Mounted factory '{}' at '/{}'",
                 factory_name,
-                spec.mount_path
+                mount_name
             );
         }
 

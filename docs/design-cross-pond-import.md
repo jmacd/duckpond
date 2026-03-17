@@ -799,3 +799,218 @@ Remote and import operations use consistent ASCII log prefixes:
 | `[WARN]` | Warning (non-fatal) |
 | `[SKIP]` | Skipping (already up to date) |
 | `[INFO]` | Informational message |
+
+---
+
+## Open Design Questions
+
+This section captures unresolved design questions that must be addressed
+before implementation. The cross-pond import design above is structurally
+sound, but several policy and interaction decisions remain open.
+
+### Design Principle: Transparency
+
+The strength of this design is that imported data is **transparent**.
+Foreign parquet files become real Delta table entries at real pond paths.
+The `pond_id` column provides provenance, and `(pond_id, txn_seq)` is
+globally unique, but from every command's perspective imported files
+are just files.
+
+This means most commands need NO changes. `cat`, `copy`, `mkdir`,
+`mknod`, `detect-overlaps`, `set-temporal-bounds`, and `export` all
+work on imported data exactly as they do on local data. The `pond_id`
+scoping handles data coexistence structurally — there is nothing
+special about an imported file from the filesystem's perspective.
+
+Commands that DO have cross-pond-specific behavior are limited to:
+display commands that could show provenance (`show`, `describe`,
+`list --long`), the import factory workflow itself (`mknod`, `run`,
+`sync`), and transaction history (`log`).
+
+### Q1: Read-only policy on import mount points
+
+The document asserts import paths are read-only (see Mount Point
+Properties above and Error Conditions), but the justification is
+thin. The `pond_id` scoping means local writes to an imported
+directory are technically safe: a locally-created file gets the local
+`pond_id`, and a foreign file keeps the foreign `pond_id`. They
+coexist without collision.
+
+The argument for read-only is preventing confusion when the factory's
+next `pull` runs — but the factory only adds/updates foreign files
+(scoped by foreign `pond_id`). Local files with local `pond_id`
+wouldn't be touched.
+
+Counterargument: allowing local writes alongside imports could create
+confusing mixed-provenance directories. Operators might not realize
+some files are imported and some are local.
+
+**Decision needed:** Enforce read-only on import directories, or
+allow local writes alongside imported data?
+
+### Q2: Provenance display depth
+
+The document shows provenance in several places:
+
+- `pond show` has a "Data Provenance" summary section
+- `pond describe` shows `Provenance: pond <uuid>` for imported files
+- `pond show` partition listing shows `[imported from <pond_id>]`
+
+But the depth is inconsistent. How much provenance should be visible
+by default vs opt-in?
+
+Options:
+- **Always show**: provenance appears in `list --long`, `describe`,
+  and `show` whenever a file/partition has a foreign `pond_id`
+- **Opt-in flag**: `--provenance` or similar flag on `list`/`describe`
+- **Only in `pond show`**: provenance is a pond-level concern, not a
+  per-file concern; `show` is the right place for the summary
+
+**Decision needed:** What level of provenance display, and where?
+
+### Q3: Import mount points vs hostmount overlays
+
+Hostmount phases 1-3 have landed since this document was written.
+The hostmount overlay system uses `OverlayPersistence` to inject
+factory nodes at mount paths in the host filesystem. Cross-pond
+import "mount points" are a completely different mechanism: real
+directories in the pond's Delta table backed by foreign parquet files.
+
+These are fundamentally different:
+- **Hostmount overlay**: host filesystem -> TinyFS abstraction via
+  `HostmountPersistence` implementing `PersistenceLayer`
+- **Import mount**: foreign parquet files added to local Delta table,
+  directory entry created at a named path. No new persistence layer;
+  data lives in the same `OpLogPersistence` as local data.
+
+Both use the word "mount" but the mechanisms don't overlap. However,
+the terminology collision could cause confusion when discussing the
+system.
+
+**Decision needed:** Keep "mount point" for import paths, or use a
+different term ("import link", "foreign directory", "import path")
+to avoid confusion with hostmount?
+
+### Q4: Factory-managed directory semantics
+
+The document says "the remote factory instance owns the mount point"
+and that mount points are "managed by the factory." But there is no
+general concept of directory ownership by factories today. Other
+factory outputs (temporal-reduce, sitegen) write to directories
+without "owning" them.
+
+This matters because ownership implies enforcement — the system would
+need to know which directories are owned by which factories, and
+refuse operations that conflict with ownership.
+
+Options:
+- **Introduce ownership**: a metadata flag on directories indicating
+  which factory manages them, enforced in the write path
+- **Convention only**: document that you shouldn't manually write
+  under import paths, but don't enforce it programmatically
+- **No ownership needed** (follows from Q1): if local writes are
+  allowed alongside imports, ownership is moot
+
+**Decision needed:** Introduce directory ownership as a concept, or
+treat it as convention?
+
+### Q5: Credential handling for import factories
+
+Import factories need S3 credentials to access foreign backups. The
+current `RemoteConfig` stores credentials in the factory config after
+Tera template expansion. The `design-security-and-credentials.md`
+document proposes runtime-only template expansion, OS keyring
+integration, and age-encrypted configs — but none of that is
+implemented yet.
+
+The question is whether cross-pond import is blocked on credential
+infrastructure improvements, or whether the current template-in-YAML
+approach (where credentials come from environment variables at
+`mknod` time via `{{ env(name='KEY') }}`) is acceptable for initial
+implementation.
+
+The risk: after `mknod`, the expanded credentials are stored
+plaintext in the pond's filesystem. A backup of the importing pond
+contains the credentials for the foreign pond's backup. This is the
+same risk that exists for self-backup credentials today.
+
+**Decision needed:** Ship cross-pond import with current credential
+handling, or gate it on security infrastructure?
+
+### Q6: Restoring a pond that contains imports
+
+`pond init --from-backup` restores a complete pond from a backup
+bundle. If that backup contains imported data (foreign `pond_id`
+parquet files), the restored pond gets that data — this is correct
+and handled by the design (see "Impact on Backup" section).
+
+But the import factory nodes (under `/system/run/` or `/system/etc/`)
+are also part of the pond filesystem. After restore:
+
+1. The import factory configs exist (with credentials, source paths)
+2. The imported data exists (at the mount paths, with foreign
+   `pond_id`)
+3. But the import state tracking (which foreign transactions have
+   been imported) lives in the control table — is that also backed
+   up and restored?
+
+If the control table is restored with the import state intact, the
+pond can resume incremental sync. If not, it would need to re-import
+from scratch or reconcile.
+
+Also: `pond init --config` (replication) creates a replica from a
+base64 config. Can a replica of a pond that has imports continue to
+pull those imports? Or does the replica only get a snapshot?
+
+**Decision needed:** What is the restore and replication story for
+ponds with imports?
+
+### Q7: Import factory placement — `/system/run/` vs `/system/etc/`
+
+The document places import factories under `/system/run/` (e.g.,
+`/system/run/10-septic`). Factories in `/system/run/` auto-execute
+on every post-commit transaction with their configured mode.
+
+For self-backup (mode `push`), auto-execution makes sense — you want
+every write transaction backed up promptly. But for import (mode
+`import`), auto-execution means every local write transaction
+triggers a pull from the foreign backup. This could be:
+
+- **Expensive**: pulling from S3 on every local commit
+- **Slow**: network latency added to every transaction
+- **Unnecessary**: the foreign pond may not have new data
+
+The existing system already handles this distinction:
+- `/system/run/`: auto-executing on post-commit (remote push)
+- `/system/etc/`: manually triggered (hydrovu, sitegen, column-rename)
+
+Import factories are more like hydrovu (periodic data ingestion) than
+backup (continuous replication). A `pond sync` or `pond run` invocation
+seems more appropriate than auto-pull.
+
+However, if imports go in `/system/etc/`, they won't be found by
+`pond sync` (which only scans `/system/run/`). The sync command would
+need to be updated to also scan `/system/etc/` for import-mode
+factories, or a different mechanism would be needed.
+
+**Decision needed:** Import factories in `/system/run/`
+(auto-pull on every commit) or `/system/etc/` (manual sync only)?
+If `/system/etc/`, how does `pond sync` find them?
+
+---
+
+## Prerequisites Already Met
+
+The following changes were proposed alongside the original cross-pond
+import design and have since been implemented:
+
+- `pond log` replaces `pond control recent/detail/incomplete` — ✅
+- `pond sync` replaces `pond control sync`, iterates all factories — ✅
+- `pond config` replaces `pond control show-config/set-config` — ✅
+- `pond run` accepts short factory names (resolves via
+  `/system/run/` then `/system/etc/`) — ✅
+- `list-files` remote subcommand removed (absorbed by `show`) — ✅
+- `pond control` retained as hidden backward-compat alias — ✅
+
+These are documented in `cli-command-structure.md`. The cross-pond
+import implementation can build directly on the current CLI structure.

@@ -7,7 +7,8 @@
     "serve": "vite --open --port 4174",
     "test": "bash test.sh",
     "test:210": "node tests/210-browser-page-validation.mjs",
-    "test:211": "node tests/211-browser-parquet-loading.mjs"
+    "test:211": "node tests/211-browser-parquet-loading.mjs",
+    "test:305": "node tests/305-browser-overlay-chart.mjs"
   },
   "devDependencies": {
     "puppeteer": "^24.36.1",

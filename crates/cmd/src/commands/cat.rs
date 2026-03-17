@@ -6,10 +6,30 @@ use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use crate::common::{ShipContext, TargetContext, classify_target};
 use log::debug;
+
+/// Resolve "auto" format to "table" or "raw" based on context.
+///
+/// When format is "auto":
+///   - If output is a String buffer (testing), use "raw" (parquet)
+///   - If stdout is a TTY and file is queryable, use "table"
+///   - Otherwise use "raw" (parquet bytes for piping)
+fn resolve_auto_format(format: &str, is_queryable: bool, is_testing: bool) -> &str {
+    if format != "auto" {
+        return format;
+    }
+    if is_testing {
+        return "raw";
+    }
+    if is_queryable && io::stdout().is_terminal() {
+        "table"
+    } else {
+        "raw"
+    }
+}
 
 /// Handle output from a DataFusion stream based on display mode
 /// Consolidates common output logic used by all cat operations
@@ -154,11 +174,12 @@ fn write_batches_to_buffer(batches: &[RecordBatch], output: &mut String) -> Resu
 pub async fn cat_command(
     ship_context: &ShipContext,
     path: &str,
-    display: &str, // Output format: "raw" (parquet bytes) or "table" (ASCII formatted)
+    display: &str, // Output format: "auto", "raw" (parquet bytes) or "table" (ASCII formatted)
     output: Option<&mut String>,
     _time_start: Option<i64>,
     _time_end: Option<i64>,
     sql_query: Option<&str>,
+    explain: bool,
 ) -> Result<()> {
     debug!(
         "cat_command called with path: {}, sql_query: {:?}",
@@ -180,7 +201,11 @@ pub async fn cat_command(
         .await?;
 
     // Execute the cat operation and handle errors properly
-    let result = cat_impl(&mut tx, path, display, output, sql_query).await;
+    let result = if explain {
+        explain_impl(&mut tx, path, sql_query).await
+    } else {
+        cat_impl(&mut tx, path, display, output, sql_query).await
+    };
 
     match result {
         Ok(()) => {
@@ -243,9 +268,11 @@ async fn cat_impl(
         let is_queryable =
             metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
 
+        let effective_display = resolve_auto_format(display, is_queryable, output.is_some());
+
         if !is_queryable {
             // Non-queryable file types (file:data) - use simple streaming
-            if display == "table" {
+            if effective_display == "table" {
                 return Err(anyhow::anyhow!(
                     "Table display mode only supports file:table and file:series types, but this file is {:?}",
                     metadata.entry_type
@@ -295,7 +322,117 @@ async fn cat_impl(
     let _ = ctx.deregister_table("source");
 
     // Use consolidated output handler
-    handle_stream_output(stream, display, sql_query, output, path).await?;
+    // If we reach here, content is queryable (non-queryable returned early above)
+    let effective_display = resolve_auto_format(display, true, output.is_some());
+    handle_stream_output(stream, effective_display, sql_query, output, path).await?;
+
+    Ok(())
+}
+
+/// Explain mode: show entry type, provider resolution, and schema without executing
+#[allow(clippy::print_stdout)]
+async fn explain_impl(
+    tx: &mut steward::Transaction<'_>,
+    path: &str,
+    sql_query: Option<&str>,
+) -> Result<()> {
+    let url = if path.contains("://") {
+        path.to_string()
+    } else {
+        let normalized_path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{}", path)
+        };
+        format!("file://{}", normalized_path)
+    };
+
+    let parsed_url =
+        provider::Url::parse(&url).map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", path, e))?;
+
+    println!("=== pond cat --explain ===\n");
+    println!("Path:   {}", path);
+    println!("URL:    {}", parsed_url);
+    println!("Scheme: {}", parsed_url.scheme());
+    println!("Host:   {}", parsed_url.is_host());
+
+    // Try to get entry type for file:// paths
+    if parsed_url.scheme() == "file" && parsed_url.entry_type().is_none() {
+        let fs = &**tx;
+        let root = fs.root().await?;
+        let file_path = parsed_url.path();
+
+        match root.metadata_for_path(file_path).await {
+            Ok(metadata) => {
+                let type_name = match metadata.entry_type {
+                    tinyfs::EntryType::DirectoryPhysical => "directory",
+                    tinyfs::EntryType::DirectoryDynamic => "dynamic-directory",
+                    tinyfs::EntryType::Symlink => "symlink",
+                    tinyfs::EntryType::FilePhysicalVersion => "data",
+                    tinyfs::EntryType::FilePhysicalSeries => "data:series",
+                    tinyfs::EntryType::FileDynamic => "data:dynamic",
+                    tinyfs::EntryType::TablePhysicalVersion => "table",
+                    tinyfs::EntryType::TablePhysicalSeries => "table:series",
+                    tinyfs::EntryType::TableDynamic => "table:dynamic",
+                };
+                println!("Type:   {}", type_name);
+
+                let is_queryable =
+                    metadata.entry_type.is_table_file() || metadata.entry_type.is_series_file();
+                println!("Query:  {}", if is_queryable { "yes" } else { "no" });
+
+                if !is_queryable {
+                    if let Some(size) = metadata.size {
+                        println!("Size:   {} bytes", size);
+                    }
+                    println!("\nThis file outputs raw bytes (not queryable via SQL).");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                println!("Type:   (unknown: {})", e);
+            }
+        }
+    } else if let Some(et) = parsed_url.entry_type() {
+        println!("Type:   {:?} (from URL)", et);
+    }
+
+    // Create provider and get schema
+    let fs = &**tx;
+    let fs_arc = std::sync::Arc::new(fs.clone());
+    let provider_context = std::sync::Arc::new(tx.provider_context()?.clone());
+    let provider = provider::Provider::with_context(fs_arc, provider_context.clone());
+    let ctx = provider_context.datafusion_session.as_ref().clone();
+
+    let unified_table_provider = provider
+        .create_provider_for_url(&url, &ctx)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create table provider for URL '{}': {}", url, e))?;
+
+    let schema = unified_table_provider.schema();
+    println!("\nSchema: {} fields", schema.fields().len());
+    for field in schema.fields() {
+        println!("  {:30} {}", field.name(), field.data_type());
+    }
+
+    let _ = ctx.register_table("source", unified_table_provider)?;
+
+    let effective_sql = sql_query.unwrap_or("SELECT * FROM source");
+    println!("\nSQL:    {}", effective_sql);
+
+    // Show the logical plan
+    let df = ctx
+        .sql(effective_sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse SQL query '{}': {}", effective_sql, e))?;
+
+    let output_schema = df.schema();
+    println!("\nOutput: {} fields", output_schema.fields().len());
+    for field in output_schema.fields() {
+        println!("  {:30} {}", field.name(), field.data_type());
+    }
+
+    let _ = ctx.deregister_table("source");
 
     Ok(())
 }
@@ -595,6 +732,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await?;
 
@@ -628,6 +766,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await?;
 
@@ -669,6 +808,7 @@ mod tests {
             None,
             None,
             Some("SELECT timestamp, value * 2 as doubled_value FROM source WHERE value > 42"),
+            false,
         )
         .await?;
 
@@ -711,6 +851,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await;
 
@@ -742,6 +883,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await?;
 
@@ -773,6 +915,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await;
 
@@ -905,6 +1048,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await?;
 
@@ -1062,6 +1206,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await?;
 
@@ -1111,6 +1256,7 @@ mod tests {
             None,
             None,
             Some("SELECT timestamp, value * 2 as doubled_value FROM source WHERE value > 40"),
+            false,
         )
         .await?;
 
@@ -1168,6 +1314,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await?;
 
@@ -1205,6 +1352,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await?;
 
@@ -1257,6 +1405,7 @@ mod tests {
             None,
             None,
             Some("SELECT name, value FROM source WHERE value > 15"),
+            false,
         )
         .await?;
 
@@ -1309,6 +1458,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await?;
 
@@ -1343,6 +1493,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .await;
 

@@ -3,6 +3,7 @@ factory: sitegen
 site:
   title: "Caspar Water"
   base_url: "/"
+  site_url: "https://casparwater.us"
 
 content:
   - name: "pages"
@@ -11,6 +12,8 @@ content:
 exports:
   - name: "metrics"
     pattern: "/reduced/*/*/*.series"
+  - name: "analysis"
+    pattern: "/analysis/*"
 
 routes:
   - name: "home"
@@ -31,8 +34,43 @@ routes:
             slug: "$0"
             page: "/site/data.md"
             export: "metrics"
+      - name: "analysis"
+        type: static
+        slug: "analysis"
+        routes:
+          - name: "analysis-detail"
+            type: template
+            slug: "$0"
+            page: "/site/analysis.md"
+            export: "analysis"
 
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
+static:
+  - pattern: "/img/*"
+
+sidebar:
+  - "Political"
+  - "Blog"
+  - "History"
+  - "Water"
+  - label: "System"
+    children:
+      - label: "Pump Cycles"
+        href: "/analysis/pump-cycles.html"
+  - label: "Monitoring"
+    children:
+      - label: "Well Depth"
+        href: "/data/well-depth.html"
+      - label: "Tank Level"
+        href: "/data/tank-level.html"
+      - label: "System Pressure"
+        href: "/data/system-pressure.html"
+      - label: "Chlorine Level"
+        href: "/data/chlorine-level.html"
+      - label: "pH"
+        href: "/data/ph.html"
+  - "Software"
+  - "Operator"
+  - "Thanks"

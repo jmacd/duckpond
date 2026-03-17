@@ -27,6 +27,12 @@ pub struct ContentPage {
     pub section: Option<String>,
     /// Pond path to the source markdown file
     pub source_path: String,
+    /// Publication date (ISO 8601, e.g. "2024-06-15")
+    pub date: Option<String>,
+    /// Short summary for blog card display
+    pub summary: Option<String>,
+    /// Image URL for blog card hero image
+    pub image: Option<String>,
 }
 
 /// All discovered content pages for one content stage, sorted by (weight, title).
@@ -286,6 +292,7 @@ mod tests {
             site: SiteMeta {
                 title: "Test".to_string(),
                 base_url: "/test/".to_string(),
+                site_url: None,
             },
             content: vec![],
             exports: vec![ExportStage {
@@ -320,6 +327,8 @@ mod tests {
             }],
             partials: BTreeMap::new(),
             static_assets: vec![],
+            sidebar: vec![],
+            feed: None,
         }
     }
 
@@ -427,6 +436,9 @@ mod tests {
                         hidden: false,
                         section: None,
                         source_path: "/pages/water.md".to_string(),
+                        date: None,
+                        summary: None,
+                        image: None,
                     },
                     ContentPage {
                         title: "History".to_string(),
@@ -435,6 +447,9 @@ mod tests {
                         hidden: false,
                         section: None,
                         source_path: "/pages/history.md".to_string(),
+                        date: None,
+                        summary: None,
+                        image: None,
                     },
                 ],
             },
@@ -444,6 +459,7 @@ mod tests {
             site: SiteMeta {
                 title: "Test".to_string(),
                 base_url: "/".to_string(),
+                site_url: None,
             },
             content: vec![],
             exports: vec![],
@@ -466,6 +482,8 @@ mod tests {
             }],
             partials: BTreeMap::new(),
             static_assets: vec![],
+            sidebar: vec![],
+            feed: None,
         };
 
         let exports = BTreeMap::new();
@@ -497,6 +515,9 @@ mod tests {
                         hidden: false,
                         section: None,
                         source_path: "/pages/water.md".to_string(),
+                        date: None,
+                        summary: None,
+                        image: None,
                     },
                     ContentPage {
                         title: "Secret".to_string(),
@@ -505,6 +526,9 @@ mod tests {
                         hidden: true,
                         section: None,
                         source_path: "/pages/secret.md".to_string(),
+                        date: None,
+                        summary: None,
+                        image: None,
                     },
                 ],
             },

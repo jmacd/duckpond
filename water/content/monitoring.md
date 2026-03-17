@@ -1,8 +1,8 @@
 ---
 title: Monitoring
-weight: 40
+weight: 60
 layout: page
-section: About
+section: Main
 ---
 
 ## Monitoring
@@ -18,3 +18,5 @@ Owner/operator Joshua MacDonald is a software engineer with professional experie
 Operators access our [Influxdb](https://casparwater.us:8086) instance with live monitoring data collected through several OpenTelemetry Collectors.
 
 We have high-resolution well depth measurements dating back to August 2022, with which we can see the history of leaks, leak repairs, faucets left running, and other kinds of fine detail about our impact on the aquifer. See the [Well Depth History](/well-depth-history.html) page for an annotated 4-year timeline.
+
+We also publish a [Pump Cycles](/analysis/pump-cycles.html) analysis showing how the well pump operates in response to tank level and demand.

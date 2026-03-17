@@ -285,6 +285,14 @@ pond copy host:///tmp/data.md    /site/data.md
 pond copy host:///tmp/sidebar.md /site/sidebar.md
 echo "✓ markdown pages loaded"
 
+# Create a minimal logo for the CSS background-image reference
+cat > /tmp/logo.svg << 'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="none"/></svg>
+SVG
+pond mkdir /img
+pond copy host:///tmp/logo.svg /img/logo.svg
+echo "✓ logo.svg loaded"
+
 # Write site.yaml config
 cat > /tmp/site.yaml << 'YAML'
 {% raw %}
@@ -329,7 +337,8 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
+static:
+  - pattern: "/img/*"
 {% endraw %}
 YAML
 
@@ -436,8 +445,8 @@ check 'grep -oP '"'"'"start_time":\s*\d+'"'"' "${OUTDIR}/params/Temperature.html
 
 echo ""
 echo "--- Layout checks ---"
-check_contains "${OUTDIR}/index.html" "index.html (default layout)" 'class="hero"'
-check_contains "${OUTDIR}/params/Temperature.html" "params/Temperature.html (data layout)" 'class="data-page"'
+check_not_contains "${OUTDIR}/index.html" "index.html (default layout, no chart.js)" 'chart.js'
+check_contains "${OUTDIR}/params/Temperature.html" "params/Temperature.html (data layout)" 'chart.js'
 
 # Copy output to /output if mounted (use: ./run-test.sh 201 --output /tmp/sitegen-output)
 if [ -d /output ]; then

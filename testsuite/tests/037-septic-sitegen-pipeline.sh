@@ -41,6 +41,7 @@ echo ""
 echo "--- Step 1: Create directory structure ---"
 
 pond mkdir -p /system/run
+pond mkdir -p /system/etc
 pond mkdir -p /ingest
 
 echo "✓ Directories created"
@@ -63,13 +64,13 @@ EOF
 
 cat /tmp/ingest.yaml
 
-pond mknod logfile-ingest /etc/ingest --config-path /tmp/ingest.yaml
+pond mknod logfile-ingest /system/etc/ingest --config-path /tmp/ingest.yaml
 
 echo "✓ logfile-ingest factory created"
 
 echo ""
 echo "--- Step 2b: Run logfile-ingest ---"
-RUST_LOG=info pond run /etc/ingest 2>&1 | tee /tmp/ingest-run.log
+RUST_LOG=info pond run /system/etc/ingest 2>&1 | tee /tmp/ingest-run.log
 
 echo ""
 echo "--- Ingested files ---"
@@ -461,13 +462,13 @@ check_contains "${OUTDIR}/data/environment.html" "environment page" "chart-conta
 
 echo ""
 echo "--- Layout checks ---"
-check_contains "${OUTDIR}/index.html" "index.html (default layout)" 'class="hero"'
-check_contains "${OUTDIR}/data/pumps.html" "pumps (data layout)" 'class="data-page"'
-check_contains "${OUTDIR}/data/cycle-times.html" "cycle-times (data layout)" 'class="data-page"'
-check_contains "${OUTDIR}/data/pump-modes.html" "pump-modes (data layout)" 'class="data-page"'
-check_contains "${OUTDIR}/data/flow-totals.html" "flow-totals (data layout)" 'class="data-page"'
-check_contains "${OUTDIR}/data/dose-zones.html" "dose-zones (data layout)" 'class="data-page"'
-check_contains "${OUTDIR}/data/environment.html" "environment (data layout)" 'class="data-page"'
+check_not_contains "${OUTDIR}/index.html" "index.html (default layout, no chart.js)" 'chart.js'
+check_contains "${OUTDIR}/data/pumps.html" "pumps (data layout)" 'chart.js'
+check_contains "${OUTDIR}/data/cycle-times.html" "cycle-times (data layout)" 'chart.js'
+check_contains "${OUTDIR}/data/pump-modes.html" "pump-modes (data layout)" 'chart.js'
+check_contains "${OUTDIR}/data/flow-totals.html" "flow-totals (data layout)" 'chart.js'
+check_contains "${OUTDIR}/data/dose-zones.html" "dose-zones (data layout)" 'chart.js'
+check_contains "${OUTDIR}/data/environment.html" "environment (data layout)" 'chart.js'
 
 echo ""
 echo "--- Navigation checks ---"

@@ -20,4 +20,4 @@ ${CARGO} run /etc/site.yaml build "${LOCAL_OUTDIR}"
 
 echo
 echo "Site generated at: ${LOCAL_OUTDIR}"
-echo "To preview: npx vite ${LOCAL_OUTDIR} --port 4177 --open"
+echo "To preview: cd ${LOCAL_OUTDIR} && python3 -m http.server 4177"

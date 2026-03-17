@@ -12,6 +12,38 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 /// DuckPond version baked into generated HTML as `<meta name="generator">`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// GitHub icon SVG, used in the top bar of all layouts.
+const GITHUB_SVG: &str = r#"<svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>"#;
+
+/// RSS feed icon SVG, used in the top bar when a feed URL is configured.
+const RSS_SVG: &str = r#"<svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="12.5" r="2"/><path d="M1.5 6.5c0-.28.22-.5.5-.5 4.14 0 7.5 3.36 7.5 7.5 0 .28-.22.5-.5.5h-1c-.28 0-.5-.22-.5-.5C7.5 10.46 5.04 8 2 8c-.28 0-.5-.22-.5-.5v-1z"/><path d="M1.5 1.5c0-.28.22-.5.5-.5C9.96.5 15.5 6.04 15.5 14c0 .28-.22.5-.5.5h-1c-.28 0-.5-.22-.5-.5C13.5 7.1 8.9 2.5 2 2.5c-.28 0-.5-.22-.5-.5v-1z"/></svg>"#;
+
+/// Render the top bar with optional back link and right-justified icons.
+fn top_bar(back_label: Option<&str>, back_href: Option<&str>, feed_url: Option<&str>) -> Markup {
+    html! {
+        nav class="top-bar" {
+            @if let (Some(label), Some(href)) = (back_label, back_href) {
+                a class="top-bar-back" href=(href) {
+                    span class="blog-back-arrow" { "\u{2190}" }
+                    " " (label)
+                }
+            } @else {
+                span {}
+            }
+            div class="top-bar-icons" {
+                @if let Some(url) = feed_url {
+                    a href=(url) target="_blank" title="RSS Feed" {
+                        (PreEscaped(RSS_SVG))
+                    }
+                }
+                a href="https://github.com/jmacd/duckpond" target="_blank" title="Source on GitHub" {
+                    (PreEscaped(GITHUB_SVG))
+                }
+            }
+        }
+    }
+}
+
 /// Context passed to layout functions.
 pub struct LayoutContext<'a> {
     /// Page title (from frontmatter)
@@ -22,6 +54,10 @@ pub struct LayoutContext<'a> {
     pub content: &'a str,
     /// Rendered sidebar HTML (from sidebar partial, if any)
     pub sidebar: Option<&'a str>,
+    /// Publication date for blog posts (ISO 8601, e.g. "2024-06-15")
+    pub date: Option<&'a str>,
+    /// URL to the RSS feed (e.g. "/feed.xml"), shown as icon in top bar
+    pub feed_url: Option<&'a str>,
 }
 
 /// Apply a named layout to rendered content.
@@ -37,9 +73,27 @@ pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
     let markup = match name {
         "data" => data_layout(ctx),
         "page" => page_layout(ctx),
+        "blog" => blog_layout(ctx),
         _ => default_layout(ctx),
     };
     markup.into_string()
+}
+
+/// Common `<head>` elements shared by all layouts.
+fn common_head(ctx: &LayoutContext) -> Markup {
+    html! {
+        meta charset="utf-8";
+        meta name="viewport" content="width=device-width, initial-scale=1";
+        meta name="generator" content=(format!("DuckPond v{}", VERSION));
+        title { (ctx.title) " -- " (ctx.site_title) }
+        link rel="preconnect" href="https://fonts.googleapis.com";
+        link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
+        link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap";
+        link rel="stylesheet" href="/style.css";
+        @if let Some(feed) = ctx.feed_url {
+            link rel="alternate" type="application/rss+xml" title="RSS Feed" href=(feed);
+        }
+    }
 }
 
 /// Layout for data pages (parameter/site detail pages).
@@ -51,42 +105,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
         (DOCTYPE)
         html lang="en" {
             head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " -- " (ctx.site_title) }
-                link rel="stylesheet" href="/style.css";
-            }
-            body {
-                @if let Some(sidebar_html) = ctx.sidebar {
-                    nav class="sidebar" {
-                        (PreEscaped(sidebar_html))
-                    }
-                }
-                main class="data-page" {
-                    (PreEscaped(ctx.content))
-                }
-                // Our glue code -- loads DuckDB-WASM + Observable Plot dynamically
-                script src="/chart.js" type="module" {}
-            }
-        }
-    }
-}
-
-/// Layout for content pages (articles, documentation, blog posts).
-///
-/// Sidebar navigation + article wrapper, no CDN scripts.
-/// Content is wrapped in `<article>` for semantic HTML.
-fn page_layout(ctx: &LayoutContext) -> Markup {
-    html! {
-        (DOCTYPE)
-        html lang="en" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " -- " (ctx.site_title) }
-                link rel="stylesheet" href="/style.css";
+                (common_head(ctx))
             }
             body {
                 @if let Some(sidebar_html) = ctx.sidebar {
@@ -95,31 +114,31 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    article {
-                        (PreEscaped(ctx.content))
+                    (top_bar(Some("Home"), Some("/"), ctx.feed_url))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
                     }
                 }
-                script {
-                    (PreEscaped(r#"document.querySelectorAll('.nav-section-title').forEach(function(t){t.addEventListener('click',function(){var s=t.parentElement;if(s.classList.contains('expanded'))return;document.querySelectorAll('.nav-section.expanded').forEach(function(e){e.classList.remove('expanded')});s.classList.add('expanded')})})"#))
-                }
+                // Our glue code -- loads DuckDB-WASM + Observable Plot dynamically
+                script src="/chart.js" type="module" {}
+                script src="/overlay.js" type="module" {}
             }
         }
     }
 }
 
-/// Default layout for static pages (index, listing pages).
+/// Layout for content pages (articles, documentation, blog index).
 ///
-/// No CDN scripts -- these are informational pages without interactive charts.
-fn default_layout(ctx: &LayoutContext) -> Markup {
+/// Sidebar navigation + card-wrapped article with back-to-home link.
+/// Content is wrapped in a card container matching the blog post style.
+fn page_layout(ctx: &LayoutContext) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
             head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="generator" content=(format!("DuckPond v{}", VERSION));
-                title { (ctx.title) " -- " (ctx.site_title) }
-                link rel="stylesheet" href="/style.css";
+                (common_head(ctx))
             }
             body {
                 @if let Some(sidebar_html) = ctx.sidebar {
@@ -127,8 +146,107 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                         (PreEscaped(sidebar_html))
                     }
                 }
-                main class="hero" {
-                    (PreEscaped(ctx.content))
+                main class="content-page" {
+                    (top_bar(Some("Home"), Some("/"), ctx.feed_url))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Layout for individual blog posts.
+///
+/// Renders the post inside a card container matching the blog grid card
+/// aesthetic: lighter background, rounded edges, date/title header, with
+/// a back-arrow link to the blog index.
+fn blog_layout(ctx: &LayoutContext) -> Markup {
+    let date_display = ctx.date.map(format_date);
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                (common_head(ctx))
+            }
+            body {
+                @if let Some(sidebar_html) = ctx.sidebar {
+                    nav class="sidebar" {
+                        (PreEscaped(sidebar_html))
+                    }
+                }
+                main class="content-page" {
+                    (top_bar(Some("Blog"), Some("blog.html"), ctx.feed_url))
+                    article class="blog-post" {
+                        header class="blog-post-header" {
+                            @if let Some(ref date) = date_display {
+                                time class="blog-post-date" { (date) }
+                            }
+                            h1 class="blog-post-title" { (ctx.title) }
+                        }
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Format an ISO 8601 date string for display (e.g. "2024-06-15" -> "June 15, 2024").
+fn format_date(iso: &str) -> String {
+    let parts: Vec<&str> = iso.split('-').collect();
+    if parts.len() != 3 {
+        return iso.to_string();
+    }
+    let month = match parts[1] {
+        "01" => "January",
+        "02" => "February",
+        "03" => "March",
+        "04" => "April",
+        "05" => "May",
+        "06" => "June",
+        "07" => "July",
+        "08" => "August",
+        "09" => "September",
+        "10" => "October",
+        "11" => "November",
+        "12" => "December",
+        _ => return iso.to_string(),
+    };
+    let day = parts[2].trim_start_matches('0');
+    format!("{} {}, {}", month, day, parts[0])
+}
+
+/// Default layout for the index/home page.
+///
+/// Same card structure as page layout, with a spacer (and optional
+/// icons) in place of the back-arrow. Icons sit above the card,
+/// over the page background.
+fn default_layout(ctx: &LayoutContext) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                (common_head(ctx))
+            }
+            body {
+                @if let Some(sidebar_html) = ctx.sidebar {
+                    nav class="sidebar" {
+                        (PreEscaped(sidebar_html))
+                    }
+                }
+                main class="content-page" {
+                    (top_bar(None, None, ctx.feed_url))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
                 }
             }
         }
@@ -146,12 +264,17 @@ mod tests {
             site_title: "Test Site",
             content: "<h1>Hello</h1>",
             sidebar: None,
+            date: None,
+            feed_url: None,
         };
         let html = apply_layout("default", &ctx);
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("Home -- Test Site"));
         assert!(html.contains("<h1>Hello</h1>"));
-        assert!(!html.contains("duckdb")); // No CDN scripts in default layout
+        assert!(html.contains("top-bar"), "Expected top bar: {}", html);
+        assert!(html.contains("github.com"), "Expected GitHub link");
+        assert!(html.contains("blog-post"), "Expected card container");
+        assert!(!html.contains("RSS Feed"), "No RSS icon without feed_url");
     }
 
     #[test]
@@ -161,13 +284,17 @@ mod tests {
             site_title: "Noyo Harbor",
             content: "<p>Chart here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
+            date: None,
+            feed_url: None,
         };
         let html = apply_layout("data", &ctx);
         assert!(html.contains("chart.js")); // Glue code present
         assert!(html.contains("type=\"module\"")); // Module script
         assert!(html.contains("class=\"sidebar\""));
         assert!(html.contains("<ul><li>Nav</li></ul>"));
-        assert!(html.contains("data-page"));
+        assert!(html.contains("top-bar"), "Top bar present");
+        assert!(html.contains("blog-post"), "Card container");
+        assert!(html.contains("github.com"), "GitHub icon");
     }
 
     #[test]
@@ -177,9 +304,11 @@ mod tests {
             site_title: "Site",
             content: "<p>Content</p>",
             sidebar: None,
+            date: None,
+            feed_url: None,
         };
         let html = apply_layout("nonexistent", &ctx);
-        assert!(html.contains("class=\"hero\"")); // Default layout uses hero class
+        assert!(html.contains("top-bar"), "Default layout uses top bar");
     }
 
     #[test]
@@ -189,12 +318,88 @@ mod tests {
             site_title: "Caspar Water",
             content: "<h1>Water</h1><p>Info</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
+            date: None,
+            feed_url: None,
         };
         let html = apply_layout("page", &ctx);
-        assert!(html.contains("content-page")); // Page layout class
-        assert!(html.contains("<article>")); // Wrapped in article
-        assert!(html.contains("class=\"sidebar\"")); // Sidebar present
-        assert!(!html.contains("chart.js")); // No CDN scripts
-        assert!(html.contains("Water System -- Caspar Water")); // Title
+        assert!(html.contains("content-page"), "Page layout class");
+        assert!(html.contains("blog-post"), "Card container");
+        assert!(html.contains("top-bar"), "Top bar present");
+        assert!(html.contains("Home"), "Back to home link: {}", html);
+        assert!(html.contains("github.com"), "GitHub icon: {}", html);
+        assert!(html.contains("class=\"sidebar\""), "Sidebar present");
+        assert!(!html.contains("chart.js"), "No CDN scripts");
+    }
+
+    #[test]
+    fn test_blog_layout() {
+        let ctx = LayoutContext {
+            title: "My Blog Post",
+            site_title: "Test Blog",
+            content: "<p>Post content here</p>",
+            sidebar: Some("<ul><li>Nav</li></ul>"),
+            date: Some("2025-03-10"),
+            feed_url: Some("/feed.xml"),
+        };
+        let html = apply_layout("blog", &ctx);
+        assert!(html.contains("top-bar"), "Expected top bar: {}", html);
+        assert!(
+            html.contains("blog.html"),
+            "Expected back link to blog: {}",
+            html
+        );
+        assert!(
+            html.contains("github.com"),
+            "Expected GitHub icon: {}",
+            html
+        );
+        assert!(
+            html.contains("March 10, 2025"),
+            "Expected formatted date: {}",
+            html
+        );
+        assert!(html.contains("My Blog Post"), "Expected title: {}", html);
+        assert!(
+            html.contains("blog-post-title"),
+            "Expected title class: {}",
+            html
+        );
+        assert!(
+            html.contains("Post content here"),
+            "Expected content: {}",
+            html
+        );
+        assert!(
+            html.contains("class=\"sidebar\""),
+            "Expected sidebar: {}",
+            html
+        );
+        assert!(!html.contains("chart.js"), "No CDN scripts in blog layout");
+        assert!(html.contains("RSS Feed"), "Expected RSS icon: {}", html);
+        assert!(html.contains("/feed.xml"), "Expected feed link: {}", html);
+        assert!(
+            html.contains("application/rss+xml"),
+            "Expected RSS autodiscovery: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn test_blog_layout_no_date() {
+        let ctx = LayoutContext {
+            title: "Undated Post",
+            site_title: "Blog",
+            content: "<p>No date</p>",
+            sidebar: None,
+            date: None,
+            feed_url: None,
+        };
+        let html = apply_layout("blog", &ctx);
+        assert!(html.contains("blog-post"), "Expected blog-post: {}", html);
+        assert!(
+            !html.contains("blog-post-date"),
+            "No date element expected: {}",
+            html
+        );
     }
 }

@@ -28,6 +28,24 @@ SPDX-FileCopyrightText = "Caspar Water Company"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
+path = ["water/img/logo.svg"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Caspar Water Company"
+SPDX-License-Identifier = "LicenseRef-AllRightsReserved"
+
+[[annotations]]
+path = ["water/img/MCCSD-conjunctive-use.pdf"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Mendocino City Community Services District (MCCSD)"
+SPDX-License-Identifier = "LicenseRef-AllRightsReserved"
+
+[[annotations]]
+path = ["water/img/*.jpg"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright held by respective owners"
+SPDX-License-Identifier = "LicenseRef-AllRightsReserved"
+
+[[annotations]]
 path = ["**.jpg", "**.png", "**.parquet", "OUT**", "CLIPPY", "DIFF", "ORIG", "WHATIS", ".dockerignore", "**/.dockerignore", ".gitignore", "**/.gitignore"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Caspar Water Company"

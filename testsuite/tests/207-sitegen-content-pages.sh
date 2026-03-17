@@ -151,12 +151,12 @@ check '[ -f "${OUTDIR}/beta.html" ]'   "beta.html exists"
 check '[ -f "${OUTDIR}/gamma.html" ]'  "gamma.html exists (hidden page still renders)"
 
 check_contains "${OUTDIR}/alpha.html"  "alpha uses page layout"       'class="content-page"'
-check_contains "${OUTDIR}/alpha.html"  "alpha has article wrapper"    '<article>'
+check_contains "${OUTDIR}/alpha.html"  "alpha has article wrapper"    'class="blog-post"'
 check_contains "${OUTDIR}/alpha.html"  "heading anchor on alpha"      'id="alpha"'
 check_contains "${OUTDIR}/beta.html"   "sub-heading anchor on beta"   'id="sub-heading"'
 check_contains "${OUTDIR}/alpha.html"  "sidebar navigation present"   'nav-list'
 check_contains "${OUTDIR}/alpha.html"  "active page highlighting"     'class="active"'
-check_contains "${OUTDIR}/index.html"  "index uses default layout"    'class="hero"'
+check_not_contains "${OUTDIR}/index.html"  "index uses default layout (no chart.js)"  'chart.js'
 
 check_not_contains "${OUTDIR}/alpha.html"  "hidden page excluded from nav"  'Gamma Page'
 check_not_contains "${OUTDIR}/alpha.html"  "no CDN scripts in page layout"  'chart.js'
