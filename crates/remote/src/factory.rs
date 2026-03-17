@@ -86,6 +86,17 @@ impl FactoryCommand for RemoteCommand {
     }
 }
 
+/// Cross-pond import configuration
+/// When present in a remote factory config, the factory operates in import mode:
+/// it reads from a foreign pond's backup and imports partitions at a local path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportConfig {
+    /// Path in the foreign pond to import (e.g., "/ingest")
+    pub source_path: String,
+    /// Path in this pond where imported content appears (e.g., "/sources/septic")
+    pub local_path: String,
+}
+
 /// Remote storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
@@ -111,6 +122,11 @@ pub struct RemoteConfig {
     /// Allow HTTP (non-TLS) connections (required for MinIO and other local S3)
     #[serde(default)]
     pub allow_http: bool,
+
+    /// Cross-pond import configuration (optional).
+    /// When present, this factory operates in import mode.
+    #[serde(default)]
+    pub import: Option<ImportConfig>,
 }
 
 impl RemoteConfig {
@@ -194,6 +210,30 @@ fn validate_remote_config(config_bytes: &[u8]) -> tinyfs::Result<Value> {
 
     if config.url.is_empty() {
         return Err(tinyfs::Error::Other("url field is required".to_string()));
+    }
+
+    // Validate import config if present
+    if let Some(ref import) = config.import {
+        if import.source_path.is_empty() {
+            return Err(tinyfs::Error::Other(
+                "import.source_path is required when import section is present".to_string(),
+            ));
+        }
+        if import.local_path.is_empty() {
+            return Err(tinyfs::Error::Other(
+                "import.local_path is required when import section is present".to_string(),
+            ));
+        }
+        if !import.source_path.starts_with('/') {
+            return Err(tinyfs::Error::Other(
+                "import.source_path must be an absolute path".to_string(),
+            ));
+        }
+        if !import.local_path.starts_with('/') {
+            return Err(tinyfs::Error::Other(
+                "import.local_path must be an absolute path".to_string(),
+            ));
+        }
     }
 
     serde_json::to_value(config)
