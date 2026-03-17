@@ -1017,33 +1017,80 @@ async fn execute_import(
         log::debug!("      [OK] Downloaded {} bytes", byte_len);
     }
 
-    // Step 7: Also download the Delta log files so the local table can read the partitions
-    let delta_log_files: Vec<_> = remote_files
-        .iter()
-        .filter(|(_bundle, path, _txn, _size)| path.starts_with("_delta_log/"))
-        .collect();
+    // Step 7: Register imported files in the local Delta table.
+    // Create Add actions for each downloaded parquet file and commit them.
+    // This makes the files visible to DataFusion queries on the local table.
+    use deltalake::kernel::Action;
+    use deltalake::kernel::models::Add;
+    use deltalake::kernel::transaction::CommitBuilder;
+    use deltalake::protocol::SaveMode;
 
-    for (bundle_id, path, txn_id, _size) in &delta_log_files {
-        let file_path = object_store::path::Path::from(path.as_str());
+    let mut add_actions: Vec<Action> = Vec::new();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
 
-        if local_store.head(&file_path).await.is_ok() {
-            log::debug!("   Skip {} (already exists)", path);
-            continue;
-        }
+    for (_bundle_id, path, _txn_id, size) in &files_to_download {
+        // Extract part_id from path (format: "part_id=<uuid>/filename.parquet")
+        let partition_values = if let Some(part_val) = path
+            .strip_prefix("part_id=")
+            .and_then(|rest| rest.split('/').next())
+        {
+            std::collections::HashMap::from([(
+                "part_id".to_string(),
+                Some(part_val.to_string()),
+            )])
+        } else {
+            std::collections::HashMap::new()
+        };
 
-        log::debug!("   Downloading delta log: {}", path);
-        let mut output = Vec::new();
-        remote_table
-            .read_file(bundle_id, path, *txn_id, &mut output)
-            .await?;
+        add_actions.push(Action::Add(Add {
+            path: path.clone(),
+            partition_values,
+            size: *size,
+            modification_time: now_ms,
+            data_change: true,
+            stats: None,
+            tags: None,
+            deletion_vector: None,
+            base_row_id: None,
+            default_row_commit_version: None,
+            clustering_provider: None,
+        }));
+    }
 
-        let bytes = Bytes::from(output);
-        local_store
-            .put(&file_path, bytes.into())
+    if !add_actions.is_empty() {
+        log::info!(
+            "   Committing {} Add action(s) to local Delta table",
+            add_actions.len()
+        );
+
+        let operation = deltalake::protocol::DeltaOperation::Write {
+            mode: SaveMode::Append,
+            partition_by: Some(vec!["part_id".to_string()]),
+            predicate: None,
+        };
+
+        let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> =
+            local_table.snapshot().ok().map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
+
+        let _commit = CommitBuilder::default()
+            .with_actions(add_actions)
+            .build(
+                snapshot_ref,
+                local_table.log_store().clone(),
+                operation,
+            )
             .await
             .map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to write {}: {}", path, e))
+                RemoteError::TableOperation(format!(
+                    "Failed to commit imported files to Delta table: {}",
+                    e
+                ))
             })?;
+
+        log::info!("   [OK] Delta commit for imported files succeeded");
     }
 
     log::info!(
