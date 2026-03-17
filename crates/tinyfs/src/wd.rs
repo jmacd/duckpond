@@ -110,6 +110,16 @@ impl WD {
         self.np.clone()
     }
 
+    /// Insert a pre-created node into this directory.
+    /// Used for cross-pond import where the node has a foreign FileID.
+    pub async fn insert_node(&self, name: &str, node: Node) -> Result<NodePath> {
+        self.dref.insert(name.to_string(), node.clone()).await?;
+        Ok(NodePath {
+            node,
+            path: self.dref.path().join(name),
+        })
+    }
+
     // Generic node creation method for all node types
     async fn create_node<T, F>(&self, name: &str, node_creator: F) -> Result<NodePath>
     where
