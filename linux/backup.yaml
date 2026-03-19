@@ -1,0 +1,8 @@
+compression_level: 3
+region: "us-east-1"
+url: "s3://duckpond-linux"
+allow_http: true
+
+endpoint: "{{ env(name='MINIO_ENDPOINT', default='http://localhost:9000') }}"
+access_key: "{{ env(name='MINIO_ACCESS_KEY') }}"
+secret_key: "{{ env(name='MINIO_SECRET_KEY') }}"
