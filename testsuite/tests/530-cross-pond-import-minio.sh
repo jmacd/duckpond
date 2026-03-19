@@ -19,7 +19,7 @@
 #   - Local data in Pond2 coexists with imported data
 set -e
 
-source /test/helpers/check.sh 2>/dev/null || source helpers/check.sh 2>/dev/null || true
+source /usr/local/bin/check.sh 2>/dev/null || source check.sh 2>/dev/null || true
 
 echo "=== Experiment: Cross-Pond Import via MinIO ==="
 echo ""
@@ -121,8 +121,11 @@ pond mkdir /system/etc
 # Configure import factory pointing at the producer's backup
 # source_path: the path in the producer's pond to import
 # local_path: where the imported data appears in this pond
+# Configure import factory pointing at the producer's backup.
+# The URL must point to the full backup table path (including pond-{id} suffix
+# that the producer's backup uses).
 cat > /tmp/import-config.yaml << EOF
-url: "s3://${BUCKET_NAME}"
+url: "s3://${BUCKET_NAME}/pond-${PRODUCER_POND_ID}"
 endpoint: "${MINIO_ENDPOINT}"
 region: "us-east-1"
 access_key_id: "${MINIO_ROOT_USER}"
@@ -183,10 +186,11 @@ check 'grep -q "sensor-002" /tmp/imported-data.txt' "imported data contains sens
 # Compare with original
 echo ""
 echo "--- Comparing with original ---"
-POND=/pond1 pond cat /ingest/sensors.csv > /tmp/original-data.txt 2>&1 || true
+POND=/pond1 pond cat /ingest/sensors.csv 2>/dev/null > /tmp/original-data.txt
+POND=/pond2 pond cat /sources/producer/sensors.csv 2>/dev/null > /tmp/imported-data2.txt
 
 ORIG_HASH=$(md5sum /tmp/original-data.txt | cut -d' ' -f1)
-IMPORT_HASH=$(md5sum /tmp/imported-data.txt | cut -d' ' -f1)
+IMPORT_HASH=$(md5sum /tmp/imported-data2.txt | cut -d' ' -f1)
 check '[ "${ORIG_HASH}" = "${IMPORT_HASH}" ]' "imported data matches original byte-for-byte"
 
 # Verify pond_ids are different (provenance preserved)

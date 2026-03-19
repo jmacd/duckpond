@@ -457,11 +457,13 @@ async fn discover_foreign_partition(
     let mut current_node_id = root_part_id.to_string();
 
     for part_name in &source_parts {
+        // Note: part_id is a Delta partition column, NOT present in the raw parquet
+        // files read from backup. Query by node_id only (globally unique for directories).
         let sql = format!(
             "SELECT content FROM foreign_oplog \
-             WHERE part_id = '{}' AND node_id = '{}' AND file_type = 'dir:physical' \
+             WHERE node_id = '{}' AND file_type = 'dir:physical' \
              ORDER BY version DESC LIMIT 1",
-            current_part_id, current_node_id
+            current_node_id
         );
 
         let df = tmp_ctx.sql(&sql).await.map_err(|e| {
@@ -592,20 +594,27 @@ async fn execute_remote(
     if required_mode != actual_mode {
         match &cmd {
             RemoteCommand::Push | RemoteCommand::Pull => {
-                // Push/Pull require ControlWriter mode but were called with PondReadWriter
-                // This happens when 'pond run' is used manually - the push/pull already
-                // runs automatically as a post-commit factory
-                log::info!(
-                    "[INFO]  Remote {} runs automatically after each commit.",
-                    if matches!(cmd, RemoteCommand::Push) {
-                        "push"
-                    } else {
-                        "pull"
-                    }
-                );
-                log::info!("   No manual execution needed - your data is already synchronized.");
-                log::info!("   To check backup status, use: pond run <path> show");
-                return Ok(());
+                // Import-mode factories can run Pull via pond run (PondReadWriter mode)
+                if config.import.is_some() && matches!(cmd, RemoteCommand::Pull) {
+                    log::info!("[DOWN] Import factory: running pull in manual mode");
+                } else {
+                    // Push/Pull require ControlWriter mode but were called with PondReadWriter
+                    // This happens when 'pond run' is used manually - the push/pull already
+                    // runs automatically as a post-commit factory
+                    log::info!(
+                        "[INFO]  Remote {} runs automatically after each commit.",
+                        if matches!(cmd, RemoteCommand::Push) {
+                            "push"
+                        } else {
+                            "pull"
+                        }
+                    );
+                    log::info!(
+                        "   No manual execution needed - your data is already synchronized."
+                    );
+                    log::info!("   To check backup status, use: pond run <path> show");
+                    return Ok(());
+                }
             }
             _ => {
                 return Err(RemoteError::ExecutionMismatch {
@@ -1128,12 +1137,12 @@ async fn execute_import(
     let mut current_node_id = root_part_id.to_string();
 
     for part_name in &source_parts {
-        // Query the directory entry content for the current directory
+        // Note: part_id is a Delta partition column, NOT in raw parquet from backup
         let sql = format!(
             "SELECT content FROM foreign_oplog \
-             WHERE part_id = '{}' AND node_id = '{}' AND file_type = 'dir:physical' \
+             WHERE node_id = '{}' AND file_type = 'dir:physical' \
              ORDER BY version DESC LIMIT 1",
-            current_part_id, current_node_id
+            current_node_id
         );
         log::debug!("   Directory query: {}", sql);
 
@@ -1241,40 +1250,9 @@ async fn execute_import(
     );
 
     // Step 5: Collect all part_ids to import (target + any child directories)
-    let mut part_ids_to_import: Vec<String> = vec![target_part_id.clone()];
-
-    // Find child physical directories that live in the target partition.
-    // Physical directories have part_id == node_id, but their parent partition
-    // contains directory entries pointing to them.
-    let child_dir_sql = format!(
-        "SELECT DISTINCT node_id FROM foreign_oplog \
-         WHERE file_type = 'dir:physical' \
-         AND node_id IN ( \
-             SELECT DISTINCT node_id FROM foreign_oplog \
-             WHERE part_id = '{}' AND file_type = 'dir:physical' AND node_id != '{}' \
-         )",
-        target_part_id, target_part_id
-    );
-    log::debug!("   Child directory query: {}", child_dir_sql);
-
-    if let Ok(df) = tmp_ctx.sql(&child_dir_sql).await {
-        if let Ok(batches) = df.collect().await {
-            for batch in &batches {
-                if let Some(ids) = batch
-                    .column_by_name("node_id")
-                    .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                {
-                    for i in 0..batch.num_rows() {
-                        let child_part = ids.value(i).to_string();
-                        if !part_ids_to_import.contains(&child_part) {
-                            log::info!("   Also importing child partition: {}", child_part);
-                            part_ids_to_import.push(child_part);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // For the initial implementation, import only the target partition.
+    // TODO: discover child physical directories from the directory entries
+    let part_ids_to_import: Vec<String> = vec![target_part_id.clone()];
 
     log::info!(
         "   Importing {} partition(s): {:?}",
