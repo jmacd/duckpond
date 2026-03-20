@@ -671,13 +671,7 @@ async fn execute_remote(
     };
 
     // Build storage options for S3/R2 configuration
-    let mut storage_options = config.to_storage_options();
-
-    // Reduce retry timeout to avoid long hangs on missing _last_checkpoint
-    if !storage_options.contains_key("max_retries") {
-        storage_options.insert("max_retries".to_string(), "3".to_string());
-        storage_options.insert("retry_timeout".to_string(), "10s".to_string());
-    }
+    let storage_options = config.to_storage_options();
     log::debug!(
         "   Final storage_options keys: {:?}",
         storage_options.keys().collect::<Vec<_>>()
@@ -726,11 +720,7 @@ async fn execute_show_remote(config: &RemoteConfig) -> Result<(), RemoteError> {
     use object_store::ObjectStore;
 
     let url_str = config.url.strip_prefix("file://").unwrap_or(&config.url);
-    let mut storage_options = config.to_storage_options();
-
-    // Reduce retry timeout for interactive exploration commands
-    storage_options.insert("max_retries".to_string(), "3".to_string());
-    storage_options.insert("retry_timeout".to_string(), "10s".to_string());
+    let storage_options = config.to_storage_options();
 
     log::info!("[SEARCH] Opening remote pond backup at {}", url_str);
 
