@@ -99,7 +99,8 @@ secret_key: "{{ env(name='R2_SECRET') }}"
 # Cross-pond import configuration
 import:
   # Path in the foreign pond to import
-  source_path: "/ingest"
+  # Use /** suffix to recursively import all child directories
+  source_path: "/ingest/**"
   # Path in this pond where imported content appears
   local_path: "/sources/septic"
 ```
@@ -318,12 +319,28 @@ compression_level: 3
 
 # Cross-pond import (new behavior)
 # NOTE: url must be the FULL backup table path including pond-{uuid}.
-# The foreign pond's UUID is visible in its backup output.
+# The foreign pond's UUID is visible via 'list-ponds' or backup output.
 url: "s3://septic-dev/pond-019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00"
 import:
-  source_path: "/ingest"
+  source_path: "/ingest"          # flat: import only /ingest partition
   local_path: "/sources/septic"
+
+# Recursive import — includes all child partitions
+url: "s3://duckpond-linux/pond-019d0473-28a8-7169-9848-00d60bebbc3c"
+import:
+  source_path: "/logs/**"         # recursive: import /logs and all descendants
+  local_path: "/sources/workshophost"
 ```
+
+The `source_path` field supports two modes:
+- **Flat** (`"/ingest"`): imports only the named directory's partition
+- **Recursive** (`"/logs/**"`): imports the named directory and all
+  descendant physical directories (each with their own partition)
+
+When flat mode encounters a child directory that references an
+unimported foreign partition, the system produces a clear error:
+"Foreign partition {id} not imported. Use source_path with ** to
+import recursively."
 
 A pond can have multiple remote factories: one for its own backup
 (mode `push`) and one or more for foreign imports.
@@ -339,13 +356,18 @@ Import is a two-step process, consistent with how other factories
      directory structure
    - Finds the `part_id` for `source_path` by navigating the foreign
      directory tree
+   - If `source_path` ends with `/**`, recursively discovers all
+     descendant physical directories and their `part_id` values
    - Creates local directory at `local_path` with the foreign
      `FileID` (same `part_id` and `node_id` as the foreign directory)
+   - For recursive imports, creates local directory entries for all
+     discovered child directories with their foreign `FileID`s
    - Creates parent directories as needed via `create_dir_all`
 
 2. **`pond run <factory> pull`** (data transfer):
    - Lists all backed-up files in the foreign backup
-   - Filters to parquet files whose path matches the target `part_id`
+   - Filters to parquet files whose path matches ALL discovered
+     `part_id` values (not just the top-level one)
    - Downloads each file via `ChunkedReader` (BLAKE3 verified)
    - Writes to local object store
    - Creates a Delta commit with `Add` actions using `CommitBuilder`
@@ -421,6 +443,22 @@ cross-backup dependencies.
     (zero-copy: foreign files not re-serialized)
 - Import factories in `/system/etc/` can Pull in PondReadWriter mode
 - End-to-end test (530) passes 6/6 checks with MinIO
+- Remote exploration subcommands:
+  - `list-ponds`: scans bucket for pond-{uuid}/ prefixes
+  - `show`: reads foreign OpLog, displays full directory tree
+  - Both accessible via `pond run host+remote:///config.yaml <cmd>`
+
+### Phase 2.5: Recursive Import and Error Handling -- IN PROGRESS
+
+- Parse `**` suffix from `source_path` to determine recursive mode
+- During mknod: recursively walk foreign directory tree to discover
+  all descendant physical directories and their `part_id` values
+- Create local directory entries for ALL discovered partitions
+- During pull: download parquet files for ALL discovered partitions
+- When traversing an imported directory that references an
+  un-imported foreign partition, produce a clear error:
+  "Foreign partition {id} not imported. Use source_path with **
+  to import recursively."
 
 ### Phase 3: Incremental Sync -- FUTURE
 
@@ -429,6 +467,43 @@ cross-backup dependencies.
 - Full control table tracking of import state
 - Support for importing updated partitions when the foreign pond
   adds new data
+
+---
+
+## Known Issues
+
+### mDNS (.local) hostname resolution
+
+The Rust HTTP client (reqwest/hyper) does not support mDNS. Hostnames
+like `watershop.local` resolve via macOS Bonjour but not via the
+standard DNS resolver used by the S3 object_store client. This causes
+silent 57-second hangs instead of immediate DNS failures.
+
+**Workaround**: use IP addresses or add entries to `/etc/hosts`.
+
+**Root cause**: the object_store S3 client should have a short connect
+timeout so unresolvable hosts fail fast. This is a library configuration
+issue, not specific to cross-pond import.
+
+---
+
+## Remote Exploration Commands
+
+The remote factory provides subcommands for exploring backup storage
+without external S3 CLI tools:
+
+```bash
+# List all ponds in a bucket
+pond run host+remote:///config.yaml list-ponds
+
+# Show the full directory tree of a specific pond backup
+pond run host+remote:///config.yaml show
+```
+
+`list-ponds` scans the bucket for `pond-{uuid}/` prefixes using
+direct object_store listing. `show` reads the foreign OpLog via
+`ChunkedAsyncFileReader` and recursively displays the directory tree
+with entry types, sizes, and version counts.
 
 ---
 
