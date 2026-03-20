@@ -671,7 +671,13 @@ async fn execute_remote(
     };
 
     // Build storage options for S3/R2 configuration
-    let storage_options = config.to_storage_options();
+    let mut storage_options = config.to_storage_options();
+
+    // Reduce retry timeout to avoid long hangs on missing _last_checkpoint
+    if !storage_options.contains_key("max_retries") {
+        storage_options.insert("max_retries".to_string(), "3".to_string());
+        storage_options.insert("retry_timeout".to_string(), "10s".to_string());
+    }
     log::debug!(
         "   Final storage_options keys: {:?}",
         storage_options.keys().collect::<Vec<_>>()
