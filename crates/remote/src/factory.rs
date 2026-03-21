@@ -71,6 +71,10 @@ enum RemoteCommand {
     /// and entry types. When run from a pond context, shows raw
     /// backup file details instead.
     Show {
+        /// Path or glob pattern to filter files (pond context only)
+        #[arg(default_value = "/*")]
+        pattern: String,
+
         /// Show full verification script (pond context only)
         #[arg(long, short)]
         script: bool,
@@ -807,13 +811,13 @@ async fn execute_remote(
         RemoteCommand::Replicate => execute_replicate(config, &context).await,
         RemoteCommand::ListFiles { txn_id } => execute_list_files(remote_table, txn_id).await,
         RemoteCommand::Verify { bundle_id } => execute_verify(remote_table, bundle_id).await,
-        RemoteCommand::Show { script } => {
+        RemoteCommand::Show { pattern, script } => {
             execute_show(
                 remote_table,
                 &config,
                 &path,
                 storage_options,
-                "/*",
+                &pattern,
                 script,
             )
             .await

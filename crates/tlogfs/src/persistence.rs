@@ -2131,8 +2131,12 @@ impl InnerState {
                     s as &dyn deltalake::kernel::transaction::TableReference
                 });
 
-            let commit = CommitBuilder::default()
+            // Include the same transaction metadata so version tracking works
+            let commit_builder = CommitBuilder::default()
                 .with_actions(add_actions)
+                .with_app_metadata(metadata.to_delta_metadata());
+
+            let commit = commit_builder
                 .build(snapshot_ref, table.log_store().clone(), operation)
                 .await?;
 
