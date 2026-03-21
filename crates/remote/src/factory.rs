@@ -257,16 +257,28 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
         None => return Ok(()), // Not an import factory, nothing to do
     };
 
+    // Parse source_path: strip /** suffix for recursive mode
+    let (source_base, recursive) = if import_config.source_path.ends_with("/**") {
+        let base = import_config
+            .source_path
+            .trim_end_matches("/**")
+            .to_string();
+        (base, true)
+    } else {
+        (import_config.source_path.clone(), false)
+    };
+
     log::info!(
-        "[INIT] Import factory: setting up local path {} -> foreign {}",
+        "[INIT] Import factory: {} {} -> foreign {}",
+        if recursive { "recursive" } else { "flat" },
         import_config.local_path,
-        import_config.source_path
+        source_base
     );
 
     // Register S3 handlers for R2/S3
     crate::s3_registration::register_s3_handlers();
 
-    // Open the foreign backup to discover directory structure
+    // Open the foreign backup and read OpLog into a queryable session
     let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
     let storage_options = config.to_storage_options();
 
@@ -275,20 +287,20 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
             RemoteError::Configuration(format!("Cannot open foreign backup at {}: {}", path, e))
         })?;
 
-    // Read foreign OpLog to discover the part_id for source_path
+    let foreign_ctx = load_foreign_oplog(&remote_table).await?;
+
+    // Find the target directory in the foreign tree
     let (foreign_part_id, foreign_node_id) =
-        discover_foreign_partition(&remote_table, &import_config.source_path).await?;
+        navigate_foreign_path(&foreign_ctx, &source_base).await?;
 
     log::info!(
         "[INIT] Foreign source '{}' maps to part_id={}, node_id={}",
-        import_config.source_path,
+        source_base,
         foreign_part_id,
         foreign_node_id
     );
 
-    // Create local directory structure at local_path with the foreign partition ID.
-    // This makes the local filesystem reference the same partition as the foreign pond.
-    // When parquet files with this part_id are later imported, they become visible here.
+    // Get local filesystem access
     let state =
         tlogfs::extract_state(&context).map_err(|e| RemoteError::Configuration(e.to_string()))?;
     let fs = tinyfs::FS::new(state.clone())
@@ -311,12 +323,6 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
                 )))?;
         }
     }
-
-    // Create the final directory with the foreign FileID.
-    let foreign_file_id = tinyfs::FileID::new_from_ids(
-        tinyfs::PartID::new(foreign_part_id.clone()),
-        tinyfs::NodeID::new(foreign_node_id.clone()),
-    );
 
     // Navigate to the parent directory
     let dir_name = local_path
@@ -344,46 +350,216 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
         root.clone()
     };
 
-    // Create directory node with the foreign FileID and insert into parent.
-    // Use PersistenceLayer trait to create the directory node.
+    // Create the top-level import directory with foreign FileID
     use tinyfs::PersistenceLayer;
-    let node: tinyfs::Node = state
-        .create_directory_node(foreign_file_id)
-        .await
-        .map_err(|e| RemoteError::Configuration(format!(
-            "Failed to create directory node with foreign partition: {}", e
-        )))?;
-    parent_wd
-        .insert_node(dir_name, node)
-        .await
-        .map_err(|e| RemoteError::Configuration(format!(
-            "Failed to insert {} into parent directory: {}", dir_name, e
-        )))?;
+    let top_node = create_foreign_dir(&state, &parent_wd, dir_name, &foreign_part_id, &foreign_node_id).await?;
+
+    let mut partition_count = 1;
+
+    // If recursive, walk the foreign directory tree and create local entries
+    // for all child physical directories
+    if recursive {
+        let top_wd = fs
+            .wd(&top_node)
+            .await
+            .map_err(|e| RemoteError::Configuration(format!(
+                "Failed to open import directory: {}", e
+            )))?;
+
+        partition_count += create_child_dirs_recursive(
+            &foreign_ctx,
+            &state,
+            &fs,
+            &top_wd,
+            &foreign_node_id,
+        )
+        .await?;
+    }
 
     log::info!(
-        "[INIT] Created import path {} -> foreign part_id={}",
+        "[INIT] Created import path {} with {} partition(s)",
         import_config.local_path,
-        foreign_part_id
+        partition_count
     );
 
     Ok(())
 }
 
-/// Discover the foreign partition ID for a given source path by reading
-/// the foreign backup's OpLog and navigating its directory tree.
+/// Create a directory node with a foreign FileID and insert it into the parent.
+async fn create_foreign_dir(
+    state: &tlogfs::persistence::State,
+    parent_wd: &tinyfs::WD,
+    name: &str,
+    part_id: &str,
+    node_id: &str,
+) -> Result<tinyfs::NodePath, RemoteError> {
+    use tinyfs::PersistenceLayer;
+
+    let file_id = tinyfs::FileID::new_from_ids(
+        tinyfs::PartID::new(part_id.to_string()),
+        tinyfs::NodeID::new(node_id.to_string()),
+    );
+
+    let node = state
+        .create_directory_node(file_id)
+        .await
+        .map_err(|e| RemoteError::Configuration(format!(
+            "Failed to create directory '{}' with foreign partition: {}", name, e
+        )))?;
+
+    parent_wd
+        .insert_node(name, node)
+        .await
+        .map_err(|e| RemoteError::Configuration(format!(
+            "Failed to insert '{}' into parent directory: {}", name, e
+        )))
+}
+
+/// Recursively create local directory entries for all child physical
+/// directories found in the foreign OpLog.
 ///
-/// Returns (part_id, node_id) as strings.
-async fn discover_foreign_partition(
-    remote_table: &RemoteTable,
-    source_path: &str,
-) -> Result<(String, String), RemoteError> {
+/// Returns the number of child partitions created.
+async fn create_child_dirs_recursive(
+    foreign_ctx: &datafusion::prelude::SessionContext,
+    state: &tlogfs::persistence::State,
+    fs: &tinyfs::FS,
+    parent_wd: &tinyfs::WD,
+    parent_node_id: &str,
+) -> Result<usize, RemoteError> {
+    use arrow_array::StringArray;
+
+    // Read the foreign directory's entries
+    let entries = read_foreign_directory_entries(foreign_ctx, parent_node_id).await?;
+    let mut count = 0;
+
+    for (name, child_id, entry_type) in &entries {
+        if entry_type == "dir:physical" {
+            // Create local directory with the foreign FileID
+            let child_node = create_foreign_dir(state, parent_wd, name, child_id, child_id).await?;
+
+            log::info!(
+                "   [INIT] Created child import dir: {} (part_id={})",
+                name,
+                child_id
+            );
+            count += 1;
+
+            // Recurse into this child
+            let child_wd = fs
+                .wd(&child_node)
+                .await
+                .map_err(|e| RemoteError::Configuration(format!(
+                    "Failed to open child directory '{}': {}", name, e
+                )))?;
+
+            count += Box::pin(create_child_dirs_recursive(
+                foreign_ctx,
+                state,
+                fs,
+                &child_wd,
+                child_id,
+            ))
+            .await?;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Read directory entries from the foreign OpLog for a given node_id.
+/// Returns Vec<(name, child_node_id, entry_type)>.
+async fn read_foreign_directory_entries(
+    ctx: &datafusion::prelude::SessionContext,
+    node_id: &str,
+) -> Result<Vec<(String, String, String)>, RemoteError> {
     use arrow_array::{BinaryArray, StringArray};
+
+    let sql = format!(
+        "SELECT content FROM oplog \
+         WHERE node_id = '{}' AND file_type = 'dir:physical' \
+         ORDER BY version DESC LIMIT 1",
+        node_id
+    );
+
+    let df = ctx.sql(&sql).await.map_err(|e| {
+        RemoteError::TableOperation(format!("Failed to query directory: {}", e))
+    })?;
+    let batches = df.collect().await.map_err(|e| {
+        RemoteError::TableOperation(format!("Failed to collect directory: {}", e))
+    })?;
+
+    if batches.is_empty() || batches[0].num_rows() == 0 {
+        return Ok(Vec::new());
+    }
+
+    let content_col = batches[0].column_by_name("content").ok_or_else(|| {
+        RemoteError::TableOperation("Missing content column".to_string())
+    })?;
+    let content_arr = content_col
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| {
+            RemoteError::TableOperation("Content not BinaryArray".to_string())
+        })?;
+    let content_bytes = content_arr.value(0);
+
+    if content_bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let cursor = std::io::Cursor::new(content_bytes);
+    let ipc_reader =
+        arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to parse directory IPC: {}", e))
+        })?;
+    let entry_batches: Vec<_> = ipc_reader
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to read directory entries: {}", e))
+        })?;
+
+    let mut entries = Vec::new();
+    for batch in &entry_batches {
+        let names = batch
+            .column_by_name("name")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| {
+                RemoteError::TableOperation("Missing name column".to_string())
+            })?;
+        let child_ids = batch
+            .column_by_name("child_node_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| {
+                RemoteError::TableOperation("Missing child_node_id column".to_string())
+            })?;
+        let entry_types = batch
+            .column_by_name("entry_type")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| {
+                RemoteError::TableOperation("Missing entry_type column".to_string())
+            })?;
+
+        for row in 0..batch.num_rows() {
+            entries.push((
+                names.value(row).to_string(),
+                child_ids.value(row).to_string(),
+                entry_types.value(row).to_string(),
+            ));
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Load the foreign OpLog into a DataFusion SessionContext for querying.
+/// The table is registered as "oplog".
+async fn load_foreign_oplog(
+    remote_table: &RemoteTable,
+) -> Result<datafusion::prelude::SessionContext, RemoteError> {
     use datafusion::prelude::*;
 
-    // List all files in the foreign backup
     let remote_files = remote_table.list_files("").await?;
-
-    // Read OpLog parquet files from the backup
     let oplog_files: Vec<_> = remote_files
         .iter()
         .filter(|(_bundle, path, _txn, _size)| {
@@ -397,7 +573,6 @@ async fn discover_foreign_partition(
         ));
     }
 
-    // Read all OpLog records into memory for querying
     let tmp_ctx = SessionContext::new();
     let mut all_batches: Vec<arrow_array::RecordBatch> = Vec::new();
 
@@ -441,10 +616,18 @@ async fn discover_foreign_partition(
     )
     .map_err(|e| RemoteError::TableOperation(format!("Failed to create MemTable: {}", e)))?;
     tmp_ctx
-        .register_table("foreign_oplog", std::sync::Arc::new(mem_table))
+        .register_table("oplog", std::sync::Arc::new(mem_table))
         .map_err(|e| RemoteError::TableOperation(format!("Failed to register table: {}", e)))?;
 
-    // Navigate the directory tree to find the target partition
+    Ok(tmp_ctx)
+}
+
+/// Navigate the foreign directory tree to find the part_id for a path.
+/// Returns (part_id, node_id).
+async fn navigate_foreign_path(
+    ctx: &datafusion::prelude::SessionContext,
+    source_path: &str,
+) -> Result<(String, String), RemoteError> {
     let source_parts: Vec<&str> = source_path
         .trim_start_matches('/')
         .split('/')
@@ -453,114 +636,40 @@ async fn discover_foreign_partition(
 
     if source_parts.is_empty() {
         return Err(RemoteError::Configuration(
-            "import.source_path must be a non-root path".to_string(),
+            "source_path must be a non-root path".to_string(),
         ));
     }
 
-    let root_part_id = "00000000-0000-7100-8000-000000000000";
-    let mut current_part_id = root_part_id.to_string();
-    let mut current_node_id = root_part_id.to_string();
+    let root_id = "00000000-0000-7100-8000-000000000000";
+    let mut current_node_id = root_id.to_string();
 
     for part_name in &source_parts {
-        // Note: part_id is a Delta partition column, NOT present in the raw parquet
-        // files read from backup. Query by node_id only (globally unique for directories).
-        let sql = format!(
-            "SELECT content FROM foreign_oplog \
-             WHERE node_id = '{}' AND file_type = 'dir:physical' \
-             ORDER BY version DESC LIMIT 1",
-            current_node_id
-        );
+        let entries = read_foreign_directory_entries(ctx, &current_node_id).await?;
 
-        let df = tmp_ctx.sql(&sql).await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to query directory: {}", e))
-        })?;
-        let batches = df.collect().await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to collect directory: {}", e))
-        })?;
+        let found = entries
+            .iter()
+            .find(|(name, _, _)| name == *part_name);
 
-        if batches.is_empty() || batches[0].num_rows() == 0 {
-            return Err(RemoteError::Configuration(format!(
-                "Directory not found in foreign pond: '{}'",
-                part_name
-            )));
-        }
-
-        let content_col = batches[0].column_by_name("content").ok_or_else(|| {
-            RemoteError::TableOperation("Missing content column".to_string())
-        })?;
-        let content_arr = content_col
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .ok_or_else(|| {
-                RemoteError::TableOperation("Content is not BinaryArray".to_string())
-            })?;
-        let content_bytes = content_arr.value(0);
-
-        if content_bytes.is_empty() {
-            return Err(RemoteError::Configuration(format!(
-                "Directory '{}' is empty in foreign pond",
-                part_name
-            )));
-        }
-
-        let cursor = std::io::Cursor::new(content_bytes);
-        let ipc_reader =
-            arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to parse directory IPC: {}", e))
-            })?;
-
-        let entry_batches: Vec<_> = ipc_reader
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to read directory entries: {}", e))
-            })?;
-
-        let mut found = false;
-        for batch in &entry_batches {
-            let names = batch
-                .column_by_name("name")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| {
-                    RemoteError::TableOperation("Missing name column in directory".to_string())
-                })?;
-            let child_ids = batch
-                .column_by_name("child_node_id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| {
-                    RemoteError::TableOperation(
-                        "Missing child_node_id column in directory".to_string(),
-                    )
-                })?;
-
-            for row in 0..batch.num_rows() {
-                if names.value(row) == *part_name {
-                    let child_id = child_ids.value(row);
-                    log::info!(
-                        "   Found '{}' -> node_id={} in foreign directory",
-                        part_name,
-                        child_id,
-                    );
-                    current_part_id = child_id.to_string();
-                    current_node_id = child_id.to_string();
-                    found = true;
-                    break;
-                }
+        match found {
+            Some((_, child_id, _)) => {
+                log::info!(
+                    "   Found '{}' -> node_id={} in foreign directory",
+                    part_name,
+                    child_id,
+                );
+                current_node_id = child_id.clone();
             }
-            if found {
-                break;
+            None => {
+                return Err(RemoteError::Configuration(format!(
+                    "Entry '{}' not found in foreign directory",
+                    part_name
+                )));
             }
-        }
-
-        if !found {
-            return Err(RemoteError::Configuration(format!(
-                "Entry '{}' not found in foreign directory",
-                part_name
-            )));
         }
     }
 
-    Ok((current_part_id, current_node_id))
+    // For physical directories, part_id == node_id
+    Ok((current_node_id.clone(), current_node_id))
 }
 
 async fn execute_remote(
@@ -1426,9 +1535,6 @@ async fn execute_import(
     import_config: &ImportConfig,
     _storage_options: &std::collections::HashMap<String, String>,
 ) -> Result<(), RemoteError> {
-    use arrow_array::{BinaryArray, StringArray};
-    use datafusion::prelude::*;
-
     log::info!(
         "[DOWN] IMPORT: Importing from foreign pond backup (source={}, local={})",
         import_config.source_path,
@@ -1437,234 +1543,31 @@ async fn execute_import(
 
     // Get local pond context
     let state = extract_tlogfs_state(context)?;
-    let _local_pond_path = state.store_path().await;
     let local_table = state.table().await;
     let local_store = local_table.object_store();
 
-    // Step 1: List all files in the foreign backup
-    let remote_files = remote_table.list_files("").await?;
-    if remote_files.is_empty() {
-        log::info!("   No files found in foreign backup");
-        return Ok(());
-    }
-    log::info!("   Foreign backup has {} file(s)", remote_files.len());
+    // Step 1: Scan local directory tree under local_path to collect all part_ids.
+    // These were created during mknod and define which partitions we need to download.
+    let fs = tinyfs::FS::new(state.clone())
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to create FS: {}", e)))?;
+    let root = fs
+        .root()
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to get root: {}", e)))?;
 
-    // Step 2: Read the foreign OpLog parquet files to discover directory structure.
-    // Collect all non-delta-log, non-large-file paths (these are OpLog parquet files).
-    let oplog_files: Vec<_> = remote_files
-        .iter()
-        .filter(|(_bundle, path, _txn, _size)| {
-            !path.starts_with("_delta_log/") && !path.starts_with("_large_files/")
-        })
-        .collect();
-    log::info!(
-        "   Found {} OpLog parquet file(s) in backup",
-        oplog_files.len()
-    );
-
-    // Step 3: Read OpLog records from the backup using ChunkedAsyncFileReader.
-    // We read all parquet files and collect their RecordBatches into a temporary
-    // DataFusion session for querying.
-    let tmp_ctx = SessionContext::new();
-    let mut all_batches: Vec<arrow_array::RecordBatch> = Vec::new();
-
-    for (bundle_id, path, txn_id, _size) in &oplog_files {
-        let reader = crate::ChunkedAsyncFileReader::from_remote(
-            &remote_table,
-            bundle_id,
-            path,
-            *txn_id,
-        )
-        .await?;
-
-        let arrow_reader =
-            parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(reader)
-                .await
-                .map_err(|e| {
-                    RemoteError::TableOperation(format!(
-                        "Failed to open parquet from backup {}: {}",
-                        path, e
-                    ))
-                })?
-                .build()
-                .map_err(|e| {
-                    RemoteError::TableOperation(format!(
-                        "Failed to build parquet reader for {}: {}",
-                        path, e
-                    ))
-                })?;
-
-        use futures::TryStreamExt;
-        let mut stream = arrow_reader;
-        while let Some(batch) = stream.try_next().await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to read batch from {}: {}", path, e))
-        })? {
-            all_batches.push(batch);
-        }
-    }
-
-    if all_batches.is_empty() {
-        log::info!("   No OpLog records found in foreign backup");
-        return Ok(());
-    }
-
-    log::info!(
-        "   Read {} RecordBatch(es) from foreign OpLog ({} total rows)",
-        all_batches.len(),
-        all_batches.iter().map(|b| b.num_rows()).sum::<usize>()
-    );
-
-    // Register all batches as a table in a temporary DataFusion session
-    let mem_table = datafusion::datasource::MemTable::try_new(
-        all_batches[0].schema(),
-        vec![all_batches],
-    )
-    .map_err(|e| {
-        RemoteError::TableOperation(format!("Failed to create MemTable: {}", e))
-    })?;
-    tmp_ctx
-        .register_table("foreign_oplog", std::sync::Arc::new(mem_table))
+    let import_wd = root
+        .open_dir_path(&import_config.local_path)
+        .await
         .map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to register table: {}", e))
+            RemoteError::TableOperation(format!(
+                "Import path {} not found. Run mknod first: {}",
+                import_config.local_path, e
+            ))
         })?;
 
-    // Step 4: Find the part_id for the source_path directory.
-    // Navigate the directory tree starting from root to find the target.
-    let source_parts: Vec<&str> = import_config
-        .source_path
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if source_parts.is_empty() {
-        return Err(RemoteError::Configuration(
-            "import.source_path must be a non-root path".to_string(),
-        ));
-    }
-
-    // Start from root directory (well-known part_id)
-    let root_part_id = "00000000-0000-7100-8000-000000000000";
-    let mut current_part_id = root_part_id.to_string();
-    let mut current_node_id = root_part_id.to_string();
-
-    for part_name in &source_parts {
-        // Note: part_id is a Delta partition column, NOT in raw parquet from backup
-        let sql = format!(
-            "SELECT content FROM foreign_oplog \
-             WHERE node_id = '{}' AND file_type = 'dir:physical' \
-             ORDER BY version DESC LIMIT 1",
-            current_node_id
-        );
-        log::debug!("   Directory query: {}", sql);
-
-        let df = tmp_ctx.sql(&sql).await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to query directory: {}", e))
-        })?;
-        let batches = df.collect().await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to collect directory: {}", e))
-        })?;
-
-        if batches.is_empty() || batches[0].num_rows() == 0 {
-            return Err(RemoteError::Configuration(format!(
-                "Directory not found in foreign pond: path component '{}' under part_id={}",
-                part_name, current_part_id
-            )));
-        }
-
-        // Deserialize directory entries from Arrow IPC content
-        let content_col = batches[0]
-            .column_by_name("content")
-            .ok_or_else(|| {
-                RemoteError::TableOperation("Missing content column".to_string())
-            })?;
-        let content_arr = content_col
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .ok_or_else(|| {
-                RemoteError::TableOperation("Content is not BinaryArray".to_string())
-            })?;
-        let content_bytes = content_arr.value(0);
-
-        if content_bytes.is_empty() {
-            return Err(RemoteError::Configuration(format!(
-                "Directory '{}' is empty in foreign pond",
-                part_name
-            )));
-        }
-
-        // Parse Arrow IPC to get directory entries
-        let cursor = std::io::Cursor::new(content_bytes);
-        let ipc_reader =
-            arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to parse directory IPC: {}", e))
-            })?;
-
-        let entry_batches: Vec<_> = ipc_reader
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to read directory entries: {}", e))
-            })?;
-
-        // Find the entry matching part_name
-        let mut found = false;
-        for batch in &entry_batches {
-            let names = batch
-                .column_by_name("name")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| {
-                    RemoteError::TableOperation("Missing name column in directory".to_string())
-                })?;
-            let child_ids = batch
-                .column_by_name("child_node_id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                .ok_or_else(|| {
-                    RemoteError::TableOperation(
-                        "Missing child_node_id column in directory".to_string(),
-                    )
-                })?;
-
-            for row in 0..batch.num_rows() {
-                if names.value(row) == *part_name {
-                    let child_id = child_ids.value(row);
-                    log::info!(
-                        "   Found '{}' -> node_id={} in directory part_id={}",
-                        part_name,
-                        child_id,
-                        current_part_id
-                    );
-                    // For physical directories, part_id == node_id
-                    current_part_id = child_id.to_string();
-                    current_node_id = child_id.to_string();
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                break;
-            }
-        }
-
-        if !found {
-            return Err(RemoteError::Configuration(format!(
-                "Entry '{}' not found in foreign directory part_id={}",
-                part_name, current_part_id
-            )));
-        }
-    }
-
-    let target_part_id = current_part_id;
-    log::info!(
-        "   Source path '{}' maps to foreign part_id={}",
-        import_config.source_path,
-        target_part_id
-    );
-
-    // Step 5: Collect all part_ids to import (target + any child directories)
-    // For the initial implementation, import only the target partition.
-    // TODO: discover child physical directories from the directory entries
-    let part_ids_to_import: Vec<String> = vec![target_part_id.clone()];
+    let mut part_ids_to_import: Vec<String> = vec![import_wd.node_path().id().part_id().to_string()];
+    collect_child_part_ids(&fs, &import_wd, &mut part_ids_to_import).await;
 
     log::info!(
         "   Importing {} partition(s): {:?}",
@@ -1672,8 +1575,15 @@ async fn execute_import(
         part_ids_to_import
     );
 
-    // Step 6: Download the partition parquet files from the backup
-    // Filter remote files to only those whose path starts with one of our target part_ids
+    // Step 2: List all files in the foreign backup
+    let remote_files = remote_table.list_files("").await?;
+    if remote_files.is_empty() {
+        log::info!("   No files found in foreign backup");
+        return Ok(());
+    }
+    log::info!("   Foreign backup has {} file(s)", remote_files.len());
+
+    // Step 3: Filter to parquet files matching our partition set
     let files_to_download: Vec<_> = remote_files
         .iter()
         .filter(|(_bundle, path, _txn, _size)| {
@@ -1684,8 +1594,9 @@ async fn execute_import(
         .collect();
 
     log::info!(
-        "   Downloading {} parquet file(s) for target partition(s)",
-        files_to_download.len()
+        "   Downloading {} parquet file(s) for {} partition(s)",
+        files_to_download.len(),
+        part_ids_to_import.len()
     );
 
     if files_to_download.is_empty() {
@@ -1693,10 +1604,11 @@ async fn execute_import(
         return Ok(());
     }
 
+    // Step 4: Download files
+    let mut downloaded = 0;
     for (bundle_id, path, txn_id, _size) in &files_to_download {
         let file_path = object_store::path::Path::from(path.as_str());
 
-        // Check if file already exists locally
         if local_store.head(&file_path).await.is_ok() {
             log::debug!("   Skip {} (already exists)", path);
             continue;
@@ -1704,13 +1616,11 @@ async fn execute_import(
 
         log::debug!("   Downloading: {}", path);
 
-        // Download using ChunkedReader
         let mut output = Vec::new();
         remote_table
             .read_file(bundle_id, path, *txn_id, &mut output)
             .await?;
 
-        // Write to local Delta table's object store
         let byte_len = output.len();
         let bytes = Bytes::from(output);
         local_store
@@ -1721,52 +1631,50 @@ async fn execute_import(
             })?;
 
         log::debug!("      [OK] Downloaded {} bytes", byte_len);
+        downloaded += 1;
     }
 
-    // Step 7: Register imported files in the local Delta table.
-    // Create Add actions for each downloaded parquet file and commit them.
-    // This makes the files visible to DataFusion queries on the local table.
-    use deltalake::kernel::Action;
-    use deltalake::kernel::models::Add;
-    use deltalake::kernel::transaction::CommitBuilder;
-    use deltalake::protocol::SaveMode;
+    // Step 5: Register imported files in local Delta table via CommitBuilder
+    if downloaded > 0 {
+        use deltalake::kernel::Action;
+        use deltalake::kernel::models::Add;
+        use deltalake::kernel::transaction::CommitBuilder;
+        use deltalake::protocol::SaveMode;
 
-    let mut add_actions: Vec<Action> = Vec::new();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+        let mut add_actions: Vec<Action> = Vec::new();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
 
-    for (_bundle_id, path, _txn_id, size) in &files_to_download {
-        // Extract part_id from path (format: "part_id=<uuid>/filename.parquet")
-        let partition_values = if let Some(part_val) = path
-            .strip_prefix("part_id=")
-            .and_then(|rest| rest.split('/').next())
-        {
-            std::collections::HashMap::from([(
-                "part_id".to_string(),
-                Some(part_val.to_string()),
-            )])
-        } else {
-            std::collections::HashMap::new()
-        };
+        for (_bundle_id, path, _txn_id, size) in &files_to_download {
+            let partition_values = if let Some(part_val) = path
+                .strip_prefix("part_id=")
+                .and_then(|rest| rest.split('/').next())
+            {
+                std::collections::HashMap::from([(
+                    "part_id".to_string(),
+                    Some(part_val.to_string()),
+                )])
+            } else {
+                std::collections::HashMap::new()
+            };
 
-        add_actions.push(Action::Add(Add {
-            path: path.clone(),
-            partition_values,
-            size: *size,
-            modification_time: now_ms,
-            data_change: true,
-            stats: None,
-            tags: None,
-            deletion_vector: None,
-            base_row_id: None,
-            default_row_commit_version: None,
-            clustering_provider: None,
-        }));
-    }
+            add_actions.push(Action::Add(Add {
+                path: path.clone(),
+                partition_values,
+                size: *size,
+                modification_time: now_ms,
+                data_change: true,
+                stats: None,
+                tags: None,
+                deletion_vector: None,
+                base_row_id: None,
+                default_row_commit_version: None,
+                clustering_provider: None,
+            }));
+        }
 
-    if !add_actions.is_empty() {
         log::info!(
             "   Committing {} Add action(s) to local Delta table",
             add_actions.len()
@@ -1778,16 +1686,14 @@ async fn execute_import(
             predicate: None,
         };
 
-        let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> =
-            local_table.snapshot().ok().map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
+        let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> = local_table
+            .snapshot()
+            .ok()
+            .map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
 
         let _commit = CommitBuilder::default()
             .with_actions(add_actions)
-            .build(
-                snapshot_ref,
-                local_table.log_store().clone(),
-                operation,
-            )
+            .build(snapshot_ref, local_table.log_store().clone(), operation)
             .await
             .map_err(|e| {
                 RemoteError::TableOperation(format!(
@@ -1797,6 +1703,8 @@ async fn execute_import(
             })?;
 
         log::info!("   [OK] Delta commit for imported files succeeded");
+    } else {
+        log::info!("   [OK] All files already up to date");
     }
 
     log::info!(
@@ -1804,6 +1712,39 @@ async fn execute_import(
         part_ids_to_import.len()
     );
     Ok(())
+}
+
+/// Recursively collect part_ids from all child directories under a WD.
+async fn collect_child_part_ids(
+    fs: &tinyfs::FS,
+    wd: &tinyfs::WD,
+    part_ids: &mut Vec<String>,
+) {
+    use futures::StreamExt;
+
+    let entries = match wd.entries().await {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    futures::pin_mut!(entries);
+    while let Some(Ok(entry)) = entries.next().await {
+        if entry.entry_type.is_directory() {
+            let child_part_id = entry.child_node_id.to_string();
+            if !part_ids.contains(&child_part_id) {
+                part_ids.push(child_part_id);
+            }
+
+            // Recurse — try to open as directory
+            if let Ok(child_node) = wd.get(&entry.name).await {
+                if let Some(child_np) = child_node {
+                    if let Ok(child_wd) = fs.wd(&child_np).await {
+                        Box::pin(collect_child_part_ids(fs, &child_wd, part_ids)).await;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Replicate: Generate replication command
