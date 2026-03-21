@@ -78,57 +78,60 @@ performance issue was discovered in `pond list`.
 
 ### Symptom
 
-`pond list '/logs/watershop/'` takes **~63 seconds** to list 124 files.
+`pond list '/logs/watershop/'` takes **~63 seconds** to list 124 files
+(day 1, 148 delta log versions).  By day 2 with 267 versions: **~114
+seconds**.
 
-### Measurements
+### Measurements (day 2, 267 versions, before fix)
 
 | Command | Time |
 |---|---|
 | `pond list /` (2 entries) | 0.8s |
 | `pond list /logs/watershop/ssh.service.jsonl` (1 file) | 1.8s |
-| `pond list '/logs/watershop/'` (124 files) | 63s |
-
-Baseline is ~1-2 seconds (loading the 148-version Delta log).  The
-remaining ~60 seconds scales linearly with the number of files listed.
-This is approximately **0.5 seconds per file**.
+| `pond list '/logs/watershop/'` (124 files) | 114s |
 
 ### Root Cause
 
-`pond list` fetches file metadata via an **individual DataFusion SQL query
-per file**.  The call chain is:
+Two layered problems:
 
-```
-list_command()
-  → FileInfoVisitor::visit()         # called once per matched file
-    → file_handle.metadata()         # crates/cmd/src/common.rs:381
-      → OpLogFile::metadata()        # crates/tlogfs/src/file.rs
-        → State::metadata(id)        # crates/tlogfs/src/persistence.rs:909
-          → State::query_records(id) # crates/tlogfs/src/persistence.rs:2770
-            → session_context.sql(   # ONE SQL QUERY PER FILE
-                "SELECT * FROM delta_table
-                 WHERE part_id = '...' AND node_id = '...'
-                 ORDER BY timestamp DESC"
-              )
-```
+**Problem 1 (fixed):** `pond list` ran a **separate DataFusion SQL query
+per file** to fetch metadata.  124 files = 124 queries, each triggering
+the full DataFusion optimizer pipeline.
 
-Each `session_context.sql()` call invokes DataFusion's full query
-optimization pipeline.  With 124 files, this produces **263 optimizer
-passes** and **193,057 debug log lines** — overwhelmingly from DataFusion
-internals (`Use filter`, `Plan unchanged`, `Optimized physical`, SQL
-parsing).
+**Problem 2 (remaining):** The `/logs/watershop/` partition has accumulated
+**261 parquet files** from 267 delta log versions.  Even a single SQL
+query scanning this partition is expensive (~60s) because DataFusion must
+open and read all 261 files.
 
-### Possible Fixes
+### Fix Applied: Partition Records Cache
 
-1. **Batch metadata query:** a single SQL query per directory partition
-   retrieving all files in one pass, rather than one query per file.
-2. **Cache the oplog scan:** the Delta table is loaded once at startup;
-   the metadata for all files could be materialized in a single scan
-   rather than re-queried per file.
-3. **Skip metadata for non-long listings:** if file size is not needed,
-   avoid the query entirely.
+Added a transparent cache in `InnerState` (`persistence.rs`).  On first
+`query_records()` for a given `part_id`, all records for that partition
+are loaded in a single SQL query and cached in a
+`HashMap<PartID, HashMap<NodeID, Vec<OplogEntry>>>`.  Subsequent calls
+for the same partition are HashMap lookups.
 
-This is a `tlogfs` layer issue.  The fix does not affect correctness,
-only performance of listing directories with many entries.
+**Result:** 124 SQL queries → 1 per partition.
+
+| Metric | Before | After |
+|---|---|---|
+| `pond list '/logs/watershop/'` | 114s | **60s** |
+| SQL queries per listing | 124 | 1 |
+
+The remaining 60 seconds is the cost of scanning 261 parquet files in
+one partition.  This will be addressed by Delta Lake compaction (merging
+many small parquet files into fewer large ones), which is a separate
+concern from the query batching fixed here.
+
+### Possible Further Improvements
+
+1. **Delta Lake compaction:** Periodically compact the data partition
+   to merge 261 small parquet files into a few large ones.
+2. **Metadata-only query:** Instead of `SELECT *`, query only the
+   columns needed for metadata (entry_type, version, timestamp, size,
+   blake3) to reduce I/O.
+3. **Delta Lake checkpointing:** Ensure Delta checkpoints are written
+   regularly to avoid replaying 267 transaction log entries on open.
 
 ---
 
