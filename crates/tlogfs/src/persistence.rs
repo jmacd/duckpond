@@ -2687,7 +2687,47 @@ impl InnerState {
             Ok(df) => match df.collect().await {
                 Ok(batches) => {
                     if batches.is_empty() || batches[0].num_rows() == 0 {
-                        Err(TLogFSError::Missing)
+                        // Check if ANY records exist for this part_id
+                        // to distinguish "foreign partition not imported"
+                        // from "node genuinely doesn't exist"
+                        let part_check_sql = format!(
+                            "SELECT COUNT(*) as cnt FROM delta_table WHERE part_id = '{}'",
+                            id.part_id()
+                        );
+                        let is_empty_partition = match self.session_context.sql(&part_check_sql).await {
+                            Ok(df) => match df.collect().await {
+                                Ok(bs) => {
+                                    bs.is_empty()
+                                        || bs[0].num_rows() == 0
+                                        || bs[0]
+                                            .column(0)
+                                            .as_any()
+                                            .downcast_ref::<Int64Array>()
+                                            .map(|a| a.value(0) == 0)
+                                            .unwrap_or(true)
+                                }
+                                Err(_) => true,
+                            },
+                            Err(_) => true,
+                        };
+
+                        if is_empty_partition {
+                            Err(TLogFSError::PartitionNotFound {
+                                part_id: id.part_id().to_string(),
+                                node_id: id.node_id().to_string(),
+                                hint: "This partition contains no data. If this is an imported \
+                                       directory from a foreign pond, the partition may not have \
+                                       been included in the import. Use source_path with /** \
+                                       to import recursively."
+                                    .to_string(),
+                            })
+                        } else {
+                            Err(TLogFSError::PartitionNotFound {
+                                part_id: id.part_id().to_string(),
+                                node_id: id.node_id().to_string(),
+                                hint: "Node not found in this partition.".to_string(),
+                            })
+                        }
                     } else {
                         let batch = &batches[0];
                         debug!("[SEARCH] Query returned {} rows", batch.num_rows());
