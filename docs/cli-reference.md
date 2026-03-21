@@ -44,6 +44,10 @@ Creates the pond directory structure with Delta Lake metadata.
 
 List files and directories matching a glob pattern.
 
+> **Unlike `ls`**, `pond list` is **recursive by default**.  Running `pond list`
+> with no arguments lists every file in the pond.  Use `pond list /` for just
+> the top-level entries.
+
 ```bash
 # List everything (default behavior)
 pond list              # defaults to '**/*' - all files recursively
@@ -64,6 +68,13 @@ pond list '**/*.csv'   # all CSV files
 pond list '/sensors/*/readings.series'
 ```
 
+**Options**:
+
+| Flag | Purpose |
+|------|---------|
+| `-l`, `--long` | Show full entry type names (e.g., `table:series`, `table:dynamic`) |
+| `-a`, `--all` | Show hidden files |
+
 **Pattern Behavior Summary**:
 
 | Pattern | Meaning |
@@ -74,7 +85,7 @@ pond list '/sensors/*/readings.series'
 | `/dir` | Entry named 'dir' exactly |
 | `**/*.ext` | All files with extension recursively |
 
-💡 **Tip**: Use trailing slash to list directory contents: `pond list /data/`
+> **Tip**: Use trailing slash to list directory contents: `pond list /data/`
 
 ---
 

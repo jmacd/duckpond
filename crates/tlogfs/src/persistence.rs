@@ -94,6 +94,11 @@ pub struct InnerState {
     txn_seq: i64,
     /// Options for large file storage (compression, etc.)
     large_file_options: crate::large_files::LargeFileOptions,
+    /// Cache of committed oplog records by partition, keyed by
+    /// (part_id -> (node_id -> records sorted by timestamp desc)).
+    /// Populated on first access per partition via a single SQL query,
+    /// avoiding per-file queries when listing directories.
+    partition_records_cache: HashMap<tinyfs::PartID, HashMap<tinyfs::NodeID, Vec<OplogEntry>>>,
 }
 
 #[derive(Clone)]
@@ -1280,6 +1285,7 @@ impl InnerState {
             session_context: ctx,
             txn_seq,
             large_file_options,
+            partition_records_cache: HashMap::new(),
         })
     }
 
@@ -1595,7 +1601,7 @@ impl InnerState {
     }
 
     /// Get the next version number for a specific node (current max + 1)
-    async fn get_next_version_for_node(&self, id: FileID) -> Result<i64, TLogFSError> {
+    async fn get_next_version_for_node(&mut self, id: FileID) -> Result<i64, TLogFSError> {
         debug!("get_next_version_for_node called for node_id={id}");
 
         // Query all records for this node and find the maximum version
@@ -1818,7 +1824,7 @@ impl InnerState {
 
     /// Create an async reader for a file without loading entire content into memory
     pub async fn async_file_reader(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         let records = self.query_records(id).await?;
@@ -2269,7 +2275,7 @@ impl InnerState {
     ///
     /// Uses SQL "ORDER BY version DESC LIMIT 1" to fetch exactly one record from Delta Lake.
     async fn query_directory_entries(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Vec<DirectoryEntry>, TLogFSError> {
         // [GO] CRITICAL: Use specialized query that fetches ONLY latest record via SQL LIMIT 1
@@ -2511,7 +2517,7 @@ impl InnerState {
     /// Get dynamic node configuration if the node is dynamic
     /// Uses the same query pattern as the rest of the persistence layer
     pub async fn get_dynamic_node_config(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Option<(String, Vec<u8>)>, TLogFSError> {
         // First check pending records (for nodes created in current transaction)
@@ -2658,7 +2664,7 @@ impl InnerState {
     }
 
     /// Query for ONLY the latest record for any node type (O(1) performance)
-    async fn query_latest_record(&self, id: FileID) -> Result<OplogEntry, TLogFSError> {
+    async fn query_latest_record(&mut self, id: FileID) -> Result<OplogEntry, TLogFSError> {
         // Step 1: Check pending records in memory FIRST
         let pending_record = self
             .records
@@ -2675,79 +2681,42 @@ impl InnerState {
             return Ok(pending);
         }
 
-        // Step 2: Query Delta Lake for the single latest committed record
-        let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY version DESC LIMIT 1",
-            id.part_id(),
-            id.node_id()
-        );
+        // Step 2: Use the partition cache to get the latest committed record
+        self.ensure_partition_cached(id.part_id()).await?;
 
-        debug!("query_latest_record SQL: {}", sql);
-        match self.session_context.sql(&sql).await {
-            Ok(df) => match df.collect().await {
-                Ok(batches) => {
-                    if batches.is_empty() || batches[0].num_rows() == 0 {
-                        // Check if ANY records exist for this part_id
-                        // to distinguish "foreign partition not imported"
-                        // from "node genuinely doesn't exist"
-                        let part_check_sql = format!(
-                            "SELECT COUNT(*) as cnt FROM delta_table WHERE part_id = '{}'",
-                            id.part_id()
-                        );
-                        let is_empty_partition = match self.session_context.sql(&part_check_sql).await {
-                            Ok(df) => match df.collect().await {
-                                Ok(bs) => {
-                                    bs.is_empty()
-                                        || bs[0].num_rows() == 0
-                                        || bs[0]
-                                            .column(0)
-                                            .as_any()
-                                            .downcast_ref::<Int64Array>()
-                                            .map(|a| a.value(0) == 0)
-                                            .unwrap_or(true)
-                                }
-                                Err(_) => true,
-                            },
-                            Err(_) => true,
-                        };
+        match self.partition_records_cache
+            .get(&id.part_id())
+            .and_then(|by_node| by_node.get(&id.node_id()))
+            .and_then(|records| records.first().cloned())
+        {
+            Some(record) => Ok(record),
+            None => {
+                // Distinguish "partition has no data" (foreign partition not imported)
+                // from "node not found within a populated partition"
+                let partition_has_data = self
+                    .partition_records_cache
+                    .get(&id.part_id())
+                    .map(|by_node| !by_node.is_empty())
+                    .unwrap_or(false);
 
-                        if is_empty_partition {
-                            Err(TLogFSError::PartitionNotFound {
-                                part_id: id.part_id().to_string(),
-                                node_id: id.node_id().to_string(),
-                                hint: "This partition contains no data. If this is an imported \
-                                       directory from a foreign pond, the partition may not have \
-                                       been included in the import. Use source_path with /** \
-                                       to import recursively."
-                                    .to_string(),
-                            })
-                        } else {
-                            Err(TLogFSError::PartitionNotFound {
-                                part_id: id.part_id().to_string(),
-                                node_id: id.node_id().to_string(),
-                                hint: "Node not found in this partition.".to_string(),
-                            })
-                        }
-                    } else {
-                        let batch = &batches[0];
-                        debug!("[SEARCH] Query returned {} rows", batch.num_rows());
-                        debug!("[SEARCH] Schema: {:?}", batch.schema());
-
-                        // Print first row details
-                        if batch.num_rows() > 0 {
-                            for (i, field) in batch.schema().fields().iter().enumerate() {
-                                let col = batch.column(i);
-                                debug!("  Column {}: {} = {:?}", i, field.name(), col);
-                            }
-                        }
-
-                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)?;
-                        Ok(records.into_iter().next().expect("one"))
-                    }
+                if partition_has_data {
+                    Err(TLogFSError::PartitionNotFound {
+                        part_id: id.part_id().to_string(),
+                        node_id: id.node_id().to_string(),
+                        hint: "Node not found in this partition.".to_string(),
+                    })
+                } else {
+                    Err(TLogFSError::PartitionNotFound {
+                        part_id: id.part_id().to_string(),
+                        node_id: id.node_id().to_string(),
+                        hint: "This partition contains no data. If this is an imported \
+                               directory from a foreign pond, the partition may not have \
+                               been included in the import. Use source_path with /** \
+                               to import recursively."
+                            .to_string(),
+                    })
                 }
-                Err(e) => Err(TLogFSError::DataFusion(e)),
-            },
-            Err(e) => Err(TLogFSError::DataFusion(e)),
+            }
         }
     }
 
@@ -2759,7 +2728,7 @@ impl InnerState {
     /// IMPORTANT: This function checks BOTH committed (Delta Lake) and pending (self.records) state.
     /// During a transaction, pending directory records in self.records take precedence over committed ones.
     async fn query_latest_directory_record(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Option<OplogEntry>, TLogFSError> {
         // Step 1: Check pending records in memory FIRST
@@ -2771,28 +2740,19 @@ impl InnerState {
             .max_by_key(|r| r.version)
             .cloned();
 
-        // Step 2: Query Delta Lake for the single latest committed directory record
-        // Note: file_type values in database are serialized as 'dir:physical' and 'dir:dynamic'
-        let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' AND file_type IN ('dir:physical', 'dir:dynamic') ORDER BY version DESC LIMIT 1",
-            id.part_id(),
-            id.node_id()
-        );
+        // Step 2: Use partition cache for committed records
+        self.ensure_partition_cached(id.part_id()).await?;
 
-        let committed_record = match self.session_context.sql(&sql).await {
-            Ok(df) => match df.collect().await {
-                Ok(batches) => {
-                    if batches.is_empty() || batches[0].num_rows() == 0 {
-                        None
-                    } else {
-                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batches[0])?;
-                        records.into_iter().next()
-                    }
-                }
-                Err(e) => return Err(TLogFSError::DataFusion(e)),
-            },
-            Err(e) => return Err(TLogFSError::DataFusion(e)),
-        };
+        let committed_record = self
+            .partition_records_cache
+            .get(&id.part_id())
+            .and_then(|by_node| by_node.get(&id.node_id()))
+            .and_then(|records| {
+                records
+                    .iter()
+                    .find(|r| r.file_type.is_directory())
+                    .cloned()
+            });
 
         // Step 3: Return the latest between committed and pending (pending wins if both exist)
         match (committed_record, pending_record) {
@@ -2803,11 +2763,55 @@ impl InnerState {
         }
     }
 
+    /// Load all committed records for a partition into the cache with a
+    /// single SQL query.  Subsequent `query_records()` calls for any node
+    /// in this partition will hit the cache instead of running SQL.
+    async fn ensure_partition_cached(
+        &mut self,
+        part_id: tinyfs::PartID,
+    ) -> Result<(), TLogFSError> {
+        if self.partition_records_cache.contains_key(&part_id) {
+            return Ok(());
+        }
+
+        let sql = format!(
+            "SELECT * FROM delta_table WHERE part_id = '{}' ORDER BY timestamp DESC",
+            part_id
+        );
+
+        let query_start = std::time::Instant::now();
+        let batches = self
+            .session_context
+            .sql(&sql)
+            .await
+            .map_err(TLogFSError::DataFusion)?
+            .collect()
+            .await
+            .map_err(TLogFSError::DataFusion)?;
+
+        let mut by_node: HashMap<tinyfs::NodeID, Vec<OplogEntry>> = HashMap::new();
+        for batch in batches {
+            let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)?;
+            for record in records {
+                by_node.entry(record.node_id).or_default().push(record);
+            }
+        }
+
+        let node_count = by_node.len();
+        let elapsed = query_start.elapsed().as_millis();
+        debug!(
+            "ensure_partition_cached: loaded {node_count} nodes for part_id={part_id} in {elapsed}ms"
+        );
+
+        _ = self.partition_records_cache.insert(part_id, by_node);
+        Ok(())
+    }
+
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
     ///
     /// SECURITY: Always requires node_id to enforce proper data isolation between nodes
-    async fn query_records(&self, id: FileID) -> Result<Vec<OplogEntry>, TLogFSError> {
+    async fn query_records(&mut self, id: FileID) -> Result<Vec<OplogEntry>, TLogFSError> {
         // Performance tracing - enable with RUST_LOG=trace and redirect stderr
         let mut trace = utilities::perf_trace::PerfTrace::start("query_records");
         let caller = utilities::perf_trace::extract_caller(
@@ -2817,33 +2821,18 @@ impl InnerState {
         trace.param("caller", &caller);
         trace.param("id", id);
 
-        // Step 1: Get committed records from Delta Lake using node-scoped SQL
-        let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
-            id.part_id(),
-            id.node_id()
-        );
-
+        // Step 1: Get committed records, using partition cache when available
         let query_start = std::time::Instant::now();
-        let committed_records = match self.session_context.sql(&sql).await {
-            Ok(df) => match df.collect().await {
-                Ok(batches) => {
-                    let mut records = Vec::new();
-                    for batch in batches {
-                        let batch_records: Vec<OplogEntry> =
-                            serde_arrow::from_record_batch(&batch)?;
-                        records.extend(batch_records);
-                    }
-                    records
-                }
-                Err(e) => {
-                    return Err(TLogFSError::DataFusion(e));
-                }
-            },
-            Err(e) => {
-                return Err(TLogFSError::DataFusion(e));
-            }
-        };
+
+        self.ensure_partition_cached(id.part_id()).await?;
+
+        let committed_records = self
+            .partition_records_cache
+            .get(&id.part_id())
+            .and_then(|by_node| by_node.get(&id.node_id()))
+            .cloned()
+            .unwrap_or_default();
+
         trace.metric("query_ms", query_start.elapsed().as_millis() as u64);
         trace.metric("committed_count", committed_records.len() as u64);
 
@@ -2869,7 +2858,7 @@ impl InnerState {
         Ok(all_records)
     }
 
-    async fn load_node(&self, id: FileID, state: State) -> TinyFSResult<Node> {
+    async fn load_node(&mut self, id: FileID, state: State) -> TinyFSResult<Node> {
         debug!("load_node {id:?}");
 
         // [SEARCH] CRITICAL FIX: Check if this is a directory in self.directories first
@@ -2899,7 +2888,7 @@ impl InnerState {
         }
     }
 
-    async fn get_factory_for_node(&self, id: FileID) -> Result<Option<String>, TLogFSError> {
+    async fn get_factory_for_node(&mut self, id: FileID) -> Result<Option<String>, TLogFSError> {
         debug!("get_factory_for_node {id}");
 
         // Query Delta Lake for the most recent record for this node
@@ -2995,7 +2984,7 @@ impl InnerState {
         Ok(())
     }
 
-    async fn load_symlink_target(&self, id: FileID) -> TinyFSResult<PathBuf> {
+    async fn load_symlink_target(&mut self, id: FileID) -> TinyFSResult<PathBuf> {
         let records = self
             .query_records(id)
             .await
@@ -3060,7 +3049,7 @@ impl InnerState {
         node_factory::create_symlink_node(id, target, state)
     }
 
-    async fn metadata(&self, id: FileID) -> TinyFSResult<NodeMetadata> {
+    async fn metadata(&mut self, id: FileID) -> TinyFSResult<NodeMetadata> {
         debug!("metadata: querying id={id}");
 
         // Check if this is a pending file (created but not yet written)
@@ -3111,7 +3100,7 @@ impl InnerState {
 
     // Versioning operations implementation
 
-    async fn list_file_versions(&self, id: FileID) -> TinyFSResult<Vec<FileVersionInfo>> {
+    async fn list_file_versions(&mut self, id: FileID) -> TinyFSResult<Vec<FileVersionInfo>> {
         debug!("list_file_versions called for id={id}");
 
         let mut records = self

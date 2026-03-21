@@ -14,6 +14,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Detect container runtime (docker or podman)
+source "${SCRIPT_DIR}/container-runtime.sh"
+
 # Parse arguments
 BUILD_MODE="debug"
 QUIET=false
@@ -125,7 +128,7 @@ chmod +x "${SCRIPT_DIR}/helpers/"* 2>/dev/null || true
 # Create pond2 symlink for helper
 ln -sf pond1 "${SCRIPT_DIR}/helpers/pond2" 2>/dev/null || true
 
-docker build \
+${CONTAINER_RT} build \
     -f Dockerfile \
     -t duckpond-test:latest \
     .
@@ -139,7 +142,7 @@ echo "=== Build complete ==="
 echo "Image: duckpond-test:latest"
 echo ""
 echo "Test with:"
-echo "  docker run --rm -it duckpond-test:latest"
+echo "  ${CONTAINER_RT} run --rm -it duckpond-test:latest"
 echo "  pond --help"
 echo ""
 echo "For S3 experiments:"
