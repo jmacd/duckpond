@@ -698,6 +698,29 @@ impl State {
         self.inner.lock().await.path.clone()
     }
 
+    /// Query directory entries for a given FileID.
+    /// Used by cross-pond import to discover child partition IDs
+    /// from directory entries created at mknod time.
+    pub async fn query_directory_entries_by_id(
+        &self,
+        id: &FileID,
+    ) -> Result<Vec<DirectoryEntry>, TLogFSError> {
+        self.inner.lock().await.query_directory_entries(*id).await
+    }
+
+    /// Register a foreign directory in the in-memory directory cache.
+    /// This makes the directory immediately usable within the current
+    /// transaction (for inserting child entries) without requiring a
+    /// commit+reload cycle. The directory will be flushed to the OpLog
+    /// at commit time.
+    pub async fn register_empty_directory(&self, id: FileID) {
+        let mut inner = self.inner.lock().await;
+        let _ = inner.directories.insert(id, DirectoryState::new_empty());
+        if let Some(dir_state) = inner.directories.get_mut(&id) {
+            dir_state.modified = true;
+        }
+    }
+
     /// Get the large file storage options (compression settings, etc.)
     #[must_use]
     pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {

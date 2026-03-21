@@ -407,6 +407,10 @@ async fn create_foreign_dir(
             "Failed to create directory '{}' with foreign partition: {}", name, e
         )))?;
 
+    // Register the directory in the in-memory cache so it's immediately
+    // usable for inserting child entries within this transaction.
+    state.register_empty_directory(file_id).await;
+
     parent_wd
         .insert_node(name, node)
         .await
@@ -1546,8 +1550,9 @@ async fn execute_import(
     let local_table = state.table().await;
     let local_store = local_table.object_store();
 
-    // Step 1: Scan local directory tree under local_path to collect all part_ids.
-    // These were created during mknod and define which partitions we need to download.
+    // Step 1: Resolve the import path to get the top-level part_id.
+    // Navigate from root using directory entries (reads from local partitions,
+    // doesn't require the foreign partition data to be present).
     let fs = tinyfs::FS::new(state.clone())
         .await
         .map_err(|e| RemoteError::TableOperation(format!("Failed to create FS: {}", e)))?;
@@ -1556,18 +1561,53 @@ async fn execute_import(
         .await
         .map_err(|e| RemoteError::TableOperation(format!("Failed to get root: {}", e)))?;
 
-    let import_wd = root
-        .open_dir_path(&import_config.local_path)
-        .await
-        .map_err(|e| {
-            RemoteError::TableOperation(format!(
-                "Import path {} not found. Run mknod first: {}",
-                import_config.local_path, e
-            ))
-        })?;
+    // Navigate to the parent of local_path and read its directory entries
+    // to find the import directory's child_node_id (= part_id for physical dirs).
+    // This avoids loading the foreign directory node itself (which would fail
+    // because the foreign partition has no data until we pull it).
+    let local_path = std::path::Path::new(&import_config.local_path);
+    let parent_path = local_path.parent().unwrap_or(std::path::Path::new("/"));
+    let dir_name = local_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
 
-    let mut part_ids_to_import: Vec<String> = vec![import_wd.node_path().id().part_id().to_string()];
-    collect_child_part_ids(&fs, &import_wd, &mut part_ids_to_import).await;
+    let parent_wd = if parent_path == std::path::Path::new("/") {
+        root.clone()
+    } else {
+        root.open_dir_path(parent_path)
+            .await
+            .map_err(|e| RemoteError::TableOperation(format!(
+                "Failed to open parent of import path: {}", e
+            )))?
+    };
+
+    // Read parent directory entries to find the import dir's child_node_id
+    let parent_entries = state
+        .query_directory_entries_by_id(&parent_wd.node_path().id())
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!(
+            "Failed to read parent directory entries: {}", e
+        )))?;
+
+    let import_entry = parent_entries
+        .iter()
+        .find(|e| e.name == dir_name)
+        .ok_or_else(|| RemoteError::TableOperation(format!(
+            "Import path {} not found in parent directory. Run mknod first.",
+            import_config.local_path
+        )))?;
+
+    let top_part_id = import_entry.child_node_id.to_string();
+    let mut part_ids_to_import: Vec<String> = vec![top_part_id.clone()];
+
+    // Collect child part_ids from directory entries created at mknod time.
+    // These entries are in the local OpLog (not in the foreign partition).
+    let import_file_id = tinyfs::FileID::new_from_ids(
+        tinyfs::PartID::new(top_part_id.clone()),
+        tinyfs::NodeID::new(top_part_id.clone()),
+    );
+    collect_child_part_ids_from_entries(&state, &import_file_id, &mut part_ids_to_import).await;
 
     log::info!(
         "   Importing {} partition(s): {:?}",
@@ -1714,35 +1754,35 @@ async fn execute_import(
     Ok(())
 }
 
-/// Recursively collect part_ids from all child directories under a WD.
-async fn collect_child_part_ids(
-    fs: &tinyfs::FS,
-    wd: &tinyfs::WD,
+/// Collect child part_ids by reading directory entries from the OpLog.
+/// This reads the directory content for a node_id from pending/committed records
+/// without trying to open the foreign partition (which may have no data yet).
+async fn collect_child_part_ids_from_entries(
+    state: &tlogfs::persistence::State,
+    parent_id: &tinyfs::FileID,
     part_ids: &mut Vec<String>,
 ) {
-    use futures::StreamExt;
-
-    let entries = match wd.entries().await {
+    // Query the directory entries for this node from the local OpLog
+    let entries = match state.query_directory_entries_by_id(parent_id).await {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return, // Directory not readable — skip
     };
 
-    futures::pin_mut!(entries);
-    while let Some(Ok(entry)) = entries.next().await {
+    for entry in &entries {
         if entry.entry_type.is_directory() {
+            // For physical directories, part_id == node_id (child_node_id)
             let child_part_id = entry.child_node_id.to_string();
             if !part_ids.contains(&child_part_id) {
-                part_ids.push(child_part_id);
+                part_ids.push(child_part_id.clone());
             }
 
-            // Recurse — try to open as directory
-            if let Ok(child_node) = wd.get(&entry.name).await {
-                if let Some(child_np) = child_node {
-                    if let Ok(child_wd) = fs.wd(&child_np).await {
-                        Box::pin(collect_child_part_ids(fs, &child_wd, part_ids)).await;
-                    }
-                }
-            }
+            // Recurse: the child directory's entries are also in the local OpLog
+            // (created at mknod time for recursive imports)
+            let child_file_id = tinyfs::FileID::new_from_ids(
+                tinyfs::PartID::new(child_part_id.clone()),
+                tinyfs::NodeID::new(child_part_id),
+            );
+            Box::pin(collect_child_part_ids_from_entries(state, &child_file_id, part_ids)).await;
         }
     }
 }
