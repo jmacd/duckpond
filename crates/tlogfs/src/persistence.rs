@@ -99,6 +99,21 @@ pub struct InnerState {
     /// Populated on first access per partition via a single SQL query,
     /// avoiding per-file queries when listing directories.
     partition_records_cache: HashMap<tinyfs::PartID, HashMap<tinyfs::NodeID, Vec<OplogEntry>>>,
+    /// External parquet files to include as Delta Add actions at commit time.
+    /// Used by cross-pond import to register imported files in the same
+    /// Delta commit as the normal OpLog records. Each entry is (path, size, part_id).
+    external_add_actions: Vec<ExternalAddAction>,
+}
+
+/// An external parquet file to register as a Delta Add action at commit time.
+#[derive(Debug, Clone)]
+pub struct ExternalAddAction {
+    /// Relative path in the object store (e.g., "part_id=<uuid>/file.parquet")
+    pub path: String,
+    /// File size in bytes
+    pub size: i64,
+    /// Partition column value
+    pub part_id: String,
 }
 
 #[derive(Clone)]
@@ -721,6 +736,14 @@ impl State {
         }
     }
 
+    /// Register an external parquet file for inclusion as a Delta Add action
+    /// at commit time. This ensures imported parquet files are part of the
+    /// same Delta commit as the normal OpLog records, maintaining the
+    /// single-transaction invariant.
+    pub async fn add_external_parquet(&self, action: ExternalAddAction) {
+        self.inner.lock().await.external_add_actions.push(action);
+    }
+
     /// Get the large file storage options (compression settings, etc.)
     #[must_use]
     pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
@@ -1309,6 +1332,7 @@ impl InnerState {
             txn_seq,
             large_file_options,
             partition_records_cache: HashMap::new(),
+            external_add_actions: Vec::new(),
         })
     }
 
@@ -2013,87 +2037,113 @@ impl InnerState {
 
         let mut records = std::mem::take(&mut self.records);
 
-        if records.is_empty() {
+        if records.is_empty() && self.external_add_actions.is_empty() {
             debug!("Committing read-only transaction");
             return Ok(None);
         }
 
-        // Stamp pond_id into every record before serialization
-        for record in &mut records {
-            record.pond_id = pond_id.clone();
-        }
+        // Write OpLog records if any exist
+        let mut table = if !records.is_empty() {
+            // Stamp pond_id into every record before serialization
+            for record in &mut records {
+                record.pond_id = pond_id.clone();
+            }
 
-        let count = records.len();
-        info!("Committing {count} operations in {:?}", self.path);
+            let count = records.len();
+            info!("Committing {count} operations in {:?}", self.path);
 
-        // Debug: log what we're about to commit
-        for (i, record) in records.iter().enumerate() {
-            debug!(
-                "  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, factory={:?}",
-                i,
-                record.part_id,
-                record.node_id,
-                record.file_type,
-                record.version,
-                record.content.as_ref().map(|c| c.len()).unwrap_or(0),
-                record.factory
-            );
-        }
-
-        // Convert records to RecordBatch
-        debug!(
-            "[SYNC] About to serialize {} records with serde_arrow",
-            records.len()
-        );
-        let batches = vec![serde_arrow::to_record_batch(
-            &OplogEntry::for_arrow(),
-            &records,
-        )?];
-
-        // Drop records immediately after Arrow conversion to free ~100MB
-        drop(records);
-
-        debug!(
-            "[TBL] RecordBatch created with {} batches, batch[0] has {} rows",
-            batches.len(),
-            batches[0].num_rows()
-        );
-
-        // DEBUG: Print first few values from part_id and node_id columns
-        if batches[0].num_rows() > 0 {
-            use arrow::array::StringArray;
-            let part_id_col = batches[0].column(0);
-            let node_id_col = batches[0].column(1);
-            debug!("[SEARCH] First 3 rows of RecordBatch:");
-            for i in 0..batches[0].num_rows().min(3) {
+            for (i, record) in records.iter().enumerate() {
                 debug!(
-                    "   Row {}: part_id={:?}, node_id={:?}",
-                    i,
-                    part_id_col
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .map(|a| a.value(i)),
-                    node_id_col
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .map(|a| a.value(i))
+                    "  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, factory={:?}",
+                    i, record.part_id, record.node_id, record.file_type,
+                    record.version, record.content.as_ref().map(|c| c.len()).unwrap_or(0),
+                    record.factory
                 );
             }
+
+            debug!("[SYNC] About to serialize {} records with serde_arrow", records.len());
+            let batches = vec![serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?];
+            drop(records);
+
+            let mut write_op = DeltaOps(table).write(batches);
+            let properties =
+                CommitProperties::default().with_metadata(metadata.to_delta_metadata().into_iter());
+            write_op = write_op.with_commit_properties(properties);
+
+            let table = write_op.await?;
+            debug!("[OK] Delta write completed, version: {:?}", table.version());
+            table
+        } else {
+            info!("Committing external-only transaction in {:?}", self.path);
+            drop(records);
+            table
+        };
+
+        // If there are external parquet files to register (cross-pond import),
+        // create a follow-up Delta commit with Add actions for them.
+        let external_actions = std::mem::take(&mut self.external_add_actions);
+        if !external_actions.is_empty() {
+            use deltalake::kernel::Action;
+            use deltalake::kernel::models::Add;
+            use deltalake::kernel::transaction::CommitBuilder;
+            use deltalake::protocol::SaveMode;
+
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+
+            let add_actions: Vec<Action> = external_actions
+                .iter()
+                .map(|ea| {
+                    Action::Add(Add {
+                        path: ea.path.clone(),
+                        partition_values: HashMap::from([(
+                            "part_id".to_string(),
+                            Some(ea.part_id.clone()),
+                        )]),
+                        size: ea.size,
+                        modification_time: now_ms,
+                        data_change: true,
+                        stats: None,
+                        tags: None,
+                        deletion_vector: None,
+                        base_row_id: None,
+                        default_row_commit_version: None,
+                        clustering_provider: None,
+                    })
+                })
+                .collect();
+
+            info!(
+                "Committing {} external Add action(s) for imported files",
+                add_actions.len()
+            );
+
+            let operation = deltalake::protocol::DeltaOperation::Write {
+                mode: SaveMode::Append,
+                partition_by: Some(vec!["part_id".to_string()]),
+                predicate: None,
+            };
+
+            let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> =
+                table.snapshot().ok().map(|s| {
+                    s as &dyn deltalake::kernel::transaction::TableReference
+                });
+
+            let commit = CommitBuilder::default()
+                .with_actions(add_actions)
+                .build(snapshot_ref, table.log_store().clone(), operation)
+                .await?;
+
+            debug!(
+                "[OK] External Add commit succeeded, version: {:?}",
+                commit.version()
+            );
+
+            // Reload table to include the external commit
+            table.load().await?;
         }
-
-        let mut write_op = DeltaOps(table).write(batches);
-
-        // Add commit metadata
-        let properties =
-            CommitProperties::default().with_metadata(metadata.to_delta_metadata().into_iter());
-        write_op = write_op.with_commit_properties(properties);
-
-        let version = write_op.await?;
-
-        debug!(
-            "[OK] Delta write completed successfully, new table version: {:?}",
-            version.version()
-        );
 
         self.records.clear();
         self.directories.clear();

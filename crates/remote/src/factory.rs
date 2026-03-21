@@ -1674,75 +1674,30 @@ async fn execute_import(
         downloaded += 1;
     }
 
-    // Step 5: Register imported files in local Delta table via CommitBuilder
+    // Step 5: Register imported files for inclusion in the Delta commit.
+    // These are added as external Add actions that will be committed
+    // at transaction commit time (not via a separate CommitBuilder).
     if downloaded > 0 {
-        use deltalake::kernel::Action;
-        use deltalake::kernel::models::Add;
-        use deltalake::kernel::transaction::CommitBuilder;
-        use deltalake::protocol::SaveMode;
-
-        let mut add_actions: Vec<Action> = Vec::new();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-
         for (_bundle_id, path, _txn_id, size) in &files_to_download {
-            let partition_values = if let Some(part_val) = path
+            let part_id_val = path
                 .strip_prefix("part_id=")
                 .and_then(|rest| rest.split('/').next())
-            {
-                std::collections::HashMap::from([(
-                    "part_id".to_string(),
-                    Some(part_val.to_string()),
-                )])
-            } else {
-                std::collections::HashMap::new()
-            };
+                .unwrap_or("")
+                .to_string();
 
-            add_actions.push(Action::Add(Add {
-                path: path.clone(),
-                partition_values,
-                size: *size,
-                modification_time: now_ms,
-                data_change: true,
-                stats: None,
-                tags: None,
-                deletion_vector: None,
-                base_row_id: None,
-                default_row_commit_version: None,
-                clustering_provider: None,
-            }));
+            state
+                .add_external_parquet(tlogfs::ExternalAddAction {
+                    path: path.clone(),
+                    size: *size,
+                    part_id: part_id_val,
+                })
+                .await;
         }
 
         log::info!(
-            "   Committing {} Add action(s) to local Delta table",
-            add_actions.len()
+            "   Registered {} file(s) for Delta commit at transaction end",
+            files_to_download.len()
         );
-
-        let operation = deltalake::protocol::DeltaOperation::Write {
-            mode: SaveMode::Append,
-            partition_by: Some(vec!["part_id".to_string()]),
-            predicate: None,
-        };
-
-        let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> = local_table
-            .snapshot()
-            .ok()
-            .map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
-
-        let _commit = CommitBuilder::default()
-            .with_actions(add_actions)
-            .build(snapshot_ref, local_table.log_store().clone(), operation)
-            .await
-            .map_err(|e| {
-                RemoteError::TableOperation(format!(
-                    "Failed to commit imported files to Delta table: {}",
-                    e
-                ))
-            })?;
-
-        log::info!("   [OK] Delta commit for imported files succeeded");
     } else {
         log::info!("   [OK] All files already up to date");
     }
