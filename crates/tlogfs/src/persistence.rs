@@ -2275,7 +2275,7 @@ impl InnerState {
     ///
     /// Uses SQL "ORDER BY version DESC LIMIT 1" to fetch exactly one record from Delta Lake.
     async fn query_directory_entries(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Vec<DirectoryEntry>, TLogFSError> {
         // [GO] CRITICAL: Use specialized query that fetches ONLY latest record via SQL LIMIT 1
@@ -2664,7 +2664,7 @@ impl InnerState {
     }
 
     /// Query for ONLY the latest record for any node type (O(1) performance)
-    async fn query_latest_record(&self, id: FileID) -> Result<OplogEntry, TLogFSError> {
+    async fn query_latest_record(&mut self, id: FileID) -> Result<OplogEntry, TLogFSError> {
         // Step 1: Check pending records in memory FIRST
         let pending_record = self
             .records
@@ -2681,40 +2681,14 @@ impl InnerState {
             return Ok(pending);
         }
 
-        // Step 2: Query Delta Lake for the single latest committed record
-        let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY version DESC LIMIT 1",
-            id.part_id(),
-            id.node_id()
-        );
+        // Step 2: Use the partition cache to get the latest committed record
+        self.ensure_partition_cached(id.part_id()).await?;
 
-        debug!("query_latest_record SQL: {}", sql);
-        match self.session_context.sql(&sql).await {
-            Ok(df) => match df.collect().await {
-                Ok(batches) => {
-                    if batches.is_empty() || batches[0].num_rows() == 0 {
-                        Err(TLogFSError::Missing)
-                    } else {
-                        let batch = &batches[0];
-                        debug!("[SEARCH] Query returned {} rows", batch.num_rows());
-                        debug!("[SEARCH] Schema: {:?}", batch.schema());
-
-                        // Print first row details
-                        if batch.num_rows() > 0 {
-                            for (i, field) in batch.schema().fields().iter().enumerate() {
-                                let col = batch.column(i);
-                                debug!("  Column {}: {} = {:?}", i, field.name(), col);
-                            }
-                        }
-
-                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)?;
-                        Ok(records.into_iter().next().expect("one"))
-                    }
-                }
-                Err(e) => Err(TLogFSError::DataFusion(e)),
-            },
-            Err(e) => Err(TLogFSError::DataFusion(e)),
-        }
+        self.partition_records_cache
+            .get(&id.part_id())
+            .and_then(|by_node| by_node.get(&id.node_id()))
+            .and_then(|records| records.first().cloned())
+            .ok_or(TLogFSError::Missing)
     }
 
     /// Query for ONLY the latest directory record (O(1) performance)
@@ -2725,7 +2699,7 @@ impl InnerState {
     /// IMPORTANT: This function checks BOTH committed (Delta Lake) and pending (self.records) state.
     /// During a transaction, pending directory records in self.records take precedence over committed ones.
     async fn query_latest_directory_record(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Option<OplogEntry>, TLogFSError> {
         // Step 1: Check pending records in memory FIRST
@@ -2737,28 +2711,19 @@ impl InnerState {
             .max_by_key(|r| r.version)
             .cloned();
 
-        // Step 2: Query Delta Lake for the single latest committed directory record
-        // Note: file_type values in database are serialized as 'dir:physical' and 'dir:dynamic'
-        let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' AND file_type IN ('dir:physical', 'dir:dynamic') ORDER BY version DESC LIMIT 1",
-            id.part_id(),
-            id.node_id()
-        );
+        // Step 2: Use partition cache for committed records
+        self.ensure_partition_cached(id.part_id()).await?;
 
-        let committed_record = match self.session_context.sql(&sql).await {
-            Ok(df) => match df.collect().await {
-                Ok(batches) => {
-                    if batches.is_empty() || batches[0].num_rows() == 0 {
-                        None
-                    } else {
-                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batches[0])?;
-                        records.into_iter().next()
-                    }
-                }
-                Err(e) => return Err(TLogFSError::DataFusion(e)),
-            },
-            Err(e) => return Err(TLogFSError::DataFusion(e)),
-        };
+        let committed_record = self
+            .partition_records_cache
+            .get(&id.part_id())
+            .and_then(|by_node| by_node.get(&id.node_id()))
+            .and_then(|records| {
+                records
+                    .iter()
+                    .find(|r| r.file_type.is_directory())
+                    .cloned()
+            });
 
         // Step 3: Return the latest between committed and pending (pending wins if both exist)
         match (committed_record, pending_record) {
@@ -2864,7 +2829,7 @@ impl InnerState {
         Ok(all_records)
     }
 
-    async fn load_node(&self, id: FileID, state: State) -> TinyFSResult<Node> {
+    async fn load_node(&mut self, id: FileID, state: State) -> TinyFSResult<Node> {
         debug!("load_node {id:?}");
 
         // [SEARCH] CRITICAL FIX: Check if this is a directory in self.directories first
