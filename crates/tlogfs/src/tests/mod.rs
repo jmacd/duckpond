@@ -4,6 +4,7 @@
 
 mod large_file_corruption;
 mod large_file_roundtrip;
+mod partition_cache;
 
 use crate::persistence::OpLogPersistence;
 use arrow_array::record_batch;
