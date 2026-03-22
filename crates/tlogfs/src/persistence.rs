@@ -768,6 +768,12 @@ impl State {
         self.inner.lock().await.import_metadata.push(record);
     }
 
+    /// Get a copy of the pending import metadata (before commit consumes it).
+    /// Used by steward to extract import state for the control table.
+    pub async fn pending_import_metadata(&self) -> Vec<ImportPartitionRecord> {
+        self.inner.lock().await.import_metadata.clone()
+    }
+
     /// Get the large file storage options (compression settings, etc.)
     #[must_use]
     pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
