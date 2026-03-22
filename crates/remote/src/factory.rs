@@ -1594,7 +1594,19 @@ async fn execute_import(
         .to_string();
     let recursive = import_config.source_path.ends_with("/**");
 
-    let part_ids_to_import: Vec<String> = if !import_config.partitions.is_empty() {
+    let part_ids_to_import: Vec<String> = if !context.import_partitions.is_empty() {
+        // Use cached partitions from control table (fastest path)
+        let ids: Vec<String> = context
+            .import_partitions
+            .iter()
+            .map(|(pid, _, _)| pid.clone())
+            .collect();
+        log::info!(
+            "   Using {} cached partition(s) from control table",
+            ids.len()
+        );
+        ids
+    } else if !import_config.partitions.is_empty() {
         log::info!(
             "   Using {} pre-discovered partition(s) from config",
             import_config.partitions.len()

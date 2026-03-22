@@ -3743,6 +3743,7 @@ mod node_factory {
             file_id: id,
             pond_metadata: None,
             txn_seq: 0, // Node creation context doesn't need txn_seq
+            import_partitions: Vec::new(),
         };
 
         debug!(

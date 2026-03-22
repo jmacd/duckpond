@@ -294,8 +294,44 @@ async fn run_pond_command_impl(
 
     // Create factory context with pond metadata (pre-loaded above)
     let provider_context = tx.provider_context()?;
-    let factory_context =
+    let mut factory_context =
         provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
+
+    // If this is a remote import factory, load import partitions from control table
+    if factory_name == "remote" {
+        if let Ok(remote_config) = serde_json::from_slice::<remote::RemoteConfig>(&config_bytes) {
+            if let Some(ref import_config) = remote_config.import {
+                // Parse the source_path to get the factory key (top-level part_id).
+                // The factory key was set during mknod as the foreign part_id.
+                // We can look it up by resolving local_path's parent directory entry.
+                let root = tx.root().await?;
+                let local_path = std::path::Path::new(&import_config.local_path);
+                let parent_path = local_path.parent().unwrap_or(std::path::Path::new("/"));
+                let dir_name = local_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+                let parent_wd = if parent_path == std::path::Path::new("/") {
+                    root.clone()
+                } else if let Ok(wd) = root.open_dir_path(parent_path).await {
+                    wd
+                } else {
+                    root.clone()
+                };
+
+                if let Ok(Some(entry)) = parent_wd.get(dir_name).await {
+                    let factory_key = entry.id().part_id().to_string();
+                    if let Ok(partitions) = tx.query_import_partitions(&factory_key).await {
+                        if !partitions.is_empty() {
+                            log::info!(
+                                "Loaded {} cached import partition(s) from control table",
+                                partitions.len()
+                            );
+                            factory_context = factory_context.with_import_partitions(partitions);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Execute the configuration using the factory registry in write mode
     FactoryRegistry::execute::<tlogfs::TLogFSError>(
