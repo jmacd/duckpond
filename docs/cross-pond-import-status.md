@@ -1,164 +1,145 @@
 # Cross-Pond Import: Implementation Status
 
-## What Works
+## Status: Working
 
-Cross-pond import is functional for **flat directory structures** (test
-530 passes 6/6). The full pipeline:
+Both flat and recursive cross-pond import are functional and tested.
 
-1. **`pond run host+remote:///config.yaml list-ponds`** -- scans an S3
-   bucket for `pond-{uuid}/` prefixes, reports pond IDs and commit counts
-2. **`pond run host+remote:///config.yaml show`** -- reads the foreign
-   OpLog directly from backup via `ChunkedAsyncFileReader`, displays
-   the full directory tree with entry types, sizes, and versions
-3. **`pond mknod remote /system/etc/10-import --config-path import.yaml`**
-   -- reads foreign backup, navigates directory tree to find `source_path`,
-   creates local directory at `local_path` with the foreign `FileID`
-4. **`pond run 10-import pull`** -- downloads foreign partition parquet
-   files, registers them as Delta Add actions at commit time
-5. **`pond list`, `pond cat`** -- imported data is queryable at the
-   local path, provenance preserved via `pond_id` column
+- Test 530 (flat import): **6/6 checks pass**
+- Test 531 (recursive import): **11/11 checks pass**
 
-## What Is In Progress
+## How It Works
 
-### Recursive import (`source_path: "/logs/**"`)
+### Exploration
 
-The `/**` pattern triggers recursive discovery of child physical
-directories during mknod. This works:
-- mknod correctly discovers all child directories in the foreign pond
-- Creates local directory entries for all of them with foreign FileIDs
-- `register_empty_directory()` makes them immediately usable as
-  parents within the same transaction
-- Pull collects all partition IDs from local directory entries
-- Downloads parquet files for all partitions
-- Registers external Add actions via `State::add_external_parquet()`
+```bash
+# List ponds available in a remote bucket
+pond run host+remote:///config.yaml list-ponds
 
-**The bug:** after pull completes, the imported data is not visible
-via `pond list` or `pond cat`. The root cause is in the interaction
-between the external Add commit and the tlogfs transaction lifecycle:
+# Show the full directory tree of a remote pond
+pond run host+remote:///config.yaml show
+```
 
-The external Add actions are committed as a **follow-up Delta commit**
-after the normal OpLog record write, within `commit_impl()`. This
-creates Delta version N+1 (or just N if there are no OpLog records).
-When `OpLogPersistence::commit()` reloads the table, it should see
-both commits. But the `last_txn_seq` tracking and partition cache
-may not account for the extra Delta version correctly.
+### Import Setup
 
-The specific failure mode in test 531:
-- `pond list '/imported/recursive/**'` shows directories (sensors,
-  logs) but not files (temps.csv, events.csv)
-- The directories exist because they were created at mknod time
-  (in the local partition)
-- The files should exist in the foreign partition data (committed
-  as external Add actions) but are not visible
+```bash
+# Create import factory (discovers foreign partition structure)
+pond mknod remote /system/etc/10-import --config-path import.yaml
 
-### Debugging leads
+# Pull data from foreign pond
+pond run 10-import pull
+```
 
-1. The external commit happens (confirmed by log output):
-   "Committing 7 external Add action(s) for imported files"
-2. But `pond list` opens a fresh transaction afterward and
-   doesn't see the imported partition data
-3. Possible causes:
-   - The partition cache in the new transaction doesn't load the
-     externally-committed data because `ensure_partition_cached()`
-     queries the Delta table which may not reflect the latest version
-   - The table reload in `OpLogPersistence::commit()` picks up the
-     wrong version (it reads `last_txn_seq` from commit metadata,
-     but the external commit has no `PondTxnMetadata`)
-   - The two-commit approach (normal write + external Add) may
-     confuse the version tracking
+### Config Format
 
-## Architecture Decisions Made
+```yaml
+url: "s3://bucket/pond-{foreign-uuid}"
+endpoint: "http://host:9000"
+region: "us-east-1"
+access_key: "..."
+secret_key: "..."
+allow_http: true
+import:
+  source_path: "/logs/**"           # /** for recursive
+  local_path: "/sources/workshophost"
+```
 
-### External Add Actions in tlogfs
+## Architecture
 
-To maintain the single-transaction invariant, imported parquet files
-are registered via `State::add_external_parquet()` during factory
-execution, then committed as Delta Add actions at transaction commit
-time in `commit_impl()`. This replaces the earlier design of using
-`CommitBuilder` directly in `execute_import()`, which violated the
-one-transaction rule.
+### Data Flow
 
-The current implementation uses a **follow-up commit** within
-`commit_impl()` -- after the normal `DeltaOps::write()` for OpLog
-records, a `CommitBuilder` commit adds the external files. This is
-not ideal (two Delta versions per transaction) but preserves the
-invariant that all changes happen within `commit_impl()`.
+1. **mknod** reads the foreign OpLog via `ChunkedAsyncFileReader`,
+   navigates the directory tree to find `source_path`, and creates
+   a local directory at `local_path` with the foreign `FileID`
+   (same `part_id` and `node_id` as the foreign directory).
 
-The ideal fix: use `CommitBuilder` for EVERYTHING -- serialize OpLog
-records to parquet manually, write them to the object store, and
-create Add actions for both OpLog files and imported files in a
-single `CommitBuilder` commit. This would be a larger refactor of
-`commit_impl()` but would produce exactly one Delta version per
-transaction.
+2. **pull** discovers all partition IDs to import:
+   - Top-level `part_id` from the local parent directory entry
+   - Child `part_id` values from the foreign OpLog (for `/**` imports)
+   - Downloads matching parquet files from the backup
+   - Writes to local object store
+   - Registers as Delta Add actions via `State::add_external_parquet()`
+   - Committed at transaction end in `commit_impl()`
 
-### Partition ID Discovery
+3. **query** works immediately -- the local directory references the
+   foreign partition, and the imported parquet files are in the Delta
+   table. `pond list`, `pond cat`, and SQL queries all work.
 
-At pull time, partition IDs are discovered from **local directory
-entries** (created at mknod time), not by re-reading the foreign
-OpLog. This means:
-- Pull is fast (no foreign backup read needed)
-- New subdirectories added to the foreign pond after mknod require
-  re-running mknod (with `--overwrite`)
-- The `collect_child_part_ids_from_entries()` function reads
-  directory entries from the local OpLog via
-  `State::query_directory_entries_by_id()`
+### Key Design Points
 
-### New tlogfs APIs
+**Foreign FileIDs.** The import directory is created with
+`FileID::new_from_ids()` using the foreign pond's `part_id` and
+`node_id`. This means imported parquet files (which contain the
+foreign `part_id` in their partition path) land in the correct
+partition automatically.
 
-Added to support cross-pond import:
+**No local empty records.** `register_empty_directory()` caches the
+directory in memory (for child insertions during mknod) but does NOT
+persist an empty OpLog record. The real directory content comes from
+the imported foreign parquet files. This avoids shadowing foreign
+records with local empty ones.
+
+**External Add actions.** Imported parquet files are registered via
+`State::add_external_parquet()` and committed as Delta Add actions
+in `commit_impl()` via `CommitBuilder`. This happens as a follow-up
+commit after the normal OpLog write, with the same `PondTxnMetadata`
+for correct version tracking.
+
+**Partition discovery.** On each pull, `execute_import` discovers
+partition IDs by reading the parent directory entry (top-level) and
+the foreign OpLog (child partitions for recursive imports). This
+avoids the need for two pulls. Future optimization: cache the
+partition list in the control table.
+
+## New tlogfs APIs
 
 | API | Purpose |
 |-----|---------|
-| `State::register_empty_directory(id)` | Make new directory immediately usable for child insertion within same transaction |
+| `State::register_empty_directory(id)` | Cache directory for child insertion without persisting empty record |
 | `State::add_external_parquet(action)` | Register imported parquet file for Delta commit at transaction end |
-| `State::query_directory_entries_by_id(id)` | Read directory entries from OpLog without opening the directory node |
+| `State::query_directory_entries_by_id(id)` | Read directory entries from OpLog without opening directory node |
 | `ExternalAddAction` struct | Describes an external parquet file (path, size, part_id) |
-| `PartitionNotFound` error variant | Clear error when accessing unimported foreign partition, suggests `/**` pattern |
+| `PartitionNotFound` error variant | Clear error for unimported foreign partition, suggests `/**` pattern |
 | `FS::wd()` made public | External directory traversal |
 | `WD::insert_node()` | Insert pre-created node with foreign FileID |
 
-## Files Changed
+## Known Issues
 
-### Core changes (Phase 1 + Phase 2)
+1. **mDNS (.local) resolution.** Rust HTTP client doesn't support
+   mDNS. Hostnames like `workshophost.local` cause silent 57-second
+   hangs. Use IP addresses or `/etc/hosts` entries instead.
+
+2. **Two Delta versions per import.** The external Add commit creates
+   a separate Delta version from the OpLog record write. Ideally
+   these would be a single commit. Requires refactoring `commit_impl`
+   to use `CommitBuilder` for all writes.
+
+3. **Partition discovery on every pull.** Recursive imports re-read
+   the foreign OpLog on each pull to discover partition IDs. Should
+   cache the partition list in the control table for efficiency.
+
+4. **No incremental sync.** Pull downloads all matching partition
+   files, skipping only those already present in the local object
+   store (via `head()` check). No transaction-level tracking of
+   what has been imported.
+
+## Files Changed
 
 | File | Changes |
 |------|---------|
 | `crates/tlogfs/src/schema.rs` | `pond_id` field on OplogEntry |
-| `crates/tlogfs/src/persistence.rs` | pond_id stamping, ExternalAddAction, register_empty_directory, partition cache integration |
+| `crates/tlogfs/src/persistence.rs` | pond_id stamping, ExternalAddAction, register_empty_directory, partition cache |
 | `crates/tlogfs/src/txn_metadata.rs` | pond_id in commit metadata |
 | `crates/tlogfs/src/error.rs` | PartitionNotFound variant |
 | `crates/tlogfs/src/large_files.rs` | Column index updates for pond_id |
 | `crates/tinyfs/src/wd.rs` | insert_node() |
 | `crates/tinyfs/src/fs.rs` | wd() made public |
 | `crates/remote/src/factory.rs` | ImportConfig, initialize_remote, execute_import, list-ponds, show, recursive import |
-| `crates/remote/src/chunked_async_reader.rs` | New file: AsyncFileReader over chunked backup |
+| `crates/remote/src/chunked_async_reader.rs` | New: AsyncFileReader over chunked backup |
 | `crates/remote/src/schema.rs` | pond_id in ChunkedFileRecord, bundle_id format |
 | `crates/remote/src/table.rs` | pond_id on RemoteTable |
 | `crates/remote/src/writer.rs` | pond_id passthrough |
 | `crates/utilities/src/chunked_files.rs` | pond_id in Arrow schema |
 | `crates/steward/src/ship.rs` | pond_id threading |
 | `crates/steward/src/guard.rs` | pond_id in factory execution |
-
-### Tests
-
-| File | Description |
-|------|-------------|
-| `testsuite/tests/530-cross-pond-import-minio.sh` | Flat import: passes 6/6 |
-| `testsuite/tests/531-recursive-cross-pond-import.sh` | Recursive import: 2/11 (directories created, data not visible) |
-
-## Next Steps
-
-1. **Fix the data visibility bug** -- investigate why externally-committed
-   partition data isn't visible after table reload. Likely a version
-   tracking or partition cache issue.
-
-2. **Consider single-commit approach** -- refactor `commit_impl()` to
-   use `CommitBuilder` for all writes (OpLog records + external files)
-   in one Delta commit.
-
-3. **Flat import error test** -- test 531's flat import checks fail
-   because the pull succeeds (downloads data) before the list check.
-   The error only appears on subsequent access. Adjust test flow.
-
-4. **mDNS issue** -- Rust HTTP client doesn't support `.local` domains.
-   Causes silent 57s hangs. Separate issue from import.
+| `testsuite/tests/530-cross-pond-import-minio.sh` | Flat import test: 6/6 |
+| `testsuite/tests/531-recursive-cross-pond-import.sh` | Recursive import test: 11/11 |
