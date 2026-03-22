@@ -77,6 +77,7 @@ pub use error::TLogFSError;
 pub use file::OpLogFileWriter;
 pub use persistence::OpLogPersistence;
 pub use persistence::ExternalAddAction;
+pub use persistence::ImportPartitionRecord;
 pub use schema::{DirectoryEntry, OplogEntry};
 // Backward compatibility alias
 #[allow(deprecated)]
