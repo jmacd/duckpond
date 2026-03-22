@@ -164,17 +164,17 @@ EOF
 pond mknod remote /system/etc/10-recursive --config-path /tmp/recursive-import.yaml
 echo "Recursive import factory created"
 
-# Verify directory structure was created at mknod time
-POND=/pond3 pond list '/imported/recursive/*' > /tmp/recursive-dirs.txt 2>&1 || true
-cat /tmp/recursive-dirs.txt
-check 'grep -q "sensors" /tmp/recursive-dirs.txt' "child dir 'sensors' created at mknod time"
-check 'grep -q "logs" /tmp/recursive-dirs.txt' "child dir 'logs' created at mknod time"
-
 # Pull data
 echo ""
 echo "=== Pulling recursive import ==="
 pond run 10-recursive pull
 echo "Pull complete"
+
+# Verify directory structure after pull
+POND=/pond3 pond list '/imported/recursive/*' > /tmp/recursive-dirs.txt 2>&1 || true
+cat /tmp/recursive-dirs.txt
+check 'grep -q "sensors" /tmp/recursive-dirs.txt' "child dir 'sensors' visible after pull"
+check 'grep -q "logs" /tmp/recursive-dirs.txt' "child dir 'logs' visible after pull"
 
 # Verify nested data is accessible
 echo ""

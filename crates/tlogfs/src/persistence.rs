@@ -726,14 +726,15 @@ impl State {
     /// Register a foreign directory in the in-memory directory cache.
     /// This makes the directory immediately usable within the current
     /// transaction (for inserting child entries) without requiring a
-    /// commit+reload cycle. The directory will be flushed to the OpLog
-    /// at commit time.
+    /// commit+reload cycle. The directory is NOT marked as modified,
+    /// so it won't be flushed as an empty OpLog record — the real
+    /// directory content comes from the imported foreign parquet files.
     pub async fn register_empty_directory(&self, id: FileID) {
         let mut inner = self.inner.lock().await;
         let _ = inner.directories.insert(id, DirectoryState::new_empty());
-        if let Some(dir_state) = inner.directories.get_mut(&id) {
-            dir_state.modified = true;
-        }
+        // NOT marked as modified — the foreign parquet files contain the
+        // real directory records. We only need this in the cache so child
+        // insertions work during mknod.
     }
 
     /// Register an external parquet file for inclusion as a Delta Add action
