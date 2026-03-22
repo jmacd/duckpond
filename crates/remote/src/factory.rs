@@ -362,6 +362,18 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
     use tinyfs::PersistenceLayer;
     let top_node = create_foreign_dir(&state, &parent_wd, dir_name, &foreign_part_id, &foreign_node_id).await?;
 
+    // Record import metadata for steward (via Delta commit metadata).
+    // Use the top-level foreign part_id as the factory identifier.
+    let factory_key = foreign_part_id.clone();
+    state
+        .add_import_metadata(tlogfs::ImportPartitionRecord {
+            factory_node_id: factory_key.clone(),
+            foreign_part_id: foreign_part_id.clone(),
+            foreign_pond_id: String::new(), // Will be filled from backup metadata
+            watermark_txn_seq: 0,
+        })
+        .await;
+
     let mut partition_count = 1;
 
     // If recursive, walk the foreign directory tree and create local entries
@@ -380,6 +392,7 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
             &fs,
             &top_wd,
             &foreign_node_id,
+            &factory_key,
         )
         .await?;
     }
@@ -437,6 +450,7 @@ async fn create_child_dirs_recursive(
     fs: &tinyfs::FS,
     parent_wd: &tinyfs::WD,
     parent_node_id: &str,
+    factory_key: &str,
 ) -> Result<usize, RemoteError> {
     use arrow_array::StringArray;
 
@@ -456,6 +470,16 @@ async fn create_child_dirs_recursive(
             );
             count += 1;
 
+            // Record import metadata for this child partition
+            state
+                .add_import_metadata(tlogfs::ImportPartitionRecord {
+                    factory_node_id: factory_key.to_string(),
+                    foreign_part_id: child_id.clone(),
+                    foreign_pond_id: String::new(),
+                    watermark_txn_seq: 0,
+                })
+                .await;
+
             // Recurse into this child
             let child_wd = fs
                 .wd(&child_node)
@@ -470,6 +494,7 @@ async fn create_child_dirs_recursive(
                 fs,
                 &child_wd,
                 child_id,
+                factory_key,
             ))
             .await?;
         }
