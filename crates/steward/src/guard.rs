@@ -340,20 +340,40 @@ impl<'a> StewardTransactionGuard<'a> {
                         import_metadata.len()
                     );
                     for record in &import_metadata {
-                        if let Err(e) = self
-                            .control_table
-                            .record_import_partition(
-                                &record.factory_node_id,
-                                &record.foreign_part_id,
-                                &record.foreign_pond_id,
-                            )
-                            .await
-                        {
-                            log::warn!(
-                                "Failed to record import partition {}: {}",
-                                record.foreign_part_id,
-                                e
-                            );
+                        if record.watermark_txn_seq > 0 {
+                            // Update existing partition watermark
+                            if let Err(e) = self
+                                .control_table
+                                .update_import_watermark(
+                                    &record.factory_node_id,
+                                    &record.foreign_part_id,
+                                    record.watermark_txn_seq,
+                                )
+                                .await
+                            {
+                                log::warn!(
+                                    "Failed to update import watermark for {}: {}",
+                                    record.foreign_part_id,
+                                    e
+                                );
+                            }
+                        } else {
+                            // Initial partition registration
+                            if let Err(e) = self
+                                .control_table
+                                .record_import_partition(
+                                    &record.factory_node_id,
+                                    &record.foreign_part_id,
+                                    &record.foreign_pond_id,
+                                )
+                                .await
+                            {
+                                log::warn!(
+                                    "Failed to record import partition {}: {}",
+                                    record.foreign_part_id,
+                                    e
+                                );
+                            }
                         }
                     }
                 }

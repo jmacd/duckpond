@@ -832,7 +832,7 @@ async fn execute_remote(
         RemoteCommand::Push => execute_push(remote_table, &context).await,
         RemoteCommand::Pull => {
             if let Some(ref import_config) = config.import {
-                execute_import(remote_table, &context, import_config, &storage_options).await
+                execute_import(remote_table, &context, import_config, &config.url).await
             } else {
                 execute_pull(remote_table, &context).await
             }
@@ -1570,7 +1570,7 @@ async fn execute_import(
     remote_table: RemoteTable,
     context: &FactoryContext,
     import_config: &ImportConfig,
-    _storage_options: &std::collections::HashMap<String, String>,
+    config_url: &str,
 ) -> Result<(), RemoteError> {
     log::info!(
         "[DOWN] IMPORT: Importing from foreign pond backup (source={}, local={})",
@@ -1698,70 +1698,104 @@ async fn execute_import(
         part_ids_to_import
     );
 
-    // Step 2: List all files in the foreign backup
-    let remote_files = remote_table.list_files("").await?;
-    if remote_files.is_empty() {
-        log::info!("   No files found in foreign backup");
-        return Ok(());
-    }
-    log::info!("   Foreign backup has {} file(s)", remote_files.len());
-
-    // Step 3: Filter to parquet files matching our partition set
-    let files_to_download: Vec<_> = remote_files
+    // Step 2: Determine watermark — highest foreign txn_seq already imported.
+    let watermark: i64 = context
+        .import_partitions
         .iter()
-        .filter(|(_bundle, path, _txn, _size)| {
-            part_ids_to_import
-                .iter()
-                .any(|pid| path.starts_with(&format!("part_id={}/", pid)))
-        })
-        .collect();
+        .map(|(_, _, wm)| *wm)
+        .max()
+        .unwrap_or(0);
 
     log::info!(
-        "   Downloading {} parquet file(s) for {} partition(s)",
-        files_to_download.len(),
-        part_ids_to_import.len()
+        "   Watermark: {} (will import transactions > {})",
+        watermark, watermark
     );
 
-    if files_to_download.is_empty() {
-        log::warn!("   No parquet files found for target partitions");
+    // Step 3: List foreign backup transactions and filter by watermark.
+    // This reads Delta metadata (fast), not data.
+    let all_txn_seqs = remote_table.list_transaction_numbers(None).await?;
+    let new_txn_seqs: Vec<i64> = all_txn_seqs
+        .iter()
+        .filter(|&&seq| seq > watermark)
+        .copied()
+        .collect();
+
+    if new_txn_seqs.is_empty() {
+        log::info!("   [OK] Already up to date (no transactions after {})", watermark);
         return Ok(());
     }
 
-    // Step 4: Download files
-    let mut downloaded = 0;
-    for (bundle_id, path, txn_id, _size) in &files_to_download {
-        let file_path = object_store::path::Path::from(path.as_str());
-
-        if local_store.head(&file_path).await.is_ok() {
-            log::debug!("   Skip {} (already exists)", path);
-            continue;
+    log::info!(
+        "   {} new transaction(s) to import: {:?}",
+        new_txn_seqs.len(),
+        if new_txn_seqs.len() <= 5 {
+            format!("{:?}", new_txn_seqs)
+        } else {
+            format!("{}..={}", new_txn_seqs[0], new_txn_seqs.last().unwrap())
         }
+    );
 
-        log::debug!("   Downloading: {}", path);
+    // Step 4: For each new transaction, query its files and download
+    // those matching our partition set. Uses bundle_id partition pruning.
+    // Extract the foreign pond_id from the config URL (format: .../pond-{uuid})
+    let pond_id_for_bundle = config_url
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.strip_prefix("pond-"))
+        .unwrap_or("")
+        .to_string();
 
-        let mut output = Vec::new();
-        remote_table
-            .read_file(bundle_id, path, *txn_id, &mut output)
-            .await?;
+    let mut downloaded = 0;
+    let mut files_to_register: Vec<(String, i64)> = Vec::new(); // (path, size)
 
-        let byte_len = output.len();
-        let bytes = Bytes::from(output);
-        local_store
-            .put(&file_path, bytes.into())
+    for &txn_seq in &new_txn_seqs {
+        let txn_files = remote_table
+            .list_transaction_files(&pond_id_for_bundle, txn_seq)
             .await
-            .map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to write {}: {}", path, e))
-            })?;
+            .unwrap_or_default();
 
-        log::debug!("      [OK] Downloaded {} bytes", byte_len);
-        downloaded += 1;
+        for (bundle_id, path, _root_hash, size, pond_txn_id) in &txn_files {
+            // Filter to files matching our partition set
+            let matches_partition = part_ids_to_import
+                .iter()
+                .any(|pid| path.starts_with(&format!("part_id={}/", pid)));
+
+            if !matches_partition {
+                continue;
+            }
+
+            let file_path = object_store::path::Path::from(path.as_str());
+
+            if local_store.head(&file_path).await.is_ok() {
+                log::debug!("   Skip {} (already exists)", path);
+                continue;
+            }
+
+            log::debug!("   Downloading: {} (txn {})", path, txn_seq);
+
+            let mut output = Vec::new();
+            remote_table
+                .read_file(bundle_id, path, *pond_txn_id, &mut output)
+                .await?;
+
+            let byte_len = output.len();
+            let bytes = Bytes::from(output);
+            local_store
+                .put(&file_path, bytes.into())
+                .await
+                .map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to write {}: {}", path, e))
+                })?;
+
+            log::debug!("      [OK] Downloaded {} bytes", byte_len);
+            files_to_register.push((path.clone(), *size));
+            downloaded += 1;
+        }
     }
 
     // Step 5: Register imported files for inclusion in the Delta commit.
-    // These are added as external Add actions that will be committed
-    // at transaction commit time (not via a separate CommitBuilder).
     if downloaded > 0 {
-        for (_bundle_id, path, _txn_id, size) in &files_to_download {
+        for (path, size) in &files_to_register {
             let part_id_val = path
                 .strip_prefix("part_id=")
                 .and_then(|rest| rest.split('/').next())
@@ -1779,15 +1813,31 @@ async fn execute_import(
 
         log::info!(
             "   Registered {} file(s) for Delta commit at transaction end",
-            files_to_download.len()
+            files_to_register.len()
         );
+
+        // Record updated watermark via import metadata (flows through Delta commit)
+        let new_watermark = new_txn_seqs.last().copied().unwrap_or(watermark);
+        let factory_key = part_ids_to_import.first().cloned().unwrap_or_default();
+        for pid in &part_ids_to_import {
+            state
+                .add_import_metadata(tlogfs::ImportPartitionRecord {
+                    factory_node_id: factory_key.clone(),
+                    foreign_part_id: pid.clone(),
+                    foreign_pond_id: String::new(),
+                    watermark_txn_seq: new_watermark,
+                })
+                .await;
+        }
+        log::info!("   Updated watermark to {}", new_watermark);
     } else {
         log::info!("   [OK] All files already up to date");
     }
 
     log::info!(
-        "   [OK] Import complete: {} partition(s) from foreign pond",
-        part_ids_to_import.len()
+        "   [OK] Import complete: {} partition(s), {} file(s) downloaded",
+        part_ids_to_import.len(),
+        downloaded
     );
     Ok(())
 }
