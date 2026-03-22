@@ -100,10 +100,14 @@ impl FactoryCommand for RemoteCommand {
 /// it reads from a foreign pond's backup and imports partitions at a local path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportConfig {
-    /// Path in the foreign pond to import (e.g., "/ingest")
+    /// Path in the foreign pond to import (e.g., "/ingest" or "/ingest/**")
     pub source_path: String,
     /// Path in this pond where imported content appears (e.g., "/sources/septic")
     pub local_path: String,
+    /// Partition IDs to import, discovered at mknod time.
+    /// Populated by initialize_remote; used by execute_import.
+    #[serde(default)]
+    pub partitions: Vec<String>,
 }
 
 /// Remote storage configuration
@@ -1554,64 +1558,102 @@ async fn execute_import(
     let local_table = state.table().await;
     let local_store = local_table.object_store();
 
-    // Step 1: Resolve the import path to get the top-level part_id.
-    // Navigate from root using directory entries (reads from local partitions,
-    // doesn't require the foreign partition data to be present).
-    let fs = tinyfs::FS::new(state.clone())
-        .await
-        .map_err(|e| RemoteError::TableOperation(format!("Failed to create FS: {}", e)))?;
-    let root = fs
-        .root()
-        .await
-        .map_err(|e| RemoteError::TableOperation(format!("Failed to get root: {}", e)))?;
+    // Step 1: Determine which partition IDs to import.
+    // If the import config has a pre-discovered partition list (from mknod),
+    // use it directly. Otherwise, read the parent directory entry to get
+    // the top-level part_id, and for recursive imports also read the
+    // foreign OpLog to discover child partitions.
+    let source_base = import_config
+        .source_path
+        .trim_end_matches("/**")
+        .to_string();
+    let recursive = import_config.source_path.ends_with("/**");
 
-    // Navigate to the parent of local_path and read its directory entries
-    // to find the import directory's child_node_id (= part_id for physical dirs).
-    // This avoids loading the foreign directory node itself (which would fail
-    // because the foreign partition has no data until we pull it).
-    let local_path = std::path::Path::new(&import_config.local_path);
-    let parent_path = local_path.parent().unwrap_or(std::path::Path::new("/"));
-    let dir_name = local_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-
-    let parent_wd = if parent_path == std::path::Path::new("/") {
-        root.clone()
+    let part_ids_to_import: Vec<String> = if !import_config.partitions.is_empty() {
+        log::info!(
+            "   Using {} pre-discovered partition(s) from config",
+            import_config.partitions.len()
+        );
+        import_config.partitions.clone()
     } else {
-        root.open_dir_path(parent_path)
+        // Discover from local directory entry (top-level) and foreign OpLog (children)
+        let fs = tinyfs::FS::new(state.clone())
+            .await
+            .map_err(|e| RemoteError::TableOperation(format!("Failed to create FS: {}", e)))?;
+        let root = fs
+            .root()
+            .await
+            .map_err(|e| RemoteError::TableOperation(format!("Failed to get root: {}", e)))?;
+
+        let local_path = std::path::Path::new(&import_config.local_path);
+        let parent_path = local_path.parent().unwrap_or(std::path::Path::new("/"));
+        let dir_name = local_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        let parent_wd = if parent_path == std::path::Path::new("/") {
+            root.clone()
+        } else {
+            root.open_dir_path(parent_path)
+                .await
+                .map_err(|e| RemoteError::TableOperation(format!(
+                    "Failed to open parent of import path: {}", e
+                )))?
+        };
+
+        let parent_entries = state
+            .query_directory_entries_by_id(&parent_wd.node_path().id())
             .await
             .map_err(|e| RemoteError::TableOperation(format!(
-                "Failed to open parent of import path: {}", e
-            )))?
+                "Failed to read parent directory entries: {}", e
+            )))?;
+
+        let import_entry = parent_entries
+            .iter()
+            .find(|e| e.name == dir_name)
+            .ok_or_else(|| RemoteError::TableOperation(format!(
+                "Import path {} not found in parent directory. Run mknod first.",
+                import_config.local_path
+            )))?;
+
+        let top_part_id = import_entry.child_node_id.to_string();
+        let mut ids = vec![top_part_id.clone()];
+
+        // For recursive imports, read the foreign OpLog to discover child partitions
+        if recursive {
+            log::info!("   Discovering child partitions from foreign backup...");
+            let foreign_ctx = load_foreign_oplog(&remote_table).await?;
+            let (_, target_node_id) = navigate_foreign_path(&foreign_ctx, &source_base).await?;
+
+            fn collect_recursive(
+                entries: &[(String, String, String)],
+                ids: &mut Vec<String>,
+            ) {
+                for (_, child_id, entry_type) in entries {
+                    if entry_type == "dir:physical" && !ids.contains(child_id) {
+                        ids.push(child_id.clone());
+                    }
+                }
+            }
+
+            let entries = read_foreign_directory_entries(&foreign_ctx, &target_node_id).await?;
+            collect_recursive(&entries, &mut ids);
+
+            // Recurse one more level for each child dir
+            for (_name, child_id, entry_type) in &entries {
+                if entry_type == "dir:physical" {
+                    if let Ok(child_entries) =
+                        read_foreign_directory_entries(&foreign_ctx, child_id).await
+                    {
+                        collect_recursive(&child_entries, &mut ids);
+                    }
+                }
+            }
+        }
+
+        ids
     };
-
-    // Read parent directory entries to find the import dir's child_node_id
-    let parent_entries = state
-        .query_directory_entries_by_id(&parent_wd.node_path().id())
-        .await
-        .map_err(|e| RemoteError::TableOperation(format!(
-            "Failed to read parent directory entries: {}", e
-        )))?;
-
-    let import_entry = parent_entries
-        .iter()
-        .find(|e| e.name == dir_name)
-        .ok_or_else(|| RemoteError::TableOperation(format!(
-            "Import path {} not found in parent directory. Run mknod first.",
-            import_config.local_path
-        )))?;
-
-    let top_part_id = import_entry.child_node_id.to_string();
-    let mut part_ids_to_import: Vec<String> = vec![top_part_id.clone()];
-
-    // Collect child part_ids from directory entries created at mknod time.
-    // These entries are in the local OpLog (not in the foreign partition).
-    let import_file_id = tinyfs::FileID::new_from_ids(
-        tinyfs::PartID::new(top_part_id.clone()),
-        tinyfs::NodeID::new(top_part_id.clone()),
-    );
-    collect_child_part_ids_from_entries(&state, &import_file_id, &mut part_ids_to_import).await;
 
     log::info!(
         "   Importing {} partition(s): {:?}",
