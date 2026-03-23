@@ -34,6 +34,13 @@ pub enum TLogFSError {
     #[error("Missing data")]
     Missing,
 
+    #[error("Partition not found: part_id={part_id}, node_id={node_id}. {hint}")]
+    PartitionNotFound {
+        part_id: String,
+        node_id: String,
+        hint: String,
+    },
+
     #[error("Commit error: {message}")]
     Commit { message: String },
 

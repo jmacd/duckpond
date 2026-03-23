@@ -43,6 +43,13 @@ impl<R: tokio::io::AsyncRead + Unpin> ChunkedWriter<R> {
         self
     }
 
+    /// Set pond identity UUID for cross-pond import provenance tracking.
+    #[must_use]
+    pub fn with_pond_id(mut self, pond_id: String) -> Self {
+        self.inner = self.inner.with_pond_id(pond_id);
+        self
+    }
+
     /// Write the file to Delta Lake in chunks with bounded memory
     ///
     /// # Returns

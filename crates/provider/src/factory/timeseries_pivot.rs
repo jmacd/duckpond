@@ -378,6 +378,7 @@ mod tests {
             file_id,
             pond_metadata: None,
             txn_seq: 0,
+            import_partitions: Vec::new(),
         }
     }
 

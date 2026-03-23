@@ -15,12 +15,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::CommitInfo;
-use deltalake::kernel::transaction::CommitProperties;
 use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
 use log::{debug, info, warn};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use provider::{FactoryContext, FactoryRegistry};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -42,6 +42,10 @@ pub struct OpLogPersistence {
     pub(crate) txn_state: Arc<TinyFsTransactionState>,
     /// Options for large file storage (compression, etc.)
     large_file_options: crate::large_files::LargeFileOptions,
+    /// Pond identity UUID - stamped into every OplogEntry at commit time.
+    /// For locally-created records, this is the local pond's UUID.
+    /// Set at create/open time and never changes.
+    pub(crate) pond_id: String,
 }
 
 /// In-memory directory state during a transaction
@@ -90,6 +94,42 @@ pub struct InnerState {
     txn_seq: i64,
     /// Options for large file storage (compression, etc.)
     large_file_options: crate::large_files::LargeFileOptions,
+    /// Cache of committed oplog records by partition, keyed by
+    /// (part_id -> (node_id -> records sorted by timestamp desc)).
+    /// Populated on first access per partition via a single SQL query,
+    /// avoiding per-file queries when listing directories.
+    partition_records_cache: HashMap<tinyfs::PartID, HashMap<tinyfs::NodeID, Vec<OplogEntry>>>,
+    /// External parquet files to include as Delta Add actions at commit time.
+    /// Used by cross-pond import to register imported files in the same
+    /// Delta commit as the normal OpLog records. Each entry is (path, size, part_id).
+    external_add_actions: Vec<ExternalAddAction>,
+    /// Import metadata to include in the Delta commit for steward to process.
+    /// Records which foreign partitions were imported, keyed by factory node_id.
+    import_metadata: Vec<ImportPartitionRecord>,
+}
+
+/// An external parquet file to register as a Delta Add action at commit time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalAddAction {
+    /// Relative path in the object store (e.g., "part_id=<uuid>/file.parquet")
+    pub path: String,
+    /// File size in bytes
+    pub size: i64,
+    /// Partition column value
+    pub part_id: String,
+}
+
+/// Import partition metadata stored in Delta commit for steward processing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportPartitionRecord {
+    /// Factory node UUID (stable identifier)
+    pub factory_node_id: String,
+    /// Foreign partition ID
+    pub foreign_part_id: String,
+    /// Foreign pond UUID
+    pub foreign_pond_id: String,
+    /// Highest foreign transaction sequence imported (0 = initial registration)
+    pub watermark_txn_seq: i64,
 }
 
 #[derive(Clone)]
@@ -132,14 +172,21 @@ impl OpLogPersistence {
         self.last_txn_seq
     }
 
+    /// Get the pond identity UUID
+    #[must_use]
+    pub fn pond_id(&self) -> &str {
+        &self.pond_id
+    }
+
     /// Creates a new OpLogPersistence instance with a new table and initializes root
     pub async fn create<P: AsRef<Path>>(
         path: P,
+        pond_id: String,
         metadata: PondUserMetadata,
     ) -> Result<Self, TLogFSError> {
         debug!("create called with path: {:?}", path.as_ref());
 
-        Self::open_or_create(path, true, Some(metadata)).await
+        Self::open_or_create(path, pond_id, true, Some(metadata)).await
     }
 
     /// Test-only helper: Create a new pond with synthetic metadata.
@@ -147,6 +194,7 @@ impl OpLogPersistence {
     pub async fn create_test(path: &str) -> Result<Self, TLogFSError> {
         Self::create(
             path,
+            uuid7::uuid7().to_string(),
             PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
         )
         .await
@@ -158,6 +206,7 @@ impl OpLogPersistence {
     pub async fn create_test_uncompressed(path: &str) -> Result<Self, TLogFSError> {
         let mut persistence = Self::create(
             path,
+            uuid7::uuid7().to_string(),
             PondUserMetadata::new(vec!["test".to_string(), "create".to_string()]),
         )
         .await?;
@@ -175,17 +224,20 @@ impl OpLogPersistence {
     }
 
     /// Opens an existing OpLogPersistence instance
-    pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self, TLogFSError> {
+    pub async fn open<P: AsRef<Path>>(path: P, pond_id: String) -> Result<Self, TLogFSError> {
         debug!("open called with path: {:?}", path.as_ref());
 
-        Self::open_or_create(path, false, None).await
+        Self::open_or_create(path, pond_id, false, None).await
     }
 
     /// Create an empty Delta table structure for restoration
     /// This creates the table schema but does NOT initialize the root directory.
     /// Used when restoring from bundles - the first bundle will write transaction #1
     /// which initializes the root directory.
-    pub async fn create_empty<P: AsRef<Path>>(path: P) -> Result<Self, TLogFSError> {
+    pub async fn create_empty<P: AsRef<Path>>(
+        path: P,
+        pond_id: String,
+    ) -> Result<Self, TLogFSError> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         debug!(
             "Creating empty table structure for restoration at: {}",
@@ -195,7 +247,7 @@ impl OpLogPersistence {
         // Create the Delta table structure
         let config: HashMap<String, Option<String>> = vec![(
             "delta.dataSkippingStatsColumns".to_string(),
-            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,pond_id".to_string())
         )]
         .into_iter()
         .collect();
@@ -224,12 +276,14 @@ impl OpLogPersistence {
             last_txn_seq: 0, // No transactions yet - bundles will provide them
             txn_state: Arc::new(TinyFsTransactionState::new()),
             large_file_options: Default::default(),
+            pond_id,
         })
     }
 
     /// @@@ UNCLEAR this should not be public
     pub async fn open_or_create<P: AsRef<Path>>(
         path: P,
+        pond_id: String,
         create_new: bool,
         root_metadata: Option<PondUserMetadata>,
     ) -> Result<Self, TLogFSError> {
@@ -270,7 +324,7 @@ impl OpLogPersistence {
                 let config: HashMap<String, Option<String>> = vec![(
                     "delta.dataSkippingStatsColumns".to_string(),
 		    // @@@ Awful
-                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
+                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,pond_id".to_string())
                 )]
                 .into_iter()
                 .collect();
@@ -302,6 +356,7 @@ impl OpLogPersistence {
             last_txn_seq: 0, // Will be updated below
             txn_state: Arc::new(TinyFsTransactionState::new()),
             large_file_options: Default::default(),
+            pond_id,
         };
 
         // Initialize root directory ONLY when creating a new pond
@@ -518,15 +573,19 @@ impl OpLogPersistence {
     /// Commit a transaction with metadata and return the committed version
     pub(crate) async fn commit(
         &mut self,
-        metadata: PondTxnMetadata,
+        mut metadata: PondTxnMetadata,
     ) -> Result<Option<()>, TLogFSError> {
+        // Stamp pond_id into commit metadata
+        let pond_id = self.pond_id.clone();
+        metadata.pond_id = pond_id.clone();
+
         let new_seq = metadata.txn_seq;
         self.fs = None;
         let res = self
             .state
             .take()
             .ok_or(TLogFSError::Missing)?
-            .commit_impl(metadata, self.table.clone())
+            .commit_impl(metadata, self.table.clone(), pond_id)
             .await?;
 
         // Reload the table from disk to pick up the committed changes
@@ -673,6 +732,50 @@ impl State {
         self.inner.lock().await.path.clone()
     }
 
+    /// Query directory entries for a given FileID.
+    /// Used by cross-pond import to discover child partition IDs
+    /// from directory entries created at mknod time.
+    pub async fn query_directory_entries_by_id(
+        &self,
+        id: &FileID,
+    ) -> Result<Vec<DirectoryEntry>, TLogFSError> {
+        self.inner.lock().await.query_directory_entries(*id).await
+    }
+
+    /// Register a foreign directory in the in-memory directory cache.
+    /// This makes the directory immediately usable within the current
+    /// transaction (for inserting child entries) without requiring a
+    /// commit+reload cycle. The directory is NOT marked as modified,
+    /// so it won't be flushed as an empty OpLog record — the real
+    /// directory content comes from the imported foreign parquet files.
+    pub async fn register_empty_directory(&self, id: FileID) {
+        let mut inner = self.inner.lock().await;
+        let _ = inner.directories.insert(id, DirectoryState::new_empty());
+        // NOT marked as modified — the foreign parquet files contain the
+        // real directory records. We only need this in the cache so child
+        // insertions work during mknod.
+    }
+
+    /// Register an external parquet file for inclusion as a Delta Add action
+    /// at commit time. This ensures imported parquet files are part of the
+    /// same Delta commit as the normal OpLog records, maintaining the
+    /// single-transaction invariant.
+    pub async fn add_external_parquet(&self, action: ExternalAddAction) {
+        self.inner.lock().await.external_add_actions.push(action);
+    }
+
+    /// Record import partition metadata for inclusion in the Delta commit.
+    /// Steward reads this from the commit metadata to populate the control table.
+    pub async fn add_import_metadata(&self, record: ImportPartitionRecord) {
+        self.inner.lock().await.import_metadata.push(record);
+    }
+
+    /// Get a copy of the pending import metadata (before commit consumes it).
+    /// Used by steward to extract import state for the control table.
+    pub async fn pending_import_metadata(&self) -> Vec<ImportPartitionRecord> {
+        self.inner.lock().await.import_metadata.clone()
+    }
+
     /// Get the large file storage options (compression settings, etc.)
     #[must_use]
     pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
@@ -694,8 +797,13 @@ impl State {
         &mut self,
         metadata: PondTxnMetadata,
         table: DeltaTable,
+        pond_id: String,
     ) -> Result<Option<()>, TLogFSError> {
-        self.inner.lock().await.commit_impl(metadata, table).await
+        self.inner
+            .lock()
+            .await
+            .commit_impl(metadata, table, pond_id)
+            .await
     }
 
     /// Create an async reader for a file without loading entire content into memory
@@ -1255,6 +1363,9 @@ impl InnerState {
             session_context: ctx,
             txn_seq,
             large_file_options,
+            partition_records_cache: HashMap::new(),
+            external_add_actions: Vec::new(),
+            import_metadata: Vec::new(),
         })
     }
 
@@ -1570,7 +1681,7 @@ impl InnerState {
     }
 
     /// Get the next version number for a specific node (current max + 1)
-    async fn get_next_version_for_node(&self, id: FileID) -> Result<i64, TLogFSError> {
+    async fn get_next_version_for_node(&mut self, id: FileID) -> Result<i64, TLogFSError> {
         debug!("get_next_version_for_node called for node_id={id}");
 
         // Query all records for this node and find the maximum version
@@ -1793,7 +1904,7 @@ impl InnerState {
 
     /// Create an async reader for a file without loading entire content into memory
     pub async fn async_file_reader(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>, TLogFSError> {
         let records = self.query_records(id).await?;
@@ -1945,6 +2056,7 @@ impl InnerState {
         &mut self,
         metadata: PondTxnMetadata,
         table: DeltaTable,
+        pond_id: String,
     ) -> Result<Option<()>, TLogFSError> {
         // Check if transaction is poisoned (failed write)
         if self.poisoned {
@@ -1956,83 +2068,179 @@ impl InnerState {
 
         self.flush_directory_operations().await?;
 
-        let records = std::mem::take(&mut self.records);
+        let mut records = std::mem::take(&mut self.records);
 
-        if records.is_empty() {
+        if records.is_empty()
+            && self.external_add_actions.is_empty()
+            && self.import_metadata.is_empty()
+        {
             debug!("Committing read-only transaction");
             return Ok(None);
         }
 
-        let count = records.len();
-        info!("Committing {count} operations in {:?}", self.path);
+        // Collect external add actions and import metadata before any writing
+        let external_actions = std::mem::take(&mut self.external_add_actions);
+        let import_metadata = std::mem::take(&mut self.import_metadata);
+        let _has_external = !external_actions.is_empty();
+        let has_records = !records.is_empty();
 
-        // Debug: log what we're about to commit
-        for (i, record) in records.iter().enumerate() {
-            debug!(
-                "  Record {}: part_id={}, node_id={}, file_type={:?}, version={}, content_len={}, factory={:?}",
-                i,
-                record.part_id,
-                record.node_id,
-                record.file_type,
-                record.version,
-                record.content.as_ref().map(|c| c.len()).unwrap_or(0),
-                record.factory
-            );
-        }
-
-        // Convert records to RecordBatch
-        debug!(
-            "[SYNC] About to serialize {} records with serde_arrow",
-            records.len()
-        );
-        let batches = vec![serde_arrow::to_record_batch(
-            &OplogEntry::for_arrow(),
-            &records,
-        )?];
-
-        // Drop records immediately after Arrow conversion to free ~100MB
-        drop(records);
-
-        debug!(
-            "[TBL] RecordBatch created with {} batches, batch[0] has {} rows",
-            batches.len(),
-            batches[0].num_rows()
-        );
-
-        // DEBUG: Print first few values from part_id and node_id columns
-        if batches[0].num_rows() > 0 {
-            use arrow::array::StringArray;
-            let part_id_col = batches[0].column(0);
-            let node_id_col = batches[0].column(1);
-            debug!("[SEARCH] First 3 rows of RecordBatch:");
-            for i in 0..batches[0].num_rows().min(3) {
-                debug!(
-                    "   Row {}: part_id={:?}, node_id={:?}",
-                    i,
-                    part_id_col
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .map(|a| a.value(i)),
-                    node_id_col
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .map(|a| a.value(i))
-                );
+        if has_records {
+            for record in &mut records {
+                record.pond_id = pond_id.clone();
             }
         }
 
-        let mut write_op = DeltaOps(table).write(batches);
+        let record_count = records.len();
+        let external_count = external_actions.len();
+        info!(
+            "Committing {} record(s) + {} external file(s) in {:?}",
+            record_count, external_count, self.path
+        );
 
-        // Add commit metadata
-        let properties =
-            CommitProperties::default().with_metadata(metadata.to_delta_metadata().into_iter());
-        write_op = write_op.with_commit_properties(properties);
+        // Build all Add actions for a single Delta commit
+        use deltalake::kernel::Action;
+        use deltalake::kernel::models::Add;
+        use deltalake::kernel::transaction::CommitBuilder;
+        use deltalake::protocol::SaveMode;
 
-        let version = write_op.await?;
+        let mut all_actions: Vec<Action> = Vec::new();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        // Phase 1: Write OpLog records as parquet to the object store
+        if has_records {
+            let batch = serde_arrow::to_record_batch(&OplogEntry::for_arrow(), &records)?;
+            drop(records);
+
+            let store = table.object_store();
+
+            // Group by part_id for partitioned writes
+            let part_id_col = batch.column_by_name("part_id").expect("part_id column");
+            let part_id_arr = part_id_col
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("part_id is StringArray");
+
+            let mut part_ids: Vec<String> = Vec::new();
+            for i in 0..batch.num_rows() {
+                let pid = part_id_arr.value(i).to_string();
+                if !part_ids.contains(&pid) {
+                    part_ids.push(pid);
+                }
+            }
+
+            for pid in &part_ids {
+                let mask: arrow::array::BooleanArray = (0..batch.num_rows())
+                    .map(|i| Some(part_id_arr.value(i) == pid.as_str()))
+                    .collect();
+                let filtered = arrow::compute::filter_record_batch(&batch, &mask)?;
+
+                // Remove part_id column (it is the partition column, stored in path)
+                let indices: Vec<usize> = filtered
+                    .schema()
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| f.name() != "part_id")
+                    .map(|(i, _)| i)
+                    .collect();
+                let filtered = filtered.project(&indices)?;
+
+                let mut parquet_buf = Vec::new();
+                let mut writer = parquet::arrow::ArrowWriter::try_new(
+                    &mut parquet_buf,
+                    filtered.schema(),
+                    None,
+                )?;
+                writer.write(&filtered)?;
+                let _file_metadata = writer.close()?;
+
+                let file_name = format!(
+                    "part_id={}/part-00000-{}-c000.snappy.parquet",
+                    pid,
+                    uuid7::uuid7()
+                );
+                let file_size = parquet_buf.len() as i64;
+
+                let obj_path = object_store::path::Path::from(file_name.as_str());
+                _ = store
+                    .put(&obj_path, parquet_buf.into())
+                    .await
+                    .map_err(|e| {
+                        TLogFSError::Internal(format!("Failed to write parquet: {}", e))
+                    })?;
+
+                all_actions.push(Action::Add(Add {
+                    path: file_name,
+                    partition_values: HashMap::from([("part_id".to_string(), Some(pid.clone()))]),
+                    size: file_size,
+                    modification_time: now_ms,
+                    data_change: true,
+                    stats: None,
+                    tags: None,
+                    deletion_vector: None,
+                    base_row_id: None,
+                    default_row_commit_version: None,
+                    clustering_provider: None,
+                }));
+            }
+        } else {
+            drop(records);
+        }
+
+        // Phase 2: Add external parquet files (already in object store)
+        for ea in &external_actions {
+            all_actions.push(Action::Add(Add {
+                path: ea.path.clone(),
+                partition_values: HashMap::from([(
+                    "part_id".to_string(),
+                    Some(ea.part_id.clone()),
+                )]),
+                size: ea.size,
+                modification_time: now_ms,
+                data_change: true,
+                stats: None,
+                tags: None,
+                deletion_vector: None,
+                base_row_id: None,
+                default_row_commit_version: None,
+                clustering_provider: None,
+            }));
+        }
+
+        // Phase 3: Single Delta commit with all actions
+        let operation = deltalake::protocol::DeltaOperation::Write {
+            mode: SaveMode::Append,
+            partition_by: Some(vec!["part_id".to_string()]),
+            predicate: None,
+        };
+
+        let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> = table
+            .snapshot()
+            .ok()
+            .map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
+
+        // Build commit metadata: pond_txn + optional import_state
+        let mut commit_metadata = metadata.to_delta_metadata();
+        if !import_metadata.is_empty() {
+            let import_json = serde_json::to_value(&import_metadata)
+                .expect("Failed to serialize import metadata");
+            let _ = commit_metadata.insert("import_state".to_string(), import_json);
+        }
+
+        let _commit = CommitBuilder::default()
+            .with_actions(all_actions)
+            .with_app_metadata(commit_metadata)
+            .build(snapshot_ref, table.log_store().clone(), operation)
+            .await?;
 
         debug!(
-            "[OK] Delta write completed successfully, new table version: {:?}",
-            version.version()
+            "[OK] Single Delta commit: {} record(s) + {} external file(s) + {} import partition(s)",
+            record_count,
+            external_count,
+            import_metadata.len()
         );
 
         self.records.clear();
@@ -2238,7 +2446,7 @@ impl InnerState {
     ///
     /// Uses SQL "ORDER BY version DESC LIMIT 1" to fetch exactly one record from Delta Lake.
     async fn query_directory_entries(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Vec<DirectoryEntry>, TLogFSError> {
         // [GO] CRITICAL: Use specialized query that fetches ONLY latest record via SQL LIMIT 1
@@ -2480,7 +2688,7 @@ impl InnerState {
     /// Get dynamic node configuration if the node is dynamic
     /// Uses the same query pattern as the rest of the persistence layer
     pub async fn get_dynamic_node_config(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Option<(String, Vec<u8>)>, TLogFSError> {
         // First check pending records (for nodes created in current transaction)
@@ -2627,7 +2835,7 @@ impl InnerState {
     }
 
     /// Query for ONLY the latest record for any node type (O(1) performance)
-    async fn query_latest_record(&self, id: FileID) -> Result<OplogEntry, TLogFSError> {
+    async fn query_latest_record(&mut self, id: FileID) -> Result<OplogEntry, TLogFSError> {
         // Step 1: Check pending records in memory FIRST
         let pending_record = self
             .records
@@ -2644,39 +2852,43 @@ impl InnerState {
             return Ok(pending);
         }
 
-        // Step 2: Query Delta Lake for the single latest committed record
-        let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY version DESC LIMIT 1",
-            id.part_id(),
-            id.node_id()
-        );
+        // Step 2: Use the partition cache to get the latest committed record
+        self.ensure_partition_cached(id.part_id()).await?;
 
-        debug!("query_latest_record SQL: {}", sql);
-        match self.session_context.sql(&sql).await {
-            Ok(df) => match df.collect().await {
-                Ok(batches) => {
-                    if batches.is_empty() || batches[0].num_rows() == 0 {
-                        Err(TLogFSError::Missing)
-                    } else {
-                        let batch = &batches[0];
-                        debug!("[SEARCH] Query returned {} rows", batch.num_rows());
-                        debug!("[SEARCH] Schema: {:?}", batch.schema());
+        match self
+            .partition_records_cache
+            .get(&id.part_id())
+            .and_then(|by_node| by_node.get(&id.node_id()))
+            .and_then(|records| records.first().cloned())
+        {
+            Some(record) => Ok(record),
+            None => {
+                // Distinguish "partition has no data" (foreign partition not imported)
+                // from "node not found within a populated partition"
+                let partition_has_data = self
+                    .partition_records_cache
+                    .get(&id.part_id())
+                    .map(|by_node| !by_node.is_empty())
+                    .unwrap_or(false);
 
-                        // Print first row details
-                        if batch.num_rows() > 0 {
-                            for (i, field) in batch.schema().fields().iter().enumerate() {
-                                let col = batch.column(i);
-                                debug!("  Column {}: {} = {:?}", i, field.name(), col);
-                            }
-                        }
-
-                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(batch)?;
-                        Ok(records.into_iter().next().expect("one"))
-                    }
+                if partition_has_data {
+                    Err(TLogFSError::PartitionNotFound {
+                        part_id: id.part_id().to_string(),
+                        node_id: id.node_id().to_string(),
+                        hint: "Node not found in this partition.".to_string(),
+                    })
+                } else {
+                    Err(TLogFSError::PartitionNotFound {
+                        part_id: id.part_id().to_string(),
+                        node_id: id.node_id().to_string(),
+                        hint: "This partition contains no data. If this is an imported \
+                               directory from a foreign pond, the partition may not have \
+                               been included in the import. Use source_path with /** \
+                               to import recursively."
+                            .to_string(),
+                    })
                 }
-                Err(e) => Err(TLogFSError::DataFusion(e)),
-            },
-            Err(e) => Err(TLogFSError::DataFusion(e)),
+            }
         }
     }
 
@@ -2688,7 +2900,7 @@ impl InnerState {
     /// IMPORTANT: This function checks BOTH committed (Delta Lake) and pending (self.records) state.
     /// During a transaction, pending directory records in self.records take precedence over committed ones.
     async fn query_latest_directory_record(
-        &self,
+        &mut self,
         id: FileID,
     ) -> Result<Option<OplogEntry>, TLogFSError> {
         // Step 1: Check pending records in memory FIRST
@@ -2700,28 +2912,14 @@ impl InnerState {
             .max_by_key(|r| r.version)
             .cloned();
 
-        // Step 2: Query Delta Lake for the single latest committed directory record
-        // Note: file_type values in database are serialized as 'dir:physical' and 'dir:dynamic'
-        let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' AND file_type IN ('dir:physical', 'dir:dynamic') ORDER BY version DESC LIMIT 1",
-            id.part_id(),
-            id.node_id()
-        );
+        // Step 2: Use partition cache for committed records
+        self.ensure_partition_cached(id.part_id()).await?;
 
-        let committed_record = match self.session_context.sql(&sql).await {
-            Ok(df) => match df.collect().await {
-                Ok(batches) => {
-                    if batches.is_empty() || batches[0].num_rows() == 0 {
-                        None
-                    } else {
-                        let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batches[0])?;
-                        records.into_iter().next()
-                    }
-                }
-                Err(e) => return Err(TLogFSError::DataFusion(e)),
-            },
-            Err(e) => return Err(TLogFSError::DataFusion(e)),
-        };
+        let committed_record = self
+            .partition_records_cache
+            .get(&id.part_id())
+            .and_then(|by_node| by_node.get(&id.node_id()))
+            .and_then(|records| records.iter().find(|r| r.file_type.is_directory()).cloned());
 
         // Step 3: Return the latest between committed and pending (pending wins if both exist)
         match (committed_record, pending_record) {
@@ -2732,11 +2930,55 @@ impl InnerState {
         }
     }
 
+    /// Load all committed records for a partition into the cache with a
+    /// single SQL query.  Subsequent `query_records()` calls for any node
+    /// in this partition will hit the cache instead of running SQL.
+    async fn ensure_partition_cached(
+        &mut self,
+        part_id: tinyfs::PartID,
+    ) -> Result<(), TLogFSError> {
+        if self.partition_records_cache.contains_key(&part_id) {
+            return Ok(());
+        }
+
+        let sql = format!(
+            "SELECT * FROM delta_table WHERE part_id = '{}' ORDER BY timestamp DESC",
+            part_id
+        );
+
+        let query_start = std::time::Instant::now();
+        let batches = self
+            .session_context
+            .sql(&sql)
+            .await
+            .map_err(TLogFSError::DataFusion)?
+            .collect()
+            .await
+            .map_err(TLogFSError::DataFusion)?;
+
+        let mut by_node: HashMap<tinyfs::NodeID, Vec<OplogEntry>> = HashMap::new();
+        for batch in batches {
+            let records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)?;
+            for record in records {
+                by_node.entry(record.node_id).or_default().push(record);
+            }
+        }
+
+        let node_count = by_node.len();
+        let elapsed = query_start.elapsed().as_millis();
+        debug!(
+            "ensure_partition_cached: loaded {node_count} nodes for part_id={part_id} in {elapsed}ms"
+        );
+
+        _ = self.partition_records_cache.insert(part_id, by_node);
+        Ok(())
+    }
+
     /// Query records from both committed (Delta Lake) and pending (in-memory) data
     /// This ensures TinyFS operations can see pending data before commit
     ///
     /// SECURITY: Always requires node_id to enforce proper data isolation between nodes
-    async fn query_records(&self, id: FileID) -> Result<Vec<OplogEntry>, TLogFSError> {
+    async fn query_records(&mut self, id: FileID) -> Result<Vec<OplogEntry>, TLogFSError> {
         // Performance tracing - enable with RUST_LOG=trace and redirect stderr
         let mut trace = utilities::perf_trace::PerfTrace::start("query_records");
         let caller = utilities::perf_trace::extract_caller(
@@ -2746,33 +2988,18 @@ impl InnerState {
         trace.param("caller", &caller);
         trace.param("id", id);
 
-        // Step 1: Get committed records from Delta Lake using node-scoped SQL
-        let sql = format!(
-            "SELECT * FROM delta_table WHERE part_id = '{}' AND node_id = '{}' ORDER BY timestamp DESC",
-            id.part_id(),
-            id.node_id()
-        );
-
+        // Step 1: Get committed records, using partition cache when available
         let query_start = std::time::Instant::now();
-        let committed_records = match self.session_context.sql(&sql).await {
-            Ok(df) => match df.collect().await {
-                Ok(batches) => {
-                    let mut records = Vec::new();
-                    for batch in batches {
-                        let batch_records: Vec<OplogEntry> =
-                            serde_arrow::from_record_batch(&batch)?;
-                        records.extend(batch_records);
-                    }
-                    records
-                }
-                Err(e) => {
-                    return Err(TLogFSError::DataFusion(e));
-                }
-            },
-            Err(e) => {
-                return Err(TLogFSError::DataFusion(e));
-            }
-        };
+
+        self.ensure_partition_cached(id.part_id()).await?;
+
+        let committed_records = self
+            .partition_records_cache
+            .get(&id.part_id())
+            .and_then(|by_node| by_node.get(&id.node_id()))
+            .cloned()
+            .unwrap_or_default();
+
         trace.metric("query_ms", query_start.elapsed().as_millis() as u64);
         trace.metric("committed_count", committed_records.len() as u64);
 
@@ -2798,7 +3025,7 @@ impl InnerState {
         Ok(all_records)
     }
 
-    async fn load_node(&self, id: FileID, state: State) -> TinyFSResult<Node> {
+    async fn load_node(&mut self, id: FileID, state: State) -> TinyFSResult<Node> {
         debug!("load_node {id:?}");
 
         // [SEARCH] CRITICAL FIX: Check if this is a directory in self.directories first
@@ -2828,7 +3055,7 @@ impl InnerState {
         }
     }
 
-    async fn get_factory_for_node(&self, id: FileID) -> Result<Option<String>, TLogFSError> {
+    async fn get_factory_for_node(&mut self, id: FileID) -> Result<Option<String>, TLogFSError> {
         debug!("get_factory_for_node {id}");
 
         // Query Delta Lake for the most recent record for this node
@@ -2924,7 +3151,7 @@ impl InnerState {
         Ok(())
     }
 
-    async fn load_symlink_target(&self, id: FileID) -> TinyFSResult<PathBuf> {
+    async fn load_symlink_target(&mut self, id: FileID) -> TinyFSResult<PathBuf> {
         let records = self
             .query_records(id)
             .await
@@ -2989,7 +3216,7 @@ impl InnerState {
         node_factory::create_symlink_node(id, target, state)
     }
 
-    async fn metadata(&self, id: FileID) -> TinyFSResult<NodeMetadata> {
+    async fn metadata(&mut self, id: FileID) -> TinyFSResult<NodeMetadata> {
         debug!("metadata: querying id={id}");
 
         // Check if this is a pending file (created but not yet written)
@@ -3040,7 +3267,7 @@ impl InnerState {
 
     // Versioning operations implementation
 
-    async fn list_file_versions(&self, id: FileID) -> TinyFSResult<Vec<FileVersionInfo>> {
+    async fn list_file_versions(&mut self, id: FileID) -> TinyFSResult<Vec<FileVersionInfo>> {
         debug!("list_file_versions called for id={id}");
 
         let mut records = self
@@ -3325,7 +3552,7 @@ mod serialization {
     /// Generic serialization function for Arrow IPC format
     pub fn serialize_to_arrow_ipc<T>(items: &[T]) -> Result<Vec<u8>, TLogFSError>
     where
-        T: Clone + ForArrow + serde::Serialize,
+        T: Clone + ForArrow + Serialize,
     {
         let batch = serde_arrow::to_record_batch(&T::for_arrow(), &items.to_vec())?;
 
@@ -3347,7 +3574,7 @@ mod serialization {
     /// Generic deserialization function for Arrow IPC format
     pub fn deserialize_from_arrow_ipc<T>(content: &[u8]) -> Result<Vec<T>, TLogFSError>
     where
-        for<'de> T: serde::Deserialize<'de>,
+        for<'de> T: Deserialize<'de>,
     {
         // Debug logging with size validation - catch corrupted IPC streams early
         let content_size = content.len();
@@ -3519,6 +3746,7 @@ mod node_factory {
             file_id: id,
             pond_metadata: None,
             txn_seq: 0, // Node creation context doesn't need txn_seq
+            import_partitions: Vec::new(),
         };
 
         debug!(

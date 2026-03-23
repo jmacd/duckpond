@@ -384,7 +384,8 @@ impl SqlDerivedFile {
                 context: self.context.context.clone(),
                 file_id: node_id,
                 pond_metadata: None,
-                txn_seq: 0, // Transform context doesn't need txn_seq
+                txn_seq: 0,
+                import_partitions: Vec::new(), // Transform context doesn't need txn_seq
             };
 
             debug!(
@@ -1504,6 +1505,7 @@ mod tests {
             file_id,
             pond_metadata: None,
             txn_seq: 0,
+            import_partitions: Vec::new(),
         }
     }
 

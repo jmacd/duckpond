@@ -157,6 +157,16 @@ pub struct TransactionRecord {
     /// Path to factory config file
     pub config_path: Option<String>,
 
+    // === Import state (record_category = "import") ===
+    /// Factory node UUID for import state tracking (stable across renames)
+    pub factory_node_id: Option<String>,
+    /// Foreign partition ID being tracked
+    pub foreign_part_id: Option<String>,
+    /// Foreign pond UUID (provenance)
+    pub foreign_pond_id: Option<String>,
+    /// Highest foreign transaction sequence imported for this partition
+    pub watermark_txn_seq: Option<i64>,
+
     // === Embedded configuration (repeated for easy extraction) ===
     /// Pond UUID (repeated in every record)
     pub pond_id: Uuid,
@@ -194,6 +204,10 @@ impl TransactionRecord {
             pond_id,
             factory_modes: serde_json::to_string(factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         }
     }
 
@@ -227,6 +241,10 @@ impl TransactionRecord {
             pond_id,
             factory_modes: serde_json::to_string(factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         }
     }
 
@@ -260,6 +278,10 @@ impl TransactionRecord {
             pond_id,
             factory_modes: serde_json::to_string(factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         }
     }
 
@@ -292,6 +314,10 @@ impl TransactionRecord {
             pond_id,
             factory_modes: serde_json::to_string(factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         }
     }
 
@@ -324,6 +350,10 @@ impl TransactionRecord {
             pond_id: pond_metadata.pond_id,
             factory_modes: serde_json::to_string(factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         })
     }
 
@@ -354,6 +384,10 @@ impl TransactionRecord {
             pond_id: pond_metadata.pond_id,
             factory_modes: serde_json::to_string(factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         })
     }
 
@@ -385,6 +419,10 @@ impl TransactionRecord {
             pond_id: pond_metadata.pond_id,
             factory_modes: serde_json::to_string(factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         })
     }
 
@@ -417,6 +455,10 @@ impl TransactionRecord {
             pond_id: pond_metadata.pond_id,
             factory_modes: serde_json::to_string(factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         })
     }
 }
@@ -478,6 +520,11 @@ impl ControlTable {
             // Embedded configuration (repeated in every record)
             Field::new("pond_id", DataType::Utf8, false), // Serialized UUID
             Field::new("factory_modes", DataType::Utf8, false), // JSON object
+            // Import state (record_category = "import")
+            Field::new("factory_node_id", DataType::Utf8, true),
+            Field::new("foreign_part_id", DataType::Utf8, true),
+            Field::new("foreign_pond_id", DataType::Utf8, true),
+            Field::new("watermark_txn_seq", DataType::Int64, true),
         ]))
     }
 
@@ -584,6 +631,10 @@ impl ControlTable {
             config_path: None,
             pond_id: pond_metadata.pond_id,
             factory_modes: "{}".to_string(),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         };
 
         control_table.write_record(initial_record).await?;
@@ -992,6 +1043,10 @@ impl ControlTable {
             pond_id: self.pond_metadata.pond_id,
             factory_modes: serde_json::to_string(&self.factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         };
 
         self.write_record(record).await?;
@@ -1037,6 +1092,10 @@ impl ControlTable {
             pond_id: self.pond_metadata.pond_id,
             factory_modes: serde_json::to_string(&self.factory_modes)
                 .unwrap_or_else(|_| "{}".to_string()),
+            factory_node_id: None,
+            foreign_part_id: None,
+            foreign_pond_id: None,
+            watermark_txn_seq: None,
         };
 
         self.write_record(record).await?;
@@ -1288,6 +1347,140 @@ impl ControlTable {
                 let user_meta = tlogfs::PondUserMetadata { txn_id, args };
                 let txn_meta = PondTxnMetadata::new(row.txn_seq, user_meta);
                 results.push((txn_meta, row.data_fs_version));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Record an import partition in the control table.
+    /// Called at mknod time to register each foreign partition.
+    pub async fn record_import_partition(
+        &mut self,
+        factory_node_id: &str,
+        foreign_part_id: &str,
+        foreign_pond_id: &str,
+    ) -> Result<(), StewardError> {
+        let record = TransactionRecord {
+            record_category: "import".into(),
+            txn_seq: 0,
+            txn_id: uuid7::uuid7(),
+            based_on_seq: None,
+            record_type: RecordType::Begin,
+            timestamp: Utc::now().timestamp_micros(),
+            transaction_type: TransactionType::Write,
+            cli_args: "[]".to_string(),
+            environment: "{}".to_string(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: None,
+            config_path: None,
+            factory_node_id: Some(factory_node_id.to_string()),
+            foreign_part_id: Some(foreign_part_id.to_string()),
+            foreign_pond_id: Some(foreign_pond_id.to_string()),
+            watermark_txn_seq: Some(0),
+            pond_id: self.pond_metadata.pond_id,
+            factory_modes: "{}".to_string(),
+        };
+        self.write_record(record).await
+    }
+
+    /// Update the import watermark for a factory/partition pair.
+    /// Called after a successful pull to record the highest imported txn_seq.
+    pub async fn update_import_watermark(
+        &mut self,
+        factory_node_id: &str,
+        foreign_part_id: &str,
+        watermark: i64,
+    ) -> Result<(), StewardError> {
+        // Write a new record with updated watermark (append-only log)
+        let record = TransactionRecord {
+            record_category: "import".into(),
+            txn_seq: 0,
+            txn_id: uuid7::uuid7(),
+            based_on_seq: None,
+            record_type: RecordType::DataCommitted,
+            timestamp: Utc::now().timestamp_micros(),
+            transaction_type: TransactionType::Write,
+            cli_args: "[]".to_string(),
+            environment: "{}".to_string(),
+            data_fs_version: None,
+            error_message: None,
+            duration_ms: None,
+            parent_txn_seq: None,
+            execution_seq: None,
+            factory_name: None,
+            config_path: None,
+            factory_node_id: Some(factory_node_id.to_string()),
+            foreign_part_id: Some(foreign_part_id.to_string()),
+            foreign_pond_id: None,
+            watermark_txn_seq: Some(watermark),
+            pond_id: self.pond_metadata.pond_id,
+            factory_modes: "{}".to_string(),
+        };
+        self.write_record(record).await
+    }
+
+    /// Query import partitions for a factory node.
+    /// Returns (foreign_part_id, foreign_pond_id, watermark_txn_seq) for each partition.
+    pub async fn query_import_partitions(
+        &self,
+        factory_node_id: &str,
+    ) -> Result<Vec<(String, String, i64)>, StewardError> {
+        use arrow_array::Array;
+
+        let sql = format!(
+            "WITH ranked AS ( \
+                SELECT foreign_part_id, foreign_pond_id, watermark_txn_seq, \
+                       ROW_NUMBER() OVER (PARTITION BY foreign_part_id ORDER BY timestamp DESC) as rn \
+                FROM transactions \
+                WHERE record_category = 'import' AND factory_node_id = '{}' \
+            ) SELECT foreign_part_id, foreign_pond_id, watermark_txn_seq \
+              FROM ranked WHERE rn = 1",
+            factory_node_id
+        );
+
+        let df = self
+            .session_context
+            .sql(&sql)
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("Import query failed: {}", e)))?;
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("Import collect failed: {}", e)))?;
+
+        let mut results = Vec::new();
+        for batch in &batches {
+            for i in 0..batch.num_rows() {
+                let pid = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .map(|a| a.value(i).to_string())
+                    .unwrap_or_default();
+                let pond_id = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .and_then(|a| {
+                        if a.is_null(i) {
+                            None
+                        } else {
+                            Some(a.value(i).to_string())
+                        }
+                    })
+                    .unwrap_or_default();
+                let wm = batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                    .unwrap_or(0);
+                results.push((pid, pond_id, wm));
             }
         }
 

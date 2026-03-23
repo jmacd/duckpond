@@ -147,9 +147,10 @@ impl Ship {
         // Create an empty data Delta table structure (schema + _delta_log/, but no data)
         // Bundles will be replayed through replay_transaction() which writes to this table
         debug!("Creating empty data table structure at {}", data_path_str);
-        let data_persistence = OpLogPersistence::create_empty(&data_path_str)
-            .await
-            .map_err(StewardError::DataInit)?;
+        let data_persistence =
+            OpLogPersistence::create_empty(&data_path_str, preserve_metadata.pond_id.to_string())
+                .await
+                .map_err(StewardError::DataInit)?;
 
         debug!(
             "Created restoration-ready pond (empty data table, bundles will populate via replay)"
@@ -200,31 +201,33 @@ impl Ship {
         let data_path_str = data_path.to_string_lossy().to_string();
         let control_path_str = control_path.to_string_lossy().to_string();
 
-        debug!("initializing data FS {data_path_str}");
-
-        // Initialize data filesystem - automatically creates root directory if create_new=true
-        let data_persistence =
-            OpLogPersistence::open_or_create(&data_path_str, create_new, txn_metadata)
-                .await
-                .map_err(StewardError::DataInit)?;
-
-        debug!("initializing control table {control_path_str}");
-
-        // Initialize control table for transaction tracking
-        let control_table = if create_new {
+        // Determine pond_id and initialize control table
+        let (pond_id, control_table) = if create_new {
             // Creating new pond - use preserved metadata if provided, otherwise create fresh metadata
             assert!(preserve_metadata.is_none());
             let metadata = PondMetadata::default();
+            let pond_id = metadata.pond_id.to_string();
             debug!(
                 "Creating control table with pond identity: {}",
                 metadata.pond_id
             );
-            ControlTable::create(&control_path_str, &metadata).await?
+            let ct = ControlTable::create(&control_path_str, &metadata).await?;
+            (pond_id, ct)
         } else {
             // Opening existing pond - metadata already exists in control table
             debug!("Opening existing control table");
-            ControlTable::open(&control_path_str).await?
+            let ct = ControlTable::open(&control_path_str).await?;
+            let pond_id = ct.pond_metadata().pond_id.to_string();
+            (pond_id, ct)
         };
+
+        debug!("initializing data FS {data_path_str} with pond_id={pond_id}");
+
+        // Initialize data filesystem - automatically creates root directory if create_new=true
+        let data_persistence =
+            OpLogPersistence::open_or_create(&data_path_str, pond_id, create_new, txn_metadata)
+                .await
+                .map_err(StewardError::DataInit)?;
 
         // Initialize last_write_seq from tlogfs (which loads from Delta metadata)
         // tlogfs is the authoritative source - it reads from actual Delta commits

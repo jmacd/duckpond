@@ -207,6 +207,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
             &remote_table,
             &mut local_table,
             &pond_path,
+            &pond_metadata_for_restore.pond_id.to_string(),
             *txn_seq,
         )
         .await

@@ -56,7 +56,7 @@ impl FS {
         self.wd(&node).await
     }
 
-    pub(crate) async fn wd(&self, np: &NodePath) -> Result<WD> {
+    pub async fn wd(&self, np: &NodePath) -> Result<WD> {
         WD::new(np.clone(), self.clone()).await
     }
 

@@ -296,6 +296,24 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Query import partitions from the control table for a given factory node.
+    /// Returns (foreign_part_id, foreign_pond_id, watermark_txn_seq) for each partition.
+    /// Returns empty vec for host transactions.
+    pub async fn query_import_partitions(
+        &self,
+        factory_node_id: &str,
+    ) -> Result<Vec<(String, String, i64)>, StewardError> {
+        match self {
+            Transaction::Pond(guard) => {
+                guard
+                    .control_table()
+                    .query_import_partitions(factory_node_id)
+                    .await
+            }
+            Transaction::Host(_) => Ok(Vec::new()),
+        }
+    }
+
     // -- Lifecycle --
 
     /// Commit the transaction.

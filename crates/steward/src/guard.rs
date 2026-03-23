@@ -272,6 +272,17 @@ impl<'a> StewardTransactionGuard<'a> {
             .version();
 
         // Step 1: Transaction metadata was already provided at begin()
+        // Extract import metadata before commit consumes the transaction state
+        let import_metadata = if let Some(ref tx) = self.data_tx {
+            if let Ok(state) = tx.state() {
+                state.pending_import_metadata().await
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         // Step 2: Extract the underlying transaction guard and commit it
         let data_tx = self.take_transaction().ok_or_else(|| {
             StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
@@ -321,6 +332,51 @@ impl<'a> StewardTransactionGuard<'a> {
 
                 // Mark as committed
                 self.committed = true;
+
+                // Write import state to control table if any
+                if !import_metadata.is_empty() {
+                    debug!(
+                        "Recording {} import partition(s) in control table",
+                        import_metadata.len()
+                    );
+                    for record in &import_metadata {
+                        if record.watermark_txn_seq > 0 {
+                            // Update existing partition watermark
+                            if let Err(e) = self
+                                .control_table
+                                .update_import_watermark(
+                                    &record.factory_node_id,
+                                    &record.foreign_part_id,
+                                    record.watermark_txn_seq,
+                                )
+                                .await
+                            {
+                                log::warn!(
+                                    "Failed to update import watermark for {}: {}",
+                                    record.foreign_part_id,
+                                    e
+                                );
+                            }
+                        } else {
+                            // Initial partition registration
+                            if let Err(e) = self
+                                .control_table
+                                .record_import_partition(
+                                    &record.factory_node_id,
+                                    &record.foreign_part_id,
+                                    &record.foreign_pond_id,
+                                )
+                                .await
+                            {
+                                log::warn!(
+                                    "Failed to record import partition {}: {}",
+                                    record.foreign_part_id,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
 
                 // Run post-commit factories for write transactions
                 // This happens AFTER commit but uses a NEW transaction
@@ -585,11 +641,10 @@ impl<'a> StewardTransactionGuard<'a> {
         // We need a NEW read transaction to see the committed data
         // This is a separate operation, not part of the original write transaction
         let data_path = crate::get_data_path(Path::new(&self.pond_path));
-        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path)
+        let pond_id = self.control_table.pond_metadata().pond_id.to_string();
+        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path, pond_id)
             .await
             .map_err(StewardError::DataInit)?;
-
-        // Open a read transaction for discovery
         // Use the CURRENT txn_seq (the one we just committed), not +1
         // Read transactions must use the last write sequence
         let discovery_metadata = PondTxnMetadata::new(
@@ -747,7 +802,8 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Reload OpLogPersistence for a fresh read transaction
         let data_path = crate::get_data_path(&self.pond_path);
-        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path)
+        let pond_id = self.control_table.pond_metadata().pond_id.to_string();
+        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path, pond_id)
             .await
             .map_err(StewardError::DataInit)?;
 

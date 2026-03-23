@@ -40,12 +40,21 @@ pub struct PondTxnMetadata {
 
     /// User-level metadata.
     pub user: PondUserMetadata,
+
+    /// Pond identity UUID string. Stamped by the persistence layer at commit time.
+    /// Included in Delta commit metadata for quick inspection without scanning rows.
+    #[serde(default)]
+    pub pond_id: String,
 }
 
 impl PondTxnMetadata {
     #[must_use]
     pub fn new(txn_seq: i64, user: PondUserMetadata) -> Self {
-        Self { txn_seq, user }
+        Self {
+            txn_seq,
+            user,
+            pond_id: String::new(),
+        }
     }
 
     /// Convert to Delta Lake commit metadata format, injecting txn_seq

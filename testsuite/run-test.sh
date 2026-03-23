@@ -13,6 +13,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="duckpond-test:latest"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
+# Detect container runtime (docker or podman)
+source "${SCRIPT_DIR}/container-runtime.sh"
+
 # Parse arguments
 INTERACTIVE=false
 INLINE_SCRIPT=""
@@ -99,7 +102,7 @@ if [[ "${NO_REBUILD}" == "false" ]]; then
     echo "=== Auto-rebuilding pond (debug mode) ==="
     "${SCRIPT_DIR}/build-image.sh" --quiet
     echo ""
-elif ! docker image inspect "${IMAGE_NAME}" &>/dev/null; then
+elif ! ${CONTAINER_RT} image inspect "${IMAGE_NAME}" &>/dev/null; then
     echo "ERROR: Image ${IMAGE_NAME} not found."
     echo "Run: ./build-image.sh (or remove --no-rebuild)"
     exit 1
@@ -159,7 +162,7 @@ if [[ "${INTERACTIVE}" == "true" ]]; then
     echo "  exit                  # Exit container"
     echo ""
     
-    docker run --rm -it \
+    ${CONTAINER_RT} run --rm -it \
         -e POND=/pond \
         -e RUST_LOG=info \
         "${IMAGE_NAME}"
@@ -173,7 +176,7 @@ if [[ -n "${INLINE_SCRIPT}" ]]; then
     TEMP_OUTPUT=$(mktemp)
     
     set +e
-    docker run --rm \
+    ${CONTAINER_RT} run --rm \
         -e POND=/pond \
         -e RUST_LOG=info \
         "${IMAGE_NAME}" \
@@ -261,23 +264,27 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     # Run the script in the container — all output to log file, NOT to stdout
     set +e
     if [[ "${COMPOSE}" == "true" ]]; then
-        # Compose mode: start MinIO, run test via docker compose
+        # Compose mode: start MinIO, run test via compose
+        if [[ ${#COMPOSE_CMD[@]} -eq 0 ]]; then
+            echo "ERROR: Compose not available. Install docker-compose or podman-compose."
+            exit 1
+        fi
         COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.test.yaml"
         COMPOSE_PROJECT="duckpond-test-$$"
 
         compose_cleanup() {
-            docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" down --volumes --timeout 5 2>/dev/null || true
+            "${COMPOSE_CMD[@]}" -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" down --volumes --timeout 5 2>/dev/null || true
         }
         trap compose_cleanup EXIT
 
         echo "  (compose test — starting MinIO)"
 
-        # Build volume args for docker compose run
+        # Build volume args for compose run
         COMPOSE_VOLUMES=(-v "${SCRIPT_FILE}:/test/run.sh:ro")
         COMPOSE_VOLUMES+=("${OUTPUT_MOUNT[@]}")
         COMPOSE_VOLUMES+=("${DATA_MOUNT[@]}")
 
-        docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" \
+        "${COMPOSE_CMD[@]}" -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" \
             run --rm \
             "${COMPOSE_VOLUMES[@]}" \
             test \
@@ -287,7 +294,7 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         compose_cleanup
         trap - EXIT
     else
-        docker run --rm \
+        ${CONTAINER_RT} run --rm \
             -e POND=/pond \
             -e RUST_LOG=info \
             -v "${SCRIPT_FILE}:/test/run.sh:ro" \

@@ -123,6 +123,7 @@ mod integration_tests {
     struct PondSimulator {
         _temp_dir: TempDir,
         store_path: String,
+        pond_id: String,
         /// FileID of the config node (created in new())
         config_file_id: tinyfs::FileID,
     }
@@ -141,6 +142,7 @@ mod integration_tests {
             let mut persistence = crate::persistence::OpLogPersistence::create_test(&store_path)
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let pond_id = persistence.pond_id().to_string();
 
             // Create config file in the pond and associate with factory
             let config_file_id = {
@@ -198,6 +200,7 @@ mod integration_tests {
             Ok(Self {
                 _temp_dir: temp_dir,
                 store_path,
+                pond_id,
                 config_file_id,
             })
         }
@@ -207,12 +210,20 @@ mod integration_tests {
             &self.store_path
         }
 
+        /// Get pond identity
+        fn pond_id(&self) -> &str {
+            &self.pond_id
+        }
+
         /// Execute the logfile-ingest factory within a transaction
         /// This properly opens a transaction, creates the context, executes, and commits
         async fn execute_factory(&self, config: &LogfileIngestConfig) -> std::io::Result<()> {
-            let mut persistence = crate::persistence::OpLogPersistence::open(self.store_path())
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence = crate::persistence::OpLogPersistence::open(
+                self.store_path(),
+                self.pond_id().to_string(),
+            )
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()
@@ -257,9 +268,12 @@ mod integration_tests {
             expected_blake3: &str,
             expected_content: &[u8],
         ) -> std::io::Result<()> {
-            let mut persistence = crate::persistence::OpLogPersistence::open(self.store_path())
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence = crate::persistence::OpLogPersistence::open(
+                self.store_path(),
+                self.pond_id().to_string(),
+            )
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()
@@ -685,12 +699,14 @@ mod integration_tests {
     /// Extended verification helper that checks both content AND metadata blake3
     struct Blake3Verifier {
         store_path: String,
+        pond_id: String,
     }
 
     impl Blake3Verifier {
-        fn new(store_path: &str) -> Self {
+        fn new(store_path: &str, pond_id: String) -> Self {
             Self {
                 store_path: store_path.to_string(),
+                pond_id,
             }
         }
 
@@ -705,9 +721,10 @@ mod integration_tests {
             filename: &str,
             expected_content: &[u8],
         ) -> std::io::Result<()> {
-            let mut persistence = crate::persistence::OpLogPersistence::open(&self.store_path)
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence =
+                crate::persistence::OpLogPersistence::open(&self.store_path, self.pond_id.clone())
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()
@@ -822,9 +839,10 @@ mod integration_tests {
             pond_path: &str,
             filename: &str,
         ) -> std::io::Result<usize> {
-            let mut persistence = crate::persistence::OpLogPersistence::open(&self.store_path)
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence =
+                crate::persistence::OpLogPersistence::open(&self.store_path, self.pond_id.clone())
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()
@@ -888,7 +906,7 @@ mod integration_tests {
         };
 
         let pond = PondSimulator::new(&config).await.unwrap();
-        let verifier = Blake3Verifier::new(pond.store_path());
+        let verifier = Blake3Verifier::new(pond.store_path(), pond.pond_id.clone());
 
         pond.execute_factory(&config).await.unwrap();
         verifier
@@ -1050,7 +1068,7 @@ mod integration_tests {
         };
 
         let pond = PondSimulator::new(&config).await.unwrap();
-        let verifier = Blake3Verifier::new(pond.store_path());
+        let verifier = Blake3Verifier::new(pond.store_path(), pond.pond_id.clone());
 
         pond.execute_factory(&config).await.unwrap();
         verifier
@@ -1140,7 +1158,7 @@ mod integration_tests {
         };
 
         let pond = PondSimulator::new(&config).await.unwrap();
-        let verifier = Blake3Verifier::new(pond.store_path());
+        let verifier = Blake3Verifier::new(pond.store_path(), pond.pond_id.clone());
 
         pond.execute_factory(&config).await.unwrap();
         verifier
@@ -1347,10 +1365,12 @@ mod integration_tests {
             let expected_states = self.expected_host_state();
             log::info!("Expected {} files in pond", expected_states.len());
 
-            let mut persistence =
-                crate::persistence::OpLogPersistence::open(self.pond.store_path())
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence = crate::persistence::OpLogPersistence::open(
+                self.pond.store_path(),
+                self.pond.pond_id().to_string(),
+            )
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()

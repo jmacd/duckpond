@@ -94,10 +94,10 @@ for test in $TESTS; do
 
     if "${runner[@]}" > /tmp/test-output-$$.txt 2>&1; then
         echo "✓ PASSED: $name"
-        ((PASSED++))
+        PASSED=$((PASSED + 1))
     else
         echo "✗ FAILED: $name"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
         FAILED_NAMES="$FAILED_NAMES  - $name\n"
         
         # Show last 20 lines on failure

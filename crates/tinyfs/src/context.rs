@@ -153,6 +153,10 @@ pub struct FactoryContext {
     /// Current transaction sequence number from persistence layer
     /// Provided by Steward for backup/replication operations
     pub txn_seq: i64,
+    /// Import partition state from the control table.
+    /// Each entry is (foreign_part_id, foreign_pond_id, watermark_txn_seq).
+    /// Populated by steward for import factories to avoid re-reading the foreign OpLog.
+    pub import_partitions: Vec<(String, String, i64)>,
 }
 
 impl FactoryContext {
@@ -164,6 +168,7 @@ impl FactoryContext {
             file_id,
             pond_metadata: None,
             txn_seq: 0,
+            import_partitions: Vec::new(),
         }
     }
 
@@ -179,6 +184,7 @@ impl FactoryContext {
             file_id,
             pond_metadata: Some(pond_metadata),
             txn_seq: 0,
+            import_partitions: Vec::new(),
         }
     }
 
@@ -186,6 +192,13 @@ impl FactoryContext {
     #[must_use]
     pub fn with_txn_seq(mut self, txn_seq: i64) -> Self {
         self.txn_seq = txn_seq;
+        self
+    }
+
+    /// Set import partition state from the control table
+    #[must_use]
+    pub fn with_import_partitions(mut self, partitions: Vec<(String, String, i64)>) -> Self {
+        self.import_partitions = partitions;
         self
     }
 }
