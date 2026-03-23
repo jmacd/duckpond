@@ -9,6 +9,11 @@ REPLICA=${NOYO}/replica
 
 EXE=${ROOT}/target/debug/pond
 
+# Source private credentials (HydroVu API keys, etc.)
+if [ -f ~/.zshrc.private ]; then
+  . ~/.zshrc.private
+fi
+
 export POND
 
 cargo build

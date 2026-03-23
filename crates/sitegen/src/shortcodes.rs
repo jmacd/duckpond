@@ -351,6 +351,142 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
 /// When `sidebar_sections` is empty, falls back to the grouped/collapsible
 /// rendering with section headings.
 fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
+    // When sidebar sections are configured, render them directly.
+    // Entries with explicit hrefs don't need content page matching.
+    // Entries without hrefs fall back to title-matching against content pages.
+    if !ctx.sidebar_sections.is_empty() {
+        let pages = ctx.content_pages.get(content_name).map(|v| v.as_slice());
+
+        let base = ctx.base_url.trim_end_matches('/');
+        let page_href = |slug: &str| -> String {
+            if base.is_empty() || base == "/" {
+                format!("/{}.html", slug)
+            } else {
+                format!("{}/{}.html", base, slug)
+            }
+        };
+
+        // If no entry in the sidebar is active at all (neither parent
+        // nor child), expand all sections so navigation is visible
+        // (e.g., on the home page where no data page is selected).
+        let any_entry_active = ctx.sidebar_sections.iter().any(|entry| {
+            let href_match = entry
+                .href()
+                .map(|h| ctx.current_path == h)
+                .unwrap_or(false);
+            let page_match = pages
+                .iter()
+                .flat_map(|pp| pp.iter())
+                .any(|p| !p.hidden && p.title.contains(entry.label()));
+            let child_match = entry
+                .children()
+                .iter()
+                .any(|c| ctx.current_path == c.href);
+            href_match || page_match || child_match
+        });
+
+        let mut html = String::from("<ul>\n");
+        for entry in &ctx.sidebar_sections {
+            let label = entry.label();
+            let children = entry.children();
+            let direct_href = entry.href();
+
+            // Resolve parent href: explicit href first, then page title match.
+            let resolved_href = if let Some(href) = direct_href {
+                Some(href.to_string())
+            } else if let Some(page) = pages
+                .iter()
+                .flat_map(|pp| pp.iter())
+                .find(|p| !p.hidden && p.title.contains(label))
+            {
+                Some(page_href(&page.slug))
+            } else {
+                None
+            };
+
+            if let Some(parent_href) = resolved_href {
+                let parent_active = ctx.current_path == parent_href;
+                let child_active = children.iter().any(|c| ctx.current_path == c.href);
+                let is_active = parent_active || child_active;
+                let li_class = if is_active { " class=\"active\"" } else { "" };
+                let aria = if parent_active {
+                    " aria-current=\"page\""
+                } else {
+                    ""
+                };
+
+                if children.is_empty() {
+                    html.push_str(&format!(
+                        "  <li{}><a href=\"{}\"{}>{}</a></li>\n",
+                        li_class, parent_href, aria, label
+                    ));
+                } else {
+                    html.push_str(&format!(
+                        "  <li{}><a href=\"{}\"{}>{}</a>\n",
+                        li_class, parent_href, aria, label
+                    ));
+                    let sub_class = if is_active || !any_entry_active {
+                        "subnav expanded"
+                    } else {
+                        "subnav"
+                    };
+                    html.push_str(&format!("    <ul class=\"{}\">\n", sub_class));
+                    for child in children {
+                        let c_active = ctx.current_path == child.href;
+                        let c_class = if c_active { " class=\"active\"" } else { "" };
+                        let c_aria = if c_active {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        };
+                        html.push_str(&format!(
+                            "      <li{}><a href=\"{}\"{}>{}</a></li>\n",
+                            c_class, child.href, c_aria, child.label
+                        ));
+                    }
+                    html.push_str("    </ul>\n  </li>\n");
+                }
+            } else if !children.is_empty() {
+                // Section heading with children but no resolved href --
+                // render as a non-link heading with sub-navigation.
+                let child_active = children.iter().any(|c| ctx.current_path == c.href);
+                let li_class = if child_active {
+                    " class=\"active\""
+                } else {
+                    ""
+                };
+                html.push_str(&format!(
+                    "  <li{}><span class=\"nav-heading\">{}</span>\n",
+                    li_class, label
+                ));
+                let sub_class = if child_active || !any_entry_active {
+                    "subnav expanded"
+                } else {
+                    "subnav"
+                };
+                html.push_str(&format!("    <ul class=\"{}\">\n", sub_class));
+                for child in children {
+                    let c_active = ctx.current_path == child.href;
+                    let c_class = if c_active { " class=\"active\"" } else { "" };
+                    let c_aria = if c_active {
+                        " aria-current=\"page\""
+                    } else {
+                        ""
+                    };
+                    html.push_str(&format!(
+                        "      <li{}><a href=\"{}\"{}>{}</a></li>\n",
+                        c_class, child.href, c_aria, child.label
+                    ));
+                }
+                html.push_str("    </ul>\n  </li>\n");
+            }
+        }
+        html.push_str("</ul>");
+        return html;
+    }
+
+    // -- Fallback: no sidebar sections configured --
+    // Render from content pages using grouped/collapsible mode.
     let pages = match ctx.content_pages.get(content_name) {
         Some(pages) => pages,
         None => return format!("<!-- content_nav: unknown content '{}' -->", content_name),
@@ -386,67 +522,6 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
             indent, li_class, href, aria, label
         )
     };
-
-    // -- Explicit order mode: sidebar lists display labels in order --
-    // Entries may be simple labels or labels with children (sub-nav).
-    if !ctx.sidebar_sections.is_empty() {
-        let mut html = String::from("<ul>\n");
-        for entry in &ctx.sidebar_sections {
-            let label = entry.label();
-            let children = entry.children();
-
-            if let Some(page) = pages.iter().find(|p| !p.hidden && p.title.contains(label)) {
-                let parent_href = page_href(&page.slug);
-                let parent_active = ctx.current_path == parent_href;
-
-                // A child is active if the current path matches any child href.
-                let child_active = children.iter().any(|c| ctx.current_path == c.href);
-
-                let is_active = parent_active || child_active;
-                let li_class = if is_active { " class=\"active\"" } else { "" };
-                let aria = if parent_active {
-                    " aria-current=\"page\""
-                } else {
-                    ""
-                };
-
-                if children.is_empty() {
-                    html.push_str(&format!(
-                        "  <li{}><a href=\"{}\"{}>{}</a></li>\n",
-                        li_class, parent_href, aria, label
-                    ));
-                } else {
-                    html.push_str(&format!(
-                        "  <li{}><a href=\"{}\"{}>{}</a>\n",
-                        li_class, parent_href, aria, label
-                    ));
-                    // Sub-nav is visible when parent or child is active
-                    let sub_class = if is_active {
-                        "subnav expanded"
-                    } else {
-                        "subnav"
-                    };
-                    html.push_str(&format!("    <ul class=\"{}\">\n", sub_class));
-                    for child in children {
-                        let c_active = ctx.current_path == child.href;
-                        let c_class = if c_active { " class=\"active\"" } else { "" };
-                        let c_aria = if c_active {
-                            " aria-current=\"page\""
-                        } else {
-                            ""
-                        };
-                        html.push_str(&format!(
-                            "      <li{}><a href=\"{}\"{}>{}</a></li>\n",
-                            c_class, child.href, c_aria, child.label
-                        ));
-                    }
-                    html.push_str("    </ul>\n  </li>\n");
-                }
-            }
-        }
-        html.push_str("</ul>");
-        return html;
-    }
 
     // -- Grouped/collapsible mode (legacy fallback) --
 
@@ -1106,6 +1181,7 @@ mod tests {
                 SidebarEntry::Simple("Blog".to_string()),
                 SidebarEntry::WithChildren {
                     label: "Monitoring".to_string(),
+                    href: None,
                     children: vec![
                         SidebarChild {
                             label: "Well Depth".to_string(),

@@ -7,7 +7,6 @@
 # Prerequisites:
 #   - pond.sh can reach septicplaystation.local
 #   - podman installed on the BeaglePlay
-#   - R2_ENDPOINT, R2_KEY, R2_SECRET set for backup
 #
 set -x
 set -e

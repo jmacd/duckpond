@@ -26,7 +26,4 @@ ssh ${HOST} \
     -v "${REMOTE_OUTPUT}:/output" \
     -e POND=/pond \
     -e RUST_LOG=${RUST_LOG:-info} \
-    -e R2_ENDPOINT=${R2_ENDPOINT:-} \
-    -e R2_KEY=${R2_KEY:-} \
-    -e R2_SECRET=${R2_SECRET:-} \
     "${IMAGE}" "$@"

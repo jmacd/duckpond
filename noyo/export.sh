@@ -1,6 +1,6 @@
 #!/bin/sh
-
-set -x -i
+set -x
+set -e
 
 ROOT=/Volumes/sourcecode/src/duckpond
 NOYO=${ROOT}/noyo

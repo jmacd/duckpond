@@ -1,8 +1,8 @@
-compression_level: 3
-region: "auto"
+region: "us-east-1"
 url: "s3://septic-dev"
 
-endpoint: "{{ env(name='R2_ENDPOINT') }}"
-access_key: "{{ env(name='R2_KEY') }}"
-secret_key: "{{ env(name='R2_SECRET') }}"
+endpoint: "http://watershop.casparwater.us:9000"
+access_key: "caspar"
+secret_key: "watertown"
+allow_http: true
 

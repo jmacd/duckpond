@@ -54,6 +54,11 @@ pub struct SiteConfig {
     /// Requires `site.site_url` to be set for absolute link generation.
     #[serde(default)]
     pub feed: Option<FeedConfig>,
+    /// Theme overrides for CSS custom properties.
+    /// Any key here overrides the corresponding CSS variable in `:root`.
+    /// Example: `accent: "#1a365d"` sets `--accent: #1a365d`.
+    #[serde(default)]
+    pub theme: std::collections::BTreeMap<String, String>,
 }
 
 /// Site-wide metadata.
@@ -189,11 +194,15 @@ pub struct StaticAsset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SidebarEntry {
-    /// Label with nested sub-navigation items.
+    /// Label with nested sub-navigation items and optional parent href.
     WithChildren {
         label: String,
+        #[serde(default)]
+        href: Option<String>,
         children: Vec<SidebarChild>,
     },
+    /// Direct link with label and href (no children, no page matching).
+    DirectLink { label: String, href: String },
     /// Simple label matched by page title substring.
     Simple(String),
 }
@@ -204,6 +213,7 @@ impl SidebarEntry {
         match self {
             SidebarEntry::Simple(s) => s,
             SidebarEntry::WithChildren { label, .. } => label,
+            SidebarEntry::DirectLink { label, .. } => label,
         }
     }
 
@@ -212,6 +222,16 @@ impl SidebarEntry {
         match self {
             SidebarEntry::Simple(_) => &[],
             SidebarEntry::WithChildren { children, .. } => children,
+            SidebarEntry::DirectLink { .. } => &[],
+        }
+    }
+
+    /// Direct href, if specified.
+    pub fn href(&self) -> Option<&str> {
+        match self {
+            SidebarEntry::Simple(_) => None,
+            SidebarEntry::WithChildren { href, .. } => href.as_deref(),
+            SidebarEntry::DirectLink { href, .. } => Some(href),
         }
     }
 }
