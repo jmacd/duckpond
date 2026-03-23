@@ -321,15 +321,15 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
 
     // Create parent directories (e.g., /sources/) using normal create_dir_all
     let local_path = std::path::Path::new(&import_config.local_path);
-    if let Some(parent) = local_path.parent() {
-        if parent != std::path::Path::new("/") {
-            root.create_dir_all(parent)
-                .await
-                .map_err(|e| RemoteError::Configuration(format!(
-                    "Failed to create parent directories for {}: {}",
-                    import_config.local_path, e
-                )))?;
-        }
+    if let Some(parent) = local_path.parent()
+        && parent != std::path::Path::new("/")
+    {
+        root.create_dir_all(parent)
+            .await
+            .map_err(|e| RemoteError::Configuration(format!(
+                "Failed to create parent directories for {}: {}",
+                import_config.local_path, e
+            )))?;
     }
 
     // Navigate to the parent directory
@@ -359,7 +359,6 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
     };
 
     // Create the top-level import directory with foreign FileID
-    use tinyfs::PersistenceLayer;
     let top_node = create_foreign_dir(&state, &parent_wd, dir_name, &foreign_part_id, &foreign_node_id).await?;
 
     // Record import metadata for steward (via Delta commit metadata).
@@ -452,8 +451,6 @@ async fn create_child_dirs_recursive(
     parent_node_id: &str,
     factory_key: &str,
 ) -> Result<usize, RemoteError> {
-    use arrow_array::StringArray;
-
     // Read the foreign directory's entries
     let entries = read_foreign_directory_entries(foreign_ctx, parent_node_id).await?;
     let mut count = 0;
@@ -863,7 +860,6 @@ async fn execute_remote(
 async fn execute_show_remote(config: &RemoteConfig) -> Result<(), RemoteError> {
     use arrow_array::StringArray;
     use datafusion::prelude::*;
-    use object_store::ObjectStore;
 
     let url_str = config.url.strip_prefix("file://").unwrap_or(&config.url);
     let storage_options = config.to_storage_options();
@@ -1679,12 +1675,11 @@ async fn execute_import(
 
             // Recurse one more level for each child dir
             for (_name, child_id, entry_type) in &entries {
-                if entry_type == "dir:physical" {
-                    if let Ok(child_entries) =
+                if entry_type == "dir:physical"
+                    && let Ok(child_entries) =
                         read_foreign_directory_entries(&foreign_ctx, child_id).await
-                    {
-                        collect_recursive(&child_entries, &mut ids);
-                    }
+                {
+                    collect_recursive(&child_entries, &mut ids);
                 }
             }
         }
@@ -1840,39 +1835,6 @@ async fn execute_import(
         downloaded
     );
     Ok(())
-}
-
-/// Collect child part_ids by reading directory entries from the OpLog.
-/// This reads the directory content for a node_id from pending/committed records
-/// without trying to open the foreign partition (which may have no data yet).
-async fn collect_child_part_ids_from_entries(
-    state: &tlogfs::persistence::State,
-    parent_id: &tinyfs::FileID,
-    part_ids: &mut Vec<String>,
-) {
-    // Query the directory entries for this node from the local OpLog
-    let entries = match state.query_directory_entries_by_id(parent_id).await {
-        Ok(e) => e,
-        Err(_) => return, // Directory not readable — skip
-    };
-
-    for entry in &entries {
-        if entry.entry_type.is_directory() {
-            // For physical directories, part_id == node_id (child_node_id)
-            let child_part_id = entry.child_node_id.to_string();
-            if !part_ids.contains(&child_part_id) {
-                part_ids.push(child_part_id.clone());
-            }
-
-            // Recurse: the child directory's entries are also in the local OpLog
-            // (created at mknod time for recursive imports)
-            let child_file_id = tinyfs::FileID::new_from_ids(
-                tinyfs::PartID::new(child_part_id.clone()),
-                tinyfs::NodeID::new(child_part_id),
-            );
-            Box::pin(collect_child_part_ids_from_entries(state, &child_file_id, part_ids)).await;
-        }
-    }
 }
 
 /// Replicate: Generate replication command

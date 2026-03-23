@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use chrono::Utc;
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::CommitInfo;
-use deltalake::kernel::transaction::CommitProperties;
 use deltalake::protocol::SaveMode;
 use deltalake::{DeltaOps, DeltaTable};
 use log::{debug, info, warn};
@@ -2076,7 +2075,7 @@ impl InnerState {
         // Collect external add actions and import metadata before any writing
         let external_actions = std::mem::take(&mut self.external_add_actions);
         let import_metadata = std::mem::take(&mut self.import_metadata);
-        let has_external = !external_actions.is_empty();
+        let _has_external = !external_actions.is_empty();
         let has_records = !records.is_empty();
 
         if has_records {

@@ -69,6 +69,11 @@ impl ChunkedAsyncFileReader {
     pub fn len(&self) -> u64 {
         self.data.len() as u64
     }
+
+    /// Returns true if the file is empty
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
 }
 
 impl AsyncFileReader for ChunkedAsyncFileReader {
