@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::directory::OpLogDirectory;
-use serde::{Deserialize, Serialize};
 use super::error::TLogFSError;
 use super::schema::{DirectoryEntry, ForArrow, OplogEntry};
 use super::symlink::OpLogSymlink;
@@ -21,6 +20,7 @@ use deltalake::{DeltaOps, DeltaTable};
 use log::{debug, info, warn};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use provider::{FactoryContext, FactoryRegistry};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -234,7 +234,10 @@ impl OpLogPersistence {
     /// This creates the table schema but does NOT initialize the root directory.
     /// Used when restoring from bundles - the first bundle will write transaction #1
     /// which initializes the root directory.
-    pub async fn create_empty<P: AsRef<Path>>(path: P, pond_id: String) -> Result<Self, TLogFSError> {
+    pub async fn create_empty<P: AsRef<Path>>(
+        path: P,
+        pond_id: String,
+    ) -> Result<Self, TLogFSError> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         debug!(
             "Creating empty table structure for restoration at: {}",
@@ -2067,7 +2070,10 @@ impl InnerState {
 
         let mut records = std::mem::take(&mut self.records);
 
-        if records.is_empty() && self.external_add_actions.is_empty() && self.import_metadata.is_empty() {
+        if records.is_empty()
+            && self.external_add_actions.is_empty()
+            && self.import_metadata.is_empty()
+        {
             debug!("Committing read-only transaction");
             return Ok(None);
         }
@@ -2143,8 +2149,11 @@ impl InnerState {
                 let filtered = filtered.project(&indices)?;
 
                 let mut parquet_buf = Vec::new();
-                let mut writer =
-                    parquet::arrow::ArrowWriter::try_new(&mut parquet_buf, filtered.schema(), None)?;
+                let mut writer = parquet::arrow::ArrowWriter::try_new(
+                    &mut parquet_buf,
+                    filtered.schema(),
+                    None,
+                )?;
                 writer.write(&filtered)?;
                 let _file_metadata = writer.close()?;
 
@@ -2165,10 +2174,7 @@ impl InnerState {
 
                 all_actions.push(Action::Add(Add {
                     path: file_name,
-                    partition_values: HashMap::from([(
-                        "part_id".to_string(),
-                        Some(pid.clone()),
-                    )]),
+                    partition_values: HashMap::from([("part_id".to_string(), Some(pid.clone()))]),
                     size: file_size,
                     modification_time: now_ms,
                     data_change: true,
@@ -2211,10 +2217,10 @@ impl InnerState {
             predicate: None,
         };
 
-        let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> =
-            table.snapshot().ok().map(|s| {
-                s as &dyn deltalake::kernel::transaction::TableReference
-            });
+        let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> = table
+            .snapshot()
+            .ok()
+            .map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
 
         // Build commit metadata: pond_txn + optional import_state
         let mut commit_metadata = metadata.to_delta_metadata();
@@ -2232,7 +2238,9 @@ impl InnerState {
 
         debug!(
             "[OK] Single Delta commit: {} record(s) + {} external file(s) + {} import partition(s)",
-            record_count, external_count, import_metadata.len()
+            record_count,
+            external_count,
+            import_metadata.len()
         );
 
         self.records.clear();
@@ -2847,7 +2855,8 @@ impl InnerState {
         // Step 2: Use the partition cache to get the latest committed record
         self.ensure_partition_cached(id.part_id()).await?;
 
-        match self.partition_records_cache
+        match self
+            .partition_records_cache
             .get(&id.part_id())
             .and_then(|by_node| by_node.get(&id.node_id()))
             .and_then(|records| records.first().cloned())
@@ -2910,12 +2919,7 @@ impl InnerState {
             .partition_records_cache
             .get(&id.part_id())
             .and_then(|by_node| by_node.get(&id.node_id()))
-            .and_then(|records| {
-                records
-                    .iter()
-                    .find(|r| r.file_type.is_directory())
-                    .cloned()
-            });
+            .and_then(|records| records.iter().find(|r| r.file_type.is_directory()).cloned());
 
         // Step 3: Return the latest between committed and pending (pending wins if both exist)
         match (committed_record, pending_record) {

@@ -336,8 +336,8 @@ impl RemoteTable {
         path: impl Into<String>,
         reader: R,
     ) -> Result<String> {
-        let writer = ChunkedWriter::new(pond_txn_id, path.into(), reader)
-            .with_pond_id(self.pond_id.clone());
+        let writer =
+            ChunkedWriter::new(pond_txn_id, path.into(), reader).with_pond_id(self.pond_id.clone());
 
         let bundle_id = writer.write_to_table(&mut self.table).await?;
 

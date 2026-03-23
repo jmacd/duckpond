@@ -154,7 +154,12 @@ impl ChunkedFileRecord {
     #[must_use]
     pub fn transaction_bundle_id(pond_id: &str, txn_seq: i64) -> String {
         let now = chrono::Utc::now();
-        format!("FILE-META-{}-{}-{}", pond_id, now.format("%Y-%m-%d"), txn_seq)
+        format!(
+            "FILE-META-{}-{}-{}",
+            pond_id,
+            now.format("%Y-%m-%d"),
+            txn_seq
+        )
     }
 
     /// Generate a large file bundle_id

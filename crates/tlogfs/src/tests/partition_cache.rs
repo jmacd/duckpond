@@ -74,9 +74,7 @@ async fn test_cache_write_through_new_file_same_partition() {
         debug!("[OK] created second.series");
 
         // The new file must be visible despite the cache.
-        let exists = root
-            .exists(std::path::Path::new("second.series"))
-            .await;
+        let exists = root.exists(std::path::Path::new("second.series")).await;
         assert!(exists, "second.series must be visible after creation");
 
         // Must also be readable.
@@ -282,11 +280,8 @@ async fn test_cache_fresh_across_transactions() {
         let tx = persistence.begin_test().await.expect("begin tx1");
         let root = tx.root().await.expect("root");
 
-        let batch = record_batch!(
-            ("timestamp", Int64, [1_i64]),
-            ("value", Float64, [1.0_f64])
-        )
-        .expect("batch");
+        let batch = record_batch!(("timestamp", Int64, [1_i64]), ("value", Float64, [1.0_f64]))
+            .expect("batch");
 
         _ = root
             .create_series_from_batch("a.series", &batch, Some("timestamp"))
@@ -309,11 +304,8 @@ async fn test_cache_fresh_across_transactions() {
         assert_eq!(b.num_rows(), 1);
 
         // Create b.series.
-        let batch2 = record_batch!(
-            ("timestamp", Int64, [2_i64]),
-            ("value", Float64, [2.0_f64])
-        )
-        .expect("batch2");
+        let batch2 = record_batch!(("timestamp", Int64, [2_i64]), ("value", Float64, [2.0_f64]))
+            .expect("batch2");
 
         _ = root
             .create_series_from_batch("b.series", &batch2, Some("timestamp"))

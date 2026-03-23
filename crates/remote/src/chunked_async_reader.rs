@@ -14,8 +14,8 @@
 use bytes::Bytes;
 use futures::FutureExt;
 use log::debug;
-use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
+use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::file::metadata::ParquetMetaData;
 use std::ops::Range;
 use std::sync::Arc;

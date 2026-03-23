@@ -1478,13 +1478,7 @@ impl ControlTable {
                     .column(2)
                     .as_any()
                     .downcast_ref::<arrow_array::Int64Array>()
-                    .and_then(|a| {
-                        if a.is_null(i) {
-                            None
-                        } else {
-                            Some(a.value(i))
-                        }
-                    })
+                    .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
                     .unwrap_or(0);
                 results.push((pid, pond_id, wm));
             }

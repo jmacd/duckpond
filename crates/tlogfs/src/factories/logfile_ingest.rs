@@ -218,10 +218,12 @@ mod integration_tests {
         /// Execute the logfile-ingest factory within a transaction
         /// This properly opens a transaction, creates the context, executes, and commits
         async fn execute_factory(&self, config: &LogfileIngestConfig) -> std::io::Result<()> {
-            let mut persistence =
-                crate::persistence::OpLogPersistence::open(self.store_path(), self.pond_id().to_string())
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence = crate::persistence::OpLogPersistence::open(
+                self.store_path(),
+                self.pond_id().to_string(),
+            )
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()
@@ -266,10 +268,12 @@ mod integration_tests {
             expected_blake3: &str,
             expected_content: &[u8],
         ) -> std::io::Result<()> {
-            let mut persistence =
-                crate::persistence::OpLogPersistence::open(self.store_path(), self.pond_id().to_string())
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence = crate::persistence::OpLogPersistence::open(
+                self.store_path(),
+                self.pond_id().to_string(),
+            )
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()
@@ -1361,10 +1365,12 @@ mod integration_tests {
             let expected_states = self.expected_host_state();
             log::info!("Expected {} files in pond", expected_states.len());
 
-            let mut persistence =
-                crate::persistence::OpLogPersistence::open(self.pond.store_path(), self.pond.pond_id().to_string())
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut persistence = crate::persistence::OpLogPersistence::open(
+                self.pond.store_path(),
+                self.pond.pond_id().to_string(),
+            )
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             let tx = persistence
                 .begin_test()

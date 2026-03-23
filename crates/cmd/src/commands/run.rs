@@ -308,7 +308,10 @@ async fn run_pond_command_impl(
         let root = tx.root().await?;
         let local_path = std::path::Path::new(&import_config.local_path);
         let parent_path = local_path.parent().unwrap_or(std::path::Path::new("/"));
-        let dir_name = local_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let dir_name = local_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
 
         let parent_wd = if parent_path == std::path::Path::new("/") {
             root.clone()

@@ -305,7 +305,10 @@ impl<'a> Transaction<'a> {
     ) -> Result<Vec<(String, String, i64)>, StewardError> {
         match self {
             Transaction::Pond(guard) => {
-                guard.control_table().query_import_partitions(factory_node_id).await
+                guard
+                    .control_table()
+                    .query_import_partitions(factory_node_id)
+                    .await
             }
             Transaction::Host(_) => Ok(Vec::new()),
         }

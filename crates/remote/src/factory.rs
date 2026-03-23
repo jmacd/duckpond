@@ -290,8 +290,9 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
     let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
     let storage_options = config.to_storage_options();
 
-    let remote_table =
-        RemoteTable::open_with_storage_options(path, storage_options).await.map_err(|e| {
+    let remote_table = RemoteTable::open_with_storage_options(path, storage_options)
+        .await
+        .map_err(|e| {
             RemoteError::Configuration(format!("Cannot open foreign backup at {}: {}", path, e))
         })?;
 
@@ -324,12 +325,12 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
     if let Some(parent) = local_path.parent()
         && parent != std::path::Path::new("/")
     {
-        root.create_dir_all(parent)
-            .await
-            .map_err(|e| RemoteError::Configuration(format!(
+        root.create_dir_all(parent).await.map_err(|e| {
+            RemoteError::Configuration(format!(
                 "Failed to create parent directories for {}: {}",
                 import_config.local_path, e
-            )))?;
+            ))
+        })?;
     }
 
     // Navigate to the parent directory
@@ -337,29 +338,34 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| {
-            RemoteError::Configuration(format!(
-                "Invalid local_path: {}",
-                import_config.local_path
-            ))
+            RemoteError::Configuration(format!("Invalid local_path: {}", import_config.local_path))
         })?;
 
     let parent_wd = if let Some(parent) = local_path.parent() {
         if parent == std::path::Path::new("/") {
             root.clone()
         } else {
-            root.open_dir_path(parent)
-                .await
-                .map_err(|e| RemoteError::Configuration(format!(
+            root.open_dir_path(parent).await.map_err(|e| {
+                RemoteError::Configuration(format!(
                     "Failed to open parent directory {}: {}",
-                    parent.display(), e
-                )))?
+                    parent.display(),
+                    e
+                ))
+            })?
         }
     } else {
         root.clone()
     };
 
     // Create the top-level import directory with foreign FileID
-    let top_node = create_foreign_dir(&state, &parent_wd, dir_name, &foreign_part_id, &foreign_node_id).await?;
+    let top_node = create_foreign_dir(
+        &state,
+        &parent_wd,
+        dir_name,
+        &foreign_part_id,
+        &foreign_node_id,
+    )
+    .await?;
 
     // Record import metadata for steward (via Delta commit metadata).
     // Use the top-level foreign part_id as the factory identifier.
@@ -378,12 +384,9 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
     // If recursive, walk the foreign directory tree and create local entries
     // for all child physical directories
     if recursive {
-        let top_wd = fs
-            .wd(&top_node)
-            .await
-            .map_err(|e| RemoteError::Configuration(format!(
-                "Failed to open import directory: {}", e
-            )))?;
+        let top_wd = fs.wd(&top_node).await.map_err(|e| {
+            RemoteError::Configuration(format!("Failed to open import directory: {}", e))
+        })?;
 
         partition_count += create_child_dirs_recursive(
             &foreign_ctx,
@@ -420,23 +423,23 @@ async fn create_foreign_dir(
         tinyfs::NodeID::new(node_id.to_string()),
     );
 
-    let node = state
-        .create_directory_node(file_id)
-        .await
-        .map_err(|e| RemoteError::Configuration(format!(
-            "Failed to create directory '{}' with foreign partition: {}", name, e
-        )))?;
+    let node = state.create_directory_node(file_id).await.map_err(|e| {
+        RemoteError::Configuration(format!(
+            "Failed to create directory '{}' with foreign partition: {}",
+            name, e
+        ))
+    })?;
 
     // Register the directory in the in-memory cache so it's immediately
     // usable for inserting child entries within this transaction.
     state.register_empty_directory(file_id).await;
 
-    parent_wd
-        .insert_node(name, node)
-        .await
-        .map_err(|e| RemoteError::Configuration(format!(
-            "Failed to insert '{}' into parent directory: {}", name, e
-        )))
+    parent_wd.insert_node(name, node).await.map_err(|e| {
+        RemoteError::Configuration(format!(
+            "Failed to insert '{}' into parent directory: {}",
+            name, e
+        ))
+    })
 }
 
 /// Recursively create local directory entries for all child physical
@@ -478,12 +481,12 @@ async fn create_child_dirs_recursive(
                 .await;
 
             // Recurse into this child
-            let child_wd = fs
-                .wd(&child_node)
-                .await
-                .map_err(|e| RemoteError::Configuration(format!(
-                    "Failed to open child directory '{}': {}", name, e
-                )))?;
+            let child_wd = fs.wd(&child_node).await.map_err(|e| {
+                RemoteError::Configuration(format!(
+                    "Failed to open child directory '{}': {}",
+                    name, e
+                ))
+            })?;
 
             count += Box::pin(create_child_dirs_recursive(
                 foreign_ctx,
@@ -515,26 +518,26 @@ async fn read_foreign_directory_entries(
         node_id
     );
 
-    let df = ctx.sql(&sql).await.map_err(|e| {
-        RemoteError::TableOperation(format!("Failed to query directory: {}", e))
-    })?;
-    let batches = df.collect().await.map_err(|e| {
-        RemoteError::TableOperation(format!("Failed to collect directory: {}", e))
-    })?;
+    let df = ctx
+        .sql(&sql)
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to query directory: {}", e)))?;
+    let batches = df
+        .collect()
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to collect directory: {}", e)))?;
 
     if batches.is_empty() || batches[0].num_rows() == 0 {
         return Ok(Vec::new());
     }
 
-    let content_col = batches[0].column_by_name("content").ok_or_else(|| {
-        RemoteError::TableOperation("Missing content column".to_string())
-    })?;
+    let content_col = batches[0]
+        .column_by_name("content")
+        .ok_or_else(|| RemoteError::TableOperation("Missing content column".to_string()))?;
     let content_arr = content_col
         .as_any()
         .downcast_ref::<BinaryArray>()
-        .ok_or_else(|| {
-            RemoteError::TableOperation("Content not BinaryArray".to_string())
-        })?;
+        .ok_or_else(|| RemoteError::TableOperation("Content not BinaryArray".to_string()))?;
     let content_bytes = content_arr.value(0);
 
     if content_bytes.is_empty() {
@@ -542,10 +545,9 @@ async fn read_foreign_directory_entries(
     }
 
     let cursor = std::io::Cursor::new(content_bytes);
-    let ipc_reader =
-        arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to parse directory IPC: {}", e))
-        })?;
+    let ipc_reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
+        RemoteError::TableOperation(format!("Failed to parse directory IPC: {}", e))
+    })?;
     let entry_batches: Vec<_> = ipc_reader
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -558,9 +560,7 @@ async fn read_foreign_directory_entries(
         let names = batch
             .column_by_name("name")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| {
-                RemoteError::TableOperation("Missing name column".to_string())
-            })?;
+            .ok_or_else(|| RemoteError::TableOperation("Missing name column".to_string()))?;
         let child_ids = batch
             .column_by_name("child_node_id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
@@ -570,9 +570,7 @@ async fn read_foreign_directory_entries(
         let entry_types = batch
             .column_by_name("entry_type")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| {
-                RemoteError::TableOperation("Missing entry_type column".to_string())
-            })?;
+            .ok_or_else(|| RemoteError::TableOperation("Missing entry_type column".to_string()))?;
 
         for row in 0..batch.num_rows() {
             entries.push((
@@ -644,11 +642,11 @@ async fn load_foreign_oplog(
         ));
     }
 
-    let mem_table = datafusion::datasource::MemTable::try_new(
-        all_batches[0].schema(),
-        vec![all_batches],
-    )
-    .map_err(|e| RemoteError::TableOperation(format!("Failed to create MemTable: {}", e)))?;
+    let mem_table =
+        datafusion::datasource::MemTable::try_new(all_batches[0].schema(), vec![all_batches])
+            .map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to create MemTable: {}", e))
+            })?;
     tmp_ctx
         .register_table("oplog", std::sync::Arc::new(mem_table))
         .map_err(|e| RemoteError::TableOperation(format!("Failed to register table: {}", e)))?;
@@ -680,9 +678,7 @@ async fn navigate_foreign_path(
     for part_name in &source_parts {
         let entries = read_foreign_directory_entries(ctx, &current_node_id).await?;
 
-        let found = entries
-            .iter()
-            .find(|(name, _, _)| name == *part_name);
+        let found = entries.iter().find(|(name, _, _)| name == *part_name);
 
         match found {
             Some((_, child_id, _)) => {
@@ -866,8 +862,9 @@ async fn execute_show_remote(config: &RemoteConfig) -> Result<(), RemoteError> {
 
     log::info!("[SEARCH] Opening remote pond backup at {}", url_str);
 
-    let remote_table =
-        RemoteTable::open_with_storage_options(url_str, storage_options).await.map_err(|e| {
+    let remote_table = RemoteTable::open_with_storage_options(url_str, storage_options)
+        .await
+        .map_err(|e| {
             RemoteError::Configuration(format!("Cannot open backup at {}: {}", url_str, e))
         })?;
 
@@ -925,9 +922,7 @@ async fn execute_show_remote(config: &RemoteConfig) -> Result<(), RemoteError> {
             })?;
     tmp_ctx
         .register_table("oplog", std::sync::Arc::new(mem_table))
-        .map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to register table: {}", e))
-        })?;
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to register table: {}", e)))?;
 
     // Show the full directory tree starting from root
     let root_id = "00000000-0000-7100-8000-000000000000";
@@ -950,7 +945,14 @@ async fn execute_show_remote(config: &RemoteConfig) -> Result<(), RemoteError> {
         String::new()
     };
 
-    println!("Remote Pond: {}", if pond_id_str.is_empty() { "(unknown)" } else { &pond_id_str });
+    println!(
+        "Remote Pond: {}",
+        if pond_id_str.is_empty() {
+            "(unknown)"
+        } else {
+            &pond_id_str
+        }
+    );
     println!("Backup URL:  {}", url_str);
     println!();
 
@@ -1057,13 +1059,7 @@ async fn show_directory_tree(
                         let s = mb[0]
                             .column_by_name("size")
                             .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
-                            .and_then(|a| {
-                                if a.is_null(0) {
-                                    None
-                                } else {
-                                    Some(a.value(0))
-                                }
-                            });
+                            .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0)) });
                         let ss = match s {
                             Some(sz) if sz >= 1024 * 1024 => {
                                 format!("{:.1}MB", sz as f64 / 1048576.0)
@@ -1120,17 +1116,22 @@ fn build_object_store_for_url(
     use object_store::ObjectStore;
 
     if url_str.starts_with("s3://") {
-        let url = url::Url::parse(url_str).map_err(|e| {
-            RemoteError::Configuration(format!("Invalid URL {}: {}", url_str, e))
-        })?;
+        let url = url::Url::parse(url_str)
+            .map_err(|e| RemoteError::Configuration(format!("Invalid URL {}: {}", url_str, e)))?;
 
         let store = object_store::aws::AmazonS3Builder::new()
             .with_url(url_str)
             .with_access_key_id(
-                storage_options.get("access_key_id").cloned().unwrap_or_default(),
+                storage_options
+                    .get("access_key_id")
+                    .cloned()
+                    .unwrap_or_default(),
             )
             .with_secret_access_key(
-                storage_options.get("secret_access_key").cloned().unwrap_or_default(),
+                storage_options
+                    .get("secret_access_key")
+                    .cloned()
+                    .unwrap_or_default(),
             )
             .with_region(storage_options.get("region").cloned().unwrap_or_default())
             .with_endpoint(storage_options.get("endpoint").cloned().unwrap_or_default())
@@ -1147,9 +1148,8 @@ fn build_object_store_for_url(
             bucket_path.to_string(),
         ))
     } else {
-        let store = object_store::local::LocalFileSystem::new_with_prefix(url_str).map_err(|e| {
-            RemoteError::Configuration(format!("Failed to open local path: {}", e))
-        })?;
+        let store = object_store::local::LocalFileSystem::new_with_prefix(url_str)
+            .map_err(|e| RemoteError::Configuration(format!("Failed to open local path: {}", e)))?;
         Ok((
             std::sync::Arc::new(store) as std::sync::Arc<dyn ObjectStore>,
             String::new(),
@@ -1170,7 +1170,8 @@ async fn execute_list_ponds(config: &RemoteConfig) -> Result<(), RemoteError> {
     let url_str = config.url.strip_prefix("file://").unwrap_or(&config.url);
     let storage_options = config.to_storage_options();
 
-    let (store, base_path) = build_object_store_for_url(url_str, &storage_options, config.allow_http)?;
+    let (store, base_path) =
+        build_object_store_for_url(url_str, &storage_options, config.allow_http)?;
 
     // List prefixes at the base path to find pond-{uuid}/ directories
     let prefix = if base_path.is_empty() {
@@ -1179,9 +1180,12 @@ async fn execute_list_ponds(config: &RemoteConfig) -> Result<(), RemoteError> {
         Some(object_store::path::Path::from(base_path.as_str()))
     };
 
-    let list_result = store.list_with_delimiter(prefix.as_ref()).await.map_err(|e| {
-        RemoteError::TableOperation(format!("Failed to list bucket contents: {}", e))
-    })?;
+    let list_result = store
+        .list_with_delimiter(prefix.as_ref())
+        .await
+        .map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to list bucket contents: {}", e))
+        })?;
 
     // Filter for pond-{uuid} prefixes
     let mut pond_prefixes: Vec<String> = list_result
@@ -1628,27 +1632,30 @@ async fn execute_import(
         let parent_wd = if parent_path == std::path::Path::new("/") {
             root.clone()
         } else {
-            root.open_dir_path(parent_path)
-                .await
-                .map_err(|e| RemoteError::TableOperation(format!(
-                    "Failed to open parent of import path: {}", e
-                )))?
+            root.open_dir_path(parent_path).await.map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to open parent of import path: {}", e))
+            })?
         };
 
         let parent_entries = state
             .query_directory_entries_by_id(&parent_wd.node_path().id())
             .await
-            .map_err(|e| RemoteError::TableOperation(format!(
-                "Failed to read parent directory entries: {}", e
-            )))?;
+            .map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to read parent directory entries: {}",
+                    e
+                ))
+            })?;
 
         let import_entry = parent_entries
             .iter()
             .find(|e| e.name == dir_name)
-            .ok_or_else(|| RemoteError::TableOperation(format!(
-                "Import path {} not found in parent directory. Run mknod first.",
-                import_config.local_path
-            )))?;
+            .ok_or_else(|| {
+                RemoteError::TableOperation(format!(
+                    "Import path {} not found in parent directory. Run mknod first.",
+                    import_config.local_path
+                ))
+            })?;
 
         let top_part_id = import_entry.child_node_id.to_string();
         let mut ids = vec![top_part_id.clone()];
@@ -1659,10 +1666,7 @@ async fn execute_import(
             let foreign_ctx = load_foreign_oplog(&remote_table).await?;
             let (_, target_node_id) = navigate_foreign_path(&foreign_ctx, &source_base).await?;
 
-            fn collect_recursive(
-                entries: &[(String, String, String)],
-                ids: &mut Vec<String>,
-            ) {
+            fn collect_recursive(entries: &[(String, String, String)], ids: &mut Vec<String>) {
                 for (_, child_id, entry_type) in entries {
                     if entry_type == "dir:physical" && !ids.contains(child_id) {
                         ids.push(child_id.clone());
@@ -1703,7 +1707,8 @@ async fn execute_import(
 
     log::info!(
         "   Watermark: {} (will import transactions > {})",
-        watermark, watermark
+        watermark,
+        watermark
     );
 
     // Step 3: List foreign backup transactions and filter by watermark.
@@ -1716,7 +1721,10 @@ async fn execute_import(
         .collect();
 
     if new_txn_seqs.is_empty() {
-        log::info!("   [OK] Already up to date (no transactions after {})", watermark);
+        log::info!(
+            "   [OK] Already up to date (no transactions after {})",
+            watermark
+        );
         return Ok(());
     }
 
@@ -2569,7 +2577,9 @@ pub async fn apply_parquet_files_from_remote(
     log::info!("Restoring transaction {} from remote backup", txn_seq);
 
     // Phase 1: Query for all files in this transaction (efficient partition query)
-    let files = remote_table.list_transaction_files(pond_id, txn_seq).await?;
+    let files = remote_table
+        .list_transaction_files(pond_id, txn_seq)
+        .await?;
 
     if files.is_empty() {
         log::warn!("No files found for transaction {}", txn_seq);
