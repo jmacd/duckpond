@@ -10,7 +10,9 @@ source check.sh
 echo "=== Experiment: Sitegen RSS Feed ==="
 
 SITE_ROOT="/tmp/host-rss-feed"
-OUTDIR="${OUTPUT:-/output}"
+# When using hostmount (-d), output must be under the site root
+# so it's resolvable within the overlay filesystem.
+OUTDIR="${SITE_ROOT}/output"
 
 rm -rf "${SITE_ROOT}"
 rm -rf "${OUTDIR:?}"/* 2>/dev/null || true
