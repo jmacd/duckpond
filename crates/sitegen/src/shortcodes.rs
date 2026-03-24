@@ -429,7 +429,8 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                 }
             } else if !children.is_empty() {
                 // Section heading with children but no resolved href --
-                // render as a non-link heading with sub-navigation.
+                // link to the first child so clicking expands the section.
+                let first_href = &children[0].href;
                 let child_active = children.iter().any(|c| ctx.current_path == c.href);
                 let li_class = if child_active {
                     " class=\"active\""
@@ -437,8 +438,8 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                     ""
                 };
                 html.push_str(&format!(
-                    "  <li{}><span class=\"nav-heading\">{}</span>\n",
-                    li_class, label
+                    "  <li{}><a href=\"{}\" class=\"nav-heading\">{}</a>\n",
+                    li_class, first_href, label
                 ));
                 let sub_class = if child_active {
                     "subnav expanded"

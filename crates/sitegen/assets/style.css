@@ -147,6 +147,29 @@ a:hover { color: var(--accent); }
   font-weight: 700;
 }
 
+/* Section heading (parent for grouped sub-navigation) */
+.sidebar .nav-heading {
+  display: block;
+  padding: 0.75rem 1rem;
+  background: var(--nav-btn);
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 1.3rem;
+  font-weight: 400;
+  border-radius: var(--radius);
+  transition: background 0.2s;
+}
+
+.sidebar .nav-heading:hover {
+  background: var(--nav-btn-hover);
+}
+
+.sidebar li.active > .nav-heading {
+  background: var(--nav-btn-active);
+  color: #ffffff;
+  font-weight: 700;
+}
+
 /* ── Sub-navigation (nested under sidebar entries) ─────────── */
 
 .sidebar .subnav {

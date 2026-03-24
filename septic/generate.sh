@@ -11,7 +11,7 @@ set -e
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
 EXE=${SCRIPTS}/pond.sh
 
-HOST=debian@septicplaystation.local
+HOST=debian@septicplaystation.casparwater.us
 REMOTE_OUTDIR=/home/debian/site-output
 LOCAL_OUTDIR=${SCRIPTS}/export
 

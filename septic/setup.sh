@@ -5,13 +5,13 @@
 # Run this ONCE on a fresh pond. To update configs later, use update.sh.
 #
 # Prerequisites:
-#   - pond.sh can reach septicplaystation.local
+#   - pond.sh can reach septicplaystation.casparwater.us
 #   - podman installed on the BeaglePlay
 #
 set -x
 set -e
 
-HOST=debian@septicplaystation.local
+HOST=debian@septicplaystation.casparwater.us
 REMOTE_CONFIG=/home/debian/config
 
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)

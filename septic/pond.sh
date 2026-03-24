@@ -6,7 +6,7 @@
 # Run ./build.sh first to build and push the image.
 #
 
-HOST=debian@septicplaystation.local
+HOST=debian@septicplaystation.casparwater.us
 IMAGE=duckpond:latest-arm64
 VOLUME=pond-data
 

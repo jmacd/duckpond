@@ -1,5 +1,5 @@
 ---
-title: Caspar Water
+title: Home
 layout: default
 ---
 
