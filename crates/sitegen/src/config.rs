@@ -71,6 +71,10 @@ pub struct SiteMeta {
     /// Required for RSS feed generation; if absent, feed is skipped.
     #[serde(default)]
     pub site_url: Option<String>,
+    /// GitHub repository URL shown as an icon in the top bar.
+    /// If absent, the GitHub icon is omitted.
+    #[serde(default)]
+    pub github_url: Option<String>,
 }
 
 /// RSS feed configuration (optional section in site.yaml).

@@ -19,7 +19,12 @@ const GITHUB_SVG: &str = r#"<svg width="22" height="22" viewBox="0 0 16 16" fill
 const RSS_SVG: &str = r#"<svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="12.5" r="2"/><path d="M1.5 6.5c0-.28.22-.5.5-.5 4.14 0 7.5 3.36 7.5 7.5 0 .28-.22.5-.5.5h-1c-.28 0-.5-.22-.5-.5C7.5 10.46 5.04 8 2 8c-.28 0-.5-.22-.5-.5v-1z"/><path d="M1.5 1.5c0-.28.22-.5.5-.5C9.96.5 15.5 6.04 15.5 14c0 .28-.22.5-.5.5h-1c-.28 0-.5-.22-.5-.5C13.5 7.1 8.9 2.5 2 2.5c-.28 0-.5-.22-.5-.5v-1z"/></svg>"#;
 
 /// Render the top bar with optional back link and right-justified icons.
-fn top_bar(back_label: Option<&str>, back_href: Option<&str>, feed_url: Option<&str>) -> Markup {
+fn top_bar(
+    back_label: Option<&str>,
+    back_href: Option<&str>,
+    feed_url: Option<&str>,
+    github_url: Option<&str>,
+) -> Markup {
     html! {
         nav class="top-bar" {
             @if let (Some(label), Some(href)) = (back_label, back_href) {
@@ -36,8 +41,10 @@ fn top_bar(back_label: Option<&str>, back_href: Option<&str>, feed_url: Option<&
                         (PreEscaped(RSS_SVG))
                     }
                 }
-                a href="https://github.com/jmacd/duckpond" target="_blank" title="Source on GitHub" {
-                    (PreEscaped(GITHUB_SVG))
+                @if let Some(url) = github_url {
+                    a href=(url) target="_blank" title="Source on GitHub" {
+                        (PreEscaped(GITHUB_SVG))
+                    }
                 }
             }
         }
@@ -58,6 +65,8 @@ pub struct LayoutContext<'a> {
     pub date: Option<&'a str>,
     /// URL to the RSS feed (e.g. "/feed.xml"), shown as icon in top bar
     pub feed_url: Option<&'a str>,
+    /// GitHub repository URL, shown as icon in top bar. Omitted if None.
+    pub github_url: Option<&'a str>,
 }
 
 /// Apply a named layout to rendered content.
@@ -114,7 +123,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    (top_bar(Some("Home"), Some("/"), ctx.feed_url))
+                    (top_bar(Some("Home"), Some("/"), ctx.feed_url, ctx.github_url))
                     article class="blog-post" {
                         div class="blog-post-content" {
                             (PreEscaped(ctx.content))
@@ -147,7 +156,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    (top_bar(Some("Home"), Some("/"), ctx.feed_url))
+                    (top_bar(Some("Home"), Some("/"), ctx.feed_url, ctx.github_url))
                     article class="blog-post" {
                         div class="blog-post-content" {
                             (PreEscaped(ctx.content))
@@ -179,7 +188,7 @@ fn blog_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    (top_bar(Some("Blog"), Some("blog.html"), ctx.feed_url))
+                    (top_bar(Some("Blog"), Some("blog.html"), ctx.feed_url, ctx.github_url))
                     article class="blog-post" {
                         header class="blog-post-header" {
                             @if let Some(ref date) = date_display {
@@ -241,7 +250,7 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    (top_bar(None, None, ctx.feed_url))
+                    (top_bar(None, None, ctx.feed_url, ctx.github_url))
                     article class="blog-post" {
                         div class="blog-post-content" {
                             (PreEscaped(ctx.content))
@@ -266,15 +275,24 @@ mod tests {
             sidebar: None,
             date: None,
             feed_url: None,
+            github_url: Some("https://github.com/test/repo"),
         };
         let html = apply_layout("default", &ctx);
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("Home -- Test Site"));
         assert!(html.contains("<h1>Hello</h1>"));
         assert!(html.contains("top-bar"), "Expected top bar: {}", html);
-        assert!(html.contains("github.com"), "Expected GitHub link");
+        assert!(html.contains("github.com/test/repo"), "Expected GitHub link");
         assert!(html.contains("blog-post"), "Expected card container");
         assert!(!html.contains("RSS Feed"), "No RSS icon without feed_url");
+
+        // Without github_url, no GitHub icon
+        let ctx_no_gh = LayoutContext {
+            github_url: None,
+            ..ctx
+        };
+        let html2 = apply_layout("default", &ctx_no_gh);
+        assert!(!html2.contains("github.com"), "No GitHub link when url is None");
     }
 
     #[test]
@@ -286,6 +304,7 @@ mod tests {
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: None,
             feed_url: None,
+            github_url: None,
         };
         let html = apply_layout("data", &ctx);
         assert!(html.contains("chart.js")); // Glue code present
@@ -294,7 +313,7 @@ mod tests {
         assert!(html.contains("<ul><li>Nav</li></ul>"));
         assert!(html.contains("top-bar"), "Top bar present");
         assert!(html.contains("blog-post"), "Card container");
-        assert!(html.contains("github.com"), "GitHub icon");
+        assert!(!html.contains("github.com"), "No GitHub link when url is None");
     }
 
     #[test]
@@ -306,6 +325,7 @@ mod tests {
             sidebar: None,
             date: None,
             feed_url: None,
+            github_url: None,
         };
         let html = apply_layout("nonexistent", &ctx);
         assert!(html.contains("top-bar"), "Default layout uses top bar");
@@ -320,13 +340,14 @@ mod tests {
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: None,
             feed_url: None,
+            github_url: None,
         };
         let html = apply_layout("page", &ctx);
         assert!(html.contains("content-page"), "Page layout class");
         assert!(html.contains("blog-post"), "Card container");
         assert!(html.contains("top-bar"), "Top bar present");
         assert!(html.contains("Home"), "Back to home link: {}", html);
-        assert!(html.contains("github.com"), "GitHub icon: {}", html);
+        assert!(!html.contains("github.com"), "No GitHub link when url is None");
         assert!(html.contains("class=\"sidebar\""), "Sidebar present");
         assert!(!html.contains("chart.js"), "No CDN scripts");
     }
@@ -339,7 +360,7 @@ mod tests {
             content: "<p>Post content here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: Some("2025-03-10"),
-            feed_url: Some("/feed.xml"),
+            feed_url: Some("/feed.xml"), github_url: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("top-bar"), "Expected top bar: {}", html);
@@ -349,8 +370,8 @@ mod tests {
             html
         );
         assert!(
-            html.contains("github.com"),
-            "Expected GitHub icon: {}",
+            !html.contains("github.com"),
+            "No GitHub link when url is None: {}",
             html
         );
         assert!(
@@ -393,6 +414,7 @@ mod tests {
             sidebar: None,
             date: None,
             feed_url: None,
+            github_url: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("blog-post"), "Expected blog-post: {}", html);

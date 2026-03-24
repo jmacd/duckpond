@@ -3,6 +3,7 @@ factory: sitegen
 site:
   title: "Noyo Harbor Blue Economy"
   base_url: "/"
+  github_url: "https://github.com/jmacd/noyo-blue-econ"
 
 exports:
   - name: "params"

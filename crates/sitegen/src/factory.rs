@@ -699,6 +699,7 @@ fn generate_site(
                 sidebar: sidebar_html.as_deref(),
                 date: fm.date.as_deref(),
                 feed_url: feed_url.as_deref(),
+                github_url: config.site.github_url.as_deref(),
             },
         );
 
@@ -997,6 +998,7 @@ mod tests {
                 title: "Test Blog".to_string(),
                 base_url: "/".to_string(),
                 site_url: Some("https://example.com".to_string()),
+                github_url: None,
             },
             content: vec![],
             exports: vec![],
@@ -1105,7 +1107,7 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/".to_string(),
                 site_url: None,
-            },
+                github_url: None,            },
             content: vec![],
             exports: vec![],
             routes: vec![],

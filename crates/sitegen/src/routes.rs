@@ -365,7 +365,7 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/test/".to_string(),
                 site_url: None,
-            },
+                github_url: None,            },
             content: vec![],
             exports: vec![ExportStage {
                 name: "params".to_string(),
@@ -532,7 +532,7 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/".to_string(),
                 site_url: None,
-            },
+                github_url: None,            },
             content: vec![],
             exports: vec![],
             routes: vec![RouteConfig {
