@@ -1,5 +1,5 @@
 ---
-title: "Noyo Harbor Blue Economy"
+title: "Home"
 layout: default
 ---
 

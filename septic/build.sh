@@ -12,7 +12,7 @@
 #
 set -euo pipefail
 
-HOST=debian@septicplaystation.local
+HOST=debian@septicplaystation.casparwater.us
 IMAGE_NAME=duckpond
 IMAGE_TAG=latest-arm64
 LOCAL_TAG="${IMAGE_NAME}:${IMAGE_TAG}"

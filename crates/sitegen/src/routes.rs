@@ -255,6 +255,73 @@ pub fn collection_keys(export: &ExportContext) -> Vec<String> {
     export.by_key.keys().cloned().collect()
 }
 
+/// Build synthetic ContentPage entries from template routes so that
+/// export-based pages are discoverable by the content_nav shortcode.
+///
+/// Template routes generate pages from export $0 values (e.g., "DO",
+/// "Temperature"). These are content pages and should be navigable
+/// via the sidebar just like explicit content pages.
+pub fn build_template_content_pages(
+    config: &SiteConfig,
+    exports: &BTreeMap<String, ExportContext>,
+) -> BTreeMap<String, Vec<ContentPage>> {
+    let mut result: BTreeMap<String, Vec<ContentPage>> = BTreeMap::new();
+
+    fn collect_template_pages(
+        route: &RouteConfig,
+        parent_path: &str,
+        exports: &BTreeMap<String, ExportContext>,
+        result: &mut BTreeMap<String, Vec<ContentPage>>,
+    ) {
+        match route.route_type {
+            RouteType::Static => {
+                let url_path = if route.slug.is_empty() {
+                    parent_path.to_string()
+                } else {
+                    format!("{}/{}", parent_path, route.slug)
+                };
+                for child in &route.routes {
+                    collect_template_pages(child, &url_path, exports, result);
+                }
+            }
+            RouteType::Template => {
+                let export_name = route.export.as_deref().unwrap_or("");
+                if let Some(export_ctx) = exports.get(export_name) {
+                    let pages: Vec<ContentPage> = export_ctx
+                        .by_key
+                        .keys()
+                        .map(|key| {
+                            let slug = route.slug.replace("$0", key);
+                            let url_path = format!("{}/{}", parent_path, slug);
+                            ContentPage {
+                                title: key.clone(),
+                                slug: url_path.trim_start_matches('/').to_string(),
+                                weight: 100,
+                                hidden: false,
+                                section: None,
+                                source_path: route.page.clone().unwrap_or_default(),
+                                date: None,
+                                summary: None,
+                                image: None,
+                            }
+                        })
+                        .collect();
+                    result
+                        .entry(export_name.to_string())
+                        .or_default()
+                        .extend(pages);
+                }
+            }
+            RouteType::Content => {}
+        }
+    }
+
+    for route in &config.routes {
+        collect_template_pages(route, "", exports, &mut result);
+    }
+    result
+}
+
 /// Build the collections map for shortcode context (collection name -> list of keys).
 ///
 /// Merges export collections (keyed by $0 values) with content collections
@@ -293,6 +360,7 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/test/".to_string(),
                 site_url: None,
+                github_url: None,
             },
             content: vec![],
             exports: vec![ExportStage {
@@ -329,6 +397,7 @@ mod tests {
             static_assets: vec![],
             sidebar: vec![],
             feed: None,
+            theme: std::collections::BTreeMap::new(),
         }
     }
 
@@ -460,6 +529,7 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/".to_string(),
                 site_url: None,
+                github_url: None,
             },
             content: vec![],
             exports: vec![],
@@ -484,6 +554,7 @@ mod tests {
             static_assets: vec![],
             sidebar: vec![],
             feed: None,
+            theme: std::collections::BTreeMap::new(),
         };
 
         let exports = BTreeMap::new();

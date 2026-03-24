@@ -1,5 +1,5 @@
 ---
-title: "Septic Station Monitor"
+title: "Home"
 layout: default
 ---
 

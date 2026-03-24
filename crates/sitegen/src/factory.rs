@@ -176,7 +176,7 @@ async fn execute(
             copy_static_assets(&static_assets, &output_path)?;
 
             // Write built-in assets (style.css, chart.js)
-            write_builtin_assets(&output_path)?;
+            write_builtin_assets(&output_path, &config.theme)?;
 
             Ok(())
         }
@@ -486,13 +486,31 @@ fn copy_static_assets(
 ///
 /// These are compiled into the binary via `include_str!` so sitegen always
 /// produces a self-contained site without requiring files in the pond.
-fn write_builtin_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
+///
+/// Theme overrides from `site.yaml` are appended as a `:root` block that
+/// takes precedence over the default CSS custom properties.
+fn write_builtin_assets(
+    output_dir: &Path,
+    theme: &std::collections::BTreeMap<String, String>,
+) -> Result<(), tinyfs::Error> {
     static STYLE_CSS: &str = include_str!("../assets/style.css");
     static CHART_JS: &str = include_str!("../assets/chart.js");
     static OVERLAY_JS: &str = include_str!("../assets/overlay.js");
 
+    // Build CSS with theme overrides appended
+    let css = if theme.is_empty() {
+        STYLE_CSS.to_string()
+    } else {
+        let mut overrides = String::from("\n/* Site theme overrides */\n:root {\n");
+        for (key, value) in theme {
+            overrides.push_str(&format!("  --{}: {};\n", key, value));
+        }
+        overrides.push_str("}\n");
+        format!("{}{}", STYLE_CSS, overrides)
+    };
+
     for (name, content) in [
-        ("style.css", STYLE_CSS),
+        ("style.css", css.as_str()),
         ("chart.js", CHART_JS),
         ("overlay.js", OVERLAY_JS),
     ] {
@@ -592,11 +610,16 @@ fn generate_site(
     // Build collections for navigation shortcodes
     let collections = routes::build_collections(exports, content);
 
-    // Build content_pages map for content_nav shortcode
-    let content_pages: BTreeMap<String, Vec<ContentPage>> = content
+    // Build content_pages map for content_nav shortcode.
+    // Includes both explicit content pages and synthetic entries from
+    // template routes so that export-based pages are navigable.
+    let mut content_pages: BTreeMap<String, Vec<ContentPage>> = content
         .iter()
         .map(|(name, ctx)| (name.clone(), ctx.pages.clone()))
         .collect();
+    for (name, pages) in routes::build_template_content_pages(config, exports) {
+        content_pages.entry(name).or_default().extend(pages);
+    }
 
     // Render each page
     for job in &jobs {
@@ -676,6 +699,7 @@ fn generate_site(
                 sidebar: sidebar_html.as_deref(),
                 date: fm.date.as_deref(),
                 feed_url: feed_url.as_deref(),
+                github_url: config.site.github_url.as_deref(),
             },
         );
 
@@ -974,6 +998,7 @@ mod tests {
                 title: "Test Blog".to_string(),
                 base_url: "/".to_string(),
                 site_url: Some("https://example.com".to_string()),
+                github_url: None,
             },
             content: vec![],
             exports: vec![],
@@ -986,6 +1011,7 @@ mod tests {
                 content: Some("pages".to_string()),
                 description: Some("A test blog".to_string()),
             }),
+            theme: std::collections::BTreeMap::new(),
         };
 
         let mut content = BTreeMap::new();
@@ -1081,6 +1107,7 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/".to_string(),
                 site_url: None,
+                github_url: None,
             },
             content: vec![],
             exports: vec![],
@@ -1089,6 +1116,7 @@ mod tests {
             static_assets: vec![],
             sidebar: vec![],
             feed: None,
+            theme: std::collections::BTreeMap::new(),
         };
         let content = BTreeMap::new();
 

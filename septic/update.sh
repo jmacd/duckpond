@@ -7,7 +7,7 @@
 set -x
 set -e
 
-HOST=debian@septicplaystation.local
+HOST=debian@septicplaystation.casparwater.us
 REMOTE_CONFIG=/home/debian/config
 
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
