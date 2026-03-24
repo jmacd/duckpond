@@ -211,8 +211,8 @@ check_contains "${OUTDIR}/about.html"       "RSS icon on content page"     'RSS 
 check_contains "${OUTDIR}/index.html"       "autodiscovery link"           'application/rss+xml'
 check_contains "${OUTDIR}/first-post.html"  "autodiscovery on blog post"   'application/rss+xml'
 
-# GitHub icon still present
-check_contains "${OUTDIR}/index.html"       "GitHub icon still present"    'github.com'
+# GitHub icon absent (no github_url configured)
+check_not_contains "${OUTDIR}/index.html"   "no GitHub icon without github_url"  'github.com'
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 6: Build WITHOUT site_url (RSS should be skipped)
