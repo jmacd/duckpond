@@ -282,7 +282,10 @@ mod tests {
         assert!(html.contains("Home -- Test Site"));
         assert!(html.contains("<h1>Hello</h1>"));
         assert!(html.contains("top-bar"), "Expected top bar: {}", html);
-        assert!(html.contains("github.com/test/repo"), "Expected GitHub link");
+        assert!(
+            html.contains("github.com/test/repo"),
+            "Expected GitHub link"
+        );
         assert!(html.contains("blog-post"), "Expected card container");
         assert!(!html.contains("RSS Feed"), "No RSS icon without feed_url");
 
@@ -292,7 +295,10 @@ mod tests {
             ..ctx
         };
         let html2 = apply_layout("default", &ctx_no_gh);
-        assert!(!html2.contains("github.com"), "No GitHub link when url is None");
+        assert!(
+            !html2.contains("github.com"),
+            "No GitHub link when url is None"
+        );
     }
 
     #[test]
@@ -313,7 +319,10 @@ mod tests {
         assert!(html.contains("<ul><li>Nav</li></ul>"));
         assert!(html.contains("top-bar"), "Top bar present");
         assert!(html.contains("blog-post"), "Card container");
-        assert!(!html.contains("github.com"), "No GitHub link when url is None");
+        assert!(
+            !html.contains("github.com"),
+            "No GitHub link when url is None"
+        );
     }
 
     #[test]
@@ -347,7 +356,10 @@ mod tests {
         assert!(html.contains("blog-post"), "Card container");
         assert!(html.contains("top-bar"), "Top bar present");
         assert!(html.contains("Home"), "Back to home link: {}", html);
-        assert!(!html.contains("github.com"), "No GitHub link when url is None");
+        assert!(
+            !html.contains("github.com"),
+            "No GitHub link when url is None"
+        );
         assert!(html.contains("class=\"sidebar\""), "Sidebar present");
         assert!(!html.contains("chart.js"), "No CDN scripts");
     }
@@ -360,7 +372,8 @@ mod tests {
             content: "<p>Post content here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: Some("2025-03-10"),
-            feed_url: Some("/feed.xml"), github_url: None,
+            feed_url: Some("/feed.xml"),
+            github_url: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("top-bar"), "Expected top bar: {}", html);

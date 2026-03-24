@@ -266,12 +266,10 @@ pub fn build_template_content_pages(
     exports: &BTreeMap<String, ExportContext>,
 ) -> BTreeMap<String, Vec<ContentPage>> {
     let mut result: BTreeMap<String, Vec<ContentPage>> = BTreeMap::new();
-    let base = config.site.base_url.trim_end_matches('/').to_string();
 
     fn collect_template_pages(
         route: &RouteConfig,
         parent_path: &str,
-        base_url: &str,
         exports: &BTreeMap<String, ExportContext>,
         result: &mut BTreeMap<String, Vec<ContentPage>>,
     ) {
@@ -283,7 +281,7 @@ pub fn build_template_content_pages(
                     format!("{}/{}", parent_path, route.slug)
                 };
                 for child in &route.routes {
-                    collect_template_pages(child, &url_path, base_url, exports, result);
+                    collect_template_pages(child, &url_path, exports, result);
                 }
             }
             RouteType::Template => {
@@ -301,10 +299,7 @@ pub fn build_template_content_pages(
                                 weight: 100,
                                 hidden: false,
                                 section: None,
-                                source_path: route
-                                    .page
-                                    .clone()
-                                    .unwrap_or_default(),
+                                source_path: route.page.clone().unwrap_or_default(),
                                 date: None,
                                 summary: None,
                                 image: None,
@@ -322,7 +317,7 @@ pub fn build_template_content_pages(
     }
 
     for route in &config.routes {
-        collect_template_pages(route, "", &base, exports, &mut result);
+        collect_template_pages(route, "", exports, &mut result);
     }
     result
 }
@@ -365,7 +360,8 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/test/".to_string(),
                 site_url: None,
-                github_url: None,            },
+                github_url: None,
+            },
             content: vec![],
             exports: vec![ExportStage {
                 name: "params".to_string(),
@@ -400,7 +396,8 @@ mod tests {
             partials: BTreeMap::new(),
             static_assets: vec![],
             sidebar: vec![],
-            feed: None, theme: std::collections::BTreeMap::new(),
+            feed: None,
+            theme: std::collections::BTreeMap::new(),
         }
     }
 
@@ -532,7 +529,8 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/".to_string(),
                 site_url: None,
-                github_url: None,            },
+                github_url: None,
+            },
             content: vec![],
             exports: vec![],
             routes: vec![RouteConfig {
@@ -555,7 +553,8 @@ mod tests {
             partials: BTreeMap::new(),
             static_assets: vec![],
             sidebar: vec![],
-            feed: None, theme: std::collections::BTreeMap::new(),
+            feed: None,
+            theme: std::collections::BTreeMap::new(),
         };
 
         let exports = BTreeMap::new();

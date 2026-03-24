@@ -375,14 +375,12 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
             // Resolve parent href: explicit href first, then page title match.
             let resolved_href = if let Some(href) = direct_href {
                 Some(href.to_string())
-            } else if let Some(page) = pages
-                .iter()
-                .flat_map(|pp| pp.iter())
-                .find(|p| !p.hidden && p.title.contains(label))
-            {
-                Some(page_href(&page.slug))
             } else {
-                None
+                pages
+                    .iter()
+                    .flat_map(|pp| pp.iter())
+                    .find(|p| !p.hidden && p.title.contains(label))
+                    .map(|page| page_href(&page.slug))
             };
 
             if let Some(parent_href) = resolved_href {

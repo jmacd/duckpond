@@ -1107,14 +1107,16 @@ mod tests {
                 title: "Test".to_string(),
                 base_url: "/".to_string(),
                 site_url: None,
-                github_url: None,            },
+                github_url: None,
+            },
             content: vec![],
             exports: vec![],
             routes: vec![],
             partials: BTreeMap::new(),
             static_assets: vec![],
             sidebar: vec![],
-            feed: None, theme: std::collections::BTreeMap::new(),
+            feed: None,
+            theme: std::collections::BTreeMap::new(),
         };
         let content = BTreeMap::new();
 
