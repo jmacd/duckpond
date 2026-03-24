@@ -366,25 +366,6 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
             }
         };
 
-        // If no entry in the sidebar is active at all (neither parent
-        // nor child), expand all sections so navigation is visible
-        // (e.g., on the home page where no data page is selected).
-        let any_entry_active = ctx.sidebar_sections.iter().any(|entry| {
-            let href_match = entry
-                .href()
-                .map(|h| ctx.current_path == h)
-                .unwrap_or(false);
-            let page_match = pages
-                .iter()
-                .flat_map(|pp| pp.iter())
-                .any(|p| !p.hidden && p.title.contains(entry.label()));
-            let child_match = entry
-                .children()
-                .iter()
-                .any(|c| ctx.current_path == c.href);
-            href_match || page_match || child_match
-        });
-
         let mut html = String::from("<ul>\n");
         for entry in &ctx.sidebar_sections {
             let label = entry.label();
@@ -425,7 +406,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                         "  <li{}><a href=\"{}\"{}>{}</a>\n",
                         li_class, parent_href, aria, label
                     ));
-                    let sub_class = if is_active || !any_entry_active {
+                    let sub_class = if is_active {
                         "subnav expanded"
                     } else {
                         "subnav"
@@ -459,7 +440,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                     "  <li{}><span class=\"nav-heading\">{}</span>\n",
                     li_class, label
                 ));
-                let sub_class = if child_active || !any_entry_active {
+                let sub_class = if child_active {
                     "subnav expanded"
                 } else {
                     "subnav"
