@@ -2,7 +2,7 @@ factory: sitegen
 
 site:
   title: "Noyo Harbor Blue Economy"
-  base_url: "/"
+  base_url: "/noyo-harbor/"
   github_url: "https://github.com/jmacd/noyo-blue-econ"
 
 exports:
@@ -42,29 +42,29 @@ partials:
 
 sidebar:
   - label: "Home"
-    href: "/"
+    href: "/noyo-harbor/"
   - label: "Parameters"
-    href: "/params/index.html"
+    href: "/noyo-harbor/params/index.html"
     children:
       - label: "Dissolved Oxygen"
-        href: "/params/DO.html"
+        href: "/noyo-harbor/params/DO.html"
       - label: "Salinity"
-        href: "/params/Salinity.html"
+        href: "/noyo-harbor/params/Salinity.html"
       - label: "Temperature"
-        href: "/params/Temperature.html"
+        href: "/noyo-harbor/params/Temperature.html"
       - label: "Tide"
-        href: "/params/Tide.html"
+        href: "/noyo-harbor/params/Tide.html"
   - label: "Sites"
-    href: "/sites/index.html"
+    href: "/noyo-harbor/sites/index.html"
     children:
       - label: "B-Dock"
-        href: "/sites/BDock.html"
+        href: "/noyo-harbor/sites/BDock.html"
       - label: "Field Station"
-        href: "/sites/FieldStation.html"
+        href: "/noyo-harbor/sites/FieldStation.html"
       - label: "Princess Seafood"
-        href: "/sites/Princess.html"
+        href: "/noyo-harbor/sites/Princess.html"
       - label: "Silver"
-        href: "/sites/Silver.html"
+        href: "/noyo-harbor/sites/Silver.html"
 
 static_assets: []
 
