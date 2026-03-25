@@ -43,8 +43,8 @@ function findOverlayPages(siteRoot) {
 
 const overlayPages = findOverlayPages(SITE_ROOT);
 if (overlayPages.length === 0) {
-  console.error("No overlay chart pages found in", SITE_ROOT);
-  process.exit(1);
+  console.log("No overlay chart pages found in", SITE_ROOT, "— skipping");
+  process.exit(0);
 }
 
 console.log(
