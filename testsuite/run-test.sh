@@ -249,7 +249,14 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     if [[ -z "${OUTPUT_DIR}" ]]; then
         OUTPUT_DIR="/tmp/test-output"
     fi
-    rm -rf "${OUTPUT_DIR}"
+    # Clean output dir. Docker containers run as root, so files may be
+    # root-owned and un-removable by the host user. Fall back to a
+    # container-based cleanup if the host rm fails.
+    if ! rm -rf "${OUTPUT_DIR}" 2>/dev/null; then
+        ${CONTAINER_RT} run --rm -v "${OUTPUT_DIR}:/cleanup" "${IMAGE_NAME}" \
+            -c "rm -rf /cleanup/*" 2>/dev/null || true
+        rm -rf "${OUTPUT_DIR}" 2>/dev/null || true
+    fi
     mkdir -p "${OUTPUT_DIR}"
     OUTPUT_MOUNT=(-v "${OUTPUT_DIR}:/output")
 
