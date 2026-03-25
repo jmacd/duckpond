@@ -160,6 +160,7 @@ entries:
           EXTRACT(EPOCH FROM (timestamp - event_start)) as elapsed_s,
           depth_at_start - depth as drawdown,
           depth,
+          depth_at_start as static_depth,
           CASE WHEN is_draw THEN 'draw' ELSE 'recovery' END as phase
         FROM with_meta
         WHERE EXTRACT(EPOCH FROM (timestamp - event_start)) <= 7200
