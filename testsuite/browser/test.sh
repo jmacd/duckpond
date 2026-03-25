@@ -36,7 +36,7 @@ start_vite() {
     local base_path="${2:-/}"
 
     # Kill anything already listening on our port
-    lsof -ti:${PORT} 2>/dev/null | xargs kill -9 2>/dev/null; true
+    lsof -ti:${PORT} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
     sleep 0.5
 
     SITE_ROOT="${site_root}" BASE_PATH="${base_path}" \
@@ -62,7 +62,7 @@ stop_vite() {
         VITE_PID=""
     fi
     # Also kill anything still listening on the port (orphaned processes)
-    lsof -ti:${PORT} 2>/dev/null | xargs kill -9 2>/dev/null; true
+    lsof -ti:${PORT} 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 }
 
 cleanup() {
