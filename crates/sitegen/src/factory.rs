@@ -695,6 +695,7 @@ fn generate_site(
             &LayoutContext {
                 title: &title,
                 site_title: &config.site.title,
+                base_url: &config.site.base_url,
                 content: &content_html,
                 sidebar: sidebar_html.as_deref(),
                 date: fm.date.as_deref(),

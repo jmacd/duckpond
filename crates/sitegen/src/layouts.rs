@@ -57,6 +57,8 @@ pub struct LayoutContext<'a> {
     pub title: &'a str,
     /// Site title (from site.yaml)
     pub site_title: &'a str,
+    /// Base URL path prefix (from site.yaml, e.g. "/" or "/noyo-harbor/")
+    pub base_url: &'a str,
     /// Rendered HTML content (from markdown + shortcodes)
     pub content: &'a str,
     /// Rendered sidebar HTML (from sidebar partial, if any)
@@ -123,7 +125,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    (top_bar(Some("Home"), Some("/"), ctx.feed_url, ctx.github_url))
+                    (top_bar(Some("Home"), Some(ctx.base_url), ctx.feed_url, ctx.github_url))
                     article class="blog-post" {
                         div class="blog-post-content" {
                             (PreEscaped(ctx.content))
@@ -156,7 +158,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    (top_bar(Some("Home"), Some("/"), ctx.feed_url, ctx.github_url))
+                    (top_bar(Some("Home"), Some(ctx.base_url), ctx.feed_url, ctx.github_url))
                     article class="blog-post" {
                         div class="blog-post-content" {
                             (PreEscaped(ctx.content))
@@ -271,6 +273,7 @@ mod tests {
         let ctx = LayoutContext {
             title: "Home",
             site_title: "Test Site",
+            base_url: "/",
             content: "<h1>Hello</h1>",
             sidebar: None,
             date: None,
@@ -306,6 +309,7 @@ mod tests {
         let ctx = LayoutContext {
             title: "Temperature",
             site_title: "Noyo Harbor",
+            base_url: "/noyo-harbor/",
             content: "<p>Chart here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: None,
@@ -320,6 +324,11 @@ mod tests {
         assert!(html.contains("top-bar"), "Top bar present");
         assert!(html.contains("blog-post"), "Card container");
         assert!(
+            html.contains("/noyo-harbor/"),
+            "Home link uses base_url: {}",
+            html
+        );
+        assert!(
             !html.contains("github.com"),
             "No GitHub link when url is None"
         );
@@ -330,6 +339,7 @@ mod tests {
         let ctx = LayoutContext {
             title: "Page",
             site_title: "Site",
+            base_url: "/",
             content: "<p>Content</p>",
             sidebar: None,
             date: None,
@@ -345,6 +355,7 @@ mod tests {
         let ctx = LayoutContext {
             title: "Water System",
             site_title: "Caspar Water",
+            base_url: "/",
             content: "<h1>Water</h1><p>Info</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: None,
@@ -369,6 +380,7 @@ mod tests {
         let ctx = LayoutContext {
             title: "My Blog Post",
             site_title: "Test Blog",
+            base_url: "/",
             content: "<p>Post content here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: Some("2025-03-10"),
@@ -423,6 +435,7 @@ mod tests {
         let ctx = LayoutContext {
             title: "Undated Post",
             site_title: "Blog",
+            base_url: "/",
             content: "<p>No date</p>",
             sidebar: None,
             date: None,
