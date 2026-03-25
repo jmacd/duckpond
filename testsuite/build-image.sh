@@ -89,15 +89,33 @@ else
     echo ""
     echo "=== Building for native Linux (${BUILD_MODE}) ==="
     cd "${REPO_ROOT}"
-    if [[ "${QUIET}" == "true" ]]; then
-        cargo build ${CARGO_PROFILE} --bin pond 2>&1 | tail -5
+
+    # Ensure target is installed
+    rustup target add "${CONTAINER_TARGET}" 2>/dev/null || true
+
+    # Use zigbuild if available to target the container's glibc (bookworm = 2.36).
+    # A plain cargo build links against the host glibc which may be too new.
+    if command -v cargo-zigbuild &> /dev/null; then
+        echo "Using cargo-zigbuild targeting glibc 2.36 (${BUILD_MODE})..."
+        if [[ "${QUIET}" == "true" ]]; then
+            cargo zigbuild ${CARGO_PROFILE} --bin pond --target ${CONTAINER_TARGET}.2.36 2>&1 | tail -5
+        else
+            cargo zigbuild ${CARGO_PROFILE} --bin pond --target ${CONTAINER_TARGET}.2.36
+        fi
     else
-        cargo build ${CARGO_PROFILE} --bin pond
-    fi
-    if [[ "${BUILD_MODE}" == "release" ]]; then
-        BINARY_PATH="${REPO_ROOT}/target/release/pond"
-    else
-        BINARY_PATH="${REPO_ROOT}/target/debug/pond"
+        echo "WARNING: cargo-zigbuild not found, using plain cargo build."
+        echo "  Binary may not run in debian:bookworm-slim if host glibc is newer."
+        echo "  Install with: cargo install cargo-zigbuild && pip3 install ziglang"
+        if [[ "${QUIET}" == "true" ]]; then
+            cargo build ${CARGO_PROFILE} --bin pond 2>&1 | tail -5
+        else
+            cargo build ${CARGO_PROFILE} --bin pond
+        fi
+        if [[ "${BUILD_MODE}" == "release" ]]; then
+            BINARY_PATH="${REPO_ROOT}/target/release/pond"
+        else
+            BINARY_PATH="${REPO_ROOT}/target/debug/pond"
+        fi
     fi
 fi
 

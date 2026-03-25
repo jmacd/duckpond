@@ -25,6 +25,14 @@ jobs:
           sudo docker image prune -a -f || true
           df -h
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
       - name: Build test image
         working-directory: testsuite
         run: ./build-image.sh --quiet
@@ -44,6 +52,14 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           df -h
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
 
       - name: Build test image
         working-directory: testsuite
@@ -83,6 +99,14 @@ jobs:
       - name: Install Chromium for Puppeteer
         working-directory: testsuite/browser
         run: npx puppeteer browsers install chrome
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
 
       - name: Build test image
         working-directory: testsuite
