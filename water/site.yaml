@@ -51,6 +51,9 @@ partials:
 static:
   - pattern: "/img/*"
 
+theme:
+  bg-image: "url('/img/logo.svg')"
+
 sidebar:
   - "Political"
   - "Blog"
