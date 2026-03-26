@@ -53,11 +53,11 @@ impl FS {
             node: root_node,
             path: "/".into(),
         };
-        self.wd(&node).await
+        WD::new(node.clone(), self.clone(), node).await
     }
 
-    pub async fn wd(&self, np: &NodePath) -> Result<WD> {
-        WD::new(np.clone(), self.clone()).await
+    pub async fn wd(&self, np: &NodePath, effective_root: NodePath) -> Result<WD> {
+        WD::new(np.clone(), self.clone(), effective_root).await
     }
 
     /// Create a new node with persistence

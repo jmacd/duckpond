@@ -129,9 +129,10 @@ async fn test_relative_symlink() {
     let result = wd_a.read_file_path_to_vec("b").await;
     assert_eq!(result, Err(Error::parent_path_invalid("../c/d")));
 
-    // Can't read an absolute path except from the root.
-    let result = wd_a.read_file_path_to_vec("e").await;
-    assert_eq!(result, Err(Error::root_path_from_non_root("/c/d")));
+    // Absolute symlink resolves via the effective root (which is the
+    // actual root, inherited from the root WD).
+    let content = wd_a.read_file_path_to_vec("e").await.unwrap();
+    assert_eq!(content, b"relative symlink target");
 }
 
 #[tokio::test]

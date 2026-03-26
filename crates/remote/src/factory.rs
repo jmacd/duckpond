@@ -384,7 +384,7 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
     // If recursive, walk the foreign directory tree and create local entries
     // for all child physical directories
     if recursive {
-        let top_wd = fs.wd(&top_node).await.map_err(|e| {
+        let top_wd = fs.wd(&top_node, root.effective_root().clone()).await.map_err(|e| {
             RemoteError::Configuration(format!("Failed to open import directory: {}", e))
         })?;
 
@@ -481,7 +481,7 @@ async fn create_child_dirs_recursive(
                 .await;
 
             // Recurse into this child
-            let child_wd = fs.wd(&child_node).await.map_err(|e| {
+            let child_wd = fs.wd(&child_node, parent_wd.effective_root().clone()).await.map_err(|e| {
                 RemoteError::Configuration(format!(
                     "Failed to open child directory '{}': {}",
                     name, e

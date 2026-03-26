@@ -160,7 +160,7 @@ async fn test_copy_destination_nested_directory_with_trailing_slash() -> Result<
     // Create nested directories
     _ = root.create_dir_path("parent").await?;
     let parent = root.get_node_path("parent").await?;
-    let parent_wd = fs.wd(&parent).await?;
+    let parent_wd = fs.wd(&parent, root.effective_root().clone()).await?;
     _ = parent_wd.create_dir_path("child").await?;
 
     // Test trailing slash on nested directory
@@ -181,7 +181,7 @@ async fn test_copy_destination_nested_directory_without_trailing_slash() -> Resu
     // Create nested directories
     _ = root.create_dir_path("parent").await?;
     let parent = root.get_node_path("parent").await?;
-    let parent_wd = fs.wd(&parent).await?;
+    let parent_wd = fs.wd(&parent, root.effective_root().clone()).await?;
     _ = parent_wd.create_dir_path("child").await?;
 
     // Test no trailing slash on nested directory
