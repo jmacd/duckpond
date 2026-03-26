@@ -24,9 +24,9 @@ ${EXE} mkdir -p /system/run
 
 ${EXE} mkdir -p /system/etc
 
-${EXE} copy host://${NOYO}/site /system/site
-
 ${EXE} mkdir -p /laketech
+
+${EXE} copy host://${NOYO}/site /system/site
 
 ${EXE} copy host://${NOYO}/laketech /laketech/data
 

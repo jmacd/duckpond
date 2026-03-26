@@ -61,7 +61,7 @@
 html {
   font: 16px/1.7 var(--font-sans);
   background: var(--bg);
-  background-image: url('/img/logo.svg');
+  background-image: var(--bg-image, none);
   background-repeat: repeat;
   background-size: 1500px auto;
   color: var(--fg);

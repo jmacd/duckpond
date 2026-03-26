@@ -28,6 +28,7 @@ USER_OUTPUT_DIR=""
 INSPECT=false
 DATA_DIR=""
 COMPOSE=false
+TIMEOUT=${TEST_TIMEOUT:-300}  # Per-test timeout in seconds (default: 5 min)
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -68,6 +69,10 @@ while [[ $# -gt 0 ]]; do
             COMPOSE=true
             shift
             ;;
+        --timeout|-t)
+            TIMEOUT="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [options] [script.sh]"
             echo ""
@@ -80,6 +85,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --output, -o DIR     Mount DIR as /output in the container (for capturing results)"
             echo "  --data, -d DIR       Mount DIR as /data in the container (read-only test data)"
             echo "  --compose, -c        Run with docker compose (starts MinIO for S3 tests)"
+            echo "  --timeout, -t SECS   Per-test timeout in seconds (default: 300, env: TEST_TIMEOUT)"
             echo "  --inspect            Copy output for inspection (always; default on failure)"
             echo "  --help, -h           Show this help"
             echo ""
@@ -234,8 +240,8 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     # Tests marked '# REQUIRES: host' run directly on the host (not in Docker).
     # They need tools like Node.js/Puppeteer that aren't in the test container.
     if head -25 "${SCRIPT_FILE}" | grep -q '# REQUIRES: host'; then
-        echo "=== Running Test: ${SCRIPT_NAME} (host) ==="
-        exec bash "${SCRIPT_FILE}" "$@"
+        echo "=== Running Test: ${SCRIPT_NAME} (host, timeout: ${TIMEOUT}s) ==="
+        exec timeout "${TIMEOUT}" bash "${SCRIPT_FILE}" "$@"
     fi
 
     # Always capture output to /tmp/test-output for inspection
@@ -243,7 +249,14 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     if [[ -z "${OUTPUT_DIR}" ]]; then
         OUTPUT_DIR="/tmp/test-output"
     fi
-    rm -rf "${OUTPUT_DIR}"
+    # Clean output dir. Docker containers run as root, so files may be
+    # root-owned and un-removable by the host user. Fall back to a
+    # container-based cleanup if the host rm fails.
+    if ! rm -rf "${OUTPUT_DIR}" 2>/dev/null; then
+        ${CONTAINER_RT} run --rm -v "${OUTPUT_DIR}:/cleanup" "${IMAGE_NAME}" \
+            -c "rm -rf /cleanup/*" 2>/dev/null || true
+        rm -rf "${OUTPUT_DIR}" 2>/dev/null || true
+    fi
     mkdir -p "${OUTPUT_DIR}"
     OUTPUT_MOUNT=(-v "${OUTPUT_DIR}:/output")
 
@@ -258,7 +271,7 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     # Full log always goes to a known file for post-hoc inspection
     LOG_FILE="/tmp/test-${SCRIPT_NAME%.sh}.log"
 
-    echo "=== Running Test: ${SCRIPT_NAME} ==="
+    echo "=== Running Test: ${SCRIPT_NAME} (timeout: ${TIMEOUT}s) ==="
     echo "Log: ${LOG_FILE}"
 
     # Run the script in the container — all output to log file, NOT to stdout
@@ -284,7 +297,8 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         COMPOSE_VOLUMES+=("${OUTPUT_MOUNT[@]}")
         COMPOSE_VOLUMES+=("${DATA_MOUNT[@]}")
 
-        "${COMPOSE_CMD[@]}" -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" \
+        timeout "${TIMEOUT}" \
+            "${COMPOSE_CMD[@]}" -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" \
             run --rm \
             "${COMPOSE_VOLUMES[@]}" \
             test \
@@ -294,7 +308,8 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         compose_cleanup
         trap - EXIT
     else
-        ${CONTAINER_RT} run --rm \
+        timeout "${TIMEOUT}" \
+            ${CONTAINER_RT} run --rm \
             -e POND=/pond \
             -e RUST_LOG=info \
             -v "${SCRIPT_FILE}:/test/run.sh:ro" \
@@ -305,6 +320,13 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         EXIT_CODE=$?
     fi
     set -e
+
+    # Detect timeout (exit code 124 from timeout command)
+    if [[ ${EXIT_CODE} -eq 124 ]]; then
+        echo "=== TIMEOUT after ${TIMEOUT}s ==="
+        echo "  Test exceeded the ${TIMEOUT}-second limit."
+        echo "  Use --timeout or TEST_TIMEOUT to increase."
+    fi
 
     # Print a short summary
     # Print a short summary — extract from the test's own results line

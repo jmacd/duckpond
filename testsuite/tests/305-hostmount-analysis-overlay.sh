@@ -160,6 +160,7 @@ entries:
           EXTRACT(EPOCH FROM (timestamp - event_start)) as elapsed_s,
           depth_at_start - depth as drawdown,
           depth,
+          depth_at_start as static_depth,
           CASE WHEN is_draw THEN 'draw' ELSE 'recovery' END as phase
         FROM with_meta
         WHERE EXTRACT(EPOCH FROM (timestamp - event_start)) <= 7200
@@ -216,10 +217,14 @@ entries:
           CAST(pump_event_id AS INT) as pump_event_id,
           MIN(timestamp) as timestamp,
           CAST(EXTRACT(MONTH FROM MIN(event_start)) AS INT) as month,
+          CAST(EXTRACT(DOY FROM MIN(event_start)) AS INT) as day_of_year,
           SUM(CASE WHEN is_draw THEN 1 ELSE 0 END) * 60.0 as draw_duration_s,
           SUM(CASE WHEN NOT is_draw THEN 1 ELSE 0 END) * 60.0 as recovery_duration_s,
           COUNT(*) * 60.0 as total_duration_s,
           MAX(depth_at_start - depth) as max_drawdown,
+          MAX(depth_at_start) as depth_at_start,
+          MAX(depth_at_start) as static_depth,
+          MIN(depth) as min_depth,
           CAST(COUNT(*) AS INT) as num_points
         FROM capped
         GROUP BY pump_event_id

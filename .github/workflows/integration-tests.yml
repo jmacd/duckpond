@@ -1,0 +1,119 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+  TEST_TIMEOUT: 300
+
+jobs:
+  integration-tests:
+    name: Container Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -a -f || true
+          df -h
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Build test image
+        working-directory: testsuite
+        run: ./build-image.sh --quiet
+
+      - name: Run container tests
+        working-directory: testsuite
+        run: ./run-all.sh --no-rebuild --skip-browser
+
+  compose-tests:
+    name: Compose Tests (S3/MinIO)
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Build test image
+        working-directory: testsuite
+        run: ./build-image.sh --quiet
+
+      - name: Run compose tests
+        working-directory: testsuite
+        run: |
+          for test in tests/*; do
+            if head -25 "$test" | grep -q '# REQUIRES: compose'; then
+              echo "--- Running: $(basename $test) ---"
+              ./run-test.sh --no-rebuild --compose "$test"
+            fi
+          done
+
+  browser-tests:
+    name: Browser Tests (Puppeteer)
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install browser test dependencies
+        working-directory: testsuite/browser
+        run: npm ci
+
+      - name: Install Chromium for Puppeteer
+        working-directory: testsuite/browser
+        run: npx puppeteer browsers install chrome
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Build test image
+        working-directory: testsuite
+        run: ./build-image.sh --quiet
+
+      - name: Run browser tests
+        working-directory: testsuite
+        env:
+          TEST_TIMEOUT: 600
+        run: ./run-test.sh --no-rebuild --timeout 600 202
