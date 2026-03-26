@@ -297,7 +297,7 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         COMPOSE_VOLUMES+=("${OUTPUT_MOUNT[@]}")
         COMPOSE_VOLUMES+=("${DATA_MOUNT[@]}")
 
-        timeout "${TIMEOUT}" \
+        timeout --foreground "${TIMEOUT}" \
             "${COMPOSE_CMD[@]}" -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" \
             run --rm \
             "${COMPOSE_VOLUMES[@]}" \
@@ -308,7 +308,7 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
         compose_cleanup
         trap - EXIT
     else
-        timeout "${TIMEOUT}" \
+        timeout --foreground "${TIMEOUT}" \
             ${CONTAINER_RT} run --rm \
             -e POND=/pond \
             -e RUST_LOG=info \

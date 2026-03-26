@@ -37,5 +37,3 @@ services:
     depends_on:
       minio:
         condition: service_healthy
-    stdin_open: true
-    tty: true
