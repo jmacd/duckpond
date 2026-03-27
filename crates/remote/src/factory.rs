@@ -357,29 +357,51 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
         root.clone()
     };
 
-    // Create the top-level import directory with foreign FileID
-    let top_node = create_foreign_dir(
-        &state,
-        &parent_wd,
-        dir_name,
-        &foreign_part_id,
-        &foreign_node_id,
-    )
-    .await?;
+    // Create the top-level import directory.
+    // When importing the root (source_path "/"), the mount point must be
+    // a fresh local partition -- we cannot reuse the foreign root UUID
+    // because it would collide with the local root. The foreign root's
+    // children are linked with their original foreign IDs via recursive
+    // import below.
+    let is_root_import = foreign_part_id == "00000000-0000-7100-8000-000000000000";
+
+    let top_node = if is_root_import {
+        // Create a normal local directory as the mount point
+        let mount_wd = parent_wd.create_dir_path(dir_name).await.map_err(|e| {
+            RemoteError::Configuration(format!(
+                "Failed to create mount point '{}': {}",
+                dir_name, e
+            ))
+        })?;
+        mount_wd.node_path()
+    } else {
+        create_foreign_dir(
+            &state,
+            &parent_wd,
+            dir_name,
+            &foreign_part_id,
+            &foreign_node_id,
+        )
+        .await?
+    };
 
     // Record import metadata for steward (via Delta commit metadata).
     // Use the top-level foreign part_id as the factory identifier.
     let factory_key = foreign_part_id.clone();
-    state
-        .add_import_metadata(tlogfs::ImportPartitionRecord {
-            factory_node_id: factory_key.clone(),
-            foreign_part_id: foreign_part_id.clone(),
-            foreign_pond_id: String::new(), // Will be filled from backup metadata
-            watermark_txn_seq: 0,
-        })
-        .await;
+    if !is_root_import {
+        state
+            .add_import_metadata(tlogfs::ImportPartitionRecord {
+                factory_node_id: factory_key.clone(),
+                foreign_part_id: foreign_part_id.clone(),
+                foreign_pond_id: String::new(),
+                watermark_txn_seq: 0,
+            })
+            .await;
+    }
 
-    let mut partition_count = 1;
+    // For root imports, the mount point is a local directory (not a
+    // foreign partition), so start the count at 0.
+    let mut partition_count: usize = if is_root_import { 0 } else { 1 };
 
     // If recursive, walk the foreign directory tree and create local entries
     // for all child physical directories
@@ -656,6 +678,7 @@ async fn load_foreign_oplog(
 
 /// Navigate the foreign directory tree to find the part_id for a path.
 /// Returns (part_id, node_id).
+/// For root path ("/"), returns the root partition directly.
 async fn navigate_foreign_path(
     ctx: &datafusion::prelude::SessionContext,
     source_path: &str,
@@ -666,10 +689,10 @@ async fn navigate_foreign_path(
         .filter(|s| !s.is_empty())
         .collect();
 
+    // Root path: return the well-known root UUID
     if source_parts.is_empty() {
-        return Err(RemoteError::Configuration(
-            "source_path must be a non-root path".to_string(),
-        ));
+        let root_id = "00000000-0000-7100-8000-000000000000".to_string();
+        return Ok((root_id.clone(), root_id));
     }
 
     let root_id = "00000000-0000-7100-8000-000000000000";
