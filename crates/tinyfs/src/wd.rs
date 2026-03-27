@@ -325,7 +325,7 @@ impl WD {
             .in_path(path.as_ref(), |wd, entry| async move {
                 match entry {
                     Lookup::NotFound(_, name) => {
-                        let id = FileID::new_physical_dir_id();
+                        let id = FileID::new_physical_dir_id(wd.effective_root.id().pond_id());
                         let node = wd.fs.persistence.create_directory_node(id).await?;
                         wd.fs.persistence.store_node(&node).await?;
 
@@ -393,7 +393,7 @@ impl WD {
                         }
                         Ok(None) => {
                             // Entry doesn't exist - create the directory
-                            let id = FileID::new_physical_dir_id();
+                            let id = FileID::new_physical_dir_id(current_wd.effective_root.id().pond_id());
                             let node = current_wd.fs.persistence.create_directory_node(id).await?;
                             current_wd.fs.persistence.store_node(&node).await?;
                             current_wd

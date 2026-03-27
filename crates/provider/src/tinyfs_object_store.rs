@@ -696,7 +696,7 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
             .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
 
         // For directories, node_id == part_id
-        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::from_node_id(node_id), node_id);
+        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::from_node_id(node_id), node_id, tinyfs::local_pond_uuid());
         return Ok(TinyFsPath {
             file_id,
             version: None, // Directories don't have explicit versions in the path
@@ -743,7 +743,7 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
         return Err(format!("Invalid TinyFS path length: {}", path));
     };
 
-    let file_id = tinyfs::FileID::new_from_ids(part_id, node_id);
+    let file_id = tinyfs::FileID::new_from_ids(part_id, node_id, tinyfs::local_pond_uuid());
     Ok(TinyFsPath { file_id, version })
 }
 

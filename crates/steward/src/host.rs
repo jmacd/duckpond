@@ -224,6 +224,7 @@ impl HostSteward {
                     parent_part_id,
                     entry_type,
                     mount_id_bytes.as_bytes(),
+                    tinyfs::local_pond_uuid(),
                 );
                 let factory_context =
                     tinyfs::FactoryContext::new(provider_context.clone(), child_file_id);
@@ -245,6 +246,7 @@ impl HostSteward {
                     parent_part_id,
                     entry_type,
                     mount_id_bytes.as_bytes(),
+                    tinyfs::local_pond_uuid(),
                 );
                 let factory_context =
                     tinyfs::FactoryContext::new(provider_context.clone(), child_file_id);

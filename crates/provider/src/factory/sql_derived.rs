@@ -566,7 +566,7 @@ impl SqlDerivedFile {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
                     EntryType::TablePhysicalSeries | EntryType::TableDynamic => file_id,
-                    _ => FileID::new_from_ids(file_id.part_id(), file_id.node_id()),
+                    _ => FileID::new_from_ids(file_id.part_id(), file_id.node_id(), file_id.pond_id()),
                 };
                 if seen.insert(dedup_key) {
                     let entry_type_str = format!("{entry_type:?}");
@@ -2433,6 +2433,7 @@ query: ""
             PartID::root(),
             EntryType::TableDynamic,
             first_query.as_bytes(),
+            tinyfs::local_pond_uuid(),
         );
         let context = test_context(&provider_context, first_file_id);
         let first_config = SqlDerivedConfig {
@@ -2482,6 +2483,7 @@ query: ""
                 PartID::root(),
                 EntryType::TableDynamic,
                 second_query.as_bytes(),
+                tinyfs::local_pond_uuid(),
             );
             let context = test_context(&provider_context, second_file_id);
             let second_config = SqlDerivedConfig {
@@ -4100,7 +4102,7 @@ rules:
         };
 
         // Create sql-derived file
-        let sql_derived_id = FileID::new_physical_dir_id();
+        let sql_derived_id = FileID::new_physical_dir_id(tinyfs::local_pond_uuid());
         let sql_file = SqlDerivedFile::new(
             sql_config,
             test_context(&provider_context, sql_derived_id),

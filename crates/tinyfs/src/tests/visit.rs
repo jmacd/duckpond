@@ -170,6 +170,7 @@ impl Directory for VisitDirectory {
                     crate::PartID::root(),
                     crate::EntryType::FileDynamic,
                     format!("visit:{}", name).as_bytes(),
+                    crate::local_pond_uuid(),
                 );
                 let dir_entry = DirectoryEntry::new(
                     name.clone(),

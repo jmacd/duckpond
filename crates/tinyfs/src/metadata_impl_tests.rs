@@ -6,14 +6,14 @@
 mod metadata_tests {
     use crate::EntryType;
     use crate::memory::{MemoryDirectory, MemoryPersistence, MemorySymlink};
-    use crate::node::{FileID, PartID};
+    use crate::node::{FileID, PartID, local_pond_uuid};
     use crate::persistence::PersistenceLayer;
     use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_memory_file_metadata() {
         let persistence = MemoryPersistence::default();
-        let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalVersion);
+        let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalVersion, local_pond_uuid());
 
         // Create file node in persistence (proper way to create nodes)
         let node = persistence.create_file_node(id).await.unwrap();

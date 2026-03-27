@@ -381,6 +381,7 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
             dir_name,
             &foreign_part_id,
             &foreign_node_id,
+            tinyfs::local_pond_uuid(), // TODO: use actual foreign pond_id from backup metadata
         )
         .await?
     };
@@ -437,12 +438,14 @@ async fn create_foreign_dir(
     name: &str,
     part_id: &str,
     node_id: &str,
+    pond_id: uuid7::Uuid,
 ) -> Result<tinyfs::NodePath, RemoteError> {
     use tinyfs::PersistenceLayer;
 
     let file_id = tinyfs::FileID::new_from_ids(
         tinyfs::PartID::new(part_id.to_string()),
         tinyfs::NodeID::new(node_id.to_string()),
+        pond_id,
     );
 
     let node = state.create_directory_node(file_id).await.map_err(|e| {
@@ -483,7 +486,10 @@ async fn create_child_dirs_recursive(
     for (name, child_id, entry_type) in &entries {
         if entry_type == "dir:physical" {
             // Create local directory with the foreign FileID
-            let child_node = create_foreign_dir(state, parent_wd, name, child_id, child_id).await?;
+            let child_node = create_foreign_dir(
+                state, parent_wd, name, child_id, child_id,
+                tinyfs::local_pond_uuid(), // TODO: use actual foreign pond_id
+            ).await?;
 
             log::info!(
                 "   [INIT] Created child import dir: {} (part_id={})",

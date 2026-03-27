@@ -117,7 +117,7 @@ impl DynamicDirDirectory {
         // unique, non-colliding children.
         let (node_type, entry_type) = if creates_directory {
             let entry_type = EntryType::DirectoryDynamic;
-            let child_file_id = tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes);
+            let child_file_id = tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes, self.context.file_id.pond_id());
             let child_context = self.create_child_context(child_file_id);
             let dir_handle =
                 FactoryRegistry::create_directory(&entry.factory, &config_bytes, child_context)?;
@@ -132,7 +132,7 @@ impl DynamicDirDirectory {
             // factories like sql-derived-table/series), then verify after creation.
             let preliminary_type = EntryType::TableDynamic;
             let child_file_id =
-                tinyfs::FileID::from_content(parent_part_id, preliminary_type, &id_bytes);
+                tinyfs::FileID::from_content(parent_part_id, preliminary_type, &id_bytes, self.context.file_id.pond_id());
             let child_context = self.create_child_context(child_file_id);
             let file_handle =
                 FactoryRegistry::create_file(&entry.factory, &config_bytes, child_context).await?;
@@ -152,7 +152,7 @@ impl DynamicDirDirectory {
             (tinyfs::NodeType::File(file_handle), actual_type)
         };
 
-        let file_id = tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes);
+        let file_id = tinyfs::FileID::from_content(parent_part_id, entry_type, &id_bytes, self.context.file_id.pond_id());
         let node_ref = Node::new(file_id, node_type);
 
         Ok(node_ref)

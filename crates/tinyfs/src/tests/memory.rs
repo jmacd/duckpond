@@ -488,12 +488,12 @@ async fn test_memory_file_physical_series_version_concatenation() {
     use crate::EntryType;
     use crate::file::File;
     use crate::memory::{MemoryFile, MemoryPersistence};
-    use crate::node::{FileID, PartID};
+    use crate::node::{FileID, PartID, local_pond_uuid};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Create persistence layer
     let persistence = MemoryPersistence::default();
-    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalSeries);
+    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalSeries, local_pond_uuid());
 
     // Create MemoryFile with FilePhysicalSeries entry type
     let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalSeries);
@@ -530,12 +530,12 @@ async fn test_memory_file_physical_version_single_content() {
     use crate::EntryType;
     use crate::file::File;
     use crate::memory::{MemoryFile, MemoryPersistence};
-    use crate::node::{FileID, PartID};
+    use crate::node::{FileID, PartID, local_pond_uuid};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Create persistence layer
     let persistence = MemoryPersistence::default();
-    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalVersion);
+    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalVersion, local_pond_uuid());
 
     // Create MemoryFile with FilePhysicalVersion entry type
     let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalVersion);

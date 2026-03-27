@@ -73,9 +73,9 @@ impl Directory for OpLogDirectory {
         // - Physical directories: part_id == node_id (self-partitioned)
         // - Everything else: part_id == parent's part_id
         let child_file_id = if entry.entry_type == tinyfs::EntryType::DirectoryPhysical {
-            FileID::from_physical_dir_node_id(entry.child_node_id)
+            FileID::from_physical_dir_node_id(entry.child_node_id, self.id.pond_id())
         } else {
-            FileID::new_from_ids(self.id.part_id(), entry.child_node_id)
+            FileID::new_from_ids(self.id.part_id(), entry.child_node_id, self.id.pond_id())
         };
 
         // Load the child node
@@ -134,9 +134,9 @@ impl Directory for OpLogDirectory {
         match removed_entry {
             Some(entry) => {
                 let child_file_id = if entry.entry_type == tinyfs::EntryType::DirectoryPhysical {
-                    FileID::from_physical_dir_node_id(entry.child_node_id)
+                    FileID::from_physical_dir_node_id(entry.child_node_id, self.id.pond_id())
                 } else {
-                    FileID::new_from_ids(self.id.part_id(), entry.child_node_id)
+                    FileID::new_from_ids(self.id.part_id(), entry.child_node_id, self.id.pond_id())
                 };
                 let child_node = self.state.load_node(child_file_id).await?;
                 Ok(Some(child_node))
