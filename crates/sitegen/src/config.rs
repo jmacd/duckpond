@@ -129,17 +129,34 @@ pub struct ContentStage {
 pub struct ExportStage {
     /// Name referenced by routes (e.g., "params", "sites")
     pub name: String,
-    /// Pond glob pattern (e.g., "/reduced/single_param/*/*.series")
+    /// Pond glob pattern or format-provider URL pattern.
+    ///
+    /// Bare paths (e.g., `/reduced/single_param/*/*.series`) are resolved
+    /// directly as queryable pond files.
+    ///
+    /// URL-scheme patterns (e.g., `jsonlogs:///logs/watershop/*.jsonl`)
+    /// are resolved through the format provider registry, allowing raw
+    /// data files to be queried via DataFusion.
     pub pattern: String,
     /// Target data points per screen width for partition sizing.
     /// Typical value: 1000-2000. Default: 1500.
     /// Controls how parquet files are temporally partitioned per resolution.
     #[serde(default = "default_target_points")]
     pub target_points: u64,
+    /// Name of the timestamp column for temporal partitioning.
+    /// Default: "timestamp". Override for format-provider patterns where
+    /// the timestamp column has a different name (e.g., "__REALTIME_TIMESTAMP"
+    /// for journald logs).
+    #[serde(default = "default_timestamp_column")]
+    pub timestamp_column: String,
 }
 
 fn default_target_points() -> u64 {
     1500
+}
+
+fn default_timestamp_column() -> String {
+    "timestamp".to_string()
 }
 
 /// A route in the hierarchical route tree.

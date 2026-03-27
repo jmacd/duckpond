@@ -212,149 +212,300 @@ async fn run_export_stages(
     let mut exports = BTreeMap::new();
 
     for stage in &config.exports {
-        let matches = root.collect_matches(&stage.pattern).await?;
-        info!(
-            "Export stage '{}': {} matches for '{}'",
-            stage.name,
-            matches.len(),
-            stage.pattern
-        );
-
-        let target_points = stage.target_points;
-        let display = crate::partitions::DisplayConfig { target_points };
-
-        // Discover resolutions from matches
-        let mut resolutions = Vec::new();
-        for (_node_path, captures) in &matches {
-            if let Some(res) = crate::partitions::extract_resolution_from_captures(captures)
-                && !resolutions.contains(&res)
-            {
-                resolutions.push(res);
-            }
-        }
-
-        // Compute per-resolution partition plans
-        let partition_plans = if resolutions.is_empty() {
-            warn!(
-                "Export stage '{}': no resolutions found in captures. \
-                 Using default temporal partition ['year'].",
-                stage.name
-            );
-            None
-        } else {
-            // max_width = coarsest_resolution * target_points
-            // This is the widest viewport the coarsest resolution will serve.
-            let mut max_res_secs = 0u64;
-            for res in &resolutions {
-                if let Some(secs) = crate::partitions::parse_duration_secs(res) {
-                    max_res_secs = max_res_secs.max(secs);
-                }
-            }
-            let max_width_secs = max_res_secs * target_points;
-
-            let (partitions, warnings) =
-                crate::partitions::compute_partitions(&resolutions, &display, max_width_secs);
-
-            for w in &warnings {
-                warn!("Export stage '{}': {}", stage.name, w);
-            }
-
-            info!(
-                "Export stage '{}': auto-partitioning {} resolutions ({:?})",
-                stage.name,
-                partitions.len(),
-                resolutions,
-            );
-            for (res, plan) in &partitions {
-                info!(
-                    "  {} -> {:?} (partition ~= {}s, max {} pts/file)",
-                    res, plan.temporal, plan.partition_width_secs, plan.max_points_per_file
-                );
-            }
-
-            Some(partitions)
-        };
-
-        let mut by_key: BTreeMap<String, Vec<shortcodes::ExportedFile>> = BTreeMap::new();
-
-        for (node_path, captures) in &matches {
-            let path_str = node_path.path.to_string_lossy().to_string();
-            let key = captures.first().cloned().unwrap_or_default();
-
-            let rel = series_path_to_data_rel(&path_str);
-            let export_dir = data_dir.join(&rel);
-
-            // Look up resolution-specific temporal partition
-            let temporal_parts: Vec<String> = if let Some(ref partitions) = partition_plans {
-                if let Some(res) = crate::partitions::extract_resolution_from_captures(captures) {
-                    if let Some(plan) = partitions.get(&res) {
-                        plan.temporal.clone()
-                    } else {
-                        warn!(
-                            "  {} -- resolution '{}' not in partition plan, using ['year']",
-                            path_str, res
-                        );
-                        vec!["year".to_string()]
-                    }
-                } else {
-                    vec!["year".to_string()]
-                }
-            } else {
-                // No resolutions discovered -- single partition
-                vec!["year".to_string()]
-            };
-
-            let (export_outputs, _schema) = provider::export::export_series_to_parquet(
-                &root,
-                &path_str,
-                &export_dir,
-                &temporal_parts,
-                captures,
-                &data_dir,
-                provider_ctx,
+        // Detect format-provider URL patterns vs bare pond glob paths
+        if stage.pattern.contains("://") {
+            let by_key = run_format_provider_export(
+                stage, context, &data_dir, provider_ctx, config,
             )
-            .await
-            .map_err(|e| {
-                tinyfs::Error::Other(format!("export_series_to_parquet '{}': {}", path_str, e))
-            })?;
-
-            for (_caps, export_output) in &export_outputs {
-                let mut temporal = BTreeMap::new();
-                for component in export_output.file.components() {
-                    let s = component.as_os_str().to_string_lossy();
-                    if let Some((k, v)) = s.split_once('=')
-                        && temporal_parts.contains(&k.to_string())
-                    {
-                        temporal.insert(k.to_string(), v.to_string());
-                    }
-                }
-
-                let base = config.site.base_url.trim_end_matches('/');
-                by_key
-                    .entry(key.clone())
-                    .or_default()
-                    .push(shortcodes::ExportedFile {
-                        path: path_str.clone(),
-                        file: format!("{}/data/{}", base, export_output.file.to_string_lossy()),
-                        captures: captures.clone(),
-                        temporal,
-                        start_time: export_output.start_time.unwrap_or(0),
-                        end_time: export_output.end_time.unwrap_or(0),
-                    });
-            }
-
-            info!(
-                "  {} -> {} partitioned files ({:?})",
-                path_str,
-                export_outputs.len(),
-                temporal_parts,
-            );
+            .await?;
+            exports.insert(stage.name.clone(), ExportContext { by_key });
+        } else {
+            let by_key = run_queryable_file_export(
+                stage, &root, &data_dir, provider_ctx, config,
+            )
+            .await?;
+            exports.insert(stage.name.clone(), ExportContext { by_key });
         }
-
-        exports.insert(stage.name.clone(), ExportContext { by_key });
     }
 
     Ok(exports)
+}
+
+/// Export via format-provider URL pattern (e.g., `jsonlogs:///path/*.jsonl`).
+///
+/// Uses the provider API to expand the pattern, create table providers
+/// through the format provider registry, and export each matched file
+/// as Hive-partitioned Parquet.
+async fn run_format_provider_export(
+    stage: &crate::config::ExportStage,
+    context: &FactoryContext,
+    data_dir: &std::path::Path,
+    provider_ctx: &tinyfs::ProviderContext,
+    config: &SiteConfig,
+) -> Result<BTreeMap<String, Vec<shortcodes::ExportedFile>>, tinyfs::Error> {
+    let fs = context.context.filesystem();
+    let provider = provider::Provider::new(Arc::new(fs));
+
+    // Use UrlPatternMatcher to expand the pattern and get matched files
+    let matcher = provider::UrlPatternMatcher::new(provider);
+    let matched_files = match matcher
+        .match_pattern(&stage.pattern, provider_ctx)
+        .await
+    {
+        Ok(files) => files,
+        Err(e) => {
+            // No matches is not fatal for log exports (logs may not exist yet)
+            warn!(
+                "Export stage '{}': pattern '{}' matched no files: {}",
+                stage.name, stage.pattern, e
+            );
+            return Ok(BTreeMap::new());
+        }
+    };
+
+    info!(
+        "Export stage '{}': {} matches for '{}'",
+        stage.name,
+        matched_files.len(),
+        stage.pattern,
+    );
+
+    let ctx = &provider_ctx.datafusion_session;
+    let url = provider::Url::parse(&stage.pattern).map_err(|e| {
+        tinyfs::Error::Other(format!("Invalid URL pattern '{}': {}", stage.pattern, e))
+    })?;
+    let scheme = url.scheme();
+    let timestamp_column = &stage.timestamp_column;
+
+    // For format-provider exports: skip temporal partitioning.
+    // Raw log data (all-Utf8 columns) needs casting before date_part works.
+    // Export as a single parquet file per source file.
+    let temporal_parts: Vec<String> = vec![];
+
+    let mut by_key: BTreeMap<String, Vec<shortcodes::ExportedFile>> = BTreeMap::new();
+    let base = config.site.base_url.trim_end_matches('/');
+
+    for matched in &matched_files {
+        let path_str = matched.path().to_string_lossy().to_string();
+        let key = matched.captures.first().cloned().unwrap_or_default();
+
+        let rel = series_path_to_data_rel(&path_str);
+        let export_dir = data_dir.join(&rel);
+
+        // Create table provider via format provider
+        let file_url_str = format!("{}://{}", scheme, path_str);
+        let table_provider = matcher.provider()
+            .create_table_provider(&file_url_str, ctx)
+            .await
+            .map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Failed to create table provider for '{}': {}",
+                    file_url_str, e
+                ))
+            })?;
+
+        let (export_outputs, _schema) =
+            provider::export::export_table_provider_to_parquet(
+                table_provider,
+                &path_str,
+                &export_dir,
+                &temporal_parts,
+                &matched.captures,
+                data_dir,
+                provider_ctx,
+                timestamp_column,
+            )
+            .await
+            .map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "export '{}': {}",
+                    path_str, e
+                ))
+            })?;
+
+        for (_caps, export_output) in &export_outputs {
+            let mut temporal = BTreeMap::new();
+            for component in export_output.file.components() {
+                let s = component.as_os_str().to_string_lossy();
+                if let Some((k, v)) = s.split_once('=')
+                    && temporal_parts.contains(&k.to_string())
+                {
+                    temporal.insert(k.to_string(), v.to_string());
+                }
+            }
+
+            by_key
+                .entry(key.clone())
+                .or_default()
+                .push(shortcodes::ExportedFile {
+                    path: path_str.clone(),
+                    file: format!("{}/data/{}", base, export_output.file.to_string_lossy()),
+                    captures: matched.captures.clone(),
+                    temporal,
+                    start_time: export_output.start_time.unwrap_or(0),
+                    end_time: export_output.end_time.unwrap_or(0),
+                });
+        }
+
+        info!(
+            "  {} -> {} partitioned files ({:?})",
+            path_str,
+            export_outputs.len(),
+            temporal_parts,
+        );
+    }
+
+    Ok(by_key)
+}
+
+/// Export queryable pond files (original path: bare glob patterns).
+async fn run_queryable_file_export(
+    stage: &crate::config::ExportStage,
+    root: &tinyfs::WD,
+    data_dir: &std::path::Path,
+    provider_ctx: &tinyfs::ProviderContext,
+    config: &SiteConfig,
+) -> Result<BTreeMap<String, Vec<shortcodes::ExportedFile>>, tinyfs::Error> {
+    let matches = root.collect_matches(&stage.pattern).await?;
+    info!(
+        "Export stage '{}': {} matches for '{}'",
+        stage.name,
+        matches.len(),
+        stage.pattern
+    );
+
+    let target_points = stage.target_points;
+    let display = crate::partitions::DisplayConfig { target_points };
+
+    // Discover resolutions from matches
+    let mut resolutions = Vec::new();
+    for (_node_path, captures) in &matches {
+        if let Some(res) = crate::partitions::extract_resolution_from_captures(captures)
+            && !resolutions.contains(&res)
+        {
+            resolutions.push(res);
+        }
+    }
+
+    // Compute per-resolution partition plans
+    let partition_plans = if resolutions.is_empty() {
+        warn!(
+            "Export stage '{}': no resolutions found in captures. \
+             Using default temporal partition ['year'].",
+            stage.name
+        );
+        None
+    } else {
+        // max_width = coarsest_resolution * target_points
+        // This is the widest viewport the coarsest resolution will serve.
+        let mut max_res_secs = 0u64;
+        for res in &resolutions {
+            if let Some(secs) = crate::partitions::parse_duration_secs(res) {
+                max_res_secs = max_res_secs.max(secs);
+            }
+        }
+        let max_width_secs = max_res_secs * target_points;
+
+        let (partitions, warnings) =
+            crate::partitions::compute_partitions(&resolutions, &display, max_width_secs);
+
+        for w in &warnings {
+            warn!("Export stage '{}': {}", stage.name, w);
+        }
+
+        info!(
+            "Export stage '{}': auto-partitioning {} resolutions ({:?})",
+            stage.name,
+            partitions.len(),
+            resolutions,
+        );
+        for (res, plan) in &partitions {
+            info!(
+                "  {} -> {:?} (partition ~= {}s, max {} pts/file)",
+                res, plan.temporal, plan.partition_width_secs, plan.max_points_per_file
+            );
+        }
+
+        Some(partitions)
+    };
+
+    let mut by_key: BTreeMap<String, Vec<shortcodes::ExportedFile>> = BTreeMap::new();
+
+    for (node_path, captures) in &matches {
+        let path_str = node_path.path.to_string_lossy().to_string();
+        let key = captures.first().cloned().unwrap_or_default();
+
+        let rel = series_path_to_data_rel(&path_str);
+        let export_dir = data_dir.join(&rel);
+
+        // Look up resolution-specific temporal partition
+        let temporal_parts: Vec<String> = if let Some(ref partitions) = partition_plans {
+            if let Some(res) = crate::partitions::extract_resolution_from_captures(captures) {
+                if let Some(plan) = partitions.get(&res) {
+                    plan.temporal.clone()
+                } else {
+                    warn!(
+                        "  {} -- resolution '{}' not in partition plan, using ['year']",
+                        path_str, res
+                    );
+                    vec!["year".to_string()]
+                }
+            } else {
+                vec!["year".to_string()]
+            }
+        } else {
+            // No resolutions discovered -- single partition
+            vec!["year".to_string()]
+        };
+
+        let (export_outputs, _schema) = provider::export::export_series_to_parquet(
+            &root,
+            &path_str,
+            &export_dir,
+            &temporal_parts,
+            captures,
+            data_dir,
+            provider_ctx,
+        )
+        .await
+        .map_err(|e| {
+            tinyfs::Error::Other(format!("export_series_to_parquet '{}': {}", path_str, e))
+        })?;
+
+        for (_caps, export_output) in &export_outputs {
+            let mut temporal = BTreeMap::new();
+            for component in export_output.file.components() {
+                let s = component.as_os_str().to_string_lossy();
+                if let Some((k, v)) = s.split_once('=')
+                    && temporal_parts.contains(&k.to_string())
+                {
+                    temporal.insert(k.to_string(), v.to_string());
+                }
+            }
+
+            let base = config.site.base_url.trim_end_matches('/');
+            by_key
+                .entry(key.clone())
+                .or_default()
+                .push(shortcodes::ExportedFile {
+                    path: path_str.clone(),
+                    file: format!("{}/data/{}", base, export_output.file.to_string_lossy()),
+                    captures: captures.clone(),
+                    temporal,
+                    start_time: export_output.start_time.unwrap_or(0),
+                    end_time: export_output.end_time.unwrap_or(0),
+                });
+        }
+
+        info!(
+            "  {} -> {} partitioned files ({:?})",
+            path_str,
+            export_outputs.len(),
+            temporal_parts,
+        );
+    }
+
+    Ok(by_key)
 }
 
 /// Run content stages: glob-match markdown data files, parse frontmatter for metadata.
@@ -496,6 +647,7 @@ fn write_builtin_assets(
     static STYLE_CSS: &str = include_str!("../assets/style.css");
     static CHART_JS: &str = include_str!("../assets/chart.js");
     static OVERLAY_JS: &str = include_str!("../assets/overlay.js");
+    static LOG_VIEWER_JS: &str = include_str!("../assets/log-viewer.js");
 
     // Build CSS with theme overrides appended
     let css = if theme.is_empty() {
@@ -513,6 +665,7 @@ fn write_builtin_assets(
         ("style.css", css.as_str()),
         ("chart.js", CHART_JS),
         ("overlay.js", OVERLAY_JS),
+        ("log-viewer.js", LOG_VIEWER_JS),
     ] {
         let path = output_dir.join(name);
         std::fs::write(&path, content.as_bytes())

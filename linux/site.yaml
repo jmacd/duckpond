@@ -1,0 +1,34 @@
+factory: sitegen
+
+site:
+  title: "Linux Logs"
+  base_url: "/"
+
+exports:
+  - name: "logs"
+    pattern: "jsonlogs:///logs/watershop/*.jsonl"
+    timestamp_column: "__REALTIME_TIMESTAMP"
+
+routes:
+  - name: "home"
+    type: static
+    slug: ""
+    page: "/site/index.md"
+    routes:
+      - name: "logs"
+        type: static
+        slug: "logs"
+        page: "/site/logs-index.md"
+        routes:
+          - name: "log-detail"
+            type: template
+            slug: "$0"
+            page: "/site/logs.md"
+            export: "logs"
+
+partials:
+  sidebar: "/site/sidebar.md"
+
+sidebar:
+  - label: "Logs"
+    href: "/logs/index.html"

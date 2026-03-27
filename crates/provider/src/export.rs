@@ -208,44 +208,6 @@ pub async fn export_series_to_parquet(
         export_dir.display()
     );
 
-    // Build SQL query with temporal partitioning columns
-    let temporal_columns = temporal_parts
-        .iter()
-        .map(|part| match part.as_str() {
-            "year" => "date_part('year', timestamp) as year".to_string(),
-            "quarter" => "date_part('quarter', timestamp) as quarter".to_string(),
-            "month" => "date_part('month', timestamp) as month".to_string(),
-            "day" => "date_part('day', timestamp) as day".to_string(),
-            "hour" => "date_part('hour', timestamp) as hour".to_string(),
-            "minute" => "date_part('minute', timestamp) as minute".to_string(),
-            _ => format!("date_part('{}', timestamp) as {}", part, part),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    // Generate unique table name
-    let unique_table_name = format!(
-        "series_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("ok")
-            .as_nanos()
-    );
-
-    // Build SELECT clause
-    let select_clause = if temporal_columns.is_empty() {
-        format!("SELECT * FROM \"{}\"", unique_table_name)
-    } else {
-        format!(
-            "SELECT *, {} FROM \"{}\"",
-            temporal_columns, unique_table_name
-        )
-    };
-
-    // Create output directory
-    std::fs::create_dir_all(export_dir)?;
-
     // Register the series as a DataFusion table
     let (_, lookup) = root
         .resolve_path(pond_path)
@@ -277,6 +239,83 @@ pub async fn export_series_to_parquet(
 
     drop(file_guard);
 
+    export_table_provider_to_parquet(
+        table_provider,
+        pond_path,
+        export_dir,
+        temporal_parts,
+        captures,
+        base_output_dir,
+        provider_ctx,
+        "timestamp",
+    )
+    .await
+}
+
+/// Export an already-resolved TableProvider to Hive-partitioned Parquet.
+///
+/// This is the core export function. `export_series_to_parquet` resolves a
+/// pond path to a TableProvider and calls this. Format-provider-based exports
+/// (e.g., `jsonlogs:///`) can construct a TableProvider via
+/// `Provider::create_provider_for_url()` and call this directly.
+///
+/// `timestamp_column` names the column used for temporal partitioning SQL
+/// (e.g., `date_part('year', <timestamp_column>) as year`).
+pub async fn export_table_provider_to_parquet(
+    table_provider: std::sync::Arc<dyn datafusion::catalog::TableProvider>,
+    source_label: &str,
+    export_dir: &Path,
+    temporal_parts: &[String],
+    captures: &[String],
+    base_output_dir: &Path,
+    provider_ctx: &tinyfs::ProviderContext,
+    timestamp_column: &str,
+) -> Result<(Vec<(Vec<String>, ExportOutput)>, TemplateSchema)> {
+    log::debug!(
+        "export_table_provider_to_parquet: source={}, export_dir={}, ts_col={}",
+        source_label,
+        export_dir.display(),
+        timestamp_column,
+    );
+
+    // Build SQL query with temporal partitioning columns
+    let temporal_columns = temporal_parts
+        .iter()
+        .map(|part| match part.as_str() {
+            "year" => format!("date_part('year', \"{}\") as year", timestamp_column),
+            "quarter" => format!("date_part('quarter', \"{}\") as quarter", timestamp_column),
+            "month" => format!("date_part('month', \"{}\") as month", timestamp_column),
+            "day" => format!("date_part('day', \"{}\") as day", timestamp_column),
+            "hour" => format!("date_part('hour', \"{}\") as hour", timestamp_column),
+            "minute" => format!("date_part('minute', \"{}\") as minute", timestamp_column),
+            _ => format!("date_part('{}', \"{}\") as {}", part, timestamp_column, part),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Generate unique table name
+    let unique_table_name = format!(
+        "series_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("ok")
+            .as_nanos()
+    );
+
+    // Build SELECT clause
+    let select_clause = if temporal_columns.is_empty() {
+        format!("SELECT * FROM \"{}\"", unique_table_name)
+    } else {
+        format!(
+            "SELECT *, {} FROM \"{}\"",
+            temporal_columns, unique_table_name
+        )
+    };
+
+    // Create output directory
+    std::fs::create_dir_all(export_dir)?;
+
     let ctx = &provider_ctx.datafusion_session;
     _ = ctx
         .register_table(
@@ -302,11 +341,11 @@ pub async fn export_series_to_parquet(
     let df = ctx
         .sql(&copy_sql)
         .await
-        .map_err(|e| anyhow::anyhow!("COPY failed for '{}': {}", pond_path, e))?;
+        .map_err(|e| anyhow::anyhow!("COPY failed for '{}': {}", source_label, e))?;
     let _ = df
         .collect()
         .await
-        .map_err(|e| anyhow::anyhow!("COPY stream failed for '{}': {}", pond_path, e))?;
+        .map_err(|e| anyhow::anyhow!("COPY stream failed for '{}': {}", source_label, e))?;
 
     // Deregister the export table to release Arc references (ViewTable,
     // ListingTable) held by the SessionContext.  Without this, every export
@@ -320,7 +359,7 @@ pub async fn export_series_to_parquet(
     log::debug!(
         "Discovered {} exported files for {}",
         exported_files.len(),
-        pond_path
+        source_label
     );
 
     // Read schema from first parquet file
@@ -333,7 +372,7 @@ pub async fn export_series_to_parquet(
         .collect();
 
     if results.is_empty() {
-        return Err(anyhow::anyhow!("No files were exported for: {}", pond_path));
+        return Err(anyhow::anyhow!("No files were exported for: {}", source_label));
     }
 
     Ok((results, schema))

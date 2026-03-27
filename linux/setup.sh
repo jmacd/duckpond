@@ -39,6 +39,15 @@ echo "=== Installing remote backup factory ==="
 pond mknod --config-path "$SCRIPT_DIR/backup.yaml" \
     remote /system/run/20-backup
 
+echo "=== Installing sitegen config ==="
+pond mkdir /site
+for f in "$SCRIPT_DIR"/site/*.md; do
+    name=$(basename "$f")
+    pond copy "host:///$f" "/site/$name"
+done
+pond mknod --config-path "$SCRIPT_DIR/site.yaml" \
+    sitegen /system/etc/site
+
 echo "=== Running initial journal collection ==="
 pond run /system/etc/journal push
 

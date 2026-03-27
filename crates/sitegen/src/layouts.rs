@@ -83,6 +83,7 @@ pub struct LayoutContext<'a> {
 pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
     let markup = match name {
         "data" => data_layout(ctx),
+        "logs" => logs_layout(ctx),
         "page" => page_layout(ctx),
         "blog" => blog_layout(ctx),
         _ => default_layout(ctx),
@@ -135,6 +136,37 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 // Our glue code -- loads DuckDB-WASM + Observable Plot dynamically
                 script src="/chart.js" type="module" {}
                 script src="/overlay.js" type="module" {}
+            }
+        }
+    }
+}
+
+/// Layout for log viewer pages.
+///
+/// Similar to data_layout but loads log-viewer.js instead of chart.js.
+/// Sidebar navigation + card-wrapped content with the log viewer container.
+fn logs_layout(ctx: &LayoutContext) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                (common_head(ctx))
+            }
+            body {
+                @if let Some(sidebar_html) = ctx.sidebar {
+                    nav class="sidebar" {
+                        (PreEscaped(sidebar_html))
+                    }
+                }
+                main class="content-page" {
+                    (top_bar(Some("Home"), Some(ctx.base_url), ctx.feed_url, ctx.github_url))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
+                }
+                script src="/log-viewer.js" type="module" {}
             }
         }
     }

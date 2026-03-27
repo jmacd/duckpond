@@ -67,6 +67,11 @@ pub struct JournalIngestConfig {
     /// Whether to collect kernel ring buffer as a separate stream (default: true)
     #[serde(default = "default_collect_kernel")]
     pub collect_kernel: bool,
+
+    /// JSON field name containing the timestamp (default: "__REALTIME_TIMESTAMP")
+    /// The value is interpreted as microseconds since Unix epoch.
+    #[serde(default = "default_timestamp_field")]
+    pub timestamp_field: String,
 }
 
 fn default_journalctl_command() -> String {
@@ -75,6 +80,10 @@ fn default_journalctl_command() -> String {
 
 fn default_collect_kernel() -> bool {
     true
+}
+
+fn default_timestamp_field() -> String {
+    "__REALTIME_TIMESTAMP".to_string()
 }
 
 impl JournalIngestConfig {
@@ -243,6 +252,68 @@ fn group_entries(
     Ok((groups, last_cursor))
 }
 
+/// Per-file temporal bounds tracked during grouping.
+struct FileBounds {
+    min_timestamp: i64,
+    max_timestamp: i64,
+}
+
+/// Extract per-file min/max timestamps from grouped entries.
+///
+/// Parses the configured timestamp field from each JSON line and tracks
+/// bounds per output file. Returns None for files where no valid
+/// timestamp was found.
+fn compute_file_bounds(
+    groups: &BTreeMap<String, Vec<&str>>,
+    timestamp_field: &str,
+) -> BTreeMap<String, FileBounds> {
+    let mut bounds: BTreeMap<String, FileBounds> = BTreeMap::new();
+
+    for (filename, lines) in groups {
+        let mut min_ts = i64::MAX;
+        let mut max_ts = i64::MIN;
+        let mut found = false;
+
+        for line in lines {
+            if let Ok(parsed) = serde_json::from_str::<Value>(line) {
+                if let Some(ts) = extract_timestamp(&parsed, timestamp_field) {
+                    if ts < min_ts {
+                        min_ts = ts;
+                    }
+                    if ts > max_ts {
+                        max_ts = ts;
+                    }
+                    found = true;
+                }
+            }
+        }
+
+        if found {
+            let _ = bounds.insert(
+                filename.clone(),
+                FileBounds {
+                    min_timestamp: min_ts,
+                    max_timestamp: max_ts,
+                },
+            );
+        }
+    }
+
+    bounds
+}
+
+/// Extract a microsecond timestamp from a JSON value's field.
+///
+/// journalctl's __REALTIME_TIMESTAMP is a string containing
+/// microseconds since epoch. We also handle numeric values.
+fn extract_timestamp(entry: &Value, field: &str) -> Option<i64> {
+    match entry.get(field)? {
+        Value::String(s) => s.parse::<i64>().ok(),
+        Value::Number(n) => n.as_i64(),
+        _ => None,
+    }
+}
+
 /// Determine the output filename for a journal entry
 fn determine_filename(entry: &Value, collect_kernel: bool) -> String {
     // Check for kernel transport first (when collect_kernel is enabled)
@@ -282,6 +353,7 @@ async fn write_entries(
     context: &FactoryContext,
     config: &JournalIngestConfig,
     groups: &BTreeMap<String, Vec<&str>>,
+    file_bounds: &BTreeMap<String, FileBounds>,
 ) -> Result<(), tinyfs::Error> {
     let fs = context.context.filesystem();
     let root = fs.root().await?;
@@ -316,6 +388,16 @@ async fn write_entries(
             .write_all(content.as_bytes())
             .await
             .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+        // Set temporal metadata if we have bounds for this file
+        if let Some(bounds) = file_bounds.get(filename) {
+            writer.set_temporal_metadata(
+                bounds.min_timestamp,
+                bounds.max_timestamp,
+                config.timestamp_field.clone(),
+            );
+        }
+
         writer
             .shutdown()
             .await
@@ -446,10 +528,13 @@ pub async fn execute(
         debug!("  {} -> {} entries", filename, entries.len());
     }
 
-    // Step 4: Write grouped entries to pond
-    write_entries(&context, &config, &groups).await?;
+    // Step 4: Compute per-file temporal bounds
+    let file_bounds = compute_file_bounds(&groups, &config.timestamp_field);
 
-    // Step 5: Save cursor
+    // Step 5: Write grouped entries to pond
+    write_entries(&context, &config, &groups, &file_bounds).await?;
+
+    // Step 6: Save cursor
     if let Some(cursor_val) = &last_cursor {
         write_cursor(&context, &config.pond_path, cursor_val).await?;
         info!("Saved cursor for next run");
@@ -494,6 +579,7 @@ mod tests {
             pond_path: "logs/workshep".to_string(),
             journalctl_command: "journalctl".to_string(),
             collect_kernel: true,
+            timestamp_field: "__REALTIME_TIMESTAMP".to_string(),
         };
         assert!(config.validate().is_ok());
     }
@@ -504,6 +590,7 @@ mod tests {
             pond_path: "".to_string(),
             journalctl_command: "journalctl".to_string(),
             collect_kernel: true,
+            timestamp_field: "__REALTIME_TIMESTAMP".to_string(),
         };
         assert!(config.validate().is_err());
     }
@@ -524,6 +611,7 @@ mod tests {
         let val = result.unwrap();
         assert_eq!(val["journalctl_command"], "journalctl");
         assert_eq!(val["collect_kernel"], true);
+        assert_eq!(val["timestamp_field"], "__REALTIME_TIMESTAMP");
     }
 
     #[test]
@@ -616,5 +704,63 @@ mod tests {
         let (groups, last_cursor) = group_entries(&lines, true).unwrap();
         assert!(groups.is_empty());
         assert!(last_cursor.is_none());
+    }
+
+    #[test]
+    fn test_extract_timestamp_string() {
+        let entry: Value = serde_json::from_str(
+            r#"{"__REALTIME_TIMESTAMP":"1772431543477823","MESSAGE":"test"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_timestamp(&entry, "__REALTIME_TIMESTAMP"),
+            Some(1772431543477823)
+        );
+    }
+
+    #[test]
+    fn test_extract_timestamp_number() {
+        let entry: Value =
+            serde_json::from_str(r#"{"ts":1772431543477823,"MESSAGE":"test"}"#).unwrap();
+        assert_eq!(extract_timestamp(&entry, "ts"), Some(1772431543477823));
+    }
+
+    #[test]
+    fn test_extract_timestamp_missing() {
+        let entry: Value = serde_json::from_str(r#"{"MESSAGE":"test"}"#).unwrap();
+        assert_eq!(extract_timestamp(&entry, "__REALTIME_TIMESTAMP"), None);
+    }
+
+    #[test]
+    fn test_compute_file_bounds() {
+        let lines = vec![
+            r#"{"_SYSTEMD_UNIT":"ssh.service","MESSAGE":"login","__CURSOR":"c1","__REALTIME_TIMESTAMP":"100"}"#.to_string(),
+            r#"{"_SYSTEMD_UNIT":"ssh.service","MESSAGE":"logout","__CURSOR":"c2","__REALTIME_TIMESTAMP":"300"}"#.to_string(),
+            r#"{"_TRANSPORT":"kernel","MESSAGE":"usb","__CURSOR":"c3","__REALTIME_TIMESTAMP":"200"}"#.to_string(),
+        ];
+
+        let (groups, _) = group_entries(&lines, true).unwrap();
+        let bounds = compute_file_bounds(&groups, "__REALTIME_TIMESTAMP");
+
+        let ssh_bounds = bounds.get("ssh.service.jsonl").unwrap();
+        assert_eq!(ssh_bounds.min_timestamp, 100);
+        assert_eq!(ssh_bounds.max_timestamp, 300);
+
+        let kernel_bounds = bounds.get("kernel.jsonl").unwrap();
+        assert_eq!(kernel_bounds.min_timestamp, 200);
+        assert_eq!(kernel_bounds.max_timestamp, 200);
+    }
+
+    #[test]
+    fn test_compute_file_bounds_no_timestamp() {
+        let lines = vec![
+            r#"{"_SYSTEMD_UNIT":"ssh.service","MESSAGE":"test"}"#.to_string(),
+        ];
+
+        let (groups, _) = group_entries(&lines, true).unwrap();
+        let bounds = compute_file_bounds(&groups, "__REALTIME_TIMESTAMP");
+
+        // No bounds when timestamp field is missing
+        assert!(bounds.get("ssh.service.jsonl").is_none());
     }
 }

@@ -2357,6 +2357,38 @@ impl InnerState {
                             }
                         }
                     }
+                    EntryType::FilePhysicalSeries => {
+                        // FilePhysicalSeries: store temporal metadata if provided,
+                        // otherwise store as a regular small file.
+                        match metadata {
+                            crate::file_writer::FileMetadata::Series {
+                                min_timestamp,
+                                max_timestamp,
+                                timestamp_column,
+                            } => {
+                                use crate::schema::ExtendedAttributes;
+                                let mut extended_attrs = ExtendedAttributes::default();
+                                _ = extended_attrs.set_timestamp_column(&timestamp_column);
+
+                                OplogEntry::new_file_series(
+                                    id,
+                                    now,
+                                    version,
+                                    content,
+                                    min_timestamp,
+                                    max_timestamp,
+                                    extended_attrs,
+                                    txn_seq,
+                                )
+                            }
+                            _ => {
+                                OplogEntry::new_small_file(
+                                    id, now, version,
+                                    content, txn_seq,
+                                )
+                            }
+                        }
+                    }
                     _ => {
                         // Regular small file
                         OplogEntry::new_small_file(
@@ -2398,6 +2430,43 @@ impl InnerState {
                                     message: "Large FileSeries requires Series metadata"
                                         .to_string(),
                                 });
+                            }
+                        }
+                    }
+                    EntryType::FilePhysicalSeries => {
+                        // Large FilePhysicalSeries: store temporal metadata
+                        // if provided, otherwise store as a regular large file.
+                        match metadata {
+                            crate::file_writer::FileMetadata::Series {
+                                min_timestamp,
+                                max_timestamp,
+                                timestamp_column,
+                            } => {
+                                use crate::schema::ExtendedAttributes;
+                                let mut extended_attrs = ExtendedAttributes::default();
+                                _ = extended_attrs.set_timestamp_column(&timestamp_column);
+
+                                OplogEntry::new_large_file_series(
+                                    id,
+                                    now,
+                                    version,
+                                    sha256,
+                                    size as i64,
+                                    min_timestamp,
+                                    max_timestamp,
+                                    extended_attrs,
+                                    txn_seq,
+                                )
+                            }
+                            _ => {
+                                OplogEntry::new_large_file(
+                                    id,
+                                    now,
+                                    version,
+                                    sha256,
+                                    size as i64,
+                                    txn_seq,
+                                )
                             }
                         }
                     }

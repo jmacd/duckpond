@@ -494,6 +494,16 @@ impl AsyncWrite for OpLogFileWriter {
                                 ));
                             }
                         }
+                        tinyfs::EntryType::FilePhysicalSeries => {
+                            // FilePhysicalSeries: use precomputed metadata if the
+                            // caller set it (e.g., journal-ingest with timestamp
+                            // tracking), otherwise fall through to Data.
+                            if let Some(precomputed) = precomputed_metadata {
+                                precomputed
+                            } else {
+                                crate::file_writer::FileMetadata::Data
+                            }
+                        }
                         tinyfs::EntryType::TablePhysicalVersion => {
                             if let Some(precomputed) = precomputed_metadata {
                                 precomputed

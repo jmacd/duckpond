@@ -112,6 +112,15 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
+    // {{ log_viewer }} -- emit log viewer container with inline datafile manifest.
+    // Client-side log-viewer.js reads the JSON to query parquet via DuckDB-WASM.
+    {
+        let c = ctx.clone();
+        shortcodes.register("log_viewer", move |_args: &ShortcodeArgs| {
+            render_log_viewer(&c.datafiles)
+        });
+    }
+
     // {{ nav_list collection="params" base="/params" /}} -- link list for a collection
     {
         let c = ctx.clone();
@@ -285,6 +294,40 @@ fn render_overlay_chart(datafiles: &[ExportedFile]) -> String {
     format!(
         "<div class=\"chart-container\" id=\"overlay-chart\">\
          <script type=\"application/json\" class=\"overlay-data\">{}</script>\
+         </div>",
+        json
+    )
+}
+
+/// Render a log viewer container with inline datafile manifest.
+///
+/// Emits a `<div id="log-viewer">` with a `<script type="application/json">`
+/// block containing the file manifest. Client-side log-viewer.js reads this
+/// and uses DuckDB-WASM to query the parquet files with SQL.
+fn render_log_viewer(datafiles: &[ExportedFile]) -> String {
+    if datafiles.is_empty() {
+        return "<div id=\"log-viewer\"><p>No log files available.</p></div>".to_string();
+    }
+
+    let files_json: Vec<serde_json::Value> = datafiles
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "path": f.path,
+                "file": f.file,
+                "captures": f.captures,
+                "temporal": f.temporal,
+                "start_time": f.start_time,
+                "end_time": f.end_time,
+            })
+        })
+        .collect();
+
+    let json = serde_json::to_string(&files_json).unwrap_or_else(|_| "[]".to_string());
+
+    format!(
+        "<div id=\"log-viewer\">\
+         <script type=\"application/json\" class=\"log-data\">{}</script>\
          </div>",
         json
     )
