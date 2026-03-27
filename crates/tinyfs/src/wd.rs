@@ -582,8 +582,12 @@ impl WD {
     /// Resolves a path and returns the working directory and lookup result
     pub async fn resolve_path<P: AsRef<Path>>(&self, path: P) -> Result<(WD, Lookup)> {
         let stack = vec![self.np.clone()];
-        let (node, handle) = self.resolve(&stack, path.as_ref(), 0).await?;
-        let wd = self.child_wd(&node).await?;
+        let (node, handle, detected_root) = self.resolve(&stack, path.as_ref(), 0).await?;
+        let mut wd = self.child_wd(&node).await?;
+        // If we crossed a pond boundary, update the effective root
+        if let Some(mount_point) = detected_root {
+            wd.effective_root = mount_point;
+        }
         Ok((wd, handle))
     }
 
@@ -603,7 +607,7 @@ impl WD {
         stack_in: &'a [NodePath],
         path: P,
         depth: u32,
-    ) -> Pin<Box<dyn Future<Output = Result<(NodePath, Lookup)>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<(NodePath, Lookup, Option<NodePath>)>> + Send + 'a>>
     where
         P: AsRef<Path> + Send + 'a,
     {
@@ -617,6 +621,10 @@ impl WD {
             );
             let mut stack = stack_in.to_vec();
             let mut components = path.components().peekable();
+            // Track if we cross a pond boundary during resolution.
+            // When a child has a different pond_id than its parent,
+            // the parent is the mount point / effective root.
+            let mut detected_root: Option<NodePath> = None;
 
             // Iterate through the components of the path
             for comp in &mut components {
@@ -678,7 +686,7 @@ impl WD {
                                 if components.peek().is_some() {
                                     return Err(Error::not_found(path));
                                 } else {
-                                    return Ok((dnode, Lookup::NotFound(path.to_path_buf(), name)));
+                                    return Ok((dnode, Lookup::NotFound(path.to_path_buf(), name), detected_root));
                                 }
                             }
                             Ok(Some(child)) => {
@@ -697,8 +705,11 @@ impl WD {
                                             .map(|p| p + 1)
                                             .unwrap_or(1);
                                         let clamped = newsz.max(min_sz);
-                                        let (_, handle) =
+                                        let (_, handle, sub_detected) =
                                             self.resolve(&stack[0..clamped], relp, depth + 1).await?;
+                                        if detected_root.is_none() {
+                                            detected_root = sub_detected;
+                                        }
                                         match handle {
                                             Lookup::Found(node) => {
                                                 stack.push(node);
@@ -715,6 +726,14 @@ impl WD {
                                     }
                                     _ => {
                                         // File or Directory.
+                                        // Detect pond boundary: if child has different
+                                        // pond_id than parent, the parent is a mount point.
+                                        if detected_root.is_none() {
+                                            let parent = stack.last().expect("stack not empty");
+                                            if child.id().pond_id() != parent.id().pond_id() {
+                                                detected_root = Some(parent.clone());
+                                            }
+                                        }
                                         stack.push(child.clone());
                                     }
                                 }
@@ -732,25 +751,22 @@ impl WD {
             if stack.is_empty() {
                 Err(Error::internal("empty resolve stack"))
             } else if stack.len() == 1 {
-                // Stack has only root - this happens when resolving "/" or when all components were ".."
-                // For the root path "/" itself, we should return Found(root), not Empty(root)
-                // Check if this was actually resolving the root by seeing if path is "/" or equivalent
                 let dir = stack.pop().expect("stack not empty");
                 let is_root_path = path
                     .components()
                     .all(|c| matches!(c, Component::RootDir | Component::CurDir));
                 if is_root_path {
                     debug!("resolve: Returning Found case (root path)");
-                    Ok((dir.clone(), Lookup::Found(dir)))
+                    Ok((dir.clone(), Lookup::Found(dir), detected_root))
                 } else {
                     debug!("resolve: Returning Empty case");
-                    Ok((dir.clone(), Lookup::Empty(dir)))
+                    Ok((dir.clone(), Lookup::Empty(dir), detected_root))
                 }
             } else {
                 debug!("resolve: Returning Found case");
                 let found = stack.pop().expect("stack.len > 1");
                 let dir = stack.pop().expect("stack.len > 1");
-                Ok((dir, Lookup::Found(found)))
+                Ok((dir, Lookup::Found(found), detected_root))
             }
         }) // Close the Box::pin(async move { block
     }
@@ -983,7 +999,7 @@ impl WD {
         let mut current = child.clone();
         if let Some(link) = child.into_symlink().await {
             let link_target = link.readlink().await?;
-            let (_, handle) = self.resolve(stack, link_target, 0).await?;
+            let (_, handle, _) = self.resolve(stack, link_target, 0).await?;
             match handle {
                 Lookup::Found(np) => current = np,
                 Lookup::NotFound(fp, _) => return Err(Error::not_found(fp)),

@@ -265,3 +265,80 @@ async fn test_as_root_sets_effective_root_to_current() {
     assert_eq!(chrooted.effective_root().id(), chrooted.node_path().id());
     assert!(!chrooted.effective_root().is_root());
 }
+
+#[tokio::test]
+async fn test_auto_detect_pond_boundary() {
+    // When resolving a path that crosses into a directory with a different
+    // pond_id, the effective root is automatically set to the mount point.
+    use crate::node::FileID;
+
+    let foreign_pond = uuid7::uuid7();
+    let fs = new_fs().await;
+    let root = fs.root().await.unwrap();
+
+    // Create /imports/foreign/ as a mount point
+    let imports = root.create_dir_path("imports").await.unwrap();
+
+    // Create a foreign directory node with a different pond_id
+    let foreign_dir_id = FileID::new_physical_dir_id(foreign_pond);
+    let foreign_node = fs.persistence.create_directory_node(foreign_dir_id).await.unwrap();
+    fs.persistence.store_node(&foreign_node).await.unwrap();
+    let foreign_np = imports.insert_node("foreign", foreign_node).await.unwrap();
+
+    // Create a file inside the foreign directory
+    let foreign_wd = fs.wd(&foreign_np, root.effective_root().clone()).await.unwrap();
+    _ = convenience::create_file_path(&foreign_wd, "data.txt", b"foreign data")
+        .await
+        .unwrap();
+
+    // Resolve /imports/foreign/data.txt from root
+    // This should auto-detect the pond boundary at /imports/
+    let (wd, lookup) = root.resolve_path("/imports/foreign/data.txt").await.unwrap();
+    assert!(matches!(lookup, Lookup::Found(_)));
+
+    // The returned WD should have effective_root set to /imports/
+    // (the parent directory where the pond transition happened)
+    assert_eq!(wd.effective_root().id(), imports.node_path().id());
+    assert!(!wd.effective_root().is_root());
+}
+
+#[tokio::test]
+async fn test_auto_detect_absolute_path_scoped_to_mount() {
+    // After auto-detection, absolute paths resolve within the mount point.
+    use crate::node::FileID;
+
+    let foreign_pond = uuid7::uuid7();
+    let fs = new_fs().await;
+    let root = fs.root().await.unwrap();
+
+    // Create /mnt/ as mount point with a foreign sub-directory
+    let mnt = root.create_dir_path("mnt").await.unwrap();
+    let foreign_dir_id = FileID::new_physical_dir_id(foreign_pond);
+    let foreign_node = fs.persistence.create_directory_node(foreign_dir_id).await.unwrap();
+    fs.persistence.store_node(&foreign_node).await.unwrap();
+    let foreign_np = mnt.insert_node("site", foreign_node).await.unwrap();
+
+    // Create /mnt/site/index.md
+    let site_wd = fs.wd(&foreign_np, root.effective_root().clone()).await.unwrap();
+    _ = convenience::create_file_path(&site_wd, "index.md", b"foreign site")
+        .await
+        .unwrap();
+
+    // Also create /site/index.md at the real root (different content)
+    _ = root.create_dir_path("site").await.unwrap();
+    _ = convenience::create_file_path(&root, "/site/index.md", b"local site")
+        .await
+        .unwrap();
+
+    // Resolve /mnt/site/index.md — this crosses a pond boundary
+    let (wd, _) = root.resolve_path("/mnt/site/index.md").await.unwrap();
+
+    // The WD's effective root is /mnt/ — so /site/index.md resolves
+    // to /mnt/site/index.md (foreign content), not the local root
+    let content = wd.read_file_path_to_vec("/site/index.md").await.unwrap();
+    assert_eq!(content, b"foreign site");
+
+    // From the global root, /site/index.md still resolves to local content
+    let local_content = root.read_file_path_to_vec("/site/index.md").await.unwrap();
+    assert_eq!(local_content, b"local site");
+}
