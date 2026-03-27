@@ -3741,13 +3741,7 @@ mod node_factory {
             .map_err(error_utils::to_tinyfs_error)?;
 
         // Create context with all template variables (vars, export, and any other keys)
-        let context = FactoryContext {
-            context: state.as_provider_context(),
-            file_id: id,
-            pond_metadata: None,
-            txn_seq: 0, // Node creation context doesn't need txn_seq
-            import_partitions: Vec::new(),
-        };
+        let context = FactoryContext::new(state.as_provider_context(), id);
 
         debug!(
             "[SEARCH] create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}",

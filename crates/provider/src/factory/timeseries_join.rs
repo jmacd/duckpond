@@ -629,13 +629,7 @@ mod tests {
 
     /// Helper to create crate::FactoryContext from ProviderContext for tests
     fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
-        crate::FactoryContext {
-            context: context.clone(),
-            file_id,
-            pond_metadata: None,
-            txn_seq: 0,
-            import_partitions: Vec::new(),
-        }
+        crate::FactoryContext::new(context.clone(), file_id)
     }
 
     /// Helper to create test environment with MemoryPersistence

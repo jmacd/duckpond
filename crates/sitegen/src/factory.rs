@@ -94,8 +94,7 @@ async fn execute(
             // Pre-read all files from the pond into a map.
             // We cannot use block_on inside this async context, so we collect
             // everything we need up front.
-            let fs = context.context.filesystem();
-            let root = fs.root().await?;
+            let root = context.root().await?;
 
             let mut file_cache: BTreeMap<String, String> = BTreeMap::new();
 
@@ -205,8 +204,7 @@ async fn run_export_stages(
     context: &FactoryContext,
     output_dir: &std::path::Path,
 ) -> Result<BTreeMap<String, ExportContext>, tinyfs::Error> {
-    let fs = context.context.filesystem();
-    let root = fs.root().await?;
+    let root = context.root().await?;
     let provider_ctx = &context.context;
     let data_dir = output_dir.join("data");
     let mut exports = BTreeMap::new();
@@ -366,8 +364,7 @@ async fn run_content_stages(
     config: &SiteConfig,
     context: &FactoryContext,
 ) -> Result<BTreeMap<String, ContentContext>, tinyfs::Error> {
-    let fs = context.context.filesystem();
-    let root = fs.root().await?;
+    let root = context.root().await?;
     let mut content = BTreeMap::new();
 
     for stage in &config.content {

@@ -141,6 +141,7 @@ impl ProviderContext {
 /// - FileID providing node and partition identity
 /// - Optional pond metadata (pond_id, birth_timestamp, etc.)
 /// - Current transaction sequence number
+/// - Effective root for path resolution scoping
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to persistence layer operations
@@ -157,6 +158,11 @@ pub struct FactoryContext {
     /// Each entry is (foreign_part_id, foreign_pond_id, watermark_txn_seq).
     /// Populated by steward for import factories to avoid re-reading the foreign OpLog.
     pub import_partitions: Vec<(String, String, i64)>,
+    /// Effective root for path resolution. When set, factories resolve
+    /// absolute paths relative to this node rather than the global root.
+    /// Used for cross-pond imports where foreign factories must resolve
+    /// paths within their imported mount point.
+    effective_root: Option<crate::node::NodePath>,
 }
 
 impl FactoryContext {
@@ -169,6 +175,7 @@ impl FactoryContext {
             pond_metadata: None,
             txn_seq: 0,
             import_partitions: Vec::new(),
+            effective_root: None,
         }
     }
 
@@ -185,6 +192,7 @@ impl FactoryContext {
             pond_metadata: Some(pond_metadata),
             txn_seq: 0,
             import_partitions: Vec::new(),
+            effective_root: None,
         }
     }
 
@@ -200,6 +208,30 @@ impl FactoryContext {
     pub fn with_import_partitions(mut self, partitions: Vec<(String, String, i64)>) -> Self {
         self.import_partitions = partitions;
         self
+    }
+
+    /// Set the effective root for path resolution scoping.
+    /// When set, root() returns a WD chrooted to this node.
+    #[must_use]
+    pub fn with_effective_root(mut self, root: crate::node::NodePath) -> Self {
+        self.effective_root = Some(root);
+        self
+    }
+
+    /// Get the filesystem root for this factory context.
+    ///
+    /// If an effective root is set (e.g., for cross-pond imports), returns
+    /// a WD chrooted to that mount point. Otherwise returns the global root.
+    /// Factories should use this instead of context.filesystem().root().
+    pub async fn root(&self) -> crate::Result<crate::WD> {
+        let fs = self.context.filesystem();
+        match &self.effective_root {
+            Some(er) => {
+                let wd = fs.wd(er, er.clone()).await?;
+                Ok(wd)
+            }
+            None => fs.root().await,
+        }
     }
 }
 

@@ -380,13 +380,10 @@ impl SqlDerivedFile {
                 .expect("transform factory has apply_table_transform");
 
             // Create FactoryContext with the transform file's FileID
-            let transform_context = crate::FactoryContext {
-                context: self.context.context.clone(),
-                file_id: node_id,
-                pond_metadata: None,
-                txn_seq: 0,
-                import_partitions: Vec::new(), // Transform context doesn't need txn_seq
-            };
+            let transform_context = crate::FactoryContext::new(
+                self.context.context.clone(),
+                node_id,
+            );
 
             debug!(
                 "[FIX] SQL-DERIVED: Applying transform '{}' (factory: '{}')",
@@ -1500,19 +1497,8 @@ mod tests {
 
     /// Helper to create crate::FactoryContext from ProviderContext for tests
     fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
-        crate::FactoryContext {
-            context: context.clone(),
-            file_id,
-            pond_metadata: None,
-            txn_seq: 0,
-            import_partitions: Vec::new(),
-        }
+        crate::FactoryContext::new(context.clone(), file_id)
     }
-
-    /// Helper to create test environment with MemoryPersistence
-    /// Returns (FS, ProviderContext) that share the SAME persistence instance
-    /// This maintains the single-instance pattern - both FS and ProviderContext
-    /// work with the same underlying data
     async fn create_test_environment() -> (FS, ProviderContext) {
         // Create ONE persistence instance
         let persistence = MemoryPersistence::default();
