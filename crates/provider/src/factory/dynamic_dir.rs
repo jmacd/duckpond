@@ -80,7 +80,14 @@ impl DynamicDirDirectory {
         } else {
             FactoryContext::new(self.context.context.clone(), child_file_id)
         };
-        ctx.with_txn_seq(self.context.txn_seq)
+        let ctx = ctx.with_txn_seq(self.context.txn_seq);
+        // Propagate effective_root so child factories resolve absolute
+        // paths within the same scope (e.g., cross-pond import mount).
+        if let Some(er) = self.context.effective_root() {
+            ctx.with_effective_root(er.clone())
+        } else {
+            ctx
+        }
     }
 
     /// Create a node for a specific entry using its configured factory

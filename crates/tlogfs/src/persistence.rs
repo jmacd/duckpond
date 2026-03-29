@@ -3785,7 +3785,25 @@ mod node_factory {
             .map_err(error_utils::to_tinyfs_error)?;
 
         // Create context with all template variables (vars, export, and any other keys)
-        let context = FactoryContext::new(state.as_provider_context(), id);
+        let mut context = FactoryContext::new(state.as_provider_context(), id);
+
+        // For cross-pond imports: if this node belongs to a foreign pond,
+        // set the effective_root so factory path resolution stays within
+        // the imported tree. Without this, absolute paths like
+        // /sensors/station_a would resolve from the consumer's root.
+        //
+        // We construct a synthetic NodePath for the foreign root rather
+        // than loading it via state.load_node() — that would deadlock
+        // because we are called from within the inner lock.
+        if id.pond_id() != state.pond_uuid() {
+            let foreign_root_id = FileID::root_for(id.pond_id());
+            let root_node = create_directory_node(foreign_root_id, state.clone())?;
+            let root_np = tinyfs::NodePath {
+                node: root_node,
+                path: "/".into(),
+            };
+            context = context.with_effective_root(root_np);
+        }
 
         debug!(
             "[SEARCH] create_dynamic_node_from_oplog_entry: factory='{}', entry_type={:?}, config_len={}",

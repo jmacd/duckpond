@@ -218,6 +218,12 @@ impl FactoryContext {
         self
     }
 
+    /// Get the effective root, if set.
+    #[must_use]
+    pub fn effective_root(&self) -> Option<&crate::node::NodePath> {
+        self.effective_root.as_ref()
+    }
+
     /// Get the filesystem root for this factory context.
     ///
     /// If an effective root is set (e.g., for cross-pond imports), returns
