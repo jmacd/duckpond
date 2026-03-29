@@ -1,6 +1,13 @@
 # Cross-Pond Import: Implementation Status
 
-## What Was Done
+## Summary
+
+Cross-pond import is functionally complete through Phase 2.5.
+A producer pond's data and dynamic factories (timeseries-join,
+temporal-reduce, etc.) work correctly when imported into a consumer
+pond. All 51 integration tests and 848+ unit tests pass.
+
+## What Was Done (prior sessions)
 
 ### 1. pond_id scoping in the persistence layer
 
@@ -126,20 +133,91 @@ Backward compatibility: existing serialized directories (Arrow IPC)
 without the `pond_id` column deserialize with `None` via
 `#[serde(default)]`. All 848+ unit tests pass.
 
+### 8. Factory path resolution uses context.root()
+
+Read-path factories (`sql_derived`, `temporal_reduce`, `timeseries_pivot`)
+were calling `fs.root()` to resolve absolute paths in their configs.
+This always returns the global pond root, so patterns like
+`/sensors/station_a` in an imported factory would resolve in the
+consumer's tree instead of the foreign tree.
+
+Changed all read-path factories to use `self.context.root()`, which
+returns a WD scoped to the `effective_root` when set. This is the
+same API that `sitegen` already uses.
+
+Write-path factories (`remote`, `hydrovu`, `logfile_ingest`,
+`journal_ingest`) are not changed -- they legitimately need the
+global root to write to the local pond.
+
+**Files changed:**
+- `crates/provider/src/factory/sql_derived.rs` -- 2 call sites
+  (pattern resolution and transform path resolution)
+- `crates/provider/src/factory/temporal_reduce.rs` -- 2 call sites
+  (discover_source_files and get_source_node_by_path)
+- `crates/provider/src/factory/timeseries_pivot.rs` -- 1 call site
+  (resolve_pattern)
+
+### 9. effective_root threaded into dynamic factory contexts
+
+When `create_dynamic_node_from_oplog_entry` loads a dynamic node
+(e.g., a `dynamic-dir` containing `timeseries-join` entries), it
+creates a `FactoryContext` for the factory. Previously this context
+always had `effective_root: None`, so factories inside an imported
+tree couldn't resolve absolute paths within the foreign tree.
+
+Now: if the node's `pond_id` differs from the persistence layer's
+`pond_uuid()`, the node is foreign. The code constructs a synthetic
+`NodePath` for the foreign root and sets it as `effective_root` on
+the context. This avoids deadlock (we're inside the inner lock, so
+can't call `load_node`; instead we use `create_directory_node`
+directly to build a lightweight handle).
+
+`DynamicDirDirectory::create_child_context()` also propagates
+`effective_root` to child factory contexts, so nested factories
+(e.g., `timeseries-join` inside a `dynamic-dir`) inherit the scope.
+
+`FactoryContext::effective_root()` getter added for propagation.
+
+**Files changed:**
+- `crates/tlogfs/src/persistence.rs` -- foreign node detection
+  in `create_dynamic_node_from_oplog_entry`
+- `crates/provider/src/factory/dynamic_dir.rs` -- propagate
+  `effective_root` in `create_child_context`
+- `crates/tinyfs/src/context.rs` -- `effective_root()` getter
+
+### 10. Integration test: cross-pond factory resolution (533)
+
+New test `testsuite/tests/533-cross-pond-factory-resolution.sh`:
+- Producer pond with `dynamic-dir` containing `synthetic-timeseries`
+  entries and a `timeseries-join` using absolute paths
+- Consumer imports producer's entire tree via S3/MinIO
+- Consumer reads the imported `timeseries-join` output
+- Verifies row counts and data match byte-for-byte
+- Verifies individual series accessible through import mount
+
 ---
 
 ## Next Steps
 
-1. **End-to-end test**: Rebuild, re-run `cross/setup.sh` +
-   `cross/import.sh`, verify `pond list -l '/sources/noyo/*'`
-   shows foreign content.
+1. **`cross/` example**: Rebuild and test the cross-pond example
+   (`cross/setup.sh` + `cross/import.sh` + `cross/generate.sh`)
+   against the real S3 backups now that directory listings and
+   factory resolution work.
 
-2. **Phase 2.5 completion**: Recursive import (`/**` suffix) can
-   now be fully validated since directory listings should work
-   correctly.
+2. **Provenance display**: `pond list --long` and `pond describe`
+   should show foreign `pond_id` for imported files/directories
+   (Decision Q2: always show).
 
-3. **Provenance display**: `pond list --long` and `pond describe`
-   should show foreign `pond_id` for imported files.
+3. **Phase 3: Incremental sync**: Track which foreign transactions
+   have been imported. Currently uses `object_store.head()` for
+   existence checks. Full control table tracking would enable
+   efficient re-sync.
+
+4. **Audit factory path usage**: Remaining factories that call
+   `fs.root()` (`journal_ingest`, `logfile_ingest`, `hydrovu`)
+   are write-path factories that need the global root. Document
+   the convention: read-path = `context.root()`, write-path =
+   `fs.root()` or `context.context.filesystem().root()`.
 
 ### S3 setup
 
@@ -153,7 +231,7 @@ Credentials: caspar/watertown (same as in deploy.env files).
 
 ### Test suite
 
-All 848 unit tests pass as of this commit. Run `cargo test` to verify.
+All 51 integration tests and 848+ unit tests pass.
 
 ---
 
@@ -170,10 +248,12 @@ adding `PersistenceLayer::pond_uuid()`.
 ### Directory traversal inherits pond_id from parent
 
 In `OpLogDirectory::get()` (`crates/tlogfs/src/directory.rs`), child
-FileIDs are constructed using `self.id.pond_id()`. This means once
-you enter a foreign directory (with a foreign `pond_id` on its FileID),
-all traversal within that tree uses the foreign `pond_id`. This is
-correct behavior for cross-pond isolation.
+FileIDs are constructed using the entry's stored `pond_id` if present,
+falling back to `self.id.pond_id()`. This means once you enter a
+foreign directory (with a foreign `pond_id` on its FileID), all
+traversal within that tree uses the foreign `pond_id`. Cross-pond
+directory entries (where the child's pond differs from the parent)
+store the child's `pond_id` explicitly in the `DirectoryEntry`.
 
 ### Pending records don't have pond_id
 
@@ -197,3 +277,26 @@ linking the local mount path to the foreign partition. No recursion
 into children. The foreign directory listing handles child references.
 `collect_partitions_recursive` only discovers partition IDs for the
 download step.
+
+### Factory path resolution convention
+
+Read-path factories (sql_derived, temporal_reduce, timeseries_pivot,
+sitegen) must use `context.root()` for absolute path resolution.
+This respects `effective_root` set by cross-pond boundary detection,
+so `/sensors/station_a` resolves within the imported tree.
+
+Write-path factories (remote, hydrovu, logfile_ingest, journal_ingest)
+use `fs.root()` because they need the global root to write to the
+local pond.
+
+`DynamicDirDirectory` propagates `effective_root` to child contexts.
+`create_dynamic_node_from_oplog_entry` auto-detects foreign nodes
+and sets `effective_root` to the foreign root.
+
+### effective_root is derived, not stored
+
+The `effective_root` on a `FactoryContext` is computed at node-load
+time by comparing `node.pond_id()` vs `persistence.pond_uuid()`.
+It is NOT stored in the oplog or directory entries. The `pond_id`
+on `DirectoryEntry` and `FileID` is the source of truth; the
+effective_root is derived from it.
