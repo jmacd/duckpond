@@ -249,15 +249,16 @@ if [[ -n "${SCRIPT_FILE}" ]]; then
     if [[ -z "${OUTPUT_DIR}" ]]; then
         OUTPUT_DIR="/tmp/test-output"
     fi
-    # Clean output dir. Docker containers run as root, so files may be
-    # root-owned and un-removable by the host user. Fall back to a
-    # container-based cleanup if the host rm fails.
-    if ! rm -rf "${OUTPUT_DIR}" 2>/dev/null; then
+    # Clean output dir contents (not the directory itself).
+    # Removing and recreating the directory can cause Docker volume mount
+    # races on macOS (VirtioFS), where the new container gets a stale
+    # mount handle and writes fail with ENOENT.
+    mkdir -p "${OUTPUT_DIR}"
+    if ! rm -rf "${OUTPUT_DIR:?}"/* 2>/dev/null; then
+        # Files may be root-owned from Docker; clean via container
         ${CONTAINER_RT} run --rm -v "${OUTPUT_DIR}:/cleanup" "${IMAGE_NAME}" \
             -c "rm -rf /cleanup/*" 2>/dev/null || true
-        rm -rf "${OUTPUT_DIR}" 2>/dev/null || true
     fi
-    mkdir -p "${OUTPUT_DIR}"
     OUTPUT_MOUNT=(-v "${OUTPUT_DIR}:/output")
 
     # Mount testdata directory if --data specified, or auto-detect testdata/

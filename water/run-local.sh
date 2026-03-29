@@ -1,21 +1,22 @@
 #!/bin/sh
 #
-# run-local.sh -- Ingest log data from local data directory.
+# run-local.sh -- Sync data from remote and ingest into the local pond.
 #
 set -x
 set -e
 
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
 DATA_DIR=${SCRIPTS}/data
-HOST=jmacd@linux.local
-REMOTE_DATA=/home/data
 
 export POND=${SCRIPTS}/pond
+
+# Load deployment config (for rsync source)
+. "${SCRIPTS}/deploy.env"
 
 CARGO="cargo run --release -p cmd --"
 
 # Sync latest data from remote (--update preserves newer local copies)
-rsync -chavzP --update --stats ${HOST}:${REMOTE_DATA}/ ${DATA_DIR}/
+rsync -chavzP --update --stats ${DEPLOY_HOST}:${DEPLOY_DATA_DIR}/ ${DATA_DIR}/
 
 # Ingest new/updated files
 ${CARGO} run /etc/ingest

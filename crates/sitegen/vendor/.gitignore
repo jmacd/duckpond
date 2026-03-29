@@ -1,0 +1,4 @@
+# Downloaded vendor files -- regenerate with: bash download.sh
+dist/
+.work/
+node_modules/

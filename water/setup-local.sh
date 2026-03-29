@@ -3,12 +3,10 @@
 # setup-local.sh -- Initialize a local water pond and install factory nodes.
 #
 # Prerequisites:
-#   - rsync data from remote first:
-#     rsync -chavzP --update --stats jmacd@linux.local:/home/data/ ./data/
+#   - deploy.env configured (cp deploy.env.example deploy.env)
 #   - cargo build works in the workspace root
 #
-# The pond is stored in ./pond/ (relative to this script's directory).
-# Data files are read from ./data/ via absolute paths.
+# The pond is stored in ./pond/ and data is rsynced to ./data/.
 #
 set -x
 set -e
@@ -16,17 +14,18 @@ set -e
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
 POND_DIR=${SCRIPTS}/pond
 DATA_DIR=${SCRIPTS}/data
-HOST=jmacd@linux.local
-REMOTE_DATA=/home/data
 
 export POND=${POND_DIR}
+
+# Load deployment config (for rsync source)
+. "${SCRIPTS}/deploy.env"
 
 # Cargo run helper
 CARGO="cargo run --release -p cmd --"
 
 # Sync data from remote (--update preserves newer local copies)
 mkdir -p "${DATA_DIR}"
-rsync -chavzP --update --stats ${HOST}:${REMOTE_DATA}/ ${DATA_DIR}/
+rsync -chavzP --update --stats ${DEPLOY_HOST}:${DEPLOY_DATA_DIR}/ ${DATA_DIR}/
 
 # Generate ingest config with absolute paths
 INGEST_CFG=$(mktemp)

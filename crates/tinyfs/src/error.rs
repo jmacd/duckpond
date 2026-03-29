@@ -46,6 +46,8 @@ pub enum Error {
     SymlinkLoop(PathBuf),
     #[error("VisitLoop: {0}")]
     VisitLoop(PathBuf),
+    #[error("ReadOnlyImport: cannot modify imported foreign content at {0}")]
+    ReadOnlyImport(PathBuf),
 }
 
 impl Error {
@@ -96,6 +98,10 @@ impl Error {
 
     pub fn visit_loop<P: AsRef<Path>>(path: P) -> Self {
         Error::VisitLoop(path.as_ref().to_path_buf())
+    }
+
+    pub fn read_only_import<P: AsRef<Path>>(path: P) -> Self {
+        Error::ReadOnlyImport(path.as_ref().to_path_buf())
     }
 
     /// Create a MultipleWildcards error from a string-like value

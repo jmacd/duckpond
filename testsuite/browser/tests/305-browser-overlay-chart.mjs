@@ -92,14 +92,33 @@ async function testPage(browser, pagePath) {
 
   await tab.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
 
-  // Wait for overlay.js to finish -- either SVG appears or error shows.
+  // Wait for overlay.js to finish -- either SVG/headers appear (success)
+  // or DuckDB initialization fails (error .empty-state).
   // DuckDB-WASM loads from CDN so allow generous timeout.
+  //
+  // IMPORTANT: We must NOT match .empty-state in the initial selector
+  // because the loading placeholder ("Loading pump cycle data...") also
+  // uses .empty-state and would match immediately before DuckDB finishes.
+  // Instead we wait for success indicators, with a fallback timeout that
+  // then checks for error state.
   const rendered = await tab
-    .waitForSelector("#overlay-chart svg, #overlay-chart .empty-state", {
+    .waitForSelector("#overlay-chart svg, #overlay-chart .overlay-header", {
       timeout: 120000,
     })
     .then(() => true)
     .catch(() => false);
+
+  if (!rendered) {
+    // Timed out waiting for charts. Check if there's a DuckDB error.
+    const earlyError = await tab.evaluate(() => {
+      const el = document.querySelector("#overlay-chart .empty-state");
+      return el ? el.textContent : null;
+    });
+    console.log(`  [INFO] chart render timed out after 120s`);
+    if (earlyError) {
+      console.log(`  [INFO] page shows: ${earlyError.substring(0, 200)}`);
+    }
+  }
 
   await sleep(2000);
 

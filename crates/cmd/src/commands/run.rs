@@ -217,7 +217,7 @@ async fn run_pond_command_impl(
     let root = tx.root().await?;
 
     // Get the node ID for the config file
-    let (_parent_wd, lookup_result) = root
+    let (parent_wd, lookup_result) = root
         .resolve_path(config_path)
         .await
         .with_context(|| format!("Failed to resolve path: {}", config_path))?;
@@ -296,6 +296,18 @@ async fn run_pond_command_impl(
     let provider_context = tx.provider_context()?;
     let mut factory_context =
         provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
+
+    // If the factory config lives inside a foreign mount (detected by
+    // resolve_path crossing a pond boundary), chroot the factory so
+    // context.root() resolves paths within the mount point.
+    if !parent_wd.effective_root().is_root() {
+        log::info!(
+            "Factory at '{}' is inside a foreign mount, setting effective root",
+            config_path
+        );
+        factory_context =
+            factory_context.with_effective_root(parent_wd.effective_root().clone());
+    }
 
     // If this is a remote import factory, load import partitions from control table
     if factory_name == "remote"

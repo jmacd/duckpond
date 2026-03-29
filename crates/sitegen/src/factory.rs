@@ -516,7 +516,99 @@ fn write_builtin_assets(
             .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", path, e)))?;
         debug!("wrote built-in asset: {}", name);
     }
+
+    // Copy vendor files (DuckDB-WASM, Observable Plot, D3) for offline use.
+    // These are downloaded by vendor/download.sh and are not embedded in the
+    // binary due to their size (~35MB, dominated by the DuckDB WASM binary).
+    copy_vendor_assets(output_dir)?;
+
     Ok(())
+}
+
+/// Vendor files to copy to the generated site for offline DuckDB-WASM,
+/// Observable Plot, and D3 support.
+const VENDOR_FILES: &[&str] = &[
+    "duckdb-browser.mjs",
+    "duckdb-browser-eh.worker.js",
+    "duckdb-eh.wasm",
+    "plot-d3-bundle.mjs",
+];
+
+/// Copy vendor files from the vendor/dist/ directory to the output site.
+///
+/// Searches for vendor files in these locations (first match wins):
+///   1. DUCKPOND_VENDOR environment variable
+///   2. vendor/dist/ relative to the sitegen crate (development)
+///   3. /usr/local/share/duckpond/vendor/ (Docker / installed)
+///   4. ~/.cache/duckpond/vendor/ (user cache)
+///
+/// If no vendor directory is found, warns but does not error -- the site
+/// will not function without network access in that case.
+fn copy_vendor_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
+    let vendor_dir = find_vendor_dir();
+
+    let vendor_dir = match vendor_dir {
+        Some(d) => d,
+        None => {
+            log::warn!(
+                "Vendor files not found. Generated site requires network access. \
+                 Run: cd crates/sitegen/vendor && bash download.sh"
+            );
+            return Ok(());
+        }
+    };
+
+    let out_vendor = output_dir.join("vendor");
+    std::fs::create_dir_all(&out_vendor)
+        .map_err(|e| tinyfs::Error::Other(format!("mkdir {:?}: {}", out_vendor, e)))?;
+
+    for name in VENDOR_FILES {
+        let src = vendor_dir.join(name);
+        let dst = out_vendor.join(name);
+        std::fs::copy(&src, &dst).map_err(|e| {
+            tinyfs::Error::Other(format!("copy vendor {:?} -> {:?}: {}", src, dst, e))
+        })?;
+    }
+
+    info!(
+        "Copied {} vendor files to {}/vendor/",
+        VENDOR_FILES.len(),
+        output_dir.display()
+    );
+    Ok(())
+}
+
+fn find_vendor_dir() -> Option<std::path::PathBuf> {
+    // 1. Explicit env var
+    if let Ok(path) = std::env::var("DUCKPOND_VENDOR") {
+        let p = std::path::PathBuf::from(path);
+        if p.join("duckdb-eh.wasm").exists() {
+            return Some(p);
+        }
+    }
+
+    // 2. Development: vendor/dist/ relative to the crate source
+    //    (works when running from the repo checkout)
+    let crate_vendor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/dist");
+    if crate_vendor.join("duckdb-eh.wasm").exists() {
+        return Some(crate_vendor);
+    }
+
+    // 3. Installed location (Docker image, system install)
+    let system = std::path::Path::new("/usr/local/share/duckpond/vendor");
+    if system.join("duckdb-eh.wasm").exists() {
+        return Some(system.to_path_buf());
+    }
+
+    // 4. User cache
+    if let Ok(home) = std::env::var("HOME") {
+        let cache = std::path::PathBuf::from(home).join(".cache/duckpond/vendor");
+        if cache.join("duckdb-eh.wasm").exists() {
+            return Some(cache);
+        }
+    }
+
+    None
 }
 
 /// Convert a pond series path to a relative directory path for export.

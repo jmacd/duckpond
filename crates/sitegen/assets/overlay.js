@@ -51,10 +51,12 @@
   let db, conn;
   try {
     const duckdb = await import(
-      "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm"
+      "./vendor/duckdb-browser.mjs"
     );
-    const bundles = duckdb.getJsDelivrBundles();
-    const bundle = await duckdb.selectBundle(bundles);
+    const bundle = {
+      mainModule: "./vendor/duckdb-eh.wasm",
+      mainWorker: "./vendor/duckdb-browser-eh.worker.js",
+    };
     const worker = new Worker(
       URL.createObjectURL(
         new Blob(['importScripts("' + bundle.mainWorker + '");'], {
@@ -123,11 +125,7 @@
 
   // -- Import Plot + D3 -------------------------------------------------------
 
-  const Plot = await import(
-    "https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6/+esm"
-  );
-
-  const d3 = await import("https://cdn.jsdelivr.net/npm/d3@7/+esm");
+  const { Plot, d3 } = await import("./vendor/plot-d3-bundle.mjs");
 
   // -- Constants ---------------------------------------------------------------
 

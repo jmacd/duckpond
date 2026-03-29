@@ -321,4 +321,40 @@ mod tests {
 
         assert_eq!(root.node_path().path, PathBuf::from("/"));
     }
+
+    #[tokio::test]
+    async fn test_factory_context_root_without_effective_root() {
+        // Without effective_root, FactoryContext::root() returns the global root.
+        let persistence = MemoryPersistence::default();
+        let session = Arc::new(SessionContext::new());
+        let context = ProviderContext::new(session, Arc::new(persistence));
+
+        let factory_ctx = super::FactoryContext::new(context, crate::FileID::root());
+        let root = factory_ctx.root().await.expect("Should get root");
+        assert!(root.effective_root().is_root());
+    }
+
+    #[tokio::test]
+    async fn test_factory_context_root_with_effective_root() {
+        // With effective_root set, FactoryContext::root() returns a chrooted WD.
+        let persistence = MemoryPersistence::default();
+        let session = Arc::new(SessionContext::new());
+        let context = ProviderContext::new(session, Arc::new(persistence));
+        let fs = context.filesystem();
+        let root = fs.root().await.expect("Should get root");
+
+        // Create /sub/
+        let sub = root.create_dir_path("sub").await.unwrap();
+        let sub_np = sub.node_path();
+
+        // Build factory context with effective_root = /sub/
+        let factory_ctx = super::FactoryContext::new(context, crate::FileID::root())
+            .with_effective_root(sub_np.clone());
+        let chrooted = factory_ctx.root().await.expect("Should get chrooted root");
+
+        // The returned WD should be at /sub/ with effective_root = /sub/
+        assert_eq!(chrooted.node_path().id(), sub_np.id());
+        assert_eq!(chrooted.effective_root().id(), sub_np.id());
+        assert!(chrooted.is_at_root_boundary());
+    }
 }

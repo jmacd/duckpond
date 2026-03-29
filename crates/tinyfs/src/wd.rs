@@ -131,6 +131,16 @@ impl WD {
         self.np.id() == self.effective_root.id()
     }
 
+    /// Check that this WD is writable (not inside a read-only foreign import).
+    /// A directory is "foreign" when its pond_id differs from the effective
+    /// root's pond_id, meaning it was imported from another pond.
+    fn check_writable(&self) -> Result<()> {
+        if self.np.id().pond_id() != self.effective_root.id().pond_id() {
+            return Err(Error::read_only_import(self.np.path()));
+        }
+        Ok(())
+    }
+
     /// Create a child WD that inherits the effective root from self.
     async fn child_wd(&self, np: &NodePath) -> Result<WD> {
         WD::new(np.clone(), self.fs.clone(), self.effective_root.clone()).await
@@ -174,6 +184,7 @@ impl WD {
     {
         let path_clone = path.as_ref().to_path_buf();
         self.in_path(path.as_ref(), |wd, entry| async move {
+            wd.check_writable()?;
             match entry {
                 Lookup::NotFound(_, name) => {
                     let node_type = node_creator()?;
@@ -231,6 +242,7 @@ impl WD {
 
         let node_path = self
             .in_path(path.as_ref(), |wd, entry| async move {
+                wd.check_writable()?;
                 match entry {
                     Lookup::NotFound(_, name) => {
                         // Use the actual parent directory's node ID
@@ -294,6 +306,7 @@ impl WD {
         let path = path.as_ref();
 
         self.in_path(path, |wd, entry| async move {
+            wd.check_writable()?;
             match entry {
                 Lookup::NotFound(_, name) => {
                     let parent_id = wd.id();
@@ -323,6 +336,7 @@ impl WD {
 
         let node = self
             .in_path(path.as_ref(), |wd, entry| async move {
+                wd.check_writable()?;
                 match entry {
                     Lookup::NotFound(_, name) => {
                         let id = FileID::new_physical_dir_id(wd.effective_root.id().pond_id());
@@ -393,6 +407,7 @@ impl WD {
                         }
                         Ok(None) => {
                             // Entry doesn't exist - create the directory
+                            current_wd.check_writable()?;
                             let id = FileID::new_physical_dir_id(current_wd.effective_root.id().pond_id());
                             let node = current_wd.fs.persistence.create_directory_node(id).await?;
                             current_wd.fs.persistence.store_node(&node).await?;
@@ -433,6 +448,7 @@ impl WD {
     /// * `Err(NotFound)` if old_name doesn't exist
     /// * `Err(AlreadyExists)` if new_name already exists
     pub async fn rename_entry(&self, old_name: &str, new_name: &str) -> Result<()> {
+        self.check_writable()?;
         // Check if new name already exists
         if self.dref.get(new_name).await?.is_some() {
             return Err(Error::already_exists(new_name));
@@ -462,6 +478,7 @@ impl WD {
     /// Returns `Ok(())` if the entry was found and removed, `Err(NotFound)` otherwise.
     /// The removed node is dropped -- this is a destructive unlink.
     pub async fn remove_entry(&self, name: &str) -> Result<()> {
+        self.check_writable()?;
         let _node = self
             .dref
             .handle
@@ -545,9 +562,10 @@ impl WD {
         entry_type: EntryType,
     ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         let path_ref = path.as_ref();
-        let (_, lookup) = self.resolve_path(path_ref).await?;
+        let (wd, lookup) = self.resolve_path(path_ref).await?;
         match lookup {
             Lookup::Found(node) => {
+                wd.check_writable()?;
                 log::debug!(
                     "async_writer_path_with_type: file exists at path '{}', returning existing file writer (no directory update)",
                     path_ref.display()
@@ -571,11 +589,11 @@ impl WD {
 
     /// Opens a directory at the specified path and returns a new working directory for it
     pub async fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
-        let (_, lookup) = self.resolve_path(path).await?;
+        let (resolved_wd, lookup) = self.resolve_path(path).await?;
         match lookup {
-            Lookup::Found(node) => self.child_wd(&node).await,
+            Lookup::Found(node) => resolved_wd.child_wd(&node).await,
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
-            Lookup::Empty(node) => self.child_wd(&node).await,
+            Lookup::Empty(node) => resolved_wd.child_wd(&node).await,
         }
     }
 
@@ -1151,10 +1169,11 @@ impl WD {
         attributes: HashMap<String, String>,
     ) -> Result<()> {
         // Resolve the path to get both the file's NodeID and its parent directory
-        let (_, lookup) = self.resolve_path(path).await?;
+        let (wd, lookup) = self.resolve_path(path).await?;
 
         match lookup {
             Lookup::Found(node_path) => {
+                wd.check_writable()?;
                 self.fs
                     .set_extended_attributes(node_path.id(), attributes)
                     .await
@@ -1176,6 +1195,7 @@ impl WD {
         let path_clone = path.as_ref().to_path_buf();
         let node = self
             .in_path(path.as_ref(), |wd, entry| async move {
+                wd.check_writable()?;
                 match entry {
                     Lookup::Found(existing) if overwrite => {
                         // For overwrite, we need to update the configuration of the existing dynamic node
