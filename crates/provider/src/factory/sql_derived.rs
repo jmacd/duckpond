@@ -300,9 +300,10 @@ impl SqlDerivedFile {
                 transform_path
             );
 
-            // Create a temporary FS to resolve the transform path
-            let fs = tinyfs::FS::from_arc(self.context.context.persistence.clone());
-            let root = fs
+            // Resolve the transform path using FactoryContext root
+            // (respects effective_root for cross-pond imports).
+            let root = self
+                .context
                 .root()
                 .await
                 .map_err(|e| tinyfs::Error::Other(format!("Failed to get root: {}", e)))?;
@@ -471,12 +472,13 @@ impl SqlDerivedFile {
             .to_string();
         let tinyfs_path = tinyfs_path_decoded.as_str();
 
-        // STEP 1: Build TinyFS from persistence via ProviderContext
-        let fs = self.context.context.filesystem();
-        let tinyfs_root = fs
+        // STEP 1: Get root from FactoryContext (respects effective_root
+        // for cross-pond imports where "/" means the foreign root).
+        let tinyfs_root = self
+            .context
             .root()
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get root: {}", e)))?;
 
         // Check if path is exact (no wildcards) - use resolve_path() for single targets
         let is_exact_path =

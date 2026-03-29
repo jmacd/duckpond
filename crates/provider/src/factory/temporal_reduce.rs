@@ -680,10 +680,11 @@ impl TemporalReduceDirectory {
 
         let mut source_files = Vec::new();
 
-        let fs = self.context.context.filesystem();
+        // Use context.root() to respect effective_root for cross-pond imports
+        let root = self.context.root().await?;
 
         // Use collect_matches to find source files with the given pattern
-        match fs.root().await?.collect_matches(pattern).await {
+        match root.collect_matches(pattern).await {
             Ok(matches) => {
                 for (node_path, captured) in matches {
                     let source_path = node_path.path.to_string_lossy().to_string();
@@ -734,9 +735,10 @@ impl TemporalReduceDirectory {
 
     /// Get source node by path from discovered source files
     async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<Node> {
-        let fs = self.context.context.filesystem();
+        // Use context.root() to respect effective_root for cross-pond imports
+        let root = self.context.root().await?;
 
-        let matches = fs.root().await?.collect_matches(source_path).await?;
+        let matches = root.collect_matches(source_path).await?;
 
         if matches.is_empty() {
             return Err(tinyfs::Error::NotFound(std::path::PathBuf::from(

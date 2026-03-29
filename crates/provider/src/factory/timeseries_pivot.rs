@@ -67,9 +67,8 @@ impl TimeseriesPivotFile {
 
     /// Resolve pattern to matched inputs, extracting captured site names
     async fn resolve_pattern(&self) -> TinyFSResult<Vec<(String, String)>> {
-        // Get filesystem from ProviderContext
-        let fs = self.context.context.filesystem();
-        let tinyfs_root = fs.root().await?;
+        // Use context.root() to respect effective_root for cross-pond imports
+        let tinyfs_root = self.context.root().await?;
 
         // Extract filesystem path from URL for pattern matching
         let pattern_path = self.config.pattern.path();
