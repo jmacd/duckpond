@@ -774,3 +774,124 @@ h3:hover .anchor {
 .overlay-chart {
   margin-bottom: 2rem;
 }
+
+/* ---- Log viewer ---- */
+
+#log-viewer {
+  font-family: var(--font-sans);
+}
+
+.log-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.log-unit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.log-unit-pill {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: background 0.15s, color 0.15s;
+}
+
+.log-unit-pill:hover {
+  background: var(--accent-light);
+  color: #fff;
+}
+
+.log-unit-pill.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.log-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.log-nav-btn {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.log-nav-btn:hover:not(:disabled) {
+  background: var(--accent-light);
+  color: #fff;
+}
+
+.log-nav-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.log-status {
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+}
+
+.log-table-wrap {
+  overflow-x: auto;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+}
+
+.log-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+  border-bottom: 2px solid var(--border);
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.log-table td {
+  padding: 0.2rem 0.5rem;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 60vw;
+}
+
+.log-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+/* Priority coloring */
+.log-emerg td,
+.log-alert td,
+.log-crit td  { color: #c0392b; font-weight: 600; }
+.log-err td   { color: #e74c3c; }
+.log-warn td  { color: #b8860b; }
+.log-notice td { color: var(--green); }
+.log-info td  { color: var(--fg); }
+.log-debug td { color: var(--fg-muted); }
