@@ -2,24 +2,20 @@
 set -x
 set -e
 
-ROOT=/Volumes/sourcecode/src/duckpond
-NOYO=${ROOT}/noyo
-POND=${NOYO}/pond
-EXE=${ROOT}/target/debug/pond
-OUTDIR=./export
-
+SCRIPTS=$(cd "$(dirname "$0")" && pwd)
+export POND=${SCRIPTS}/pond
 export RUST_BACKTRACE=1
 export POND_MAX_ALLOC_MB=1000
 
-export POND
+LOCAL_OUTDIR=${SCRIPTS}/export
+CARGO="cargo run --release -p cmd --"
 
-cargo build
+rm -rf ${LOCAL_OUTDIR}
+mkdir -p ${LOCAL_OUTDIR}
 
-rm -rf ${OUTDIR}
-mkdir -p ${OUTDIR}
+${CARGO} run /system/etc/90-sitegen build ${LOCAL_OUTDIR}
 
-# Sitegen: exports data + renders HTML in one step
-${EXE} run /system/etc/90-sitegen build ${OUTDIR}
-
-echo Now, run:
-echo npx vite ${OUTDIR} --port 4174 --open
+echo
+echo "Site generated at: ${LOCAL_OUTDIR}"
+echo "To preview:"
+echo "  SITE_ROOT=${LOCAL_OUTDIR} BASE_PATH=/noyo-harbor/ npx vite --config ${SCRIPTS}/../testsuite/browser/vite.config.js --port 4174 --open"

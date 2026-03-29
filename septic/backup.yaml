@@ -3,5 +3,5 @@ url: "${S3_URL}"
 endpoint: "${S3_ENDPOINT}"
 access_key: "${S3_ACCESS_KEY}"
 secret_key: "${S3_SECRET_KEY}"
-allow_http: ${S3_ALLOW_HTTP:-false}
+allow_http: ${S3_ALLOW_HTTP}
 

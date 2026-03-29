@@ -2,50 +2,51 @@
 set -x
 set -e
 
-ROOT=/Volumes/sourcecode/src/duckpond
-NOYO=${ROOT}/noyo
-POND=${NOYO}/pond
-REPLICA=${NOYO}/replica
+SCRIPTS=$(cd "$(dirname "$0")" && pwd)
+POND_DIR=${SCRIPTS}/pond
 
-EXE=${ROOT}/target/debug/pond
+export POND=${POND_DIR}
 
-# Source private credentials (HydroVu API keys, etc.)
+# Load credentials (HydroVu keys, S3 creds)
+if [ -f "${SCRIPTS}/deploy.env" ]; then
+  . "${SCRIPTS}/deploy.env"
+fi
 if [ -f ~/.zshrc.private ]; then
   . ~/.zshrc.private
 fi
 
-export POND
+CARGO="cargo run --release -p cmd --"
 
-cargo build
+# Expand env vars in backup.yaml
+export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY
+BACKUP_CFG=$(mktemp)
+envsubst < "${SCRIPTS}/backup.yaml" > "${BACKUP_CFG}"
 
-${EXE} init
+${CARGO} init
 
-${EXE} mkdir -p /system/run
+${CARGO} mkdir -p /system/run
+${CARGO} mkdir -p /system/etc
+${CARGO} mkdir -p /laketech
 
-${EXE} mkdir -p /system/etc
-
-${EXE} mkdir -p /laketech
-
-${EXE} copy host://${NOYO}/site /system/site
-
-${EXE} copy host://${NOYO}/laketech /laketech/data
+${CARGO} copy host://${SCRIPTS}/site /system/site
+${CARGO} copy host://${SCRIPTS}/laketech /laketech/data
 
 # Import archived instrument data (if any exported Parquet files exist)
-# Archive Parquet lives in noyo/hydrovu/ — same pattern as noyo/laketech/
-if [ -d "${NOYO}/hydrovu" ]; then
-  ${EXE} copy host://${NOYO}/hydrovu /hydrovu
+if [ -d "${SCRIPTS}/hydrovu" ]; then
+  ${CARGO} copy host://${SCRIPTS}/hydrovu /hydrovu
 fi
 
-${EXE} mknod remote /system/run/1-backup --config-path ${NOYO}/backup.yaml
+${CARGO} mknod remote /system/run/1-backup --config-path "${BACKUP_CFG}"
+${CARGO} mknod hydrovu /system/etc/20-hydrovu --config-path ${SCRIPTS}/hydrovu.yaml
+${CARGO} mknod dynamic-dir /combined --config-path ${SCRIPTS}/combine.yaml
+${CARGO} mknod dynamic-dir /singled --config-path ${SCRIPTS}/single.yaml
+${CARGO} mknod dynamic-dir /reduced --config-path ${SCRIPTS}/reduce.yaml
+${CARGO} mknod sitegen /system/etc/90-sitegen --config-path ${SCRIPTS}/site.yaml
+${CARGO} mknod column-rename /system/etc/10-hrename --config-path ${SCRIPTS}/hrename.yaml
 
-${EXE} mknod hydrovu /system/etc/20-hydrovu --config-path ${NOYO}/hydrovu.yaml
+rm -f "${BACKUP_CFG}"
 
-${EXE} mknod dynamic-dir /combined --config-path ${NOYO}/combine.yaml
-
-${EXE} mknod dynamic-dir /singled --config-path ${NOYO}/single.yaml
-
-${EXE} mknod dynamic-dir /reduced --config-path ${NOYO}/reduce.yaml
-
-${EXE} mknod sitegen /system/etc/90-sitegen --config-path ${NOYO}/site.yaml
-
-${EXE} mknod column-rename /system/etc/10-hrename --config-path ${NOYO}/hrename.yaml
+echo
+echo "=== Setup complete ==="
+echo "Next: ./run.sh       # collect from HydroVu"
+echo "Then: ./export.sh    # build the site"

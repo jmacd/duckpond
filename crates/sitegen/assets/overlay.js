@@ -54,8 +54,8 @@
       "./vendor/duckdb-browser.mjs"
     );
     const bundle = {
-      mainModule: "./vendor/duckdb-eh.wasm",
-      mainWorker: "./vendor/duckdb-browser-eh.worker.js",
+      mainModule: new URL("./vendor/duckdb-eh.wasm", import.meta.url).href,
+      mainWorker: new URL("./vendor/duckdb-browser-eh.worker.js", import.meta.url).href,
     };
     const worker = new Worker(
       URL.createObjectURL(
