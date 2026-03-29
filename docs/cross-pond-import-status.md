@@ -1,145 +1,256 @@
 # Cross-Pond Import: Implementation Status
 
-## Status: Working
+Commit: 0102ebb (jmacd/33)
+Date: 2026-03-29
 
-Both flat and recursive cross-pond import are functional and tested.
+## What Was Done
 
-- Test 530 (flat import): **6/6 checks pass**
-- Test 531 (recursive import): **11/11 checks pass**
+### 1. pond_id scoping in the persistence layer
 
-## How It Works
+The persistence layer (`tlogfs/persistence.rs`) now filters committed
+records by `pond_id` when looking up nodes. This is the foundation for
+cross-pond import: two ponds can have records in the same partition
+(e.g., the well-known root partition `00000000-0000-7100-8000-000000000000`)
+and queries will return only the records belonging to the correct pond.
 
-### Exploration
+**Key changes:**
+
+- `PersistenceLayer` trait gained a `pond_uuid()` method (default returns
+  `local_pond_uuid()` for backward compatibility with memory/hostmount)
+- `State` implements `pond_uuid()` using `self.pond_id` (the real UUID
+  from `OpLogPersistence`)
+- `CachingPersistence` forwards `pond_uuid()` to inner persistence
+- `FS::root()` now calls `FileID::root_for(self.persistence.pond_uuid())`
+  instead of `FileID::root()` (which used the placeholder `LOCAL_POND_ID`)
+- `initialize_root_directory(&mut self, pond_id)` takes the real pond UUID
+- Three query functions filter committed records by `pond_id`:
+  - `query_latest_record`
+  - `query_latest_directory_record`
+  - `query_records`
+- Pending (uncommitted) records are NOT filtered by `pond_id` because
+  their `pond_id` field is empty until commit-time stamping. This is
+  correct: pending records are always from the local pond's current
+  transaction.
+
+### 2. Simplified import architecture
+
+The import creates ONE directory entry per mount point. Previously,
+`create_child_dirs_recursive` walked the foreign OpLog and created
+individual local directory entries for each child physical directory.
+This was wrong -- the foreign partition data already contains the full
+directory tree. When the persistence layer loads a foreign directory's
+content, the IPC-encoded entries list all children (physical dirs,
+dynamic dirs, files). Traversal into child physical directories works
+because `execute_import` downloaded those child partitions' parquet
+files too.
+
+**Removed:** `create_child_dirs_recursive` (was ~60 lines, filtered
+only `dir:physical`, dropped dynamic-dirs and files)
+
+**Kept:** `collect_partitions_recursive` -- this reads the foreign
+directory tree to discover partition IDs for the pull step. It does
+NOT create local entries.
+
+### 3. Foreign pond_id extraction
+
+`extract_foreign_pond_id()` queries the foreign OpLog for its `pond_id`
+value. This UUID is used when creating the mount point `FileID` via
+`create_foreign_dir()`, replacing the incorrect `local_pond_uuid()`.
+
+### 4. Fixed Ship::create_pond double-UUID bug
+
+`Ship::create_pond` was calling `PondMetadata::default()` twice: once
+in `create_infrastructure` (line 208, used for data persistence) and
+once in `create_pond` (line 90, overwrote the control table). These
+generated different UUIDs. Fixed by reusing the metadata already set
+by `create_infrastructure`.
+
+### 5. Cross-pond example (`cross/`)
+
+A new example directory that imports noyo, water, and septic from
+their S3 backups into a fourth pond with a combined sitegen. Scripts:
+`setup.sh`, `import.sh`, `generate.sh`.
+
+### 6. Fixed endpoint hostname
+
+All `deploy.env.example` files: `workshophost.casparwater.us` ->
+`watershop.casparwater.us` (DNS-resolvable name).
+
+---
+
+## What Is Broken
+
+### The root partition directory listing returns local content
+
+After importing three ponds with `source_path: "/**"`, listing
+`/sources/noyo/*` shows the LOCAL root's children (`/sources`,
+`/system`) instead of the foreign noyo root's children (`/combined`,
+`/hydrovu`, `/laketech`, `/reduced`, `/singled`, `/system`).
+
+All three imports show identical entries with the same node_ids --
+confirming these are the local root's entries leaking through.
+
+### Why
+
+The mount point at `/sources/noyo` has:
+```
+FileID(part_id=root_uuid, node_id=root_uuid, pond_id=noyo_uuid)
+```
+
+When we traverse into it, `query_latest_directory_record` should
+filter by `pond_id=noyo_uuid` and find the foreign root's directory
+record. Instead, it appears to find the local root's record.
+
+### Where to look
+
+1. **`ensure_partition_cached`** loads ALL records for a partition
+   into `HashMap<NodeID, Vec<OplogEntry>>`. For the root partition,
+   this cache entry has records from BOTH the local and foreign ponds.
+   The records are sorted by `timestamp DESC`.
+
+2. **`query_latest_directory_record`** filters the cache by:
+   ```rust
+   records.iter()
+       .find(|r| r.pond_id == pond_id_str && r.file_type.is_directory())
+   ```
+   Since records are sorted by timestamp DESC and `find()` returns
+   the first match, it should find the latest record with the matching
+   pond_id. This logic looks correct on paper.
+
+3. **Possible issues to investigate:**
+   - Is the foreign root record actually present in the imported
+     parquet files? Check: are the foreign root partition's files
+     being downloaded by `execute_import`?
+   - Is the `pond_id` on the foreign records correct? The records
+     were committed by the foreign pond with its real UUID. Verify
+     this matches what `extract_foreign_pond_id()` returns.
+   - Is `OpLogDirectory::get()` in `crates/tlogfs/src/directory.rs`
+     constructing child FileIDs with the parent's `pond_id`? (Yes,
+     it does: `self.id.pond_id()`. But verify the `self.id` is the
+     foreign FileID, not the local one.)
+   - Is the `register_empty_directory` call in `create_foreign_dir`
+     interfering? It registers an EMPTY directory state for the
+     foreign partition. If this empty state takes precedence over
+     the imported data, we'd see an empty listing.
+
+4. **Most likely cause:** `register_empty_directory` in
+   `create_foreign_dir` (line ~444 of `factory.rs`):
+   ```rust
+   state.register_empty_directory(file_id).await;
+   ```
+   This inserts an empty `DirectoryState` into the in-memory
+   `directories` HashMap. During `flush_directory_operations` at
+   commit time, this gets written as a directory record with EMPTY
+   content. The imported foreign data has the REAL directory listing,
+   but the locally-created empty record has a higher version number
+   (it was created in the current transaction). So
+   `query_latest_directory_record` finds the empty local record
+   first.
+
+   **FIX:** `register_empty_directory` should NOT be called for
+   import mount points. It was needed by `create_child_dirs_recursive`
+   (now removed) to allow inserting child entries in the same
+   transaction. With the simplified architecture (no child entry
+   creation), this registration is unnecessary and harmful.
+
+---
+
+## Debugging Instructions
+
+### Quick test
 
 ```bash
-# List ponds available in a remote bucket
-pond run host+remote:///config.yaml list-ponds
+cd /Volumes/sourcecode/src/duckpond
+rm -rf cross/pond
+bash cross/setup.sh    # Creates pond, imports 3 sources
+bash cross/import.sh   # Pulls data from S3
 
-# Show the full directory tree of a remote pond
-pond run host+remote:///config.yaml show
+# This should show noyo's content (combined, hydrovu, etc.)
+# but currently shows local content (sources, system):
+POND=cross/pond cargo run --release -p cmd -- list -l '/sources/noyo/*'
 ```
 
-### Import Setup
+### Verify the hypothesis
 
-```bash
-# Create import factory (discovers foreign partition structure)
-pond mknod remote /system/etc/10-import --config-path import.yaml
+1. Comment out `state.register_empty_directory(file_id).await;` in
+   `create_foreign_dir` (factory.rs ~line 444)
+2. Rebuild and re-run the test
+3. If the listing now shows foreign content, the hypothesis is
+   confirmed
 
-# Pull data from foreign pond
-pond run 10-import pull
+### If that doesn't fix it
+
+Add debug logging to `query_latest_directory_record`:
+```rust
+log::debug!(
+    "query_latest_directory_record: id={:?}, pond_id_str={}, found={:?}",
+    id, pond_id_str,
+    committed_record.as_ref().map(|r| &r.pond_id)
+);
 ```
 
-### Config Format
-
-```yaml
-url: "s3://bucket/pond-{foreign-uuid}"
-endpoint: "http://host:9000"
-region: "us-east-1"
-access_key: "..."
-secret_key: "..."
-allow_http: true
-import:
-  source_path: "/logs/**"           # /** for recursive
-  local_path: "/sources/workshophost"
+Also log what `ensure_partition_cached` loads for the root partition:
+```rust
+log::debug!(
+    "ensure_partition_cached: part_id={}, loaded {} nodes, pond_ids={:?}",
+    part_id, node_count,
+    by_node.values().flat_map(|v| v.iter().map(|r| &r.pond_id)).collect::<HashSet<_>>()
+);
 ```
 
-## Architecture
+### S3 setup
 
-### Data Flow
+The three source ponds are backed up to MinIO at
+`watershop.casparwater.us:9000`:
+- `s3://duckpond-dev` -- noyo (pond_id: 019d379c-a10c-7fdc-b2c3-414ccbe41eb0)
+- `s3://septic-dev` -- septic (pond_id: 019d377d-b65f-7b9d-b729-07037e3f0925)
+- `s3://water-dev` -- water (pond_id: 019d3793-9cb8-7c05-8ef8-132418027919)
 
-1. **mknod** reads the foreign OpLog via `ChunkedAsyncFileReader`,
-   navigates the directory tree to find `source_path`, and creates
-   a local directory at `local_path` with the foreign `FileID`
-   (same `part_id` and `node_id` as the foreign directory).
+Credentials: caspar/watertown (same as in deploy.env files).
 
-2. **pull** discovers all partition IDs to import:
-   - Top-level `part_id` from the local parent directory entry
-   - Child `part_id` values from the foreign OpLog (for `/**` imports)
-   - Downloads matching parquet files from the backup
-   - Writes to local object store
-   - Registers as Delta Add actions via `State::add_external_parquet()`
-   - Committed at transaction end in `commit_impl()`
+### Test suite
 
-3. **query** works immediately -- the local directory references the
-   foreign partition, and the imported parquet files are in the Delta
-   table. `pond list`, `pond cat`, and SQL queries all work.
+All 848 unit tests pass as of this commit. Run `cargo test` to verify.
 
-### Key Design Points
+---
 
-**Foreign FileIDs.** The import directory is created with
-`FileID::new_from_ids()` using the foreign pond's `part_id` and
-`node_id`. This means imported parquet files (which contain the
-foreign `part_id` in their partition path) land in the correct
-partition automatically.
+## Architecture Notes (Learned During This Session)
 
-**No local empty records.** `register_empty_directory()` caches the
-directory in memory (for child insertions during mknod) but does NOT
-persist an empty OpLog record. The real directory content comes from
-the imported foreign parquet files. This avoids shadowing foreign
-records with local empty ones.
+### FileID has three components
 
-**External Add actions.** Imported parquet files are registered via
-`State::add_external_parquet()` and committed as Delta Add actions
-in `commit_impl()` via `CommitBuilder`. This happens as a follow-up
-commit after the normal OpLog write, with the same `PondTxnMetadata`
-for correct version tracking.
+`FileID = (node_id, part_id, pond_id)`. The `pond_id` field was added
+to the `FileID` struct alongside the cross-pond import design, but the
+actual pond UUID was never threaded through -- everything used a
+placeholder constant `LOCAL_POND_ID`. This session fixed that by
+adding `PersistenceLayer::pond_uuid()`.
 
-**Partition discovery.** On each pull, `execute_import` discovers
-partition IDs by reading the parent directory entry (top-level) and
-the foreign OpLog (child partitions for recursive imports). This
-avoids the need for two pulls. Future optimization: cache the
-partition list in the control table.
+### Directory traversal inherits pond_id from parent
 
-## New tlogfs APIs
+In `OpLogDirectory::get()` (`crates/tlogfs/src/directory.rs`), child
+FileIDs are constructed using `self.id.pond_id()`. This means once
+you enter a foreign directory (with a foreign `pond_id` on its FileID),
+all traversal within that tree uses the foreign `pond_id`. This is
+correct behavior for cross-pond isolation.
 
-| API | Purpose |
-|-----|---------|
-| `State::register_empty_directory(id)` | Cache directory for child insertion without persisting empty record |
-| `State::add_external_parquet(action)` | Register imported parquet file for Delta commit at transaction end |
-| `State::query_directory_entries_by_id(id)` | Read directory entries from OpLog without opening directory node |
-| `ExternalAddAction` struct | Describes an external parquet file (path, size, part_id) |
-| `PartitionNotFound` error variant | Clear error for unimported foreign partition, suggests `/**` pattern |
-| `FS::wd()` made public | External directory traversal |
-| `WD::insert_node()` | Insert pre-created node with foreign FileID |
+### Pending records don't have pond_id
 
-## Known Issues
+OpLog records get their `pond_id` stamped at commit time (line ~2089
+of `persistence.rs`). During the transaction, pending records in
+`self.records` have empty `pond_id`. This is why the query functions
+don't filter pending records by `pond_id`.
 
-1. **mDNS (.local) resolution.** Rust HTTP client doesn't support
-   mDNS. Hostnames like `workshophost.local` cause silent 57-second
-   hangs. Use IP addresses or `/etc/hosts` entries instead.
+### The root partition is special
 
-2. **Two Delta versions per import.** The external Add commit creates
-   a separate Delta version from the OpLog record write. Ideally
-   these would be a single commit. Requires refactoring `commit_impl`
-   to use `CommitBuilder` for all writes.
+The root partition has the well-known UUID `00000000-0000-7100-8000-000000000000`.
+ALL ponds share this UUID for their root. Cross-pond import of root
+partitions means the local Delta table has records from multiple ponds
+in the same partition. The `pond_id` scoping in queries is what makes
+this safe.
 
-3. **Partition discovery on every pull.** Recursive imports re-read
-   the foreign OpLog on each pull to discover partition IDs. Should
-   cache the partition list in the control table for efficiency.
+### One directory entry per import
 
-4. **No incremental sync.** Pull downloads all matching partition
-   files, skipping only those already present in the local object
-   store (via `head()` check). No transaction-level tracking of
-   what has been imported.
-
-## Files Changed
-
-| File | Changes |
-|------|---------|
-| `crates/tlogfs/src/schema.rs` | `pond_id` field on OplogEntry |
-| `crates/tlogfs/src/persistence.rs` | pond_id stamping, ExternalAddAction, register_empty_directory, partition cache |
-| `crates/tlogfs/src/txn_metadata.rs` | pond_id in commit metadata |
-| `crates/tlogfs/src/error.rs` | PartitionNotFound variant |
-| `crates/tlogfs/src/large_files.rs` | Column index updates for pond_id |
-| `crates/tinyfs/src/wd.rs` | insert_node() |
-| `crates/tinyfs/src/fs.rs` | wd() made public |
-| `crates/remote/src/factory.rs` | ImportConfig, initialize_remote, execute_import, list-ponds, show, recursive import |
-| `crates/remote/src/chunked_async_reader.rs` | New: AsyncFileReader over chunked backup |
-| `crates/remote/src/schema.rs` | pond_id in ChunkedFileRecord, bundle_id format |
-| `crates/remote/src/table.rs` | pond_id on RemoteTable |
-| `crates/remote/src/writer.rs` | pond_id passthrough |
-| `crates/utilities/src/chunked_files.rs` | pond_id in Arrow schema |
-| `crates/steward/src/ship.rs` | pond_id threading |
-| `crates/steward/src/guard.rs` | pond_id in factory execution |
-| `testsuite/tests/530-cross-pond-import-minio.sh` | Flat import test: 6/6 |
-| `testsuite/tests/531-recursive-cross-pond-import.sh` | Recursive import test: 11/11 |
+Import = copy foreign parquet files + create one directory entry
+linking the local mount path to the foreign partition. No recursion
+into children. The foreign directory listing handles child references.
+`collect_partitions_recursive` only discovers partition IDs for the
+download step.
