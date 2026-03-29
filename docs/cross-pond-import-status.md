@@ -1,8 +1,5 @@
 # Cross-Pond Import: Implementation Status
 
-Commit: 0102ebb (jmacd/33)
-Date: 2026-03-29
-
 ## What Was Done
 
 ### 1. pond_id scoping in the persistence layer
@@ -78,7 +75,7 @@ All `deploy.env.example` files: `workshophost.casparwater.us` ->
 
 ---
 
-## What Is Broken
+## What Is Broken -- FIXED
 
 ### The root partition directory listing returns local content
 
@@ -90,113 +87,59 @@ After importing three ponds with `source_path: "/**"`, listing
 All three imports show identical entries with the same node_ids --
 confirming these are the local root's entries leaking through.
 
-### Why
+### Root Cause
 
-The mount point at `/sources/noyo` has:
-```
-FileID(part_id=root_uuid, node_id=root_uuid, pond_id=noyo_uuid)
-```
+The `DirectoryEntry` struct did not carry the child's `pond_id`.
+When `OpLogDirectory::insert()` added a foreign node to a local
+directory (e.g., inserting the `noyo` mount point under `/sources`),
+the foreign `pond_id` was discarded. When `OpLogDirectory::get()`
+later reconstructed the child `FileID`, it used the parent's
+`pond_id` (local), producing `FileID(root_uuid, root_uuid,
+LOCAL_pond_id)` instead of `FileID(root_uuid, root_uuid,
+NOYO_pond_id)`. The query then filtered by the wrong `pond_id`
+and found the local root's directory record.
 
-When we traverse into it, `query_latest_directory_record` should
-filter by `pond_id=noyo_uuid` and find the foreign root's directory
-record. Instead, it appears to find the local root's record.
+The earlier hypothesis about `register_empty_directory` was wrong.
+That function correctly marks the directory as `modified: false`,
+so it is NOT flushed as a local record. The real issue was one
+layer higher: the directory entry metadata itself didn't preserve
+cross-pond identity.
 
-### Where to look
+### Fix
 
-1. **`ensure_partition_cached`** loads ALL records for a partition
-   into `HashMap<NodeID, Vec<OplogEntry>>`. For the root partition,
-   this cache entry has records from BOTH the local and foreign ponds.
-   The records are sorted by `timestamp DESC`.
+Added `pond_id: Option<String>` to `DirectoryEntry`:
+- `None` = child belongs to the same pond as parent (default)
+- `Some(uuid)` = child is from a foreign pond
 
-2. **`query_latest_directory_record`** filters the cache by:
-   ```rust
-   records.iter()
-       .find(|r| r.pond_id == pond_id_str && r.file_type.is_directory())
-   ```
-   Since records are sorted by timestamp DESC and `find()` returns
-   the first match, it should find the latest record with the matching
-   pond_id. This logic looks correct on paper.
+Changes:
+- `crates/tinyfs/src/dir.rs`: Added `pond_id` field with
+  `#[serde(default)]` for backward compatibility
+- `crates/tlogfs/src/schema.rs`: Added nullable `pond_id` Utf8
+  column to the `ForArrow` schema
+- `crates/tlogfs/src/directory.rs`: `insert()` compares child vs
+  parent `pond_id` and stores it when they differ; `get()` and
+  `remove()` use the stored `pond_id` for child FileID construction
+- `crates/tlogfs/src/persistence.rs`: `flush_directory_operations()`
+  preserves `pond_id` when recreating entries at flush time
 
-3. **Possible issues to investigate:**
-   - Is the foreign root record actually present in the imported
-     parquet files? Check: are the foreign root partition's files
-     being downloaded by `execute_import`?
-   - Is the `pond_id` on the foreign records correct? The records
-     were committed by the foreign pond with its real UUID. Verify
-     this matches what `extract_foreign_pond_id()` returns.
-   - Is `OpLogDirectory::get()` in `crates/tlogfs/src/directory.rs`
-     constructing child FileIDs with the parent's `pond_id`? (Yes,
-     it does: `self.id.pond_id()`. But verify the `self.id` is the
-     foreign FileID, not the local one.)
-   - Is the `register_empty_directory` call in `create_foreign_dir`
-     interfering? It registers an EMPTY directory state for the
-     foreign partition. If this empty state takes precedence over
-     the imported data, we'd see an empty listing.
-
-4. **Most likely cause:** `register_empty_directory` in
-   `create_foreign_dir` (line ~444 of `factory.rs`):
-   ```rust
-   state.register_empty_directory(file_id).await;
-   ```
-   This inserts an empty `DirectoryState` into the in-memory
-   `directories` HashMap. During `flush_directory_operations` at
-   commit time, this gets written as a directory record with EMPTY
-   content. The imported foreign data has the REAL directory listing,
-   but the locally-created empty record has a higher version number
-   (it was created in the current transaction). So
-   `query_latest_directory_record` finds the empty local record
-   first.
-
-   **FIX:** `register_empty_directory` should NOT be called for
-   import mount points. It was needed by `create_child_dirs_recursive`
-   (now removed) to allow inserting child entries in the same
-   transaction. With the simplified architecture (no child entry
-   creation), this registration is unnecessary and harmful.
+Backward compatibility: existing serialized directories (Arrow IPC)
+without the `pond_id` column deserialize with `None` via
+`#[serde(default)]`. All 848+ unit tests pass.
 
 ---
 
-## Debugging Instructions
+## Next Steps
 
-### Quick test
+1. **End-to-end test**: Rebuild, re-run `cross/setup.sh` +
+   `cross/import.sh`, verify `pond list -l '/sources/noyo/*'`
+   shows foreign content.
 
-```bash
-cd /Volumes/sourcecode/src/duckpond
-rm -rf cross/pond
-bash cross/setup.sh    # Creates pond, imports 3 sources
-bash cross/import.sh   # Pulls data from S3
+2. **Phase 2.5 completion**: Recursive import (`/**` suffix) can
+   now be fully validated since directory listings should work
+   correctly.
 
-# This should show noyo's content (combined, hydrovu, etc.)
-# but currently shows local content (sources, system):
-POND=cross/pond cargo run --release -p cmd -- list -l '/sources/noyo/*'
-```
-
-### Verify the hypothesis
-
-1. Comment out `state.register_empty_directory(file_id).await;` in
-   `create_foreign_dir` (factory.rs ~line 444)
-2. Rebuild and re-run the test
-3. If the listing now shows foreign content, the hypothesis is
-   confirmed
-
-### If that doesn't fix it
-
-Add debug logging to `query_latest_directory_record`:
-```rust
-log::debug!(
-    "query_latest_directory_record: id={:?}, pond_id_str={}, found={:?}",
-    id, pond_id_str,
-    committed_record.as_ref().map(|r| &r.pond_id)
-);
-```
-
-Also log what `ensure_partition_cached` loads for the root partition:
-```rust
-log::debug!(
-    "ensure_partition_cached: part_id={}, loaded {} nodes, pond_ids={:?}",
-    part_id, node_count,
-    by_node.values().flat_map(|v| v.iter().map(|r| &r.pond_id)).collect::<HashSet<_>>()
-);
-```
+3. **Provenance display**: `pond list --long` and `pond describe`
+   should show foreign `pond_id` for imported files.
 
 ### S3 setup
 

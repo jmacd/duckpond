@@ -26,10 +26,16 @@ pub struct DirectoryEntry {
     pub entry_type: EntryType,
     /// Version number when this entry was last modified
     pub version_last_modified: i64,
+    /// Pond identity for cross-pond imports. None means the child belongs
+    /// to the same pond as its parent directory. Some(uuid) means the
+    /// child is from a foreign pond (e.g., an imported mount point).
+    /// Existing serialized data without this field deserializes as None.
+    #[serde(default)]
+    pub pond_id: Option<String>,
 }
 
 impl DirectoryEntry {
-    /// Create a new directory entry
+    /// Create a new directory entry (local, same pond as parent)
     #[must_use]
     pub fn new(
         name: String,
@@ -42,7 +48,15 @@ impl DirectoryEntry {
             child_node_id,
             entry_type,
             version_last_modified,
+            pond_id: None,
         }
+    }
+
+    /// Set the pond_id for a cross-pond import entry.
+    #[must_use]
+    pub fn with_pond_id(mut self, pond_id: String) -> Self {
+        self.pond_id = Some(pond_id);
+        self
     }
 }
 

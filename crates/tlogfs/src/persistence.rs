@@ -2550,13 +2550,16 @@ impl InnerState {
                 .mapping
                 .values()
                 .map(|entry| {
-                    // Update version_last_modified to current version
-                    DirectoryEntry::new(
+                    // Update version_last_modified to current version,
+                    // preserving pond_id for cross-pond import entries.
+                    let mut new_entry = DirectoryEntry::new(
                         entry.name.clone(),
                         entry.child_node_id,
                         entry.entry_type,
                         next_version,
-                    )
+                    );
+                    new_entry.pond_id = entry.pond_id.clone();
+                    new_entry
                 })
                 .collect();
 

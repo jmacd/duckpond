@@ -898,6 +898,7 @@ impl ForArrow for tinyfs::DirectoryEntry {
             Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
             Arc::new(Field::new("entry_type", DataType::Utf8, false)),
             Arc::new(Field::new("version_last_modified", DataType::Int64, false)),
+            Arc::new(Field::new("pond_id", DataType::Utf8, true)),
         ]
     }
 }
