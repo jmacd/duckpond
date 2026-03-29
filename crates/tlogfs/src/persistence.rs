@@ -151,6 +151,8 @@ pub struct State {
     large_file_options: crate::large_files::LargeFileOptions,
     /// Format provider cache directory ({POND}/cache/), computed from data path
     cache_dir: Option<PathBuf>,
+    /// Pond identity UUID for this persistence layer
+    pond_id: String,
 }
 
 // Re-export TableProviderKey from provider for backward compatibility
@@ -540,6 +542,7 @@ impl OpLogPersistence {
             txn_state: self.txn_state.clone(),
             large_file_options: self.large_file_options.clone(),
             cache_dir,
+            pond_id: self.pond_id.clone(),
         };
 
         // Complete SessionContext setup with ObjectStore registration
@@ -786,7 +789,12 @@ impl State {
     ///
     /// Should only be called during pond bootstrap from steward or tests
     pub async fn initialize_root_directory(&self) -> Result<(), TLogFSError> {
-        self.inner.lock().await.initialize_root_directory().await
+        let pond_id = self.pond_uuid();
+        self.inner
+            .lock()
+            .await
+            .initialize_root_directory(pond_id)
+            .await
     }
 
     async fn begin_impl(&self) -> Result<(), TLogFSError> {
@@ -873,6 +881,12 @@ impl PersistenceLayer for State {
 
     fn transaction_state(&self) -> Arc<TinyFsTransactionState> {
         self.txn_state.clone()
+    }
+
+    fn pond_uuid(&self) -> uuid7::Uuid {
+        self.pond_id
+            .parse::<uuid7::Uuid>()
+            .unwrap_or_else(|_| tinyfs::local_pond_uuid())
     }
 
     async fn load_node(&self, id: FileID) -> TinyFSResult<Node> {
@@ -1387,8 +1401,8 @@ impl InnerState {
     /// Should only be called from:
     /// - Steward layer during pond initialization (with proper metadata)
     /// - Tests (with test metadata)
-    pub async fn initialize_root_directory(&mut self) -> Result<(), TLogFSError> {
-        let root_id = FileID::root();
+    pub async fn initialize_root_directory(&mut self, pond_id: uuid7::Uuid) -> Result<(), TLogFSError> {
+        let root_id = FileID::root_for(pond_id);
 
         // Initialize root directory in memory as empty (will be written to OpLog at commit)
         _ = self
@@ -2836,7 +2850,12 @@ impl InnerState {
 
     /// Query for ONLY the latest record for any node type (O(1) performance)
     async fn query_latest_record(&mut self, id: FileID) -> Result<OplogEntry, TLogFSError> {
+        let pond_id_str = id.pond_id().to_string();
+
         // Step 1: Check pending records in memory FIRST
+        // Pending records have empty pond_id (stamped at commit), so match
+        // only by part_id+node_id. This is safe because pending records
+        // are always from the local pond's current transaction.
         let pending_record = self
             .records
             .iter()
@@ -2852,14 +2871,21 @@ impl InnerState {
             return Ok(pending);
         }
 
-        // Step 2: Use the partition cache to get the latest committed record
+        // Step 2: Use the partition cache to get the latest committed record.
+        // Filter by pond_id to isolate records from different ponds that
+        // share the same partition (e.g., root partition in cross-pond import).
         self.ensure_partition_cached(id.part_id()).await?;
 
         match self
             .partition_records_cache
             .get(&id.part_id())
             .and_then(|by_node| by_node.get(&id.node_id()))
-            .and_then(|records| records.first().cloned())
+            .and_then(|records| {
+                records
+                    .iter()
+                    .find(|r| r.pond_id == pond_id_str)
+                    .cloned()
+            })
         {
             Some(record) => Ok(record),
             None => {
@@ -2903,6 +2929,8 @@ impl InnerState {
         &mut self,
         id: FileID,
     ) -> Result<Option<OplogEntry>, TLogFSError> {
+        let pond_id_str = id.pond_id().to_string();
+
         // Step 1: Check pending records in memory FIRST
         // During flush_directory_operations, newly created directory snapshots are in self.records
         let pending_record = self
@@ -2912,14 +2940,19 @@ impl InnerState {
             .max_by_key(|r| r.version)
             .cloned();
 
-        // Step 2: Use partition cache for committed records
+        // Step 2: Use partition cache for committed records, scoped by pond_id
         self.ensure_partition_cached(id.part_id()).await?;
 
         let committed_record = self
             .partition_records_cache
             .get(&id.part_id())
             .and_then(|by_node| by_node.get(&id.node_id()))
-            .and_then(|records| records.iter().find(|r| r.file_type.is_directory()).cloned());
+            .and_then(|records| {
+                records
+                    .iter()
+                    .find(|r| r.pond_id == pond_id_str && r.file_type.is_directory())
+                    .cloned()
+            });
 
         // Step 3: Return the latest between committed and pending (pending wins if both exist)
         match (committed_record, pending_record) {
@@ -2988,16 +3021,24 @@ impl InnerState {
         trace.param("caller", &caller);
         trace.param("id", id);
 
-        // Step 1: Get committed records, using partition cache when available
+        let pond_id_str = id.pond_id().to_string();
+
+        // Step 1: Get committed records, scoped by pond_id
         let query_start = std::time::Instant::now();
 
         self.ensure_partition_cached(id.part_id()).await?;
 
-        let committed_records = self
+        let committed_records: Vec<OplogEntry> = self
             .partition_records_cache
             .get(&id.part_id())
             .and_then(|by_node| by_node.get(&id.node_id()))
-            .cloned()
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|r| r.pond_id == pond_id_str)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
 
         trace.metric("query_ms", query_start.elapsed().as_millis() as u64);

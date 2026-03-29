@@ -298,6 +298,9 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
 
     let foreign_ctx = load_foreign_oplog(&remote_table).await?;
 
+    // Extract the foreign pond's UUID from its OpLog records
+    let foreign_pond_uuid = extract_foreign_pond_id(&foreign_ctx).await?;
+
     // Find the target directory in the foreign tree
     let (foreign_part_id, foreign_node_id) =
         navigate_foreign_path(&foreign_ctx, &source_base).await?;
@@ -357,69 +360,53 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
         root.clone()
     };
 
-    // Create the top-level import directory.
-    // When importing the root (source_path "/"), the mount point must be
-    // a fresh local partition -- we cannot reuse the foreign root UUID
-    // because it would collide with the local root. The foreign root's
-    // children are linked with their original foreign IDs via recursive
-    // import below.
-    let is_root_import = foreign_part_id == "00000000-0000-7100-8000-000000000000";
+    // Create a single local directory entry linking to the foreign partition.
+    // The foreign partition's data (imported during pull) contains the full
+    // directory tree — all children (physical dirs, dynamic dirs, files) are
+    // referenced by the foreign directory listing. No local child entries
+    // needed; the persistence layer follows the foreign references directly.
+    let _top_node = create_foreign_dir(
+        &state,
+        &parent_wd,
+        dir_name,
+        &foreign_part_id,
+        &foreign_node_id,
+        foreign_pond_uuid,
+    )
+    .await?;
 
-    let top_node = if is_root_import {
-        // Create a normal local directory as the mount point
-        let mount_wd = parent_wd.create_dir_path(dir_name).await.map_err(|e| {
-            RemoteError::Configuration(format!(
-                "Failed to create mount point '{}': {}",
-                dir_name, e
-            ))
-        })?;
-        mount_wd.node_path()
-    } else {
-        create_foreign_dir(
-            &state,
-            &parent_wd,
-            dir_name,
-            &foreign_part_id,
-            &foreign_node_id,
-            tinyfs::local_pond_uuid(), // TODO: use actual foreign pond_id from backup metadata
-        )
-        .await?
-    };
-
-    // Record import metadata for steward (via Delta commit metadata).
-    // Use the top-level foreign part_id as the factory identifier.
+    // Record import metadata for the top-level partition.
     let factory_key = foreign_part_id.clone();
-    if !is_root_import {
-        state
-            .add_import_metadata(tlogfs::ImportPartitionRecord {
-                factory_node_id: factory_key.clone(),
-                foreign_part_id: foreign_part_id.clone(),
-                foreign_pond_id: String::new(),
-                watermark_txn_seq: 0,
-            })
-            .await;
-    }
+    state
+        .add_import_metadata(tlogfs::ImportPartitionRecord {
+            factory_node_id: factory_key.clone(),
+            foreign_part_id: foreign_part_id.clone(),
+            foreign_pond_id: String::new(),
+            watermark_txn_seq: 0,
+        })
+        .await;
 
-    // For root imports, the mount point is a local directory (not a
-    // foreign partition), so start the count at 0.
-    let mut partition_count: usize = if is_root_import { 0 } else { 1 };
+    // Discover all descendant partition IDs so execute_import knows
+    // which parquet files to download. This only reads the foreign
+    // directory tree metadata — it does NOT create local entries.
+    let mut partition_count: usize = 1;
 
-    // If recursive, walk the foreign directory tree and create local entries
-    // for all child physical directories
     if recursive {
-        let top_wd = fs.wd(&top_node, root.effective_root().clone()).await.map_err(|e| {
-            RemoteError::Configuration(format!("Failed to open import directory: {}", e))
-        })?;
+        let mut child_part_ids = Vec::new();
+        collect_partitions_recursive(&foreign_ctx, &foreign_node_id, &mut child_part_ids)
+            .await?;
 
-        partition_count += create_child_dirs_recursive(
-            &foreign_ctx,
-            &state,
-            &fs,
-            &top_wd,
-            &foreign_node_id,
-            &factory_key,
-        )
-        .await?;
+        for child_part_id in &child_part_ids {
+            state
+                .add_import_metadata(tlogfs::ImportPartitionRecord {
+                    factory_node_id: factory_key.clone(),
+                    foreign_part_id: child_part_id.clone(),
+                    foreign_pond_id: String::new(),
+                    watermark_txn_seq: 0,
+                })
+                .await;
+        }
+        partition_count += child_part_ids.len();
     }
 
     log::info!(
@@ -467,68 +454,21 @@ async fn create_foreign_dir(
     })
 }
 
-/// Recursively create local directory entries for all child physical
-/// directories found in the foreign OpLog.
-///
-/// Returns the number of child partitions created.
-async fn create_child_dirs_recursive(
-    foreign_ctx: &datafusion::prelude::SessionContext,
-    state: &tlogfs::persistence::State,
-    fs: &tinyfs::FS,
-    parent_wd: &tinyfs::WD,
+/// Recursively collect partition IDs for all physical directory descendants.
+/// Used by `execute_import` to discover the full set of partitions to download.
+async fn collect_partitions_recursive(
+    ctx: &datafusion::prelude::SessionContext,
     parent_node_id: &str,
-    factory_key: &str,
-) -> Result<usize, RemoteError> {
-    // Read the foreign directory's entries
-    let entries = read_foreign_directory_entries(foreign_ctx, parent_node_id).await?;
-    let mut count = 0;
-
-    for (name, child_id, entry_type) in &entries {
-        if entry_type == "dir:physical" {
-            // Create local directory with the foreign FileID
-            let child_node = create_foreign_dir(
-                state, parent_wd, name, child_id, child_id,
-                tinyfs::local_pond_uuid(), // TODO: use actual foreign pond_id
-            ).await?;
-
-            log::info!(
-                "   [INIT] Created child import dir: {} (part_id={})",
-                name,
-                child_id
-            );
-            count += 1;
-
-            // Record import metadata for this child partition
-            state
-                .add_import_metadata(tlogfs::ImportPartitionRecord {
-                    factory_node_id: factory_key.to_string(),
-                    foreign_part_id: child_id.clone(),
-                    foreign_pond_id: String::new(),
-                    watermark_txn_seq: 0,
-                })
-                .await;
-
-            // Recurse into this child
-            let child_wd = fs.wd(&child_node, parent_wd.effective_root().clone()).await.map_err(|e| {
-                RemoteError::Configuration(format!(
-                    "Failed to open child directory '{}': {}",
-                    name, e
-                ))
-            })?;
-
-            count += Box::pin(create_child_dirs_recursive(
-                foreign_ctx,
-                state,
-                fs,
-                &child_wd,
-                child_id,
-                factory_key,
-            ))
-            .await?;
+    ids: &mut Vec<String>,
+) -> Result<(), RemoteError> {
+    let entries = read_foreign_directory_entries(ctx, parent_node_id).await?;
+    for (_name, child_id, entry_type) in &entries {
+        if entry_type == "dir:physical" && !ids.contains(child_id) {
+            ids.push(child_id.clone());
+            Box::pin(collect_partitions_recursive(ctx, child_id, ids)).await?;
         }
     }
-
-    Ok(count)
+    Ok(())
 }
 
 /// Read directory entries from the foreign OpLog for a given node_id.
@@ -610,6 +550,37 @@ async fn read_foreign_directory_entries(
     }
 
     Ok(entries)
+}
+
+/// Extract the foreign pond's UUID from its OpLog records.
+async fn extract_foreign_pond_id(
+    ctx: &datafusion::prelude::SessionContext,
+) -> Result<uuid7::Uuid, RemoteError> {
+    let df = ctx
+        .sql("SELECT DISTINCT pond_id FROM oplog LIMIT 1")
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to query foreign pond_id: {}", e)))?;
+    let batches = df
+        .collect()
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to collect foreign pond_id: {}", e)))?;
+
+    if batches.is_empty() || batches[0].num_rows() == 0 {
+        return Err(RemoteError::Configuration(
+            "Foreign OpLog contains no records - cannot determine pond_id".to_string(),
+        ));
+    }
+
+    let col = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow_array::StringArray>()
+        .ok_or_else(|| RemoteError::TableOperation("pond_id column not StringArray".to_string()))?;
+
+    let pond_id_str = col.value(0);
+    pond_id_str
+        .parse::<uuid7::Uuid>()
+        .map_err(|_| RemoteError::Configuration(format!("Invalid foreign pond_id: {}", pond_id_str)))
 }
 
 /// Load the foreign OpLog into a DataFusion SessionContext for querying.
@@ -1689,32 +1660,14 @@ async fn execute_import(
         let top_part_id = import_entry.child_node_id.to_string();
         let mut ids = vec![top_part_id.clone()];
 
-        // For recursive imports, read the foreign OpLog to discover child partitions
+        // For recursive imports, read the foreign OpLog to discover all
+        // descendant partitions at any depth.
         if recursive {
             log::info!("   Discovering child partitions from foreign backup...");
             let foreign_ctx = load_foreign_oplog(&remote_table).await?;
             let (_, target_node_id) = navigate_foreign_path(&foreign_ctx, &source_base).await?;
 
-            fn collect_recursive(entries: &[(String, String, String)], ids: &mut Vec<String>) {
-                for (_, child_id, entry_type) in entries {
-                    if entry_type == "dir:physical" && !ids.contains(child_id) {
-                        ids.push(child_id.clone());
-                    }
-                }
-            }
-
-            let entries = read_foreign_directory_entries(&foreign_ctx, &target_node_id).await?;
-            collect_recursive(&entries, &mut ids);
-
-            // Recurse one more level for each child dir
-            for (_name, child_id, entry_type) in &entries {
-                if entry_type == "dir:physical"
-                    && let Ok(child_entries) =
-                        read_foreign_directory_entries(&foreign_ctx, child_id).await
-                {
-                    collect_recursive(&child_entries, &mut ids);
-                }
-            }
+            collect_partitions_recursive(&foreign_ctx, &target_node_id, &mut ids).await?;
         }
 
         ids

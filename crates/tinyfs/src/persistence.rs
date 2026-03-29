@@ -39,6 +39,13 @@ pub trait PersistenceLayer: Send + Sync {
     /// This allows transaction guards to be created from the persistence layer
     fn transaction_state(&self) -> Arc<TransactionState>;
 
+    /// Get the pond UUID for this persistence layer.
+    /// Returns the real pond UUID for OpLog-backed ponds, or a well-known
+    /// placeholder for memory/hostmount persistence.
+    fn pond_uuid(&self) -> uuid7::Uuid {
+        crate::local_pond_uuid()
+    }
+
     async fn load_node(&self, file_id: FileID) -> Result<Node>;
 
     async fn store_node(&self, node: &Node) -> Result<()>;

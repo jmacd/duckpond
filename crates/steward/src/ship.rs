@@ -86,8 +86,8 @@ impl Ship {
             root_seq
         );
 
-        // Set pond identity metadata
-        let metadata = PondMetadata::default();
+        // Report pond identity (already set by create_infrastructure)
+        let metadata = ship.control_table.pond_metadata().clone();
         info!(
             "Pond created with ID: {} at {} by {}@{}",
             metadata.pond_id,
@@ -97,7 +97,6 @@ impl Ship {
             metadata.birth_username,
             metadata.birth_hostname
         );
-        ship.control_table.set_pond_metadata(&metadata).await?;
 
         // Set default factory modes for primary pond
         // "remote" factory runs in "push" mode (automatic post-commit backup)

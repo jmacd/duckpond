@@ -48,7 +48,8 @@ impl FS {
     /// Returns a working directory context for the root directory
     /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {
-        let root_node = self.persistence.load_node(FileID::root()).await?;
+        let root_id = FileID::root_for(self.persistence.pond_uuid());
+        let root_node = self.persistence.load_node(root_id).await?;
         let node = NodePath {
             node: root_node,
             path: "/".into(),

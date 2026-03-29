@@ -125,7 +125,7 @@ impl<P: PersistenceLayer> TinyFsObjectStore<P> {
         let path_str = path.as_ref();
 
         // Use canonical parser for consistency
-        match parse_tinyfs_path(path_str) {
+        match parse_tinyfs_path(path_str, self.persistence.pond_uuid()) {
             Ok(parsed) => {
                 // Create series key using FileID components
                 let series_key = format!(
@@ -210,7 +210,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
 
         // Parse the path to get node_id and part_id for dynamic discovery
         let parsed_path =
-            parse_tinyfs_path(location.as_ref()).map_err(|err| object_store::Error::Generic {
+            parse_tinyfs_path(location.as_ref(), self.persistence.pond_uuid()).map_err(|err| object_store::Error::Generic {
                 store: "TinyFS",
                 source: err.into(),
             })?;
@@ -363,7 +363,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
 
         // Parse the path to get node_id and part_id
         let parsed_path =
-            parse_tinyfs_path(location_str).map_err(|err| object_store::Error::Generic {
+            parse_tinyfs_path(location_str, self.persistence.pond_uuid()).map_err(|err| object_store::Error::Generic {
                 store: "TinyFS",
                 source: err.into(),
             })?;
@@ -554,6 +554,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         let persistence = self.persistence.clone();
         let metadata_cache = self.metadata_cache.clone();
         let prefix = prefix.map(|p| p.as_ref().to_string());
+        let pond_id = self.persistence.pond_uuid();
 
         let prefix_str = prefix.as_ref().map(|p| p.as_ref()).unwrap_or("None");
         debug!("ObjectStore list called with prefix: {prefix_str}");
@@ -561,7 +562,7 @@ impl<P: PersistenceLayer + Clone + 'static> ObjectStore for TinyFsObjectStore<P>
         let stream = async_stream::stream! {
             // Parse the prefix to extract both node_id and part_id for dynamic discovery
             if let Some(ref prefix_str) = prefix {
-                if let Some(file_id) = extract_node_and_part_ids_from_path(prefix_str) {
+                if let Some(file_id) = extract_node_and_part_ids_from_path(prefix_str, pond_id) {
                     debug!("ObjectStore extracting file versions for file_id: {file_id}");
 
                     // Query persistence layer directly with FileID - no pre-registration needed!
@@ -685,7 +686,7 @@ struct TinyFsPath {
 
 /// Single canonical method to parse all TinyFS path formats
 /// This eliminates duplication and ensures consistency across all path parsing
-fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
+fn parse_tinyfs_path(path: &str, pond_id: uuid7::Uuid) -> Result<TinyFsPath, String> {
     let parts: Vec<&str> = path.split('/').collect();
 
     // Handle directory paths: "directory/{node_id}"
@@ -696,7 +697,7 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
             .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
 
         // For directories, node_id == part_id
-        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::from_node_id(node_id), node_id, tinyfs::local_pond_uuid());
+        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::from_node_id(node_id), node_id, pond_id);
         return Ok(TinyFsPath {
             file_id,
             version: None, // Directories don't have explicit versions in the path
@@ -743,7 +744,7 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
         return Err(format!("Invalid TinyFS path length: {}", path));
     };
 
-    let file_id = tinyfs::FileID::new_from_ids(part_id, node_id, tinyfs::local_pond_uuid());
+    let file_id = tinyfs::FileID::new_from_ids(part_id, node_id, pond_id);
     Ok(TinyFsPath { file_id, version })
 }
 
@@ -751,8 +752,8 @@ fn parse_tinyfs_path(path: &str) -> Result<TinyFsPath, String> {
 /// Examples:
 /// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version" -> Some(file_id)
 /// - "part/987fcdeb-51a2-4321-8765-432109876543/node/019945f3-031b-7e54-863d-895392f16dac/version/1.parquet" -> Some(file_id)
-fn extract_node_and_part_ids_from_path(path: &str) -> Option<tinyfs::FileID> {
-    parse_tinyfs_path(path).ok().map(|parsed| parsed.file_id)
+fn extract_node_and_part_ids_from_path(path: &str, pond_id: uuid7::Uuid) -> Option<tinyfs::FileID> {
+    parse_tinyfs_path(path, pond_id).ok().map(|parsed| parsed.file_id)
 }
 
 /// Register TinyFsObjectStore with a SessionContext

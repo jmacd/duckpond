@@ -137,12 +137,18 @@ pub struct FileID {
 /// Used by MemoryPersistence and hostmount where no real pond_id exists.
 pub const LOCAL_POND_ID: &str = "00000000-0000-7000-8000-000000000000";
 
+/// Returns the fallback pond UUID used when no real pond identity is available
+/// (memory persistence, hostmount, tests without a real pond).
 #[must_use]
 pub fn local_pond_uuid() -> Uuid {
     LOCAL_POND_ID
         .parse::<Uuid>()
         .expect("LOCAL_POND_ID should be a valid UUID7")
 }
+
+/// Set the local pond UUID (no-op, kept for API compatibility).
+/// The pond UUID is now obtained from the PersistenceLayer::pond_uuid() method.
+pub fn set_local_pond_uuid(_uuid: Uuid) {}
 
 impl FileID {
     #[must_use]
