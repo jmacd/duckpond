@@ -5,61 +5,25 @@ site:
   base_url: "/"
   github_url: "https://github.com/jmacd/duckpond"
 
-exports:
-  - name: "septic"
-    pattern: "/sources/septic/reduced/*/*/*.series"
+subsites:
+  - name: "noyo"
+    path: "/sources/noyo"
+    config: "/system/etc/90-sitegen"
+    base_url: "/noyo/"
   - name: "water"
-    pattern: "/sources/water/reduced/*/*/*.series"
-  - name: "noyo-params"
-    pattern: "/sources/noyo/reduced/single_param/*/*/*.series"
-  - name: "noyo-sites"
-    pattern: "/sources/noyo/reduced/single_site/*/*/*.series"
+    path: "/sources/water"
+    config: "/etc/site.yaml"
+    base_url: "/water/"
+  - name: "septic"
+    path: "/sources/septic"
+    config: "/etc/site.yaml"
+    base_url: "/septic/"
 
 routes:
   - name: "home"
     type: static
     slug: ""
     page: "/system/site/index.md"
-  - name: "septic"
-    type: static
-    slug: "septic"
-    page: "/system/site/septic.md"
-    routes:
-      - name: "septic-detail"
-        type: template
-        slug: "$0"
-        page: "/system/site/data.md"
-        export: "septic"
-  - name: "water"
-    type: static
-    slug: "water"
-    page: "/system/site/water.md"
-    routes:
-      - name: "water-detail"
-        type: template
-        slug: "$0"
-        page: "/system/site/data.md"
-        export: "water"
-  - name: "noyo-params"
-    type: static
-    slug: "noyo/params"
-    page: "/system/site/noyo-params.md"
-    routes:
-      - name: "noyo-param-detail"
-        type: template
-        slug: "$0"
-        page: "/system/site/data.md"
-        export: "noyo-params"
-  - name: "noyo-sites"
-    type: static
-    slug: "noyo/sites"
-    page: "/system/site/noyo-sites.md"
-    routes:
-      - name: "noyo-site-detail"
-        type: template
-        slug: "$0"
-        page: "/system/site/data.md"
-        export: "noyo-sites"
 
 partials:
   sidebar: "/system/site/sidebar.md"
@@ -67,60 +31,14 @@ partials:
 sidebar:
   - label: "Home"
     href: "/"
-  - label: "Septic"
-    href: "/septic/index.html"
-    children:
-      - label: "Pump Amps"
-        href: "/septic/pumps.html"
-      - label: "Cycle Times"
-        href: "/septic/cycle-times.html"
-      - label: "Pump Modes"
-        href: "/septic/pump-modes.html"
-      - label: "Flow Totals"
-        href: "/septic/flow-totals.html"
-      - label: "Dose Zones"
-        href: "/septic/dose-zones.html"
-      - label: "BME280"
-        href: "/septic/environment.html"
-  - label: "Water"
-    href: "/water/index.html"
-    children:
-      - label: "Well Depth"
-        href: "/water/well-depth.html"
-      - label: "Tank Level"
-        href: "/water/tank-level.html"
-      - label: "System Pressure"
-        href: "/water/system-pressure.html"
-      - label: "Chlorine Level"
-        href: "/water/chlorine-level.html"
-      - label: "pH"
-        href: "/water/ph.html"
-  - label: "Noyo Parameters"
-    href: "/noyo/params/index.html"
-    children:
-      - label: "Dissolved Oxygen"
-        href: "/noyo/params/DO.html"
-      - label: "Salinity"
-        href: "/noyo/params/Salinity.html"
-      - label: "Temperature"
-        href: "/noyo/params/Temperature.html"
-      - label: "Tide"
-        href: "/noyo/params/Tide.html"
-  - label: "Noyo Sites"
-    href: "/noyo/sites/index.html"
-    children:
-      - label: "B-Dock"
-        href: "/noyo/sites/BDock.html"
-      - label: "Field Station"
-        href: "/noyo/sites/FieldStation.html"
-      - label: "Princess Seafood"
-        href: "/noyo/sites/Princess.html"
-      - label: "Silver"
-        href: "/noyo/sites/Silver.html"
+  - label: "Noyo Harbor"
+    href: "/noyo/"
+  - label: "Water System"
+    href: "/water/"
+  - label: "Septic Station"
+    href: "/septic/"
 
-static_assets: []
-
-# Combined infrastructure theme — steel blue
+# Combined infrastructure theme -- steel blue
 theme:
   accent: "#1a365d"
   accent-light: "#2a4a7f"

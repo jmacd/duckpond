@@ -5,14 +5,14 @@ layout: default
 
 # Caspar Infrastructure
 
-Combined monitoring dashboard for all three systems, powered by
+Combined monitoring dashboard for three independent systems, powered by
 [cross-pond import](https://github.com/jmacd/duckpond).
 
 ## Systems
 
-- **[Septic](/septic/index.html)** -- Orenco septic system (BeaglePlay)
-- **[Water](/water/index.html)** -- Caspar water system (workshophost)
-- **[Noyo Harbor](/noyo/params/index.html)** -- HydroVu water quality (parameters and sites)
+- **[Noyo Harbor](/noyo/)** -- HydroVu water quality monitoring
+- **[Water System](/water/)** -- Caspar water system
+- **[Septic Station](/septic/)** -- Orenco septic system
 
-Each system runs its own collector independently and pushes backups to S3.
-This site imports all three and generates a unified view.
+Each system runs its own collector and defines its own site. This portal
+imports all three ponds and recursively generates each sub-site.

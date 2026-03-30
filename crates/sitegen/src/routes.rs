@@ -399,6 +399,7 @@ mod tests {
             sidebar: vec![],
             feed: None,
             theme: std::collections::BTreeMap::new(),
+            subsites: vec![],
         }
     }
 
@@ -556,6 +557,7 @@ mod tests {
             sidebar: vec![],
             feed: None,
             theme: std::collections::BTreeMap::new(),
+            subsites: vec![],
         };
 
         let exports = BTreeMap::new();

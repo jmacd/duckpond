@@ -83,103 +83,193 @@ async fn execute(
     match cmd.command {
         SitegenSubcommand::Build { output_dir } => {
             let output_path = std::path::PathBuf::from(&output_dir);
-
-            // Run export stages: glob-match pond files, export as Hive-partitioned
-            // parquet, scan output for real files with start_time/end_time.
-            let exports = run_export_stages(&config, &context, &output_path).await?;
-
-            // Run content stages: glob-match markdown data files, parse frontmatter.
-            let content = run_content_stages(&config, &context).await?;
-
-            // Pre-read all files from the pond into a map.
-            // We cannot use block_on inside this async context, so we collect
-            // everything we need up front.
             let root = context.root().await?;
+            let provider_ctx = &context.context;
+            let root_base_url = config.site.base_url.clone();
 
-            let mut file_cache: BTreeMap<String, String> = BTreeMap::new();
+            // Build the main site
+            build_site_from_root(&config, &root, provider_ctx, &output_path, &root_base_url)
+                .await?;
 
-            // Collect all page paths from route expansion
-            let jobs = routes::expand_routes(&config, &exports, &content);
-            for job in &jobs {
-                if !file_cache.contains_key(&job.page_source) {
-                    let data = root
-                        .read_file_path_to_vec(&job.page_source)
-                        .await
-                        .map_err(|e| {
-                            tinyfs::Error::Other(format!(
-                                "Cannot read page '{}': {}",
-                                job.page_source, e
-                            ))
-                        })?;
-                    let text = String::from_utf8(data).map_err(|e| {
-                        tinyfs::Error::Other(format!("Non-UTF8 page '{}': {}", job.page_source, e))
+            // Write shared build assets (base CSS, JS, vendor) once
+            write_shared_assets(&output_path)?;
+
+            // Write per-site theme overrides
+            write_theme_css(&output_path, &config.theme)?;
+
+            // Build subsites from imported ponds
+            for subsite in &config.subsites {
+                info!("Building subsite '{}'...", subsite.name);
+
+                // Read sub-site config from the imported pond
+                let config_full_path = format!("{}{}", subsite.path, subsite.config);
+                let config_bytes = root
+                    .read_file_path_to_vec(&config_full_path)
+                    .await
+                    .map_err(|e| {
+                        tinyfs::Error::Other(format!(
+                            "Cannot read subsite config '{}': {}",
+                            config_full_path, e
+                        ))
                     })?;
-                    file_cache.insert(job.page_source.clone(), text);
+                let mut sub_config: SiteConfig =
+                    serde_yaml::from_slice(&config_bytes).map_err(|e| {
+                        tinyfs::Error::Other(format!(
+                            "Invalid subsite config '{}': {}",
+                            config_full_path, e
+                        ))
+                    })?;
+
+                // Override base_url if specified
+                if let Some(ref base_url) = subsite.base_url {
+                    sub_config.site.base_url = base_url.clone();
                 }
+
+                // Derive output subdirectory from base_url or name
+                let subdir = subsite
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(&subsite.name)
+                    .trim_matches('/');
+                let subsite_output = output_path.join(subdir);
+                std::fs::create_dir_all(&subsite_output).map_err(|e| {
+                    tinyfs::Error::Other(format!("mkdir {:?}: {}", subsite_output, e))
+                })?;
+
+                // Create WD scoped to the mount point
+                let subsite_wd = root.open_dir_path(&subsite.path).await.map_err(|e| {
+                    tinyfs::Error::Other(format!(
+                        "Cannot open subsite path '{}': {}",
+                        subsite.path, e
+                    ))
+                })?;
+                let subsite_root = subsite_wd.as_root();
+
+                build_site_from_root(
+                    &sub_config,
+                    &subsite_root,
+                    provider_ctx,
+                    &subsite_output,
+                    &root_base_url,
+                )
+                .await?;
+
+                // Write per-subsite theme overrides
+                write_theme_css(&subsite_output, &sub_config.theme)?;
+
+                info!(
+                    "Subsite '{}' built at {:?}",
+                    subsite.name, subsite_output
+                );
             }
-
-            // Collect partials
-            for path in config.partials.values() {
-                if !file_cache.contains_key(path) {
-                    match root.read_file_path_to_vec(path).await {
-                        Ok(data) => {
-                            if let Ok(text) = String::from_utf8(data) {
-                                file_cache.insert(path.clone(), text);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Cannot read partial '{}': {}", path, e);
-                        }
-                    }
-                }
-            }
-
-            // Collect static assets via glob, including binary files.
-            // Each pattern is glob-expanded; matched files are read as raw
-            // bytes and written to the output preserving their path structure.
-            let mut static_assets: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-            for asset in &config.static_assets {
-                let matches = root.collect_matches(&asset.pattern).await?;
-                if matches.is_empty() {
-                    warn!("No files matched static pattern '{}'", asset.pattern);
-                }
-                for (node_path, _captures) in &matches {
-                    let path_str = node_path.path.to_string_lossy().to_string();
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        static_assets.entry(path_str.clone())
-                    {
-                        match root.read_file_path_to_vec(&path_str).await {
-                            Ok(data) => {
-                                entry.insert(data);
-                            }
-                            Err(e) => {
-                                warn!("Cannot read static asset '{}': {}", path_str, e);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Simple lookup closure -- no async needed
-            let read_pond_file = |path: &str| -> Result<String, String> {
-                file_cache
-                    .get(path)
-                    .cloned()
-                    .ok_or_else(|| format!("File not in cache: {}", path))
-            };
-
-            generate_site(&config, &exports, &content, &read_pond_file, &output_path)
-                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-
-            // Copy static assets to output, preserving directory structure
-            copy_static_assets(&static_assets, &output_path)?;
-
-            // Write built-in assets (style.css, chart.js)
-            write_builtin_assets(&output_path, &config.theme)?;
 
             Ok(())
         }
     }
+}
+
+/// Build a single site from a WD root.
+///
+/// Runs the full sitegen pipeline: export stages, content stages, route
+/// expansion, page rendering, and static asset copying. Does NOT write
+/// shared build assets (CSS/JS/vendor) or theme.css -- those are handled
+/// by the caller.
+///
+/// `root_base_url` is the top-level site's base_url, used for shared
+/// asset references (style.css, chart.js, vendor/). For standalone sites
+/// this equals the config's base_url. For subsites it's the parent's
+/// base_url.
+async fn build_site_from_root(
+    config: &SiteConfig,
+    root: &tinyfs::WD,
+    provider_ctx: &tinyfs::ProviderContext,
+    output_dir: &std::path::Path,
+    root_base_url: &str,
+) -> Result<(), tinyfs::Error> {
+    // Run export stages
+    let exports = run_export_stages(config, root, provider_ctx, output_dir).await?;
+
+    // Run content stages
+    let content = run_content_stages(config, root).await?;
+
+    // Pre-read all files from the pond into a map
+    let mut file_cache: BTreeMap<String, String> = BTreeMap::new();
+
+    // Collect all page paths from route expansion
+    let jobs = routes::expand_routes(config, &exports, &content);
+    for job in &jobs {
+        if !file_cache.contains_key(&job.page_source) {
+            let data = root
+                .read_file_path_to_vec(&job.page_source)
+                .await
+                .map_err(|e| {
+                    tinyfs::Error::Other(format!(
+                        "Cannot read page '{}': {}",
+                        job.page_source, e
+                    ))
+                })?;
+            let text = String::from_utf8(data).map_err(|e| {
+                tinyfs::Error::Other(format!("Non-UTF8 page '{}': {}", job.page_source, e))
+            })?;
+            file_cache.insert(job.page_source.clone(), text);
+        }
+    }
+
+    // Collect partials
+    for path in config.partials.values() {
+        if !file_cache.contains_key(path) {
+            match root.read_file_path_to_vec(path).await {
+                Ok(data) => {
+                    if let Ok(text) = String::from_utf8(data) {
+                        file_cache.insert(path.clone(), text);
+                    }
+                }
+                Err(e) => {
+                    warn!("Cannot read partial '{}': {}", path, e);
+                }
+            }
+        }
+    }
+
+    // Collect static assets via glob
+    let mut static_assets: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for asset in &config.static_assets {
+        let matches = root.collect_matches(&asset.pattern).await?;
+        if matches.is_empty() {
+            warn!("No files matched static pattern '{}'", asset.pattern);
+        }
+        for (node_path, _captures) in &matches {
+            let path_str = node_path.path.to_string_lossy().to_string();
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                static_assets.entry(path_str.clone())
+            {
+                match root.read_file_path_to_vec(&path_str).await {
+                    Ok(data) => {
+                        entry.insert(data);
+                    }
+                    Err(e) => {
+                        warn!("Cannot read static asset '{}': {}", path_str, e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Simple lookup closure
+    let read_pond_file = |path: &str| -> Result<String, String> {
+        file_cache
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("File not in cache: {}", path))
+    };
+
+    generate_site(config, &exports, &content, &read_pond_file, output_dir, root_base_url)
+        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+    // Copy static assets to output, preserving directory structure
+    copy_static_assets(&static_assets, output_dir)?;
+
+    Ok(())
 }
 
 /// Run export stages: glob-match pond files, export as Hive-partitioned parquet,
@@ -201,11 +291,10 @@ async fn execute(
 /// 3. Exports each match with its resolution-specific temporal partition.
 async fn run_export_stages(
     config: &SiteConfig,
-    context: &FactoryContext,
+    root: &tinyfs::WD,
+    provider_ctx: &tinyfs::ProviderContext,
     output_dir: &std::path::Path,
 ) -> Result<BTreeMap<String, ExportContext>, tinyfs::Error> {
-    let root = context.root().await?;
-    let provider_ctx = &context.context;
     let data_dir = output_dir.join("data");
     let mut exports = BTreeMap::new();
 
@@ -213,13 +302,13 @@ async fn run_export_stages(
         // Detect format-provider URL patterns vs bare pond glob paths
         if stage.pattern.contains("://") {
             let by_key = run_format_provider_export(
-                stage, context, &data_dir, provider_ctx, config,
+                stage, provider_ctx, &data_dir, config,
             )
             .await?;
             exports.insert(stage.name.clone(), ExportContext { by_key });
         } else {
             let by_key = run_queryable_file_export(
-                stage, &root, &data_dir, provider_ctx, config,
+                stage, root, &data_dir, provider_ctx, config,
             )
             .await?;
             exports.insert(stage.name.clone(), ExportContext { by_key });
@@ -236,12 +325,11 @@ async fn run_export_stages(
 /// as Hive-partitioned Parquet.
 async fn run_format_provider_export(
     stage: &crate::config::ExportStage,
-    context: &FactoryContext,
-    data_dir: &std::path::Path,
     provider_ctx: &tinyfs::ProviderContext,
+    data_dir: &std::path::Path,
     config: &SiteConfig,
 ) -> Result<BTreeMap<String, Vec<shortcodes::ExportedFile>>, tinyfs::Error> {
-    let fs = context.context.filesystem();
+    let fs = provider_ctx.filesystem();
     let provider = provider::Provider::new(Arc::new(fs));
 
     // Use UrlPatternMatcher to expand the pattern and get matched files
@@ -513,9 +601,8 @@ async fn run_queryable_file_export(
 /// sorted by (weight, title).
 async fn run_content_stages(
     config: &SiteConfig,
-    context: &FactoryContext,
+    root: &tinyfs::WD,
 ) -> Result<BTreeMap<String, ContentContext>, tinyfs::Error> {
-    let root = context.root().await?;
     let mut content = BTreeMap::new();
 
     for stage in &config.content {
@@ -630,36 +717,20 @@ fn copy_static_assets(
     Ok(())
 }
 
-/// Write built-in assets (style.css, chart.js) to the output directory.
+/// Write shared build assets (base CSS, JS, vendor) to the output directory.
 ///
 /// These are compiled into the binary via `include_str!` so sitegen always
 /// produces a self-contained site without requiring files in the pond.
-///
-/// Theme overrides from `site.yaml` are appended as a `:root` block that
-/// takes precedence over the default CSS custom properties.
-fn write_builtin_assets(
-    output_dir: &Path,
-    theme: &std::collections::BTreeMap<String, String>,
-) -> Result<(), tinyfs::Error> {
+/// Written once at the top-level output directory; subsites reference them
+/// via root-relative paths.
+fn write_shared_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
     static STYLE_CSS: &str = include_str!("../assets/style.css");
     static CHART_JS: &str = include_str!("../assets/chart.js");
     static OVERLAY_JS: &str = include_str!("../assets/overlay.js");
     static LOG_VIEWER_JS: &str = include_str!("../assets/log-viewer.js");
 
-    // Build CSS with theme overrides appended
-    let css = if theme.is_empty() {
-        STYLE_CSS.to_string()
-    } else {
-        let mut overrides = String::from("\n/* Site theme overrides */\n:root {\n");
-        for (key, value) in theme {
-            overrides.push_str(&format!("  --{}: {};\n", key, value));
-        }
-        overrides.push_str("}\n");
-        format!("{}{}", STYLE_CSS, overrides)
-    };
-
     for (name, content) in [
-        ("style.css", css.as_str()),
+        ("style.css", STYLE_CSS),
         ("chart.js", CHART_JS),
         ("overlay.js", OVERLAY_JS),
         ("log-viewer.js", LOG_VIEWER_JS),
@@ -667,7 +738,7 @@ fn write_builtin_assets(
         let path = output_dir.join(name);
         std::fs::write(&path, content.as_bytes())
             .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", path, e)))?;
-        debug!("wrote built-in asset: {}", name);
+        debug!("wrote shared asset: {}", name);
     }
 
     // Copy vendor files (DuckDB-WASM, Observable Plot, D3) for offline use.
@@ -675,6 +746,33 @@ fn write_builtin_assets(
     // binary due to their size (~35MB, dominated by the DuckDB WASM binary).
     copy_vendor_assets(output_dir)?;
 
+    Ok(())
+}
+
+/// Write per-site theme.css with CSS custom property overrides.
+///
+/// Each site (top-level and each subsite) gets its own theme.css.
+/// If no theme overrides are configured, writes an empty comment
+/// so the `<link>` does not 404.
+fn write_theme_css(
+    output_dir: &Path,
+    theme: &std::collections::BTreeMap<String, String>,
+) -> Result<(), tinyfs::Error> {
+    let css = if theme.is_empty() {
+        "/* No theme overrides */\n".to_string()
+    } else {
+        let mut css = String::from("/* Site theme overrides */\n:root {\n");
+        for (key, value) in theme {
+            css.push_str(&format!("  --{}: {};\n", key, value));
+        }
+        css.push_str("}\n");
+        css
+    };
+
+    let path = output_dir.join("theme.css");
+    std::fs::write(&path, css.as_bytes())
+        .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", path, e)))?;
+    debug!("wrote theme.css ({} overrides)", theme.len());
     Ok(())
 }
 
@@ -836,6 +934,7 @@ fn generate_site(
     content: &BTreeMap<String, ContentContext>,
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
     output_dir: &Path,
+    root_base_url: &str,
 ) -> Result<(), GenerateError> {
     // Compute feed URL if site_url is configured
     let feed_url = if config.site.site_url.is_some() {
@@ -938,6 +1037,7 @@ fn generate_site(
                 title: &title,
                 site_title: &config.site.title,
                 base_url: &config.site.base_url,
+                root_base_url,
                 content: &content_html,
                 sidebar: sidebar_html.as_deref(),
                 date: fm.date.as_deref(),
@@ -1255,6 +1355,7 @@ mod tests {
                 description: Some("A test blog".to_string()),
             }),
             theme: std::collections::BTreeMap::new(),
+            subsites: vec![],
         };
 
         let mut content = BTreeMap::new();
@@ -1360,6 +1461,7 @@ mod tests {
             sidebar: vec![],
             feed: None,
             theme: std::collections::BTreeMap::new(),
+            subsites: vec![],
         };
         let content = BTreeMap::new();
 

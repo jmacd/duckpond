@@ -59,6 +59,10 @@ pub struct LayoutContext<'a> {
     pub site_title: &'a str,
     /// Base URL path prefix (from site.yaml, e.g. "/" or "/noyo-harbor/")
     pub base_url: &'a str,
+    /// Root base URL for shared assets (style.css, chart.js, vendor/).
+    /// For standalone sites this equals base_url. For subsites this is
+    /// the top-level site's base_url (typically "/").
+    pub root_base_url: &'a str,
     /// Rendered HTML content (from markdown + shortcodes)
     pub content: &'a str,
     /// Rendered sidebar HTML (from sidebar partial, if any)
@@ -93,6 +97,8 @@ pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
 
 /// Common `<head>` elements shared by all layouts.
 fn common_head(ctx: &LayoutContext) -> Markup {
+    let style_url = format!("{}style.css", ctx.root_base_url);
+    let theme_url = format!("{}theme.css", ctx.base_url);
     html! {
         meta charset="utf-8";
         meta name="viewport" content="width=device-width, initial-scale=1";
@@ -101,7 +107,8 @@ fn common_head(ctx: &LayoutContext) -> Markup {
         link rel="preconnect" href="https://fonts.googleapis.com";
         link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
         link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap";
-        link rel="stylesheet" href="/style.css";
+        link rel="stylesheet" href=(style_url);
+        link rel="stylesheet" href=(theme_url);
         @if let Some(feed) = ctx.feed_url {
             link rel="alternate" type="application/rss+xml" title="RSS Feed" href=(feed);
         }
@@ -113,6 +120,8 @@ fn common_head(ctx: &LayoutContext) -> Markup {
 /// Includes CDN scripts for DuckDB-WASM and Observable Plot,
 /// a sidebar for navigation, and a main content area.
 fn data_layout(ctx: &LayoutContext) -> Markup {
+    let chart_url = format!("{}chart.js", ctx.root_base_url);
+    let overlay_url = format!("{}overlay.js", ctx.root_base_url);
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -133,9 +142,8 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                // Our glue code -- loads DuckDB-WASM + Observable Plot dynamically
-                script src="/chart.js" type="module" {}
-                script src="/overlay.js" type="module" {}
+                script src=(chart_url) type="module" {}
+                script src=(overlay_url) type="module" {}
             }
         }
     }
@@ -146,6 +154,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
 /// Similar to data_layout but loads log-viewer.js instead of chart.js.
 /// Sidebar navigation + card-wrapped content with the log viewer container.
 fn logs_layout(ctx: &LayoutContext) -> Markup {
+    let log_viewer_url = format!("{}log-viewer.js", ctx.root_base_url);
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -166,7 +175,7 @@ fn logs_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                script src="/log-viewer.js" type="module" {}
+                script src=(log_viewer_url) type="module" {}
             }
         }
     }
@@ -306,6 +315,7 @@ mod tests {
             title: "Home",
             site_title: "Test Site",
             base_url: "/",
+            root_base_url: "/",
             content: "<h1>Hello</h1>",
             sidebar: None,
             date: None,
@@ -327,6 +337,7 @@ mod tests {
         // Without github_url, no GitHub icon
         let ctx_no_gh = LayoutContext {
             github_url: None,
+            root_base_url: "/",
             ..ctx
         };
         let html2 = apply_layout("default", &ctx_no_gh);
@@ -342,6 +353,7 @@ mod tests {
             title: "Temperature",
             site_title: "Noyo Harbor",
             base_url: "/noyo-harbor/",
+            root_base_url: "/noyo-harbor/",
             content: "<p>Chart here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: None,
@@ -372,6 +384,7 @@ mod tests {
             title: "Page",
             site_title: "Site",
             base_url: "/",
+            root_base_url: "/",
             content: "<p>Content</p>",
             sidebar: None,
             date: None,
@@ -388,6 +401,7 @@ mod tests {
             title: "Water System",
             site_title: "Caspar Water",
             base_url: "/",
+            root_base_url: "/",
             content: "<h1>Water</h1><p>Info</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: None,
@@ -413,6 +427,7 @@ mod tests {
             title: "My Blog Post",
             site_title: "Test Blog",
             base_url: "/",
+            root_base_url: "/",
             content: "<p>Post content here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: Some("2025-03-10"),
@@ -468,6 +483,7 @@ mod tests {
             title: "Undated Post",
             site_title: "Blog",
             base_url: "/",
+            root_base_url: "/",
             content: "<p>No date</p>",
             sidebar: None,
             date: None,
