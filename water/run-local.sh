@@ -15,8 +15,10 @@ export POND=${SCRIPTS}/pond
 
 CARGO="cargo run --release -p cmd --"
 
-# Sync latest data from remote (--update preserves newer local copies)
-rsync -chavzP --update --stats ${DEPLOY_HOST}:${DEPLOY_DATA_DIR}/ ${DATA_DIR}/
+# Sync latest data from remote (skip if data already exists locally)
+if [ -z "$(ls -A "${DATA_DIR}" 2>/dev/null)" ]; then
+  rsync -chavzP --update --stats ${DEPLOY_HOST}:${DEPLOY_DATA_DIR}/ ${DATA_DIR}/
+fi
 
 # Ingest new/updated files
 ${CARGO} run /etc/ingest

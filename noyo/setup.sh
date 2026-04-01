@@ -18,10 +18,12 @@ fi
 CARGO="cargo run --release -p cmd --"
 
 # Expand env vars in backup.yaml
-export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY
+export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_ALLOW_HTTP
 BACKUP_CFG=$(mktemp)
 envsubst < "${SCRIPTS}/backup.yaml" > "${BACKUP_CFG}"
 
+# Wipe and initialize
+rm -rf "${POND_DIR}"
 ${CARGO} init
 
 ${CARGO} mkdir -p /system/run

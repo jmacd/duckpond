@@ -959,10 +959,13 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         );
                         let fs = self.context.context.filesystem();
                         let fs_arc = Arc::new(fs);
-                        let provider_api = crate::Provider::with_context(
+                        let mut provider_api = crate::Provider::with_context(
                             fs_arc,
                             Arc::new(self.context.context.clone()),
                         );
+                        if let Ok(root) = self.context.root().await {
+                            provider_api = provider_api.with_root(root);
+                        }
                         let datafusion_ctx = datafusion::prelude::SessionContext::new();
 
                         if queryable_files.len() == 1 {

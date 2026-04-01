@@ -227,8 +227,11 @@ impl TemporalReduceSqlFile {
         );
 
         let fs = self.context.context.filesystem();
-        let provider =
+        let mut provider =
             crate::Provider::with_context(Arc::new(fs), Arc::new(self.context.context.clone()));
+        if let Ok(root) = self.context.root().await {
+            provider = provider.with_root(root);
+        }
         let datafusion_ctx = datafusion::prelude::SessionContext::new();
 
         let table_provider = provider

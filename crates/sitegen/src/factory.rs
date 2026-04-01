@@ -302,7 +302,7 @@ async fn run_export_stages(
         // Detect format-provider URL patterns vs bare pond glob paths
         if stage.pattern.contains("://") {
             let by_key = run_format_provider_export(
-                stage, provider_ctx, &data_dir, config,
+                stage, root, provider_ctx, &data_dir, config,
             )
             .await?;
             exports.insert(stage.name.clone(), ExportContext { by_key });
@@ -325,12 +325,13 @@ async fn run_export_stages(
 /// as Hive-partitioned Parquet.
 async fn run_format_provider_export(
     stage: &crate::config::ExportStage,
+    root: &tinyfs::WD,
     provider_ctx: &tinyfs::ProviderContext,
     data_dir: &std::path::Path,
     config: &SiteConfig,
 ) -> Result<BTreeMap<String, Vec<shortcodes::ExportedFile>>, tinyfs::Error> {
     let fs = provider_ctx.filesystem();
-    let provider = provider::Provider::new(Arc::new(fs));
+    let provider = provider::Provider::new(Arc::new(fs)).with_root(root.clone());
 
     // Use UrlPatternMatcher to expand the pattern and get matched files
     let matcher = provider::UrlPatternMatcher::new(provider);

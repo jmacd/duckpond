@@ -117,6 +117,12 @@ impl WD {
     #[must_use]
     pub fn as_root(mut self) -> Self {
         self.effective_root = self.np.clone();
+        // Reset the display path to "/" so that paths built from this
+        // root (e.g. by collect_matches) are relative to the new root,
+        // not the global tree.
+        self.np.path = "/".into();
+        self.effective_root.path = "/".into();
+        self.dref = self.dref.with_path("/".into());
         self
     }
 

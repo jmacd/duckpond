@@ -89,6 +89,17 @@ pub struct Pathed<T> {
     path: PathBuf,
 }
 
+impl<T> Pathed<T> {
+    /// Return a new Pathed with the given path, keeping the same handle.
+    #[must_use]
+    pub fn with_path(self, path: PathBuf) -> Self {
+        Self {
+            handle: self.handle,
+            path,
+        }
+    }
+}
+
 impl Handle {
     pub fn new(r: Arc<tokio::sync::Mutex<Box<dyn Directory>>>) -> Self {
         Self(r)

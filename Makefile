@@ -40,6 +40,13 @@ help:
 	@echo "    make add-headers    Add SPDX headers to Rust files"
 	@echo "    make clean          Remove build artifacts"
 	@echo ""
+	@echo "  Demo sites (local-only, no network required)"
+	@echo "    make site-noyo      Rebuild noyo pond"
+	@echo "    make site-septic    Rebuild septic pond"
+	@echo "    make site-water     Rebuild water pond"
+	@echo "    make sites          Rebuild all three source ponds"
+	@echo "    make site-cross     Full cross-pond demo (needs S3 backups)"
+	@echo ""
 
 # ── Development ──────────────────────────────────────────────────────────
 
@@ -89,6 +96,43 @@ add-headers:
 		--skip-unrecognised \
 		--recursive \
 		crates
+
+# ── Demo sites (local-only, no network) ──────────────────────────────────
+#
+# Regenerate the demo pond data from local files. Each site's setup.sh
+# wipes and re-creates ./pond/, then ingests local data.  The cross
+# demo imports from the three source ponds' S3 backups.
+#
+# Individual sites:
+#   make site-noyo      Rebuild noyo pond from local HydroVu + LakeTech data
+#   make site-septic    Rebuild septic pond from local JSON logs
+#   make site-water     Rebuild water pond from local JSON logs
+#
+# Combined:
+#   make sites          Rebuild all three source ponds
+#   make site-cross     Setup + import + generate the cross-pond demo
+#                       (requires the three source ponds to have been
+#                        backed up to S3 at least once)
+
+.PHONY: sites site-noyo site-septic site-water site-cross
+
+site-noyo: release
+	cd noyo && bash setup.sh
+
+site-septic: release
+	cd septic && bash setup.sh
+	cd septic && bash run.sh
+
+site-water: release
+	cd water && bash setup-local.sh
+	cd water && bash run-local.sh
+
+sites: site-noyo site-septic site-water
+
+site-cross: release sites
+	cd cross && bash setup.sh
+	cd cross && bash import.sh
+	cd cross && bash generate.sh
 
 # ── Cleanup ──────────────────────────────────────────────────────────────
 

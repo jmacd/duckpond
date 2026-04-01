@@ -25,9 +25,11 @@ export POND=${POND_DIR}
 # Cargo run helper
 CARGO="cargo run --release -p cmd --"
 
-# Sync data from remote
+# Sync data from remote (skip if data already exists locally)
 mkdir -p "${DATA_DIR}"
-rsync -chavzP --update --stats ${DEPLOY_HOST}:${DEPLOY_DATA_DIR}/ ${DATA_DIR}/
+if [ -z "$(ls -A "${DATA_DIR}" 2>/dev/null)" ]; then
+  rsync -chavzP --update --stats ${DEPLOY_HOST}:${DEPLOY_DATA_DIR}/ ${DATA_DIR}/
+fi
 
 # Generate ingest config with absolute paths
 INGEST_CFG=$(mktemp)

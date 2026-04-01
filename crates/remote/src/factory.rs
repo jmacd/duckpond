@@ -298,8 +298,13 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
 
     let foreign_ctx = load_foreign_oplog(&remote_table).await?;
 
-    // Extract the foreign pond's UUID from its OpLog records
-    let foreign_pond_uuid = extract_foreign_pond_id(&foreign_ctx).await?;
+    // Extract the foreign pond's UUID from the backup's FILE-META partition keys
+    let foreign_pond_id_str = remote_table.extract_pond_id()?;
+    let foreign_pond_uuid = foreign_pond_id_str
+        .parse::<uuid7::Uuid>()
+        .map_err(|_| {
+            RemoteError::Configuration(format!("Invalid foreign pond_id: {}", foreign_pond_id_str))
+        })?;
 
     // Find the target directory in the foreign tree
     let (foreign_part_id, foreign_node_id) =
@@ -552,37 +557,6 @@ async fn read_foreign_directory_entries(
     Ok(entries)
 }
 
-/// Extract the foreign pond's UUID from its OpLog records.
-async fn extract_foreign_pond_id(
-    ctx: &datafusion::prelude::SessionContext,
-) -> Result<uuid7::Uuid, RemoteError> {
-    let df = ctx
-        .sql("SELECT DISTINCT pond_id FROM oplog LIMIT 1")
-        .await
-        .map_err(|e| RemoteError::TableOperation(format!("Failed to query foreign pond_id: {}", e)))?;
-    let batches = df
-        .collect()
-        .await
-        .map_err(|e| RemoteError::TableOperation(format!("Failed to collect foreign pond_id: {}", e)))?;
-
-    if batches.is_empty() || batches[0].num_rows() == 0 {
-        return Err(RemoteError::Configuration(
-            "Foreign OpLog contains no records - cannot determine pond_id".to_string(),
-        ));
-    }
-
-    let col = batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow_array::StringArray>()
-        .ok_or_else(|| RemoteError::TableOperation("pond_id column not StringArray".to_string()))?;
-
-    let pond_id_str = col.value(0);
-    pond_id_str
-        .parse::<uuid7::Uuid>()
-        .map_err(|_| RemoteError::Configuration(format!("Invalid foreign pond_id: {}", pond_id_str)))
-}
-
 /// Load the foreign OpLog into a DataFusion SessionContext for querying.
 /// The table is registered as "oplog".
 async fn load_foreign_oplog(
@@ -825,7 +799,7 @@ async fn execute_remote(
         RemoteCommand::Push => execute_push(remote_table, &context).await,
         RemoteCommand::Pull => {
             if let Some(ref import_config) = config.import {
-                execute_import(remote_table, &context, import_config, &config.url).await
+                execute_import(remote_table, &context, import_config).await
             } else {
                 execute_pull(remote_table, &context).await
             }
@@ -1570,7 +1544,6 @@ async fn execute_import(
     remote_table: RemoteTable,
     context: &FactoryContext,
     import_config: &ImportConfig,
-    config_url: &str,
 ) -> Result<(), RemoteError> {
     log::info!(
         "[DOWN] IMPORT: Importing from foreign pond backup (source={}, local={})",
@@ -1722,13 +1695,7 @@ async fn execute_import(
 
     // Step 4: For each new transaction, query its files and download
     // those matching our partition set. Uses bundle_id partition pruning.
-    // Extract the foreign pond_id from the config URL (format: .../pond-{uuid})
-    let pond_id_for_bundle = config_url
-        .rsplit('/')
-        .next()
-        .and_then(|s| s.strip_prefix("pond-"))
-        .unwrap_or("")
-        .to_string();
+    let pond_id_for_bundle = remote_table.extract_pond_id()?;
 
     let mut downloaded = 0;
     let mut files_to_register: Vec<(String, i64)> = Vec::new(); // (path, size)
