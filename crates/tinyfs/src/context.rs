@@ -337,7 +337,7 @@ mod tests {
 
         let factory_ctx = super::FactoryContext::new(context, crate::FileID::root());
         let root = factory_ctx.root().await.expect("Should get root");
-        assert!(root.effective_root().is_root());
+        assert!(root.effective_root().id().has_root_ids());
     }
 
     #[tokio::test]

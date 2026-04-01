@@ -546,7 +546,7 @@ async fn run_queryable_file_export(
         };
 
         let (export_outputs, _schema) = provider::export::export_series_to_parquet(
-            &root,
+            root,
             &path_str,
             &export_dir,
             &temporal_parts,

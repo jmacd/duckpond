@@ -1259,22 +1259,20 @@ async fn execute_push(
         }
     }
 
-    if missing_versions.is_empty() {
-        log::info!("   [OK] All transactions already backed up");
-        return Ok(());
-    }
-
-    log::info!(
-        "   Need to back up {} transactions: {:?}",
-        missing_versions.len(),
-        missing_versions
-    );
-
-    // Get pond path for large files
+    // Get pond path (used for both transaction backup and large files)
     let pond_path = state.store_path().await;
 
-    // Back up each missing transaction
-    for version in missing_versions {
+    if missing_versions.is_empty() {
+        log::info!("   [OK] All transactions already backed up");
+    } else {
+        log::info!(
+            "   Need to back up {} transactions: {:?}",
+            missing_versions.len(),
+            missing_versions
+        );
+
+        // Back up each missing transaction
+        for version in missing_versions {
         log::info!(
             "   [PKG] Backing up transaction {} (version {})...",
             version,
@@ -1357,6 +1355,7 @@ async fn execute_push(
             new_files.len()
         );
     }
+    } // end if missing_versions
 
     // Back up large files (these are cumulative, not per-transaction)
     // Only back up large files that don't exist remotely yet
@@ -1784,6 +1783,47 @@ async fn execute_import(
         log::info!("   Updated watermark to {}", new_watermark);
     } else {
         log::info!("   [OK] All files already up to date");
+    }
+
+    // Step 6: Download large files from the remote backup.
+    // Large files are stored with POND-FILE bundles and referenced by
+    // BLAKE3 hash from the imported partition data.
+    let pond_path = state.store_path().await;
+    let all_remote_files = remote_table.list_files("").await?;
+    let mut large_downloaded = 0;
+    for (bundle_id, path, pond_txn_id, _size) in &all_remote_files {
+        if !path.starts_with("_large_files/") {
+            continue;
+        }
+        let large_file_fs_path = pond_path.join(path);
+        if large_file_fs_path.exists() {
+            continue;
+        }
+        if let Some(parent) = large_file_fs_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to create _large_files directory: {}",
+                    e
+                ))
+            })?;
+        }
+        let mut output = Vec::new();
+        remote_table
+            .read_file(bundle_id, path, *pond_txn_id, &mut output)
+            .await?;
+        tokio::fs::write(&large_file_fs_path, &output)
+            .await
+            .map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to write {}: {}",
+                    large_file_fs_path.display(),
+                    e
+                ))
+            })?;
+        large_downloaded += 1;
+    }
+    if large_downloaded > 0 {
+        log::info!("   Downloaded {} large file(s)", large_downloaded);
     }
 
     log::info!(
@@ -2749,8 +2789,8 @@ async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteE
         if file_type.is_file() {
             let filename = entry.file_name();
             let name = filename.to_string_lossy();
-            if name.starts_with("sha256=") {
-                // Flat structure: _large_files/sha256=X
+            if name.starts_with("sha256=") || name.starts_with("blake3=") {
+                // Flat structure: _large_files/sha256=X or _large_files/blake3=X
                 let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
                     RemoteError::TableOperation(format!("Failed to get file metadata: {}", e))
                 })?;

@@ -160,8 +160,11 @@ impl FileID {
         }
     }
 
+    /// Structural check: does this FileID have the well-known root node_id
+    /// and part_id? Does NOT check pond_id -- use full equality against
+    /// FileID::root_for(pond_id) when pond identity matters.
     #[must_use]
-    pub fn is_root(&self) -> bool {
+    pub fn has_root_ids(&self) -> bool {
         self.node_id == NodeID(root_uuid()) && self.part_id == PartID(NodeID(root_uuid()))
     }
 
@@ -392,11 +395,6 @@ impl NodePath {
     #[must_use]
     pub fn new(node: Node, path: PathBuf) -> Self {
         Self { node, path }
-    }
-
-    #[must_use]
-    pub fn is_root(&self) -> bool {
-        self.id() == FileID::root()
     }
 
     #[must_use]

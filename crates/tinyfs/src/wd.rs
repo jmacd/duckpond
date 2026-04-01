@@ -103,10 +103,6 @@ impl WD {
         self.dref.get(name).await
     }
 
-    fn is_root(&self) -> bool {
-        self.id().is_root()
-    }
-
     fn id(&self) -> FileID {
         self.np.id()
     }
@@ -133,6 +129,7 @@ impl WD {
     }
 
     /// Check if this WD is at its effective root boundary.
+    #[must_use]
     pub fn is_at_root_boundary(&self) -> bool {
         self.np.id() == self.effective_root.id()
     }
@@ -1302,7 +1299,7 @@ mod tests {
         let (wd, lookup) = root.resolve_path("/").await.expect("Failed to resolve /");
         match lookup {
             Lookup::Found(node) => {
-                assert!(node.is_root(), "Should resolve to root node");
+                assert!(node.id().has_root_ids(), "Should resolve to root node");
             }
             Lookup::Empty(_) => {
                 panic!("Bug: resolve_path(\"/\") returned Empty instead of Found");
@@ -1314,13 +1311,13 @@ mod tests {
                 );
             }
         }
-        assert!(wd.is_root(), "Working directory should be root");
+        assert!(wd.node_path().id().has_root_ids(), "Working directory should be root");
 
         // Test 2: Resolve "." from root (should also be Found)
         let (wd2, lookup2) = root.resolve_path(".").await.expect("Failed to resolve .");
         match lookup2 {
             Lookup::Found(node) => {
-                assert!(node.is_root(), "Should resolve to root node");
+                assert!(node.id().has_root_ids(), "Should resolve to root node");
             }
             Lookup::Empty(_) => {
                 panic!("Bug: resolve_path(\".\") returned Empty instead of Found");
@@ -1332,7 +1329,7 @@ mod tests {
                 );
             }
         }
-        assert!(wd2.is_root(), "Working directory should be root");
+        assert!(wd2.node_path().id().has_root_ids(), "Working directory should be root");
     }
 
     #[tokio::test]
@@ -1371,7 +1368,7 @@ mod tests {
             }
         }
         assert!(
-            parent_wd.is_root(),
+            parent_wd.node_path().id().has_root_ids(),
             "Parent working directory should be root"
         );
     }

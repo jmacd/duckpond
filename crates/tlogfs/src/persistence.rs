@@ -886,7 +886,7 @@ impl PersistenceLayer for State {
     fn pond_uuid(&self) -> uuid7::Uuid {
         self.pond_id
             .parse::<uuid7::Uuid>()
-            .unwrap_or_else(|_| tinyfs::local_pond_uuid())
+            .expect("pond_id must be a valid UUID")
     }
 
     async fn load_node(&self, id: FileID) -> TinyFSResult<Node> {

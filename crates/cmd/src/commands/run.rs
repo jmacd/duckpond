@@ -300,7 +300,7 @@ async fn run_pond_command_impl(
     // If the factory config lives inside a foreign mount (detected by
     // resolve_path crossing a pond boundary), chroot the factory so
     // context.root() resolves paths within the mount point.
-    if !parent_wd.effective_root().is_root() {
+    if !parent_wd.effective_root().id().has_root_ids() {
         log::info!(
             "Factory at '{}' is inside a foreign mount, setting effective root",
             config_path

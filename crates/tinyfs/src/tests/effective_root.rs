@@ -215,7 +215,7 @@ async fn test_backward_compat_no_effective_root_change() {
     let root = fs.root().await.unwrap();
 
     // Verify effective root is the actual root
-    assert!(root.effective_root().is_root());
+    assert!(root.effective_root().id().has_root_ids());
 
     // Create and read files normally
     _ = root.create_dir_path("dir").await.unwrap();
@@ -228,7 +228,7 @@ async fn test_backward_compat_no_effective_root_change() {
 
     // Open a sub-directory - effective root should still be actual root
     let wd = root.open_dir_path("/dir").await.unwrap();
-    assert!(wd.effective_root().is_root());
+    assert!(wd.effective_root().id().has_root_ids());
 }
 
 #[tokio::test]
@@ -261,12 +261,12 @@ async fn test_as_root_sets_effective_root_to_current() {
     let wd = root.open_dir_path("/a").await.unwrap();
 
     // Before as_root: effective root is the actual root
-    assert!(wd.effective_root().is_root());
+    assert!(wd.effective_root().id().has_root_ids());
 
     // After as_root: effective root is /a
     let chrooted = wd.as_root();
     assert_eq!(chrooted.effective_root().id(), chrooted.node_path().id());
-    assert!(!chrooted.effective_root().is_root());
+    assert!(!chrooted.effective_root().id().has_root_ids());
 }
 
 #[tokio::test]
@@ -301,7 +301,7 @@ async fn test_auto_detect_pond_boundary() {
     // The returned WD should have effective_root set to /imports/
     // (the parent directory where the pond transition happened)
     assert_eq!(wd.effective_root().id(), imports.node_path().id());
-    assert!(!wd.effective_root().is_root());
+    assert!(!wd.effective_root().id().has_root_ids());
 }
 
 #[tokio::test]
@@ -742,7 +742,7 @@ async fn test_open_dir_path_propagates_effective_root_on_boundary() {
         mnt.node_path().id(),
         "open_dir_path should propagate detected effective_root"
     );
-    assert!(!foreign_wd.effective_root().is_root());
+    assert!(!foreign_wd.effective_root().id().has_root_ids());
 }
 
 #[tokio::test]

@@ -275,16 +275,16 @@ fn compute_file_bounds(
         let mut found = false;
 
         for line in lines {
-            if let Ok(parsed) = serde_json::from_str::<Value>(line) {
-                if let Some(ts) = extract_timestamp(&parsed, timestamp_field) {
-                    if ts < min_ts {
-                        min_ts = ts;
-                    }
-                    if ts > max_ts {
-                        max_ts = ts;
-                    }
-                    found = true;
+            if let Ok(parsed) = serde_json::from_str::<Value>(line)
+                && let Some(ts) = extract_timestamp(&parsed, timestamp_field)
+            {
+                if ts < min_ts {
+                    min_ts = ts;
                 }
+                if ts > max_ts {
+                    max_ts = ts;
+                }
+                found = true;
             }
         }
 
@@ -708,10 +708,9 @@ mod tests {
 
     #[test]
     fn test_extract_timestamp_string() {
-        let entry: Value = serde_json::from_str(
-            r#"{"__REALTIME_TIMESTAMP":"1772431543477823","MESSAGE":"test"}"#,
-        )
-        .unwrap();
+        let entry: Value =
+            serde_json::from_str(r#"{"__REALTIME_TIMESTAMP":"1772431543477823","MESSAGE":"test"}"#)
+                .unwrap();
         assert_eq!(
             extract_timestamp(&entry, "__REALTIME_TIMESTAMP"),
             Some(1772431543477823)
@@ -753,14 +752,12 @@ mod tests {
 
     #[test]
     fn test_compute_file_bounds_no_timestamp() {
-        let lines = vec![
-            r#"{"_SYSTEMD_UNIT":"ssh.service","MESSAGE":"test"}"#.to_string(),
-        ];
+        let lines = vec![r#"{"_SYSTEMD_UNIT":"ssh.service","MESSAGE":"test"}"#.to_string()];
 
         let (groups, _) = group_entries(&lines, true).unwrap();
         let bounds = compute_file_bounds(&groups, "__REALTIME_TIMESTAMP");
 
         // No bounds when timestamp field is missing
-        assert!(bounds.get("ssh.service.jsonl").is_none());
+        assert!(!bounds.contains_key("ssh.service.jsonl"));
     }
 }

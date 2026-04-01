@@ -278,10 +278,10 @@ impl RemoteTable {
 
         for add in snapshot.log_data() {
             let path_str = add.path();
-            if let Some(rest) = path_str.strip_prefix("bundle_id=FILE-META-") {
-                if rest.len() >= 36 {
-                    return Ok(rest[..36].to_string());
-                }
+            if let Some(rest) = path_str.strip_prefix("bundle_id=FILE-META-")
+                && rest.len() >= 36
+            {
+                return Ok(rest[..36].to_string());
             }
         }
 
