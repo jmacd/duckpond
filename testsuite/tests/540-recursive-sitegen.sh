@@ -101,32 +101,24 @@ echo "Producer sensors created"
 # Create a temporal-reduce to make series files
 cat > /tmp/reduce.yaml << 'YAML'
 entries:
-  - name: "temperature"
+  - name: "single_param"
     factory: "temporal-reduce"
     config:
-      source_patterns:
-        - "/sensors/temperature"
+      in_pattern: "series:///sensors/*"
+      out_pattern: "$0"
+      time_column: "timestamp"
       resolutions:
         - "1h"
-      aggregation: "mean"
-      timestamp_column: "timestamp"
-
-  - name: "pressure"
-    factory: "temporal-reduce"
-    config:
-      source_patterns:
-        - "/sensors/pressure"
-      resolutions:
-        - "1h"
-      aggregation: "mean"
-      timestamp_column: "timestamp"
+      aggregations:
+        - type: "avg"
+          columns: ["*"]
 YAML
 
 pond mknod dynamic-dir /reduced --config-path /tmp/reduce.yaml
 echo "Producer reduce created"
 
 # Verify the series are accessible
-pond cat /reduced/temperature --format=table --sql "SELECT COUNT(*) AS rows FROM source" > /tmp/producer-temp.txt 2>&1
+pond cat /reduced/single_param/temperature/res=1h.series --format=table --sql "SELECT COUNT(*) AS rows FROM source" > /tmp/producer-temp.txt 2>&1
 cat /tmp/producer-temp.txt
 check 'grep -q "rows" /tmp/producer-temp.txt' "producer temperature has rows"
 
@@ -156,13 +148,13 @@ layout: data
 
 # {{ $0 }}
 
-{{ chart }}
+{{ chart /}}
 EOF
 pond copy host:///tmp/producer-data.md /site/data.md
 
 # Create producer sidebar
 cat > /tmp/producer-sidebar.md << 'EOF'
-{{ content_nav }}
+{{ content_nav /}}
 EOF
 pond copy host:///tmp/producer-sidebar.md /site/sidebar.md
 
@@ -176,7 +168,7 @@ site:
 
 exports:
   - name: "metrics"
-    pattern: "/reduced/*"
+    pattern: "/reduced/single_param/*/*.series"
 
 routes:
   - name: "home"
@@ -257,6 +249,7 @@ CONSUMER_POND_ID=$(pond config 2>/dev/null | grep "Pond ID" | awk '{print $NF}')
 echo "Consumer pond_id: ${CONSUMER_POND_ID}"
 
 pond mkdir -p /system/etc
+pond mkdir -p /system/site
 pond mkdir -p /sources
 
 # Import the producer's entire tree
