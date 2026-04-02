@@ -66,6 +66,38 @@ pub struct SiteConfig {
     pub subsites: Vec<SubsiteConfig>,
 }
 
+impl SiteConfig {
+    /// Rewrite sidebar hrefs when a subsite is mounted at a different base_url.
+    ///
+    /// Any href starting with `old_base` is rewritten to start with `new_base`.
+    pub fn rewrite_sidebar_urls(&mut self, old_base: &str, new_base: &str) {
+        fn rewrite(href: &mut String, old: &str, new: &str) {
+            if let Some(rest) = href.strip_prefix(old) {
+                *href = format!("{}{}", new, rest);
+            }
+        }
+
+        for entry in &mut self.sidebar {
+            match entry {
+                SidebarEntry::WithChildren {
+                    href, children, ..
+                } => {
+                    if let Some(h) = href {
+                        rewrite(h, old_base, new_base);
+                    }
+                    for child in children {
+                        rewrite(&mut child.href, old_base, new_base);
+                    }
+                }
+                SidebarEntry::DirectLink { href, .. } => {
+                    rewrite(href, old_base, new_base);
+                }
+                SidebarEntry::Simple(_) => {}
+            }
+        }
+    }
+}
+
 /// Site-wide metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteMeta {

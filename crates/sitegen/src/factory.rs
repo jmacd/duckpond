@@ -120,9 +120,14 @@ async fn execute(
                         ))
                     })?;
 
-                // Override base_url if specified
+                // Override base_url if specified, rewriting sidebar links
+                // to match the new mount point.
                 if let Some(ref base_url) = subsite.base_url {
+                    let old_base = sub_config.site.base_url.clone();
                     sub_config.site.base_url = base_url.clone();
+                    if old_base != *base_url {
+                        sub_config.rewrite_sidebar_urls(&old_base, base_url);
+                    }
                 }
 
                 // Derive output subdirectory from base_url or name

@@ -686,8 +686,8 @@ struct TinyFsPath {
 
 /// Single canonical method to parse all TinyFS path formats
 /// This eliminates duplication and ensures consistency across all path parsing
-fn parse_tinyfs_path(path: &str, pond_id: uuid7::Uuid) -> Result<TinyFsPath, String> {
-    let parts: Vec<&str> = path.split('/').collect();
+fn parse_tinyfs_path(path: &str, default_pond_id: uuid7::Uuid) -> Result<TinyFsPath, String> {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     // Handle directory paths: "directory/{node_id}"
     if parts.len() == 2 && parts[0] == "directory" {
@@ -697,45 +697,55 @@ fn parse_tinyfs_path(path: &str, pond_id: uuid7::Uuid) -> Result<TinyFsPath, Str
             .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
 
         // For directories, node_id == part_id
-        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::from_node_id(node_id), node_id, pond_id);
+        let file_id = tinyfs::FileID::new_from_ids(tinyfs::PartID::from_node_id(node_id), node_id, default_pond_id);
         return Ok(TinyFsPath {
             file_id,
-            version: None, // Directories don't have explicit versions in the path
+            version: None,
         });
     }
 
-    // Handle file paths (following partition -> node -> version hierarchy):
-    // - "part/{part_id}/node/{node_id}/version/"
-    // - "part/{part_id}/node/{node_id}/version/{version}.parquet"
+    // Handle file paths with pond_id:
+    //   "pond/{pond_id}/part/{part_id}/node/{node_id}/version/"
+    //   "pond/{pond_id}/part/{part_id}/node/{node_id}/version/{version}.parquet"
+    // Also supports legacy paths without pond_id:
+    //   "part/{part_id}/node/{node_id}/version/..."
+    let (pond_id, part_idx) = if parts.len() >= 2 && parts[0] == "pond" {
+        let pid = parts[1]
+            .parse::<uuid7::Uuid>()
+            .map_err(|_| format!("Invalid pond_id UUID: {}", parts[1]))?;
+        (pid, 2) // part_id starts at index 2
+    } else {
+        (default_pond_id, 0) // legacy path, use default
+    };
 
-    // Minimum: ["part", part_id, "node", node_id, "version"]
-    if parts.len() < 5 || parts[0] != "part" || parts[2] != "node" || parts[4] != "version" {
+    // Minimum remaining: ["part", part_id, "node", node_id, "version"]
+    if parts.len() < part_idx + 5
+        || parts[part_idx] != "part"
+        || parts[part_idx + 2] != "node"
+        || parts[part_idx + 4] != "version"
+    {
         return Err(format!(
-            "Invalid TinyFS path format. Expected: part/{{part_id}}/node/{{node_id}}/version/[{{version}}.parquet] or directory/{{node_id}}, got: {}",
+            "Invalid TinyFS path format. Expected: [pond/{{pond_id}}/]part/{{part_id}}/node/{{node_id}}/version/[{{version}}.parquet], got: {}",
             path
         ));
     }
 
-    // Parse part_id and node_id (following correct hierarchy)
-    let part_id = parts[1]
+    let part_id = parts[part_idx + 1]
         .parse::<uuid7::Uuid>()
-        .map_err(|_| format!("Invalid part_id UUID: {}", parts[1]))
+        .map_err(|_| format!("Invalid part_id UUID: {}", parts[part_idx + 1]))
         .map(|uuid| tinyfs::PartID::new(uuid.to_string()))?;
 
-    let node_id = parts[3]
+    let node_id = parts[part_idx + 3]
         .parse::<uuid7::Uuid>()
-        .map_err(|_| format!("Invalid node_id UUID: {}", parts[3]))
+        .map_err(|_| format!("Invalid node_id UUID: {}", parts[part_idx + 3]))
         .map(|uuid| tinyfs::NodeID::new(uuid.to_string()))?;
 
-    // Determine version from path format
-    let version = if parts.len() == 5 {
-        // Directory format: ends with "version/" -> all versions
+    let version = if parts.len() == part_idx + 5 {
         None
-    } else if parts.len() == 6 {
-        // Specific version format: "version/{version}.parquet"
-        let version_str = parts[5]
+    } else if parts.len() == part_idx + 6 {
+        let version_str = parts[part_idx + 5]
             .strip_suffix(".parquet")
-            .ok_or_else(|| format!("Version file must end with .parquet: {}", parts[5]))?;
+            .ok_or_else(|| format!("Version file must end with .parquet: {}", parts[part_idx + 5]))?;
         let version_num = version_str
             .parse::<u64>()
             .map_err(|_| format!("Invalid version number: {}", version_str))?;

@@ -1200,9 +1200,10 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                 // This maintains the ownership chain: FS Root -> State -> Cache -> Single TableProvider
 
                                 // Generate URL pattern - works for both OpLogFile and MemoryFile
-                                // Format: tinyfs:///part/{part_id}/node/{node_id}/version/
+                                // Format: tinyfs:///pond/{pond_id}/part/{part_id}/node/{node_id}/version/
                                 let url_pattern = format!(
-                                    "tinyfs:///part/{}/node/{}/version/",
+                                    "tinyfs:///pond/{}/part/{}/node/{}/version/",
+                                    file_id.pond_id(),
                                     file_id.part_id(),
                                     file_id.node_id()
                                 );
