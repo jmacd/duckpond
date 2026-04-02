@@ -85,10 +85,9 @@ async fn execute(
             let output_path = std::path::PathBuf::from(&output_dir);
             let root = context.root().await?;
             let provider_ctx = &context.context;
-            let root_base_url = config.site.base_url.clone();
 
             // Build the main site
-            build_site_from_root(&config, &root, provider_ctx, &output_path, &root_base_url)
+            build_site_from_root(&config, &root, provider_ctx, &output_path)
                 .await?;
 
             // Write shared build assets (base CSS, JS, vendor) once
@@ -155,7 +154,6 @@ async fn execute(
                     &subsite_root,
                     provider_ctx,
                     &subsite_output,
-                    &root_base_url,
                 )
                 .await?;
 
@@ -180,7 +178,6 @@ async fn execute(
 /// shared build assets (CSS/JS/vendor) or theme.css -- those are handled
 /// by the caller.
 ///
-/// `root_base_url` is the top-level site's base_url, used for shared
 /// asset references (style.css, chart.js, vendor/). For standalone sites
 /// this equals the config's base_url. For subsites it's the parent's
 /// base_url.
@@ -189,7 +186,6 @@ async fn build_site_from_root(
     root: &tinyfs::WD,
     provider_ctx: &tinyfs::ProviderContext,
     output_dir: &std::path::Path,
-    root_base_url: &str,
 ) -> Result<(), tinyfs::Error> {
     // Run export stages
     let exports = run_export_stages(config, root, provider_ctx, output_dir).await?;
@@ -268,7 +264,7 @@ async fn build_site_from_root(
             .ok_or_else(|| format!("File not in cache: {}", path))
     };
 
-    generate_site(config, &exports, &content, &read_pond_file, output_dir, root_base_url)
+    generate_site(config, &exports, &content, &read_pond_file, output_dir)
         .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
     // Copy static assets to output, preserving directory structure
@@ -940,7 +936,6 @@ fn generate_site(
     content: &BTreeMap<String, ContentContext>,
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
     output_dir: &Path,
-    root_base_url: &str,
 ) -> Result<(), GenerateError> {
     // Compute feed URL if site_url is configured
     let feed_url = if config.site.site_url.is_some() {
@@ -1043,7 +1038,6 @@ fn generate_site(
                 title: &title,
                 site_title: &config.site.title,
                 base_url: &config.site.base_url,
-                root_base_url,
                 content: &content_html,
                 sidebar: sidebar_html.as_deref(),
                 date: fm.date.as_deref(),
