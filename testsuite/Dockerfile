@@ -104,6 +104,9 @@ RUN chmod +x /usr/local/bin/pond
 COPY duckpond-emergency /usr/local/bin/duckpond-emergency
 RUN chmod +x /usr/local/bin/duckpond-emergency
 
+# Copy vendor assets (DuckDB-WASM, Observable Plot, D3) for sitegen
+COPY vendor/ /usr/local/share/duckpond/vendor/
+
 # Create experiment workspace
 RUN mkdir -p /experiment /results /etc/supervisor/conf.d
 

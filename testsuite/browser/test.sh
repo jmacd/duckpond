@@ -129,8 +129,21 @@ echo "  ✓ Subdir site generated"
 
 echo ""
 echo "=== Browser tests: subdir site (/myapp/) ==="
-start_vite "${SUBDIR_OUTPUT}" "/myapp/"
-run_test "${TESTS_DIR}/210-browser-page-validation.mjs" "http://localhost:${PORT}" "/myapp/" "${SUBDIR_OUTPUT}"
+# Nest the subdir output under myapp/ so we can serve from the parent
+# without using Vite's base rewriting (which doubles paths in pre-rendered HTML).
+SUBDIR_SERVE="/tmp/test-output-subdir-serve"
+rm -rf "${SUBDIR_SERVE}"
+mkdir -p "${SUBDIR_SERVE}/myapp"
+cp -r "${SUBDIR_OUTPUT}"/* "${SUBDIR_SERVE}/myapp/"
+# Shared assets (style.css, chart.js, vendor/) are at the root
+cp "${ROOT_OUTPUT}/style.css" "${SUBDIR_SERVE}/"
+cp "${ROOT_OUTPUT}/chart.js" "${SUBDIR_SERVE}/"
+cp "${ROOT_OUTPUT}/overlay.js" "${SUBDIR_SERVE}/"
+cp "${ROOT_OUTPUT}/log-viewer.js" "${SUBDIR_SERVE}/"
+cp -r "${ROOT_OUTPUT}/vendor" "${SUBDIR_SERVE}/"
+echo '<html><body>root</body></html>' > "${SUBDIR_SERVE}/index.html"
+start_vite "${SUBDIR_SERVE}" "/"
+run_test "${TESTS_DIR}/210-browser-page-validation.mjs" "http://localhost:${PORT}" "/myapp/" "${SUBDIR_SERVE}/myapp"
 stop_vite
 
 # ── Overlay site: generate, serve, run 305 ───────────────────

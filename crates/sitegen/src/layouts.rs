@@ -96,7 +96,6 @@ pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
 
 /// Common `<head>` elements shared by all layouts.
 fn common_head(ctx: &LayoutContext) -> Markup {
-    let theme_url = format!("{}theme.css", ctx.base_url);
     html! {
         meta charset="utf-8";
         meta name="viewport" content="width=device-width, initial-scale=1";
@@ -106,7 +105,7 @@ fn common_head(ctx: &LayoutContext) -> Markup {
         link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
         link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap";
         link rel="stylesheet" href="/style.css";
-        link rel="stylesheet" href=(theme_url);
+        link rel="stylesheet" href=(format!("{}theme.css", ctx.base_url));
         @if let Some(feed) = ctx.feed_url {
             link rel="alternate" type="application/rss+xml" title="RSS Feed" href=(feed);
         }

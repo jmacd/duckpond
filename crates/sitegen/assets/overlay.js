@@ -51,19 +51,13 @@
   let db, conn;
   try {
     const duckdb = await import(
-      "./vendor/duckdb-browser.mjs"
+      /* @vite-ignore */ "./vendor/duckdb-browser.mjs"
     );
     const bundle = {
       mainModule: new URL("./vendor/duckdb-eh.wasm", import.meta.url).href,
       mainWorker: new URL("./vendor/duckdb-browser-eh.worker.js", import.meta.url).href,
     };
-    const worker = new Worker(
-      URL.createObjectURL(
-        new Blob(['importScripts("' + bundle.mainWorker + '");'], {
-          type: "text/javascript",
-        })
-      )
-    );
+    const worker = new Worker(bundle.mainWorker);
     const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
     db = new duckdb.AsyncDuckDB(logger, worker);
     await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
@@ -125,7 +119,7 @@
 
   // -- Import Plot + D3 -------------------------------------------------------
 
-  const { Plot, d3 } = await import("./vendor/plot-d3-bundle.mjs");
+  const { Plot, d3 } = await import(/* @vite-ignore */ "./vendor/plot-d3-bundle.mjs");
 
   // -- Constants ---------------------------------------------------------------
 

@@ -116,14 +116,12 @@
 
   let db, conn;
   try {
-    const duckdb = await import("./vendor/duckdb-browser.mjs");
+    const duckdb = await import(/* @vite-ignore */ "./vendor/duckdb-browser.mjs");
     const bundle = {
       mainModule: new URL("./vendor/duckdb-eh.wasm", import.meta.url).href,
       mainWorker: new URL("./vendor/duckdb-browser-eh.worker.js", import.meta.url).href,
     };
-    const worker = new Worker(
-      URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" }))
-    );
+    const worker = new Worker(bundle.mainWorker);
     const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
     db = new duckdb.AsyncDuckDB(logger, worker);
     await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
@@ -293,7 +291,7 @@
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  const Plot = await import("./vendor/plot-d3-bundle.mjs").then(m => m.Plot);
+  const Plot = await import(/* @vite-ignore */ "./vendor/plot-d3-bundle.mjs").then(m => m.Plot);
 
   function toDate(v) {
     return typeof v === "bigint" ? new Date(Number(v / 1000000n)) : new Date(v);
