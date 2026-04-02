@@ -1,1 +1,1 @@
-{{ content_nav }}
+{{ content_nav /}}
