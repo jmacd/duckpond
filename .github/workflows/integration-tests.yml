@@ -108,6 +108,9 @@ jobs:
           pip3 install ziglang
           cargo install cargo-zigbuild
 
+      - name: Download vendor dependencies
+        run: make vendor
+
       - name: Build test image
         working-directory: testsuite
         run: ./build-image.sh --quiet
