@@ -87,8 +87,7 @@ async fn execute(
             let provider_ctx = &context.context;
 
             // Build the main site
-            build_site_from_root(&config, &root, provider_ctx, &output_path)
-                .await?;
+            build_site_from_root(&config, &root, provider_ctx, &output_path).await?;
 
             // Write shared build assets (base CSS, JS, vendor) once
             write_shared_assets(&output_path)?;
@@ -149,21 +148,13 @@ async fn execute(
                 })?;
                 let subsite_root = subsite_wd.as_root();
 
-                build_site_from_root(
-                    &sub_config,
-                    &subsite_root,
-                    provider_ctx,
-                    &subsite_output,
-                )
-                .await?;
+                build_site_from_root(&sub_config, &subsite_root, provider_ctx, &subsite_output)
+                    .await?;
 
                 // Write per-subsite theme overrides
                 write_theme_css(&subsite_output, &sub_config.theme)?;
 
-                info!(
-                    "Subsite '{}' built at {:?}",
-                    subsite.name, subsite_output
-                );
+                info!("Subsite '{}' built at {:?}", subsite.name, subsite_output);
             }
 
             Ok(())
@@ -204,10 +195,7 @@ async fn build_site_from_root(
                 .read_file_path_to_vec(&job.page_source)
                 .await
                 .map_err(|e| {
-                    tinyfs::Error::Other(format!(
-                        "Cannot read page '{}': {}",
-                        job.page_source, e
-                    ))
+                    tinyfs::Error::Other(format!("Cannot read page '{}': {}", job.page_source, e))
                 })?;
             let text = String::from_utf8(data).map_err(|e| {
                 tinyfs::Error::Other(format!("Non-UTF8 page '{}': {}", job.page_source, e))
@@ -302,16 +290,12 @@ async fn run_export_stages(
     for stage in &config.exports {
         // Detect format-provider URL patterns vs bare pond glob paths
         if stage.pattern.contains("://") {
-            let by_key = run_format_provider_export(
-                stage, root, provider_ctx, &data_dir, config,
-            )
-            .await?;
+            let by_key =
+                run_format_provider_export(stage, root, provider_ctx, &data_dir, config).await?;
             exports.insert(stage.name.clone(), ExportContext { by_key });
         } else {
-            let by_key = run_queryable_file_export(
-                stage, root, &data_dir, provider_ctx, config,
-            )
-            .await?;
+            let by_key =
+                run_queryable_file_export(stage, root, &data_dir, provider_ctx, config).await?;
             exports.insert(stage.name.clone(), ExportContext { by_key });
         }
     }
@@ -336,10 +320,7 @@ async fn run_format_provider_export(
 
     // Use UrlPatternMatcher to expand the pattern and get matched files
     let matcher = provider::UrlPatternMatcher::new(provider);
-    let matched_files = match matcher
-        .match_pattern(&stage.pattern, provider_ctx)
-        .await
-    {
+    let matched_files = match matcher.match_pattern(&stage.pattern, provider_ctx).await {
         Ok(files) => files,
         Err(e) => {
             // No matches is not fatal for log exports (logs may not exist yet)
@@ -382,7 +363,8 @@ async fn run_format_provider_export(
 
         // Create table provider via format provider
         let file_url_str = format!("{}://{}", scheme, path_str);
-        let table_provider = matcher.provider()
+        let table_provider = matcher
+            .provider()
             .create_table_provider(&file_url_str, ctx)
             .await
             .map_err(|e| {
@@ -392,24 +374,18 @@ async fn run_format_provider_export(
                 ))
             })?;
 
-        let (export_outputs, _schema) =
-            provider::export::export_table_provider_to_parquet(
-                table_provider,
-                &path_str,
-                &export_dir,
-                &temporal_parts,
-                &matched.captures,
-                data_dir,
-                provider_ctx,
-                timestamp_column,
-            )
-            .await
-            .map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "export '{}': {}",
-                    path_str, e
-                ))
-            })?;
+        let (export_outputs, _schema) = provider::export::export_table_provider_to_parquet(
+            table_provider,
+            &path_str,
+            &export_dir,
+            &temporal_parts,
+            &matched.captures,
+            data_dir,
+            provider_ctx,
+            timestamp_column,
+        )
+        .await
+        .map_err(|e| tinyfs::Error::Other(format!("export '{}': {}", path_str, e)))?;
 
         for (_caps, export_output) in &export_outputs {
             let mut temporal = BTreeMap::new();

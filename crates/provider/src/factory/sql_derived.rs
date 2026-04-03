@@ -381,10 +381,8 @@ impl SqlDerivedFile {
                 .expect("transform factory has apply_table_transform");
 
             // Create FactoryContext with the transform file's FileID
-            let transform_context = crate::FactoryContext::new(
-                self.context.context.clone(),
-                node_id,
-            );
+            let transform_context =
+                crate::FactoryContext::new(self.context.context.clone(), node_id);
 
             debug!(
                 "[FIX] SQL-DERIVED: Applying transform '{}' (factory: '{}')",
@@ -568,7 +566,11 @@ impl SqlDerivedFile {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
                     EntryType::TablePhysicalSeries | EntryType::TableDynamic => file_id,
-                    _ => FileID::new_from_ids(file_id.part_id(), file_id.node_id(), file_id.pond_id()),
+                    _ => FileID::new_from_ids(
+                        file_id.part_id(),
+                        file_id.node_id(),
+                        file_id.pond_id(),
+                    ),
                 };
                 if seen.insert(dedup_key) {
                     let entry_type_str = format!("{entry_type:?}");

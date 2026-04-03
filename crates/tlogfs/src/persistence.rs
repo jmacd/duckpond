@@ -1401,7 +1401,10 @@ impl InnerState {
     /// Should only be called from:
     /// - Steward layer during pond initialization (with proper metadata)
     /// - Tests (with test metadata)
-    pub async fn initialize_root_directory(&mut self, pond_id: uuid7::Uuid) -> Result<(), TLogFSError> {
+    pub async fn initialize_root_directory(
+        &mut self,
+        pond_id: uuid7::Uuid,
+    ) -> Result<(), TLogFSError> {
         let root_id = FileID::root_for(pond_id);
 
         // Initialize root directory in memory as empty (will be written to OpLog at commit)
@@ -2395,12 +2398,7 @@ impl InnerState {
                                     txn_seq,
                                 )
                             }
-                            _ => {
-                                OplogEntry::new_small_file(
-                                    id, now, version,
-                                    content, txn_seq,
-                                )
-                            }
+                            _ => OplogEntry::new_small_file(id, now, version, content, txn_seq),
                         }
                     }
                     _ => {
@@ -2472,16 +2470,14 @@ impl InnerState {
                                     txn_seq,
                                 )
                             }
-                            _ => {
-                                OplogEntry::new_large_file(
-                                    id,
-                                    now,
-                                    version,
-                                    sha256,
-                                    size as i64,
-                                    txn_seq,
-                                )
-                            }
+                            _ => OplogEntry::new_large_file(
+                                id,
+                                now,
+                                version,
+                                sha256,
+                                size as i64,
+                                txn_seq,
+                            ),
                         }
                     }
                     _ => {
@@ -2952,12 +2948,7 @@ impl InnerState {
             .partition_records_cache
             .get(&id.part_id())
             .and_then(|by_node| by_node.get(&id.node_id()))
-            .and_then(|records| {
-                records
-                    .iter()
-                    .find(|r| r.pond_id == pond_id_str)
-                    .cloned()
-            })
+            .and_then(|records| records.iter().find(|r| r.pond_id == pond_id_str).cloned())
         {
             Some(record) => Ok(record),
             None => {

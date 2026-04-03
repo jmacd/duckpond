@@ -493,7 +493,11 @@ async fn test_memory_file_physical_series_version_concatenation() {
 
     // Create persistence layer
     let persistence = MemoryPersistence::default();
-    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalSeries, local_pond_uuid());
+    let id = FileID::new_in_partition(
+        PartID::root(),
+        EntryType::FilePhysicalSeries,
+        local_pond_uuid(),
+    );
 
     // Create MemoryFile with FilePhysicalSeries entry type
     let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalSeries);
@@ -535,7 +539,11 @@ async fn test_memory_file_physical_version_single_content() {
 
     // Create persistence layer
     let persistence = MemoryPersistence::default();
-    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalVersion, local_pond_uuid());
+    let id = FileID::new_in_partition(
+        PartID::root(),
+        EntryType::FilePhysicalVersion,
+        local_pond_uuid(),
+    );
 
     // Create MemoryFile with FilePhysicalVersion entry type
     let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalVersion);

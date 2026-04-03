@@ -288,7 +288,10 @@ pub async fn export_table_provider_to_parquet(
             "day" => format!("date_part('day', \"{}\") as day", timestamp_column),
             "hour" => format!("date_part('hour', \"{}\") as hour", timestamp_column),
             "minute" => format!("date_part('minute', \"{}\") as minute", timestamp_column),
-            _ => format!("date_part('{}', \"{}\") as {}", part, timestamp_column, part),
+            _ => format!(
+                "date_part('{}', \"{}\") as {}",
+                part, timestamp_column, part
+            ),
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -372,7 +375,10 @@ pub async fn export_table_provider_to_parquet(
         .collect();
 
     if results.is_empty() {
-        return Err(anyhow::anyhow!("No files were exported for: {}", source_label));
+        return Err(anyhow::anyhow!(
+            "No files were exported for: {}",
+            source_label
+        ));
     }
 
     Ok((results, schema))

@@ -79,9 +79,7 @@ impl SiteConfig {
 
         for entry in &mut self.sidebar {
             match entry {
-                SidebarEntry::WithChildren {
-                    href, children, ..
-                } => {
+                SidebarEntry::WithChildren { href, children, .. } => {
                     if let Some(h) = href {
                         rewrite(h, old_base, new_base);
                     }

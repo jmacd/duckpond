@@ -300,11 +300,9 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
 
     // Extract the foreign pond's UUID from the backup's FILE-META partition keys
     let foreign_pond_id_str = remote_table.extract_pond_id()?;
-    let foreign_pond_uuid = foreign_pond_id_str
-        .parse::<uuid7::Uuid>()
-        .map_err(|_| {
-            RemoteError::Configuration(format!("Invalid foreign pond_id: {}", foreign_pond_id_str))
-        })?;
+    let foreign_pond_uuid = foreign_pond_id_str.parse::<uuid7::Uuid>().map_err(|_| {
+        RemoteError::Configuration(format!("Invalid foreign pond_id: {}", foreign_pond_id_str))
+    })?;
 
     // Find the target directory in the foreign tree
     let (foreign_part_id, foreign_node_id) =
@@ -398,8 +396,7 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
 
     if recursive {
         let mut child_part_ids = Vec::new();
-        collect_partitions_recursive(&foreign_ctx, &foreign_node_id, &mut child_part_ids)
-            .await?;
+        collect_partitions_recursive(&foreign_ctx, &foreign_node_id, &mut child_part_ids).await?;
 
         for child_part_id in &child_part_ids {
             state
@@ -1273,88 +1270,92 @@ async fn execute_push(
 
         // Back up each missing transaction
         for version in missing_versions {
-        log::info!(
-            "   [PKG] Backing up transaction {} (version {})...",
-            version,
-            version
-        );
+            log::info!(
+                "   [PKG] Backing up transaction {} (version {})...",
+                version,
+                version
+            );
 
-        // Load Delta table at this specific version
-        let store_path = pond_path.to_string_lossy().to_string();
-        let url = Url::from_directory_path(&pond_path)
-            .map_err(|_| RemoteError::TableOperation(format!("Invalid path: {}", store_path)))?;
-        let mut versioned_table = deltalake::open_table(url)
-            .await
-            .map_err(|e| RemoteError::TableOperation(format!("Failed to open table: {}", e)))?;
+            // Load Delta table at this specific version
+            let store_path = pond_path.to_string_lossy().to_string();
+            let url = Url::from_directory_path(&pond_path).map_err(|_| {
+                RemoteError::TableOperation(format!("Invalid path: {}", store_path))
+            })?;
+            let mut versioned_table = deltalake::open_table(url)
+                .await
+                .map_err(|e| RemoteError::TableOperation(format!("Failed to open table: {}", e)))?;
 
-        versioned_table.load_version(version).await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to load version {}: {}", version, e))
-        })?;
-
-        let local_store = versioned_table.object_store();
-
-        // Get NEW files added in this specific transaction (incremental delta only)
-        // Each Delta transaction has a commit log with 'add' actions for new parquet files
-        let new_files = get_delta_commit_files(&versioned_table, version).await?;
-        log::info!(
-            "      Transaction {} added {} new files",
-            version,
-            new_files.len()
-        );
-
-        // Back up parquet files with transaction bundle_id
-        let transaction_bundle_id =
-            crate::schema::ChunkedFileRecord::transaction_bundle_id(&pond_id, version);
-
-        for (path, size) in &new_files {
-            log::debug!("      Backing up: {} ({} bytes)", path, size);
-
-            let file_path = object_store::path::Path::from(path.as_str());
-            let get_result = local_store.get(&file_path).await.map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to read {}: {}", path, e))
+            versioned_table.load_version(version).await.map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to load version {}: {}", version, e))
             })?;
 
-            let bytes = get_result.bytes().await.map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to read bytes from {}: {}", path, e))
-            })?;
+            let local_store = versioned_table.object_store();
 
-            let reader = std::io::Cursor::new(bytes.to_vec());
-            remote_table
-                .write_file_with_bundle_id(&transaction_bundle_id, version, path, reader)
-                .await?;
-        }
+            // Get NEW files added in this specific transaction (incremental delta only)
+            // Each Delta transaction has a commit log with 'add' actions for new parquet files
+            let new_files = get_delta_commit_files(&versioned_table, version).await?;
+            log::info!(
+                "      Transaction {} added {} new files",
+                version,
+                new_files.len()
+            );
 
-        // Back up Delta commit log for this version
-        let commit_log_path = format!("_delta_log/{:020}.json", version);
-        let log_file_path = object_store::path::Path::from(commit_log_path.as_str());
+            // Back up parquet files with transaction bundle_id
+            let transaction_bundle_id =
+                crate::schema::ChunkedFileRecord::transaction_bundle_id(&pond_id, version);
 
-        match local_store.get(&log_file_path).await {
-            Ok(get_result) => {
+            for (path, size) in &new_files {
+                log::debug!("      Backing up: {} ({} bytes)", path, size);
+
+                let file_path = object_store::path::Path::from(path.as_str());
+                let get_result = local_store.get(&file_path).await.map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to read {}: {}", path, e))
+                })?;
+
                 let bytes = get_result.bytes().await.map_err(|e| {
-                    RemoteError::TableOperation(format!("Failed to read commit log: {}", e))
+                    RemoteError::TableOperation(format!(
+                        "Failed to read bytes from {}: {}",
+                        path, e
+                    ))
                 })?;
 
                 let reader = std::io::Cursor::new(bytes.to_vec());
                 remote_table
-                    .write_file_with_bundle_id(
-                        &transaction_bundle_id,
-                        version,
-                        &commit_log_path,
-                        reader,
-                    )
+                    .write_file_with_bundle_id(&transaction_bundle_id, version, path, reader)
                     .await?;
             }
-            Err(e) => {
-                log::warn!("      Could not read commit log (may not exist): {}", e);
-            }
-        }
 
-        log::info!(
-            "      [OK] Transaction {} backed up ({} files)",
-            version,
-            new_files.len()
-        );
-    }
+            // Back up Delta commit log for this version
+            let commit_log_path = format!("_delta_log/{:020}.json", version);
+            let log_file_path = object_store::path::Path::from(commit_log_path.as_str());
+
+            match local_store.get(&log_file_path).await {
+                Ok(get_result) => {
+                    let bytes = get_result.bytes().await.map_err(|e| {
+                        RemoteError::TableOperation(format!("Failed to read commit log: {}", e))
+                    })?;
+
+                    let reader = std::io::Cursor::new(bytes.to_vec());
+                    remote_table
+                        .write_file_with_bundle_id(
+                            &transaction_bundle_id,
+                            version,
+                            &commit_log_path,
+                            reader,
+                        )
+                        .await?;
+                }
+                Err(e) => {
+                    log::warn!("      Could not read commit log (may not exist): {}", e);
+                }
+            }
+
+            log::info!(
+                "      [OK] Transaction {} backed up ({} files)",
+                version,
+                new_files.len()
+            );
+        }
     } // end if missing_versions
 
     // Back up large files (these are cumulative, not per-transaction)

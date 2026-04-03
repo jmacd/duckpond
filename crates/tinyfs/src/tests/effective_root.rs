@@ -64,10 +64,7 @@ async fn test_parent_dir_clamped_at_effective_root() {
     let chrooted = root.open_dir_path("/sub").await.unwrap().as_root();
 
     // `../file.txt` from the effective root should stay at root and find file.txt
-    let content = chrooted
-        .read_file_path_to_vec("../file.txt")
-        .await
-        .unwrap();
+    let content = chrooted.read_file_path_to_vec("../file.txt").await.unwrap();
     assert_eq!(content, b"in sub");
 
     // Multiple `..` should also be clamped
@@ -86,11 +83,17 @@ async fn test_glob_with_effective_root() {
 
     // Build: /sub/a.txt, /sub/b.txt
     let sub = root.create_dir_path("sub").await.unwrap();
-    _ = convenience::create_file_path(&sub, "a.txt", b"a").await.unwrap();
-    _ = convenience::create_file_path(&sub, "b.txt", b"b").await.unwrap();
+    _ = convenience::create_file_path(&sub, "a.txt", b"a")
+        .await
+        .unwrap();
+    _ = convenience::create_file_path(&sub, "b.txt", b"b")
+        .await
+        .unwrap();
 
     // Also create /c.txt at real root (should NOT be matched)
-    _ = convenience::create_file_path(&root, "c.txt", b"c").await.unwrap();
+    _ = convenience::create_file_path(&root, "c.txt", b"c")
+        .await
+        .unwrap();
 
     let chrooted = root.open_dir_path("/sub").await.unwrap().as_root();
     let matches = chrooted.collect_matches("/*.txt").await.unwrap();
@@ -98,13 +101,7 @@ async fn test_glob_with_effective_root() {
     // Should find a.txt and b.txt but NOT c.txt
     let names: Vec<String> = matches
         .iter()
-        .map(|(np, _)| {
-            np.path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string()
-        })
+        .map(|(np, _)| np.path.file_name().unwrap().to_string_lossy().to_string())
         .collect();
     assert_eq!(names.len(), 2);
     assert!(names.contains(&"a.txt".to_string()));
@@ -134,10 +131,7 @@ async fn test_child_wd_inherits_effective_root() {
     let child = chrooted.open_dir_path("dir").await.unwrap();
 
     // From child, `/dir/file.txt` should still resolve within effective root
-    let content = child
-        .read_file_path_to_vec("/dir/file.txt")
-        .await
-        .unwrap();
+    let content = child.read_file_path_to_vec("/dir/file.txt").await.unwrap();
     assert_eq!(content, b"deep");
 }
 
@@ -177,13 +171,9 @@ async fn test_symlink_relative_clamped_at_effective_root() {
         .await
         .unwrap();
     _ = sub.create_dir_path("inner").await.unwrap();
-    _ = convenience::create_file_path(
-        &root,
-        "/sub/inner/file.txt",
-        b"in inner",
-    )
-    .await
-    .unwrap();
+    _ = convenience::create_file_path(&root, "/sub/inner/file.txt", b"in inner")
+        .await
+        .unwrap();
 
     // Symlink from /sub/inner/link -> ../target.txt (goes up to /sub)
     let inner = sub.open_dir_path("inner").await.unwrap();
@@ -193,18 +183,12 @@ async fn test_symlink_relative_clamped_at_effective_root() {
         .unwrap();
 
     // From the actual root, this symlink resolves fine
-    let content = root
-        .read_file_path_to_vec("/sub/inner/link")
-        .await
-        .unwrap();
+    let content = root.read_file_path_to_vec("/sub/inner/link").await.unwrap();
     assert_eq!(content, b"at sub");
 
     // From chrooted at /sub, the symlink still resolves (stays within /sub)
     let chrooted = root.open_dir_path("/sub").await.unwrap().as_root();
-    let content = chrooted
-        .read_file_path_to_vec("inner/link")
-        .await
-        .unwrap();
+    let content = chrooted.read_file_path_to_vec("inner/link").await.unwrap();
     assert_eq!(content, b"at sub");
 }
 
@@ -282,7 +266,11 @@ async fn test_auto_detect_pond_boundary() {
 
     // Create a foreign directory node with a different pond_id
     let foreign_dir_id = FileID::new_physical_dir_id(foreign_pond);
-    let foreign_node = fs.persistence.create_directory_node(foreign_dir_id).await.unwrap();
+    let foreign_node = fs
+        .persistence
+        .create_directory_node(foreign_dir_id)
+        .await
+        .unwrap();
     fs.persistence.store_node(&foreign_node).await.unwrap();
     let foreign_np = imports.insert_node("foreign", foreign_node).await.unwrap();
 
@@ -295,7 +283,10 @@ async fn test_auto_detect_pond_boundary() {
 
     // Resolve /imports/foreign/data.txt from root
     // This should auto-detect the pond boundary at /imports/
-    let (wd, lookup) = root.resolve_path("/imports/foreign/data.txt").await.unwrap();
+    let (wd, lookup) = root
+        .resolve_path("/imports/foreign/data.txt")
+        .await
+        .unwrap();
     assert!(matches!(lookup, Lookup::Found(_)));
 
     // The returned WD should have effective_root set to /imports/
@@ -314,7 +305,11 @@ async fn test_auto_detect_absolute_path_scoped_to_mount() {
     // Create /mnt/ as mount point with a foreign sub-directory
     let mnt = root.create_dir_path("mnt").await.unwrap();
     let foreign_dir_id = FileID::new_physical_dir_id(foreign_pond);
-    let foreign_node = fs.persistence.create_directory_node(foreign_dir_id).await.unwrap();
+    let foreign_node = fs
+        .persistence
+        .create_directory_node(foreign_dir_id)
+        .await
+        .unwrap();
     fs.persistence.store_node(&foreign_node).await.unwrap();
     let foreign_np = mnt.insert_node("site", foreign_node).await.unwrap();
 
@@ -497,10 +492,7 @@ async fn test_can_read_foreign_import() {
 
     // Reading must still work
     let foreign_wd = root.open_dir_path("/mnt/foreign").await.unwrap();
-    let content = foreign_wd
-        .read_file_path_to_vec("data.txt")
-        .await
-        .unwrap();
+    let content = foreign_wd.read_file_path_to_vec("data.txt").await.unwrap();
     assert_eq!(content, b"foreign data");
 }
 
@@ -513,10 +505,7 @@ async fn test_can_create_local_sibling_next_to_foreign_mount() {
     _ = convenience::create_file_path(&local_dir, "notes.txt", b"local notes")
         .await
         .unwrap();
-    let content = local_dir
-        .read_file_path_to_vec("notes.txt")
-        .await
-        .unwrap();
+    let content = local_dir.read_file_path_to_vec("notes.txt").await.unwrap();
     assert_eq!(content, b"local notes");
 }
 
@@ -577,10 +566,7 @@ async fn test_symlink_crossing_pond_boundary() {
         .unwrap();
 
     // Following the symlink should cross the pond boundary
-    let (wd, lookup) = root
-        .resolve_path("/shortcut/secret.txt")
-        .await
-        .unwrap();
+    let (wd, lookup) = root.resolve_path("/shortcut/secret.txt").await.unwrap();
     assert!(matches!(lookup, Lookup::Found(_)));
 
     // The boundary should have been detected
@@ -808,10 +794,7 @@ async fn test_as_root_on_foreign_wd_allows_writes() {
     let foreign_np = mnt.insert_node("foreign", foreign_node).await.unwrap();
 
     // Use as_root to act as the producer
-    let producer_wd = fs
-        .wd(&foreign_np, foreign_np.clone())
-        .await
-        .unwrap();
+    let producer_wd = fs.wd(&foreign_np, foreign_np.clone()).await.unwrap();
 
     // This should succeed — we are the "producer"
     let sub = producer_wd.create_dir_path("works").await.unwrap();

@@ -411,7 +411,9 @@ impl WD {
                         Ok(None) => {
                             // Entry doesn't exist - create the directory
                             current_wd.check_writable()?;
-                            let id = FileID::new_physical_dir_id(current_wd.effective_root.id().pond_id());
+                            let id = FileID::new_physical_dir_id(
+                                current_wd.effective_root.id().pond_id(),
+                            );
                             let node = current_wd.fs.persistence.create_directory_node(id).await?;
                             current_wd.fs.persistence.store_node(&node).await?;
                             current_wd
@@ -707,7 +709,11 @@ impl WD {
                                 if components.peek().is_some() {
                                     return Err(Error::not_found(path));
                                 } else {
-                                    return Ok((dnode, Lookup::NotFound(path.to_path_buf(), name), detected_root));
+                                    return Ok((
+                                        dnode,
+                                        Lookup::NotFound(path.to_path_buf(), name),
+                                        detected_root,
+                                    ));
                                 }
                             }
                             Ok(Some(child)) => {
@@ -726,8 +732,9 @@ impl WD {
                                             .map(|p| p + 1)
                                             .unwrap_or(1);
                                         let clamped = newsz.max(min_sz);
-                                        let (_, handle, sub_detected) =
-                                            self.resolve(&stack[0..clamped], relp, depth + 1).await?;
+                                        let (_, handle, sub_detected) = self
+                                            .resolve(&stack[0..clamped], relp, depth + 1)
+                                            .await?;
                                         if detected_root.is_none() {
                                             detected_root = sub_detected;
                                         }
@@ -1311,7 +1318,10 @@ mod tests {
                 );
             }
         }
-        assert!(wd.node_path().id().has_root_ids(), "Working directory should be root");
+        assert!(
+            wd.node_path().id().has_root_ids(),
+            "Working directory should be root"
+        );
 
         // Test 2: Resolve "." from root (should also be Found)
         let (wd2, lookup2) = root.resolve_path(".").await.expect("Failed to resolve .");
@@ -1329,7 +1339,10 @@ mod tests {
                 );
             }
         }
-        assert!(wd2.node_path().id().has_root_ids(), "Working directory should be root");
+        assert!(
+            wd2.node_path().id().has_root_ids(),
+            "Working directory should be root"
+        );
     }
 
     #[tokio::test]

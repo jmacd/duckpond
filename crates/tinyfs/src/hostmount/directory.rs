@@ -84,7 +84,12 @@ impl HostDirectory {
     /// Compute a deterministic FileID for a child entry
     fn child_file_id(&self, name: &str, entry_type: EntryType) -> FileID {
         let parent_part_id = PartID::from_node_id(self.file_id.node_id());
-        FileID::from_content(parent_part_id, entry_type, name.as_bytes(), self.file_id.pond_id())
+        FileID::from_content(
+            parent_part_id,
+            entry_type,
+            name.as_bytes(),
+            self.file_id.pond_id(),
+        )
     }
 
     /// Determine the entry type for a host filesystem entry

@@ -305,8 +305,7 @@ async fn run_pond_command_impl(
             "Factory at '{}' is inside a foreign mount, setting effective root",
             config_path
         );
-        factory_context =
-            factory_context.with_effective_root(parent_wd.effective_root().clone());
+        factory_context = factory_context.with_effective_root(parent_wd.effective_root().clone());
     }
 
     // If this is a remote import factory, load import partitions from control table
