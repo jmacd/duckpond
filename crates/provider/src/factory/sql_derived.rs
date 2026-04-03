@@ -300,9 +300,10 @@ impl SqlDerivedFile {
                 transform_path
             );
 
-            // Create a temporary FS to resolve the transform path
-            let fs = tinyfs::FS::from_arc(self.context.context.persistence.clone());
-            let root = fs
+            // Resolve the transform path using FactoryContext root
+            // (respects effective_root for cross-pond imports).
+            let root = self
+                .context
                 .root()
                 .await
                 .map_err(|e| tinyfs::Error::Other(format!("Failed to get root: {}", e)))?;
@@ -380,13 +381,8 @@ impl SqlDerivedFile {
                 .expect("transform factory has apply_table_transform");
 
             // Create FactoryContext with the transform file's FileID
-            let transform_context = crate::FactoryContext {
-                context: self.context.context.clone(),
-                file_id: node_id,
-                pond_metadata: None,
-                txn_seq: 0,
-                import_partitions: Vec::new(), // Transform context doesn't need txn_seq
-            };
+            let transform_context =
+                crate::FactoryContext::new(self.context.context.clone(), node_id);
 
             debug!(
                 "[FIX] SQL-DERIVED: Applying transform '{}' (factory: '{}')",
@@ -474,12 +470,13 @@ impl SqlDerivedFile {
             .to_string();
         let tinyfs_path = tinyfs_path_decoded.as_str();
 
-        // STEP 1: Build TinyFS from persistence via ProviderContext
-        let fs = self.context.context.filesystem();
-        let tinyfs_root = fs
+        // STEP 1: Get root from FactoryContext (respects effective_root
+        // for cross-pond imports where "/" means the foreign root).
+        let tinyfs_root = self
+            .context
             .root()
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get TinyFS root: {}", e)))?;
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to get root: {}", e)))?;
 
         // Check if path is exact (no wildcards) - use resolve_path() for single targets
         let is_exact_path =
@@ -569,7 +566,11 @@ impl SqlDerivedFile {
                 // For FileSeries, deduplicate by full FileID. For FileTable, use only node_id.
                 let dedup_key = match entry_type {
                     EntryType::TablePhysicalSeries | EntryType::TableDynamic => file_id,
-                    _ => FileID::new_from_ids(file_id.part_id(), file_id.node_id()),
+                    _ => FileID::new_from_ids(
+                        file_id.part_id(),
+                        file_id.node_id(),
+                        file_id.pond_id(),
+                    ),
                 };
                 if seen.insert(dedup_key) {
                     let entry_type_str = format!("{entry_type:?}");
@@ -960,10 +961,13 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                         );
                         let fs = self.context.context.filesystem();
                         let fs_arc = Arc::new(fs);
-                        let provider_api = crate::Provider::with_context(
+                        let mut provider_api = crate::Provider::with_context(
                             fs_arc,
                             Arc::new(self.context.context.clone()),
                         );
+                        if let Ok(root) = self.context.root().await {
+                            provider_api = provider_api.with_root(root);
+                        }
                         let datafusion_ctx = datafusion::prelude::SessionContext::new();
 
                         if queryable_files.len() == 1 {
@@ -1198,9 +1202,10 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                 // This maintains the ownership chain: FS Root -> State -> Cache -> Single TableProvider
 
                                 // Generate URL pattern - works for both OpLogFile and MemoryFile
-                                // Format: tinyfs:///part/{part_id}/node/{node_id}/version/
+                                // Format: tinyfs:///pond/{pond_id}/part/{part_id}/node/{node_id}/version/
                                 let url_pattern = format!(
-                                    "tinyfs:///part/{}/node/{}/version/",
+                                    "tinyfs:///pond/{}/part/{}/node/{}/version/",
+                                    file_id.pond_id(),
                                     file_id.part_id(),
                                     file_id.node_id()
                                 );
@@ -1500,19 +1505,8 @@ mod tests {
 
     /// Helper to create crate::FactoryContext from ProviderContext for tests
     fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
-        crate::FactoryContext {
-            context: context.clone(),
-            file_id,
-            pond_metadata: None,
-            txn_seq: 0,
-            import_partitions: Vec::new(),
-        }
+        crate::FactoryContext::new(context.clone(), file_id)
     }
-
-    /// Helper to create test environment with MemoryPersistence
-    /// Returns (FS, ProviderContext) that share the SAME persistence instance
-    /// This maintains the single-instance pattern - both FS and ProviderContext
-    /// work with the same underlying data
     async fn create_test_environment() -> (FS, ProviderContext) {
         // Create ONE persistence instance
         let persistence = MemoryPersistence::default();
@@ -2447,6 +2441,7 @@ query: ""
             PartID::root(),
             EntryType::TableDynamic,
             first_query.as_bytes(),
+            tinyfs::local_pond_uuid(),
         );
         let context = test_context(&provider_context, first_file_id);
         let first_config = SqlDerivedConfig {
@@ -2496,6 +2491,7 @@ query: ""
                 PartID::root(),
                 EntryType::TableDynamic,
                 second_query.as_bytes(),
+                tinyfs::local_pond_uuid(),
             );
             let context = test_context(&provider_context, second_file_id);
             let second_config = SqlDerivedConfig {
@@ -4114,7 +4110,7 @@ rules:
         };
 
         // Create sql-derived file
-        let sql_derived_id = FileID::new_physical_dir_id();
+        let sql_derived_id = FileID::new_physical_dir_id(tinyfs::local_pond_uuid());
         let sql_file = SqlDerivedFile::new(
             sql_config,
             test_context(&provider_context, sql_derived_id),

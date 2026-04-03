@@ -175,10 +175,10 @@ check_contains     "${OUTDIR}/index.html"  "subnav class present"        'class=
 echo ""
 echo "--- Verification: Theme Overrides ---"
 
-check_contains     "${OUTDIR}/style.css"   "accent override in CSS"      'accent: #1a1a2e'
-check_contains     "${OUTDIR}/style.css"   "accent-light override"       'accent-light: #16213e'
-check_contains     "${OUTDIR}/style.css"   "nav-btn override"            'nav-btn: rgba(100, 100, 200, 0.8)'
-check_contains     "${OUTDIR}/style.css"   "nav-btn-active override"     'nav-btn-active: rgba(50, 50, 150, 0.9)'
+check_contains     "${OUTDIR}/theme.css"   "accent override in CSS"      'accent: #1a1a2e'
+check_contains     "${OUTDIR}/theme.css"   "accent-light override"       'accent-light: #16213e'
+check_contains     "${OUTDIR}/theme.css"   "nav-btn override"            'nav-btn: rgba(100, 100, 200, 0.8)'
+check_contains     "${OUTDIR}/theme.css"   "nav-btn-active override"     'nav-btn-active: rgba(50, 50, 150, 0.9)'
 
 # Base CSS variables still present (not replaced, overridden)
 check_contains     "${OUTDIR}/style.css"   "base nav-heading styles"     '.sidebar .nav-heading'

@@ -121,6 +121,10 @@ impl<P: PersistenceLayer + Send + Sync + 'static> PersistenceLayer for CachingPe
         self.inner.transaction_state()
     }
 
+    fn pond_uuid(&self) -> uuid7::Uuid {
+        self.inner.pond_uuid()
+    }
+
     /// Load node with caching
     async fn load_node(&self, id: FileID) -> Result<Node> {
         // Check cache first

@@ -34,7 +34,7 @@ async fn test_memory_persistence_temporal_bounds() {
     let uuid_str = "01933eb8-7e8e-7000-8000-000000000001".to_string();
     let node_id = NodeID::new(uuid_str.clone());
     let part_id = PartID::new(uuid_str);
-    let file_id = FileID::new_from_ids(part_id, node_id);
+    let file_id = FileID::new_from_ids(part_id, node_id, tinyfs::local_pond_uuid());
 
     // Initially no temporal bounds
     let bounds = persistence
@@ -63,7 +63,7 @@ async fn test_memory_persistence_caching_passthrough() {
     let uuid_str = "01933eb8-7e8e-7000-8000-000000000002".to_string();
     let node_id = NodeID::new(uuid_str.clone());
     let part_id = PartID::new(uuid_str);
-    let file_id = FileID::new_from_ids(part_id, node_id);
+    let file_id = FileID::new_from_ids(part_id, node_id, tinyfs::local_pond_uuid());
 
     // Set temporal bounds through base layer
     base.set_temporal_bounds(file_id, 1000, 2000).await;
@@ -133,10 +133,14 @@ async fn test_temporal_filtered_listing_table_with_memory() {
     let persistence = MemoryPersistence::default();
 
     // Create a FileID for a FileSeries Parquet file
-    // FileID::new_physical_dir_id() creates a proper directory, then we create a series file in it
+    // FileID::new_physical_dir_id(tinyfs::local_pond_uuid()) creates a proper directory, then we create a series file in it
     use tinyfs::EntryType;
-    let dir_id = FileID::new_physical_dir_id();
-    let file_id = FileID::new_in_partition(dir_id.part_id(), EntryType::TablePhysicalSeries);
+    let dir_id = FileID::new_physical_dir_id(tinyfs::local_pond_uuid());
+    let file_id = FileID::new_in_partition(
+        dir_id.part_id(),
+        EntryType::TablePhysicalSeries,
+        tinyfs::local_pond_uuid(),
+    );
 
     // Set temporal bounds for the file
     persistence.set_temporal_bounds(file_id, 1000, 2000).await;

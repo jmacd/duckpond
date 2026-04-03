@@ -63,8 +63,11 @@ async fn test_load_root_node() {
 async fn test_load_unknown_id_errors() {
     let dir = create_test_tree();
     let persistence = HostmountPersistence::new(dir.path().to_path_buf()).unwrap();
-    let fake_id =
-        FileID::new_in_partition(crate::node::PartID::root(), EntryType::FilePhysicalVersion);
+    let fake_id = FileID::new_in_partition(
+        crate::node::PartID::root(),
+        EntryType::FilePhysicalVersion,
+        crate::local_pond_uuid(),
+    );
     let result = persistence.load_node(fake_id).await;
     assert!(result.is_err());
 }

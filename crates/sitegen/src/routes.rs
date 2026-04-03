@@ -367,6 +367,7 @@ mod tests {
                 name: "params".to_string(),
                 pattern: "/reduced/single_param/*/*.series".to_string(),
                 target_points: 1500,
+                timestamp_column: "timestamp".to_string(),
             }],
             routes: vec![RouteConfig {
                 name: "home".to_string(),
@@ -398,6 +399,7 @@ mod tests {
             sidebar: vec![],
             feed: None,
             theme: std::collections::BTreeMap::new(),
+            subsites: vec![],
         }
     }
 
@@ -555,6 +557,7 @@ mod tests {
             sidebar: vec![],
             feed: None,
             theme: std::collections::BTreeMap::new(),
+            subsites: vec![],
         };
 
         let exports = BTreeMap::new();

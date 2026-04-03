@@ -1,354 +1,173 @@
-# Duckpond
+# DuckPond
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jmacd/duckpond/badge)](https://scorecard.dev/viewer/?uri=github.com/jmacd/duckpond)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
 
-Duckpond is a very small data lake.
+DuckPond is a query-native filesystem for time-series data, built on
+Apache Arrow, DataFusion, and Delta Lake.  Every filesystem object can
+be queried with SQL, and SQL queries create new filesystem objects that
+appear as native files and directories.
 
-Duckpond is built by the [Caspar Water System](https://github.com/jmacd/caspar.water).
-
-Duckpond writes timeseries data into an applicaton-level file system,
-then assembles them for export using DataFusion.  A sibling project
-[Noyo Blue Economy](https://github.com/jmacd/noyo-blue-econ) shows how
-to use this system to create a public portal for sharing water quality
-data.
+Built by the [Caspar Water System](https://github.com/jmacd/caspar.water).
 
 ![Caspar Duck Pond](./caspar_duckpond.jpg)
 
-## Resource categories
+## Quick Start
 
-### HydroVu
+```bash
+# Build
+make build
 
-A receiver for www.hydrovu.com environmental monitoring data.  To
-instantiate one of these, for example:
+# Run unit tests
+make test
 
-```
-apiVersion: www.hydrovu.com/v1
-kind: HydroVu
-name: noyo-harbor
-desc: Noyo Harbor Blue Economy
-spec:
-  key: ...
-  secret: ...
-```
-
-This downloads the complete set of data for all locations and
-instruments.  Configure key and secret fields using values supplied by
-the HydroVu system.
-
-### Backup
-
-An exporter for backing up all files in the Pond to a storage bucket.
-
-```
-apiVersion: github.com/jmacd/duckpond/v1
-kind: Backup
-name: cloudflare
-desc: Backup to Cloudflare R2
-spec:
-  bucket: noyoharbor
-  region: ...
-  key: ...
-  secret: ...
-  endpoint: ...
+# Initialize a pond and try it out
+export POND=/tmp/mypond
+pond init
+pond mkdir /data
+echo "hello" | pond copy - /data/greeting.txt
+pond list /**
+pond cat /data/greeting.txt
 ```
 
-Configure region, key, secret, and endpoint fields using values
-supplied by your service provider.
+## Developer Guide
 
-### Copy
+### Prerequisites
 
-Loads from a Backup storage bucket.
+- Rust stable toolchain (see `rust-toolchain.toml`)
+- Docker (for integration tests and site deployment)
+- Node.js >= 22 (for browser tests and vendor download)
 
-```
-apiVersion: github.com/jmacd/duckpond/v1
-kind: Copy
-name: cloudflare
-desc: Backup from storage
-spec:
-  bucket: noyoharbor
-  region: ...
-  key: ...
-  secret: ...
-  endpoint: ...
-  backup_uuid: 6fe1e0e1-b262-4d99-ae6f-3cae39e1196a
+### Daily Workflow
+
+```bash
+make build          # Build pond binary (debug)
+make test           # Run all unit tests
+make integration    # Build Docker test image + run integration tests
+make check          # fmt + clippy + test (CI equivalent)
 ```
 
-Configure region, key, secret, and endpoint the same as you 
-would for the corresponding Backup.
+Run `make` with no arguments to see all available targets.
 
-### Inbox
+### One-Time Setup
 
-Ingest files from a local directory on the host file system.
+Download JavaScript vendor dependencies for offline site generation:
 
-```
-apiVersion: github.com/jmacd/duckpond/v1
-kind: Inbox
-name: csvin
-desc: CSV inbox
-spec:
-  pattern: /home/user/inbox/csv/**
+```bash
+make vendor         # Downloads DuckDB-WASM, Observable Plot, D3
 ```
 
-The files will be placed in a directory named `/Inbox/{UUID}`.
+This populates `crates/sitegen/vendor/dist/` (gitignored, ~35MB).
+After this, `pond run sitegen build` produces sites that work without
+network access.
 
-### Derive
-
-Register a SQL query to transform arbitrary data (e.g., from the
-Inbox) into a desired representation.  The query will be executed once
-per target file matching the pattern in the Pond.
+### Repository Structure
 
 ```
-apiVersion: github.com/jmacd/duckpond/v1
-kind: Derive
-name: csvextract
-desc: Extract from CSV
-spec:
-  collections:
-  - pattern: /Inbox/csvdata/*surface*.csv
-    name: SurfaceMeasurements
-    query: >
-      
-      WITH INPUT as ... 
-	  SELECT ... 
-	  FROM read_csv('$1')
-	  ...
+crates/
+  tinyfs/       Pure filesystem abstractions (FS, WD, Node, path resolution)
+  tlogfs/       Delta Lake persistence (OpLog, transactions, DataFusion)
+  steward/      Transaction orchestration, control table, factory execution
+  provider/     URL-based data access, factory registry, table providers
+  cmd/          CLI commands (pond init/list/cat/copy/run/...)
+  sitegen/      Static site generator (factory)
+  remote/       S3 backup & replication (factory)
+  hydrovu/      HydroVu API collector (factory)
+  utilities/    Shared helpers (glob, chunked files, perf tracing)
+
+scripts/        Shared deployment scripts
+testsuite/      Integration tests (Docker-based)
+  tests/        Individual test scripts (NNN-description.sh)
+  browser/      Puppeteer browser validation tests
+
+docs/           Architecture and design documentation
+water/          Water monitoring demo site
+septic/         Septic system demo site
+noyo/           Noyo Harbor demo site
 ```
 
-The placeholder `$1` is replaced by the real path of each file
-matching the configured pattern, and the resulting derived files are
-populated with the results of the `query` in a synthetic Pond
-directory named `/Derive/{UUID}/{spec.name}`.
+### Architecture
 
-### Combine
+See [docs/duckpond-overview.md](docs/duckpond-overview.md) for the
+full architecture description.  Key layers (bottom to top):
 
-Use the Combine resource to merge a set of files with different names
-and identical schemas.  This is accomplished by an automatically
-generated FULL OUTER JOIN with COALLESCE statements.
+| Layer | Crate | Role |
+|-------|-------|------|
+| Filesystem | `tinyfs` | Pure abstractions: FS, WD, Node, path resolution |
+| Persistence | `tlogfs` | Delta Lake storage, OpLog, DataFusion integration |
+| Orchestration | `steward` | Transactions, control table, factory lifecycle |
+| Data Access | `provider` | URL schemes, factory registry, table providers |
+| CLI | `cmd` | User-facing commands |
 
-```
-apiVersion: www.hydrovu.com/v1
-kind: Combine
-name: noyo-data
-desc: Noyo harbor instrument collections
-spec:
-  scopes:
-  - name: FieldStation-Surface
-    series:
-    - pattern: /Derive/othersource/SurfaceMeasurements/*
-```
+### CLI Reference
 
-### Template
+See [docs/cli-reference.md](docs/cli-reference.md) for the complete
+command reference.  Common commands:
 
-Use the Template resource to synthesize content generated through the
-Rust `Tera` template engine.  Each named collection applies the
-supplied pattern, which must capture a single variable.  For each
-match, the captured value becomes the basename of a file with the
-contents of the expanded template.
-
-```
-apiVersion: github.com/jmacd/duckpond/v1
-kind: Template
-name: website
-desc: observable
-spec:
-  collections:
-  - name: details
-    in_pattern: "/Combine/noyodata/*/combine"
-    out_pattern: "$0.md"
-    template: |-
-      ---
-      title: Detail with combined data
-      ---
-	  {% for field in schema.fields %}
-		{{ field.name }}
-	  {% endfor %}
+```bash
+pond init                           # Create a new pond
+pond list '/**'                     # List all entries
+pond cat /path/to/file              # Read a file
+pond cat --sql "SELECT * FROM source WHERE ..." /path  # Query a table
+pond copy host:///local/file /pond/path                # Import a file
+pond copy host+series:///data.parquet /pond/series      # Import time-series
+pond mkdir /dir                     # Create a directory
+pond mknod <factory> /path --config-path config.yaml   # Install a factory
+pond run /path/to/factory <command>                     # Execute a factory
+pond log                            # Transaction history
 ```
 
-The template context includes the schema of the matching file in a
-variable named "schema".  The schema is an array of fields:
+### Integration Tests
 
-```
-pub struct Schema {
-    fields: Vec<Field>,
-}
+Tests live in `testsuite/tests/` as numbered shell scripts.  Each test
+runs in a fresh Docker container with the `pond` binary:
 
-pub struct Field {
-    name: String,
-    instrument: String,
-    unit: String,
-}
-```
+```bash
+make test-image                     # Build the test Docker image
+make integration                    # Run all tests (skips browser tests)
+make integration-all                # Run all tests including browser
 
-TODO: The schema is structured according to the HydroVu data model,
-which is not general purpose.
+# Run a single test
+cd testsuite && ./run-test.sh 201
 
-#### Template functions
-
-##### Group
-
-The `group(by=..., in=...)` built-in groups any array of objects,
-returning a map of arrays of objects.  It can be used to group fields
-by instrument name, for example.
-
-```
-{% for key, fields in group(by="name",in=schema.fields) %}
-  Name is {{ key }}
-  {% for field in fields %}
-    Instrument is {{ field.instrument }}
-  {% endfor %}
-{% endfor %}
+# Run interactively (explore in container)
+cd testsuite && ./run-test.sh --interactive
 ```
 
-### Reduce
+### Demo Sites
 
-Use the Reduce resource to aggregate timeseries into larger time
-buckets.  Each collection's datasets are synthesized, expanding the
-input wildcard (e.g., `.../*/...`) to the output placeholder (e.g.,
-`output-$0`).
+Each demo site (water/, septic/, noyo/) rsyncs data from its remote
+machine and runs everything locally:
 
-Multiple datasets may be listed within a collection, which must not
-generate overlapping output names.
+```bash
+# First time: configure your site
+cp water/deploy.env.example water/deploy.env
+# Edit deploy.env with your remote host and S3 credentials
 
-```
-apiVersion: duckpond/v1
-kind: Reduce
-name: downsampled
-desc: Downsampled datasets
-spec:
-  collections:
-  - name: single_instrument
-    resolutions: [1h, 2h, 4h, 12h, 24h]
-    datasets:
-    - in_pattern: "/Combine/noyodata/*/combine"
-      out_pattern: "reduce-$0"
-      columns:
-      - "AT500_Bottom.DO.mg/L"
-      - "AT500_Surface.DO.mg/L"
+# Site workflow (all run locally)
+cd water
+./setup-local.sh          # rsync data + init pond + install factories
+./run-local.sh            # rsync new data + ingest
+./generate-local.sh       # build static site + preview
+./update-local.sh         # after editing YAML/templates
 ```
 
-### Scribble
+Credentials are kept in `deploy.env` (gitignored) — never in the YAML
+configs checked into the repository.  Remote machines use container
+images built by GitHub Actions.
 
-Synthetic data generator for testing.
+## Documentation
 
-```
-apiVersion: github.com/jmacd/duckpond/v1
-kind: Scribble
-name: first-scribble
-desc: Test data generator
-spec:
-  count_min: 5
-  count_max: 10
-  probs:
-    tree: 0.05
-    table: 0.4
-```
+| Document | Contents |
+|----------|----------|
+| [CLI Reference](docs/cli-reference.md) | Complete command syntax and examples |
+| [Architecture Overview](docs/duckpond-overview.md) | System design and crate map |
+| [System Patterns](docs/duckpond-system-patterns.md) | Transaction model, factories, providers |
+| [Sitegen Design](docs/sitegen-design.md) | Static site generator architecture |
+| [Cross-Pond Import](docs/cross-pond-import-status.md) | Foreign pond import status |
+| [Large File Storage](docs/large-file-storage-implementation.md) | Content-addressed storage for large files |
+| [Releasing](RELEASING.md) | Release process and supply chain security |
 
-## Usage
+## License
 
-### Init
-
-To initialize a new pond in the current working directory or `$POND`,
-if set.  The pond directory is named ".pond".  To create a new pond:
-
-```
-duckpond init
-```
-
-### Apply
-
-To apply a resource definition, such as to create a new temporal data
-set.  For example:
-
-```
-duckpond apply -f noyo.yaml
-```
-
-### Run
-
-Fetches new data from registered resources.  For example:
-
-```
-duckpond run
-```
-
-### Check
-
-Determines whether expected files are present in the pond and various
-other consistency checks.  WIP: Simply prints the unexpected files.
-
-```
-duckpond check
-```
-
-### List
-
-Produces a directory listing.  Accepts shell wildcards.
-
-```
-duckpond list PATTERN
-```
-
-### Cat
-
-Writes a file to the standard output.
-
-```
-duckpond cat PATH
-```
-
-### Export
-
-Writes a sert of matching files to corresponding paths in the host
-file system from one or more patterns.
-
-```
-duckpond export --pattern '/reduced/single_param/*/*.series' --pattern '/templates/params/*' --dir OUTDIR --temporal "year,month" --start-time "2024-03-01 00:00:00" --end-time "2024-08-01 00:00:00" 
-```
-
-If the file is tabular and the `--temporal` flag is set , data will be
-exported in date-partitioned Parquet files.  The `--temporal` argument
-determines the partition keys for the output (which must include
-`year`).
-
-The set of files exported by each pattern are placed into the
-`Template` context object, under the `export` key, making it possible
-for exported templates to refer to exported files. For each wildcard
-in the export pattern, a nested map is built for the captured
-variable.  If a pattern `/var/*/data/*` matched a path
-`/var/log/data/messages`, the `export` context would include a list of
-generated files, for example, like this:
-
-```
-{
-  "log": {
-    "messages": [
-  	  {
-  		"file": "log/messages/year=2024/month=1/data_01.parquet"
-	    "start_time": 1234,
-	    "end_time": 5678,
-	  },
-  	  ...
-	],
-  }
-}
-```
-
-TODO: This example belongs with `Template`. Also document `args`, the 
-matching wildcard variables.
-
-## Configuration template expansion
-
-Configuration values that are String typed have template expansion applied,
-meaning that a line of configuration such as:
-
-```
-property: "{{ variable }}"
-```
-
-can be configured during `duckpond apply`.  As an special case, the
-Template resource's `template` field itself is not expanded.  For example,
-
-```
-duckpond apply -f config.yaml -v variable=value
-```
+Apache-2.0 — see [LICENSES/](LICENSES/) for details.

@@ -22,7 +22,7 @@ SPDX-FileCopyrightText = "Caspar Water Company"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
-path = ["noyo/**", "original/src/config/**/**", "pond/**", "export/**", "inbox/**", "history/**", "sample-**/**", "testsuite/**"]
+path = ["noyo/**", "septic/**", "water/**", "cross/**", "original/src/config/**/**", "pond/**", "export/**", "inbox/**", "history/**", "sample-**/**", "testsuite/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Caspar Water Company"
 SPDX-License-Identifier = "Apache-2.0"

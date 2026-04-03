@@ -266,6 +266,30 @@ impl RemoteTable {
         self.pond_id = pond_id;
     }
 
+    /// Extract the pond_id from FILE-META partition keys in the Delta table.
+    ///
+    /// The partition format is `bundle_id=FILE-META-{pond_id}-{YYYY-MM-DD}-{txn}`.
+    /// The pond_id is a 36-character UUID, so we take the first 36 characters
+    /// after stripping the `FILE-META-` prefix.
+    pub fn extract_pond_id(&self) -> Result<String> {
+        let snapshot = self.table.snapshot().map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to get Delta snapshot: {}", e))
+        })?;
+
+        for add in snapshot.log_data() {
+            let path_str = add.path();
+            if let Some(rest) = path_str.strip_prefix("bundle_id=FILE-META-")
+                && rest.len() >= 36
+            {
+                return Ok(rest[..36].to_string());
+            }
+        }
+
+        Err(RemoteError::TableOperation(
+            "No FILE-META partitions found — cannot determine pond_id".to_string(),
+        ))
+    }
+
     /// Get the table path
     #[must_use]
     pub fn path(&self) -> &str {
@@ -822,16 +846,21 @@ impl RemoteTable {
         pond_id: &str,
         txn_seq: i64,
     ) -> Result<Vec<(String, String, String, i64, i64)>> {
-        let bundle_id = crate::schema::ChunkedFileRecord::transaction_bundle_id(pond_id, txn_seq);
+        // Match by prefix (FILE-META-{pond_id}-) and suffix (-{txn_seq})
+        // rather than constructing an exact bundle_id, because the embedded
+        // date component is set at push time and cannot be predicted at
+        // query time.
+        let prefix = format!("FILE-META-{}-", pond_id);
+        let suffix = format!("-{}", txn_seq);
 
         let df = self
             .session_context
             .sql(&format!(
                 "SELECT DISTINCT bundle_id, path, root_hash, total_size, pond_txn_id \
                  FROM remote_files \
-                 WHERE bundle_id = '{}' \
+                 WHERE bundle_id LIKE '{}%' AND bundle_id LIKE '%{}' \
                  ORDER BY path",
-                bundle_id
+                prefix, suffix
             ))
             .await?;
 

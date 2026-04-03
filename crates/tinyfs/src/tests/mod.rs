@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod corruption;
+mod effective_root;
 mod glob_bug;
 mod in_path_debug;
 mod memory;

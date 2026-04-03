@@ -803,7 +803,10 @@ fn format_operations_from_batches(
         })?;
 
         // For directory partitions, the FileID is self-partitioned (part_id == node_id)
-        let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(part_id.to_node_id());
+        let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(
+            part_id.to_node_id(),
+            tinyfs::local_pond_uuid(),
+        );
 
         let path_display = path_map
             .get(&dir_file_id.to_string())

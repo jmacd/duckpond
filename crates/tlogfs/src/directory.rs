@@ -72,10 +72,18 @@ impl Directory for OpLogDirectory {
         // Construct FileID based on entry type:
         // - Physical directories: part_id == node_id (self-partitioned)
         // - Everything else: part_id == parent's part_id
+        // Use the entry's stored pond_id for cross-pond imports,
+        // falling back to the parent's pond_id for local entries.
+        let child_pond_id = entry
+            .pond_id
+            .as_ref()
+            .and_then(|s| s.parse::<uuid7::Uuid>().ok())
+            .unwrap_or_else(|| self.id.pond_id());
+
         let child_file_id = if entry.entry_type == tinyfs::EntryType::DirectoryPhysical {
-            FileID::from_physical_dir_node_id(entry.child_node_id)
+            FileID::from_physical_dir_node_id(entry.child_node_id, child_pond_id)
         } else {
-            FileID::new_from_ids(self.id.part_id(), entry.child_node_id)
+            FileID::new_from_ids(self.id.part_id(), entry.child_node_id, child_pond_id)
         };
 
         // Load the child node
@@ -94,12 +102,19 @@ impl Directory for OpLogDirectory {
 
         // Create the new entry
         let node_id = node.id();
-        let new_entry = tinyfs::DirectoryEntry::new(
+        let mut new_entry = tinyfs::DirectoryEntry::new(
             name.clone(),
             node_id.node_id(),
             node_id.entry_type(),
             1, // version_last_modified - will be set properly at flush time
         );
+
+        // For cross-pond imports: if the child's pond_id differs from
+        // this directory's pond_id, record it on the entry so get()
+        // can reconstruct the correct FileID later.
+        if node_id.pond_id() != self.id.pond_id() {
+            new_entry.pond_id = Some(node_id.pond_id().to_string());
+        }
 
         // Insert into in-memory state (checks for duplicates and marks as modified)
         self.state
@@ -133,10 +148,16 @@ impl Directory for OpLogDirectory {
         // If entry existed, load and return the node
         match removed_entry {
             Some(entry) => {
+                let child_pond_id = entry
+                    .pond_id
+                    .as_ref()
+                    .and_then(|s| s.parse::<uuid7::Uuid>().ok())
+                    .unwrap_or_else(|| self.id.pond_id());
+
                 let child_file_id = if entry.entry_type == tinyfs::EntryType::DirectoryPhysical {
-                    FileID::from_physical_dir_node_id(entry.child_node_id)
+                    FileID::from_physical_dir_node_id(entry.child_node_id, child_pond_id)
                 } else {
-                    FileID::new_from_ids(self.id.part_id(), entry.child_node_id)
+                    FileID::new_from_ids(self.id.part_id(), entry.child_node_id, child_pond_id)
                 };
                 let child_node = self.state.load_node(child_file_id).await?;
                 Ok(Some(child_node))

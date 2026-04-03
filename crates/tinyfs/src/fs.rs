@@ -48,16 +48,17 @@ impl FS {
     /// Returns a working directory context for the root directory
     /// The root directory must be explicitly initialized before calling this method
     pub async fn root(&self) -> Result<WD> {
-        let root_node = self.persistence.load_node(FileID::root()).await?;
+        let root_id = FileID::root_for(self.persistence.pond_uuid());
+        let root_node = self.persistence.load_node(root_id).await?;
         let node = NodePath {
             node: root_node,
             path: "/".into(),
         };
-        self.wd(&node).await
+        WD::new(node.clone(), self.clone(), node).await
     }
 
-    pub async fn wd(&self, np: &NodePath) -> Result<WD> {
-        WD::new(np.clone(), self.clone()).await
+    pub async fn wd(&self, np: &NodePath, effective_root: NodePath) -> Result<WD> {
+        WD::new(np.clone(), self.clone(), effective_root).await
     }
 
     /// Create a new node with persistence

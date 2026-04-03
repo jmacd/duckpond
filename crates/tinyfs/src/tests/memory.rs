@@ -129,9 +129,10 @@ async fn test_relative_symlink() {
     let result = wd_a.read_file_path_to_vec("b").await;
     assert_eq!(result, Err(Error::parent_path_invalid("../c/d")));
 
-    // Can't read an absolute path except from the root.
-    let result = wd_a.read_file_path_to_vec("e").await;
-    assert_eq!(result, Err(Error::root_path_from_non_root("/c/d")));
+    // Absolute symlink resolves via the effective root (which is the
+    // actual root, inherited from the root WD).
+    let content = wd_a.read_file_path_to_vec("e").await.unwrap();
+    assert_eq!(content, b"relative symlink target");
 }
 
 #[tokio::test]
@@ -487,12 +488,16 @@ async fn test_memory_file_physical_series_version_concatenation() {
     use crate::EntryType;
     use crate::file::File;
     use crate::memory::{MemoryFile, MemoryPersistence};
-    use crate::node::{FileID, PartID};
+    use crate::node::{FileID, PartID, local_pond_uuid};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Create persistence layer
     let persistence = MemoryPersistence::default();
-    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalSeries);
+    let id = FileID::new_in_partition(
+        PartID::root(),
+        EntryType::FilePhysicalSeries,
+        local_pond_uuid(),
+    );
 
     // Create MemoryFile with FilePhysicalSeries entry type
     let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalSeries);
@@ -529,12 +534,16 @@ async fn test_memory_file_physical_version_single_content() {
     use crate::EntryType;
     use crate::file::File;
     use crate::memory::{MemoryFile, MemoryPersistence};
-    use crate::node::{FileID, PartID};
+    use crate::node::{FileID, PartID, local_pond_uuid};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Create persistence layer
     let persistence = MemoryPersistence::default();
-    let id = FileID::new_in_partition(PartID::root(), EntryType::FilePhysicalVersion);
+    let id = FileID::new_in_partition(
+        PartID::root(),
+        EntryType::FilePhysicalVersion,
+        local_pond_uuid(),
+    );
 
     // Create MemoryFile with FilePhysicalVersion entry type
     let memory_file = MemoryFile::new(id, persistence.clone(), EntryType::FilePhysicalVersion);

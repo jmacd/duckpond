@@ -59,6 +59,41 @@ pub struct SiteConfig {
     /// Example: `accent: "#1a365d"` sets `--accent: #1a365d`.
     #[serde(default)]
     pub theme: std::collections::BTreeMap<String, String>,
+    /// Sub-sites to generate recursively from imported ponds.
+    /// Each sub-site references a sitegen config inside an imported mount
+    /// and generates into a subdirectory of the output.
+    #[serde(default)]
+    pub subsites: Vec<SubsiteConfig>,
+}
+
+impl SiteConfig {
+    /// Rewrite sidebar hrefs when a subsite is mounted at a different base_url.
+    ///
+    /// Any href starting with `old_base` is rewritten to start with `new_base`.
+    pub fn rewrite_sidebar_urls(&mut self, old_base: &str, new_base: &str) {
+        fn rewrite(href: &mut String, old: &str, new: &str) {
+            if let Some(rest) = href.strip_prefix(old) {
+                *href = format!("{}{}", new, rest);
+            }
+        }
+
+        for entry in &mut self.sidebar {
+            match entry {
+                SidebarEntry::WithChildren { href, children, .. } => {
+                    if let Some(h) = href {
+                        rewrite(h, old_base, new_base);
+                    }
+                    for child in children {
+                        rewrite(&mut child.href, old_base, new_base);
+                    }
+                }
+                SidebarEntry::DirectLink { href, .. } => {
+                    rewrite(href, old_base, new_base);
+                }
+                SidebarEntry::Simple(_) => {}
+            }
+        }
+    }
 }
 
 /// Site-wide metadata.
@@ -129,17 +164,34 @@ pub struct ContentStage {
 pub struct ExportStage {
     /// Name referenced by routes (e.g., "params", "sites")
     pub name: String,
-    /// Pond glob pattern (e.g., "/reduced/single_param/*/*.series")
+    /// Pond glob pattern or format-provider URL pattern.
+    ///
+    /// Bare paths (e.g., `/reduced/single_param/*/*.series`) are resolved
+    /// directly as queryable pond files.
+    ///
+    /// URL-scheme patterns (e.g., `jsonlogs:///logs/watershop/*.jsonl`)
+    /// are resolved through the format provider registry, allowing raw
+    /// data files to be queried via DataFusion.
     pub pattern: String,
     /// Target data points per screen width for partition sizing.
     /// Typical value: 1000-2000. Default: 1500.
     /// Controls how parquet files are temporally partitioned per resolution.
     #[serde(default = "default_target_points")]
     pub target_points: u64,
+    /// Name of the timestamp column for temporal partitioning.
+    /// Default: "timestamp". Override for format-provider patterns where
+    /// the timestamp column has a different name (e.g., "__REALTIME_TIMESTAMP"
+    /// for journald logs).
+    #[serde(default = "default_timestamp_column")]
+    pub timestamp_column: String,
 }
 
 fn default_target_points() -> u64 {
     1500
+}
+
+fn default_timestamp_column() -> String {
+    "timestamp".to_string()
 }
 
 /// A route in the hierarchical route tree.
@@ -247,6 +299,30 @@ pub struct SidebarChild {
     pub label: String,
     /// Direct URL path (e.g., "/data/well-depth.html")
     pub href: String,
+}
+
+/// A sub-site to generate recursively from an imported pond.
+///
+/// ```yaml
+/// subsites:
+///   - name: "noyo"
+///     path: "/sources/noyo"
+///     config: "/system/etc/90-sitegen"
+///     base_url: "/noyo/"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubsiteConfig {
+    /// Display name (used for logging and output directory fallback).
+    pub name: String,
+    /// Pond path to the import mount point (e.g., "/sources/noyo").
+    pub path: String,
+    /// Path to the sitegen config within the foreign pond (absolute,
+    /// resolved relative to the mount point via effective_root).
+    pub config: String,
+    /// Override the sub-site's base_url for the combined site.
+    /// If omitted, the sub-site's own base_url is used.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[cfg(test)]
@@ -405,5 +481,55 @@ sidebar:
             "/data/well-depth.html"
         );
         assert_eq!(config.sidebar[3].label(), "Thanks");
+    }
+
+    #[test]
+    fn parse_config_with_subsites() {
+        let yaml = r#"
+site:
+  title: "Caspar Infrastructure"
+  base_url: "/"
+
+subsites:
+  - name: "noyo"
+    path: "/sources/noyo"
+    config: "/system/etc/90-sitegen"
+    base_url: "/noyo/"
+  - name: "water"
+    path: "/sources/water"
+    config: "/etc/site.yaml"
+  - name: "septic"
+    path: "/sources/septic"
+    config: "/etc/site.yaml"
+    base_url: "/septic/"
+
+routes:
+  - name: "home"
+    type: static
+    slug: ""
+    page: "/system/site/index.md"
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert_eq!(config.subsites.len(), 3);
+        assert_eq!(config.subsites[0].name, "noyo");
+        assert_eq!(config.subsites[0].path, "/sources/noyo");
+        assert_eq!(config.subsites[0].config, "/system/etc/90-sitegen");
+        assert_eq!(config.subsites[0].base_url.as_deref(), Some("/noyo/"));
+        assert_eq!(config.subsites[1].name, "water");
+        assert!(config.subsites[1].base_url.is_none());
+        assert_eq!(config.subsites[2].base_url.as_deref(), Some("/septic/"));
+        // Existing fields still work
+        assert_eq!(config.routes.len(), 1);
+        assert!(config.exports.is_empty());
+    }
+
+    #[test]
+    fn parse_config_no_subsites_default() {
+        let yaml = r#"
+site:
+  title: "Standalone Site"
+"#;
+        let config: SiteConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert!(config.subsites.is_empty());
     }
 }

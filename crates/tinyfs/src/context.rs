@@ -141,6 +141,7 @@ impl ProviderContext {
 /// - FileID providing node and partition identity
 /// - Optional pond metadata (pond_id, birth_timestamp, etc.)
 /// - Current transaction sequence number
+/// - Effective root for path resolution scoping
 #[derive(Clone)]
 pub struct FactoryContext {
     /// Access to persistence layer operations
@@ -157,6 +158,11 @@ pub struct FactoryContext {
     /// Each entry is (foreign_part_id, foreign_pond_id, watermark_txn_seq).
     /// Populated by steward for import factories to avoid re-reading the foreign OpLog.
     pub import_partitions: Vec<(String, String, i64)>,
+    /// Effective root for path resolution. When set, factories resolve
+    /// absolute paths relative to this node rather than the global root.
+    /// Used for cross-pond imports where foreign factories must resolve
+    /// paths within their imported mount point.
+    effective_root: Option<crate::node::NodePath>,
 }
 
 impl FactoryContext {
@@ -169,6 +175,7 @@ impl FactoryContext {
             pond_metadata: None,
             txn_seq: 0,
             import_partitions: Vec::new(),
+            effective_root: None,
         }
     }
 
@@ -185,6 +192,7 @@ impl FactoryContext {
             pond_metadata: Some(pond_metadata),
             txn_seq: 0,
             import_partitions: Vec::new(),
+            effective_root: None,
         }
     }
 
@@ -200,6 +208,36 @@ impl FactoryContext {
     pub fn with_import_partitions(mut self, partitions: Vec<(String, String, i64)>) -> Self {
         self.import_partitions = partitions;
         self
+    }
+
+    /// Set the effective root for path resolution scoping.
+    /// When set, root() returns a WD chrooted to this node.
+    #[must_use]
+    pub fn with_effective_root(mut self, root: crate::node::NodePath) -> Self {
+        self.effective_root = Some(root);
+        self
+    }
+
+    /// Get the effective root, if set.
+    #[must_use]
+    pub fn effective_root(&self) -> Option<&crate::node::NodePath> {
+        self.effective_root.as_ref()
+    }
+
+    /// Get the filesystem root for this factory context.
+    ///
+    /// If an effective root is set (e.g., for cross-pond imports), returns
+    /// a WD chrooted to that mount point. Otherwise returns the global root.
+    /// Factories should use this instead of context.filesystem().root().
+    pub async fn root(&self) -> crate::Result<crate::WD> {
+        let fs = self.context.filesystem();
+        match &self.effective_root {
+            Some(er) => {
+                let wd = fs.wd(er, er.clone()).await?;
+                Ok(wd)
+            }
+            None => fs.root().await,
+        }
     }
 }
 
@@ -288,5 +326,41 @@ mod tests {
         let root = fs.root().await.expect("Should get root");
 
         assert_eq!(root.node_path().path, PathBuf::from("/"));
+    }
+
+    #[tokio::test]
+    async fn test_factory_context_root_without_effective_root() {
+        // Without effective_root, FactoryContext::root() returns the global root.
+        let persistence = MemoryPersistence::default();
+        let session = Arc::new(SessionContext::new());
+        let context = ProviderContext::new(session, Arc::new(persistence));
+
+        let factory_ctx = super::FactoryContext::new(context, crate::FileID::root());
+        let root = factory_ctx.root().await.expect("Should get root");
+        assert!(root.effective_root().id().has_root_ids());
+    }
+
+    #[tokio::test]
+    async fn test_factory_context_root_with_effective_root() {
+        // With effective_root set, FactoryContext::root() returns a chrooted WD.
+        let persistence = MemoryPersistence::default();
+        let session = Arc::new(SessionContext::new());
+        let context = ProviderContext::new(session, Arc::new(persistence));
+        let fs = context.filesystem();
+        let root = fs.root().await.expect("Should get root");
+
+        // Create /sub/
+        let sub = root.create_dir_path("sub").await.unwrap();
+        let sub_np = sub.node_path();
+
+        // Build factory context with effective_root = /sub/
+        let factory_ctx = super::FactoryContext::new(context, crate::FileID::root())
+            .with_effective_root(sub_np.clone());
+        let chrooted = factory_ctx.root().await.expect("Should get chrooted root");
+
+        // The returned WD should be at /sub/ with effective_root = /sub/
+        assert_eq!(chrooted.node_path().id(), sub_np.id());
+        assert_eq!(chrooted.effective_root().id(), sub_np.id());
+        assert!(chrooted.is_at_root_boundary());
     }
 }

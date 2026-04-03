@@ -13,21 +13,23 @@ use tinyfs::FileID;
 pub struct TinyFsPathBuilder;
 
 impl TinyFsPathBuilder {
-    /// Create path for all versions: "part/{part_id}/node/{node_id}/version/"
+    /// Create path for all versions: "pond/{pond_id}/part/{part_id}/node/{node_id}/version/"
     #[must_use]
     pub fn all_versions(file_id: &FileID) -> String {
         format!(
-            "part/{}/node/{}/version/",
+            "pond/{}/part/{}/node/{}/version/",
+            file_id.pond_id(),
             file_id.part_id(),
             file_id.node_id()
         )
     }
 
-    /// Create path for specific version: "part/{part_id}/node/{node_id}/version/{version}.parquet"
+    /// Create path for specific version: "pond/{pond_id}/part/{part_id}/node/{node_id}/version/{version}.parquet"
     #[must_use]
     pub fn specific_version(file_id: &FileID, version: u64) -> String {
         format!(
-            "part/{}/node/{}/version/{}.parquet",
+            "pond/{}/part/{}/node/{}/version/{}.parquet",
+            file_id.pond_id(),
             file_id.part_id(),
             file_id.node_id(),
             version
@@ -70,22 +72,24 @@ mod tests {
 
         // Test all_versions path
         let path = TinyFsPathBuilder::all_versions(&file_id);
-        assert!(path.starts_with("part/"));
+        assert!(path.starts_with("pond/"));
+        assert!(path.contains("/part/"));
         assert!(path.contains("/node/"));
         assert!(path.ends_with("/version/"));
 
         // Test specific_version path
         let path = TinyFsPathBuilder::specific_version(&file_id, 42);
-        assert!(path.starts_with("part/"));
+        assert!(path.starts_with("pond/"));
+        assert!(path.contains("/part/"));
         assert!(path.contains("/node/"));
         assert!(path.ends_with("/version/42.parquet"));
 
         // Test URL formats
         let url = TinyFsPathBuilder::url_all_versions(&file_id);
-        assert!(url.starts_with("tinyfs:///part/"));
+        assert!(url.starts_with("tinyfs:///pond/"));
 
         let url = TinyFsPathBuilder::url_specific_version(&file_id, 42);
-        assert!(url.starts_with("tinyfs:///part/"));
+        assert!(url.starts_with("tinyfs:///pond/"));
         assert!(url.ends_with("/version/42.parquet"));
 
         // Test directory path

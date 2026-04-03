@@ -298,6 +298,12 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
 
     let foreign_ctx = load_foreign_oplog(&remote_table).await?;
 
+    // Extract the foreign pond's UUID from the backup's FILE-META partition keys
+    let foreign_pond_id_str = remote_table.extract_pond_id()?;
+    let foreign_pond_uuid = foreign_pond_id_str.parse::<uuid7::Uuid>().map_err(|_| {
+        RemoteError::Configuration(format!("Invalid foreign pond_id: {}", foreign_pond_id_str))
+    })?;
+
     // Find the target directory in the foreign tree
     let (foreign_part_id, foreign_node_id) =
         navigate_foreign_path(&foreign_ctx, &source_base).await?;
@@ -357,46 +363,52 @@ async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(),
         root.clone()
     };
 
-    // Create the top-level import directory with foreign FileID
-    let top_node = create_foreign_dir(
+    // Create a single local directory entry linking to the foreign partition.
+    // The foreign partition's data (imported during pull) contains the full
+    // directory tree — all children (physical dirs, dynamic dirs, files) are
+    // referenced by the foreign directory listing. No local child entries
+    // needed; the persistence layer follows the foreign references directly.
+    let _top_node = create_foreign_dir(
         &state,
         &parent_wd,
         dir_name,
         &foreign_part_id,
         &foreign_node_id,
+        foreign_pond_uuid,
     )
     .await?;
 
-    // Record import metadata for steward (via Delta commit metadata).
-    // Use the top-level foreign part_id as the factory identifier.
+    // Record import metadata for the top-level partition.
     let factory_key = foreign_part_id.clone();
     state
         .add_import_metadata(tlogfs::ImportPartitionRecord {
             factory_node_id: factory_key.clone(),
             foreign_part_id: foreign_part_id.clone(),
-            foreign_pond_id: String::new(), // Will be filled from backup metadata
+            foreign_pond_id: String::new(),
             watermark_txn_seq: 0,
         })
         .await;
 
-    let mut partition_count = 1;
+    // Discover all descendant partition IDs so execute_import knows
+    // which parquet files to download. This only reads the foreign
+    // directory tree metadata — it does NOT create local entries.
+    let mut partition_count: usize = 1;
 
-    // If recursive, walk the foreign directory tree and create local entries
-    // for all child physical directories
     if recursive {
-        let top_wd = fs.wd(&top_node).await.map_err(|e| {
-            RemoteError::Configuration(format!("Failed to open import directory: {}", e))
-        })?;
+        let mut child_part_ids = Vec::new();
+        collect_partitions_recursive(&foreign_ctx, &foreign_node_id, &mut child_part_ids).await?;
 
-        partition_count += create_child_dirs_recursive(
-            &foreign_ctx,
-            &state,
-            &fs,
-            &top_wd,
-            &foreign_node_id,
-            &factory_key,
-        )
-        .await?;
+        for child_part_id in &child_part_ids {
+            state
+                .add_import_metadata(tlogfs::ImportPartitionRecord {
+                    factory_node_id: factory_key.clone(),
+                    foreign_part_id: child_part_id.clone(),
+                    foreign_pond_id: String::new(),
+                    watermark_txn_seq: 0,
+                })
+                .await;
+        }
+        partition_count += child_part_ids.len();
     }
 
     log::info!(
@@ -415,12 +427,14 @@ async fn create_foreign_dir(
     name: &str,
     part_id: &str,
     node_id: &str,
+    pond_id: uuid7::Uuid,
 ) -> Result<tinyfs::NodePath, RemoteError> {
     use tinyfs::PersistenceLayer;
 
     let file_id = tinyfs::FileID::new_from_ids(
         tinyfs::PartID::new(part_id.to_string()),
         tinyfs::NodeID::new(node_id.to_string()),
+        pond_id,
     );
 
     let node = state.create_directory_node(file_id).await.map_err(|e| {
@@ -442,65 +456,21 @@ async fn create_foreign_dir(
     })
 }
 
-/// Recursively create local directory entries for all child physical
-/// directories found in the foreign OpLog.
-///
-/// Returns the number of child partitions created.
-async fn create_child_dirs_recursive(
-    foreign_ctx: &datafusion::prelude::SessionContext,
-    state: &tlogfs::persistence::State,
-    fs: &tinyfs::FS,
-    parent_wd: &tinyfs::WD,
+/// Recursively collect partition IDs for all physical directory descendants.
+/// Used by `execute_import` to discover the full set of partitions to download.
+async fn collect_partitions_recursive(
+    ctx: &datafusion::prelude::SessionContext,
     parent_node_id: &str,
-    factory_key: &str,
-) -> Result<usize, RemoteError> {
-    // Read the foreign directory's entries
-    let entries = read_foreign_directory_entries(foreign_ctx, parent_node_id).await?;
-    let mut count = 0;
-
-    for (name, child_id, entry_type) in &entries {
-        if entry_type == "dir:physical" {
-            // Create local directory with the foreign FileID
-            let child_node = create_foreign_dir(state, parent_wd, name, child_id, child_id).await?;
-
-            log::info!(
-                "   [INIT] Created child import dir: {} (part_id={})",
-                name,
-                child_id
-            );
-            count += 1;
-
-            // Record import metadata for this child partition
-            state
-                .add_import_metadata(tlogfs::ImportPartitionRecord {
-                    factory_node_id: factory_key.to_string(),
-                    foreign_part_id: child_id.clone(),
-                    foreign_pond_id: String::new(),
-                    watermark_txn_seq: 0,
-                })
-                .await;
-
-            // Recurse into this child
-            let child_wd = fs.wd(&child_node).await.map_err(|e| {
-                RemoteError::Configuration(format!(
-                    "Failed to open child directory '{}': {}",
-                    name, e
-                ))
-            })?;
-
-            count += Box::pin(create_child_dirs_recursive(
-                foreign_ctx,
-                state,
-                fs,
-                &child_wd,
-                child_id,
-                factory_key,
-            ))
-            .await?;
+    ids: &mut Vec<String>,
+) -> Result<(), RemoteError> {
+    let entries = read_foreign_directory_entries(ctx, parent_node_id).await?;
+    for (_name, child_id, entry_type) in &entries {
+        if entry_type == "dir:physical" && !ids.contains(child_id) {
+            ids.push(child_id.clone());
+            Box::pin(collect_partitions_recursive(ctx, child_id, ids)).await?;
         }
     }
-
-    Ok(count)
+    Ok(())
 }
 
 /// Read directory entries from the foreign OpLog for a given node_id.
@@ -656,6 +626,7 @@ async fn load_foreign_oplog(
 
 /// Navigate the foreign directory tree to find the part_id for a path.
 /// Returns (part_id, node_id).
+/// For root path ("/"), returns the root partition directly.
 async fn navigate_foreign_path(
     ctx: &datafusion::prelude::SessionContext,
     source_path: &str,
@@ -666,10 +637,10 @@ async fn navigate_foreign_path(
         .filter(|s| !s.is_empty())
         .collect();
 
+    // Root path: return the well-known root UUID
     if source_parts.is_empty() {
-        return Err(RemoteError::Configuration(
-            "source_path must be a non-root path".to_string(),
-        ));
+        let root_id = "00000000-0000-7100-8000-000000000000".to_string();
+        return Ok((root_id.clone(), root_id));
     }
 
     let root_id = "00000000-0000-7100-8000-000000000000";
@@ -825,7 +796,7 @@ async fn execute_remote(
         RemoteCommand::Push => execute_push(remote_table, &context).await,
         RemoteCommand::Pull => {
             if let Some(ref import_config) = config.import {
-                execute_import(remote_table, &context, import_config, &config.url).await
+                execute_import(remote_table, &context, import_config).await
             } else {
                 execute_pull(remote_table, &context).await
             }
@@ -1285,104 +1256,107 @@ async fn execute_push(
         }
     }
 
-    if missing_versions.is_empty() {
-        log::info!("   [OK] All transactions already backed up");
-        return Ok(());
-    }
-
-    log::info!(
-        "   Need to back up {} transactions: {:?}",
-        missing_versions.len(),
-        missing_versions
-    );
-
-    // Get pond path for large files
+    // Get pond path (used for both transaction backup and large files)
     let pond_path = state.store_path().await;
 
-    // Back up each missing transaction
-    for version in missing_versions {
+    if missing_versions.is_empty() {
+        log::info!("   [OK] All transactions already backed up");
+    } else {
         log::info!(
-            "   [PKG] Backing up transaction {} (version {})...",
-            version,
-            version
+            "   Need to back up {} transactions: {:?}",
+            missing_versions.len(),
+            missing_versions
         );
 
-        // Load Delta table at this specific version
-        let store_path = pond_path.to_string_lossy().to_string();
-        let url = Url::from_directory_path(&pond_path)
-            .map_err(|_| RemoteError::TableOperation(format!("Invalid path: {}", store_path)))?;
-        let mut versioned_table = deltalake::open_table(url)
-            .await
-            .map_err(|e| RemoteError::TableOperation(format!("Failed to open table: {}", e)))?;
+        // Back up each missing transaction
+        for version in missing_versions {
+            log::info!(
+                "   [PKG] Backing up transaction {} (version {})...",
+                version,
+                version
+            );
 
-        versioned_table.load_version(version).await.map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to load version {}: {}", version, e))
-        })?;
+            // Load Delta table at this specific version
+            let store_path = pond_path.to_string_lossy().to_string();
+            let url = Url::from_directory_path(&pond_path).map_err(|_| {
+                RemoteError::TableOperation(format!("Invalid path: {}", store_path))
+            })?;
+            let mut versioned_table = deltalake::open_table(url)
+                .await
+                .map_err(|e| RemoteError::TableOperation(format!("Failed to open table: {}", e)))?;
 
-        let local_store = versioned_table.object_store();
-
-        // Get NEW files added in this specific transaction (incremental delta only)
-        // Each Delta transaction has a commit log with 'add' actions for new parquet files
-        let new_files = get_delta_commit_files(&versioned_table, version).await?;
-        log::info!(
-            "      Transaction {} added {} new files",
-            version,
-            new_files.len()
-        );
-
-        // Back up parquet files with transaction bundle_id
-        let transaction_bundle_id =
-            crate::schema::ChunkedFileRecord::transaction_bundle_id(&pond_id, version);
-
-        for (path, size) in &new_files {
-            log::debug!("      Backing up: {} ({} bytes)", path, size);
-
-            let file_path = object_store::path::Path::from(path.as_str());
-            let get_result = local_store.get(&file_path).await.map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to read {}: {}", path, e))
+            versioned_table.load_version(version).await.map_err(|e| {
+                RemoteError::TableOperation(format!("Failed to load version {}: {}", version, e))
             })?;
 
-            let bytes = get_result.bytes().await.map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to read bytes from {}: {}", path, e))
-            })?;
+            let local_store = versioned_table.object_store();
 
-            let reader = std::io::Cursor::new(bytes.to_vec());
-            remote_table
-                .write_file_with_bundle_id(&transaction_bundle_id, version, path, reader)
-                .await?;
-        }
+            // Get NEW files added in this specific transaction (incremental delta only)
+            // Each Delta transaction has a commit log with 'add' actions for new parquet files
+            let new_files = get_delta_commit_files(&versioned_table, version).await?;
+            log::info!(
+                "      Transaction {} added {} new files",
+                version,
+                new_files.len()
+            );
 
-        // Back up Delta commit log for this version
-        let commit_log_path = format!("_delta_log/{:020}.json", version);
-        let log_file_path = object_store::path::Path::from(commit_log_path.as_str());
+            // Back up parquet files with transaction bundle_id
+            let transaction_bundle_id =
+                crate::schema::ChunkedFileRecord::transaction_bundle_id(&pond_id, version);
 
-        match local_store.get(&log_file_path).await {
-            Ok(get_result) => {
+            for (path, size) in &new_files {
+                log::debug!("      Backing up: {} ({} bytes)", path, size);
+
+                let file_path = object_store::path::Path::from(path.as_str());
+                let get_result = local_store.get(&file_path).await.map_err(|e| {
+                    RemoteError::TableOperation(format!("Failed to read {}: {}", path, e))
+                })?;
+
                 let bytes = get_result.bytes().await.map_err(|e| {
-                    RemoteError::TableOperation(format!("Failed to read commit log: {}", e))
+                    RemoteError::TableOperation(format!(
+                        "Failed to read bytes from {}: {}",
+                        path, e
+                    ))
                 })?;
 
                 let reader = std::io::Cursor::new(bytes.to_vec());
                 remote_table
-                    .write_file_with_bundle_id(
-                        &transaction_bundle_id,
-                        version,
-                        &commit_log_path,
-                        reader,
-                    )
+                    .write_file_with_bundle_id(&transaction_bundle_id, version, path, reader)
                     .await?;
             }
-            Err(e) => {
-                log::warn!("      Could not read commit log (may not exist): {}", e);
-            }
-        }
 
-        log::info!(
-            "      [OK] Transaction {} backed up ({} files)",
-            version,
-            new_files.len()
-        );
-    }
+            // Back up Delta commit log for this version
+            let commit_log_path = format!("_delta_log/{:020}.json", version);
+            let log_file_path = object_store::path::Path::from(commit_log_path.as_str());
+
+            match local_store.get(&log_file_path).await {
+                Ok(get_result) => {
+                    let bytes = get_result.bytes().await.map_err(|e| {
+                        RemoteError::TableOperation(format!("Failed to read commit log: {}", e))
+                    })?;
+
+                    let reader = std::io::Cursor::new(bytes.to_vec());
+                    remote_table
+                        .write_file_with_bundle_id(
+                            &transaction_bundle_id,
+                            version,
+                            &commit_log_path,
+                            reader,
+                        )
+                        .await?;
+                }
+                Err(e) => {
+                    log::warn!("      Could not read commit log (may not exist): {}", e);
+                }
+            }
+
+            log::info!(
+                "      [OK] Transaction {} backed up ({} files)",
+                version,
+                new_files.len()
+            );
+        }
+    } // end if missing_versions
 
     // Back up large files (these are cumulative, not per-transaction)
     // Only back up large files that don't exist remotely yet
@@ -1570,7 +1544,6 @@ async fn execute_import(
     remote_table: RemoteTable,
     context: &FactoryContext,
     import_config: &ImportConfig,
-    config_url: &str,
 ) -> Result<(), RemoteError> {
     log::info!(
         "[DOWN] IMPORT: Importing from foreign pond backup (source={}, local={})",
@@ -1660,32 +1633,14 @@ async fn execute_import(
         let top_part_id = import_entry.child_node_id.to_string();
         let mut ids = vec![top_part_id.clone()];
 
-        // For recursive imports, read the foreign OpLog to discover child partitions
+        // For recursive imports, read the foreign OpLog to discover all
+        // descendant partitions at any depth.
         if recursive {
             log::info!("   Discovering child partitions from foreign backup...");
             let foreign_ctx = load_foreign_oplog(&remote_table).await?;
             let (_, target_node_id) = navigate_foreign_path(&foreign_ctx, &source_base).await?;
 
-            fn collect_recursive(entries: &[(String, String, String)], ids: &mut Vec<String>) {
-                for (_, child_id, entry_type) in entries {
-                    if entry_type == "dir:physical" && !ids.contains(child_id) {
-                        ids.push(child_id.clone());
-                    }
-                }
-            }
-
-            let entries = read_foreign_directory_entries(&foreign_ctx, &target_node_id).await?;
-            collect_recursive(&entries, &mut ids);
-
-            // Recurse one more level for each child dir
-            for (_name, child_id, entry_type) in &entries {
-                if entry_type == "dir:physical"
-                    && let Ok(child_entries) =
-                        read_foreign_directory_entries(&foreign_ctx, child_id).await
-                {
-                    collect_recursive(&child_entries, &mut ids);
-                }
-            }
+            collect_partitions_recursive(&foreign_ctx, &target_node_id, &mut ids).await?;
         }
 
         ids
@@ -1740,13 +1695,7 @@ async fn execute_import(
 
     // Step 4: For each new transaction, query its files and download
     // those matching our partition set. Uses bundle_id partition pruning.
-    // Extract the foreign pond_id from the config URL (format: .../pond-{uuid})
-    let pond_id_for_bundle = config_url
-        .rsplit('/')
-        .next()
-        .and_then(|s| s.strip_prefix("pond-"))
-        .unwrap_or("")
-        .to_string();
+    let pond_id_for_bundle = remote_table.extract_pond_id()?;
 
     let mut downloaded = 0;
     let mut files_to_register: Vec<(String, i64)> = Vec::new(); // (path, size)
@@ -1835,6 +1784,47 @@ async fn execute_import(
         log::info!("   Updated watermark to {}", new_watermark);
     } else {
         log::info!("   [OK] All files already up to date");
+    }
+
+    // Step 6: Download large files from the remote backup.
+    // Large files are stored with POND-FILE bundles and referenced by
+    // BLAKE3 hash from the imported partition data.
+    let pond_path = state.store_path().await;
+    let all_remote_files = remote_table.list_files("").await?;
+    let mut large_downloaded = 0;
+    for (bundle_id, path, pond_txn_id, _size) in &all_remote_files {
+        if !path.starts_with("_large_files/") {
+            continue;
+        }
+        let large_file_fs_path = pond_path.join(path);
+        if large_file_fs_path.exists() {
+            continue;
+        }
+        if let Some(parent) = large_file_fs_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to create _large_files directory: {}",
+                    e
+                ))
+            })?;
+        }
+        let mut output = Vec::new();
+        remote_table
+            .read_file(bundle_id, path, *pond_txn_id, &mut output)
+            .await?;
+        tokio::fs::write(&large_file_fs_path, &output)
+            .await
+            .map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to write {}: {}",
+                    large_file_fs_path.display(),
+                    e
+                ))
+            })?;
+        large_downloaded += 1;
+    }
+    if large_downloaded > 0 {
+        log::info!("   Downloaded {} large file(s)", large_downloaded);
     }
 
     log::info!(
@@ -2800,8 +2790,8 @@ async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteE
         if file_type.is_file() {
             let filename = entry.file_name();
             let name = filename.to_string_lossy();
-            if name.starts_with("sha256=") {
-                // Flat structure: _large_files/sha256=X
+            if name.starts_with("sha256=") || name.starts_with("blake3=") {
+                // Flat structure: _large_files/sha256=X or _large_files/blake3=X
                 let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
                     RemoteError::TableOperation(format!("Failed to get file metadata: {}", e))
                 })?;

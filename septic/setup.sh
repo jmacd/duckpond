@@ -1,59 +1,71 @@
 #!/bin/sh
 #
-# setup.sh — Initialize the septic station pond and install all factory nodes.
+# setup.sh — Initialize a local septic pond and install all factory nodes.
 #
 # Run this ONCE on a fresh pond. To update configs later, use update.sh.
 #
 # Prerequisites:
-#   - pond.sh can reach septicplaystation.casparwater.us
-#   - podman installed on the BeaglePlay
+#   - deploy.env configured (cp deploy.env.example deploy.env)
+#   - cargo build works in the workspace root
+#
+# The pond is stored in ./pond/ and data is rsynced to ./data/.
 #
 set -x
 set -e
 
-HOST=debian@septicplaystation.casparwater.us
-REMOTE_CONFIG=/home/debian/config
-
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
-EXE=${SCRIPTS}/pond.sh
+POND_DIR=${SCRIPTS}/pond
+DATA_DIR=${SCRIPTS}/data
 
-# Copy all config files to remote host
-ssh ${HOST} "mkdir -p ${REMOTE_CONFIG}/site"
-scp \
-    ingest.yaml \
-    backup.yaml \
-    reduce.yaml \
-    site.yaml \
-    ${HOST}:${REMOTE_CONFIG}/
-scp site/index.md site/data.md site/sidebar.md ${HOST}:${REMOTE_CONFIG}/site/
+export POND=${POND_DIR}
 
-# Wipe the podman volume for a clean start
-ssh ${HOST} "podman volume rm -f pond-data && podman volume create pond-data"
+# Load deployment config (for rsync source and S3 credentials)
+. "${SCRIPTS}/deploy.env"
 
-# Initialize the pond
-${EXE} init
+# Cargo run helper
+CARGO="cargo run --release -p cmd --"
+
+# Sync data from remote (skip if data already exists locally)
+mkdir -p "${DATA_DIR}"
+if [ -z "$(ls -A "${DATA_DIR}" 2>/dev/null)" ]; then
+  rsync -chavzP --update --stats ${DEPLOY_HOST}:${DEPLOY_DATA_DIR}/ ${DATA_DIR}/
+fi
+
+# Generate ingest config with absolute paths
+INGEST_CFG=$(mktemp)
+cat > "${INGEST_CFG}" <<EOF
+archived_pattern: ${DATA_DIR}/septicstation.json.*
+active_pattern: ${DATA_DIR}/septicstation.json
+pond_path: /ingest
+EOF
+
+# Expand env vars in backup.yaml (S3 credentials from deploy.env)
+export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_ALLOW_HTTP
+BACKUP_CFG=$(mktemp)
+envsubst < "${SCRIPTS}/backup.yaml" > "${BACKUP_CFG}"
+
+# Wipe and initialize
+rm -rf "${POND_DIR}"
+${CARGO} init
 
 # Create directory structure
-${EXE} mkdir -p /system/run
-${EXE} mkdir -p /ingest
-${EXE} mkdir -p /etc
+${CARGO} mkdir -p /system/run
+${CARGO} mkdir -p /ingest
+${CARGO} mkdir -p /etc
 
 # Copy site templates into the pond
-# (config is mounted at /config inside container)
-${EXE} copy host:///config/site /etc/site
+${CARGO} copy host:///${SCRIPTS}/site /etc/site
 
 # Install factory nodes
-# (ingest reads from /data which is the host data dir mounted into container)
-${EXE} mknod logfile-ingest /etc/ingest --config-path /config/ingest.yaml
+${CARGO} mknod logfile-ingest /etc/ingest --config-path "${INGEST_CFG}"
+${CARGO} mknod remote /system/run/1-backup --config-path "${BACKUP_CFG}"
+${CARGO} mknod dynamic-dir /reduced --config-path ${SCRIPTS}/reduce.yaml
+${CARGO} mknod sitegen /etc/site.yaml --config-path ${SCRIPTS}/site.yaml
 
-${EXE} mknod remote /system/run/1-backup --config-path /config/backup.yaml
+rm -f "${INGEST_CFG}" "${BACKUP_CFG}"
 
-${EXE} mknod dynamic-dir /reduced --config-path /config/reduce.yaml
-
-${EXE} mknod sitegen /etc/site.yaml --config-path /config/site.yaml
-
+echo
 echo "=== Setup complete ==="
-echo "Next steps:"
-echo "  ./run.sh          # ingest data from logfiles"
-echo "  ./generate.sh     # build the static site"
+echo "Next: ./run.sh          # sync + ingest data"
+echo "Then: ./generate.sh     # build the site"
 

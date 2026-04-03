@@ -27,6 +27,7 @@ pub struct WD {
     np: NodePath,
     fs: FS,
     dref: DirNode,
+    effective_root: NodePath,
 }
 
 /// Result of path resolution
@@ -50,9 +51,14 @@ pub enum CopyDestination {
 }
 
 impl WD {
-    pub(crate) async fn new(np: NodePath, fs: FS) -> Result<Self> {
+    pub(crate) async fn new(np: NodePath, fs: FS, effective_root: NodePath) -> Result<Self> {
         let dref = np.as_dir().await?;
-        Ok(Self { np, fs, dref })
+        Ok(Self {
+            np,
+            fs,
+            dref,
+            effective_root,
+        })
     }
 
     /// Detects if a path has a trailing slash, which indicates directory intent
@@ -97,12 +103,50 @@ impl WD {
         self.dref.get(name).await
     }
 
-    fn is_root(&self) -> bool {
-        self.id().is_root()
-    }
-
     fn id(&self) -> FileID {
         self.np.id()
+    }
+
+    /// Mark the current directory as the effective root for path resolution.
+    /// All absolute paths will resolve relative to this position.
+    /// Symlinks cannot escape above this boundary.
+    #[must_use]
+    pub fn as_root(mut self) -> Self {
+        self.effective_root = self.np.clone();
+        // Reset the display path to "/" so that paths built from this
+        // root (e.g. by collect_matches) are relative to the new root,
+        // not the global tree.
+        self.np.path = "/".into();
+        self.effective_root.path = "/".into();
+        self.dref = self.dref.with_path("/".into());
+        self
+    }
+
+    /// Returns a reference to the effective root.
+    #[must_use]
+    pub fn effective_root(&self) -> &NodePath {
+        &self.effective_root
+    }
+
+    /// Check if this WD is at its effective root boundary.
+    #[must_use]
+    pub fn is_at_root_boundary(&self) -> bool {
+        self.np.id() == self.effective_root.id()
+    }
+
+    /// Check that this WD is writable (not inside a read-only foreign import).
+    /// A directory is "foreign" when its pond_id differs from the effective
+    /// root's pond_id, meaning it was imported from another pond.
+    fn check_writable(&self) -> Result<()> {
+        if self.np.id().pond_id() != self.effective_root.id().pond_id() {
+            return Err(Error::read_only_import(self.np.path()));
+        }
+        Ok(())
+    }
+
+    /// Create a child WD that inherits the effective root from self.
+    async fn child_wd(&self, np: &NodePath) -> Result<WD> {
+        WD::new(np.clone(), self.fs.clone(), self.effective_root.clone()).await
     }
 
     #[must_use]
@@ -143,6 +187,7 @@ impl WD {
     {
         let path_clone = path.as_ref().to_path_buf();
         self.in_path(path.as_ref(), |wd, entry| async move {
+            wd.check_writable()?;
             match entry {
                 Lookup::NotFound(_, name) => {
                     let node_type = node_creator()?;
@@ -200,6 +245,7 @@ impl WD {
 
         let node_path = self
             .in_path(path.as_ref(), |wd, entry| async move {
+                wd.check_writable()?;
                 match entry {
                     Lookup::NotFound(_, name) => {
                         // Use the actual parent directory's node ID
@@ -263,6 +309,7 @@ impl WD {
         let path = path.as_ref();
 
         self.in_path(path, |wd, entry| async move {
+            wd.check_writable()?;
             match entry {
                 Lookup::NotFound(_, name) => {
                     let parent_id = wd.id();
@@ -292,9 +339,10 @@ impl WD {
 
         let node = self
             .in_path(path.as_ref(), |wd, entry| async move {
+                wd.check_writable()?;
                 match entry {
                     Lookup::NotFound(_, name) => {
-                        let id = FileID::new_physical_dir_id();
+                        let id = FileID::new_physical_dir_id(wd.effective_root.id().pond_id());
                         let node = wd.fs.persistence.create_directory_node(id).await?;
                         wd.fs.persistence.store_node(&node).await?;
 
@@ -307,7 +355,7 @@ impl WD {
             })
             .await?;
 
-        self.fs.wd(&node).await
+        self.child_wd(&node).await
     }
 
     /// Creates a directory and all parent directories as needed (mkdir -p semantics).
@@ -349,8 +397,7 @@ impl WD {
                             match &child.node.node_type {
                                 NodeType::Directory(_) => {
                                     current_wd = current_wd
-                                        .fs
-                                        .wd(&NodePath::new(
+                                        .child_wd(&NodePath::new(
                                             child.node.clone(),
                                             ddir.path().join(&name_str),
                                         ))
@@ -363,7 +410,10 @@ impl WD {
                         }
                         Ok(None) => {
                             // Entry doesn't exist - create the directory
-                            let id = FileID::new_physical_dir_id();
+                            current_wd.check_writable()?;
+                            let id = FileID::new_physical_dir_id(
+                                current_wd.effective_root.id().pond_id(),
+                            );
                             let node = current_wd.fs.persistence.create_directory_node(id).await?;
                             current_wd.fs.persistence.store_node(&node).await?;
                             current_wd
@@ -371,8 +421,7 @@ impl WD {
                                 .insert(name_str.clone(), node.clone())
                                 .await?;
                             current_wd = current_wd
-                                .fs
-                                .wd(&NodePath::new(node, ddir.path().join(&name_str)))
+                                .child_wd(&NodePath::new(node, ddir.path().join(&name_str)))
                                 .await?;
                         }
                         Err(e) => {
@@ -404,6 +453,7 @@ impl WD {
     /// * `Err(NotFound)` if old_name doesn't exist
     /// * `Err(AlreadyExists)` if new_name already exists
     pub async fn rename_entry(&self, old_name: &str, new_name: &str) -> Result<()> {
+        self.check_writable()?;
         // Check if new name already exists
         if self.dref.get(new_name).await?.is_some() {
             return Err(Error::already_exists(new_name));
@@ -433,6 +483,7 @@ impl WD {
     /// Returns `Ok(())` if the entry was found and removed, `Err(NotFound)` otherwise.
     /// The removed node is dropped -- this is a destructive unlink.
     pub async fn remove_entry(&self, name: &str) -> Result<()> {
+        self.check_writable()?;
         let _node = self
             .dref
             .handle
@@ -516,9 +567,10 @@ impl WD {
         entry_type: EntryType,
     ) -> Result<Pin<Box<dyn crate::file::FileMetadataWriter>>> {
         let path_ref = path.as_ref();
-        let (_, lookup) = self.resolve_path(path_ref).await?;
+        let (wd, lookup) = self.resolve_path(path_ref).await?;
         match lookup {
             Lookup::Found(node) => {
+                wd.check_writable()?;
                 log::debug!(
                     "async_writer_path_with_type: file exists at path '{}', returning existing file writer (no directory update)",
                     path_ref.display()
@@ -542,19 +594,23 @@ impl WD {
 
     /// Opens a directory at the specified path and returns a new working directory for it
     pub async fn open_dir_path<P: AsRef<Path>>(&self, path: P) -> Result<WD> {
-        let (_, lookup) = self.resolve_path(path).await?;
+        let (resolved_wd, lookup) = self.resolve_path(path).await?;
         match lookup {
-            Lookup::Found(node) => self.fs.wd(&node).await,
+            Lookup::Found(node) => resolved_wd.child_wd(&node).await,
             Lookup::NotFound(full_path, _) => Err(Error::not_found(&full_path)),
-            Lookup::Empty(node) => Ok(self.fs.wd(&node).await?),
+            Lookup::Empty(node) => resolved_wd.child_wd(&node).await,
         }
     }
 
     /// Resolves a path and returns the working directory and lookup result
     pub async fn resolve_path<P: AsRef<Path>>(&self, path: P) -> Result<(WD, Lookup)> {
         let stack = vec![self.np.clone()];
-        let (node, handle) = self.resolve(&stack, path.as_ref(), 0).await?;
-        let wd = self.fs.wd(&node).await?;
+        let (node, handle, detected_root) = self.resolve(&stack, path.as_ref(), 0).await?;
+        let mut wd = self.child_wd(&node).await?;
+        // If we crossed a pond boundary, update the effective root
+        if let Some(mount_point) = detected_root {
+            wd.effective_root = mount_point;
+        }
         Ok((wd, handle))
     }
 
@@ -574,7 +630,7 @@ impl WD {
         stack_in: &'a [NodePath],
         path: P,
         depth: u32,
-    ) -> Pin<Box<dyn Future<Output = Result<(NodePath, Lookup)>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<(NodePath, Lookup, Option<NodePath>)>> + Send + 'a>>
     where
         P: AsRef<Path> + Send + 'a,
     {
@@ -588,6 +644,10 @@ impl WD {
             );
             let mut stack = stack_in.to_vec();
             let mut components = path.components().peekable();
+            // Track if we cross a pond boundary during resolution.
+            // When a child has a different pond_id than its parent,
+            // the parent is the mount point / effective root.
+            let mut detected_root: Option<NodePath> = None;
 
             // Iterate through the components of the path
             for comp in &mut components {
@@ -596,9 +656,9 @@ impl WD {
                         return Err(Error::prefix_not_supported(path));
                     }
                     Component::RootDir => {
-                        if !self.is_root() {
-                            return Err(Error::root_path_from_non_root(path));
-                        }
+                        // Reset stack to effective root (chroot semantics)
+                        stack.clear();
+                        stack.push(self.effective_root.clone());
                         continue;
                     }
                     Component::CurDir => {
@@ -606,7 +666,12 @@ impl WD {
                     }
                     Component::ParentDir => {
                         if stack.len() <= 1 {
-                            return Err(Error::parent_path_invalid(path));
+                            // At root boundary: stay put (chroot semantics)
+                            continue;
+                        }
+                        // Check if popping would go above effective root
+                        if stack.last().map(|n| n.id()) == Some(self.effective_root.id()) {
+                            continue;
                         }
                         _ = stack.pop();
                     }
@@ -644,7 +709,11 @@ impl WD {
                                 if components.peek().is_some() {
                                     return Err(Error::not_found(path));
                                 } else {
-                                    return Ok((dnode, Lookup::NotFound(path.to_path_buf(), name)));
+                                    return Ok((
+                                        dnode,
+                                        Lookup::NotFound(path.to_path_buf(), name),
+                                        detected_root,
+                                    ));
                                 }
                             }
                             Ok(Some(child)) => {
@@ -656,8 +725,19 @@ impl WD {
                                         if depth >= SYMLINK_LOOP_LIMIT {
                                             return Err(Error::symlink_loop(target));
                                         }
-                                        let (_, handle) =
-                                            self.resolve(&stack[0..newsz], relp, depth + 1).await?;
+                                        // Clamp stack at effective root boundary
+                                        let min_sz = stack
+                                            .iter()
+                                            .position(|n| n.id() == self.effective_root.id())
+                                            .map(|p| p + 1)
+                                            .unwrap_or(1);
+                                        let clamped = newsz.max(min_sz);
+                                        let (_, handle, sub_detected) = self
+                                            .resolve(&stack[0..clamped], relp, depth + 1)
+                                            .await?;
+                                        if detected_root.is_none() {
+                                            detected_root = sub_detected;
+                                        }
                                         match handle {
                                             Lookup::Found(node) => {
                                                 stack.push(node);
@@ -674,6 +754,14 @@ impl WD {
                                     }
                                     _ => {
                                         // File or Directory.
+                                        // Detect pond boundary: if child has different
+                                        // pond_id than parent, the parent is a mount point.
+                                        if detected_root.is_none() {
+                                            let parent = stack.last().expect("stack not empty");
+                                            if child.id().pond_id() != parent.id().pond_id() {
+                                                detected_root = Some(parent.clone());
+                                            }
+                                        }
                                         stack.push(child.clone());
                                     }
                                 }
@@ -691,25 +779,22 @@ impl WD {
             if stack.is_empty() {
                 Err(Error::internal("empty resolve stack"))
             } else if stack.len() == 1 {
-                // Stack has only root - this happens when resolving "/" or when all components were ".."
-                // For the root path "/" itself, we should return Found(root), not Empty(root)
-                // Check if this was actually resolving the root by seeing if path is "/" or equivalent
                 let dir = stack.pop().expect("stack not empty");
                 let is_root_path = path
                     .components()
                     .all(|c| matches!(c, Component::RootDir | Component::CurDir));
                 if is_root_path {
                     debug!("resolve: Returning Found case (root path)");
-                    Ok((dir.clone(), Lookup::Found(dir)))
+                    Ok((dir.clone(), Lookup::Found(dir), detected_root))
                 } else {
                     debug!("resolve: Returning Empty case");
-                    Ok((dir.clone(), Lookup::Empty(dir)))
+                    Ok((dir.clone(), Lookup::Empty(dir), detected_root))
                 }
             } else {
                 debug!("resolve: Returning Found case");
                 let found = stack.pop().expect("stack.len > 1");
                 let dir = stack.pop().expect("stack.len > 1");
-                Ok((dir, Lookup::Found(found)))
+                Ok((dir, Lookup::Found(found), detected_root))
             }
         }) // Close the Box::pin(async move { block
     }
@@ -721,7 +806,7 @@ impl WD {
         V: Visitor<T>,
         T: Send,
     {
-        let pattern = if self.is_root() {
+        let pattern = if self.is_at_root_boundary() {
             crate::path::strip_root(pattern)
         } else {
             pattern.as_ref().to_path_buf()
@@ -942,7 +1027,7 @@ impl WD {
         let mut current = child.clone();
         if let Some(link) = child.into_symlink().await {
             let link_target = link.readlink().await?;
-            let (_, handle) = self.resolve(stack, link_target, 0).await?;
+            let (_, handle, _) = self.resolve(stack, link_target, 0).await?;
             match handle {
                 Lookup::Found(np) => current = np,
                 Lookup::NotFound(fp, _) => return Err(Error::not_found(fp)),
@@ -958,7 +1043,7 @@ impl WD {
             stack.push(child.clone());
 
             // Recursive visit.
-            let cd = self.fs.wd(&current).await?;
+            let cd = self.child_wd(&current).await?;
             if is_double {
                 // If **, there are two recursive branches.
                 cd.visit_recursive_with_visitor(
@@ -1002,7 +1087,7 @@ impl WD {
             match lookup {
                 Lookup::Found(found_node) => {
                     // This call fails if not a directory
-                    let dest_wd = self.fs.wd(&found_node).await?;
+                    let dest_wd = self.child_wd(&found_node).await?;
                     Ok((dest_wd, CopyDestination::Directory))
                 }
                 Lookup::NotFound(_, _) => Err(Error::not_found(&path)),
@@ -1018,7 +1103,7 @@ impl WD {
             match lookup {
                 Lookup::Found(found_node) => {
                     if found_node.id().entry_type().is_directory() {
-                        let dest_wd = self.fs.wd(&found_node).await?;
+                        let dest_wd = self.child_wd(&found_node).await?;
                         Ok((dest_wd, CopyDestination::ExistingDirectory))
                     } else {
                         Ok((wd, CopyDestination::ExistingFile))
@@ -1094,10 +1179,11 @@ impl WD {
         attributes: HashMap<String, String>,
     ) -> Result<()> {
         // Resolve the path to get both the file's NodeID and its parent directory
-        let (_, lookup) = self.resolve_path(path).await?;
+        let (wd, lookup) = self.resolve_path(path).await?;
 
         match lookup {
             Lookup::Found(node_path) => {
+                wd.check_writable()?;
                 self.fs
                     .set_extended_attributes(node_path.id(), attributes)
                     .await
@@ -1119,6 +1205,7 @@ impl WD {
         let path_clone = path.as_ref().to_path_buf();
         let node = self
             .in_path(path.as_ref(), |wd, entry| async move {
+                wd.check_writable()?;
                 match entry {
                     Lookup::Found(existing) if overwrite => {
                         // For overwrite, we need to update the configuration of the existing dynamic node
@@ -1219,7 +1306,7 @@ mod tests {
         let (wd, lookup) = root.resolve_path("/").await.expect("Failed to resolve /");
         match lookup {
             Lookup::Found(node) => {
-                assert!(node.is_root(), "Should resolve to root node");
+                assert!(node.id().has_root_ids(), "Should resolve to root node");
             }
             Lookup::Empty(_) => {
                 panic!("Bug: resolve_path(\"/\") returned Empty instead of Found");
@@ -1231,13 +1318,16 @@ mod tests {
                 );
             }
         }
-        assert!(wd.is_root(), "Working directory should be root");
+        assert!(
+            wd.node_path().id().has_root_ids(),
+            "Working directory should be root"
+        );
 
         // Test 2: Resolve "." from root (should also be Found)
         let (wd2, lookup2) = root.resolve_path(".").await.expect("Failed to resolve .");
         match lookup2 {
             Lookup::Found(node) => {
-                assert!(node.is_root(), "Should resolve to root node");
+                assert!(node.id().has_root_ids(), "Should resolve to root node");
             }
             Lookup::Empty(_) => {
                 panic!("Bug: resolve_path(\".\") returned Empty instead of Found");
@@ -1249,7 +1339,10 @@ mod tests {
                 );
             }
         }
-        assert!(wd2.is_root(), "Working directory should be root");
+        assert!(
+            wd2.node_path().id().has_root_ids(),
+            "Working directory should be root"
+        );
     }
 
     #[tokio::test]
@@ -1288,7 +1381,7 @@ mod tests {
             }
         }
         assert!(
-            parent_wd.is_root(),
+            parent_wd.node_path().id().has_root_ids(),
             "Parent working directory should be root"
         );
     }

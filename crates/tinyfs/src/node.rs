@@ -120,24 +120,52 @@ impl PartID {
     }
 }
 
-/// A FileID combines NodeID and PartID with embedded EntryType information.
+/// A FileID combines NodeID, PartID, and PondID for full identity.
+/// The pond_id distinguishes nodes from different ponds, enabling
+/// cross-pond imports where the same root UUID exists in multiple ponds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileID {
     /// The unique identifier for this node
     node_id: NodeID,
     /// The partition identifier (containing directory's partition)
     part_id: PartID,
+    /// The pond that created this node
+    pond_id: Uuid,
 }
+
+/// Well-known pond_id for the local pond before it's initialized.
+/// Used by MemoryPersistence and hostmount where no real pond_id exists.
+pub const LOCAL_POND_ID: &str = "00000000-0000-7000-8000-000000000000";
+
+/// Returns the fallback pond UUID used when no real pond identity is available
+/// (memory persistence, hostmount, tests without a real pond).
+#[must_use]
+pub fn local_pond_uuid() -> Uuid {
+    LOCAL_POND_ID
+        .parse::<Uuid>()
+        .expect("LOCAL_POND_ID should be a valid UUID7")
+}
+
+/// Set the local pond UUID (no-op, kept for API compatibility).
+/// The pond UUID is now obtained from the PersistenceLayer::pond_uuid() method.
+pub fn set_local_pond_uuid(_uuid: Uuid) {}
 
 impl FileID {
     #[must_use]
-    pub fn new_from_ids(part_id: PartID, node_id: NodeID) -> Self {
-        Self { part_id, node_id }
+    pub fn new_from_ids(part_id: PartID, node_id: NodeID, pond_id: Uuid) -> Self {
+        Self {
+            part_id,
+            node_id,
+            pond_id,
+        }
     }
 
+    /// Structural check: does this FileID have the well-known root node_id
+    /// and part_id? Does NOT check pond_id -- use full equality against
+    /// FileID::root_for(pond_id) when pond identity matters.
     #[must_use]
-    pub fn is_root(&self) -> bool {
-        *self == Self::root()
+    pub fn has_root_ids(&self) -> bool {
+        self.node_id == NodeID(root_uuid()) && self.part_id == PartID(NodeID(root_uuid()))
     }
 
     #[must_use]
@@ -150,53 +178,71 @@ impl FileID {
         self.part_id
     }
 
-    /// Root directory has a special UUID7
+    #[must_use]
+    pub fn pond_id(&self) -> Uuid {
+        self.pond_id
+    }
+
+    /// Root directory has a special UUID7, scoped to a pond.
     #[must_use]
     pub fn root() -> Self {
+        Self::root_for(local_pond_uuid())
+    }
+
+    /// Root directory for a specific pond.
+    #[must_use]
+    pub fn root_for(pond_id: Uuid) -> Self {
         let uuid = root_uuid();
         Self {
             node_id: NodeID(uuid),
             part_id: PartID(NodeID(uuid)),
+            pond_id,
         }
     }
 
     #[must_use]
-    pub fn new_physical_dir_id() -> Self {
+    pub fn new_physical_dir_id(pond_id: Uuid) -> Self {
         let node_id = NodeID::generate(EntryType::DirectoryPhysical);
         let part_id = PartID(node_id);
-        Self { node_id, part_id }
+        Self {
+            node_id,
+            part_id,
+            pond_id,
+        }
     }
 
     /// Create FileID for a physical directory using an existing NodeID
     /// Physical directories are self-partitioned (part_id == node_id)
     #[must_use]
-    pub fn from_physical_dir_node_id(node_id: NodeID) -> Self {
+    pub fn from_physical_dir_node_id(node_id: NodeID, pond_id: Uuid) -> Self {
         Self {
             part_id: PartID(node_id),
             node_id,
+            pond_id,
         }
     }
 
     /// Create FileID in a specific partition with a new node ID
     /// Used when creating nodes that should live in their parent's partition
     #[must_use]
-    pub fn new_in_partition(parent_part_id: PartID, entry_type: EntryType) -> Self {
+    pub fn new_in_partition(parent_part_id: PartID, entry_type: EntryType, pond_id: Uuid) -> Self {
         let node_id = NodeID::generate(entry_type);
         Self {
             part_id: parent_part_id,
             node_id,
+            pond_id,
         }
     }
 
     /// Create FileID with deterministic NodeID from content
     /// Used by dynamic factories to create stable IDs for generated nodes
-    /// For dynamic directories creating children:
-    ///   - Use parent directory's NodeID as the PartID
-    ///
-    /// For root-level dynamic nodes:
-    ///   - Use PartID::root()
     #[must_use]
-    pub fn from_content(parent_part_id: PartID, entry_type: EntryType, content: &[u8]) -> Self {
+    pub fn from_content(
+        parent_part_id: PartID,
+        entry_type: EntryType,
+        content: &[u8],
+        pond_id: Uuid,
+    ) -> Self {
         // Create BLAKE3 hash of content
         let hash = blake3::hash(content);
         let hash_bytes = hash.as_bytes();
@@ -237,17 +283,19 @@ impl FileID {
         Self {
             part_id: parent_part_id,
             node_id,
+            pond_id,
         }
     }
 
     #[must_use]
     pub fn new_child_id(&self, et: EntryType) -> Self {
         if et == EntryType::DirectoryPhysical {
-            Self::new_physical_dir_id()
+            Self::new_physical_dir_id(self.pond_id)
         } else {
             Self {
                 part_id: self.part_id,
                 node_id: NodeID::generate(et),
+                pond_id: self.pond_id,
             }
         }
     }
@@ -263,13 +311,22 @@ impl FileID {
             Self {
                 node_id: child,
                 part_id: PartID(child),
+                pond_id: self.pond_id,
             }
         } else {
             Self {
                 node_id: child,
                 part_id: self.part_id,
+                pond_id: self.pond_id,
             }
         }
+    }
+
+    /// Return a copy with a different pond_id
+    #[must_use]
+    pub fn with_pond_id(mut self, pond_id: Uuid) -> Self {
+        self.pond_id = pond_id;
+        self
     }
 }
 
@@ -338,11 +395,6 @@ impl NodePath {
     #[must_use]
     pub fn new(node: Node, path: PathBuf) -> Self {
         Self { node, path }
-    }
-
-    #[must_use]
-    pub fn is_root(&self) -> bool {
-        self.id() == FileID::root()
     }
 
     #[must_use]

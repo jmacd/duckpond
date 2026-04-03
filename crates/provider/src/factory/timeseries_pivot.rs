@@ -67,9 +67,8 @@ impl TimeseriesPivotFile {
 
     /// Resolve pattern to matched inputs, extracting captured site names
     async fn resolve_pattern(&self) -> TinyFSResult<Vec<(String, String)>> {
-        // Get filesystem from ProviderContext
-        let fs = self.context.context.filesystem();
-        let tinyfs_root = fs.root().await?;
+        // Use context.root() to respect effective_root for cross-pond imports
+        let tinyfs_root = self.context.root().await?;
 
         // Extract filesystem path from URL for pattern matching
         let pattern_path = self.config.pattern.path();
@@ -373,13 +372,7 @@ mod tests {
 
     /// Helper to create crate::FactoryContext from ProviderContext for tests
     fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
-        crate::FactoryContext {
-            context: context.clone(),
-            file_id,
-            pond_metadata: None,
-            txn_seq: 0,
-            import_partitions: Vec::new(),
-        }
+        crate::FactoryContext::new(context.clone(), file_id)
     }
 
     /// Helper to create test environment with MemoryPersistence

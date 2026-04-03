@@ -1,37 +1,40 @@
 #!/bin/sh
+set -x
+set -e
 
-ROOT=/Volumes/sourcecode/src/duckpond
-NOYO=${ROOT}/noyo
-POND=${NOYO}/pond
-EXE=${ROOT}/target/debug/pond
-OUTDIR=./export
+SCRIPTS=$(cd "$(dirname "$0")" && pwd)
+export POND=${SCRIPTS}/pond
 
-# Source private credentials (HydroVu API keys, etc.)
+# Load credentials (HydroVu keys, S3 creds)
+if [ -f "${SCRIPTS}/deploy.env" ]; then
+  . "${SCRIPTS}/deploy.env"
+fi
 if [ -f ~/.zshrc.private ]; then
   . ~/.zshrc.private
 fi
 
-export POND
+CARGO="cargo run --release -p cmd --"
 
-cargo build
+# Expand env vars in backup.yaml
+export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY
+BACKUP_CFG=$(mktemp)
+envsubst < "${SCRIPTS}/backup.yaml" > "${BACKUP_CFG}"
 
-# Re-copy page templates from host (overwrites existing versions in pond)
-${EXE} copy host://${NOYO}/site/index.md /system/site/index.md
-${EXE} copy host://${NOYO}/site/data.md /system/site/data.md
-${EXE} copy host://${NOYO}/site/sidebar.md /system/site/sidebar.md
-${EXE} copy host://${NOYO}/site/params.md /system/site/params.md
-${EXE} copy host://${NOYO}/site/sites.md /system/site/sites.md
+# Re-copy page templates from host
+for f in index.md data.md sidebar.md params.md sites.md; do
+    ${CARGO} copy host://${SCRIPTS}/site/${f} /system/site/${f}
+done
 
-${EXE} mknod remote /system/run/1-backup --overwrite --config-path ${NOYO}/backup.yaml
+${CARGO} mknod remote /system/run/1-backup --overwrite --config-path "${BACKUP_CFG}"
+${CARGO} mknod hydrovu /system/etc/20-hydrovu --overwrite --config-path ${SCRIPTS}/hydrovu.yaml
+${CARGO} mknod dynamic-dir /combined --overwrite --config-path ${SCRIPTS}/combine.yaml
+${CARGO} mknod dynamic-dir /singled --overwrite --config-path ${SCRIPTS}/single.yaml
+${CARGO} mknod dynamic-dir /reduced --overwrite --config-path ${SCRIPTS}/reduce.yaml
+${CARGO} mknod sitegen /system/etc/90-sitegen --overwrite --config-path ${SCRIPTS}/site.yaml
+${CARGO} mknod column-rename /system/etc/10-hrename --overwrite --config-path ${SCRIPTS}/hrename.yaml
 
-${EXE} mknod hydrovu /system/etc/20-hydrovu --overwrite --config-path ${NOYO}/hydrovu.yaml
+rm -f "${BACKUP_CFG}"
 
-${EXE} mknod dynamic-dir /combined --overwrite --config-path ${NOYO}/combine.yaml
-
-${EXE} mknod dynamic-dir /singled --overwrite --config-path ${NOYO}/single.yaml
-
-${EXE} mknod dynamic-dir /reduced --overwrite --config-path ${NOYO}/reduce.yaml
-
-${EXE} mknod sitegen /system/etc/90-sitegen --overwrite --config-path ${NOYO}/site.yaml
-
-${EXE} mknod column-rename /system/etc/10-hrename --overwrite --config-path ${NOYO}/hrename.yaml
+echo
+echo "=== Update complete ==="
+echo "Next: ./export.sh  # rebuild the site"

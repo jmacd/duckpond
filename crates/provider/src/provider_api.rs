@@ -33,6 +33,9 @@ pub struct Provider {
     fs: Arc<tinyfs::FS>,
     /// Optional ProviderContext for builtin type support (requires active transaction)
     provider_context: Option<Arc<tinyfs::ProviderContext>>,
+    /// Optional root WD that respects effective_root (cross-pond imports).
+    /// When set, path resolution uses this instead of fs.root().
+    root_wd: Option<tinyfs::WD>,
 }
 
 impl Provider {
@@ -43,6 +46,7 @@ impl Provider {
         Self {
             fs,
             provider_context: None,
+            root_wd: None,
         }
     }
 
@@ -56,6 +60,23 @@ impl Provider {
         Self {
             fs,
             provider_context: Some(provider_context),
+            root_wd: None,
+        }
+    }
+
+    /// Set the root WD for path resolution (respects effective_root).
+    #[must_use]
+    pub fn with_root(mut self, root: tinyfs::WD) -> Self {
+        self.root_wd = Some(root);
+        self
+    }
+
+    /// Get the root WD, using the effective_root if set, otherwise fs.root().
+    async fn root(&self) -> tinyfs::Result<tinyfs::WD> {
+        if let Some(ref wd) = self.root_wd {
+            Ok(wd.clone())
+        } else {
+            self.fs.root().await
         }
     }
 
@@ -138,7 +159,7 @@ impl Provider {
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
         use tinyfs::Lookup;
 
-        let root = self.fs.root().await?;
+        let root = self.root().await?;
         let path = url.path();
 
         let (_, lookup_result) = root
@@ -201,7 +222,7 @@ impl Provider {
 
         if has_wildcards {
             // Expand pattern
-            let root = self.fs.root().await?;
+            let root = self.root().await?;
             let matches = root.collect_matches(path).await.map_err(|e| {
                 Error::InvalidUrl(format!("Pattern expansion failed for '{}': {}", path, e))
             })?;
@@ -294,7 +315,7 @@ impl Provider {
         let path = url.path();
 
         // Resolve URL path to FileID
-        let root = self.fs.root().await?;
+        let root = self.root().await?;
         let (_, lookup_result) = root
             .resolve_path(path)
             .await
@@ -415,7 +436,7 @@ impl Provider {
                 .ok_or_else(|| Error::InvalidUrl(format!("Unknown format: {}", scheme)))?;
 
             // Expand pattern via TinyFS
-            let root = self.fs.root().await?;
+            let root = self.root().await?;
             let matches = root.collect_matches(path).await.map_err(|e| {
                 Error::InvalidUrl(format!("Pattern expansion failed for '{}': {}", path, e))
             })?;

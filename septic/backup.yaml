@@ -1,8 +1,7 @@
 region: "us-east-1"
-url: "s3://septic-dev"
-
-endpoint: "http://watershop.casparwater.us:9000"
-access_key: "caspar"
-secret_key: "watertown"
-allow_http: true
+url: "${S3_URL}"
+endpoint: "${S3_ENDPOINT}"
+access_key: "${S3_ACCESS_KEY}"
+secret_key: "${S3_SECRET_KEY}"
+allow_http: ${S3_ALLOW_HTTP}
 

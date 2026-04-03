@@ -218,10 +218,11 @@ impl crate::file::QueryableFile for MemoryFile {
         // Use the same pattern as tlogfs: create a ListingTable with a tinyfs:// URL
         // The TinyFsObjectStore (registered in SessionContext) handles reading from MemoryPersistence
 
-        // Build URL pattern for this file: tinyfs:///part/{part_id}/node/{node_id}/version/
+        // Build URL pattern for this file: tinyfs:///pond/{pond_id}/part/{part_id}/node/{node_id}/version/
         // This matches the TinyFsObjectStore path format expectations
         let url_pattern = format!(
-            "tinyfs:///part/{}/node/{}/version/",
+            "tinyfs:///pond/{}/part/{}/node/{}/version/",
+            id.pond_id(),
             id.part_id(),
             id.node_id()
         );

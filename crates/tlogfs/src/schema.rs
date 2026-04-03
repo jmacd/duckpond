@@ -550,12 +550,16 @@ impl OplogEntry {
             "Cannot create OplogEntry for dynamic EntryType {:?} without factory field. Use new_dynamic_node instead.",
             id.entry_type()
         );
-        assert_eq!(EntryType::TablePhysicalSeries, id.entry_type());
+        assert!(
+            id.entry_type().is_series_file() || id.entry_type() == EntryType::FilePhysicalSeries,
+            "new_large_file_series requires a series EntryType, got {:?}",
+            id.entry_type()
+        );
 
         Self {
             part_id: id.part_id(),
             node_id: id.node_id(),
-            file_type: EntryType::TablePhysicalSeries,
+            file_type: id.entry_type(),
             timestamp,
             version,
             content: None,
@@ -898,6 +902,7 @@ impl ForArrow for tinyfs::DirectoryEntry {
             Arc::new(Field::new("child_node_id", DataType::Utf8, false)),
             Arc::new(Field::new("entry_type", DataType::Utf8, false)),
             Arc::new(Field::new("version_last_modified", DataType::Int64, false)),
+            Arc::new(Field::new("pond_id", DataType::Utf8, true)),
         ]
     }
 }

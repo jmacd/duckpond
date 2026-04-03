@@ -30,8 +30,8 @@ entries:
   - name: "north_temperature"
     factory: "synthetic-timeseries"
     config:
-      start: "2025-01-01T00:00:00Z"
-      end:   "2025-12-31T23:00:00Z"
+      start: "2025-06-01T00:00:00Z"
+      end:   "2026-06-01T00:00:00Z"
       interval: "1h"
       points:
         - name: "temperature.C"
@@ -48,8 +48,8 @@ entries:
   - name: "north_do"
     factory: "synthetic-timeseries"
     config:
-      start: "2025-01-01T00:00:00Z"
-      end:   "2025-12-31T23:00:00Z"
+      start: "2025-06-01T00:00:00Z"
+      end:   "2026-06-01T00:00:00Z"
       interval: "1h"
       points:
         - name: "do.mgL"
@@ -67,8 +67,8 @@ entries:
   - name: "south_temperature"
     factory: "synthetic-timeseries"
     config:
-      start: "2025-01-01T00:00:00Z"
-      end:   "2025-12-31T23:00:00Z"
+      start: "2025-06-01T00:00:00Z"
+      end:   "2026-06-01T00:00:00Z"
       interval: "1h"
       points:
         - name: "temperature.C"
@@ -85,8 +85,8 @@ entries:
   - name: "south_do"
     factory: "synthetic-timeseries"
     config:
-      start: "2025-01-01T00:00:00Z"
-      end:   "2025-12-31T23:00:00Z"
+      start: "2025-06-01T00:00:00Z"
+      end:   "2026-06-01T00:00:00Z"
       interval: "1h"
       points:
         - name: "do.mgL"

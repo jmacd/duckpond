@@ -30,7 +30,9 @@ pub use context::{FactoryContext, PondMetadata, ProviderContext};
 pub use dir::{Directory, DirectoryEntry, Handle as DirHandle, Pathed};
 pub use file::{AsyncReadSeek, File, FileMetadataWriter, Handle as FileHandle, QueryableFile};
 pub use fs::FS;
-pub use node::{FileID, Node, NodeID, NodePath, NodeType, PartID};
+pub use node::{
+    FileID, Node, NodeID, NodePath, NodeType, PartID, local_pond_uuid, set_local_pond_uuid,
+};
 pub use wd::{CopyDestination, Lookup, Visitor, WD};
 
 // Buffer utilities for tests and special cases

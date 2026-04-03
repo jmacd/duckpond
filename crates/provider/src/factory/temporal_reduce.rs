@@ -227,8 +227,11 @@ impl TemporalReduceSqlFile {
         );
 
         let fs = self.context.context.filesystem();
-        let provider =
+        let mut provider =
             crate::Provider::with_context(Arc::new(fs), Arc::new(self.context.context.clone()));
+        if let Ok(root) = self.context.root().await {
+            provider = provider.with_root(root);
+        }
         let datafusion_ctx = datafusion::prelude::SessionContext::new();
 
         let table_provider = provider
@@ -680,10 +683,11 @@ impl TemporalReduceDirectory {
 
         let mut source_files = Vec::new();
 
-        let fs = self.context.context.filesystem();
+        // Use context.root() to respect effective_root for cross-pond imports
+        let root = self.context.root().await?;
 
         // Use collect_matches to find source files with the given pattern
-        match fs.root().await?.collect_matches(pattern).await {
+        match root.collect_matches(pattern).await {
             Ok(matches) => {
                 for (node_path, captured) in matches {
                     let source_path = node_path.path.to_string_lossy().to_string();
@@ -734,9 +738,10 @@ impl TemporalReduceDirectory {
 
     /// Get source node by path from discovered source files
     async fn get_source_node_by_path(&self, source_path: &str) -> TinyFSResult<Node> {
-        let fs = self.context.context.filesystem();
+        // Use context.root() to respect effective_root for cross-pond imports
+        let root = self.context.root().await?;
 
-        let matches = fs.root().await?.collect_matches(source_path).await?;
+        let matches = root.collect_matches(source_path).await?;
 
         if matches.is_empty() {
             return Err(tinyfs::Error::NotFound(std::path::PathBuf::from(
@@ -775,8 +780,12 @@ impl TemporalReduceDirectory {
         id_bytes.extend_from_slice(b"temporal-reduce-site-directory");
         // Use this temporal reduce directory's NodeID as the PartID for children
         let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-        let file_id =
-            tinyfs::FileID::from_content(parent_part_id, EntryType::DirectoryDynamic, &id_bytes);
+        let file_id = tinyfs::FileID::from_content(
+            parent_part_id,
+            EntryType::DirectoryDynamic,
+            &id_bytes,
+            self.context.file_id.pond_id(),
+        );
 
         Node::new(file_id, NodeType::Directory(site_directory.create_handle()))
     }
@@ -989,8 +998,12 @@ impl Directory for TemporalReduceSiteDirectory {
             id_bytes.extend_from_slice(b"temporal-reduce-site-entry");
             // Use this temporal reduce site directory's NodeID as the PartID for children
             let parent_part_id = tinyfs::PartID::from_node_id(self.context.file_id.node_id());
-            let file_id =
-                tinyfs::FileID::from_content(parent_part_id, EntryType::TableDynamic, &id_bytes);
+            let file_id = tinyfs::FileID::from_content(
+                parent_part_id,
+                EntryType::TableDynamic,
+                &id_bytes,
+                self.context.file_id.pond_id(),
+            );
 
             let dir_entry = tinyfs::DirectoryEntry::new(
                 filename.clone(),
@@ -1027,6 +1040,7 @@ impl Directory for TemporalReduceSiteDirectory {
                     parent_part_id,
                     EntryType::TableDynamic,
                     &id_bytes,
+                    self.context.file_id.pond_id(),
                 );
 
                 let node_ref = Node::new(file_id, NodeType::File(sql_file));
@@ -1129,13 +1143,7 @@ mod tests {
 
     /// Helper to create crate::FactoryContext from ProviderContext for tests
     fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
-        crate::FactoryContext {
-            context: context.clone(),
-            file_id,
-            pond_metadata: None,
-            txn_seq: 0,
-            import_partitions: Vec::new(),
-        }
+        crate::FactoryContext::new(context.clone(), file_id)
     }
 
     /// Helper to create test environment with MemoryPersistence

@@ -524,7 +524,7 @@ async fn read_pond_state(
         }
 
         // Construct FileID from parent's part_id and child's node_id
-        let file_id = FileID::new_from_ids(part_id, entry.child_node_id);
+        let file_id = FileID::new_from_ids(part_id, entry.child_node_id, dir_file_id.pond_id());
         let filename = entry.name.clone();
 
         // Get metadata from persistence layer (works with any backend)

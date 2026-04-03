@@ -74,16 +74,16 @@ mod tests {
 
         let all = VersionSelection::AllVersions;
         let url = all.to_url_pattern(&file_id);
-        assert!(url.starts_with("tinyfs:///part/"));
+        assert!(url.starts_with("tinyfs:///pond/"));
         assert!(url.contains("/version/"));
 
         let latest = VersionSelection::LatestVersion;
         let url = latest.to_url_pattern(&file_id);
-        assert!(url.starts_with("tinyfs:///part/"));
+        assert!(url.starts_with("tinyfs:///pond/"));
 
         let specific = VersionSelection::SpecificVersion(42);
         let url = specific.to_url_pattern(&file_id);
-        assert!(url.starts_with("tinyfs:///part/"));
+        assert!(url.starts_with("tinyfs:///pond/"));
         assert!(url.ends_with("/version/42.parquet"));
     }
 }

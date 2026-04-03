@@ -1,39 +1,48 @@
 #!/bin/sh
 #
-# update.sh — Push updated configs to the remote and recreate factory nodes.
+# update.sh — Update configs and recreate factory nodes in the local pond.
 #
-# Use this after editing any .yaml or site/* files locally.
+# Use this after editing any .yaml or site/* files.
 #
 set -x
 set -e
 
-HOST=debian@septicplaystation.casparwater.us
-REMOTE_CONFIG=/home/debian/config
-
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
-EXE=${SCRIPTS}/pond.sh
+DATA_DIR=${SCRIPTS}/data
 
-# Copy all config files to remote host
-ssh ${HOST} "mkdir -p ${REMOTE_CONFIG}/site"
-scp \
-    ingest.yaml \
-    backup.yaml \
-    reduce.yaml \
-    site.yaml \
-    ${HOST}:${REMOTE_CONFIG}/
-scp site/index.md site/data.md site/sidebar.md ${HOST}:${REMOTE_CONFIG}/site/
+export POND=${SCRIPTS}/pond
 
-# Update site templates in the pond (copy individual files into existing dir)
-# (config is mounted at /config inside container)
+# Load deployment config (for S3 credentials)
+. "${SCRIPTS}/deploy.env"
+
+CARGO="cargo run --release -p cmd --"
+
+# Generate ingest config with absolute paths
+INGEST_CFG=$(mktemp)
+cat > "${INGEST_CFG}" <<EOF
+archived_pattern: ${DATA_DIR}/septicstation.json.*
+active_pattern: ${DATA_DIR}/septicstation.json
+pond_path: /ingest
+EOF
+
+# Expand env vars in backup.yaml
+export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_ALLOW_HTTP
+BACKUP_CFG=$(mktemp)
+envsubst < "${SCRIPTS}/backup.yaml" > "${BACKUP_CFG}"
+
+# Update site templates in the pond
 for f in index.md data.md sidebar.md; do
-    ${EXE} copy host:///config/site/${f} /etc/site/${f}
+    ${CARGO} copy host:///${SCRIPTS}/site/${f} /etc/site/${f}
 done
 
 # Recreate factory nodes with --overwrite
-${EXE} mknod logfile-ingest /etc/ingest --overwrite --config-path /config/ingest.yaml
+${CARGO} mknod logfile-ingest /etc/ingest --overwrite --config-path "${INGEST_CFG}"
+${CARGO} mknod remote /system/run/1-backup --overwrite --config-path "${BACKUP_CFG}"
+${CARGO} mknod dynamic-dir /reduced --overwrite --config-path ${SCRIPTS}/reduce.yaml
+${CARGO} mknod sitegen /etc/site.yaml --overwrite --config-path ${SCRIPTS}/site.yaml
 
-${EXE} mknod remote /system/run/1-backup --overwrite --config-path /config/backup.yaml
+rm -f "${INGEST_CFG}" "${BACKUP_CFG}"
 
-${EXE} mknod dynamic-dir /reduced --overwrite --config-path /config/reduce.yaml
-
-${EXE} mknod sitegen /etc/site.yaml --overwrite --config-path /config/site.yaml
+echo
+echo "=== Update complete ==="
+echo "Next: ./generate.sh  # rebuild the site"

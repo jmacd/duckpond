@@ -59,6 +59,9 @@ pub struct LayoutContext<'a> {
     pub site_title: &'a str,
     /// Base URL path prefix (from site.yaml, e.g. "/" or "/noyo-harbor/")
     pub base_url: &'a str,
+    /// Root base URL for shared assets (style.css, chart.js, vendor/).
+    /// For standalone sites this equals base_url. For subsites this is
+    /// the top-level site's base_url (typically "/").
     /// Rendered HTML content (from markdown + shortcodes)
     pub content: &'a str,
     /// Rendered sidebar HTML (from sidebar partial, if any)
@@ -83,6 +86,7 @@ pub struct LayoutContext<'a> {
 pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
     let markup = match name {
         "data" => data_layout(ctx),
+        "logs" => logs_layout(ctx),
         "page" => page_layout(ctx),
         "blog" => blog_layout(ctx),
         _ => default_layout(ctx),
@@ -101,6 +105,7 @@ fn common_head(ctx: &LayoutContext) -> Markup {
         link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
         link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap";
         link rel="stylesheet" href="/style.css";
+        link rel="stylesheet" href=(format!("{}theme.css", ctx.base_url));
         @if let Some(feed) = ctx.feed_url {
             link rel="alternate" type="application/rss+xml" title="RSS Feed" href=(feed);
         }
@@ -132,9 +137,39 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                // Our glue code -- loads DuckDB-WASM + Observable Plot dynamically
                 script src="/chart.js" type="module" {}
                 script src="/overlay.js" type="module" {}
+            }
+        }
+    }
+}
+
+/// Layout for log viewer pages.
+///
+/// Similar to data_layout but loads log-viewer.js instead of chart.js.
+/// Sidebar navigation + card-wrapped content with the log viewer container.
+fn logs_layout(ctx: &LayoutContext) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                (common_head(ctx))
+            }
+            body {
+                @if let Some(sidebar_html) = ctx.sidebar {
+                    nav class="sidebar" {
+                        (PreEscaped(sidebar_html))
+                    }
+                }
+                main class="content-page" {
+                    (top_bar(Some("Home"), Some(ctx.base_url), ctx.feed_url, ctx.github_url))
+                    article class="blog-post" {
+                        div class="blog-post-content" {
+                            (PreEscaped(ctx.content))
+                        }
+                    }
+                }
+                script src="/log-viewer.js" type="module" {}
             }
         }
     }
