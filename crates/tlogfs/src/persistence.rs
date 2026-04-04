@@ -16,7 +16,7 @@ use chrono::Utc;
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::CommitInfo;
 use deltalake::protocol::SaveMode;
-use deltalake::{DeltaOps, DeltaTable};
+use deltalake::DeltaTable;
 use log::{debug, info, warn};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use provider::{FactoryContext, FactoryRegistry};
@@ -259,7 +259,7 @@ impl OpLogPersistence {
             .map_err(|_| {
                 TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str))
             })?;
-        let table = DeltaOps::try_from_uri(url)
+        let table = DeltaTable::try_from_url(url)
             .await?
             .create()
             .with_columns(OplogEntry::for_delta())
@@ -331,7 +331,7 @@ impl OpLogPersistence {
                 .into_iter()
                 .collect();
 
-                let create_result = DeltaOps::try_from_uri(url.clone())
+                let create_result = DeltaTable::try_from_url(url.clone())
                     .await?
                     .create()
                     .with_columns(OplogEntry::for_delta())

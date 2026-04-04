@@ -88,7 +88,7 @@ async fn test_delta_table_version_inspection() -> Result<()> {
     debug!("Delta table path: {}", data_path_str);
 
     let url = url::Url::parse(&data_path_str)?;
-    let builder = deltalake::DeltaTableBuilder::from_uri(url)?;
+    let builder = deltalake::DeltaTableBuilder::from_url(url)?;
     match builder.load().await {
         Ok(table) => {
             debug!(
@@ -119,7 +119,7 @@ async fn test_delta_table_version_inspection() -> Result<()> {
 
             // Check version after commit
             let url = url::Url::parse(&data_path_str)?;
-            let builder = deltalake::DeltaTableBuilder::from_uri(url)?;
+            let builder = deltalake::DeltaTableBuilder::from_url(url)?;
             match builder.load().await {
                 Ok(table) => {
                     debug!(

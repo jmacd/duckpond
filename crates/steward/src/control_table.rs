@@ -60,7 +60,7 @@ use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
 use deltalake::protocol::SaveMode;
-use deltalake::{DeltaOps, DeltaTable};
+use deltalake::DeltaTable;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -570,7 +570,7 @@ impl ControlTable {
             .map_err(|_| {
                 StewardError::ControlTable(format!("Failed to create URL from path: {}", path_str))
             })?;
-        let table = DeltaOps::try_from_uri(url)
+        let table = DeltaTable::try_from_url(url)
             .await
             .map_err(|e| StewardError::ControlTable(format!("Failed to initialize table: {}", e)))?
             .create()
@@ -899,7 +899,7 @@ impl ControlTable {
 
         // Write to Delta Lake
         let old_version = self.table.version();
-        let table = DeltaOps(self.table.clone())
+        let table = self.table.clone()
             .write(vec![batch])
             .await
             .map_err(|e| {

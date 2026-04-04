@@ -5,7 +5,7 @@
 use anyhow::Result;
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use deltalake::DeltaOps;
+use deltalake::DeltaTable;
 use deltalake::protocol::SaveMode;
 use log::debug;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {
     let url = url::Url::from_directory_path(table_path)
         .or_else(|_| url::Url::from_file_path(table_path))
         .map_err(|_| anyhow::anyhow!("Invalid path"))?;
-    let table = DeltaOps::try_from_uri(url)
+    let table = DeltaTable::try_from_url(url)
         .await?
         .write(vec![batch1])
         .with_save_mode(SaveMode::ErrorIfExists)
@@ -54,7 +54,7 @@ async fn test_deltalake_commit_and_read_same_handle() -> Result<()> {
         ],
     )?;
 
-    let table = DeltaOps::from(table)
+    let table = table
         .write(vec![batch2])
         .with_save_mode(SaveMode::Append)
         .await?;
@@ -117,7 +117,7 @@ async fn test_multiple_separate_table_handles() -> Result<()> {
     let url = url::Url::from_directory_path(table_path)
         .or_else(|_| url::Url::from_file_path(table_path))
         .map_err(|_| anyhow::anyhow!("Invalid path"))?;
-    let table1 = DeltaOps::try_from_uri(url.clone())
+    let table1 = DeltaTable::try_from_url(url.clone())
         .await?
         .write(vec![batch1])
         .with_save_mode(SaveMode::ErrorIfExists)
@@ -145,7 +145,7 @@ async fn test_multiple_separate_table_handles() -> Result<()> {
         ],
     )?;
 
-    let table2 = DeltaOps::from(table2)
+    let table2 = table2
         .write(vec![batch2])
         .with_save_mode(SaveMode::Append)
         .await?;
@@ -188,7 +188,7 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
     )]));
 
     // Track the table handle through multiple commits
-    let mut table = None;
+    let mut table: Option<DeltaTable> = None;
 
     // Simulate multiple transaction commits
     for tx_id in 1..=5 {
@@ -199,7 +199,7 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
 
         table = Some(if let Some(existing_table) = table {
             // Append to existing table
-            DeltaOps::from(existing_table)
+            existing_table
                 .write(vec![batch])
                 .with_save_mode(SaveMode::Append)
                 .await?
@@ -208,7 +208,7 @@ async fn test_transaction_sequence_numbering() -> Result<()> {
             let url = url::Url::from_directory_path(table_path)
                 .or_else(|_| url::Url::from_file_path(table_path))
                 .map_err(|_| anyhow::anyhow!("Invalid path"))?;
-            DeltaOps::try_from_uri(url)
+            DeltaTable::try_from_url(url)
                 .await?
                 .write(vec![batch])
                 .with_save_mode(SaveMode::ErrorIfExists)
@@ -267,7 +267,7 @@ async fn test_deltalake_handle_sees_own_commits() -> Result<()> {
     let url = url::Url::from_directory_path(table_path)
         .or_else(|_| url::Url::from_file_path(table_path))
         .map_err(|_| anyhow::anyhow!("Invalid path"))?;
-    let table = DeltaOps::try_from_uri(url)
+    let table = DeltaTable::try_from_url(url)
         .await?
         .write(vec![batch1])
         .with_save_mode(SaveMode::ErrorIfExists)
@@ -282,7 +282,7 @@ async fn test_deltalake_handle_sees_own_commits() -> Result<()> {
         vec![Arc::new(StringArray::from(vec!["step2"]))],
     )?;
 
-    let table = DeltaOps::from(table)
+    let table = table
         .write(vec![batch2])
         .with_save_mode(SaveMode::Append)
         .await?;
