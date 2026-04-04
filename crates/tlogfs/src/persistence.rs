@@ -165,6 +165,12 @@ impl OpLogPersistence {
         &self.table
     }
 
+    /// Replace the underlying Delta table (used after maintenance operations
+    /// that produce a new table, e.g. vacuum/optimize).
+    pub fn set_table(&mut self, table: DeltaTable) {
+        self.table = table;
+    }
+
     /// Get the last committed transaction sequence number
     ///
     /// This is the authoritative source for the current transaction sequence.

@@ -16,6 +16,7 @@ mod control_table;
 mod dispatch;
 mod guard;
 mod host;
+pub mod maintenance;
 mod ship;
 
 pub use control_table::ControlTable;

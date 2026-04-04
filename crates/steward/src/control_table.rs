@@ -730,6 +730,17 @@ impl ControlTable {
         &self.table
     }
 
+    /// Replace the underlying Delta table (used after maintenance operations
+    /// that produce a new table, e.g. vacuum/optimize).
+    pub fn set_table(&mut self, table: DeltaTable) {
+        self.table = table;
+        // Re-register so SessionContext sees the updated table
+        let _prev = self.session_context.deregister_table("transactions");
+        let _reg = self
+            .session_context
+            .register_table("transactions", Arc::new(self.table.clone()));
+    }
+
     /// Get the shared SessionContext for querying control table
     /// Use this for all queries - no need to create new contexts
     #[must_use]

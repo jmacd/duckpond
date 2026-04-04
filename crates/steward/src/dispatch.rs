@@ -13,6 +13,7 @@ use crate::{
     RecoveryResult, StewardError, StewardTransactionGuard,
     control_table::ControlTable,
     host::{HostSteward, HostTransaction},
+    maintenance::MaintenanceReport,
     ship::Ship,
 };
 use std::ops::{AsyncFnOnce, Deref};
@@ -162,6 +163,20 @@ impl Steward {
                 recovered_count: 0,
                 was_needed: false,
             }),
+        }
+    }
+
+    // -- Maintenance (pond-specific) --
+
+    /// Run maintenance (checkpoint + vacuum) on both data and control tables.
+    ///
+    /// When `force` is true, checkpoint is always created.
+    /// When `compact` is true, also merges small parquet files into larger ones.
+    /// Returns a default (empty) report for Host stewards.
+    pub async fn maintain(&mut self, force: bool, compact: bool) -> MaintenanceReport {
+        match self {
+            Steward::Pond(ship) => ship.maintain(force, compact).await,
+            Steward::Host(_) => MaintenanceReport::default(),
         }
     }
 
