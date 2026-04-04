@@ -22,9 +22,9 @@
 //!   (only on explicit request via `pond maintain --compact`).
 
 use chrono::Duration;
+use deltalake::DeltaTable;
 use deltalake::checkpoints;
 use deltalake::operations::optimize::OptimizeType;
-use deltalake::DeltaTable;
 use log::{debug, info, warn};
 
 /// How often to create checkpoints (every N versions).
@@ -134,7 +134,7 @@ pub async fn maintain_table(
     // 1. Checkpoint if needed (or forced)
     let version = table.version().unwrap_or(0);
     let should_checkpoint =
-        version > 0 && (force || (version as u64) % CHECKPOINT_INTERVAL == 0);
+        version > 0 && (force || (version as u64).is_multiple_of(CHECKPOINT_INTERVAL));
     if should_checkpoint {
         debug!(
             "[MAINTAIN] Creating checkpoint for {} at version {}",
@@ -170,10 +170,7 @@ pub async fn maintain_table(
                 result.logs_cleaned = cleaned;
             }
             Err(e) => {
-                warn!(
-                    "[MAINTAIN] Log cleanup failed for {}: {}",
-                    table_name, e
-                );
+                warn!("[MAINTAIN] Log cleanup failed for {}: {}", table_name, e);
             }
         }
     }

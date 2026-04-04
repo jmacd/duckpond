@@ -9,8 +9,8 @@ use crate::schema::ChunkedFileRecord;
 use crate::{ChunkedReader, ChunkedWriter, Result};
 use arrow_array::Array;
 use datafusion::prelude::SessionContext;
-use deltalake::protocol::SaveMode;
 use deltalake::DeltaTable;
+use deltalake::protocol::SaveMode;
 use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -123,7 +123,10 @@ impl RemoteTable {
         let table = DeltaTable::try_from_url_with_storage_options(url, storage_options.clone())
             .await
             .map_err(|e| {
-                log::error!("DeltaTable::try_from_url_with_storage_options failed: {}", e);
+                log::error!(
+                    "DeltaTable::try_from_url_with_storage_options failed: {}",
+                    e
+                );
                 RemoteError::TableOperation(format!("Failed to initialize table URI: {}", e))
             })?
             .create()

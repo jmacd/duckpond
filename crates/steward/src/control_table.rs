@@ -56,11 +56,11 @@ use crate::StewardError;
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
 use datafusion::prelude::SessionContext;
+use deltalake::DeltaTable;
 use deltalake::kernel::{
     DataType as DeltaDataType, PrimitiveType, StructField as DeltaStructField,
 };
 use deltalake::protocol::SaveMode;
-use deltalake::DeltaTable;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -910,12 +910,9 @@ impl ControlTable {
 
         // Write to Delta Lake
         let old_version = self.table.version();
-        let table = self.table.clone()
-            .write(vec![batch])
-            .await
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to write to Delta Lake: {}", e))
-            })?;
+        let table = self.table.clone().write(vec![batch]).await.map_err(|e| {
+            StewardError::ControlTable(format!("Failed to write to Delta Lake: {}", e))
+        })?;
 
         let new_version = table.version();
         debug!(
