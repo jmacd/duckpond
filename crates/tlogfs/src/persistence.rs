@@ -14,9 +14,9 @@ use arrow::datatypes::UInt16Type;
 use async_trait::async_trait;
 use chrono::Utc;
 use datafusion::execution::context::{SessionConfig, SessionContext};
+use deltalake::DeltaTable;
 use deltalake::kernel::CommitInfo;
 use deltalake::protocol::SaveMode;
-use deltalake::{DeltaOps, DeltaTable};
 use log::{debug, info, warn};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use provider::{FactoryContext, FactoryRegistry};
@@ -165,6 +165,12 @@ impl OpLogPersistence {
         &self.table
     }
 
+    /// Replace the underlying Delta table (used after maintenance operations
+    /// that produce a new table, e.g. vacuum/optimize).
+    pub fn set_table(&mut self, table: DeltaTable) {
+        self.table = table;
+    }
+
     /// Get the last committed transaction sequence number
     ///
     /// This is the authoritative source for the current transaction sequence.
@@ -259,7 +265,7 @@ impl OpLogPersistence {
             .map_err(|_| {
                 TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str))
             })?;
-        let table = DeltaOps::try_from_uri(url)
+        let table = DeltaTable::try_from_url(url)
             .await?
             .create()
             .with_columns(OplogEntry::for_delta())
@@ -331,7 +337,7 @@ impl OpLogPersistence {
                 .into_iter()
                 .collect();
 
-                let create_result = DeltaOps::try_from_uri(url.clone())
+                let create_result = DeltaTable::try_from_url(url.clone())
                     .await?
                     .create()
                     .with_columns(OplogEntry::for_delta())

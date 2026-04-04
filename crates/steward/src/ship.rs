@@ -8,6 +8,7 @@ use crate::{
     RecoveryResult, StewardError, StewardTransactionGuard,
     control_table::{ControlTable, TransactionType},
     get_control_path, get_data_path,
+    maintenance::{self, MaintenanceReport},
 };
 use anyhow::Result;
 use log::{debug, info};
@@ -504,14 +505,41 @@ impl Ship {
         // Commit the guard (this releases the borrow on control_table)
         let commit_result = guard.commit().await?;
 
-        // If this was a write transaction that committed data, run post-commit factories
+        // After a successful write, run automatic maintenance (checkpoint + vacuum)
         if is_write && commit_result.is_some() {
-            // TODO: Discover and execute post-commit factories from /system/run/*
-            // This happens AFTER the guard is consumed, so we have full access to self
-            debug!("Post-commit processing would run here for write transaction");
+            let report = self.maintain(false, false).await;
+            if report.data.is_some() || report.control.is_some() {
+                debug!("Post-commit maintenance: {}", report);
+            }
         }
 
         Ok(commit_result)
+    }
+
+    /// Run maintenance (checkpoint + vacuum) on both data and control tables.
+    ///
+    /// When `force` is true, checkpoint is always created (for explicit commands).
+    /// When `compact` is true, also merges small parquet files into larger ones.
+    /// This is best-effort: individual failures are logged as warnings and do
+    /// not prevent maintenance of the other table.
+    pub async fn maintain(&mut self, force: bool, compact: bool) -> MaintenanceReport {
+        let mut report = MaintenanceReport::default();
+
+        // Maintain data table
+        let data_table = self.data_persistence.table().clone();
+        let (new_data_table, data_result) =
+            maintenance::maintain_table(data_table, "data", force, compact).await;
+        self.data_persistence.set_table(new_data_table);
+        report.data = Some(data_result);
+
+        // Maintain control table
+        let control_table = self.control_table.table().clone();
+        let (new_control_table, control_result) =
+            maintenance::maintain_table(control_table, "control", force, compact).await;
+        self.control_table.set_table(new_control_table);
+        report.control = Some(control_result);
+
+        report
     }
 
     /// Check if recovery is needed by querying the control table

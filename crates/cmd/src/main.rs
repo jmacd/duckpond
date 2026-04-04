@@ -102,6 +102,12 @@ enum Commands {
     },
     /// Recover from crash by checking and restoring transaction metadata
     Recover,
+    /// Run Delta Lake maintenance (checkpoint, vacuum, optional compaction)
+    Maintain {
+        /// Also compact small parquet files into larger ones
+        #[arg(long)]
+        compact: bool,
+    },
     /// Show pond contents
     Show {
         /// Display mode: brief (summary stats), concise (1 line per tx), or detailed (full dump)
@@ -317,6 +323,7 @@ async fn main() -> Result<()> {
             // Recover command works with potentially damaged pond, handle specially
             commands::recover_command(&ship_context).await
         }
+        Commands::Maintain { compact } => commands::maintain_command(&ship_context, compact).await,
 
         // Read-only commands that use ShipContext for consistency
         Commands::Show { mode } => {
