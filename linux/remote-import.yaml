@@ -1,0 +1,6 @@
+url: "s3://duckpond-linux"
+region: "us-east-1"
+allow_http: true
+endpoint: "{{ env(name='MINIO_ENDPOINT', default='http://watershop.casparwater.us:9000') }}"
+access_key: "{{ env(name='MINIO_ACCESS_KEY') }}"
+secret_key: "{{ env(name='MINIO_SECRET_KEY') }}"

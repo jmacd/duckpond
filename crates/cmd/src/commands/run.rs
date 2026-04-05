@@ -5,6 +5,7 @@
 //! Run command - executes factory configurations from pond nodes or host files
 
 use crate::common::{ShipContext, TargetContext, classify_target};
+use crate::template_utils;
 use anyhow::{Context, Result, anyhow};
 use log::{debug, error};
 use provider::FactoryRegistry;
@@ -113,6 +114,10 @@ async fn run_host_command(
         config_bytes.len(),
         host_path
     );
+
+    // Expand templates ({{ env(name='VAR') }}) at runtime so that
+    // config files can reference environment variables for secrets.
+    let config_bytes = expand_config_templates(&config_bytes, host_path)?;
 
     // Resolve the config node's FileID for the factory context.
     // On the host filesystem the FileID is deterministic from the path.
@@ -268,6 +273,11 @@ async fn run_pond_command_impl(
         config_bytes.len()
     );
 
+    // Expand templates ({{ env(name='VAR') }}) at runtime so that
+    // config files can reference environment variables for secrets.
+    // Raw templates are stored by mknod; expansion happens here.
+    let config_bytes = expand_config_templates(&config_bytes, config_path)?;
+
     // Build args: if extra_args provided, use those; otherwise use factory mode from control table
     let args = if !extra_args.is_empty() {
         log::debug!(
@@ -367,6 +377,35 @@ async fn run_pond_command_impl(
     .with_context(|| format!("Execution failed for factory '{}'", factory_name))?;
 
     Ok(())
+}
+
+/// Expand MiniJinja template expressions in config bytes.
+///
+/// Supports `{{ env(name='VAR') }}` and `{{ env(name='VAR', default='fallback') }}`
+/// for reading environment variables at runtime.  Config files stored in the pond
+/// contain raw templates; this function resolves them just before factory execution
+/// so that secrets are never persisted in the oplog.
+fn expand_config_templates(config_bytes: &[u8], source_path: &str) -> Result<Vec<u8>> {
+    let content = std::str::from_utf8(config_bytes)
+        .with_context(|| format!("Config file is not valid UTF-8: {}", source_path))?;
+
+    // If there are no template markers, skip expansion for efficiency
+    if !content.contains("{{") {
+        return Ok(config_bytes.to_vec());
+    }
+
+    let expanded =
+        template_utils::expand_yaml_template(content, &std::collections::HashMap::new())
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to expand template in config '{}':\n  {}\n  \
+                Tip: Use {{{{ env(name='VAR') }}}} to read environment variables",
+                    source_path,
+                    e
+                )
+            })?;
+
+    Ok(expanded.into_bytes())
 }
 
 #[cfg(test)]
