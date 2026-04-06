@@ -39,11 +39,10 @@ juggling environment variables.
     _delta_log/                   Transaction log + commit metadata
     _large_files/                 Content-addressed store (files >64KB)
     part_id=<uuid>/               Partitions (one per directory)
-  local/                          Per-replica state (disposable)
-    modes.yaml                    Factory execution modes
-    imports/                      Import watermarks
-    push-state.yaml               Push/sync watermarks
-    settings.yaml                 Operator settings
+  control/                        Control table (per-replica, NOT replicated)
+    _delta_log/                   Control transaction log
+    record_category=metadata/     Pond identity, factory modes, settings
+    record_category=transaction/  Audit log of all transactions
 ```
 
 ### Filesystem Conventions
@@ -51,33 +50,35 @@ juggling environment variables.
 ```
 /                                 Pond root
   sys/                            System configuration (replicated)
-    remotes/                      Remote factory configs (auto-exec)
+    run/                          Auto-exec factories (run after each commit)
       1-backup                    Primary remote
-    etc/                          Manual factories
+    etc/                          Manual factories (run on demand)
       20-hydrovu                  Data collector
       90-sitegen                  Static site generator
-    site/                         Static content (templates)
-  var/                            System state (replicated)
-    metadata                      Pond identity
   ...                             User data
 ```
 
-The `/sys/` and `/var/` paths are configurable via static properties
-set at pond creation time (defaults shown above).
+Factories in `/sys/run/` are automatically executed after each write
+transaction.  Their behavior is determined by their per-replica mode
+(e.g., `push` for primaries, `pull` for replicas; `pull`-mode
+factories are skipped during post-commit auto-execution).
+
+Factories in `/sys/etc/` are only executed manually via `pond run`.
 
 ### Universal vs. Per-Replica State
 
-Because multiple replicas share the same data, the system
+Because multiple replicas share the same data table, the system
 distinguishes between:
 
 | Kind | Examples | Where it lives |
 |------|----------|----------------|
-| **Universal** | Factory configs, pond identity, user data | Data FS (replicated to all) |
-| **Per-replica** | Factory modes, import watermarks, push state | `local/` directory (never replicated) |
+| **Universal** | Factory configs, user data | Data table (replicated via push/pull) |
+| **Per-replica** | Pond identity, factory modes, import watermarks, settings | Control table (never replicated) |
 
-Per-replica state is disposable.  You can delete `local/` and
-rebuild it.  Modes re-default (primary=push, replica=pull),
-watermarks are recomputed from the data.
+Per-replica state is disposable.  You can delete the control table
+and rebuild it.  Modes re-default (primary=push, replica=pull),
+watermarks are recomputed from the data.  Pond identity is set
+during `pond init` or replica creation.
 
 ---
 
@@ -86,8 +87,8 @@ watermarks are recomputed from the data.
 ### Why contexts?
 
 Without contexts, every command requires `$POND` to be set or
-`--pond` to be passed.  Contexts provide named shortcuts and
-enable features like the host mirror.
+`--pond` to be passed.  Contexts provide named shortcuts for
+interactive use.
 
 ### Setting up contexts
 
@@ -124,7 +125,7 @@ Commands resolve the pond path in this order:
 3. `~/.pond/config` current context (interactive use)
 
 Scripts and cron jobs should continue using `$POND`.  Contexts are
-for interactive use and the host mirror.
+for interactive use.
 
 ### Context configuration file
 
@@ -140,73 +141,7 @@ contexts:
 
 ---
 
-## 2. The Host Mirror
-
-Each context has a **host mirror**: a checkout of the pond's system
-configuration onto the host filesystem.  The mirror is always
-readable, even when the pond is mid-transaction.
-
-### Mirror layout
-
-```
-~/.pond/
-  config                          Context configuration
-  mysite/                         Mirror for "mysite"
-    sys/                          From /sys/ (universal config)
-      remotes/
-        1-backup.yaml             Remote factory config
-      etc/
-        20-hydrovu.yaml           HydroVu collector config
-        90-sitegen.yaml           Site generator config
-      site/
-        page.md                   Template file
-    var/                          From /var/ (universal state)
-      metadata.yaml               Pond identity
-    local/                        Per-replica state (NOT from data FS)
-      modes.yaml                  Factory modes for THIS replica
-      imports/                    Import watermarks
-      push-state.yaml             Push watermarks
-      settings.yaml               Operator settings
-    .mirror-state                 Mirror version tracking
-  septic/
-    ...
-```
-
-### Refreshing the mirror
-
-The mirror refreshes automatically after each write transaction.
-To manually refresh:
-
-```
-$ pond config checkout
-Mirror updated from pond (version 1658).
-```
-
-### Editing configuration
-
-Edit files in the mirror, then apply:
-
-```
-$ vi ~/.pond/mysite/sys/etc/20-hydrovu.yaml
-  (make changes)
-
-$ pond config diff
-  sys/etc/20-hydrovu.yaml: modified
-    - collect_interval: 60
-    + collect_interval: 300
-
-$ pond config apply
-  Applied 1 change to pond.
-  sys/etc/20-hydrovu.yaml -> /sys/etc/20-hydrovu (updated)
-```
-
-Template secrets (`{{ env(AWS_SECRET_ACCESS_KEY) }}`) are preserved
-as templates in the mirror.  They are never expanded into files on
-disk.
-
----
-
-## 3. Remotes
+## 2. Remotes
 
 ### Adding a remote
 
@@ -224,7 +159,7 @@ Then add it to the pond:
 
 ```
 $ pond remote add backup.yaml
-Remote "1-backup" configured at /sys/remotes/1-backup
+Remote "1-backup" configured at /sys/run/1-backup
   URL:  s3://my-bucket/backups/
   Mode: push (auto after each commit)
   Test connection... OK
@@ -279,7 +214,7 @@ $ pond remote list
 
 ```
 $ pond remote status
-Remote: s3://my-bucket/backups/ (via /sys/remotes/1-backup)
+Remote: s3://my-bucket/backups/ (via /sys/run/1-backup)
   Mode:          push (this replica)
   Local version: 1658
   Remote version:1658
@@ -292,7 +227,7 @@ When behind:
 
 ```
 $ pond remote status
-Remote: s3://my-bucket/backups/ (via /sys/remotes/1-backup)
+Remote: s3://my-bucket/backups/ (via /sys/run/1-backup)
   Mode:          push (this replica)
   Local version: 1661
   Remote version:1658
@@ -357,12 +292,12 @@ Verifying remote backup...
 Every `pond remote` subcommand delegates to `pond run`:
 
 ```
-pond remote push         =  pond run /sys/remotes/<name> push
-pond remote pull         =  pond run /sys/remotes/<name> pull
-pond remote show         =  pond run /sys/remotes/<name> show
-pond remote verify       =  pond run /sys/remotes/<name> verify
-pond remote list-ponds   =  pond run /sys/remotes/<name> list-ponds
-pond remote replicate    =  pond run /sys/remotes/<name> replicate
+pond remote push         =  pond run /sys/run/<name> push
+pond remote pull         =  pond run /sys/run/<name> pull
+pond remote show         =  pond run /sys/run/<name> show
+pond remote verify       =  pond run /sys/run/<name> verify
+pond remote list-ponds   =  pond run /sys/run/<name> list-ponds
+pond remote replicate    =  pond run /sys/run/<name> replicate
 ```
 
 When there is one remote, the name is implicit.  With multiple
@@ -375,9 +310,12 @@ $ pond remote push --name=archive
 `pond run` continues to work for all factory types.  `pond remote`
 is a convenience for the most common case.
 
+`pond sync` is a hidden alias: `pond sync` behaves like
+`pond remote push` (or `pond remote pull` on replicas).
+
 ---
 
-## 4. Replicas
+## 3. Replicas
 
 ### Creating a replica
 
@@ -433,7 +371,7 @@ import:
 
 ```
 $ pond remote add import-config.yaml --mode=pull
-Remote "1-import" configured at /sys/remotes/1-import
+Remote "1-import" configured at /sys/run/1-import
   URL:  s3://my-bucket/backups/
   Mode: pull (import from foreign pond)
   Import: /ingest -> /sources/foreign-pond
@@ -441,7 +379,7 @@ Remote "1-import" configured at /sys/remotes/1-import
 
 ---
 
-## 5. Maintenance
+## 4. Maintenance
 
 ### What maintenance does
 
@@ -517,7 +455,7 @@ running maintenance on this table. Retry later.
 
 ---
 
-## 6. Status
+## 5. Status
 
 ```
 $ pond status
@@ -527,7 +465,7 @@ Pond:        /data/mysite
 ID:          a1b2c3d4-e5f6-7890-abcd-ef1234567890
 Role:        primary (push)
 
-Remote:      s3://my-bucket/backups/ (/sys/remotes/1-backup)
+Remote:      s3://my-bucket/backups/ (/sys/run/1-backup)
   Status:    IN SYNC -- last push 2 min ago
   Behind:    0 versions
 
@@ -553,7 +491,7 @@ pond status --quiet || alert "DuckPond needs attention"
 
 ---
 
-## 7. Transaction Log
+## 6. Transaction Log
 
 ### Recent transactions
 
@@ -583,7 +521,7 @@ Transaction 1657
   Status:  completed (2.1s)
 
   Post-commit:
-    /sys/remotes/1-backup:
+    /sys/run/1-backup:
       push started  21:28:02.150 UTC
       push FAILED   21:28:05.300 UTC -- connection timeout
 ```
@@ -601,7 +539,7 @@ Incomplete operations:
 
 ---
 
-## 8. Configuration
+## 7. Configuration
 
 ### Viewing
 
@@ -615,7 +553,7 @@ Per-replica settings:
   mode:     push (primary)
 
 Factory modes:
-  /sys/remotes/1-backup: push
+  /sys/run/1-backup: push
 ```
 
 ### Setting
@@ -627,12 +565,23 @@ Maintenance lock cleared.
 
 ### Editing factory configs
 
-See section 2 (Host Mirror).  Edit files in `~/.pond/<context>/sys/`,
-then `pond config apply`.
+To modify a factory configuration, use `pond cat` to read the current
+config, edit it locally, then `pond copy` the updated file back:
+
+```
+$ pond cat /sys/etc/20-hydrovu --format=raw > /tmp/20-hydrovu.yaml
+$ vi /tmp/20-hydrovu.yaml
+  (make changes)
+$ pond copy host:///tmp/20-hydrovu.yaml /sys/etc/20-hydrovu --overwrite
+```
+
+Template secrets (`{{ env(AWS_SECRET_ACCESS_KEY) }}`) are stored as
+raw template strings.  They are expanded at `pond run` time, never
+persisted in expanded form.
 
 ---
 
-## 9. Recovery
+## 8. Recovery
 
 ### From a crash
 
@@ -667,10 +616,11 @@ Restore complete: 847 MB, 1,643 files.
 
 ### Resetting per-replica state
 
-Per-replica state is disposable.  If it becomes corrupt:
+Per-replica state lives in the control table and is disposable.
+If it becomes corrupt:
 
 ```
-$ rm -rf /data/mysite/local/
+$ rm -rf /data/mysite/control/
 $ pond recover
 Rebuilding per-replica state...
   Factory modes: defaulted (push)
@@ -681,7 +631,7 @@ Recovery complete.
 
 ---
 
-## 10. Cron / Systemd Integration
+## 9. Cron / Systemd Integration
 
 ### Data collection (every minute)
 
@@ -733,7 +683,7 @@ ExecStart=/usr/local/bin/pond run 20-hydrovu collect
 
 ---
 
-## 11. Operational Runbook
+## 10. Operational Runbook
 
 ### "Replication is behind"
 
@@ -852,9 +802,6 @@ MONITORING
 CONFIGURATION
   pond config                               Show configuration
   pond config set <key> <value>             Set a setting
-  pond config checkout                      Refresh mirror from pond
-  pond config diff                          Show mirror changes
-  pond config apply                         Commit mirror edits to pond
 
 RECOVERY
   pond recover                              Fix incomplete transactions
@@ -866,7 +813,7 @@ RECOVERY
 
 ## YAML Reference
 
-### Remote config (`/sys/remotes/<name>`)
+### Remote config (`/sys/run/<name>`)
 
 ```yaml
 url: s3://bucket/prefix/             # Required: S3-compatible URL
@@ -891,37 +838,4 @@ contexts:
     path: /data/mysite
   septic:
     path: /data/septic
-```
-
-### Per-replica modes (`local/modes.yaml`)
-
-```yaml
-# Factory execution modes for THIS replica.
-# Set by 'pond remote add --mode=...' or 'pond config set mode ...'.
-# Primary ponds default to push; replicas default to pull.
-/sys/remotes/1-backup: push
-```
-
-### Per-replica push state (`local/push-state.yaml`)
-
-```yaml
-# Tracks which data versions have been pushed to the remote.
-# Managed automatically. Delete to force re-sync.
-/sys/remotes/1-backup:
-  last_pushed_version: 1658
-  last_push_time: "2026-04-05T21:30:12Z"
-```
-
-### Per-replica import state (`local/imports/<factory>.yaml`)
-
-```yaml
-# Tracks which foreign partitions/versions have been imported.
-# Managed automatically. Delete to force re-import.
-partitions:
-  - part_id: a1b2c3d4-...
-    foreign_pond_id: f9e8d7c6-...
-    watermark_txn_seq: 423
-  - part_id: e5f6a7b8-...
-    foreign_pond_id: f9e8d7c6-...
-    watermark_txn_seq: 423
 ```
