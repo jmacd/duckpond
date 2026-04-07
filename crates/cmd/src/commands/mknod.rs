@@ -4,7 +4,7 @@
 
 // CLI command for creating dynamic nodes
 use crate::common::ShipContext;
-use crate::template_utils;
+use crate::env_substitution;
 use anyhow::{Result, anyhow};
 use log::debug;
 use provider::FactoryRegistry;
@@ -24,15 +24,15 @@ pub async fn mknod_command(
     let config_content = fs::read_to_string(config_path)
         .map_err(|e| anyhow!("Failed to read config file '{}': {}", config_path, e))?;
 
-    // Expand templates for validation and initialization only.
-    // The raw content (with template expressions) is stored in the
-    // pond so that secrets from {{ env(...) }} are never persisted.
+    // Expand env references for validation and initialization only.
+    // The raw content (with ${env:...} references) is stored in the
+    // pond so that secrets are never persisted.
     let expanded_content =
-        template_utils::expand_yaml_template(&config_content, &std::collections::HashMap::new())
+        env_substitution::substitute_env_vars(&config_content)
             .map_err(|e| {
                 anyhow!(
-                    "Failed to expand template in config file '{}':\n  {}\n  \
-            Tip: Use {{ env(name='VAR') }} to read environment variables",
+                    "Failed to expand environment variables in config file '{}':\n  {}\n  \
+            Tip: Use ${{env:VAR}} to read environment variables, ${{env:VAR:-default}} for defaults",
                     config_path,
                     e
                 )
@@ -51,9 +51,9 @@ pub async fn mknod_command(
             )
         })?;
 
-    // Store the raw config content (with template expressions intact).
-    // Template expansion happens at runtime in `pond run` so that
-    // secrets from {{ env(...) }} are never persisted in the oplog.
+    // Store the raw config content (with ${env:...} references intact).
+    // Expansion happens at runtime in `pond run` so that
+    // secrets are never persisted in the oplog.
     let stored_config_bytes = config_content.into_bytes();
 
     // Create ship and use scoped transaction for mknod operation

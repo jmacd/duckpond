@@ -233,10 +233,12 @@ metadata for template consumption.
 
 ## What Was Kept
 
-- **`template_utils.rs`** (`crates/cmd/src/template_utils.rs`) — Tera-based YAML
-  config expansion for `mknod`. Still supports `{{ env(name="FOO") }}` in factory
-  YAML configs. The `{{ vars.* }}` expansion no longer has a source but the
-  function remains for env() support.
+- **`env_substitution.rs`** (`crates/cmd/src/env_substitution.rs`) — Pure-Rust
+  environment variable substitution for factory YAML configs. Supports
+  `${env:VAR}` and `${env:VAR:-default}` syntax. Expansion happens at
+  `pond run` time so secrets are never persisted in the oplog. Replaced
+  the earlier MiniJinja-based `template_utils.rs`.
+  Reserved for future providers (e.g., `${file:path}`, `${vault:key}`).
 - **`pond export`** — the command itself remains for exporting pond data to the
   host filesystem. The multi-stage pipeline and template variable injection were
   stripped; export now processes patterns independently without stage chaining.

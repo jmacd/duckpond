@@ -37,11 +37,6 @@ active_pattern: ${DATA_DIR}/casparwater.json
 pond_path: /ingest
 EOF
 
-# Expand env vars in backup.yaml (S3 credentials from deploy.env)
-export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_ALLOW_HTTP
-BACKUP_CFG=$(mktemp)
-envsubst < "${SCRIPTS}/backup.yaml" > "${BACKUP_CFG}"
-
 # Wipe and initialize
 rm -rf "${POND_DIR}"
 ${CARGO} init
@@ -57,12 +52,12 @@ ${CARGO} copy host:///${SCRIPTS}/content /content
 
 # Install factory nodes
 ${CARGO} mknod logfile-ingest /etc/ingest --config-path "${INGEST_CFG}"
-${CARGO} mknod remote /system/run/1-backup --config-path "${BACKUP_CFG}"
+${CARGO} mknod remote /system/run/1-backup --config-path "${SCRIPTS}/backup.yaml"
 ${CARGO} mknod dynamic-dir /reduced --config-path ${SCRIPTS}/reduce-remote.yaml
 ${CARGO} mknod dynamic-dir /analysis --config-path ${SCRIPTS}/analysis-remote.yaml
 ${CARGO} mknod sitegen /etc/site.yaml --config-path ${SCRIPTS}/site.yaml
 
-rm -f "${INGEST_CFG}" "${BACKUP_CFG}"
+rm -f "${INGEST_CFG}"
 
 echo
 echo "=== Setup complete ==="

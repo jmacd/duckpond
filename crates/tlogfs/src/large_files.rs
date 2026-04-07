@@ -362,6 +362,13 @@ impl HybridWriter {
 
             let final_path = large_file_path(&self.pond_path, &blake3).await?;
 
+            // Ensure the parent directory exists (hierarchical structure may
+            // return a path like _large_files/blake3_16=XXXX/blake3=....parquet
+            // where the subdirectory hasn't been created yet for new files).
+            if let Some(parent) = final_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+
             // Write batches to parquet file
             let parquet_file = File::create(&final_path).await?;
             let schema = utilities::chunked_files::arrow_schema();
