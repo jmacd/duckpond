@@ -4,7 +4,7 @@
 
 // CLI command for creating dynamic nodes
 use crate::common::ShipContext;
-use crate::env_substitution;
+use utilities::env_substitution;
 use anyhow::{Result, anyhow};
 use log::debug;
 use provider::FactoryRegistry;

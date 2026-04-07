@@ -1366,16 +1366,23 @@ async fn execute_push(
 
     let large_files = get_large_files(pond_path.as_path()).await?;
     // Convert absolute paths to relative paths for comparison with remote
-    // Absolute: /tmp/pond/_large_files/sha256=abc -> Relative: _large_files/sha256=abc
+    // Absolute: /tmp/pond/_large_files/blake3=abc -> Relative: _large_files/blake3=abc
     let large_files_to_backup: Vec<_> = large_files
         .into_iter()
         .filter_map(|(abs_path, size)| {
-            // Extract the relative path: everything after the pond directory
-            // e.g., /tmp/pond/_large_files/sha256=X -> _large_files/sha256=X
-            let file_name = std::path::Path::new(&abs_path)
-                .file_name()
-                .and_then(|s| s.to_str())?;
-            let relative_path = format!("_large_files/{}", file_name);
+            // Extract the relative path from the pond directory.
+            // Preserves hierarchical structure if present:
+            //   /pond/_large_files/blake3_16=XX/blake3=Y -> _large_files/blake3_16=XX/blake3=Y
+            //   /pond/_large_files/blake3=Y              -> _large_files/blake3=Y
+            let pond_prefix = format!("{}/", pond_path.display());
+            let relative_path = if let Some(rel) = abs_path.strip_prefix(&pond_prefix) {
+                rel.to_string()
+            } else {
+                let file_name = std::path::Path::new(&abs_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())?;
+                format!("_large_files/{}", file_name)
+            };
 
             if remote_paths.contains(relative_path.as_str()) {
                 None // Already backed up
@@ -2584,7 +2591,7 @@ pub async fn apply_parquet_files_from_remote(
     // Phase 2: Download and write files
     // - Parquet files and Delta logs go to the object store
     // - Large files (with _large_files/ prefix) go to the filesystem
-    for (bundle_id, path, _sha256, size, pond_txn_id) in &files {
+    for (bundle_id, path, _root_hash, size, pond_txn_id) in &files {
         log::debug!("Restoring file: {} ({} bytes)", path, size);
 
         // Create a buffer to hold the reconstructed file
@@ -2667,7 +2674,7 @@ pub async fn apply_parquet_files(
 
 /// Restore large files from remote backup to the filesystem
 ///
-/// Large files are stored with bundle_id="POND-FILE-{sha256}" and path="_large_files/sha256=..."
+/// Large files are stored with bundle_id="POND-FILE-{blake3}" and path="_large_files/blake3=..."
 /// This function lists all such files from the remote table and restores them to the pond's
 /// _large_files directory.
 ///
@@ -2764,7 +2771,7 @@ fn extract_tlogfs_state(
 }
 
 /// Get large files from _large_files directory
-/// Scans both flat (sha256=X) and hierarchical (sha256_16=XX/sha256=X) structures
+/// Scans both flat (blake3=X) and hierarchical (blake3_16=XX/blake3=X) structures
 /// Returns Vec of (absolute_path, file_size)
 async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteError> {
     let large_files_dir = pond_path.join("_large_files");
@@ -2790,8 +2797,8 @@ async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteE
         if file_type.is_file() {
             let filename = entry.file_name();
             let name = filename.to_string_lossy();
-            if name.starts_with("sha256=") || name.starts_with("blake3=") {
-                // Flat structure: _large_files/sha256=X or _large_files/blake3=X
+            if name.starts_with("blake3=") {
+                // Flat structure: _large_files/blake3=X
                 let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
                     RemoteError::TableOperation(format!("Failed to get file metadata: {}", e))
                 })?;
@@ -2800,8 +2807,8 @@ async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteE
         } else if file_type.is_dir() {
             let dirname = entry.file_name();
             let dir_name = dirname.to_string_lossy();
-            if dir_name.starts_with("sha256_16=") {
-                // Hierarchical structure: _large_files/sha256_16=XX/sha256=Y
+            if dir_name.starts_with("blake3_16=") {
+                // Hierarchical structure: _large_files/blake3_16=XX/blake3=Y
                 let mut subentries = tokio::fs::read_dir(&path).await.map_err(|e| {
                     RemoteError::TableOperation(format!("Failed to read subdirectory: {}", e))
                 })?;
@@ -2817,7 +2824,7 @@ async fn get_large_files(pond_path: &Path) -> Result<Vec<(String, i64)>, RemoteE
                     if subfile_type.is_file() {
                         let subfilename = subentry.file_name();
                         let subname = subfilename.to_string_lossy();
-                        if subname.starts_with("sha256=") {
+                        if subname.starts_with("blake3=") {
                             let metadata = tokio::fs::metadata(&subpath).await.map_err(|e| {
                                 RemoteError::TableOperation(format!(
                                     "Failed to get file metadata: {}",

@@ -837,10 +837,37 @@ impl<'a> StewardTransactionGuard<'a> {
         // Pass factory mode as args[0]
         let args = vec![factory_mode.to_string()];
 
+        // Expand ${env:VAR} references at runtime so secrets are never
+        // persisted in the oplog.
+        let expanded_config = if utilities::env_substitution::has_env_refs(
+            std::str::from_utf8(config_bytes).unwrap_or(""),
+        ) {
+            match utilities::env_substitution::substitute_env_vars(
+                std::str::from_utf8(config_bytes).map_err(|e| {
+                    StewardError::DataInit(tlogfs::TLogFSError::Internal(format!(
+                        "Config for {} is not valid UTF-8: {}",
+                        config_path, e
+                    )))
+                })?,
+            ) {
+                Ok(expanded) => expanded.into_bytes(),
+                Err(e) => {
+                    log::warn!(
+                        "Failed to expand env vars in config {}: {}",
+                        config_path,
+                        e
+                    );
+                    config_bytes.to_vec()
+                }
+            }
+        } else {
+            config_bytes.to_vec()
+        };
+
         // Execute the factory as a ControlWriter.
         let result = FactoryRegistry::execute(
             factory_name,
-            config_bytes,
+            &expanded_config,
             factory_context,
             ExecutionContext::control_writer(args),
         )

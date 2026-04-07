@@ -11,7 +11,6 @@ use std::path::PathBuf;
 mod commands;
 mod common;
 mod panic_alloc;
-mod env_substitution;
 
 // External modules
 use hydrovu as _;

@@ -17,7 +17,33 @@
 //! | `$$` | Replaced by a single literal `$` |
 //! | `${...}` (no `env:` prefix) | Passed through unchanged (reserved for future providers) |
 
-use anyhow::{Result, anyhow};
+use std::fmt;
+
+/// Error type for environment variable substitution.
+#[derive(Debug)]
+pub enum EnvSubstError {
+    /// Environment variable is not set and no default was provided.
+    NotSet(String),
+    /// Environment variable contains invalid Unicode.
+    InvalidUnicode(String),
+}
+
+impl fmt::Display for EnvSubstError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotSet(var) => write!(
+                f,
+                "Environment variable '{}' not set and no default provided",
+                var
+            ),
+            Self::InvalidUnicode(var) => {
+                write!(f, "Environment variable '{}' contains invalid Unicode", var)
+            }
+        }
+    }
+}
+
+impl std::error::Error for EnvSubstError {}
 
 /// Returns true if `input` contains any `${env:` placeholders.
 pub fn has_env_refs(input: &str) -> bool {
@@ -30,7 +56,7 @@ pub fn has_env_refs(input: &str) -> bool {
 ///
 /// Returns an error when a `${env:VAR}` placeholder is encountered and `VAR`
 /// is not set in the process environment and no `:-default` was provided.
-pub fn substitute_env_vars(input: &str) -> Result<String> {
+pub fn substitute_env_vars(input: &str) -> Result<String, EnvSubstError> {
     let mut output = String::with_capacity(input.len());
     let mut rest = input;
 
@@ -63,17 +89,11 @@ pub fn substitute_env_vars(input: &str) -> Result<String> {
                         Err(std::env::VarError::NotPresent) => match default {
                             Some(d) => d.to_string(),
                             None => {
-                                return Err(anyhow!(
-                                    "Environment variable '{}' not set and no default provided",
-                                    var_name
-                                ));
+                                return Err(EnvSubstError::NotSet(var_name.to_string()));
                             }
                         },
                         Err(std::env::VarError::NotUnicode(_)) => {
-                            return Err(anyhow!(
-                                "Environment variable '{}' contains invalid Unicode",
-                                var_name
-                            ));
+                            return Err(EnvSubstError::InvalidUnicode(var_name.to_string()));
                         }
                     };
 
