@@ -61,7 +61,8 @@ pub struct LayoutContext<'a> {
     pub base_url: &'a str,
     /// Root base URL for shared assets (style.css, chart.js, vendor/).
     /// For standalone sites this equals base_url. For subsites this is
-    /// the top-level site's base_url (typically "/").
+    /// the top-level site's base_url.
+    pub root_base_url: &'a str,
     /// Rendered HTML content (from markdown + shortcodes)
     pub content: &'a str,
     /// Rendered sidebar HTML (from sidebar partial, if any)
@@ -104,7 +105,7 @@ fn common_head(ctx: &LayoutContext) -> Markup {
         link rel="preconnect" href="https://fonts.googleapis.com";
         link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
         link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap";
-        link rel="stylesheet" href="/style.css";
+        link rel="stylesheet" href=(format!("{}style.css", ctx.root_base_url));
         link rel="stylesheet" href=(format!("{}theme.css", ctx.base_url));
         @if let Some(feed) = ctx.feed_url {
             link rel="alternate" type="application/rss+xml" title="RSS Feed" href=(feed);
@@ -137,8 +138,8 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                script src="/chart.js" type="module" {}
-                script src="/overlay.js" type="module" {}
+                script src=(format!("{}chart.js", ctx.root_base_url)) type="module" {}
+                script src=(format!("{}overlay.js", ctx.root_base_url)) type="module" {}
             }
         }
     }
@@ -309,6 +310,7 @@ mod tests {
             title: "Home",
             site_title: "Test Site",
             base_url: "/",
+            root_base_url: "/",
             content: "<h1>Hello</h1>",
             sidebar: None,
             date: None,
@@ -345,6 +347,7 @@ mod tests {
             title: "Temperature",
             site_title: "Noyo Harbor",
             base_url: "/noyo-harbor/",
+            root_base_url: "/",
             content: "<p>Chart here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: None,
@@ -375,6 +378,7 @@ mod tests {
             title: "Page",
             site_title: "Site",
             base_url: "/",
+            root_base_url: "/",
             content: "<p>Content</p>",
             sidebar: None,
             date: None,
@@ -391,6 +395,7 @@ mod tests {
             title: "Water System",
             site_title: "Caspar Water",
             base_url: "/",
+            root_base_url: "/",
             content: "<h1>Water</h1><p>Info</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: None,
@@ -416,6 +421,7 @@ mod tests {
             title: "My Blog Post",
             site_title: "Test Blog",
             base_url: "/",
+            root_base_url: "/",
             content: "<p>Post content here</p>",
             sidebar: Some("<ul><li>Nav</li></ul>"),
             date: Some("2025-03-10"),
@@ -471,6 +477,7 @@ mod tests {
             title: "Undated Post",
             site_title: "Blog",
             base_url: "/",
+            root_base_url: "/",
             content: "<p>No date</p>",
             sidebar: None,
             date: None,

@@ -87,7 +87,14 @@ async fn execute(
             let provider_ctx = &context.context;
 
             // Build the main site
-            build_site_from_root(&config, &root, provider_ctx, &output_path).await?;
+            build_site_from_root(
+                &config,
+                &root,
+                provider_ctx,
+                &output_path,
+                &config.site.base_url,
+            )
+            .await?;
 
             // Write shared build assets (base CSS, JS, vendor) once
             write_shared_assets(&output_path)?;
@@ -128,12 +135,19 @@ async fn execute(
                     }
                 }
 
-                // Derive output subdirectory from base_url or name
-                let subdir = subsite
+                // Derive output subdirectory from base_url relative to parent.
+                // e.g. parent base="/staging/", subsite base="/staging/noyo-harbor/"
+                // → subdir = "noyo-harbor"
+                let parent_base = config.site.base_url.trim_matches('/');
+                let sub_base = subsite
                     .base_url
                     .as_deref()
                     .unwrap_or(&subsite.name)
                     .trim_matches('/');
+                let subdir = sub_base
+                    .strip_prefix(parent_base)
+                    .unwrap_or(sub_base)
+                    .trim_start_matches('/');
                 let subsite_output = output_path.join(subdir);
                 std::fs::create_dir_all(&subsite_output).map_err(|e| {
                     tinyfs::Error::Other(format!("mkdir {:?}: {}", subsite_output, e))
@@ -148,8 +162,14 @@ async fn execute(
                 })?;
                 let subsite_root = subsite_wd.as_root();
 
-                build_site_from_root(&sub_config, &subsite_root, provider_ctx, &subsite_output)
-                    .await?;
+                build_site_from_root(
+                    &sub_config,
+                    &subsite_root,
+                    provider_ctx,
+                    &subsite_output,
+                    &config.site.base_url,
+                )
+                .await?;
 
                 // Write per-subsite theme overrides
                 write_theme_css(&subsite_output, &sub_config.theme)?;
@@ -177,6 +197,7 @@ async fn build_site_from_root(
     root: &tinyfs::WD,
     provider_ctx: &tinyfs::ProviderContext,
     output_dir: &std::path::Path,
+    root_base_url: &str,
 ) -> Result<(), tinyfs::Error> {
     // Run export stages
     let exports = run_export_stages(config, root, provider_ctx, output_dir).await?;
@@ -252,8 +273,15 @@ async fn build_site_from_root(
             .ok_or_else(|| format!("File not in cache: {}", path))
     };
 
-    generate_site(config, &exports, &content, &read_pond_file, output_dir)
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    generate_site(
+        config,
+        &exports,
+        &content,
+        &read_pond_file,
+        output_dir,
+        root_base_url,
+    )
+    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
     // Copy static assets to output, preserving directory structure
     copy_static_assets(&static_assets, output_dir)?;
@@ -912,6 +940,7 @@ fn generate_site(
     content: &BTreeMap<String, ContentContext>,
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
     output_dir: &Path,
+    root_base_url: &str,
 ) -> Result<(), GenerateError> {
     // Compute feed URL if site_url is configured
     let feed_url = if config.site.site_url.is_some() {
@@ -1007,6 +1036,10 @@ fn generate_site(
         // Render markdown -> HTML
         let content_html = render_markdown(&expanded);
 
+        // Rewrite absolute URLs to include base_url prefix
+        let content_html =
+            crate::markdown::rewrite_absolute_urls(&content_html, &config.site.base_url);
+
         // Wrap in layout
         let full_html = layouts::apply_layout(
             &fm.layout,
@@ -1014,6 +1047,7 @@ fn generate_site(
                 title: &title,
                 site_title: &config.site.title,
                 base_url: &config.site.base_url,
+                root_base_url,
                 content: &content_html,
                 sidebar: sidebar_html.as_deref(),
                 date: fm.date.as_deref(),

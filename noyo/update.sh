@@ -15,25 +15,18 @@ fi
 
 CARGO="cargo run --release -p cmd --"
 
-# Expand env vars in backup.yaml
-export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY
-BACKUP_CFG=$(mktemp)
-envsubst < "${SCRIPTS}/backup.yaml" > "${BACKUP_CFG}"
-
 # Re-copy page templates from host
 for f in index.md data.md sidebar.md params.md sites.md; do
     ${CARGO} copy host://${SCRIPTS}/site/${f} /system/site/${f}
 done
 
-${CARGO} mknod remote /system/run/1-backup --overwrite --config-path "${BACKUP_CFG}"
+${CARGO} mknod remote /system/run/1-backup --overwrite --config-path "${SCRIPTS}/backup.yaml"
 ${CARGO} mknod hydrovu /system/etc/20-hydrovu --overwrite --config-path ${SCRIPTS}/hydrovu.yaml
 ${CARGO} mknod dynamic-dir /combined --overwrite --config-path ${SCRIPTS}/combine.yaml
 ${CARGO} mknod dynamic-dir /singled --overwrite --config-path ${SCRIPTS}/single.yaml
 ${CARGO} mknod dynamic-dir /reduced --overwrite --config-path ${SCRIPTS}/reduce.yaml
 ${CARGO} mknod sitegen /system/etc/90-sitegen --overwrite --config-path ${SCRIPTS}/site.yaml
 ${CARGO} mknod column-rename /system/etc/10-hrename --overwrite --config-path ${SCRIPTS}/hrename.yaml
-
-rm -f "${BACKUP_CFG}"
 
 echo
 echo "=== Update complete ==="

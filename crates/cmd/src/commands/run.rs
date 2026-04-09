@@ -5,12 +5,12 @@
 //! Run command - executes factory configurations from pond nodes or host files
 
 use crate::common::{ShipContext, TargetContext, classify_target};
-use crate::template_utils;
 use anyhow::{Context, Result, anyhow};
 use log::{debug, error};
 use provider::FactoryRegistry;
 use provider::registry::ExecutionContext;
 use tokio::io::AsyncReadExt;
+use utilities::env_substitution;
 
 /// Execute a run configuration
 pub async fn run_command(
@@ -115,7 +115,7 @@ async fn run_host_command(
         host_path
     );
 
-    // Expand templates ({{ env(name='VAR') }}) at runtime so that
+    // Expand env references (${env:VAR}) at runtime so that
     // config files can reference environment variables for secrets.
     let config_bytes = expand_config_templates(&config_bytes, host_path)?;
 
@@ -273,9 +273,9 @@ async fn run_pond_command_impl(
         config_bytes.len()
     );
 
-    // Expand templates ({{ env(name='VAR') }}) at runtime so that
-    // config files can reference environment variables for secrets.
-    // Raw templates are stored by mknod; expansion happens here.
+    // Expand env references (${env:VAR}) at runtime so that
+    // secrets are never persisted in the oplog.
+    // Raw references are stored by mknod; expansion happens here.
     let config_bytes = expand_config_templates(&config_bytes, config_path)?;
 
     // Build args: if extra_args provided, use those; otherwise use factory mode from control table
@@ -379,27 +379,27 @@ async fn run_pond_command_impl(
     Ok(())
 }
 
-/// Expand MiniJinja template expressions in config bytes.
+/// Expand `${env:VAR}` references in config bytes.
 ///
-/// Supports `{{ env(name='VAR') }}` and `{{ env(name='VAR', default='fallback') }}`
-/// for reading environment variables at runtime.  Config files stored in the pond
-/// contain raw templates; this function resolves them just before factory execution
+/// Supports `${env:VAR}` and `${env:VAR:-default}` for reading environment
+/// variables at runtime.  Config files stored in the pond contain raw
+/// references; this function resolves them just before factory execution
 /// so that secrets are never persisted in the oplog.
 fn expand_config_templates(config_bytes: &[u8], source_path: &str) -> Result<Vec<u8>> {
     let content = std::str::from_utf8(config_bytes)
         .with_context(|| format!("Config file is not valid UTF-8: {}", source_path))?;
 
-    // If there are no template markers, skip expansion for efficiency
-    if !content.contains("{{") {
+    // If there are no env references, skip expansion for efficiency
+    if !env_substitution::has_env_refs(content) {
         return Ok(config_bytes.to_vec());
     }
 
     let expanded =
-        template_utils::expand_yaml_template(content, &std::collections::HashMap::new())
+        env_substitution::substitute_env_vars(content)
             .map_err(|e| {
                 anyhow!(
-                    "Failed to expand template in config '{}':\n  {}\n  \
-                Tip: Use {{{{ env(name='VAR') }}}} to read environment variables",
+                    "Failed to expand environment variables in config '{}':\n  {}\n  \
+                Tip: Use ${{env:VAR}} to read environment variables, ${{env:VAR:-default}} for defaults",
                     source_path,
                     e
                 )

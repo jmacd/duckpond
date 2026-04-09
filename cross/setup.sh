@@ -51,19 +51,25 @@ ${CARGO} mkdir -p /sources
 # Copy site templates into the pond
 ${CARGO} copy host:///${SCRIPTS}/site /system/site
 
-# Generate import configs with discovered pond_ids
+# Generate import configs with discovered pond_ids.
+# URLs are baked (dynamic config, not secrets); credentials stay as
+# ${env:} references for runtime expansion.
 make_import_config() {
     local SOURCE_URL="$1"
     local POND_ID="$2"
     local LOCAL_PATH="$3"
     local OUTFILE="$4"
-    SOURCE_URL="${SOURCE_URL}/pond-${POND_ID}" \
-    LOCAL_PATH="${LOCAL_PATH}" \
-    S3_ENDPOINT="${S3_ENDPOINT}" \
-    S3_ACCESS_KEY="${S3_ACCESS_KEY}" \
-    S3_SECRET_KEY="${S3_SECRET_KEY}" \
-    S3_ALLOW_HTTP="${S3_ALLOW_HTTP}" \
-    envsubst < "${SCRIPTS}/import.yaml" > "${OUTFILE}"
+    cat > "${OUTFILE}" <<ENDCFG
+region: "us-east-1"
+url: "${SOURCE_URL}/pond-${POND_ID}"
+endpoint: "\${env:S3_ENDPOINT}"
+access_key_id: "\${env:S3_ACCESS_KEY}"
+secret_access_key: "\${env:S3_SECRET_KEY}"
+allow_http: \${env:S3_ALLOW_HTTP}
+import:
+  source_path: "/**"
+  local_path: "${LOCAL_PATH}"
+ENDCFG
 }
 
 NOYO_CFG=$(mktemp)
