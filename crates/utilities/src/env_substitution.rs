@@ -46,6 +46,7 @@ impl fmt::Display for EnvSubstError {
 impl std::error::Error for EnvSubstError {}
 
 /// Returns true if `input` contains any `${env:` placeholders.
+#[must_use]
 pub fn has_env_refs(input: &str) -> bool {
     input.contains("${env:")
 }
@@ -73,40 +74,38 @@ pub fn substitute_env_vars(input: &str) -> Result<String, EnvSubstError> {
         }
 
         // Possible `${...}` placeholder.
-        if rest.starts_with("${") {
-            if let Some(close) = rest[2..].find('}') {
-                let inner = &rest[2..2 + close];
+        if rest.starts_with("${") && let Some(close) = rest[2..].find('}') {
+            let inner = &rest[2..2 + close];
 
-                if let Some(spec) = inner.strip_prefix("env:") {
-                    // Split on the first `:-` to allow an optional default.
-                    let (var_name, default) = match spec.find(":-") {
-                        Some(p) => (&spec[..p], Some(&spec[p + 2..])),
-                        None => (spec, None),
-                    };
+            if let Some(spec) = inner.strip_prefix("env:") {
+                // Split on the first `:-` to allow an optional default.
+                let (var_name, default) = match spec.find(":-") {
+                    Some(p) => (&spec[..p], Some(&spec[p + 2..])),
+                    None => (spec, None),
+                };
 
-                    let value = match std::env::var(var_name) {
-                        Ok(v) => v,
-                        Err(std::env::VarError::NotPresent) => match default {
-                            Some(d) => d.to_string(),
-                            None => {
-                                return Err(EnvSubstError::NotSet(var_name.to_string()));
-                            }
-                        },
-                        Err(std::env::VarError::NotUnicode(_)) => {
-                            return Err(EnvSubstError::InvalidUnicode(var_name.to_string()));
+                let value = match std::env::var(var_name) {
+                    Ok(v) => v,
+                    Err(std::env::VarError::NotPresent) => match default {
+                        Some(d) => d.to_string(),
+                        None => {
+                            return Err(EnvSubstError::NotSet(var_name.to_string()));
                         }
-                    };
+                    },
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        return Err(EnvSubstError::InvalidUnicode(var_name.to_string()));
+                    }
+                };
 
-                    output.push_str(&value);
-                    rest = &rest[2 + close + 1..];
-                } else {
-                    // Not an `env:` provider — pass through verbatim
-                    // (reserved for future providers like file:, vault:).
-                    output.push_str(&rest[..2 + close + 1]);
-                    rest = &rest[2 + close + 1..];
-                }
-                continue;
+                output.push_str(&value);
+                rest = &rest[2 + close + 1..];
+            } else {
+                // Not an `env:` provider — pass through verbatim
+                // (reserved for future providers like file:, vault:).
+                output.push_str(&rest[..2 + close + 1]);
+                rest = &rest[2 + close + 1..];
             }
+            continue;
         }
 
         // Bare `$` with no recognised pattern — emit and advance.

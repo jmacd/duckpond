@@ -61,7 +61,7 @@ pub fn render_markdown(content: &str) -> String {
 /// When `base` is `/` or empty, the input is returned unchanged.
 pub fn rewrite_absolute_urls(html: &str, base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
-    if base.is_empty() || base == "" {
+    if base.is_empty() {
         return html.to_string();
     }
 

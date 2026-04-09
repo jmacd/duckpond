@@ -317,9 +317,9 @@ check_contains "${SUB_DIR}/params/Temperature.html" "subdir: breadcrumb Home hre
 check_contains "${SUB_DIR}/params/Temperature.html" "subdir: breadcrumb params href=/myapp/params" 'href="/myapp/params"'
 
 echo ""
-echo "  Layout assets (should still be / — Vite handles base):"
-check_contains "${SUB_DIR}/index.html" "subdir: style.css still at /style.css" 'href="/style.css"'
-check_contains "${SUB_DIR}/params/Temperature.html" "subdir: chart.js still at /chart.js" 'src="/chart.js"'
+echo "  Layout assets (should be prefixed with base_url):"
+check_contains "${SUB_DIR}/index.html" "subdir: style.css at /myapp/style.css" 'href="/myapp/style.css"'
+check_contains "${SUB_DIR}/params/Temperature.html" "subdir: chart.js at /myapp/chart.js" 'src="/myapp/chart.js"'
 
 echo ""
 echo "  Chart data manifest paths (should be /myapp/data/...):"
