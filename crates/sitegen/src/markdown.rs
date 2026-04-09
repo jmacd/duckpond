@@ -52,8 +52,34 @@ pub fn render_markdown(content: &str) -> String {
     html
 }
 
-/// Slugify text for use as an HTML id attribute.
+/// Rewrite absolute URLs in rendered HTML to include a base path prefix.
 ///
+/// Matches `href="/..."` and `src="/..."` attributes and prepends the
+/// base path.  External URLs (starting with `//` or a scheme) and
+/// already-prefixed URLs are left untouched.
+///
+/// When `base` is `/` or empty, the input is returned unchanged.
+pub fn rewrite_absolute_urls(html: &str, base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.is_empty() || base == "" {
+        return html.to_string();
+    }
+
+    // Match href="/..." or src="/..." where the path starts with /
+    // but not with // (protocol-relative) or the base itself.
+    let re = regex::Regex::new(r#"((?:href|src|action)=")(/[^"/][^"]*")"#).unwrap();
+    re.replace_all(html, |caps: &regex::Captures| {
+        let attr = &caps[1]; // e.g. href="
+        let path = &caps[2]; // e.g. /data/foo.html"
+        // Don't double-prefix
+        if path.starts_with(&format!("{}/", base)) {
+            format!("{}{}", attr, path)
+        } else {
+            format!("{}{}{}", attr, base, path)
+        }
+    })
+    .into_owned()
+}
 /// Lowercases, replaces non-alphanumeric runs with hyphens, strips
 /// leading/trailing hyphens.
 fn slugify(text: &str) -> String {

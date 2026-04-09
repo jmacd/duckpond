@@ -4617,6 +4617,7 @@ dependencies = [
  "paste",
  "provider",
  "pulldown-cmark",
+ "regex",
  "rss",
  "serde",
  "serde_json",
