@@ -852,11 +852,7 @@ impl<'a> StewardTransactionGuard<'a> {
             ) {
                 Ok(expanded) => expanded.into_bytes(),
                 Err(e) => {
-                    log::warn!(
-                        "Failed to expand env vars in config {}: {}",
-                        config_path,
-                        e
-                    );
+                    log::warn!("Failed to expand env vars in config {}: {}", config_path, e);
                     config_bytes.to_vec()
                 }
             }

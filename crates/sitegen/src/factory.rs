@@ -87,7 +87,14 @@ async fn execute(
             let provider_ctx = &context.context;
 
             // Build the main site
-            build_site_from_root(&config, &root, provider_ctx, &output_path, &config.site.base_url).await?;
+            build_site_from_root(
+                &config,
+                &root,
+                provider_ctx,
+                &output_path,
+                &config.site.base_url,
+            )
+            .await?;
 
             // Write shared build assets (base CSS, JS, vendor) once
             write_shared_assets(&output_path)?;
@@ -155,8 +162,14 @@ async fn execute(
                 })?;
                 let subsite_root = subsite_wd.as_root();
 
-                build_site_from_root(&sub_config, &subsite_root, provider_ctx, &subsite_output, &config.site.base_url)
-                    .await?;
+                build_site_from_root(
+                    &sub_config,
+                    &subsite_root,
+                    provider_ctx,
+                    &subsite_output,
+                    &config.site.base_url,
+                )
+                .await?;
 
                 // Write per-subsite theme overrides
                 write_theme_css(&subsite_output, &sub_config.theme)?;
@@ -260,8 +273,15 @@ async fn build_site_from_root(
             .ok_or_else(|| format!("File not in cache: {}", path))
     };
 
-    generate_site(config, &exports, &content, &read_pond_file, output_dir, root_base_url)
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    generate_site(
+        config,
+        &exports,
+        &content,
+        &read_pond_file,
+        output_dir,
+        root_base_url,
+    )
+    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
     // Copy static assets to output, preserving directory structure
     copy_static_assets(&static_assets, output_dir)?;

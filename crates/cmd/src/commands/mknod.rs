@@ -4,11 +4,11 @@
 
 // CLI command for creating dynamic nodes
 use crate::common::ShipContext;
-use utilities::env_substitution;
 use anyhow::{Result, anyhow};
 use log::debug;
 use provider::FactoryRegistry;
 use std::fs;
+use utilities::env_substitution;
 
 /// Create a dynamic node in the pond using transaction guard pattern
 pub async fn mknod_command(
@@ -42,8 +42,8 @@ pub async fn mknod_command(
     let expanded_bytes = expanded_content.as_bytes();
 
     // Validate the factory and configuration early
-    let _validated_config =
-        FactoryRegistry::validate_config(factory_type, expanded_bytes).map_err(|e| {
+    let _validated_config = FactoryRegistry::validate_config(factory_type, expanded_bytes)
+        .map_err(|e| {
             anyhow!(
                 "Invalid configuration for factory '{}': {}",
                 factory_type,

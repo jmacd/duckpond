@@ -200,11 +200,7 @@ mod tests {
         env_remove_var("POND_TEST_MISSING");
         let err = substitute_env_vars("key: ${env:POND_TEST_MISSING}");
         assert!(err.is_err());
-        assert!(
-            err.unwrap_err()
-                .to_string()
-                .contains("POND_TEST_MISSING")
-        );
+        assert!(err.unwrap_err().to_string().contains("POND_TEST_MISSING"));
     }
 
     #[test]
