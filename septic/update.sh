@@ -25,11 +25,6 @@ active_pattern: ${DATA_DIR}/septicstation.json
 pond_path: /ingest
 EOF
 
-# Expand env vars in backup.yaml
-export S3_URL S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_ALLOW_HTTP
-BACKUP_CFG=$(mktemp)
-envsubst < "${SCRIPTS}/backup.yaml" > "${BACKUP_CFG}"
-
 # Update site templates in the pond
 for f in index.md data.md sidebar.md; do
     ${CARGO} copy host:///${SCRIPTS}/site/${f} /etc/site/${f}
@@ -37,11 +32,11 @@ done
 
 # Recreate factory nodes with --overwrite
 ${CARGO} mknod logfile-ingest /etc/ingest --overwrite --config-path "${INGEST_CFG}"
-${CARGO} mknod remote /system/run/1-backup --overwrite --config-path "${BACKUP_CFG}"
+${CARGO} mknod remote /system/run/1-backup --overwrite --config-path "${SCRIPTS}/backup.yaml"
 ${CARGO} mknod dynamic-dir /reduced --overwrite --config-path ${SCRIPTS}/reduce.yaml
 ${CARGO} mknod sitegen /etc/site.yaml --overwrite --config-path ${SCRIPTS}/site.yaml
 
-rm -f "${INGEST_CFG}" "${BACKUP_CFG}"
+rm -f "${INGEST_CFG}"
 
 echo
 echo "=== Update complete ==="

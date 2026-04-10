@@ -4,11 +4,11 @@
 
 // CLI command for creating dynamic nodes
 use crate::common::ShipContext;
-use crate::template_utils;
 use anyhow::{Result, anyhow};
 use log::debug;
 use provider::FactoryRegistry;
 use std::fs;
+use utilities::env_substitution;
 
 /// Create a dynamic node in the pond using transaction guard pattern
 pub async fn mknod_command(
@@ -24,24 +24,26 @@ pub async fn mknod_command(
     let config_content = fs::read_to_string(config_path)
         .map_err(|e| anyhow!("Failed to read config file '{}': {}", config_path, e))?;
 
-    // Apply template expansion (supports {{ env(name='VAR') }} for environment variables)
+    // Expand env references for validation and initialization only.
+    // The raw content (with ${env:...} references) is stored in the
+    // pond so that secrets are never persisted.
     let expanded_content =
-        template_utils::expand_yaml_template(&config_content, &std::collections::HashMap::new())
+        env_substitution::substitute_env_vars(&config_content)
             .map_err(|e| {
                 anyhow!(
-                    "Failed to expand template in config file '{}':\n  {}\n  \
-            Tip: Use {{ env(name='VAR') }} to read environment variables",
+                    "Failed to expand environment variables in config file '{}':\n  {}\n  \
+            Tip: Use ${{env:VAR}} to read environment variables, ${{env:VAR:-default}} for defaults",
                     config_path,
                     e
                 )
             })?;
 
-    // Convert expanded content to bytes for validation
-    let config_bytes = expanded_content.as_bytes();
+    // Validate using the expanded (secrets-resolved) content
+    let expanded_bytes = expanded_content.as_bytes();
 
-    // Validate the factory and configuration early, get processed config
-    let validated_config =
-        FactoryRegistry::validate_config(factory_type, config_bytes).map_err(|e| {
+    // Validate the factory and configuration early
+    let _validated_config = FactoryRegistry::validate_config(factory_type, expanded_bytes)
+        .map_err(|e| {
             anyhow!(
                 "Invalid configuration for factory '{}': {}",
                 factory_type,
@@ -49,10 +51,10 @@ pub async fn mknod_command(
             )
         })?;
 
-    // Convert validated config back to bytes for storage
-    let processed_config_bytes = serde_yaml::to_string(&validated_config)
-        .map_err(|e| anyhow!("Failed to serialize processed config: {}", e))?
-        .into_bytes();
+    // Store the raw config content (with ${env:...} references intact).
+    // Expansion happens at runtime in `pond run` so that
+    // secrets are never persisted in the oplog.
+    let stored_config_bytes = config_content.into_bytes();
 
     // Create ship and use scoped transaction for mknod operation
     let mut ship = ship_context.open_pond().await?;
@@ -75,7 +77,8 @@ pub async fn mknod_command(
         &tx,
         &path_clone,
         &factory_type_clone,
-        processed_config_bytes.clone(),
+        stored_config_bytes.clone(),
+        expanded_content.into_bytes(),
         overwrite,
     )
     .await
@@ -100,6 +103,7 @@ async fn mknod_impl(
     path: &str,
     factory_type: &str,
     config_bytes: Vec<u8>,
+    expanded_config_bytes: Vec<u8>,
     overwrite: bool,
 ) -> Result<()> {
     let root = fs.root().await?;
@@ -182,9 +186,15 @@ async fn mknod_impl(
     let context = provider::FactoryContext::new(provider_context, parent_node_id);
 
     // Run factory initialization if it exists (e.g., create directories)
-    FactoryRegistry::initialize::<tlogfs::TLogFSError>(factory_type, &config_bytes, context)
-        .await
-        .map_err(|e| anyhow!("Factory initialization failed: {}", e))?;
+    // Use expanded config for initialization since it may need to connect
+    // to remote services (e.g., S3 for import-mode partition discovery).
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        factory_type,
+        &expanded_config_bytes,
+        context,
+    )
+    .await
+    .map_err(|e| anyhow!("Factory initialization failed: {}", e))?;
 
     Ok(())
 }

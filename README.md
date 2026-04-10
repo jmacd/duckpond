@@ -12,6 +12,39 @@ Built by the [Caspar Water System](https://github.com/jmacd/caspar.water).
 
 ![Caspar Duck Pond](./caspar_duckpond.jpg)
 
+## What DuckPond Does
+
+DuckPond gives you a **transactional filesystem** where files are
+first-class data.  It has two operating modes:
+
+- **Pond mode** (`$POND`): A persistent, transactional filesystem
+  backed by Delta Lake.  Every write is atomic.  Files can be raw
+  bytes, queryable Parquet tables, or multi-version time-series.
+  The pond replicates to S3-compatible storage for backup and
+  cross-machine access.
+
+- **Host mode** (`host+`): A read-only view of the local filesystem
+  where the same query and factory tools work directly on host files
+  -- no pond initialization required.
+
+Both modes use the same URL scheme system and the same SQL engine.
+A CSV file on your local disk and a time-series inside a remote
+pond backup are queried with the same `pond cat --sql` syntax.
+
+### Replication and Cross-Pond Import
+
+Every pond can push incremental backups to S3-compatible storage
+(MinIO, AWS S3).  From any other machine, you can:
+
+- **Discover** remote ponds: `pond run host+remote:///config.yaml list-ponds`
+- **Browse** backup contents: `pond run host+remote:///config.yaml show`
+- **Import** a subtree into a local pond for querying
+
+The `host+remote://` pattern lets you point at a YAML config file on
+your local disk and interact with a remote backup without initializing
+a pond first.  This makes it easy to inspect what a remote machine has
+collected before deciding what to pull down.
+
 ## Quick Start
 
 ```bash
@@ -28,6 +61,12 @@ pond mkdir /data
 echo "hello" | pond copy - /data/greeting.txt
 pond list /**
 pond cat /data/greeting.txt
+
+# Query a local CSV with SQL (no pond needed)
+pond cat host+csv:///tmp/data.csv --format=table --sql "SELECT * FROM source"
+
+# Run a factory from a local config file (no pond needed)
+pond run host+remote:///path/to/backup-config.yaml list-ponds
 ```
 
 ## Developer Guide
@@ -115,6 +154,13 @@ pond mkdir /dir                     # Create a directory
 pond mknod <factory> /path --config-path config.yaml   # Install a factory
 pond run /path/to/factory <command>                     # Execute a factory
 pond log                            # Transaction history
+```
+
+**Host mode** (no pond required):
+```bash
+pond cat host+csv:///tmp/data.csv --format=table       # Query a local CSV
+pond run host+remote:///config.yaml list-ponds          # Browse S3 backups
+pond run host+sitegen:///site.yaml build ./dist         # Generate a site
 ```
 
 ### Integration Tests

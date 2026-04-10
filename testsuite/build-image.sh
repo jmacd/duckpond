@@ -72,7 +72,8 @@ if [[ "${HOST_OS}" == "Darwin" ]]; then
     rustup target add "${CONTAINER_TARGET}" 2>/dev/null || true
     
     # Try zigbuild if available (works best for cross-compilation)
-    if command -v cargo-zigbuild &> /dev/null; then
+    # cargo-zigbuild finds zig via PATH or via the Python ziglang package.
+    if command -v cargo-zigbuild &> /dev/null && cargo-zigbuild zig cc -- --version &> /dev/null; then
         echo "Using cargo-zigbuild (${BUILD_MODE})..."
         cd "${REPO_ROOT}"
         if [[ "${QUIET}" == "true" ]]; then
@@ -81,8 +82,8 @@ if [[ "${HOST_OS}" == "Darwin" ]]; then
             cargo zigbuild ${CARGO_PROFILE} --bin pond --target ${CONTAINER_TARGET}
         fi
     else
-        echo "ERROR: cargo-zigbuild not found."
-        echo "Install with: cargo install cargo-zigbuild"
+        echo "ERROR: cargo-zigbuild and/or zig not found."
+        echo "Install with: cargo install cargo-zigbuild && pip3 install ziglang"
         exit 1
     fi
 else
@@ -95,7 +96,8 @@ else
 
     # Use zigbuild if available to target the container's glibc (bookworm = 2.36).
     # A plain cargo build links against the host glibc which may be too new.
-    if command -v cargo-zigbuild &> /dev/null; then
+    # cargo-zigbuild finds zig via PATH or via the Python ziglang package.
+    if command -v cargo-zigbuild &> /dev/null && cargo-zigbuild zig cc -- --version &> /dev/null; then
         echo "Using cargo-zigbuild targeting glibc 2.36 (${BUILD_MODE})..."
         if [[ "${QUIET}" == "true" ]]; then
             cargo zigbuild ${CARGO_PROFILE} --bin pond --target ${CONTAINER_TARGET}.2.36 2>&1 | tail -5
@@ -103,7 +105,7 @@ else
             cargo zigbuild ${CARGO_PROFILE} --bin pond --target ${CONTAINER_TARGET}.2.36
         fi
     else
-        echo "WARNING: cargo-zigbuild not found, using plain cargo build."
+        echo "WARNING: cargo-zigbuild/zig not found, using plain cargo build."
         echo "  Binary may not run in debian:bookworm-slim if host glibc is newer."
         echo "  Install with: cargo install cargo-zigbuild && pip3 install ziglang"
         if [[ "${QUIET}" == "true" ]]; then

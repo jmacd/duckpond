@@ -295,7 +295,6 @@ echo "✓ logo.svg loaded"
 
 # Write site.yaml config
 cat > /tmp/site.yaml << 'YAML'
-{% raw %}
 factory: sitegen
 
 site:
@@ -339,7 +338,6 @@ partials:
 
 static:
   - pattern: "/img/*"
-{% endraw %}
 YAML
 
 pond mknod sitegen /site.yaml --config-path /tmp/site.yaml

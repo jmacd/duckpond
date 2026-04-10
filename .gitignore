@@ -30,3 +30,4 @@ sample-*/
 
 # Per-site deployment credentials (see deploy.env.example)
 */deploy.env
+linux/remote-pond/

@@ -14,15 +14,31 @@
 | `pond describe` | Show file schema | `pond describe /data/*.csv` |
 | `pond mknod` | Create factory nodes | `pond mknod --config f.yaml /path` |
 | `pond run` | Execute factory nodes | `pond run 20-foo collect` |
+| `pond run` | Execute from host config | `pond run host+remote:///config.yaml list-ponds` |
 | `pond log` | View transaction history | `pond log --limit 20` |
 | `pond sync` | Sync with remote storage | `pond sync` |
 | `pond config` | Show/set pond configuration | `pond config` |
+
+### Two Operating Modes
+
+DuckPond commands work in two modes:
+
+- **Pond mode**: Operations on a transactional filesystem at `$POND`.
+  Files are persistent, versioned, and replicable.
+- **Host mode** (`host+` prefix): Read-only operations on host
+  filesystem files.  No `$POND` required.  The same query engine and
+  factory system work directly on local files.
+
+| Mode | `pond cat` | `pond run` | `pond copy` |
+|------|-----------|-----------|-------------|
+| Pond | `pond cat /data/file` | `pond run 20-backup push` | `pond copy host:///f /data/f` |
+| Host | `pond cat host+csv:///f` | `pond run host+remote:///c.yaml show` | N/A (read-only) |
 
 ## Environment
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `POND` | Path to pond storage | Required |
+| `POND` | Path to pond storage | Required for pond mode; not needed for `host+` operations |
 | `RUST_LOG` | Logging level | `info` |
 
 ## Commands in Detail
@@ -312,7 +328,8 @@ See [Factory Types](#factory-types) for configuration options.
 
 ### pond run
 
-Execute a factory node's commands.
+Execute a factory node's commands.  Works on both **pond nodes** and
+**host filesystem config files** (via `host+` URL prefix).
 
 ```bash
 # Run data collection (full path)
@@ -334,6 +351,43 @@ pond run /system/etc/90-sitegen build ./dist
 Short names (without a leading `/`) are resolved by checking `/system/run/{name}`
 then `/system/etc/{name}`. The first path that exists wins. If neither exists,
 falls back to `/system/run/{name}` (which will produce a clear error downstream).
+
+#### Host Mode (`host+factory://`)
+
+When the path uses a `host+` URL, `pond run` reads the config from the
+host filesystem and executes the factory named by the URL scheme.  **No
+`$POND` is required.**  This is useful for inspecting remote backups,
+generating sites, or running any factory against a local config file
+without first setting up a pond.
+
+```bash
+# Discover ponds in a remote S3 bucket
+pond run host+remote:///path/to/backup-config.yaml list-ponds
+
+# Browse what's in a remote backup
+pond run host+remote:///path/to/backup-config.yaml show
+
+# Build a site from a local config
+pond run host+sitegen:///path/to/site.yaml build ./dist
+```
+
+The URL scheme (`remote`, `sitegen`, etc.) must be a registered factory
+name.  Format providers like `csv` are not valid here -- use `pond cat`
+for those.
+
+**Config file format**: the YAML file at the host path is passed directly
+to the factory, exactly as if it were stored inside a pond node.  For
+remote factories, this is the same YAML used with `pond mknod`:
+
+```yaml
+# backup-config.yaml -- point at a remote S3 bucket
+url: "s3://my-bucket"
+endpoint: "http://my-server:9000"
+region: "us-east-1"
+access_key: "..."
+secret_key: "..."
+allow_http: true
+```
 
 ---
 
@@ -1214,7 +1268,7 @@ inputs:
 
 ### remote
 
-Backup and replication to S3-compatible storage.
+Backup, replication, and cross-pond import via S3-compatible storage.
 
 ```yaml
 # Local file backup
@@ -1248,6 +1302,82 @@ pond run /system/run/1-backup list-files
 pond run /system/run/1-backup show           # All files
 pond run /system/run/1-backup show "/data/*" # Pattern match
 pond run /system/run/1-backup show --script  # Generate copy-pastable scripts
+
+# Discover ponds in a bucket
+pond run /system/run/1-backup list-ponds
+```
+
+#### Host Mode (no pond required)
+
+Any remote factory command works from a host config file via `host+remote://`.
+This is the fastest way to inspect a remote backup from another machine:
+
+```bash
+# Create a config file pointing at the remote bucket
+cat > remote.yaml << 'EOF'
+url: "s3://my-bucket"
+endpoint: "http://remote-host:9000"
+region: "us-east-1"
+access_key: "mykey"
+secret_key: "mysecret"
+allow_http: true
+EOF
+
+# Discover what ponds exist in the bucket
+pond run host+remote:///path/to/remote.yaml list-ponds
+
+# Browse the filesystem tree in a specific pond's backup
+# (use the pond-{uuid} URL from list-ponds output)
+# First, update remote.yaml to include the pond-{uuid} suffix:
+#   url: "s3://my-bucket/pond-019d2da5-..."
+pond run host+remote:///path/to/remote.yaml show
+```
+
+#### Cross-Pond Import
+
+Import lets one pond pull a subtree from another pond's remote backup.
+The import config specifies which path in the foreign pond to import
+and where it appears locally:
+
+```yaml
+# import-config.yaml
+url: "s3://bucket-name/pond-<producer-uuid>"
+endpoint: "http://remote-host:9000"
+region: "us-east-1"
+access_key: "..."
+secret_key: "..."
+allow_http: true
+import:
+  source_path: "/logs/data"       # Path in the foreign pond
+  local_path: "/sources/remote"   # Where it appears in this pond
+```
+
+Use `/**` suffix on `source_path` for recursive import of nested
+directories:
+
+```yaml
+import:
+  source_path: "/logs/**"          # Import all subdirectories
+  local_path: "/sources/remote"
+```
+
+**Workflow:**
+```bash
+# 1. Discover the producer's pond UUID
+pond run host+remote:///remote.yaml list-ponds
+
+# 2. Create the import config with the discovered UUID
+#    (set url to s3://bucket/pond-<uuid>, add import section)
+
+# 3. Install the import factory in the consumer pond
+pond mknod remote /system/etc/10-import --config-path import-config.yaml
+
+# 4. Pull the foreign data
+pond run 10-import pull
+
+# 5. Query the imported data
+pond list '/sources/remote/**'
+pond cat /sources/remote/data.csv
 ```
 
 #### Emergency Recovery (duckpond-emergency)

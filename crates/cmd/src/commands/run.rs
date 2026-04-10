@@ -10,6 +10,7 @@ use log::{debug, error};
 use provider::FactoryRegistry;
 use provider::registry::ExecutionContext;
 use tokio::io::AsyncReadExt;
+use utilities::env_substitution;
 
 /// Execute a run configuration
 pub async fn run_command(
@@ -113,6 +114,10 @@ async fn run_host_command(
         config_bytes.len(),
         host_path
     );
+
+    // Expand env references (${env:VAR}) at runtime so that
+    // config files can reference environment variables for secrets.
+    let config_bytes = expand_config_templates(&config_bytes, host_path)?;
 
     // Resolve the config node's FileID for the factory context.
     // On the host filesystem the FileID is deterministic from the path.
@@ -268,6 +273,11 @@ async fn run_pond_command_impl(
         config_bytes.len()
     );
 
+    // Expand env references (${env:VAR}) at runtime so that
+    // secrets are never persisted in the oplog.
+    // Raw references are stored by mknod; expansion happens here.
+    let config_bytes = expand_config_templates(&config_bytes, config_path)?;
+
     // Build args: if extra_args provided, use those; otherwise use factory mode from control table
     let args = if !extra_args.is_empty() {
         log::debug!(
@@ -367,6 +377,35 @@ async fn run_pond_command_impl(
     .with_context(|| format!("Execution failed for factory '{}'", factory_name))?;
 
     Ok(())
+}
+
+/// Expand `${env:VAR}` references in config bytes.
+///
+/// Supports `${env:VAR}` and `${env:VAR:-default}` for reading environment
+/// variables at runtime.  Config files stored in the pond contain raw
+/// references; this function resolves them just before factory execution
+/// so that secrets are never persisted in the oplog.
+fn expand_config_templates(config_bytes: &[u8], source_path: &str) -> Result<Vec<u8>> {
+    let content = std::str::from_utf8(config_bytes)
+        .with_context(|| format!("Config file is not valid UTF-8: {}", source_path))?;
+
+    // If there are no env references, skip expansion for efficiency
+    if !env_substitution::has_env_refs(content) {
+        return Ok(config_bytes.to_vec());
+    }
+
+    let expanded =
+        env_substitution::substitute_env_vars(content)
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to expand environment variables in config '{}':\n  {}\n  \
+                Tip: Use ${{env:VAR}} to read environment variables, ${{env:VAR:-default}} for defaults",
+                    source_path,
+                    e
+                )
+            })?;
+
+    Ok(expanded.into_bytes())
 }
 
 #[cfg(test)]
