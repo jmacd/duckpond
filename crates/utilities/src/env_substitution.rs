@@ -74,7 +74,9 @@ pub fn substitute_env_vars(input: &str) -> Result<String, EnvSubstError> {
         }
 
         // Possible `${...}` placeholder.
-        if rest.starts_with("${") && let Some(close) = rest[2..].find('}') {
+        if rest.starts_with("${")
+            && let Some(close) = rest[2..].find('}')
+        {
             let inner = &rest[2..2 + close];
 
             if let Some(spec) = inner.strip_prefix("env:") {
