@@ -138,15 +138,8 @@ cp "${BINARY_PATH}" "${SCRIPT_DIR}/pond"
 # Copy emergency recovery script
 cp "${REPO_ROOT}/crates/cmd/scripts/duckpond-emergency" "${SCRIPT_DIR}/duckpond-emergency"
 
-# Copy vendor assets (DuckDB-WASM, Plot, D3) if available
-VENDOR_SRC="${REPO_ROOT}/crates/sitegen/vendor/dist"
-if [[ -d "${VENDOR_SRC}" ]]; then
-    rm -rf "${SCRIPT_DIR}/vendor"
-    cp -r "${VENDOR_SRC}" "${SCRIPT_DIR}/vendor"
-else
-    echo "WARNING: vendor/dist not found — run 'make vendor' first for browser tests"
-    mkdir -p "${SCRIPT_DIR}/vendor"
-fi
+# Copy vendor download script for Docker build (downloaded inside Docker, not from host)
+cp "${REPO_ROOT}/crates/sitegen/vendor/download.sh" "${SCRIPT_DIR}/vendor-download.sh"
 
 echo ""
 echo "=== Building Docker image ==="
@@ -163,10 +156,10 @@ ${CONTAINER_RT} build \
     -t duckpond-test:latest \
     .
 
-# Clean up copied binary, scripts, and vendor
+# Clean up copied binary and scripts
 rm -f "${SCRIPT_DIR}/pond"
 rm -f "${SCRIPT_DIR}/duckpond-emergency"
-rm -rf "${SCRIPT_DIR}/vendor"
+rm -f "${SCRIPT_DIR}/vendor-download.sh"
 
 echo ""
 echo "=== Build complete ==="

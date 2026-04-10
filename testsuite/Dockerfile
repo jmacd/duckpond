@@ -9,6 +9,13 @@
 # - Local S3 via MinIO for replication testing
 # - Systemd-like supervision (using supervisord)
 
+# Vendor stage — download JS/WASM dependencies for sitegen.
+# Same mechanism as the production Dockerfile.
+FROM node:18-slim AS vendor
+WORKDIR /vendor
+COPY vendor-download.sh download.sh
+RUN bash download.sh
+
 FROM debian:bookworm-slim
 
 # Install runtime dependencies and useful debugging tools
@@ -105,7 +112,7 @@ COPY duckpond-emergency /usr/local/bin/duckpond-emergency
 RUN chmod +x /usr/local/bin/duckpond-emergency
 
 # Copy vendor assets (DuckDB-WASM, Observable Plot, D3) for sitegen
-COPY vendor/ /usr/local/share/duckpond/vendor/
+COPY --from=vendor /vendor/dist/ /usr/local/share/duckpond/vendor/
 
 # Create experiment workspace
 RUN mkdir -p /experiment /results /etc/supervisor/conf.d
