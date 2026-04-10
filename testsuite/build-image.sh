@@ -73,7 +73,7 @@ if [[ "${HOST_OS}" == "Darwin" ]]; then
     
     # Try zigbuild if available (works best for cross-compilation)
     # cargo-zigbuild finds zig via PATH or via the Python ziglang package.
-    if command -v cargo-zigbuild &> /dev/null && cargo-zigbuild zig version &> /dev/null; then
+    if command -v cargo-zigbuild &> /dev/null && cargo-zigbuild zig cc -- --version &> /dev/null; then
         echo "Using cargo-zigbuild (${BUILD_MODE})..."
         cd "${REPO_ROOT}"
         if [[ "${QUIET}" == "true" ]]; then
@@ -97,7 +97,7 @@ else
     # Use zigbuild if available to target the container's glibc (bookworm = 2.36).
     # A plain cargo build links against the host glibc which may be too new.
     # cargo-zigbuild finds zig via PATH or via the Python ziglang package.
-    if command -v cargo-zigbuild &> /dev/null && cargo-zigbuild zig version &> /dev/null; then
+    if command -v cargo-zigbuild &> /dev/null && cargo-zigbuild zig cc -- --version &> /dev/null; then
         echo "Using cargo-zigbuild targeting glibc 2.36 (${BUILD_MODE})..."
         if [[ "${QUIET}" == "true" ]]; then
             cargo zigbuild ${CARGO_PROFILE} --bin pond --target ${CONTAINER_TARGET}.2.36 2>&1 | tail -5
