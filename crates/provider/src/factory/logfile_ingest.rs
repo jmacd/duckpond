@@ -203,11 +203,16 @@ pub async fn execute(
     // - A new archived file exists that matches pond's tracked content
     let active_host_file = host_files.iter().find(|f| f.is_active);
     if let Some(host_active) = active_host_file {
-        let active_filename = host_active
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let active_filename = match host_active.path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => {
+                log::warn!(
+                    "Skipping active file with non-UTF8 name: {:?}",
+                    host_active.path
+                );
+                return Ok(());
+            }
+        };
 
         if let Some(pond_active) = pond_files.get(active_filename) {
             // Check if rotation might have occurred:

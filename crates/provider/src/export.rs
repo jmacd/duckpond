@@ -666,9 +666,12 @@ pub fn read_parquet_schema(export_dir: &Path) -> Result<TemplateSchema> {
 
 fn find_first_parquet_file(dir: &Path) -> Result<PathBuf> {
     fn find_recursive(dir: &Path) -> Option<PathBuf> {
-        let entries = std::fs::read_dir(dir).ok()?;
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
         for entry in entries {
-            let entry = entry.ok()?;
             let path = entry.path();
             if path.is_file() && path.extension().is_some_and(|ext| ext == "parquet") {
                 return Some(path);

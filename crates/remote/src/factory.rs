@@ -951,9 +951,25 @@ async fn show_directory_tree(
     let batches = match ctx.sql(&sql).await {
         Ok(df) => match df.collect().await {
             Ok(b) => b,
-            Err(_) => return,
+            Err(e) => {
+                log::warn!(
+                    "{}[SHOW] Failed to read directory {}: {}",
+                    "  ".repeat(depth),
+                    path,
+                    e
+                );
+                return;
+            }
         },
-        Err(_) => return,
+        Err(e) => {
+            log::warn!(
+                "{}[SHOW] Failed to query directory {}: {}",
+                "  ".repeat(depth),
+                path,
+                e
+            );
+            return;
+        }
     };
 
     if batches.is_empty() || batches[0].num_rows() == 0 {
@@ -1607,7 +1623,12 @@ async fn execute_import(
         let dir_name = local_path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("");
+            .ok_or_else(|| {
+                RemoteError::Configuration(format!(
+                    "Invalid import local_path '{}': cannot extract directory name",
+                    import_config.local_path
+                ))
+            })?;
 
         let parent_wd = if parent_path == std::path::Path::new("/") {
             root.clone()
@@ -1711,7 +1732,12 @@ async fn execute_import(
         let txn_files = remote_table
             .list_transaction_files(&pond_id_for_bundle, txn_seq)
             .await
-            .unwrap_or_default();
+            .map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to list files for transaction {}: {}",
+                    txn_seq, e
+                ))
+            })?;
 
         for (bundle_id, path, _root_hash, size, pond_txn_id) in &txn_files {
             // Filter to files matching our partition set
@@ -2037,15 +2063,27 @@ fn path_matches_pattern(path: &str, pattern: &str) -> bool {
 
     // Simple prefix matching for "/data/*" style patterns
     if let Some(prefix) = pattern.strip_suffix("/*") {
-        return path.starts_with(prefix) || path.starts_with(&prefix[1..]); // Handle with or without leading /
+        if prefix.is_empty() {
+            return true;
+        }
+        // Require delimiter after prefix to avoid matching "/abc" against "/abcdef/file"
+        let matches_with_slash = |p: &str| path == p || path.starts_with(&format!("{}/", p));
+        return matches_with_slash(prefix)
+            || (!prefix.is_empty() && matches_with_slash(&prefix[1..]));
     }
 
     if let Some(prefix) = pattern.strip_suffix("*") {
-        return path.starts_with(prefix) || path.starts_with(&prefix[1..]);
+        if prefix.is_empty() {
+            return true;
+        }
+        return path.starts_with(prefix) || (!prefix.is_empty() && path.starts_with(&prefix[1..]));
     }
 
     // Exact match
-    path == pattern || path == &pattern[1..] // Handle with or without leading /
+    if pattern.is_empty() {
+        return path.is_empty();
+    }
+    path == pattern || path == &pattern[1..]
 }
 
 /// Format file size for display

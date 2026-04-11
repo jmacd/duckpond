@@ -116,7 +116,14 @@ impl ColumnRenameTableProvider {
 
                 // Check if this column needs type casting
                 let data_type = if let Some(cast_type) = cast_map.get(&new_name) {
-                    parse_arrow_type(cast_type).unwrap_or_else(|| field.data_type().clone())
+                    parse_arrow_type(cast_type).unwrap_or_else(|| {
+                        log::warn!(
+                            "Unknown cast type '{}' for column '{}', keeping original type",
+                            cast_type,
+                            new_name
+                        );
+                        field.data_type().clone()
+                    })
                 } else {
                     field.data_type().clone()
                 };

@@ -366,12 +366,13 @@ async fn copy_directory_recursive(
                                 file_count += sub_files;
                             } else if entry.entry_type.is_file() {
                                 // Copy file: read from host WD, write to pond WD
-                                let entry_type = if name.ends_with(".series") {
-                                    tinyfs::EntryType::TablePhysicalSeries
-                                } else if name.ends_with(".table") {
-                                    tinyfs::EntryType::TablePhysicalVersion
-                                } else {
-                                    tinyfs::EntryType::FilePhysicalVersion
+                                let ext = std::path::Path::new(name.as_str())
+                                    .extension()
+                                    .and_then(|e| e.to_str());
+                                let entry_type = match ext {
+                                    Some("series") => tinyfs::EntryType::TablePhysicalSeries,
+                                    Some("table") => tinyfs::EntryType::TablePhysicalVersion,
+                                    _ => tinyfs::EntryType::FilePhysicalVersion,
                                 };
 
                                 copy_single_file(host_wd, name, &pond_wd, name, entry_type)

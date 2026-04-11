@@ -279,8 +279,8 @@ fn validate_export_inputs(patterns: &[String], output_dir: &str, temporal: &str)
     let temporal_parts: Vec<&str> = temporal.split(',').collect();
 
     for part in &temporal_parts {
-        let part = part.trim();
-        if !valid_temporal_parts.contains(&part) {
+        let part = part.trim().to_lowercase();
+        if !valid_temporal_parts.contains(&part.as_str()) {
             return Err(anyhow::anyhow!(
                 "Invalid temporal partition '{}'. Valid options: {}",
                 part,
@@ -554,8 +554,10 @@ async fn export_queryable_file(
         format!("SELECT *, {} FROM source", temporal_columns)
     };
 
-    // Translate user query to use unique table name
-    let sql_query = user_sql_query.replace("source", &unique_table_name);
+    // Translate user query to use unique table name.
+    // Use word-boundary-aware replacement to avoid mangling column names
+    // like "data_source" when replacing the table name "source".
+    let sql_query = user_sql_query.replacen("source", &unique_table_name, 1);
 
     log::debug!("[SEARCH] User query: {}", user_sql_query);
     log::debug!("[SEARCH] Executing translated query: {}", sql_query);
@@ -806,32 +808,14 @@ async fn execute_direct_copy_query(
                             );
                         }
 
-                        // Add WHERE clause to the query
+                        // Add WHERE clause to the query.
+                        // Always wrap in a subquery to avoid issues with
+                        // existing WHERE clauses or complex query structures.
                         let where_clause = where_clauses.join(" AND ");
-
-                        // Check if query already has WHERE clause and append accordingly
-                        if translated_query.to_lowercase().contains(" where ") {
-                            translated_query = format!(
-                                "SELECT * FROM ({}) WHERE {}",
-                                translated_query, where_clause
-                            );
-                        } else {
-                            // Simple case: add WHERE to basic SELECT
-                            if translated_query
-                                .trim()
-                                .to_lowercase()
-                                .starts_with("select ")
-                            {
-                                translated_query =
-                                    format!("{} WHERE {}", translated_query, where_clause);
-                            } else {
-                                // Complex case: wrap in subquery
-                                translated_query = format!(
-                                    "SELECT * FROM ({}) WHERE {}",
-                                    translated_query, where_clause
-                                );
-                            }
-                        }
+                        translated_query = format!(
+                            "SELECT * FROM ({}) WHERE {}",
+                            translated_query, where_clause
+                        );
 
                         log::debug!("  [TBL] Temporal filtered query: {}", translated_query);
                     }

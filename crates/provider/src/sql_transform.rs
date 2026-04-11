@@ -32,7 +32,7 @@ pub fn transform_sql(original_sql: &str, options: &SqlTransformOptions) -> Strin
     let statements = match DFParser::parse_sql_with_dialect(original_sql, &dialect) {
         Ok(stmts) => stmts,
         Err(e) => {
-            debug!(
+            log::warn!(
                 "Failed to parse SQL for transformation, falling back to original: {}",
                 e
             );

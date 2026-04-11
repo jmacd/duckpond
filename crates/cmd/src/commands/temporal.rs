@@ -178,14 +178,20 @@ pub async fn detect_overlaps_command(
             // Extract and print the statistics
             if let Some(batch) = stats_batches.first() {
                 if batch.num_rows() > 0 {
-                    let row_count_col = batch.column_by_name("row_count").expect("ok");
-                    let min_ts_col = batch.column_by_name("min_ts").expect("ok");
-                    let max_ts_col = batch.column_by_name("max_ts").expect("ok");
+                    let row_count_col = batch.column_by_name("row_count").ok_or_else(|| {
+                        anyhow::anyhow!("Expected 'row_count' column in statistics")
+                    })?;
+                    let min_ts_col = batch
+                        .column_by_name("min_ts")
+                        .ok_or_else(|| anyhow::anyhow!("Expected 'min_ts' column in statistics"))?;
+                    let max_ts_col = batch
+                        .column_by_name("max_ts")
+                        .ok_or_else(|| anyhow::anyhow!("Expected 'max_ts' column in statistics"))?;
 
                     let row_count = row_count_col
                         .as_any()
                         .downcast_ref::<arrow::array::Int64Array>()
-                        .expect("ok")
+                        .ok_or_else(|| anyhow::anyhow!("Expected Int64 type for 'row_count'"))?
                         .value(0);
 
                     // Handle potential null timestamps (empty tables)
@@ -201,7 +207,7 @@ pub async fn detect_overlaps_command(
                                 let min_ts = min_ts_col
                                     .as_any()
                                     .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                                    .expect("ok")
+                                    .expect("downcast failed after type match")
                                     .value(0);
                                 format_timestamp(min_ts)
                             }
@@ -212,7 +218,7 @@ pub async fn detect_overlaps_command(
                                 let min_ts = min_ts_col
                                     .as_any()
                                     .downcast_ref::<arrow::array::TimestampSecondArray>()
-                                    .expect("ok")
+                                    .expect("downcast failed after type match")
                                     .value(0);
                                 format_timestamp(min_ts * 1000)
                             }
@@ -231,7 +237,7 @@ pub async fn detect_overlaps_command(
                                 let max_ts = max_ts_col
                                     .as_any()
                                     .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                                    .expect("ok")
+                                    .expect("downcast failed after type match")
                                     .value(0);
                                 format_timestamp(max_ts)
                             }
@@ -242,7 +248,7 @@ pub async fn detect_overlaps_command(
                                 let max_ts = max_ts_col
                                     .as_any()
                                     .downcast_ref::<arrow::array::TimestampSecondArray>()
-                                    .expect("ok")
+                                    .expect("downcast failed after type match")
                                     .value(0);
                                 format_timestamp(max_ts * 1000)
                             }
@@ -510,7 +516,10 @@ fn analyze_timeline(data_points: &[(i64, i64)]) -> Vec<TimelineSegment> {
                         // Add overlap
                         timeline.push(TimelineSegment::Overlap {
                             start_timestamp: prev_timestamp,
-                            end_timestamp: overlap_points.last().expect("ok").0,
+                            end_timestamp: overlap_points
+                                .last()
+                                .expect("overlap_points is non-empty")
+                                .0,
                             points: overlap_points,
                         });
 
@@ -852,7 +861,7 @@ fn parse_timestamp_millis(timestamp_str: &str) -> Result<i64> {
 
     // Try parsing date-only format and assume 00:00:00 UTC
     if let Ok(date) = chrono::NaiveDate::parse_from_str(timestamp_str, "%Y-%m-%d") {
-        let naive_dt = date.and_hms_opt(0, 0, 0).expect("ok");
+        let naive_dt = date.and_hms_opt(0, 0, 0).expect("midnight is always valid");
         let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc);
         return Ok(utc_dt.timestamp_millis());
     }
