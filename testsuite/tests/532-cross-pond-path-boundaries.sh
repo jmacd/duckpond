@@ -160,7 +160,7 @@ pond mkdir /system/etc
 
 # Import with source_path: "/" — the entire foreign root
 cat > /tmp/import-config.yaml << EOF
-url: "s3://${BUCKET_NAME}/pond-${PRODUCER_POND_ID}"
+url: "s3://${BUCKET_NAME}"
 endpoint: "${MINIO_ENDPOINT}"
 region: "us-east-1"
 access_key_id: "${MINIO_ROOT_USER}"

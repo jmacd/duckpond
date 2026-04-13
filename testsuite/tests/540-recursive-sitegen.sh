@@ -60,9 +60,6 @@ echo "=== Setting up Pond1 (Producer with data + sitegen) ==="
 export POND=/pond1
 pond init
 
-PRODUCER_POND_ID=$(pond config 2>/dev/null | grep "Pond ID" | awk '{print $NF}')
-echo "Producer pond_id: ${PRODUCER_POND_ID}"
-
 # Create a dynamic-dir with synthetic timeseries
 cat > /tmp/sensors.yaml << 'YAML'
 entries:
@@ -254,7 +251,7 @@ pond mkdir -p /sources
 
 # Import the producer's entire tree
 cat > /tmp/import-config.yaml << EOF
-url: "s3://${BUCKET_NAME}/pond-${PRODUCER_POND_ID}"
+url: "s3://${BUCKET_NAME}"
 endpoint: "${MINIO_ENDPOINT}"
 region: "us-east-1"
 access_key_id: "${MINIO_ROOT_USER}"

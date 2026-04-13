@@ -181,13 +181,7 @@ echo "✓ DuckDB available: $(duckdb --version 2>&1 | head -1)"
 
 # Determine table path
 if [[ "$USE_S3" == "true" ]]; then
-    # For S3, we need the full path including pond-id
-    POND_ID=$(pond config 2>/dev/null | grep 'pond_id' | awk '{print $2}' || echo "")
-    if [[ -n "$POND_ID" ]]; then
-        TABLE_PATH="s3://${BUCKET_NAME}/pond-${POND_ID}"
-    else
-        TABLE_PATH="s3://${BUCKET_NAME}"
-    fi
+    TABLE_PATH="s3://${BUCKET_NAME}"
     
     echo "Testing Delta table at: ${TABLE_PATH}"
     duckdb -c "

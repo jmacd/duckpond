@@ -317,16 +317,15 @@ mode. When absent, it operates in the existing push/pull modes.
 url: "s3://my-backup"
 compression_level: 3
 
-# Cross-pond import (new behavior)
-# NOTE: url must be the FULL backup table path including pond-{uuid}.
-# The foreign pond's UUID is visible via 'list-ponds' or backup output.
-url: "s3://septic-dev/pond-019503a1-7c44-7f8e-8a3b-5e2d9f4c1a00"
+# Cross-pond import
+# Each pond has its own dedicated bucket. URL points directly to the bucket.
+url: "s3://septic-dev"
 import:
   source_path: "/ingest"          # flat: import only /ingest partition
   local_path: "/sources/septic"
 
 # Recursive import — includes all child partitions
-url: "s3://duckpond-linux/pond-019d0473-28a8-7169-9848-00d60bebbc3c"
+url: "s3://duckpond-linux"
 import:
   source_path: "/logs/**"         # recursive: import /logs and all descendants
   local_path: "/sources/workshophost"
@@ -444,9 +443,8 @@ cross-backup dependencies.
 - Import factories in `/system/etc/` can Pull in PondReadWriter mode
 - End-to-end test (530) passes 6/6 checks with MinIO
 - Remote exploration subcommands:
-  - `list-ponds`: scans bucket for pond-{uuid}/ prefixes
   - `show`: reads foreign OpLog, displays full directory tree
-  - Both accessible via `pond run host+remote:///config.yaml <cmd>`
+  - Accessible via `pond run host+remote:///config.yaml show`
 
 ### Phase 2.5: Recursive Import and Error Handling -- IN PROGRESS
 
@@ -493,15 +491,12 @@ The remote factory provides subcommands for exploring backup storage
 without external S3 CLI tools:
 
 ```bash
-# List all ponds in a bucket
-pond run host+remote:///config.yaml list-ponds
-
-# Show the full directory tree of a specific pond backup
+# Show the full directory tree of a pond backup
 pond run host+remote:///config.yaml show
 ```
 
-`list-ponds` scans the bucket for `pond-{uuid}/` prefixes using
-direct object_store listing. `show` reads the foreign OpLog via
+Each pond has its own dedicated bucket, so the URL in the config file
+points directly to the bucket. `show` reads the foreign OpLog via
 `ChunkedAsyncFileReader` and recursively displays the directory tree
 with entry types, sizes, and version counts.
 

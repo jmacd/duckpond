@@ -32,7 +32,7 @@ surface and operator-facing features are either absent or rough.
 ### Already exists (backend ready)
 | Feature | Where | Notes |
 |---------|-------|-------|
-| Remote push/pull | `crates/remote/src/factory.rs` | Factory subcommands: push, pull, replicate, verify, show, list-ponds, list-files |
+| Remote push/pull | `crates/remote/src/factory.rs` | Factory subcommands: push, pull, replicate, verify, show, list-files |
 | `pond sync` | `crates/cmd/src/commands/control.rs:504-735` | Scans `/system/run/*`, runs remote factories |
 | `pond run` | `crates/cmd/src/commands/run.rs` | Full factory execution, template expansion |
 | `pond maintain` | `crates/cmd/src/commands/maintain.rs` + `crates/steward/src/maintenance.rs` | Checkpoint, vacuum, optional compact on data+control tables |
@@ -83,7 +83,7 @@ other phases since the operator guide uses `/sys/` paths throughout.
 
 - New `crates/cmd/src/commands/remote.rs`
 - Subcommands: `add`, `list`, `status`, `push`, `pull`, `show`, `verify`,
-  `list-ponds`, `replicate`
+  `replicate`
 - `add`: `pond mknod --config` + `set_factory_mode` in one step
 - `list/status`: query control table for remote factory state
 - Others: delegate to `pond run <path> <subcommand>`

@@ -157,7 +157,7 @@ async fn init_from_backup(ship_context: &ShipContext, init_config: InitConfig) -
     remote::register_s3_handlers();
 
     // Build the remote table URL with pond_id and get storage options with credentials
-    let remote_url = config.build_table_url(&pond_metadata_for_restore.pond_id.to_string());
+    let remote_url = config.build_table_url();
     let storage_options = config.to_storage_options();
     log::debug!(
         "Opening remote table at {} with storage_options keys: {:?}",

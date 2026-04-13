@@ -121,11 +121,10 @@ pond mkdir /system/etc
 # Configure import factory pointing at the producer's backup
 # source_path: the path in the producer's pond to import
 # local_path: where the imported data appears in this pond
-# Configure import factory pointing at the producer's backup.
-# The URL must point to the full backup table path (including pond-{id} suffix
-# that the producer's backup uses).
+# Configure import factory pointing at the producer's backup bucket.
+# The import code discovers the producer's pond UUID internally from FILE-META objects.
 cat > /tmp/import-config.yaml << EOF
-url: "s3://${BUCKET_NAME}/pond-${PRODUCER_POND_ID}"
+url: "s3://${BUCKET_NAME}"
 endpoint: "${MINIO_ENDPOINT}"
 region: "us-east-1"
 access_key_id: "${MINIO_ROOT_USER}"
