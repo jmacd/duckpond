@@ -733,17 +733,14 @@ async fn execute_remote(
     log::info!("   Command: {:?}", cmd);
 
     // Handle commands that don't need a pond-specific table
-    match &cmd {
-        RemoteCommand::Show { .. } => {
-            // When run from host+remote:// (no pond context), show reads
-            // the foreign OpLog directly from backup.
-            if context.pond_metadata.is_none() {
-                return execute_show_remote(&config).await;
-            }
-            // Otherwise fall through to normal pond-context show
-        }
-        _ => {}
+    if matches!(cmd, RemoteCommand::Show{..}) &&
+        // When run from host+remote:// (no pond context), show reads
+        // the foreign OpLog directly from backup.
+        context.pond_metadata.is_none()
+    {
+        return execute_show_remote(&config).await;
     }
+    // Otherwise fall through to normal pond-context show
 
     // Get pond UUID for path prefix
     let pond_metadata = context
