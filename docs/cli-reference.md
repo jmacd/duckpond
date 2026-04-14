@@ -14,7 +14,7 @@
 | `pond describe` | Show file schema | `pond describe /data/*.csv` |
 | `pond mknod` | Create factory nodes | `pond mknod --config f.yaml /path` |
 | `pond run` | Execute factory nodes | `pond run 20-foo collect` |
-| `pond run` | Execute from host config | `pond run host+remote:///config.yaml list-ponds` |
+| `pond run` | Execute from host config | `pond run host+remote:///config.yaml show` |
 | `pond log` | View transaction history | `pond log --limit 20` |
 | `pond sync` | Sync with remote storage | `pond sync` |
 | `pond config` | Show/set pond configuration | `pond config` |
@@ -361,9 +361,6 @@ generating sites, or running any factory against a local config file
 without first setting up a pond.
 
 ```bash
-# Discover ponds in a remote S3 bucket
-pond run host+remote:///path/to/backup-config.yaml list-ponds
-
 # Browse what's in a remote backup
 pond run host+remote:///path/to/backup-config.yaml show
 
@@ -1298,13 +1295,10 @@ pond run /system/run/1-backup verify
 # List files in remote storage
 pond run /system/run/1-backup list-files
 
-# Show files with verification script (for external tool validation)
+# Show backup contents
 pond run /system/run/1-backup show           # All files
 pond run /system/run/1-backup show "/data/*" # Pattern match
 pond run /system/run/1-backup show --script  # Generate copy-pastable scripts
-
-# Discover ponds in a bucket
-pond run /system/run/1-backup list-ponds
 ```
 
 #### Host Mode (no pond required)
@@ -1313,9 +1307,9 @@ Any remote factory command works from a host config file via `host+remote://`.
 This is the fastest way to inspect a remote backup from another machine:
 
 ```bash
-# Create a config file pointing at the remote bucket
+# Create a config file pointing at the pond's bucket
 cat > remote.yaml << 'EOF'
-url: "s3://my-bucket"
+url: "s3://my-pond-bucket"
 endpoint: "http://remote-host:9000"
 region: "us-east-1"
 access_key: "mykey"
@@ -1323,13 +1317,7 @@ secret_key: "mysecret"
 allow_http: true
 EOF
 
-# Discover what ponds exist in the bucket
-pond run host+remote:///path/to/remote.yaml list-ponds
-
-# Browse the filesystem tree in a specific pond's backup
-# (use the pond-{uuid} URL from list-ponds output)
-# First, update remote.yaml to include the pond-{uuid} suffix:
-#   url: "s3://my-bucket/pond-019d2da5-..."
+# Browse the filesystem tree in the backup
 pond run host+remote:///path/to/remote.yaml show
 ```
 
@@ -1341,7 +1329,7 @@ and where it appears locally:
 
 ```yaml
 # import-config.yaml
-url: "s3://bucket-name/pond-<producer-uuid>"
+url: "s3://producer-pond-bucket"
 endpoint: "http://remote-host:9000"
 region: "us-east-1"
 access_key: "..."
@@ -1363,19 +1351,16 @@ import:
 
 **Workflow:**
 ```bash
-# 1. Discover the producer's pond UUID
-pond run host+remote:///remote.yaml list-ponds
+# 1. Create the import config pointing at the producer's bucket
+#    Each pond has its own bucket -- no UUID discovery needed.
 
-# 2. Create the import config with the discovered UUID
-#    (set url to s3://bucket/pond-<uuid>, add import section)
-
-# 3. Install the import factory in the consumer pond
+# 2. Install the import factory in the consumer pond
 pond mknod remote /system/etc/10-import --config-path import-config.yaml
 
-# 4. Pull the foreign data
+# 3. Pull the foreign data
 pond run 10-import pull
 
-# 5. Query the imported data
+# 4. Query the imported data
 pond list '/sources/remote/**'
 pond cat /sources/remote/data.csv
 ```

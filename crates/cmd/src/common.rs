@@ -238,8 +238,14 @@ pub fn format_node_id(node_id: &impl std::fmt::Display) -> String {
             hex_only
         }
     } else {
-        // Hex format - parse as hex and format based on magnitude
-        panic!("unhandled code path");
+        // Non-UUID hex format — show last UUID_SHORT_LENGTH hex characters
+        let hex_only: String = node_id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let len = hex_only.len();
+        if len >= UUID_SHORT_LENGTH {
+            hex_only[len - UUID_SHORT_LENGTH..].to_string()
+        } else {
+            hex_only
+        }
     };
 
     format!("[{}]", id_str)

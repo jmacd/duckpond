@@ -44,7 +44,7 @@ pub struct SiteConfig {
     #[serde(rename = "static", default)]
     pub static_assets: Vec<StaticAsset>,
     /// Ordered list of sidebar entries.
-    /// Each entry is either a plain string (matched by page title substring)
+    /// Each entry is either a plain string (matched by page title, preferring exact match)
     /// or a map with `label` and `children` for hierarchical navigation.
     /// When present, `content_nav` renders pages in this exact order.
     /// Pages not listed are excluded from the sidebar.
@@ -235,7 +235,8 @@ pub struct StaticAsset {
 
 /// A sidebar entry: either a simple label or a label with sub-navigation children.
 ///
-/// Simple entries are plain strings matched by page title substring.
+/// Simple entries are plain strings matched by page title.
+/// Match priority: exact title > case-insensitive exact > substring.
 /// Entries with children render a parent link plus nested sub-items
 /// that expand when the parent or any child is the current page.
 ///
@@ -259,7 +260,7 @@ pub enum SidebarEntry {
     },
     /// Direct link with label and href (no children, no page matching).
     DirectLink { label: String, href: String },
-    /// Simple label matched by page title substring.
+    /// Simple label matched by page title (exact > case-insensitive > substring).
     Simple(String),
 }
 

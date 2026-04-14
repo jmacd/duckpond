@@ -77,9 +77,6 @@ pond copy host:///tmp/temps.csv /data/sensors/temps.csv
 pond copy host:///tmp/events.csv /data/logs/events.csv
 echo "Created nested data structure"
 
-PRODUCER_POND_ID=$(pond config 2>/dev/null | grep "Pond ID" | awk '{print $NF}')
-echo "Producer pond_id: ${PRODUCER_POND_ID}"
-
 # Push to MinIO
 pond mkdir /system
 pond mkdir /system/run
@@ -115,7 +112,7 @@ pond mkdir /system/etc
 
 # Flat import — no /** suffix
 cat > /tmp/flat-import.yaml << EOF
-url: "s3://${BUCKET_NAME}/pond-${PRODUCER_POND_ID}"
+url: "s3://${BUCKET_NAME}"
 endpoint: "${MINIO_ENDPOINT}"
 region: "us-east-1"
 access_key_id: "${MINIO_ROOT_USER}"
@@ -150,7 +147,7 @@ pond mkdir /system/etc
 
 # Recursive import — with /** suffix
 cat > /tmp/recursive-import.yaml << EOF
-url: "s3://${BUCKET_NAME}/pond-${PRODUCER_POND_ID}"
+url: "s3://${BUCKET_NAME}"
 endpoint: "${MINIO_ENDPOINT}"
 region: "us-east-1"
 access_key_id: "${MINIO_ROOT_USER}"

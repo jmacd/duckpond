@@ -404,18 +404,21 @@ fn extract_schema_info(
         });
     }
 
-    // Try to detect timestamp column for series
+    // Try to detect timestamp column for series.
+    // Search in specificity order: most specific names first.
     let timestamp_column = if detect_timestamp {
-        schema
-            .fields()
-            .iter()
-            .find(|field| {
-                matches!(
-                    field.name().to_lowercase().as_str(),
-                    "timestamp" | "time" | "event_time" | "ts" | "datetime"
-                )
-            })
-            .map(|field| field.name().clone())
+        let fields = schema.fields();
+        let find_by = |name: &str| {
+            fields
+                .iter()
+                .find(|f| f.name().to_lowercase() == name)
+                .map(|f| f.name().clone())
+        };
+        find_by("timestamp")
+            .or_else(|| find_by("datetime"))
+            .or_else(|| find_by("event_time"))
+            .or_else(|| find_by("ts"))
+            .or_else(|| find_by("time"))
     } else {
         None
     };

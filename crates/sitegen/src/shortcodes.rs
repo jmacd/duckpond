@@ -200,17 +200,35 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
 ///
 /// Also rewrites the YAML frontmatter variable references.
 pub fn preprocess_variables(content: &str) -> String {
-    content
-        .replace("{{ $0 }}", "{{ cap0 /}}")
-        .replace("{{ $1 }}", "{{ cap1 /}}")
-        .replace("{{ $2 }}", "{{ cap2 /}}")
-        .replace("{{ $3 }}", "{{ cap3 /}}")
-        .replace("nav-list", "nav_list")
-        .replace("site-title", "site_title")
-        .replace("content-nav", "content_nav")
-        .replace("base-url", "base_url")
-        .replace("blog-grid", "blog_grid")
-        .replace("overlay-chart", "overlay_chart")
+    // Only replace shortcode names within {{ }} delimiters to avoid
+    // corrupting prose that happens to contain these strings.
+    let mut result = String::with_capacity(content.len());
+    let mut rest = content;
+
+    while let Some(start) = rest.find("{{") {
+        result.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("}}") {
+            let block = &rest[start..start + end + 2];
+            let replaced = block
+                .replace("{{ $0 }}", "{{ cap0 /}}")
+                .replace("{{ $1 }}", "{{ cap1 /}}")
+                .replace("{{ $2 }}", "{{ cap2 /}}")
+                .replace("{{ $3 }}", "{{ cap3 /}}")
+                .replace("nav-list", "nav_list")
+                .replace("site-title", "site_title")
+                .replace("content-nav", "content_nav")
+                .replace("base-url", "base_url")
+                .replace("blog-grid", "blog_grid")
+                .replace("overlay-chart", "overlay_chart");
+            result.push_str(&replaced);
+            rest = &rest[start + end + 2..];
+        } else {
+            result.push_str(&rest[start..]);
+            rest = "";
+        }
+    }
+    result.push_str(rest);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -416,13 +434,25 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
             let direct_href = entry.href();
 
             // Resolve parent href: explicit href first, then page title match.
+            // Match priority: exact title > case-insensitive exact > substring.
             let resolved_href = if let Some(href) = direct_href {
                 Some(href.to_string())
             } else {
-                pages
+                let all_pages: Vec<_> = pages.iter().flat_map(|pp| pp.iter()).collect();
+                let label_lower = label.to_lowercase();
+                all_pages
                     .iter()
-                    .flat_map(|pp| pp.iter())
-                    .find(|p| !p.hidden && p.title.contains(label))
+                    .find(|p| !p.hidden && p.title == label)
+                    .or_else(|| {
+                        all_pages
+                            .iter()
+                            .find(|p| !p.hidden && p.title.to_lowercase() == label_lower)
+                    })
+                    .or_else(|| {
+                        all_pages
+                            .iter()
+                            .find(|p| !p.hidden && p.title.contains(label))
+                    })
                     .map(|page| page_href(&page.slug))
             };
 
@@ -636,7 +666,10 @@ fn render_figure(_ctx: &ShortcodeContext, args: &ShortcodeArgs) -> String {
         ));
     }
     if !caption.is_empty() {
-        html.push_str(&format!("  <figcaption>{}</figcaption>\n", caption));
+        html.push_str(&format!(
+            "  <figcaption>{}</figcaption>\n",
+            html_escape(caption)
+        ));
     }
     html.push_str("</figure>");
     html
@@ -1159,6 +1192,58 @@ mod tests {
         let water_pos = html.find("Water").unwrap();
         assert!(blog_pos < history_pos, "Blog before History");
         assert!(history_pos < water_pos, "History before Water");
+    }
+
+    #[test]
+    fn test_sidebar_prefers_exact_title_match() {
+        // "Water" sidebar label should match page titled "Water",
+        // not "CSD for Water" which merely contains "Water".
+        let pages = vec![
+            ContentPage {
+                title: "CSD for Water".to_string(),
+                slug: "csd_for_water".to_string(),
+                weight: 10,
+                hidden: false,
+                section: Some("Blog".to_string()),
+                source_path: "/content/csd_for_water.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
+            },
+            ContentPage {
+                title: "Water".to_string(),
+                slug: "water".to_string(),
+                weight: 20,
+                hidden: false,
+                section: Some("Main".to_string()),
+                source_path: "/content/water.md".to_string(),
+                date: None,
+                summary: None,
+                image: None,
+            },
+        ];
+        let ctx = ShortcodeContext {
+            captures: vec![],
+            datafiles: vec![],
+            collections: BTreeMap::new(),
+            content_pages: BTreeMap::from([("pages".to_string(), pages)]),
+            site_title: String::new(),
+            current_path: "/index.html".to_string(),
+            breadcrumbs: vec![],
+            base_url: "/".to_string(),
+            sidebar_sections: vec![SidebarEntry::Simple("Water".to_string())],
+        };
+        let html = render_content_nav(&ctx, "pages");
+        assert!(
+            html.contains("href=\"/water.html\""),
+            "Should link to water.html, not csd_for_water.html: {}",
+            html
+        );
+        assert!(
+            !html.contains("csd_for_water"),
+            "Should not link to csd_for_water: {}",
+            html
+        );
     }
 
     #[test]

@@ -90,7 +90,12 @@ pub fn apply_layout(name: &str, ctx: &LayoutContext) -> String {
         "logs" => logs_layout(ctx),
         "page" => page_layout(ctx),
         "blog" => blog_layout(ctx),
-        _ => default_layout(ctx),
+        other => {
+            if other != "default" {
+                log::warn!("Unknown layout '{}', using default layout", other);
+            }
+            default_layout(ctx)
+        }
     };
     markup.into_string()
 }

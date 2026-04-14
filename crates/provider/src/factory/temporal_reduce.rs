@@ -562,7 +562,9 @@ fn match_column_pattern(column: &str, pattern: &str) -> bool {
     let prefix_str = prefix.unwrap_or("");
     let suffix_str = suffix.unwrap_or("");
 
-    column.starts_with(prefix_str) && column.ends_with(suffix_str)
+    column.starts_with(prefix_str)
+        && column.ends_with(suffix_str)
+        && column.len() >= prefix_str.len() + suffix_str.len()
 }
 
 /// Generate SQL query for temporal aggregation

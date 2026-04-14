@@ -69,7 +69,7 @@ async fn show_filesystem_transactions(
 
     // Route to appropriate display mode
     match mode {
-        "brief" => show_brief_mode(&commit_history, &store_path, &pond_path, tx).await,
+        "brief" | "concise" => show_brief_mode(&commit_history, &store_path, &pond_path, tx).await,
         "detailed" => show_detailed_mode(&commit_history, &store_path, &pond_path, tx).await,
         _ => Err(steward::StewardError::Dyn(
             format!(

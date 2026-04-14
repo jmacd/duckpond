@@ -258,15 +258,9 @@ Pull complete: local now at version 1661.
 ### Exploring the remote
 
 ```
-# List ponds in the bucket
-$ pond remote list-ponds
-POND ID                               VERSIONS  LAST PUSH
-a1b2c3d4-e5f6-7890-abcd-ef1234567890  1658      2026-04-05 21:30 UTC
-f9e8d7c6-b5a4-3210-fedc-ba0987654321  423       2026-04-04 15:12 UTC
-
 # Show what's in the remote backup
 $ pond remote show
-Remote backup: s3://my-bucket/backups/ (pond a1b2c3d4-...)
+Remote backup: s3://my-pond-bucket/ (pond a1b2c3d4-...)
   /hydrovu/
     /devices/
       /device-123/
@@ -296,7 +290,6 @@ pond remote push         =  pond run /sys/run/<name> push
 pond remote pull         =  pond run /sys/run/<name> pull
 pond remote show         =  pond run /sys/run/<name> show
 pond remote verify       =  pond run /sys/run/<name> verify
-pond remote list-ponds   =  pond run /sys/run/<name> list-ponds
 pond remote replicate    =  pond run /sys/run/<name> replicate
 ```
 
@@ -785,7 +778,6 @@ REMOTES
   pond remote pull                          Pull from remote
   pond remote show                          Show remote backup contents
   pond remote verify                        Verify backup integrity
-  pond remote list-ponds                    List ponds in the bucket
   pond remote replicate                     Generate replica command
 
 MAINTENANCE

@@ -155,7 +155,7 @@ fn parse_table_data(
         let is_data_row = row
             .attributes()
             .class()
-            .map(|c| c.as_utf8_str().contains("data"))
+            .map(|c| c.as_utf8_str().split_whitespace().any(|cls| cls == "data"))
             .unwrap_or(false)
             || row.attributes().get("isi-data-row").flatten().is_some();
 

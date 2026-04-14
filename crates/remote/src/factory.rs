@@ -58,12 +58,6 @@ enum RemoteCommand {
         bundle_id: Option<String>,
     },
 
-    /// List ponds available in the remote storage bucket
-    ///
-    /// Scans the bucket for pond-{uuid}/ prefixes and shows pond
-    /// identity, transaction count, and import configuration hints.
-    ListPonds,
-
     /// Show the contents of a remote pond backup
     ///
     /// Reads the foreign OpLog directly from backup storage and
@@ -90,7 +84,6 @@ impl FactoryCommand for RemoteCommand {
             Self::ListFiles { .. } => ExecutionMode::PondReadWriter,
             Self::Verify { .. } => ExecutionMode::PondReadWriter,
             Self::Show { .. } => ExecutionMode::PondReadWriter,
-            Self::ListPonds => ExecutionMode::PondReadWriter,
         }
     }
 }
@@ -175,16 +168,12 @@ impl RemoteConfig {
         storage_options
     }
 
-    /// Build the full remote table URL with pond_id appended if needed
+    /// Build the full remote table URL.
     ///
-    /// For S3 URLs with just bucket (e.g., s3://bucket), appends pond-{pond_id}
+    /// Each pond gets its own dedicated bucket, so the URL is used as-is.
     #[must_use]
-    pub fn build_table_url(&self, pond_id: &str) -> String {
-        if self.url.starts_with("s3://") && self.url.matches('/').count() == 2 {
-            format!("{}/pond-{}", self.url, pond_id)
-        } else {
-            self.url.clone()
-        }
+    pub fn build_table_url(&self) -> String {
+        self.url.clone()
     }
 }
 
@@ -744,20 +733,14 @@ async fn execute_remote(
     log::info!("   Command: {:?}", cmd);
 
     // Handle commands that don't need a pond-specific table
-    match &cmd {
-        RemoteCommand::ListPonds => {
-            return execute_list_ponds(&config).await;
-        }
-        RemoteCommand::Show { .. } => {
-            // When run from host+remote:// (no pond context), show reads
-            // the foreign OpLog directly from backup.
-            if context.pond_metadata.is_none() {
-                return execute_show_remote(&config).await;
-            }
-            // Otherwise fall through to normal pond-context show
-        }
-        _ => {}
+    if matches!(cmd, RemoteCommand::Show{..}) &&
+        // When run from host+remote:// (no pond context), show reads
+        // the foreign OpLog directly from backup.
+        context.pond_metadata.is_none()
+    {
+        return execute_show_remote(&config).await;
     }
+    // Otherwise fall through to normal pond-context show
 
     // Get pond UUID for path prefix
     let pond_metadata = context
@@ -768,17 +751,9 @@ async fn execute_remote(
 
     // Open or create remote table
     // DeltaOps supports both file:// and s3:// URLs through object_store
+    // Each pond uses its own dedicated bucket, so the URL is used as-is.
     let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
-
-    // If S3 URL is just bucket without path (e.g., s3://bucket), append pond UUID as table path
-    // DeltaLake 0.29+ requires a full table path, not just a bucket
-    let path = if path.starts_with("s3://") && path.matches('/').count() == 2 {
-        let table_path = format!("{}/pond-{}", path, pond_id);
-        log::info!("   Appending pond UUID to path: {}", table_path);
-        table_path
-    } else {
-        path.to_string()
-    };
+    let path = path.to_string();
 
     // Build storage options for S3/R2 configuration
     let storage_options = config.to_storage_options();
@@ -815,7 +790,6 @@ async fn execute_remote(
             )
             .await
         }
-        RemoteCommand::ListPonds => unreachable!("handled above"),
     }
 }
 
@@ -951,9 +925,25 @@ async fn show_directory_tree(
     let batches = match ctx.sql(&sql).await {
         Ok(df) => match df.collect().await {
             Ok(b) => b,
-            Err(_) => return,
+            Err(e) => {
+                log::warn!(
+                    "{}[SHOW] Failed to read directory {}: {}",
+                    "  ".repeat(depth),
+                    path,
+                    e
+                );
+                return;
+            }
         },
-        Err(_) => return,
+        Err(e) => {
+            log::warn!(
+                "{}[SHOW] Failed to query directory {}: {}",
+                "  ".repeat(depth),
+                path,
+                e
+            );
+            return;
+        }
     };
 
     if batches.is_empty() || batches[0].num_rows() == 0 {
@@ -1075,145 +1065,6 @@ async fn show_directory_tree(
             }
         }
     }
-}
-
-/// Build an object_store and base path for a remote URL.
-/// Shared by list-ponds and show to avoid Delta's _last_checkpoint timeout.
-fn build_object_store_for_url(
-    url_str: &str,
-    storage_options: &std::collections::HashMap<String, String>,
-    allow_http: bool,
-) -> Result<(std::sync::Arc<dyn object_store::ObjectStore>, String), RemoteError> {
-    use object_store::ObjectStore;
-
-    if url_str.starts_with("s3://") {
-        let url = url::Url::parse(url_str)
-            .map_err(|e| RemoteError::Configuration(format!("Invalid URL {}: {}", url_str, e)))?;
-
-        let store = object_store::aws::AmazonS3Builder::new()
-            .with_url(url_str)
-            .with_access_key_id(
-                storage_options
-                    .get("access_key_id")
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .with_secret_access_key(
-                storage_options
-                    .get("secret_access_key")
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .with_region(storage_options.get("region").cloned().unwrap_or_default())
-            .with_endpoint(storage_options.get("endpoint").cloned().unwrap_or_default())
-            .with_virtual_hosted_style_request(false)
-            .with_allow_http(allow_http)
-            .build()
-            .map_err(|e| {
-                RemoteError::Configuration(format!("Failed to create S3 client: {}", e))
-            })?;
-
-        let bucket_path = url.path().trim_start_matches('/');
-        Ok((
-            std::sync::Arc::new(store) as std::sync::Arc<dyn ObjectStore>,
-            bucket_path.to_string(),
-        ))
-    } else {
-        let store = object_store::local::LocalFileSystem::new_with_prefix(url_str)
-            .map_err(|e| RemoteError::Configuration(format!("Failed to open local path: {}", e)))?;
-        Ok((
-            std::sync::Arc::new(store) as std::sync::Arc<dyn ObjectStore>,
-            String::new(),
-        ))
-    }
-}
-
-/// List ponds available in the remote storage bucket.
-///
-/// Scans the bucket for `pond-{uuid}/` prefixes and shows each pond's
-/// identity and transaction count.
-#[allow(clippy::print_stdout)]
-async fn execute_list_ponds(config: &RemoteConfig) -> Result<(), RemoteError> {
-    use object_store::ObjectStore;
-
-    log::info!("[SEARCH] Scanning bucket for ponds...");
-
-    let url_str = config.url.strip_prefix("file://").unwrap_or(&config.url);
-    let storage_options = config.to_storage_options();
-
-    let (store, base_path) =
-        build_object_store_for_url(url_str, &storage_options, config.allow_http)?;
-
-    // List prefixes at the base path to find pond-{uuid}/ directories
-    let prefix = if base_path.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(base_path.as_str()))
-    };
-
-    let list_result = store
-        .list_with_delimiter(prefix.as_ref())
-        .await
-        .map_err(|e| {
-            RemoteError::TableOperation(format!("Failed to list bucket contents: {}", e))
-        })?;
-
-    // Filter for pond-{uuid} prefixes
-    let mut pond_prefixes: Vec<String> = list_result
-        .common_prefixes
-        .iter()
-        .filter_map(|p| {
-            let name = p.as_ref().rsplit('/').find(|s| !s.is_empty())?;
-            if name.starts_with("pond-") {
-                Some(name.to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-    pond_prefixes.sort();
-
-    if pond_prefixes.is_empty() {
-        println!("No ponds found in {}", url_str);
-        return Ok(());
-    }
-
-    println!("Ponds in {}:", url_str);
-    println!();
-
-    for prefix_name in &pond_prefixes {
-        let pond_id = prefix_name.strip_prefix("pond-").unwrap_or(prefix_name);
-
-        // Count Delta log files to estimate transaction count (fast, no table open)
-        let log_prefix = if base_path.is_empty() {
-            object_store::path::Path::from(format!("{}/_delta_log", prefix_name))
-        } else {
-            object_store::path::Path::from(format!("{}/{}/_delta_log", base_path, prefix_name))
-        };
-
-        let txn_info = match store.list_with_delimiter(Some(&log_prefix)).await {
-            Ok(result) => {
-                let json_files: Vec<_> = result
-                    .objects
-                    .iter()
-                    .filter(|o| o.location.as_ref().ends_with(".json"))
-                    .collect();
-                if json_files.is_empty() {
-                    "no delta log".to_string()
-                } else {
-                    format!("{} commit(s)", json_files.len())
-                }
-            }
-            Err(_) => "unable to read delta log".to_string(),
-        };
-
-        println!("  pond-id: {}", pond_id);
-        println!("  url:     {}/{}", url_str, prefix_name);
-        println!("  status:  {}", txn_info);
-        println!();
-    }
-
-    Ok(())
 }
 
 /// Push: Back up local files to remote
@@ -1607,7 +1458,12 @@ async fn execute_import(
         let dir_name = local_path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("");
+            .ok_or_else(|| {
+                RemoteError::Configuration(format!(
+                    "Invalid import local_path '{}': cannot extract directory name",
+                    import_config.local_path
+                ))
+            })?;
 
         let parent_wd = if parent_path == std::path::Path::new("/") {
             root.clone()
@@ -1711,7 +1567,12 @@ async fn execute_import(
         let txn_files = remote_table
             .list_transaction_files(&pond_id_for_bundle, txn_seq)
             .await
-            .unwrap_or_default();
+            .map_err(|e| {
+                RemoteError::TableOperation(format!(
+                    "Failed to list files for transaction {}: {}",
+                    txn_seq, e
+                ))
+            })?;
 
         for (bundle_id, path, _root_hash, size, pond_txn_id) in &txn_files {
             // Filter to files matching our partition set
@@ -2037,15 +1898,27 @@ fn path_matches_pattern(path: &str, pattern: &str) -> bool {
 
     // Simple prefix matching for "/data/*" style patterns
     if let Some(prefix) = pattern.strip_suffix("/*") {
-        return path.starts_with(prefix) || path.starts_with(&prefix[1..]); // Handle with or without leading /
+        if prefix.is_empty() {
+            return true;
+        }
+        // Require delimiter after prefix to avoid matching "/abc" against "/abcdef/file"
+        let matches_with_slash = |p: &str| path == p || path.starts_with(&format!("{}/", p));
+        return matches_with_slash(prefix)
+            || (!prefix.is_empty() && matches_with_slash(&prefix[1..]));
     }
 
     if let Some(prefix) = pattern.strip_suffix("*") {
-        return path.starts_with(prefix) || path.starts_with(&prefix[1..]);
+        if prefix.is_empty() {
+            return true;
+        }
+        return path.starts_with(prefix) || (!prefix.is_empty() && path.starts_with(&prefix[1..]));
     }
 
     // Exact match
-    path == pattern || path == &pattern[1..] // Handle with or without leading /
+    if pattern.is_empty() {
+        return path.is_empty();
+    }
+    path == pattern || path == &pattern[1..]
 }
 
 /// Format file size for display

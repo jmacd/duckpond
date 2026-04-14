@@ -284,7 +284,15 @@ impl RemoteTable {
             if let Some(rest) = path_str.strip_prefix("bundle_id=FILE-META-")
                 && rest.len() >= 36
             {
-                return Ok(rest[..36].to_string());
+                let candidate = &rest[..36];
+                if candidate.parse::<uuid7::Uuid>().is_ok() {
+                    return Ok(candidate.to_string());
+                }
+                log::warn!(
+                    "Skipping invalid pond_id '{}' in bundle path: {}",
+                    candidate,
+                    path_str
+                );
             }
         }
 
@@ -853,7 +861,9 @@ impl RemoteTable {
         // rather than constructing an exact bundle_id, because the embedded
         // date component is set at push time and cannot be predicted at
         // query time.
-        let prefix = format!("FILE-META-{}-", pond_id);
+        // Escape SQL LIKE wildcards in pond_id to prevent injection.
+        let escaped_pond_id = pond_id.replace('%', "\\%").replace('_', "\\_");
+        let prefix = format!("FILE-META-{}-", escaped_pond_id);
         let suffix = format!("-{}", txn_seq);
 
         let df = self
@@ -861,7 +871,7 @@ impl RemoteTable {
             .sql(&format!(
                 "SELECT DISTINCT bundle_id, path, root_hash, total_size, pond_txn_id \
                  FROM remote_files \
-                 WHERE bundle_id LIKE '{}%' AND bundle_id LIKE '%{}' \
+                 WHERE bundle_id LIKE '{}%' ESCAPE '\\' AND bundle_id LIKE '%{}' ESCAPE '\\' \
                  ORDER BY path",
                 prefix, suffix
             ))
