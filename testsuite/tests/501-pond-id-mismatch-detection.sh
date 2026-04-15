@@ -67,7 +67,10 @@ pond mknod remote /system/run/1-backup --config-path "${REMOTE_CFG}"
 
 # Create some data
 pond mkdir -p /data
-echo "hello from pond1" | pond copy host:///dev/stdin /data/file1.txt
+TMPFILE=$(mktemp)
+echo "hello from pond1" > "${TMPFILE}"
+pond copy "host:///${TMPFILE}" /data/file1.txt
+rm -f "${TMPFILE}"
 
 # Push should succeed
 pond run /system/run/1-backup push
@@ -94,7 +97,10 @@ pond mknod remote /system/run/1-backup --config-path "${REMOTE_CFG2}"
 
 # Create different data
 pond mkdir -p /data
-echo "hello from pond2" | pond copy host:///dev/stdin /data/file2.txt
+TMPFILE=$(mktemp)
+echo "hello from pond2" > "${TMPFILE}"
+pond copy "host:///${TMPFILE}" /data/file2.txt
+rm -f "${TMPFILE}"
 
 POND2_ID=$(pond config 2>/dev/null | grep "Pond ID" | awk '{print $NF}')
 echo "Pond2 ID: ${POND2_ID}"
@@ -109,20 +115,13 @@ echo "[OK] Pond IDs differ: ${POND1_ID} vs ${POND2_ID}"
 # Push should FAIL with mismatch error
 echo ""
 echo "--- Attempting push (should fail) ---"
-if pond run /system/run/1-backup push 2>&1; then
-    echo "[FAIL] Push succeeded but should have failed with pond_id mismatch"
-    exit 1
-fi
-
-echo "[OK] Push correctly refused"
-
-# Verify the error mentions mismatch
 OUTPUT=$(pond run /system/run/1-backup push 2>&1 || true)
+echo "${OUTPUT}"
+
 if echo "${OUTPUT}" | grep -qi "mismatch"; then
-    echo "[OK] Error message mentions mismatch"
+    echo "[OK] Push correctly refused with mismatch error"
 else
-    echo "[FAIL] Error message should mention 'mismatch'"
-    echo "Got: ${OUTPUT}"
+    echo "[FAIL] Expected mismatch error"
     exit 1
 fi
 

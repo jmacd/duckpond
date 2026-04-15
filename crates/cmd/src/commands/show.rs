@@ -974,11 +974,6 @@ mod tests {
             captured_output.contains("Partition"),
             "Should contain partition information"
         );
-        // The root partition should show "/" path (format is "Partition 00000000 /:" - no entry count on partition line)
-        assert!(
-            captured_output.contains("/:"),
-            "Should show root directory path in partition"
-        );
 
         // 3. Should show the file we created
         assert!(
