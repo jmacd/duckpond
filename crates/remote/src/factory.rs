@@ -1092,6 +1092,26 @@ async fn execute_push(
     let pond_id = pond_metadata.pond_id.to_string();
     log::info!("   Pond ID: {}", pond_id);
 
+    // Check for pond_id mismatch: refuse to push to a bucket that
+    // contains a different pond's data.
+    match remote_table.extract_pond_id() {
+        Ok(remote_pond_id) => {
+            if remote_pond_id != pond_id {
+                return Err(RemoteError::Configuration(format!(
+                    "Pond ID mismatch: local pond is {} but bucket already contains data from pond {}. \
+                     This can happen when a pond is recreated (new init) but the bucket was not cleaned. \
+                     Clean the bucket and retry, or use a different bucket.",
+                    pond_id, remote_pond_id
+                )));
+            }
+            log::info!("   Remote pond ID matches: {}", remote_pond_id);
+        }
+        Err(_) => {
+            // No remote data yet (empty bucket) -- first push is fine.
+            log::info!("   Remote bucket is empty (first push)");
+        }
+    }
+
     // Find which transactions are already backed up
     let backed_up_txns = remote_table.list_transaction_numbers(None).await?;
     log::info!("   Remote has transactions: {:?}", backed_up_txns);
