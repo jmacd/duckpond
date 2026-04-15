@@ -483,7 +483,11 @@ impl std::fmt::Debug for NodeType {
 
 impl std::fmt::Display for FileID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<{}/[{}]@{}>", self.part_id.0.0, self.node_id.0, self.pond_id)
+        write!(
+            f,
+            "<{}/[{}]@{}>",
+            self.part_id.0.0, self.node_id.0, self.pond_id
+        )
     }
 }
 
