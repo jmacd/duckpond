@@ -75,15 +75,17 @@ pub fn fetch_and_resolve(
     url: &str,
     git_ref: &str,
 ) -> Result<String, tinyfs::Error> {
-    // Init or open the bare repo
+    // Clone or open+fetch the bare repo
     let repo = if repo_path.exists() {
-        open_bare_repo(repo_path)?
+        let repo = open_bare_repo(repo_path)?;
+        fetch_remote(&repo)?;
+        repo
     } else {
-        init_bare_repo(repo_path, url)?
+        clone_bare_repo(repo_path, url)?
     };
 
-    // Fetch from origin and resolve the ref from the remote's advertised refs
-    fetch_and_resolve_ref(&repo, git_ref)
+    // Resolve ref from local refs (populated by clone or fetch)
+    resolve_local_ref(&repo, git_ref)
 }
 
 /// Walk the tree at the given commit and build a manifest
@@ -149,27 +151,20 @@ pub fn read_symlink_target(
 
 // --- Internal helpers ---
 
-fn init_bare_repo(
+fn clone_bare_repo(
     path: &Path,
     url: &str,
 ) -> Result<gix::Repository, tinyfs::Error> {
-    std::fs::create_dir_all(path)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to create bare repo dir: {}", e)))?;
+    log::info!("Cloning bare repo from {} to {}", url, path.display());
 
-    let _repo = gix::init_bare(path)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to init bare repo: {}", e)))?;
+    let mut prep = gix::prepare_clone_bare(url, path)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to prepare clone: {}", e)))?;
 
-    // Write the remote config directly to the git config file
-    let config_path = path.join("config");
-    let config_content = format!(
-        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"origin\"]\n\turl = {}\n\tfetch = +refs/*:refs/*\n",
-        url
-    );
-    std::fs::write(&config_path, config_content)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to write git config: {}", e)))?;
+    let (repo, _outcome) = prep
+        .fetch_only(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        .map_err(|e| tinyfs::Error::Other(format!("Clone fetch failed: {}", e)))?;
 
-    // Re-open so the repo picks up the new config
-    open_bare_repo(path)
+    Ok(repo)
 }
 
 fn open_bare_repo(path: &Path) -> Result<gix::Repository, tinyfs::Error> {
@@ -177,17 +172,16 @@ fn open_bare_repo(path: &Path) -> Result<gix::Repository, tinyfs::Error> {
         .map_err(|e| tinyfs::Error::Other(format!("Failed to open bare repo at {}: {}", path.display(), e)))
 }
 
-fn fetch_and_resolve_ref(
+fn fetch_remote(
     repo: &gix::Repository,
-    git_ref: &str,
-) -> Result<String, tinyfs::Error> {
+) -> Result<(), tinyfs::Error> {
     log::info!("Fetching from origin");
 
     let remote = repo
         .find_remote("origin")
         .map_err(|e| tinyfs::Error::Other(format!("Failed to find remote 'origin': {}", e)))?;
 
-    let outcome = remote
+    let _outcome = remote
         .connect(gix::remote::Direction::Fetch)
         .map_err(|e| tinyfs::Error::Other(format!("Failed to connect to remote: {}", e)))?
         .prepare_fetch(gix::progress::Discard, Default::default())
@@ -196,66 +190,31 @@ fn fetch_and_resolve_ref(
         .map_err(|e| tinyfs::Error::Other(format!("Fetch failed: {}", e)))?;
 
     log::info!("Fetch complete");
+    Ok(())
+}
 
-    // Resolve the ref from the remote's advertised refs.
-    let target_branch = format!("refs/heads/{}", git_ref);
-    let target_tag = format!("refs/tags/{}", git_ref);
+fn resolve_local_ref(
+    repo: &gix::Repository,
+    git_ref: &str,
+) -> Result<String, tinyfs::Error> {
+    // Try as a branch, tag, remote tracking ref, or direct ref
+    let candidates = [
+        format!("refs/heads/{}", git_ref),
+        format!("refs/remotes/origin/{}", git_ref),
+        format!("refs/tags/{}", git_ref),
+        git_ref.to_string(),
+    ];
 
-    log::debug!(
-        "Looking for ref '{}': {} remote refs, {} mappings",
-        git_ref,
-        outcome.ref_map.remote_refs.len(),
-        outcome.ref_map.mappings.len()
-    );
-
-    // Strategy 1: Check remote_refs (available for network protocols)
-    for remote_ref in &outcome.ref_map.remote_refs {
-        log::debug!("  remote ref: {:?}", remote_ref);
-        let (name, oid) = match remote_ref {
-            gix::protocol::handshake::Ref::Direct { full_ref_name, object } => {
-                (full_ref_name.as_ref(), Some(*object))
-            }
-            gix::protocol::handshake::Ref::Symbolic { full_ref_name, object, .. } => {
-                (full_ref_name.as_ref(), Some(*object))
-            }
-            gix::protocol::handshake::Ref::Peeled { full_ref_name, tag, .. } => {
-                (full_ref_name.as_ref(), Some(*tag))
-            }
-            gix::protocol::handshake::Ref::Unborn { .. } => continue,
-        };
-
-        let name_str = std::str::from_utf8(name).unwrap_or("");
-        if let Some(oid) = oid {
-            if name_str == target_branch || name_str == target_tag || name_str == git_ref {
-                return Ok(oid.to_hex().to_string());
+    for candidate in &candidates {
+        if let Ok(reference) = repo.find_reference(candidate.as_str()) {
+            if let Ok(id) = reference.into_fully_peeled_id() {
+                log::info!("Resolved '{}' via '{}' -> {}", git_ref, candidate, id);
+                return Ok(id.to_hex().to_string());
             }
         }
     }
 
-    // Strategy 2: Check mappings (populated by refspec matching)
-    for mapping in &outcome.ref_map.mappings {
-        log::debug!("  mapping: {:?}", mapping);
-        if let Some(local) = &mapping.local {
-            let local_str = std::str::from_utf8(local.as_ref()).unwrap_or("");
-            if local_str == target_branch || local_str == target_tag {
-                if let Some(oid) = mapping.remote.as_id() {
-                    return Ok(oid.to_hex().to_string());
-                }
-            }
-        }
-    }
-
-    // Strategy 3: Look up local refs (populated by fetch ref update)
-    if let Ok(reference) = repo.find_reference(&target_branch)
-        .or_else(|_| repo.find_reference(&target_tag))
-        .or_else(|_| repo.find_reference(git_ref))
-    {
-        if let Ok(id) = reference.into_fully_peeled_id() {
-            return Ok(id.to_hex().to_string());
-        }
-    }
-
-    // Strategy 4: If git_ref looks like a full SHA, try it directly
+    // If git_ref looks like a full SHA, try it directly
     if git_ref.len() >= 40 {
         if let Ok(oid) = gix::ObjectId::from_hex(git_ref.as_bytes()) {
             if repo.find_object(oid).is_ok() {
@@ -265,7 +224,7 @@ fn fetch_and_resolve_ref(
     }
 
     Err(tinyfs::Error::Other(format!(
-        "Failed to resolve ref '{}': not found in remote refs, mappings, or local refs",
+        "Failed to resolve ref '{}': not found in local refs",
         git_ref
     )))
 }
