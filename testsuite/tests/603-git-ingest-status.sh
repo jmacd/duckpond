@@ -12,7 +12,7 @@ REPO_DIR=/tmp/test-blog-status
 rm -rf "$REPO_DIR"
 mkdir -p "$REPO_DIR"
 cd "$REPO_DIR"
-git init
+git init -b main
 git config user.email "test@example.com"
 git config user.name "Test User"
 echo "hello" > hello.txt
