@@ -49,7 +49,7 @@ EOF
 # Build the site using hostmount
 pond run \
     -d "${SITE_ROOT}" \
-    "host+sitegen:///${SITE_ROOT}/site.yaml" \
+    "host+sitegen:///site.yaml" \
     build "${OUTDIR}"
 
 echo "=== VERIFICATION ==="
