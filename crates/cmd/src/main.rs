@@ -13,6 +13,7 @@ mod common;
 mod panic_alloc;
 
 // External modules
+use gitpond as _;
 use hydrovu as _;
 use sitegen as _;
 
@@ -225,6 +226,15 @@ enum Commands {
         #[arg(long)]
         overwrite: bool,
     },
+    /// Apply configuration files (idempotent create-or-update)
+    ///
+    /// Each file contains a prelude (kind, path, version) separated from
+    /// the config body by '---'. Creates new nodes or updates changed ones.
+    Apply {
+        /// Configuration files to apply
+        #[arg(short = 'f', required = true, num_args = 1..)]
+        files: Vec<String>,
+    },
     /// List available dynamic node factories
     ListFactories,
     /// Execute a run configuration (e.g., hydrovu collector)
@@ -422,6 +432,7 @@ async fn main() -> Result<()> {
                 .await
         }
         Commands::ListFactories => commands::list_factories_command().await,
+        Commands::Apply { files } => commands::apply_command(&ship_context, &files).await,
         Commands::Run { path, args } => commands::run_command(&ship_context, &path, args).await,
         Commands::DetectOverlaps {
             patterns,

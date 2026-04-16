@@ -6,6 +6,7 @@
 // entries are included. Without this, `FactoryRegistry` and `SchemeRegistry`
 // won't see factories registered in hydrovu, sitegen, or remote crates
 // when running lib tests.
+use gitpond as _;
 use hydrovu as _;
 use remote as _;
 use sitegen as _;

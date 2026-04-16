@@ -78,7 +78,6 @@ echo ""
 echo "--- Step 2: Build site ---"
 
 cat > "${SITE_ROOT}/site.yaml" << 'YAML'
-factory: sitegen
 
 site:
   title: "Sidebar Test"
@@ -125,7 +124,6 @@ sidebar:
       - label: "Item B2"
         href: "/b/beta.html"
 
-static_assets: []
 
 theme:
   accent: "#1a1a2e"

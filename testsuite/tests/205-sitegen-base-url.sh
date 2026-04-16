@@ -166,7 +166,6 @@ echo ""
 echo "--- Step 3A: Sitegen with base_url: / ---"
 
 cat > /tmp/site-root.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "Root Base URL Test"
@@ -195,7 +194,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
 YAML
 
 pond mknod sitegen /site-root.yaml --config-path /tmp/site-root.yaml
@@ -214,7 +212,6 @@ echo ""
 echo "--- Step 3B: Sitegen with base_url: /myapp/ ---"
 
 cat > /tmp/site-subdir.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "Subdir Base URL Test"
@@ -243,7 +240,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
 YAML
 
 pond mknod sitegen /site-subdir.yaml --config-path /tmp/site-subdir.yaml

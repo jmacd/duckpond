@@ -330,7 +330,6 @@ echo "--- Step 8: Run sitegen with analysis overlay ---"
 mkdir -p "${HOST_ROOT}/site"
 
 cat > "${HOST_ROOT}/site.yaml" << 'YAML'
-factory: sitegen
 
 site:
   title: "Analysis Test"

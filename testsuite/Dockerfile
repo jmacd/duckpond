@@ -49,6 +49,8 @@ RUN apt-get update && \
         procps \
         # For extracting archives
         unzip \
+        # Git for git-ingest factory testing
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install MinIO client (mc) for S3 testing

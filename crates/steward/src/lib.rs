@@ -95,3 +95,9 @@ pub fn get_data_path(pond_path: &Path) -> PathBuf {
 pub fn get_control_path(pond_path: &Path) -> PathBuf {
     pond_path.join("control")
 }
+
+/// Get the git bare repo cache path under the pond
+#[must_use]
+pub fn get_git_path(pond_path: &Path) -> PathBuf {
+    pond_path.join("git")
+}

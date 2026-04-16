@@ -357,7 +357,6 @@ echo ""
 echo "--- Step 6: Create sitegen factory ---"
 
 cat > /tmp/site.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "Septic Station Monitor"
@@ -385,7 +384,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
 YAML
 
 pond mknod sitegen /site.yaml --config-path /tmp/site.yaml

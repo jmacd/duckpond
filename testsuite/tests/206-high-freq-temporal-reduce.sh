@@ -134,7 +134,6 @@ pond copy host:///tmp/data.md /site/data.md
 pond copy host:///tmp/sidebar.md /site/sidebar.md
 
 cat > /tmp/site.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "HF Test"
@@ -163,7 +162,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
 YAML
 
 pond mknod sitegen /site.yaml --config-path /tmp/site.yaml

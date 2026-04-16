@@ -151,6 +151,8 @@ pub struct State {
     large_file_options: crate::large_files::LargeFileOptions,
     /// Format provider cache directory ({POND}/cache/), computed from data path
     cache_dir: Option<PathBuf>,
+    /// Pond root directory ({POND}/), computed from data path
+    pond_path: Option<PathBuf>,
     /// Pond identity UUID for this persistence layer
     pond_id: String,
 }
@@ -538,7 +540,8 @@ impl OpLogPersistence {
 
         // Compute the format provider cache directory: {POND}/cache/
         // self.path is {POND}/data, so parent is {POND}
-        let cache_dir = self.path.parent().map(|pond_root| pond_root.join("cache"));
+        let pond_root = self.path.parent().map(|p| p.to_path_buf());
+        let cache_dir = pond_root.as_ref().map(|p| p.join("cache"));
 
         let state = State {
             inner: Arc::new(Mutex::new(inner_state)),
@@ -548,6 +551,7 @@ impl OpLogPersistence {
             txn_state: self.txn_state.clone(),
             large_file_options: self.large_file_options.clone(),
             cache_dir,
+            pond_path: pond_root,
             pond_id: self.pond_id.clone(),
         };
 
@@ -866,16 +870,19 @@ impl State {
     #[must_use]
     pub fn as_provider_context(&self) -> provider::ProviderContext {
         // Create provider context with State as the persistence layer
-        let ctx = provider::ProviderContext::new(
+        let mut ctx = provider::ProviderContext::new(
             self.session_context.clone(),
             Arc::new(self.clone()) as Arc<dyn PersistenceLayer>,
         );
         // Attach cache_dir if available (tlogfs has a real filesystem)
         if let Some(ref cache_dir) = self.cache_dir {
-            ctx.with_cache_dir(cache_dir.clone())
-        } else {
-            ctx
+            ctx = ctx.with_cache_dir(cache_dir.clone());
         }
+        // Attach pond_path if available
+        if let Some(ref pond_path) = self.pond_path {
+            ctx = ctx.with_pond_path(pond_path.clone());
+        }
+        ctx
     }
 }
 
@@ -3128,7 +3135,7 @@ impl InnerState {
         // Step 3: Combine and sort by timestamp
         let mut all_records = committed_records;
         all_records.extend(records);
-        all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
 
         trace.metric("total_count", all_records.len() as u64);
 

@@ -106,7 +106,6 @@ echo ""
 echo "--- Step 3: Run sitegen via hostmount ---"
 
 cat > "${SITE_ROOT}/site.yaml" << 'YAML'
-factory: sitegen
 
 site:
   title: "Test Site"
@@ -132,7 +131,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
 YAML
 
 echo "Command: pond run -d ${SITE_ROOT} host+sitegen:///site.yaml build ${OUTDIR}"
