@@ -249,7 +249,9 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
             .map_err(|e| anyhow!("apply: failed to commit transaction: {}", e))?;
         log::info!(
             "apply: {} created, {} updated, {} unchanged",
-            created, updated, unchanged
+            created,
+            updated,
+            unchanged
         );
     } else {
         log::info!(

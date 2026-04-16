@@ -383,6 +383,38 @@ text-based editing tools and cause silent file corruption.
 
 ---
 
+## ✅ PRE-MERGE CHECKLIST (Required Before Every PR)
+
+**Before pushing or declaring work complete, run these exact commands.
+They mirror the CI pipeline. Fix all errors before pushing.**
+
+```bash
+# 1. Format all code (CI runs --check; fix locally first)
+cargo fmt --all
+
+# 2. Run clippy with the exact CI flags
+cargo clippy --workspace --all-features -- -D warnings
+
+# 3. Run all unit tests
+cargo test --workspace
+
+# 4. If you modified testsuite/ tests, rebuild and run them
+cd testsuite && ./run-test.sh <number>
+```
+
+**Why this matters:** CI enforces `cargo fmt --check`, `clippy -D warnings`,
+and `cargo test`. Every clippy warning is a hard error. Every formatting
+deviation fails the build. Running these locally before pushing avoids
+round-trip delays waiting for CI to catch preventable failures.
+
+**Common gotchas:**
+- `eprintln!` / `println!` are denied by clippy -- use `log::info!`, `log::warn!`, etc.
+- Nested `if let` / `if` must be collapsed (clippy `collapsible_if`)
+- `sort_by(|a, b| b.x.cmp(&a.x))` must be `sort_by_key(|b| std::cmp::Reverse(b.x))`
+- All `#[derive(Deserialize)]` config structs must have `#[serde(deny_unknown_fields)]`
+
+---
+
 ## 🏷️ CLASSIFICATION GUIDE
 
 When a test completes, classify and act:
