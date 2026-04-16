@@ -134,7 +134,6 @@ pond copy host:///tmp/data.md /site/data.md
 pond copy host:///tmp/sidebar.md /site/sidebar.md
 
 cat > /tmp/site.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "HF Test"

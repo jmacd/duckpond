@@ -166,7 +166,6 @@ echo ""
 echo "--- Step 3A: Sitegen with base_url: / ---"
 
 cat > /tmp/site-root.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "Root Base URL Test"
@@ -214,7 +213,6 @@ echo ""
 echo "--- Step 3B: Sitegen with base_url: /myapp/ ---"
 
 cat > /tmp/site-subdir.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "Subdir Base URL Test"

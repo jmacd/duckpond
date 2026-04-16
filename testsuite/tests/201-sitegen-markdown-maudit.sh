@@ -295,7 +295,6 @@ echo "✓ logo.svg loaded"
 
 # Write site.yaml config
 cat > /tmp/site.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "Synthetic Example"

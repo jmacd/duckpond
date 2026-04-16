@@ -357,7 +357,6 @@ echo ""
 echo "--- Step 6: Create sitegen factory ---"
 
 cat > /tmp/site.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "Septic Station Monitor"

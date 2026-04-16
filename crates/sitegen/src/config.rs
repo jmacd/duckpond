@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 ///   - pattern: "/static/*"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SiteConfig {
     pub site: SiteMeta,
     #[serde(default)]

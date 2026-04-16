@@ -111,7 +111,6 @@ echo ""
 echo "--- Step 4: Create sitegen config ---"
 
 cat > "${SITE_ROOT}/site.yaml" << 'YAML'
-factory: sitegen
 
 site:
   title: "Host Site"

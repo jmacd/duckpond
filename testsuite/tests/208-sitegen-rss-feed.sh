@@ -127,7 +127,6 @@ echo ""
 echo "--- Step 3: Build with site_url ---"
 
 cat > "${SITE_ROOT}/site.yaml" << 'YAML'
-factory: sitegen
 
 site:
   title: "Test Blog"
@@ -228,7 +227,6 @@ rm -rf "${OUTDIR2}" 2>/dev/null || true
 mkdir -p "${OUTDIR2}"
 
 cat > "${SITE_ROOT}/site-nofeed.yaml" << 'YAML'
-factory: sitegen
 
 site:
   title: "Test Blog"
