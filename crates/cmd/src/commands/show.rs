@@ -581,7 +581,8 @@ async fn show_detailed_mode(
         output.push('\n');
 
         // Format operations for this transaction
-        let formatted_ops = format_operations_from_batches(batches_for_txn.clone(), &path_map, pond_id)?;
+        let formatted_ops =
+            format_operations_from_batches(batches_for_txn.clone(), &path_map, pond_id)?;
 
         if formatted_ops.is_empty() {
             output.push_str("  (No operations found - this should not happen)\n");
@@ -805,10 +806,7 @@ fn format_operations_from_batches(
         })?;
 
         // For directory partitions, the FileID is self-partitioned (part_id == node_id)
-        let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(
-            part_id.to_node_id(),
-            pond_id,
-        );
+        let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(part_id.to_node_id(), pond_id);
 
         let path_display = path_map
             .get(&dir_file_id.to_string())
