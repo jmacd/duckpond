@@ -48,18 +48,18 @@ EOF
 
 # Build the site using hostmount
 pond run \
-    --hostmount "/templates=host+file:///${SITE_ROOT}/templates" \
+    -d "${SITE_ROOT}" \
     "host+sitegen:///${SITE_ROOT}/site.yaml" \
     build "${OUTDIR}"
 
 echo "=== VERIFICATION ==="
 
 # Check that index.html exists
-check_file "${OUTDIR}/index.html"
+check 'test -f "${OUTDIR}/index.html"' "index.html exists"
 
 # Check that the build footer is present
-check_contains "${OUTDIR}/index.html" "build-footer"
-check_contains "${OUTDIR}/index.html" "DuckPond"
+check_contains "${OUTDIR}/index.html" "footer contains build-footer class" "build-footer"
+check_contains "${OUTDIR}/index.html" "footer mentions DuckPond" "DuckPond"
 
 # The footer should contain either a version (v0.38.0) or a git SHA
 if grep -q 'DuckPond v[0-9]' "${OUTDIR}/index.html"; then
@@ -68,8 +68,10 @@ elif grep -q 'DuckPond [0-9a-f]' "${OUTDIR}/index.html"; then
     echo "[OK] Footer contains git SHA identifier"
 else
     echo "[FAIL] Footer does not contain a recognizable build identifier"
-    grep "build-footer" "${OUTDIR}/index.html"
+    grep "build-footer" "${OUTDIR}/index.html" || true
     exit 1
 fi
 
 echo "[OK] Build footer verified"
+
+check_finish
