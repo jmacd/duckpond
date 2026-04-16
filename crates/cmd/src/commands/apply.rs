@@ -105,13 +105,8 @@ fn parse_apply_file(content: &str, source_file: &str) -> Result<(ApplyPrelude, S
     }
 
     // Parse the prelude
-    let prelude: ApplyPrelude = serde_yaml::from_str(&documents[0]).map_err(|e| {
-        anyhow!(
-            "{}: failed to parse prelude: {}",
-            source_file,
-            e
-        )
-    })?;
+    let prelude: ApplyPrelude = serde_yaml::from_str(&documents[0])
+        .map_err(|e| anyhow!("{}: failed to parse prelude: {}", source_file, e))?;
 
     // Validate version
     if prelude.version != "v1" {
@@ -226,9 +221,9 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
     let mut unchanged = 0usize;
 
     for spec in &specs {
-        let result = apply_one(&tx, &tx, spec).await.map_err(|e| {
-            anyhow!("{}: {}", spec.source_file, e)
-        })?;
+        let result = apply_one(&tx, &tx, spec)
+            .await
+            .map_err(|e| anyhow!("{}: {}", spec.source_file, e))?;
 
         match result {
             ApplyResult::Created => {
@@ -257,7 +252,10 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
             created, updated, unchanged
         );
     } else {
-        eprintln!("apply: all {} config(s) unchanged, no transaction committed", unchanged);
+        eprintln!(
+            "apply: all {} config(s) unchanged, no transaction committed",
+            unchanged
+        );
     }
 
     Ok(())
@@ -335,15 +333,16 @@ async fn apply_one(
             }
 
             // Update the config using create_dynamic_path_with_overwrite (overwrite=true)
-            _ = root.create_dynamic_path_with_overwrite(
-                &spec.path,
-                entry_type,
-                &spec.kind,
-                new_config_bytes.to_vec(),
-                true,
-            )
-            .await
-            .map_err(|e| anyhow!("failed to update config at '{}': {}", spec.path, e))?;
+            _ = root
+                .create_dynamic_path_with_overwrite(
+                    &spec.path,
+                    entry_type,
+                    &spec.kind,
+                    new_config_bytes.to_vec(),
+                    true,
+                )
+                .await
+                .map_err(|e| anyhow!("failed to update config at '{}': {}", spec.path, e))?;
 
             // Re-run factory initialization with expanded config
             run_factory_init(tx, &root, spec).await?;
@@ -359,23 +358,22 @@ async fn apply_one(
             let entry_type = determine_entry_type(factory, &spec.kind)?;
 
             // Create the dynamic node
-            _ = root.create_dynamic_path(
-                &spec.path,
-                entry_type,
-                &spec.kind,
-                spec.raw_config.as_bytes().to_vec(),
-            )
-            .await
-            .map_err(|e| anyhow!("failed to create node at '{}': {}", spec.path, e))?;
+            _ = root
+                .create_dynamic_path(
+                    &spec.path,
+                    entry_type,
+                    &spec.kind,
+                    spec.raw_config.as_bytes().to_vec(),
+                )
+                .await
+                .map_err(|e| anyhow!("failed to create node at '{}': {}", spec.path, e))?;
 
             // Run factory initialization
             run_factory_init(tx, &root, spec).await?;
 
             Ok(ApplyResult::Created)
         }
-        tinyfs::Lookup::Empty(_) => {
-            Err(anyhow!("empty path"))
-        }
+        tinyfs::Lookup::Empty(_) => Err(anyhow!("empty path")),
     }
 }
 
@@ -435,9 +433,13 @@ async fn ensure_parent_dirs(root: &tinyfs::WD, path: &str) -> Result<()> {
                 }
             }
         } else {
-            _ = root.create_dir_path(&current_path)
-                .await
-                .map_err(|e| anyhow!("failed to create parent directory '{}': {}", current_path, e))?;
+            _ = root.create_dir_path(&current_path).await.map_err(|e| {
+                anyhow!(
+                    "failed to create parent directory '{}': {}",
+                    current_path,
+                    e
+                )
+            })?;
         }
     }
     Ok(())
@@ -517,9 +519,7 @@ mod tests {
             body: &str,
         ) -> PathBuf {
             let file_path = self.temp_dir.path().join(filename);
-            let content = format!(
-                "kind: {kind}\npath: {path}\nversion: v1\n---\n{body}"
-            );
+            let content = format!("kind: {kind}\npath: {path}\nversion: v1\n---\n{body}");
             fs::write(&file_path, content).expect("Failed to write config file");
             file_path
         }
@@ -560,10 +560,7 @@ mod tests {
                 let (_, lookup) = root.resolve_path(pond_path).await.unwrap();
                 match lookup {
                     tinyfs::Lookup::Found(node) => {
-                        let config = fs_ref
-                            .get_dynamic_node_config(node.id())
-                            .await
-                            .unwrap();
+                        let config = fs_ref.get_dynamic_node_config(node.id()).await.unwrap();
                         config.map(|(_, bytes)| bytes).unwrap_or_default()
                     }
                     _ => panic!("Node not found: {}", pond_path),
@@ -765,7 +762,12 @@ mod tests {
 
         let result = apply_command(&setup.ship_context, &[]).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no files specified"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no files specified")
+        );
 
         Ok(())
     }
@@ -828,12 +830,8 @@ mod tests {
     async fn test_apply_invalid_factory() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        let config_path = setup.write_apply_config(
-            "bad.yaml",
-            "nonexistent-factory",
-            "/data/bad",
-            "foo: bar\n",
-        );
+        let config_path =
+            setup.write_apply_config("bad.yaml", "nonexistent-factory", "/data/bad", "foo: bar\n");
 
         let result = apply_command(
             &setup.ship_context,
