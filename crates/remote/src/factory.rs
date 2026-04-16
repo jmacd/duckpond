@@ -92,6 +92,7 @@ impl FactoryCommand for RemoteCommand {
 /// When present in a remote factory config, the factory operates in import mode:
 /// it reads from a foreign pond's backup and imports partitions at a local path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImportConfig {
     /// Path in the foreign pond to import (e.g., "/ingest" or "/ingest/**")
     pub source_path: String,
@@ -105,6 +106,7 @@ pub struct ImportConfig {
 
 /// Remote storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteConfig {
     /// Remote Delta Lake table URL (e.g., "file:///path/to/remote" or "s3://bucket/remote")
     pub url: String,
@@ -179,6 +181,7 @@ impl RemoteConfig {
 
 /// Replication configuration for creating replica ponds
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplicationConfig {
     pub remote: RemoteConfig,
     pub pond_id: String,

@@ -115,6 +115,7 @@ pub struct SiteMeta {
 
 /// RSS feed configuration (optional section in site.yaml).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedConfig {
     /// Content section to include in the feed (default: "Blog").
     #[serde(default = "default_feed_section")]
@@ -197,6 +198,7 @@ fn default_timestamp_column() -> String {
 
 /// A route in the hierarchical route tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     /// Route name (for logging/debugging)
     pub name: String,
@@ -313,6 +315,7 @@ pub struct SidebarChild {
 ///     base_url: "/noyo/"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubsiteConfig {
     /// Display name (used for logging and output directory fallback).
     pub name: String,

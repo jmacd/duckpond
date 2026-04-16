@@ -9,6 +9,7 @@ use tlogfs::data_taxonomy::{ApiKey, ApiSecret};
 
 /// Configuration for HydroVu OAuth credentials and device list
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HydroVuConfig {
     /// OAuth client ID (sensitive - will show as [REDACTED] when serialized)
     pub client_id: ApiKey<String>,
