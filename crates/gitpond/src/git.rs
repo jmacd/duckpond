@@ -197,10 +197,10 @@ fn resolve_local_ref(
     repo: &gix::Repository,
     git_ref: &str,
 ) -> Result<String, tinyfs::Error> {
-    // Try as a branch, tag, remote tracking ref, or direct ref
+    // Try remote tracking ref first (updated by fetch), then local branch, tag, direct
     let candidates = [
-        format!("refs/heads/{}", git_ref),
         format!("refs/remotes/origin/{}", git_ref),
+        format!("refs/heads/{}", git_ref),
         format!("refs/tags/{}", git_ref),
         git_ref.to_string(),
     ];
