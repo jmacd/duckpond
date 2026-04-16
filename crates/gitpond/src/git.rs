@@ -198,32 +198,64 @@ fn fetch_and_resolve_ref(
     log::info!("Fetch complete");
 
     // Resolve the ref from the remote's advertised refs.
-    // This is more reliable than looking up local refs, which may not
-    // be updated depending on the refspec configuration.
     let target_branch = format!("refs/heads/{}", git_ref);
     let target_tag = format!("refs/tags/{}", git_ref);
 
+    log::debug!(
+        "Looking for ref '{}': {} remote refs, {} mappings",
+        git_ref,
+        outcome.ref_map.remote_refs.len(),
+        outcome.ref_map.mappings.len()
+    );
+
+    // Strategy 1: Check remote_refs (available for network protocols)
     for remote_ref in &outcome.ref_map.remote_refs {
+        log::debug!("  remote ref: {:?}", remote_ref);
         let (name, oid) = match remote_ref {
             gix::protocol::handshake::Ref::Direct { full_ref_name, object } => {
-                (full_ref_name.as_ref(), *object)
+                (full_ref_name.as_ref(), Some(*object))
             }
             gix::protocol::handshake::Ref::Symbolic { full_ref_name, object, .. } => {
-                (full_ref_name.as_ref(), *object)
+                (full_ref_name.as_ref(), Some(*object))
             }
             gix::protocol::handshake::Ref::Peeled { full_ref_name, tag, .. } => {
-                (full_ref_name.as_ref(), *tag)
+                (full_ref_name.as_ref(), Some(*tag))
             }
-            _ => continue,
+            gix::protocol::handshake::Ref::Unborn { .. } => continue,
         };
 
         let name_str = std::str::from_utf8(name).unwrap_or("");
-        if name_str == target_branch || name_str == target_tag || name_str == git_ref {
-            return Ok(oid.to_hex().to_string());
+        if let Some(oid) = oid {
+            if name_str == target_branch || name_str == target_tag || name_str == git_ref {
+                return Ok(oid.to_hex().to_string());
+            }
         }
     }
 
-    // If git_ref looks like a full SHA, try it directly
+    // Strategy 2: Check mappings (populated by refspec matching)
+    for mapping in &outcome.ref_map.mappings {
+        log::debug!("  mapping: {:?}", mapping);
+        if let Some(local) = &mapping.local {
+            let local_str = std::str::from_utf8(local.as_ref()).unwrap_or("");
+            if local_str == target_branch || local_str == target_tag {
+                if let Some(oid) = mapping.remote.as_id() {
+                    return Ok(oid.to_hex().to_string());
+                }
+            }
+        }
+    }
+
+    // Strategy 3: Look up local refs (populated by fetch ref update)
+    if let Ok(reference) = repo.find_reference(&target_branch)
+        .or_else(|_| repo.find_reference(&target_tag))
+        .or_else(|_| repo.find_reference(git_ref))
+    {
+        if let Ok(id) = reference.into_fully_peeled_id() {
+            return Ok(id.to_hex().to_string());
+        }
+    }
+
+    // Strategy 4: If git_ref looks like a full SHA, try it directly
     if git_ref.len() >= 40 {
         if let Ok(oid) = gix::ObjectId::from_hex(git_ref.as_bytes()) {
             if repo.find_object(oid).is_ok() {
@@ -233,7 +265,7 @@ fn fetch_and_resolve_ref(
     }
 
     Err(tinyfs::Error::Other(format!(
-        "Failed to resolve ref '{}': not found in remote refs",
+        "Failed to resolve ref '{}': not found in remote refs, mappings, or local refs",
         git_ref
     )))
 }
