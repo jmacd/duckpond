@@ -48,7 +48,7 @@ jobs:
         run: |
           mkdir -p artifacts
           cp target/release/pond artifacts/pond
-          cp crates/cmd/target/debian/*.deb artifacts/
+          cp target/debian/*.deb artifacts/
       
       - name: Generate hashes
         id: hash

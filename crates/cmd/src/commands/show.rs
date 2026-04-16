@@ -448,6 +448,7 @@ async fn show_detailed_mode(
 
     // Also add the root directory
     let root_node_id = root.node_path().id();
+    let pond_id = root_node_id.pond_id();
     _ = path_map.insert(root_node_id.to_string(), "/".to_string());
 
     // Query ALL operations in a single query, ordered by transaction (newest first)
@@ -580,7 +581,8 @@ async fn show_detailed_mode(
         output.push('\n');
 
         // Format operations for this transaction
-        let formatted_ops = format_operations_from_batches(batches_for_txn.clone(), &path_map)?;
+        let formatted_ops =
+            format_operations_from_batches(batches_for_txn.clone(), &path_map, pond_id)?;
 
         if formatted_ops.is_empty() {
             output.push_str("  (No operations found - this should not happen)\n");
@@ -616,6 +618,7 @@ fn format_byte_size(bytes: i64) -> String {
 fn format_operations_from_batches(
     batches: Vec<arrow::record_batch::RecordBatch>,
     path_map: &std::collections::HashMap<String, String>,
+    pond_id: uuid7::Uuid,
 ) -> Result<Vec<String>, steward::StewardError> {
     use arrow::array::{Array, BinaryArray, Int64Array, StringArray};
     use arrow::datatypes::DataType;
@@ -803,10 +806,7 @@ fn format_operations_from_batches(
         })?;
 
         // For directory partitions, the FileID is self-partitioned (part_id == node_id)
-        let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(
-            part_id.to_node_id(),
-            tinyfs::local_pond_uuid(),
-        );
+        let dir_file_id = tinyfs::FileID::from_physical_dir_node_id(part_id.to_node_id(), pond_id);
 
         let path_display = path_map
             .get(&dir_file_id.to_string())
@@ -974,10 +974,10 @@ mod tests {
             captured_output.contains("Partition"),
             "Should contain partition information"
         );
-        // The root partition should show "/" path (format is "Partition 00000000 /:" - no entry count on partition line)
+        // The root partition should show "/" path
         assert!(
-            captured_output.contains("/:"),
-            "Should show root directory path in partition"
+            captured_output.contains(" /:"),
+            "Should show root directory path in partition line"
         );
 
         // 3. Should show the file we created
