@@ -10,7 +10,7 @@ use log::info;
 use provider::{ExecutionContext, FactoryContext, register_executable_factory};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tinyfs::Result as TinyFSResult;
+use tinyfs::{EntryType, Result as TinyFSResult};
 
 use clap::{Parser, Subcommand};
 
@@ -81,6 +81,58 @@ async fn initialize(_config: Value, _context: FactoryContext) -> Result<(), tiny
     Ok(())
 }
 
+/// Pond path for the manifest file, stored inside the synced directory
+fn manifest_pond_path(config: &GitIngestConfig) -> String {
+    format!("{}/.git-manifest", config.pond_path)
+}
+
+/// Read manifest from the pond filesystem, or return empty if not found
+async fn read_manifest(
+    context: &FactoryContext,
+    config: &GitIngestConfig,
+) -> Result<git::GitManifest, tinyfs::Error> {
+    let fs = context.context.filesystem();
+    let root = fs.root().await?;
+    let path = manifest_pond_path(config);
+
+    match root.read_file_path_to_vec(&path).await {
+        Ok(data) => git::GitManifest::from_bytes(&data),
+        Err(tinyfs::Error::NotFound(_)) => Ok(git::GitManifest::empty()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write manifest to the pond filesystem (atomic with other pond changes)
+async fn write_manifest(
+    context: &FactoryContext,
+    config: &GitIngestConfig,
+    manifest: &git::GitManifest,
+) -> Result<(), tinyfs::Error> {
+    let fs = context.context.filesystem();
+    let root = fs.root().await?;
+    let path = manifest_pond_path(config);
+    let data = manifest.to_bytes()?;
+
+    // Ensure the destination directory exists
+    let _ = root.create_dir_all(&config.pond_path).await?;
+
+    // Use async_writer_path_with_type: creates if missing, appends new version if exists
+    use tokio::io::AsyncWriteExt;
+    let mut writer = root
+        .async_writer_path_with_type(&path, EntryType::FilePhysicalVersion)
+        .await?;
+    writer
+        .write_all(&data)
+        .await
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to write manifest: {}", e)))?;
+    writer
+        .shutdown()
+        .await
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to finalize manifest: {}", e)))?;
+
+    Ok(())
+}
+
 /// Execute the git-ingest factory
 pub async fn execute(
     config: Value,
@@ -111,7 +163,7 @@ pub async fn execute(
             Ok(())
         }
         Some(GitIngestSubcommand::Status) => {
-            execute_status(&pond_path, &node_id, &config)
+            execute_status(&context, &config).await
         }
         Some(GitIngestSubcommand::Pull) | None => {
             execute_pull(&context, &pond_path, &node_id, &config).await
@@ -120,26 +172,21 @@ pub async fn execute(
 }
 
 /// Show sync status
-fn execute_status(
-    pond_path: &std::path::Path,
-    node_id: &str,
+async fn execute_status(
+    context: &FactoryContext,
     config: &GitIngestConfig,
 ) -> Result<(), tinyfs::Error> {
-    let manifest_file = git::manifest_path(pond_path, node_id);
-    let manifest = git::GitManifest::load(&manifest_file)?;
+    let manifest = read_manifest(context, config).await?;
 
     if manifest.commit_sha.is_empty() {
         log::info!("git-ingest: not yet synced");
-        log::info!("  url: {}", config.url);
-        log::info!("  ref: {}", config.git_ref);
-        log::info!("  pond_path: {}", config.pond_path);
     } else {
         log::info!("git-ingest: synced at {}", manifest.commit_sha);
-        log::info!("  url: {}", config.url);
-        log::info!("  ref: {}", config.git_ref);
-        log::info!("  pond_path: {}", config.pond_path);
         log::info!("  entries: {}", manifest.entries.len());
     }
+    log::info!("  url: {}", config.url);
+    log::info!("  ref: {}", config.git_ref);
+    log::info!("  pond_path: {}", config.pond_path);
     Ok(())
 }
 
@@ -165,9 +212,8 @@ async fn execute_pull(
     let commit_sha = git::fetch_and_resolve(&repo_path, &config.url, &config.git_ref)?;
     info!("Resolved {} -> {}", config.git_ref, &commit_sha[..12]);
 
-    // Load the existing manifest
-    let manifest_file = git::manifest_path(pond_path, node_id);
-    let old_manifest = git::GitManifest::load(&manifest_file)?;
+    // Load the existing manifest from the pond (transactional)
+    let old_manifest = read_manifest(context, config).await?;
 
     // Check if anything changed
     if old_manifest.commit_sha == commit_sha {
@@ -187,7 +233,7 @@ async fn execute_pull(
     let changes = sync::diff_manifests(&old_manifest, &new_manifest);
     if changes.is_empty() {
         info!("No file changes detected (tree structure unchanged)");
-        new_manifest.save(&manifest_file)?;
+        write_manifest(context, config, &new_manifest).await?;
         return Ok(());
     }
 
@@ -199,8 +245,8 @@ async fn execute_pull(
 
     info!("Sync complete: {}", stats);
 
-    // Save updated manifest
-    new_manifest.save(&manifest_file)?;
+    // Save updated manifest to pond (commits atomically with file changes)
+    write_manifest(context, config, &new_manifest).await?;
 
     Ok(())
 }

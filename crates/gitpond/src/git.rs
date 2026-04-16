@@ -49,23 +49,16 @@ impl GitManifest {
         }
     }
 
-    /// Load manifest from a JSON file, or return empty if not found
-    pub fn load(path: &Path) -> Result<Self, tinyfs::Error> {
-        if !path.exists() {
-            return Ok(Self::empty());
-        }
-        let data = std::fs::read(path)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to read manifest: {}", e)))?;
-        serde_json::from_slice(&data)
+    /// Deserialize manifest from JSON bytes
+    pub fn from_bytes(data: &[u8]) -> Result<Self, tinyfs::Error> {
+        serde_json::from_slice(data)
             .map_err(|e| tinyfs::Error::Other(format!("Failed to parse manifest: {}", e)))
     }
 
-    /// Save manifest to a JSON file
-    pub fn save(&self, path: &Path) -> Result<(), tinyfs::Error> {
-        let data = serde_json::to_vec_pretty(self)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize manifest: {}", e)))?;
-        std::fs::write(path, data)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to write manifest: {}", e)))
+    /// Serialize manifest to JSON bytes
+    pub fn to_bytes(&self) -> Result<Vec<u8>, tinyfs::Error> {
+        serde_json::to_vec_pretty(self)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize manifest: {}", e)))
     }
 }
 
@@ -73,12 +66,6 @@ impl GitManifest {
 #[must_use]
 pub fn bare_repo_path(pond_path: &Path, node_id: &str) -> PathBuf {
     pond_path.join("git").join(format!("{}.git", node_id))
-}
-
-/// Get the path to the manifest file for a given factory node
-#[must_use]
-pub fn manifest_path(pond_path: &Path, node_id: &str) -> PathBuf {
-    pond_path.join("git").join(format!("{}.manifest.json", node_id))
 }
 
 /// Initialize or open a bare repo, fetch the remote, and return the
