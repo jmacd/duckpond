@@ -10,6 +10,7 @@ members = [
 "crates/provider",
 "crates/remote",
 "crates/sitegen",
+"crates/gitpond",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ steward = { path = "crates/steward" }
 tinyfs = { path = "crates/tinyfs" }
 tlogfs = { path = "crates/tlogfs" }
 hydrovu = { path = "crates/hydrovu" }
+gitpond = { path = "crates/gitpond" }
 provider = { path = "crates/provider" }
 utilities = { path = "crates/utilities" }
 remote = { path = "crates/remote" }

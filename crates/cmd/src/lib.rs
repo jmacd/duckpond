@@ -9,6 +9,7 @@
 use hydrovu as _;
 use remote as _;
 use sitegen as _;
+use gitpond as _;
 
 pub mod commands;
 pub mod common;

@@ -42,6 +42,7 @@ deltalake = { workspace = true }
 env_logger = { workspace = true }
 file-rotate = { workspace = true }
 futures = { workspace = true }
+gitpond = { workspace = true }
 hydrovu = { workspace = true }
 linkme = { workspace = true }
 log = { workspace = true }

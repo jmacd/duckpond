@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2025 Caspar Water Company
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gitpond"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+# Workspace dependencies
+clap.workspace = true
+linkme.workspace = true
+log.workspace = true
+paste.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tinyfs.workspace = true
+provider.workspace = true
+tokio.workspace = true
+
+# Git support (pure Rust)
+gix = { version = "0.72", default-features = false, features = [
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
+] }
+
+[lints]
+workspace = true

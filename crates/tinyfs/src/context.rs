@@ -41,6 +41,10 @@ pub struct ProviderContext {
     /// Format provider cache directory ({POND}/cache/), if available.
     /// None for in-memory persistence (tests).
     pub cache_dir: Option<PathBuf>,
+
+    /// Pond root directory ({POND}/), if available.
+    /// None for in-memory persistence (tests).
+    pub pond_path: Option<PathBuf>,
 }
 
 impl ProviderContext {
@@ -54,6 +58,7 @@ impl ProviderContext {
             table_provider_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             persistence,
             cache_dir: None,
+            pond_path: None,
         }
     }
 
@@ -61,6 +66,13 @@ impl ProviderContext {
     #[must_use]
     pub fn with_cache_dir(mut self, cache_dir: PathBuf) -> Self {
         self.cache_dir = Some(cache_dir);
+        self
+    }
+
+    /// Create a provider context with the pond root directory
+    #[must_use]
+    pub fn with_pond_path(mut self, pond_path: PathBuf) -> Self {
+        self.pond_path = Some(pond_path);
         self
     }
 
@@ -131,6 +143,12 @@ impl ProviderContext {
     #[must_use]
     pub fn cache_dir(&self) -> Option<&Path> {
         self.cache_dir.as_deref()
+    }
+
+    /// Get the pond root directory, if available
+    #[must_use]
+    pub fn pond_path(&self) -> Option<&Path> {
+        self.pond_path.as_deref()
     }
 }
 
