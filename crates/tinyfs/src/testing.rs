@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for test directory factory
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct TestDirectoryConfig {
     /// Name/description of this test directory
     pub name: String,
@@ -21,6 +22,7 @@ pub struct TestDirectoryConfig {
 
 /// Configuration for test file factory  
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct TestFileConfig {
     /// Content to return when reading the file
     pub content: String,

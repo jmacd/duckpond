@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 ///   - pattern: "/static/*"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SiteConfig {
     pub site: SiteMeta,
     #[serde(default)]
@@ -98,6 +99,7 @@ impl SiteConfig {
 
 /// Site-wide metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SiteMeta {
     pub title: String,
     #[serde(default = "default_base_url")]
@@ -114,6 +116,7 @@ pub struct SiteMeta {
 
 /// RSS feed configuration (optional section in site.yaml).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeedConfig {
     /// Content section to include in the feed (default: "Blog").
     #[serde(default = "default_feed_section")]
@@ -140,6 +143,7 @@ fn default_base_url() -> String {
 /// Content stages are resolved before route expansion. A `content` route
 /// references a stage by name, producing one page per matched file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContentStage {
     /// Name referenced by content routes (e.g., "pages")
     pub name: String,
@@ -161,6 +165,7 @@ pub struct ContentStage {
 /// (more data per file, fewer files). Default is 1500, matching a typical
 /// screen width in pixels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportStage {
     /// Name referenced by routes (e.g., "params", "sites")
     pub name: String,
@@ -196,6 +201,7 @@ fn default_timestamp_column() -> String {
 
 /// A route in the hierarchical route tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     /// Route name (for logging/debugging)
     pub name: String,
@@ -229,6 +235,7 @@ pub enum RouteType {
 
 /// Static asset to copy verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StaticAsset {
     pub pattern: String,
 }
@@ -295,6 +302,7 @@ impl SidebarEntry {
 
 /// A child item in a sidebar entry with sub-navigation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SidebarChild {
     /// Display label
     pub label: String,
@@ -312,6 +320,7 @@ pub struct SidebarChild {
 ///     base_url: "/noyo/"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubsiteConfig {
     /// Display name (used for logging and output directory fallback).
     pub name: String,
