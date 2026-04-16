@@ -208,12 +208,11 @@ fn resolve_local_ref(repo: &gix::Repository, git_ref: &str) -> Result<String, ti
     }
 
     // If git_ref looks like a full SHA, try it directly
-    if git_ref.len() >= 40 {
-        if let Ok(oid) = gix::ObjectId::from_hex(git_ref.as_bytes()) {
-            if repo.find_object(oid).is_ok() {
-                return Ok(git_ref.to_string());
-            }
-        }
+    if git_ref.len() >= 40
+        && let Ok(oid) = gix::ObjectId::from_hex(git_ref.as_bytes())
+        && repo.find_object(oid).is_ok()
+    {
+        return Ok(git_ref.to_string());
     }
 
     Err(tinyfs::Error::Other(format!(

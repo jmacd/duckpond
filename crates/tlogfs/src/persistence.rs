@@ -3135,7 +3135,7 @@ impl InnerState {
         // Step 3: Combine and sort by timestamp
         let mut all_records = committed_records;
         all_records.extend(records);
-        all_records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
 
         trace.metric("total_count", all_records.len() as u64);
 

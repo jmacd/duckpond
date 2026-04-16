@@ -185,12 +185,12 @@ pub async fn apply_changes(
                 let _ = remove_entry_at_path(&root, &full_path).await;
 
                 // Ensure parent directory exists
-                if let Some(parent) = Path::new(&full_path).parent() {
-                    if parent != Path::new("") {
-                        let _dir = root
-                            .create_dir_all(parent.to_string_lossy().as_ref())
-                            .await?;
-                    }
+                if let Some(parent) = Path::new(&full_path).parent()
+                    && parent != Path::new("")
+                {
+                    let _dir = root
+                        .create_dir_all(parent.to_string_lossy().as_ref())
+                        .await?;
                 }
 
                 // Create as FilePhysicalVersion
@@ -222,12 +222,12 @@ pub async fn apply_changes(
                 let _ = remove_entry_at_path(&root, &full_path).await;
 
                 // Ensure parent directory exists
-                if let Some(parent) = Path::new(&full_path).parent() {
-                    if parent != Path::new("") {
-                        let _dir = root
-                            .create_dir_all(parent.to_string_lossy().as_ref())
-                            .await?;
-                    }
+                if let Some(parent) = Path::new(&full_path).parent()
+                    && parent != Path::new("")
+                {
+                    let _dir = root
+                        .create_dir_all(parent.to_string_lossy().as_ref())
+                        .await?;
                 }
 
                 let _node = root.create_symlink_path(&full_path, &target).await?;
