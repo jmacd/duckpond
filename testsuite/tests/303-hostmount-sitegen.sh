@@ -136,7 +136,7 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
+static: []
 YAML
 
 echo "config:"
