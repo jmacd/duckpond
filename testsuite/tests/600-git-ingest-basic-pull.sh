@@ -43,7 +43,7 @@ pond mknod git-ingest /system/etc/blog --config-path /tmp/git-ingest.yaml
 echo "Created git-ingest factory node"
 
 # --- Pull from git -----------------------------------------------------------
-RUST_LOG=info pond run /system/etc/blog pull
+RUST_LOG=info,gitpond=debug pond run /system/etc/blog pull
 
 # --- Verify files appeared in the pond ---------------------------------------
 echo ""
