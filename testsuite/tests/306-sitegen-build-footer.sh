@@ -30,7 +30,6 @@ cat > "${SITE_ROOT}/templates/sidebar.md" <<'EOF'
 EOF
 
 cat > "${SITE_ROOT}/site.yaml" <<'EOF'
-factory: sitegen
 
 site:
   title: "Footer Test"

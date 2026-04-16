@@ -176,7 +176,6 @@ echo ""
 echo "--- Step 3: Run sitegen ---"
 
 cat > /tmp/site.yaml << 'YAML'
-factory: sitegen
 
 site:
   title: "HTML Pass-Through Test"

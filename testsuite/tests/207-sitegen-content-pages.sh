@@ -106,7 +106,6 @@ echo ""
 echo "--- Step 3: Run sitegen via hostmount ---"
 
 cat > "${SITE_ROOT}/site.yaml" << 'YAML'
-factory: sitegen
 
 site:
   title: "Test Site"
