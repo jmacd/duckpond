@@ -28,6 +28,7 @@ pub struct HydroVuConfig {
 
 /// Device configuration specifying which HydroVu location to collect
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HydroVuDevice {
     pub name: String,
     pub id: i64,

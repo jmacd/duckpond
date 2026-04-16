@@ -124,7 +124,6 @@ sidebar:
       - label: "Item B2"
         href: "/b/beta.html"
 
-static: []
 
 theme:
   accent: "#1a1a2e"

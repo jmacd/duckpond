@@ -157,6 +157,7 @@ pond copy host:///tmp/producer-sidebar.md /site/sidebar.md
 
 # Create producer sitegen config
 cat > /tmp/producer-site.yaml << 'YAML'
+
 site:
   title: "Producer Monitoring"
   base_url: "/"
@@ -298,6 +299,7 @@ pond copy host:///tmp/portal-sidebar.md /system/site/sidebar.md
 
 # Create consumer sitegen with subsites
 cat > /tmp/consumer-site.yaml << 'YAML'
+
 site:
   title: "Combined Dashboard"
   base_url: "/"

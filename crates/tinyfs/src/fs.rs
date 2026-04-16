@@ -144,6 +144,11 @@ impl FS {
             .await
     }
 
+    /// Read the factory type and configuration of a dynamic node
+    pub async fn get_dynamic_node_config(&self, id: FileID) -> Result<Option<(String, Vec<u8>)>> {
+        self.persistence.get_dynamic_node_config(id).await
+    }
+
     /// Set extended attributes on an existing node
     pub(crate) async fn set_extended_attributes(
         &self,

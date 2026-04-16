@@ -131,7 +131,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static: []
 YAML
 
 echo "Command: pond run -d ${SITE_ROOT} host+sitegen:///site.yaml build ${OUTDIR}"

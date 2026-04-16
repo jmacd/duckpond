@@ -99,6 +99,7 @@ impl SiteConfig {
 
 /// Site-wide metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SiteMeta {
     pub title: String,
     #[serde(default = "default_base_url")]
@@ -142,6 +143,7 @@ fn default_base_url() -> String {
 /// Content stages are resolved before route expansion. A `content` route
 /// references a stage by name, producing one page per matched file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContentStage {
     /// Name referenced by content routes (e.g., "pages")
     pub name: String,
@@ -163,6 +165,7 @@ pub struct ContentStage {
 /// (more data per file, fewer files). Default is 1500, matching a typical
 /// screen width in pixels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportStage {
     /// Name referenced by routes (e.g., "params", "sites")
     pub name: String,
@@ -232,6 +235,7 @@ pub enum RouteType {
 
 /// Static asset to copy verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StaticAsset {
     pub pattern: String,
 }
@@ -298,6 +302,7 @@ impl SidebarEntry {
 
 /// A child item in a sidebar entry with sub-navigation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SidebarChild {
     /// Display label
     pub label: String,

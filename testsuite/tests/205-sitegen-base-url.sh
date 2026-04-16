@@ -194,7 +194,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static: []
 YAML
 
 pond mknod sitegen /site-root.yaml --config-path /tmp/site-root.yaml
@@ -241,7 +240,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static: []
 YAML
 
 pond mknod sitegen /site-subdir.yaml --config-path /tmp/site-subdir.yaml
