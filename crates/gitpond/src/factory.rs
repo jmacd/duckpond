@@ -162,9 +162,7 @@ pub async fn execute(
             info!("git-ingest: 'push' mode is a no-op (git is a read-only source)");
             Ok(())
         }
-        Some(GitIngestSubcommand::Status) => {
-            execute_status(&context, &config).await
-        }
+        Some(GitIngestSubcommand::Status) => execute_status(&context, &config).await,
         Some(GitIngestSubcommand::Pull) | None => {
             execute_pull(&context, &pond_path, &node_id, &config).await
         }

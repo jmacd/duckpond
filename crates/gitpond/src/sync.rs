@@ -13,31 +13,17 @@ use tinyfs::EntryType;
 #[derive(Debug)]
 pub enum Change {
     /// Create or update a file
-    WriteFile {
-        path: String,
-        oid: String,
-    },
+    WriteFile { path: String, oid: String },
     /// Create a directory
-    CreateDir {
-        path: String,
-    },
+    CreateDir { path: String },
     /// Create or update a symlink
-    WriteSymlink {
-        path: String,
-        oid: String,
-    },
+    WriteSymlink { path: String, oid: String },
     /// Remove an entry (file, symlink, or directory)
-    Remove {
-        path: String,
-        kind: EntryKind,
-    },
+    Remove { path: String, kind: EntryKind },
 }
 
 /// Compute the changes needed to go from old_manifest to new_manifest
-pub fn diff_manifests(
-    old: &GitManifest,
-    new: &GitManifest,
-) -> Vec<Change> {
+pub fn diff_manifests(old: &GitManifest, new: &GitManifest) -> Vec<Change> {
     let mut changes = Vec::new();
 
     // Detect removals (in old but not in new)
@@ -177,7 +163,11 @@ pub async fn apply_changes(
                         stats.removed += 1;
                     }
                     Err(e) => {
-                        log::warn!("Failed to remove {}: {} (may already be gone)", full_path, e);
+                        log::warn!(
+                            "Failed to remove {}: {} (may already be gone)",
+                            full_path,
+                            e
+                        );
                     }
                 }
             }
@@ -206,7 +196,10 @@ pub async fn apply_changes(
                 // Create as FilePhysicalVersion
                 use tokio::io::AsyncWriteExt;
                 let (_, mut writer) = root
-                    .create_file_path_streaming_with_type(&full_path, EntryType::FilePhysicalVersion)
+                    .create_file_path_streaming_with_type(
+                        &full_path,
+                        EntryType::FilePhysicalVersion,
+                    )
                     .await?;
                 writer
                     .write_all(&content)
@@ -223,8 +216,7 @@ pub async fn apply_changes(
             }
             Change::WriteSymlink { path, oid } => {
                 let full_path = format!("{}/{}", config_pond_path, path);
-                let target =
-                    crate::git::read_symlink_target(pond_path_on_disk, node_id, oid)?;
+                let target = crate::git::read_symlink_target(pond_path_on_disk, node_id, oid)?;
 
                 // Remove existing entry if present
                 let _ = remove_entry_at_path(&root, &full_path).await;
@@ -251,10 +243,7 @@ pub async fn apply_changes(
 
 /// Remove an entry from the pond at the given path.
 /// Handles the path decomposition into parent directory + entry name.
-async fn remove_entry_at_path(
-    root: &tinyfs::WD,
-    full_path: &str,
-) -> Result<(), tinyfs::Error> {
+async fn remove_entry_at_path(root: &tinyfs::WD, full_path: &str) -> Result<(), tinyfs::Error> {
     let path = Path::new(full_path);
     let parent = path
         .parent()
@@ -317,8 +306,14 @@ mod tests {
     fn test_diff_empty_to_populated() {
         let old = GitManifest::empty();
         let entries = BTreeMap::from([
-            ("README.md".to_string(), make_entry("abc123", EntryKind::File, 0o100644)),
-            ("docs".to_string(), make_entry("def456", EntryKind::Directory, 0o40000)),
+            (
+                "README.md".to_string(),
+                make_entry("abc123", EntryKind::File, 0o100644),
+            ),
+            (
+                "docs".to_string(),
+                make_entry("def456", EntryKind::Directory, 0o40000),
+            ),
         ]);
         let new = GitManifest {
             commit_sha: "commit1".to_string(),
@@ -334,9 +329,10 @@ mod tests {
 
     #[test]
     fn test_diff_no_changes() {
-        let entries = BTreeMap::from([
-            ("file.txt".to_string(), make_entry("abc123", EntryKind::File, 0o100644)),
-        ]);
+        let entries = BTreeMap::from([(
+            "file.txt".to_string(),
+            make_entry("abc123", EntryKind::File, 0o100644),
+        )]);
         let old = GitManifest {
             commit_sha: "c1".to_string(),
             entries: entries.clone(),
@@ -353,9 +349,18 @@ mod tests {
     #[test]
     fn test_diff_deletion_deepest_first() {
         let entries = BTreeMap::from([
-            ("a".to_string(), make_entry("1", EntryKind::Directory, 0o40000)),
-            ("a/b".to_string(), make_entry("2", EntryKind::Directory, 0o40000)),
-            ("a/b/c.txt".to_string(), make_entry("3", EntryKind::File, 0o100644)),
+            (
+                "a".to_string(),
+                make_entry("1", EntryKind::Directory, 0o40000),
+            ),
+            (
+                "a/b".to_string(),
+                make_entry("2", EntryKind::Directory, 0o40000),
+            ),
+            (
+                "a/b/c.txt".to_string(),
+                make_entry("3", EntryKind::File, 0o100644),
+            ),
         ]);
         let old = GitManifest {
             commit_sha: "c1".to_string(),

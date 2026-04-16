@@ -13,9 +13,9 @@ mod common;
 mod panic_alloc;
 
 // External modules
+use gitpond as _;
 use hydrovu as _;
 use sitegen as _;
-use gitpond as _;
 
 #[global_allocator]
 static PEAK_ALLOC: PanicOnLargeAlloc = PanicOnLargeAlloc::new(3000);

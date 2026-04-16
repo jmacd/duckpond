@@ -120,11 +120,7 @@ pub fn walk_tree(
 }
 
 /// Read the content of a blob by OID
-pub fn read_blob(
-    pond_path: &Path,
-    node_id: &str,
-    oid_hex: &str,
-) -> Result<Vec<u8>, tinyfs::Error> {
+pub fn read_blob(pond_path: &Path, node_id: &str, oid_hex: &str) -> Result<Vec<u8>, tinyfs::Error> {
     let repo_path = bare_repo_path(pond_path, node_id);
     let repo = open_bare_repo(&repo_path)?;
 
@@ -151,10 +147,7 @@ pub fn read_symlink_target(
 
 // --- Internal helpers ---
 
-fn clone_bare_repo(
-    path: &Path,
-    url: &str,
-) -> Result<gix::Repository, tinyfs::Error> {
+fn clone_bare_repo(path: &Path, url: &str) -> Result<gix::Repository, tinyfs::Error> {
     log::info!("Cloning bare repo from {} to {}", url, path.display());
 
     let mut prep = gix::prepare_clone_bare(url, path)
@@ -168,13 +161,16 @@ fn clone_bare_repo(
 }
 
 fn open_bare_repo(path: &Path) -> Result<gix::Repository, tinyfs::Error> {
-    gix::open(path)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to open bare repo at {}: {}", path.display(), e)))
+    gix::open(path).map_err(|e| {
+        tinyfs::Error::Other(format!(
+            "Failed to open bare repo at {}: {}",
+            path.display(),
+            e
+        ))
+    })
 }
 
-fn fetch_remote(
-    repo: &gix::Repository,
-) -> Result<(), tinyfs::Error> {
+fn fetch_remote(repo: &gix::Repository) -> Result<(), tinyfs::Error> {
     log::info!("Fetching from origin");
 
     let remote = repo
@@ -193,10 +189,7 @@ fn fetch_remote(
     Ok(())
 }
 
-fn resolve_local_ref(
-    repo: &gix::Repository,
-    git_ref: &str,
-) -> Result<String, tinyfs::Error> {
+fn resolve_local_ref(repo: &gix::Repository, git_ref: &str) -> Result<String, tinyfs::Error> {
     // Try remote tracking ref first (updated by fetch), then local branch, tag, direct
     let candidates = [
         format!("refs/remotes/origin/{}", git_ref),
@@ -264,16 +257,12 @@ fn walk_tree_recursive(
                 );
 
                 // Recurse into subdirectory
-                let sub_obj = repo
-                    .find_object(entry.oid())
-                    .map_err(|e| {
-                        tinyfs::Error::Other(format!("Failed to find tree object: {}", e))
-                    })?;
+                let sub_obj = repo.find_object(entry.oid()).map_err(|e| {
+                    tinyfs::Error::Other(format!("Failed to find tree object: {}", e))
+                })?;
                 let sub_tree = sub_obj
                     .try_into_tree()
-                    .map_err(|e| {
-                        tinyfs::Error::Other(format!("Object is not a tree: {}", e))
-                    })?;
+                    .map_err(|e| tinyfs::Error::Other(format!("Object is not a tree: {}", e)))?;
                 walk_tree_recursive(repo, &sub_tree, &path, entries)?;
             }
             gix::object::tree::EntryKind::Link => {
@@ -297,7 +286,11 @@ fn walk_tree_recursive(
                 );
             }
             _ => {
-                log::debug!("Skipping unsupported entry type at {}: mode={:#o}", path, mode);
+                log::debug!(
+                    "Skipping unsupported entry type at {}: mode={:#o}",
+                    path,
+                    mode
+                );
             }
         }
     }
