@@ -8,10 +8,10 @@ source check.sh
 echo "=== Experiment: Sitegen Build Footer ==="
 
 SITE_ROOT="/tmp/footer-test"
-OUTDIR="${OUTPUT:-/output}"
+OUTDIR="/tmp/footer-output"
 
 rm -rf "${SITE_ROOT}"
-rm -rf "${OUTDIR:?}"/* 2>/dev/null || true
+rm -rf "${OUTDIR}"
 mkdir -p "${OUTDIR}"
 
 # Create minimal site structure
