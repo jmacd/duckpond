@@ -199,11 +199,11 @@ fn resolve_local_ref(repo: &gix::Repository, git_ref: &str) -> Result<String, ti
     ];
 
     for candidate in &candidates {
-        if let Ok(reference) = repo.find_reference(candidate.as_str()) {
-            if let Ok(id) = reference.into_fully_peeled_id() {
-                log::info!("Resolved '{}' via '{}' -> {}", git_ref, candidate, id);
-                return Ok(id.to_hex().to_string());
-            }
+        if let Ok(reference) = repo.find_reference(candidate.as_str())
+            && let Ok(id) = reference.into_fully_peeled_id()
+        {
+            log::info!("Resolved '{}' via '{}' -> {}", git_ref, candidate, id);
+            return Ok(id.to_hex().to_string());
         }
     }
 
