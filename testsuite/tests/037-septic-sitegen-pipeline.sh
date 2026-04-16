@@ -384,7 +384,6 @@ routes:
 partials:
   sidebar: "/site/sidebar.md"
 
-static_assets: []
 YAML
 
 pond mknod sitegen /site.yaml --config-path /tmp/site.yaml

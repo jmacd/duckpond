@@ -44,7 +44,6 @@ routes:
 partials:
   sidebar: "/templates/sidebar.md"
 
-static_assets: []
 EOF
 
 # Build the site using hostmount
