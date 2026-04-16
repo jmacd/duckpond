@@ -48,7 +48,7 @@ RUST_LOG=info pond run /system/etc/gitrepo pull
 # --- Verify structure ---------------------------------------------------------
 echo ""
 echo "=== Full listing ==="
-pond list -r /content/
+pond list /content/**
 
 echo ""
 echo "=== Verify nested file ==="
