@@ -227,15 +227,15 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
 
         match result {
             ApplyResult::Created => {
-                eprintln!("  created  {}", spec.path);
+                log::info!("  created  {}", spec.path);
                 created += 1;
             }
             ApplyResult::Updated => {
-                eprintln!("  updated  {}", spec.path);
+                log::info!("  updated  {}", spec.path);
                 updated += 1;
             }
             ApplyResult::Unchanged => {
-                eprintln!("  unchanged  {}", spec.path);
+                log::info!("  unchanged  {}", spec.path);
                 unchanged += 1;
             }
         }
@@ -247,12 +247,12 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
             .commit()
             .await
             .map_err(|e| anyhow!("apply: failed to commit transaction: {}", e))?;
-        eprintln!(
+        log::info!(
             "apply: {} created, {} updated, {} unchanged",
             created, updated, unchanged
         );
     } else {
-        eprintln!(
+        log::info!(
             "apply: all {} config(s) unchanged, no transaction committed",
             unchanged
         );
@@ -287,16 +287,16 @@ async fn apply_one(
                 .await
                 .map_err(|e| anyhow!("failed to get factory for '{}': {}", spec.path, e))?;
 
-            if let Some(ref factory_name) = existing_factory {
-                if factory_name != &spec.kind {
-                    return Err(anyhow!(
-                        "factory type mismatch at '{}': existing is '{}', apply specifies '{}'. \
-                        Cannot change factory type in place; remove the node first.",
-                        spec.path,
-                        factory_name,
-                        spec.kind
-                    ));
-                }
+            if let Some(ref factory_name) = existing_factory
+                && factory_name != &spec.kind
+            {
+                return Err(anyhow!(
+                    "factory type mismatch at '{}': existing is '{}', apply specifies '{}'. \
+                    Cannot change factory type in place; remove the node first.",
+                    spec.path,
+                    factory_name,
+                    spec.kind
+                ));
             }
 
             // Read existing config to compare
@@ -308,10 +308,10 @@ async fn apply_one(
             let new_config_bytes = spec.raw_config.as_bytes();
 
             // Compare raw bytes — if identical, skip
-            if let Some((_, ref existing_bytes)) = existing_config {
-                if existing_bytes == new_config_bytes {
-                    return Ok(ApplyResult::Unchanged);
-                }
+            if let Some((_, ref existing_bytes)) = existing_config
+                && existing_bytes == new_config_bytes
+            {
+                return Ok(ApplyResult::Unchanged);
             }
 
             // Config changed — determine entry type and update

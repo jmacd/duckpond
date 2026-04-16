@@ -295,7 +295,7 @@ async fn show_brief_mode(
 
     // Sort partitions by total rows
     let mut partition_vec: Vec<_> = partition_map.into_iter().collect();
-    partition_vec.sort_by(|a, b| b.1.total_rows.cmp(&a.1.total_rows));
+    partition_vec.sort_by_key(|b| std::cmp::Reverse(b.1.total_rows));
 
     // Show all partitions with detailed breakdown
     output.push_str("  Partitions (by row count)\n");
