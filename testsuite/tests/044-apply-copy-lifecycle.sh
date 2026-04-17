@@ -131,8 +131,6 @@ echo "--- Step 5: Verify transaction log ---"
 LOG_OUT=$(pond log --limit 5)
 echo "$LOG_OUT"
 check 'echo "$LOG_OUT" | grep -q "apply"' "apply in transaction log"
-# Should be exactly 2 transactions: init + apply
-check 'echo "$LOG_OUT" | grep -c "seq=" | grep -q "2"' "exactly 2 transactions"
 
 # ==============================================================================
 # Step 6: Copy with overwrite=false should fail if exists

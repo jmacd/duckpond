@@ -210,14 +210,14 @@ fn parse_resource(yaml: &str, source_file: &str, index: usize) -> Result<ApplySp
 fn parse_kind(doc: &ResourceDoc, source_file: &str, index: usize) -> Result<ApplyKind> {
     match doc.kind.as_str() {
         "mkdir" => {
-            if let Some(ref spec) = doc.spec {
-                if !spec.is_null() {
-                    return Err(anyhow!(
-                        "{}[{}]: mkdir does not accept a spec",
-                        source_file,
-                        index
-                    ));
-                }
+            if let Some(ref spec) = doc.spec
+                && !spec.is_null()
+            {
+                return Err(anyhow!(
+                    "{}[{}]: mkdir does not accept a spec",
+                    source_file,
+                    index
+                ));
             }
             Ok(ApplyKind::Mkdir)
         }
