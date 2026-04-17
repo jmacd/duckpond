@@ -6,41 +6,41 @@
 //!
 //! `pond apply -f file1.yaml [file2.yaml ...]`
 //!
-//! Each YAML file contains a prelude (kind, path, version) separated
-//! from the config body by a `---` document separator.
+//! Each YAML file contains one or more resource documents separated by `---`.
+//! Each document follows a k8s-inspired structure:
 //!
-//! Supported kinds:
-//!
-//! Factory nodes (any registered factory name):
 //! ```yaml
-//! kind: remote
-//! path: /system/etc/10-water
 //! version: v1
-//! ---
-//! region: "${env:S3_REGION}"
-//! url: "${env:WATER_S3_URL}"
+//! kind: mknod
+//! metadata:
+//!   path: /system/etc/10-water
+//! spec:
+//!   factory: remote
+//!   region: "${env:S3_REGION}"
+//!   url: "${env:WATER_S3_URL}"
 //! ```
 //!
-//! Directory creation:
+//! Supported kinds: `mkdir`, `copy`, `mknod`
+//!
+//! Multiple resources per file:
 //! ```yaml
+//! version: v1
 //! kind: mkdir
-//! path: /
-//! version: v1
+//! metadata:
+//!   path: /system/etc
 //! ---
-//! paths:
-//!   - /system/etc
-//!   - /system/run
-//!   - /sources
-//! ```
-//!
-//! Host-to-pond copy:
-//! ```yaml
-//! kind: copy
-//! path: /content
 //! version: v1
+//! kind: mkdir
+//! metadata:
+//!   path: /sources
 //! ---
-//! source: "host:///path/to/content"
-//! overwrite: false
+//! version: v1
+//! kind: mknod
+//! metadata:
+//!   path: /system/etc/10-water
+//! spec:
+//!   factory: remote
+//!   region: "${env:S3_REGION}"
 //! ```
 
 use crate::common::ShipContext;
@@ -51,30 +51,47 @@ use std::collections::HashSet;
 use std::fs;
 use utilities::env_substitution;
 
-/// Prelude parsed from the first YAML document in an apply file.
+// ---------------------------------------------------------------------------
+// Resource document structure
+// ---------------------------------------------------------------------------
+
+/// A single resource document parsed from YAML.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ApplyPrelude {
-    /// Kind: a factory type name, "mkdir", or "copy"
-    kind: String,
-    /// Path in the pond (factory mount path, copy destination, or "/" for mkdir)
-    path: String,
+struct ResourceDoc {
     /// Format version (must be "v1")
     version: String,
+    /// Resource kind: "mkdir", "copy", or "mknod"
+    kind: String,
+    /// Resource metadata (path in the pond)
+    metadata: ResourceMetadata,
+    /// Kind-specific configuration (optional for mkdir)
+    #[serde(default)]
+    spec: Option<serde_yaml::Value>,
 }
 
-/// Config body for `kind: mkdir`.
+/// Resource metadata -- identity and location in the pond.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MkdirConfig {
-    /// Absolute paths to create (with implied -p semantics)
-    paths: Vec<String>,
+struct ResourceMetadata {
+    /// Path in the pond
+    path: String,
 }
 
-/// Config body for `kind: copy`.
+/// Spec for `kind: mknod` -- factory type plus factory-specific config.
+#[derive(Debug, Deserialize)]
+struct MknodSpec {
+    /// Factory type (e.g., "remote", "sitegen", "dynamic-dir")
+    factory: String,
+    /// Remaining fields are the factory config
+    #[serde(flatten)]
+    config: serde_yaml::Mapping,
+}
+
+/// Spec for `kind: copy`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CopyConfig {
+struct CopySpec {
     /// Host source URL (e.g., "host:///path/to/content")
     source: String,
     /// If true, overwrite existing destination. If false (default), error if exists.
@@ -82,17 +99,23 @@ struct CopyConfig {
     overwrite: bool,
 }
 
-/// Parsed apply kind with its validated config.
+// ---------------------------------------------------------------------------
+// Internal representation after parsing + validation
+// ---------------------------------------------------------------------------
+
+/// Parsed and validated apply kind.
 #[derive(Debug)]
 enum ApplyKind {
-    /// Create directories (pond mkdir -p)
-    Mkdir(MkdirConfig),
+    /// Create a directory (pond mkdir -p)
+    Mkdir,
     /// Copy host content into pond (pond copy)
-    Copy(CopyConfig),
+    Copy(CopySpec),
     /// Create/update a factory node (pond mknod)
-    Factory {
+    Mknod {
         factory_type: String,
+        /// Raw config YAML (with ${env:...} intact, for storage)
         raw_config: String,
+        /// Expanded config YAML (for validation and initialization)
         expanded_config: String,
     },
 }
@@ -102,7 +125,7 @@ enum ApplyKind {
 struct ApplySpec {
     /// Source file path (for error messages)
     source_file: String,
-    /// Pond path from prelude
+    /// Pond path from metadata
     path: String,
     /// Parsed and validated kind
     kind: ApplyKind,
@@ -116,96 +139,190 @@ enum ApplyResult {
     Unchanged,
 }
 
-/// Parse an apply file into prelude + config body.
-///
-/// The file must contain exactly two YAML documents separated by `---`:
-/// 1. Prelude with kind, path, version
-/// 2. Config body (passed to the factory)
-fn parse_apply_file(content: &str, source_file: &str) -> Result<(ApplyPrelude, String)> {
-    // Split on the YAML document separator.
-    // The separator must be a line starting with "---" (standard YAML multi-doc).
-    // We skip the first occurrence if the file starts with "---" (optional YAML preamble).
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+/// Split a file into YAML documents separated by `---`.
+fn split_yaml_documents(content: &str) -> Vec<String> {
     let mut documents = Vec::new();
     let mut current = String::new();
-    let mut first_line = true;
 
     for line in content.lines() {
-        if !first_line && line == "---" {
-            documents.push(std::mem::take(&mut current));
+        if line == "---" {
+            if !current.trim().is_empty() {
+                documents.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
         } else {
             if !current.is_empty() {
                 current.push('\n');
             }
             current.push_str(line);
         }
-        first_line = false;
     }
-    // Push the last document
-    if !current.is_empty() {
+    if !current.trim().is_empty() {
         documents.push(current);
     }
-
-    if documents.len() < 2 {
-        return Err(anyhow!(
-            "{}: expected prelude and config body separated by '---'",
-            source_file
-        ));
-    }
-    if documents.len() > 2 {
-        return Err(anyhow!(
-            "{}: expected exactly two YAML documents (prelude + config body), found {}",
-            source_file,
-            documents.len()
-        ));
-    }
-
-    // Parse the prelude
-    let prelude: ApplyPrelude = serde_yaml::from_str(&documents[0])
-        .map_err(|e| anyhow!("{}: failed to parse prelude: {}", source_file, e))?;
-
-    // Validate version
-    if prelude.version != "v1" {
-        return Err(anyhow!(
-            "{}: unsupported version '{}', expected 'v1'",
-            source_file,
-            prelude.version
-        ));
-    }
-
-    // Validate path starts with /
-    if !prelude.path.starts_with('/') {
-        return Err(anyhow!(
-            "{}: path must be absolute (start with '/'), got '{}'",
-            source_file,
-            prelude.path
-        ));
-    }
-
-    // The config body is everything after the separator.
-    // Add a trailing newline to match how files are normally stored.
-    let mut body = documents[1].clone();
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-
-    Ok((prelude, body))
+    documents
 }
+
+/// Parse a single resource document into a validated ApplySpec.
+fn parse_resource(yaml: &str, source_file: &str, index: usize) -> Result<ApplySpec> {
+    let doc: ResourceDoc = serde_yaml::from_str(yaml).map_err(|e| {
+        anyhow!(
+            "{}[{}]: failed to parse resource: {}",
+            source_file,
+            index,
+            e
+        )
+    })?;
+
+    if doc.version != "v1" {
+        return Err(anyhow!(
+            "{}[{}]: unsupported version '{}', expected 'v1'",
+            source_file,
+            index,
+            doc.version
+        ));
+    }
+
+    if !doc.metadata.path.starts_with('/') {
+        return Err(anyhow!(
+            "{}[{}]: metadata.path must be absolute, got '{}'",
+            source_file,
+            index,
+            doc.metadata.path
+        ));
+    }
+
+    let kind = parse_kind(&doc, source_file, index)?;
+
+    Ok(ApplySpec {
+        source_file: source_file.to_string(),
+        path: doc.metadata.path,
+        kind,
+    })
+}
+
+/// Parse the kind-specific spec into an ApplyKind.
+fn parse_kind(doc: &ResourceDoc, source_file: &str, index: usize) -> Result<ApplyKind> {
+    match doc.kind.as_str() {
+        "mkdir" => {
+            if let Some(ref spec) = doc.spec {
+                if !spec.is_null() {
+                    return Err(anyhow!(
+                        "{}[{}]: mkdir does not accept a spec",
+                        source_file,
+                        index
+                    ));
+                }
+            }
+            Ok(ApplyKind::Mkdir)
+        }
+        "copy" => {
+            let spec_value = doc.spec.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "{}[{}]: copy requires a spec with 'source'",
+                    source_file,
+                    index
+                )
+            })?;
+
+            let spec_yaml = serde_yaml::to_string(spec_value).map_err(|e| {
+                anyhow!(
+                    "{}[{}]: failed to serialize copy spec: {}",
+                    source_file,
+                    index,
+                    e
+                )
+            })?;
+            let expanded = env_substitution::substitute_env_vars(&spec_yaml).map_err(|e| {
+                anyhow!("{}[{}]: env expansion failed: {}", source_file, index, e)
+            })?;
+            let config: CopySpec = serde_yaml::from_str(&expanded).map_err(|e| {
+                anyhow!("{}[{}]: invalid copy spec: {}", source_file, index, e)
+            })?;
+
+            if !config.source.starts_with("host:///") && !config.source.starts_with("host+") {
+                return Err(anyhow!(
+                    "{}[{}]: copy source must be a host URL (host:///...), got '{}'",
+                    source_file,
+                    index,
+                    config.source
+                ));
+            }
+
+            Ok(ApplyKind::Copy(config))
+        }
+        "mknod" => {
+            let spec_value = doc.spec.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "{}[{}]: mknod requires a spec with 'factory'",
+                    source_file,
+                    index
+                )
+            })?;
+
+            let mknod: MknodSpec = serde_yaml::from_value(spec_value.clone()).map_err(|e| {
+                anyhow!("{}[{}]: invalid mknod spec: {}", source_file, index, e)
+            })?;
+
+            let raw_config = serde_yaml::to_string(&mknod.config).map_err(|e| {
+                anyhow!(
+                    "{}[{}]: failed to serialize factory config: {}",
+                    source_file,
+                    index,
+                    e
+                )
+            })?;
+
+            let expanded = env_substitution::substitute_env_vars(&raw_config).map_err(|e| {
+                anyhow!("{}[{}]: env expansion failed: {}", source_file, index, e)
+            })?;
+
+            _ = FactoryRegistry::validate_config(&mknod.factory, expanded.as_bytes()).map_err(
+                |e| {
+                    anyhow!(
+                        "{}[{}]: invalid config for factory '{}': {}",
+                        source_file,
+                        index,
+                        mknod.factory,
+                        e
+                    )
+                },
+            )?;
+
+            Ok(ApplyKind::Mknod {
+                factory_type: mknod.factory,
+                raw_config,
+                expanded_config: expanded,
+            })
+        }
+        other => Err(anyhow!(
+            "{}[{}]: unknown kind '{}', expected 'mkdir', 'copy', or 'mknod'",
+            source_file,
+            index,
+            other
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command entry point
+// ---------------------------------------------------------------------------
 
 /// Apply one or more configuration files to the pond.
 ///
-/// For each file:
-/// 1. Parse prelude (kind, path, version) and config body
-/// 2. Validate kind-specific configuration
-/// 3. Create or update resources as needed
-///
-/// All changes are made in a single transaction, committed only if
-/// at least one resource was created or updated.
+/// Each file may contain multiple resource documents separated by `---`.
+/// All changes are made in a single transaction.
 pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Result<()> {
     if files.is_empty() {
         return Err(anyhow!("no files specified; use -f <file.yaml>"));
     }
 
-    // Phase 1: Parse and validate all files before opening a transaction.
+    // Phase 1: Parse and validate all resources before opening a transaction.
     let mut specs = Vec::new();
     let mut claimed_paths: HashSet<String> = HashSet::new();
 
@@ -213,75 +330,46 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
         let content = fs::read_to_string(file_path)
             .map_err(|e| anyhow!("failed to read '{}': {}", file_path, e))?;
 
-        let (prelude, body) = parse_apply_file(&content, file_path)?;
-
-        let kind = parse_apply_kind(&prelude, &body, file_path)?;
-
-        // Collect claimed paths for duplicate detection
-        match &kind {
-            ApplyKind::Mkdir(cfg) => {
-                for p in &cfg.paths {
-                    if !claimed_paths.insert(p.clone()) {
-                        return Err(anyhow!(
-                            "duplicate path '{}' in '{}' (already claimed by another spec)",
-                            p,
-                            file_path
-                        ));
-                    }
-                }
-            }
-            ApplyKind::Copy(_) | ApplyKind::Factory { .. } => {
-                if !claimed_paths.insert(prelude.path.clone()) {
-                    return Err(anyhow!(
-                        "duplicate path '{}' in '{}' (already claimed by another spec)",
-                        prelude.path,
-                        file_path
-                    ));
-                }
-            }
+        let documents = split_yaml_documents(&content);
+        if documents.is_empty() {
+            return Err(anyhow!("{}: no YAML documents found", file_path));
         }
 
-        specs.push(ApplySpec {
-            source_file: file_path.clone(),
-            path: prelude.path,
-            kind,
-        });
+        for (i, doc_yaml) in documents.iter().enumerate() {
+            let spec = parse_resource(doc_yaml, file_path, i)?;
+
+            if !claimed_paths.insert(spec.path.clone()) {
+                return Err(anyhow!(
+                    "{}[{}]: duplicate path '{}' (already claimed by another resource)",
+                    file_path,
+                    i,
+                    spec.path
+                ));
+            }
+
+            specs.push(spec);
+        }
     }
 
-    // Sort specs: mkdir first (shallowest), then factories/copies by depth
+    // Sort: mkdir first, then copy, then mknod; within each group by path depth
     specs.sort_by(|a, b| {
-        let order_a = match &a.kind {
-            ApplyKind::Mkdir(_) => 0,
+        let order = |k: &ApplyKind| match k {
+            ApplyKind::Mkdir => 0,
             ApplyKind::Copy(_) => 1,
-            ApplyKind::Factory { .. } => 2,
+            ApplyKind::Mknod { .. } => 2,
         };
-        let order_b = match &b.kind {
-            ApplyKind::Mkdir(_) => 0,
-            ApplyKind::Copy(_) => 1,
-            ApplyKind::Factory { .. } => 2,
-        };
-        order_a
-            .cmp(&order_b)
+        order(&a.kind)
+            .cmp(&order(&b.kind))
             .then_with(|| {
-                let depth_a = a.path.matches('/').count();
-                let depth_b = b.path.matches('/').count();
-                depth_a.cmp(&depth_b)
+                a.path.matches('/').count().cmp(&b.path.matches('/').count())
             })
             .then(a.path.cmp(&b.path))
     });
 
     // Phase 2: Open transaction and apply
     let mut ship = ship_context.open_pond().await?;
-    let tx = ship
-        .begin_write(&steward::PondUserMetadata::new(vec![
-            "apply".to_string(),
-            format!("{} file(s)", specs.len()),
-        ]))
-        .await
-        .map_err(|e| anyhow!("apply: failed to begin transaction: {}", e))?;
 
-    // Open host steward for copy operations (read-only, no conflict with pond write).
-    // Must be declared before the transaction so it outlives it.
+    // Host steward for copy operations (read-only)
     let needs_host = specs.iter().any(|s| matches!(s.kind, ApplyKind::Copy(_)));
     let mut host_ship = if needs_host {
         Some(ship_context.open_host()?)
@@ -299,6 +387,14 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
     } else {
         None
     };
+
+    let tx = ship
+        .begin_write(&steward::PondUserMetadata::new(vec![
+            "apply".to_string(),
+            format!("{} resource(s)", specs.len()),
+        ]))
+        .await
+        .map_err(|e| anyhow!("apply: failed to begin transaction: {}", e))?;
 
     let mut created = 0usize;
     let mut updated = 0usize;
@@ -327,12 +423,12 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
 
     // Commit host read transaction if opened
     if let Some(host_tx) = host_read {
-        _ = host_tx.commit().await.map_err(|e| {
-            anyhow!("apply: failed to commit host read transaction: {}", e)
-        })?;
+        _ = host_tx
+            .commit()
+            .await
+            .map_err(|e| anyhow!("apply: failed to commit host read transaction: {}", e))?;
     }
 
-    // Only commit pond transaction if something changed
     if created > 0 || updated > 0 {
         _ = tx
             .commit()
@@ -340,13 +436,11 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
             .map_err(|e| anyhow!("apply: failed to commit transaction: {}", e))?;
         log::info!(
             "apply: {} created, {} updated, {} unchanged",
-            created,
-            updated,
-            unchanged
+            created, updated, unchanged
         );
     } else {
         log::info!(
-            "apply: all {} config(s) unchanged, no transaction committed",
+            "apply: all {} resource(s) unchanged, no transaction committed",
             unchanged
         );
     }
@@ -354,73 +448,9 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
     Ok(())
 }
 
-/// Parse the kind field and body into a validated ApplyKind.
-fn parse_apply_kind(prelude: &ApplyPrelude, body: &str, source_file: &str) -> Result<ApplyKind> {
-    match prelude.kind.as_str() {
-        "mkdir" => {
-            let config: MkdirConfig = serde_yaml::from_str(body).map_err(|e| {
-                anyhow!("{}: invalid mkdir config: {}", source_file, e)
-            })?;
-            // Validate all paths are absolute
-            for p in &config.paths {
-                if !p.starts_with('/') {
-                    return Err(anyhow!(
-                        "{}: mkdir path must be absolute: '{}'",
-                        source_file,
-                        p
-                    ));
-                }
-            }
-            Ok(ApplyKind::Mkdir(config))
-        }
-        "copy" => {
-            let config: CopyConfig = serde_yaml::from_str(body).map_err(|e| {
-                anyhow!("{}: invalid copy config: {}", source_file, e)
-            })?;
-            // Validate source is a host URL
-            if !config.source.starts_with("host:///")
-                && !config.source.starts_with("host+")
-            {
-                return Err(anyhow!(
-                    "{}: copy source must be a host URL (host:///... or host+scheme:///...), got '{}'",
-                    source_file,
-                    config.source
-                ));
-            }
-            Ok(ApplyKind::Copy(config))
-        }
-        factory_type => {
-            // Expand env references for validation
-            let expanded = env_substitution::substitute_env_vars(body).map_err(|e| {
-                anyhow!(
-                    "{}: failed to expand environment variables:\n  {}\n  \
-                    Tip: Use ${{env:VAR}} to read environment variables, ${{env:VAR:-default}} for defaults",
-                    source_file,
-                    e
-                )
-            })?;
-
-            // Validate the factory and configuration
-            let _validated =
-                FactoryRegistry::validate_config(factory_type, expanded.as_bytes()).map_err(
-                    |e| {
-                        anyhow!(
-                            "{}: invalid configuration for factory '{}': {}",
-                            source_file,
-                            factory_type,
-                            e
-                        )
-                    },
-                )?;
-
-            Ok(ApplyKind::Factory {
-                factory_type: factory_type.to_string(),
-                raw_config: body.to_string(),
-                expanded_config: expanded,
-            })
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Per-kind apply logic
+// ---------------------------------------------------------------------------
 
 /// Apply a single spec within an open transaction.
 async fn apply_one(
@@ -430,55 +460,56 @@ async fn apply_one(
     host_read: Option<&steward::Transaction<'_>>,
 ) -> Result<ApplyResult> {
     match &spec.kind {
-        ApplyKind::Mkdir(config) => apply_mkdir(fs, config).await,
+        ApplyKind::Mkdir => apply_mkdir(fs, &spec.path).await,
         ApplyKind::Copy(config) => {
-            let host_tx = host_read
-                .ok_or_else(|| anyhow!("copy requires host access but host steward not available"))?;
+            let host_tx = host_read.ok_or_else(|| {
+                anyhow!("copy requires host access but host steward not available")
+            })?;
             apply_copy(fs, &spec.path, config, host_tx).await
         }
-        ApplyKind::Factory {
+        ApplyKind::Mknod {
             factory_type,
             raw_config,
             expanded_config,
-        } => {
-            apply_factory(tx, fs, &spec.path, factory_type, raw_config, expanded_config).await
-        }
+        } => apply_mknod(tx, fs, &spec.path, factory_type, raw_config, expanded_config).await,
     }
 }
 
-/// Apply a mkdir spec: create all listed directories with -p semantics.
-async fn apply_mkdir(fs: &tinyfs::FS, config: &MkdirConfig) -> Result<ApplyResult> {
+/// Apply a mkdir spec: create the directory with -p semantics.
+async fn apply_mkdir(fs: &tinyfs::FS, path: &str) -> Result<ApplyResult> {
     let root = fs.root().await?;
+
+    let components: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if components.is_empty() {
+        return Ok(ApplyResult::Unchanged);
+    }
+
     let mut any_created = false;
+    let mut current_path = String::new();
+    for component in components {
+        current_path.push('/');
+        current_path.push_str(component);
 
-    for path in &config.paths {
-        let components: Vec<&str> = path
-            .trim_start_matches('/')
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let mut current_path = String::new();
-        for component in components {
-            current_path.push('/');
-            current_path.push_str(component);
-
-            if root.exists(&current_path).await {
-                match root.open_dir_path(&current_path).await {
-                    Ok(_) => continue,
-                    Err(_) => {
-                        return Err(anyhow!(
-                            "path '{}' exists but is not a directory",
-                            current_path
-                        ));
-                    }
+        if root.exists(&current_path).await {
+            match root.open_dir_path(&current_path).await {
+                Ok(_) => continue,
+                Err(_) => {
+                    return Err(anyhow!(
+                        "path '{}' exists but is not a directory",
+                        current_path
+                    ));
                 }
-            } else {
-                _ = root.create_dir_path(&current_path).await.map_err(|e| {
-                    anyhow!("failed to create directory '{}': {}", current_path, e)
-                })?;
-                any_created = true;
             }
+        } else {
+            _ = root.create_dir_path(&current_path).await.map_err(|e| {
+                anyhow!("failed to create directory '{}': {}", current_path, e)
+            })?;
+            any_created = true;
         }
     }
 
@@ -493,16 +524,17 @@ async fn apply_mkdir(fs: &tinyfs::FS, config: &MkdirConfig) -> Result<ApplyResul
 async fn apply_copy(
     fs: &tinyfs::FS,
     dest_path: &str,
-    config: &CopyConfig,
+    config: &CopySpec,
     host_tx: &steward::Transaction<'_>,
 ) -> Result<ApplyResult> {
     let pond_root = fs.root().await?;
     let host_root = host_tx.root().await?;
 
-    // Parse the host source path from the URL
     let host_path = parse_host_source(&config.source)?;
 
-    // Check if source is a directory or file on the host
+    // Ensure parent dirs exist
+    ensure_parent_dirs(&pond_root, dest_path).await?;
+
     if host_root.open_dir_path(&host_path).await.is_ok() {
         // Directory copy
         if !config.overwrite && pond_root.exists(dest_path).await {
@@ -515,7 +547,6 @@ async fn apply_copy(
         Ok(ApplyResult::Created)
     } else {
         // Single file copy
-        ensure_parent_dirs(&pond_root, dest_path).await?;
         if !config.overwrite && pond_root.exists(dest_path).await {
             return Err(anyhow!(
                 "destination '{}' already exists; set overwrite: true to replace",
@@ -527,13 +558,207 @@ async fn apply_copy(
     }
 }
 
+/// Apply a mknod spec: create or update a factory node.
+async fn apply_mknod(
+    tx: &steward::Transaction<'_>,
+    fs: &tinyfs::FS,
+    path: &str,
+    factory_type: &str,
+    raw_config: &str,
+    expanded_config: &str,
+) -> Result<ApplyResult> {
+    let root = fs.root().await?;
+
+    ensure_parent_dirs(&root, path).await?;
+
+    let (_, lookup) = root.resolve_path(path).await?;
+
+    match lookup {
+        tinyfs::Lookup::Found(existing_node) => {
+            let node_id = existing_node.id();
+
+            // Verify factory type matches
+            let existing_factory = tx
+                .get_factory_for_node(node_id)
+                .await
+                .map_err(|e| anyhow!("failed to get factory for '{}': {}", path, e))?;
+
+            if let Some(ref factory_name) = existing_factory
+                && factory_name != factory_type
+            {
+                return Err(anyhow!(
+                    "factory type mismatch at '{}': existing is '{}', apply specifies '{}'. \
+                    Cannot change factory type in place; remove the node first.",
+                    path, factory_name, factory_type
+                ));
+            }
+
+            // Compare config
+            let existing_config = fs
+                .get_dynamic_node_config(node_id)
+                .await
+                .map_err(|e| anyhow!("failed to read existing config at '{}': {}", path, e))?;
+
+            let new_config_bytes = raw_config.as_bytes();
+
+            if let Some((_, ref existing_bytes)) = existing_config
+                && existing_bytes == new_config_bytes
+            {
+                return Ok(ApplyResult::Unchanged);
+            }
+
+            // Update
+            let factory = FactoryRegistry::get_factory(factory_type)
+                .ok_or_else(|| anyhow!("unknown factory type: {}", factory_type))?;
+            let entry_type = determine_entry_type(factory, factory_type)?;
+
+            if node_id.entry_type() != entry_type {
+                return Err(anyhow!(
+                    "entry type mismatch at '{}': existing {:?} vs factory '{}' {:?}",
+                    path, node_id.entry_type(), factory_type, entry_type
+                ));
+            }
+
+            _ = root
+                .create_dynamic_path_with_overwrite(
+                    path, entry_type, factory_type,
+                    new_config_bytes.to_vec(), true,
+                )
+                .await
+                .map_err(|e| anyhow!("failed to update config at '{}': {}", path, e))?;
+
+            run_factory_init(tx, &root, path, factory_type, expanded_config).await?;
+            Ok(ApplyResult::Updated)
+        }
+        tinyfs::Lookup::NotFound(_, _) => {
+            let factory = FactoryRegistry::get_factory(factory_type)
+                .ok_or_else(|| anyhow!("unknown factory type: {}", factory_type))?;
+            let entry_type = determine_entry_type(factory, factory_type)?;
+
+            _ = root
+                .create_dynamic_path(
+                    path, entry_type, factory_type,
+                    raw_config.as_bytes().to_vec(),
+                )
+                .await
+                .map_err(|e| anyhow!("failed to create node at '{}': {}", path, e))?;
+
+            run_factory_init(tx, &root, path, factory_type, expanded_config).await?;
+            Ok(ApplyResult::Created)
+        }
+        tinyfs::Lookup::Empty(_) => Err(anyhow!("empty path")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Determine the entry type for a factory (mirrors mknod logic).
+fn determine_entry_type(
+    factory: &provider::DynamicFactory,
+    factory_name: &str,
+) -> Result<tinyfs::EntryType> {
+    if factory.create_directory.is_some() {
+        Ok(tinyfs::EntryType::DirectoryDynamic)
+    } else if factory.create_file.is_some()
+        || factory.execute.is_some()
+        || factory.apply_table_transform.is_some()
+    {
+        if factory.try_as_queryable.is_some() {
+            Ok(tinyfs::EntryType::TableDynamic)
+        } else {
+            Ok(tinyfs::EntryType::FileDynamic)
+        }
+    } else {
+        Err(anyhow!(
+            "factory '{}' does not support creating directories or files",
+            factory_name
+        ))
+    }
+}
+
+/// Ensure all parent directories exist for the given path (mkdir -p semantics).
+async fn ensure_parent_dirs(root: &tinyfs::WD, path: &str) -> Result<()> {
+    let parent = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("/"));
+
+    let components: Vec<&str> = parent
+        .to_str()
+        .unwrap_or("/")
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut current_path = String::new();
+    for component in components {
+        current_path.push('/');
+        current_path.push_str(component);
+
+        if root.exists(&current_path).await {
+            match root.open_dir_path(&current_path).await {
+                Ok(_) => continue,
+                Err(_) => {
+                    return Err(anyhow!(
+                        "path '{}' exists but is not a directory",
+                        current_path
+                    ));
+                }
+            }
+        } else {
+            _ = root.create_dir_path(&current_path).await.map_err(|e| {
+                anyhow!("failed to create parent directory '{}': {}", current_path, e)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Run factory initialization after creating or updating a node.
+async fn run_factory_init(
+    tx: &steward::Transaction<'_>,
+    root: &tinyfs::WD,
+    path: &str,
+    factory_type: &str,
+    expanded_config: &str,
+) -> Result<()> {
+    let parent_path = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("/"));
+    let parent_node_path = root.resolve_path(parent_path).await?;
+    let parent_node_id = match parent_node_path.1 {
+        tinyfs::Lookup::Found(node) => node.id(),
+        _ => {
+            return Err(anyhow!(
+                "parent directory not found: {}",
+                parent_path.display()
+            ));
+        }
+    };
+
+    let provider_context = tx
+        .provider_context()
+        .map_err(|e| anyhow!("failed to get provider context: {}", e))?;
+    let context = provider::FactoryContext::new(provider_context, parent_node_id);
+
+    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
+        factory_type,
+        expanded_config.as_bytes(),
+        context,
+    )
+    .await
+    .map_err(|e| anyhow!("factory initialization failed for '{}': {}", factory_type, e))?;
+
+    Ok(())
+}
+
 /// Parse host source URL to extract the filesystem path.
 fn parse_host_source(source: &str) -> Result<String> {
-    // Handle host:///path and host+scheme:///path
     if let Some(path) = source.strip_prefix("host:///") {
         Ok(format!("/{}", path))
     } else if source.starts_with("host+") {
-        // host+file:///path, host+table:///path, etc.
         if let Some(pos) = source.find(":///") {
             Ok(format!("/{}", &source[pos + 4..]))
         } else {
@@ -557,7 +782,6 @@ async fn copy_directory_into_pond(
     use futures::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // Ensure destination directory exists
     ensure_parent_dirs(pond_root, &format!("{}/x", pond_path)).await?;
     if !pond_root.exists(pond_path).await {
         _ = pond_root
@@ -566,7 +790,6 @@ async fn copy_directory_into_pond(
             .map_err(|e| anyhow!("failed to create destination dir '{}': {}", pond_path, e))?;
     }
 
-    // List host directory entries
     let host_dir = host_root
         .open_dir_path(host_path)
         .await
@@ -575,8 +798,8 @@ async fn copy_directory_into_pond(
     let mut entries = host_dir.entries().await?;
 
     while let Some(entry) = entries.next().await {
-        let entry =
-            entry.map_err(|e| anyhow!("failed to read host dir entry in '{}': {}", host_path, e))?;
+        let entry = entry
+            .map_err(|e| anyhow!("failed to read host dir entry in '{}': {}", host_path, e))?;
         let name = &entry.name;
         let src = format!("{}/{}", host_path, name);
         let dst = format!("{}/{}", pond_path, name);
@@ -651,219 +874,9 @@ async fn copy_single_file_into_pond(
     Ok(())
 }
 
-/// Apply a factory spec: create or update a dynamic node.
-async fn apply_factory(
-    tx: &steward::Transaction<'_>,
-    fs: &tinyfs::FS,
-    path: &str,
-    factory_type: &str,
-    raw_config: &str,
-    expanded_config: &str,
-) -> Result<ApplyResult> {
-    let root = fs.root().await?;
-
-    // Ensure parent directories exist
-    ensure_parent_dirs(&root, path).await?;
-
-    // Check if the node already exists
-    let (_, lookup) = root.resolve_path(path).await?;
-
-    match lookup {
-        tinyfs::Lookup::Found(existing_node) => {
-            let node_id = existing_node.id();
-
-            // Verify the factory type matches
-            let existing_factory = tx
-                .get_factory_for_node(node_id)
-                .await
-                .map_err(|e| anyhow!("failed to get factory for '{}': {}", path, e))?;
-
-            if let Some(ref factory_name) = existing_factory
-                && factory_name != factory_type
-            {
-                return Err(anyhow!(
-                    "factory type mismatch at '{}': existing is '{}', apply specifies '{}'. \
-                    Cannot change factory type in place; remove the node first.",
-                    path,
-                    factory_name,
-                    factory_type
-                ));
-            }
-
-            // Read existing config to compare
-            let existing_config = fs
-                .get_dynamic_node_config(node_id)
-                .await
-                .map_err(|e| anyhow!("failed to read existing config at '{}': {}", path, e))?;
-
-            let new_config_bytes = raw_config.as_bytes();
-
-            if let Some((_, ref existing_bytes)) = existing_config
-                && existing_bytes == new_config_bytes
-            {
-                return Ok(ApplyResult::Unchanged);
-            }
-
-            // Config changed -- update
-            let factory = FactoryRegistry::get_factory(factory_type)
-                .ok_or_else(|| anyhow!("unknown factory type: {}", factory_type))?;
-
-            let entry_type = determine_entry_type(factory, factory_type)?;
-
-            if node_id.entry_type() != entry_type {
-                return Err(anyhow!(
-                    "entry type mismatch at '{}': existing node type {:?} does not match \
-                    factory '{}' which creates {:?}",
-                    path,
-                    node_id.entry_type(),
-                    factory_type,
-                    entry_type
-                ));
-            }
-
-            _ = root
-                .create_dynamic_path_with_overwrite(
-                    path,
-                    entry_type,
-                    factory_type,
-                    new_config_bytes.to_vec(),
-                    true,
-                )
-                .await
-                .map_err(|e| anyhow!("failed to update config at '{}': {}", path, e))?;
-
-            run_factory_init(tx, &root, path, factory_type, expanded_config).await?;
-
-            Ok(ApplyResult::Updated)
-        }
-        tinyfs::Lookup::NotFound(_, _) => {
-            let factory = FactoryRegistry::get_factory(factory_type)
-                .ok_or_else(|| anyhow!("unknown factory type: {}", factory_type))?;
-            let entry_type = determine_entry_type(factory, factory_type)?;
-
-            _ = root
-                .create_dynamic_path(
-                    path,
-                    entry_type,
-                    factory_type,
-                    raw_config.as_bytes().to_vec(),
-                )
-                .await
-                .map_err(|e| anyhow!("failed to create node at '{}': {}", path, e))?;
-
-            run_factory_init(tx, &root, path, factory_type, expanded_config).await?;
-
-            Ok(ApplyResult::Created)
-        }
-        tinyfs::Lookup::Empty(_) => Err(anyhow!("empty path")),
-    }
-}
-
-/// Determine the entry type for a factory (mirrors mknod logic).
-fn determine_entry_type(
-    factory: &provider::DynamicFactory,
-    factory_name: &str,
-) -> Result<tinyfs::EntryType> {
-    if factory.create_directory.is_some() {
-        Ok(tinyfs::EntryType::DirectoryDynamic)
-    } else if factory.create_file.is_some()
-        || factory.execute.is_some()
-        || factory.apply_table_transform.is_some()
-    {
-        if factory.try_as_queryable.is_some() {
-            Ok(tinyfs::EntryType::TableDynamic)
-        } else {
-            Ok(tinyfs::EntryType::FileDynamic)
-        }
-    } else {
-        Err(anyhow!(
-            "factory '{}' does not support creating directories or files",
-            factory_name
-        ))
-    }
-}
-
-/// Ensure all parent directories exist for the given path (mkdir -p semantics).
-async fn ensure_parent_dirs(root: &tinyfs::WD, path: &str) -> Result<()> {
-    let parent = std::path::Path::new(path)
-        .parent()
-        .unwrap_or(std::path::Path::new("/"));
-
-    // Split into components and create each level
-    let components: Vec<&str> = parent
-        .to_str()
-        .unwrap_or("/")
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let mut current_path = String::new();
-    for component in components {
-        current_path.push('/');
-        current_path.push_str(component);
-
-        if root.exists(&current_path).await {
-            // Verify it's a directory
-            match root.open_dir_path(&current_path).await {
-                Ok(_) => continue,
-                Err(_) => {
-                    return Err(anyhow!(
-                        "path '{}' exists but is not a directory",
-                        current_path
-                    ));
-                }
-            }
-        } else {
-            _ = root.create_dir_path(&current_path).await.map_err(|e| {
-                anyhow!(
-                    "failed to create parent directory '{}': {}",
-                    current_path,
-                    e
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
-/// Run factory initialization after creating or updating a node.
-async fn run_factory_init(
-    tx: &steward::Transaction<'_>,
-    root: &tinyfs::WD,
-    path: &str,
-    factory_type: &str,
-    expanded_config: &str,
-) -> Result<()> {
-    let parent_path = std::path::Path::new(path)
-        .parent()
-        .unwrap_or(std::path::Path::new("/"));
-    let parent_node_path = root.resolve_path(parent_path).await?;
-    let parent_node_id = match parent_node_path.1 {
-        tinyfs::Lookup::Found(node) => node.id(),
-        _ => {
-            return Err(anyhow!(
-                "parent directory not found: {}",
-                parent_path.display()
-            ));
-        }
-    };
-
-    let provider_context = tx
-        .provider_context()
-        .map_err(|e| anyhow!("failed to get provider context: {}", e))?;
-    let context = provider::FactoryContext::new(provider_context, parent_node_id);
-
-    FactoryRegistry::initialize::<tlogfs::TLogFSError>(
-        factory_type,
-        expanded_config.as_bytes(),
-        context,
-    )
-    .await
-    .map_err(|e| anyhow!("factory initialization failed for '{}': {}", factory_type, e))?;
-
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -885,7 +898,6 @@ mod tests {
 
             let init_args = vec!["pond".to_string(), "init".to_string()];
             let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
-
             init_command(&ship_context, None, None).await?;
 
             Ok(Self {
@@ -894,17 +906,10 @@ mod tests {
             })
         }
 
-        /// Write an apply-format config file and return its path
-        fn write_apply_config(
-            &self,
-            filename: &str,
-            kind: &str,
-            path: &str,
-            body: &str,
-        ) -> PathBuf {
+        /// Write a resource file and return its path
+        fn write_resource(&self, filename: &str, content: &str) -> PathBuf {
             let file_path = self.temp_dir.path().join(filename);
-            let content = format!("kind: {kind}\npath: {path}\nversion: v1\n---\n{body}");
-            fs::write(&file_path, content).expect("Failed to write config file");
+            fs::write(&file_path, content).expect("Failed to write resource file");
             file_path
         }
 
@@ -928,7 +933,7 @@ mod tests {
             result
         }
 
-        /// Read config bytes from a dynamic node in the pond
+        /// Read config bytes from a dynamic node
         async fn read_node_config(&self, pond_path: &str) -> Vec<u8> {
             let mut ship = self.ship_context.open_pond().await.unwrap();
             let tx = ship
@@ -944,7 +949,10 @@ mod tests {
                 let (_, lookup) = root.resolve_path(pond_path).await.unwrap();
                 match lookup {
                     tinyfs::Lookup::Found(node) => {
-                        let config = fs_ref.get_dynamic_node_config(node.id()).await.unwrap();
+                        let config = fs_ref
+                            .get_dynamic_node_config(node.id())
+                            .await
+                            .unwrap();
                         config.map(|(_, bytes)| bytes).unwrap_or_default()
                     }
                     _ => panic!("Node not found: {}", pond_path),
@@ -956,320 +964,145 @@ mod tests {
         }
     }
 
+    // -- parsing tests --
+
     #[test]
-    fn test_parse_apply_file_basic() {
-        let content = "kind: remote\npath: /etc/water\nversion: v1\n---\nregion: us-east-1\n";
-        let (prelude, body) = parse_apply_file(content, "test.yaml").unwrap();
-        assert_eq!(prelude.kind, "remote");
-        assert_eq!(prelude.path, "/etc/water");
-        assert_eq!(prelude.version, "v1");
-        assert_eq!(body, "region: us-east-1\n");
+    fn test_split_yaml_documents_single() {
+        let docs = split_yaml_documents("version: v1\nkind: mkdir\nmetadata:\n  path: /a\n");
+        assert_eq!(docs.len(), 1);
     }
 
     #[test]
-    fn test_parse_apply_file_missing_separator() {
-        let content = "kind: remote\npath: /etc/water\nversion: v1\n";
-        let result = parse_apply_file(content, "test.yaml");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("---"));
+    fn test_split_yaml_documents_multi() {
+        let content = "version: v1\nkind: mkdir\nmetadata:\n  path: /a\n---\nversion: v1\nkind: mkdir\nmetadata:\n  path: /b\n";
+        let docs = split_yaml_documents(content);
+        assert_eq!(docs.len(), 2);
     }
 
     #[test]
-    fn test_parse_apply_file_bad_version() {
-        let content = "kind: remote\npath: /etc/water\nversion: v2\n---\nfoo: bar\n";
-        let result = parse_apply_file(content, "test.yaml");
+    fn test_parse_resource_mkdir() {
+        let yaml = "version: v1\nkind: mkdir\nmetadata:\n  path: /system/etc\n";
+        let spec = parse_resource(yaml, "test.yaml", 0).unwrap();
+        assert_eq!(spec.path, "/system/etc");
+        assert!(matches!(spec.kind, ApplyKind::Mkdir));
+    }
+
+    #[test]
+    fn test_parse_resource_bad_version() {
+        let yaml = "version: v2\nkind: mkdir\nmetadata:\n  path: /a\n";
+        let result = parse_resource(yaml, "test.yaml", 0);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("v1"));
     }
 
     #[test]
-    fn test_parse_apply_file_relative_path() {
-        let content = "kind: remote\npath: etc/water\nversion: v1\n---\nfoo: bar\n";
-        let result = parse_apply_file(content, "test.yaml");
+    fn test_parse_resource_relative_path() {
+        let yaml = "version: v1\nkind: mkdir\nmetadata:\n  path: relative\n";
+        let result = parse_resource(yaml, "test.yaml", 0);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("absolute"));
     }
 
     #[test]
-    fn test_parse_apply_file_unknown_prelude_field() {
-        let content = "kind: remote\npath: /etc/water\nversion: v1\nextra: bad\n---\nfoo: bar\n";
-        let result = parse_apply_file(content, "test.yaml");
+    fn test_parse_resource_unknown_kind() {
+        let yaml = "version: v1\nkind: frobnicate\nmetadata:\n  path: /a\n";
+        let result = parse_resource(yaml, "test.yaml", 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown kind"));
+    }
+
+    #[test]
+    fn test_parse_resource_unknown_field() {
+        let yaml = "version: v1\nkind: mkdir\nmetadata:\n  path: /a\nextra: bad\n";
+        let result = parse_resource(yaml, "test.yaml", 0);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown field"));
     }
 
     #[test]
-    fn test_parse_apply_file_multiline_body() {
-        let content = "kind: remote\npath: /etc/water\nversion: v1\n---\nregion: us-east-1\nurl: s3://bucket\nendpoint: http://localhost:9000\n";
-        let (_, body) = parse_apply_file(content, "test.yaml").unwrap();
-        assert!(body.contains("region: us-east-1"));
-        assert!(body.contains("url: s3://bucket"));
-        assert!(body.contains("endpoint: http://localhost:9000"));
-    }
-
-    #[tokio::test]
-    async fn test_apply_create_new_node() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        let config_path = setup.write_apply_config(
-            "derived.yaml",
-            "sql-derived-table",
-            "/data/derived",
-            "patterns:\n  source: \"table:///data/*.table\"\nquery: \"SELECT * FROM source\"\n",
-        );
-
-        apply_command(
-            &setup.ship_context,
-            &[config_path.to_string_lossy().to_string()],
-        )
-        .await?;
-
-        assert!(setup.node_exists("/data/derived").await);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_apply_idempotent() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        let config_path = setup.write_apply_config(
-            "derived.yaml",
-            "sql-derived-table",
-            "/data/derived",
-            "patterns:\n  source: \"table:///data/*.table\"\nquery: \"SELECT * FROM source\"\n",
-        );
-
-        let file_arg = config_path.to_string_lossy().to_string();
-
-        // First apply — creates
-        apply_command(&setup.ship_context, &[file_arg.clone()]).await?;
-        assert!(setup.node_exists("/data/derived").await);
-
-        // Second apply — unchanged
-        apply_command(&setup.ship_context, &[file_arg]).await?;
-        assert!(setup.node_exists("/data/derived").await);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_apply_update_changed_config() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        // First apply
-        let config_path = setup.write_apply_config(
-            "derived.yaml",
-            "sql-derived-table",
-            "/data/derived",
-            "patterns:\n  source: \"table:///data/*.table\"\nquery: \"SELECT * FROM source\"\n",
-        );
-        apply_command(
-            &setup.ship_context,
-            &[config_path.to_string_lossy().to_string()],
-        )
-        .await?;
-
-        let original_config = setup.read_node_config("/data/derived").await;
-
-        // Update the config file
-        let new_body = "patterns:\n  source: \"table:///data/*.table\"\nquery: \"SELECT * FROM source LIMIT 10\"\n";
-        let config_path2 = setup.write_apply_config(
-            "derived2.yaml",
-            "sql-derived-table",
-            "/data/derived",
-            new_body,
-        );
-        apply_command(
-            &setup.ship_context,
-            &[config_path2.to_string_lossy().to_string()],
-        )
-        .await?;
-
-        let updated_config = setup.read_node_config("/data/derived").await;
-        assert_ne!(original_config, updated_config);
-        assert_eq!(updated_config, new_body.as_bytes());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_apply_duplicate_path_error() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        let config1 = setup.write_apply_config(
-            "a.yaml",
-            "sql-derived-table",
-            "/data/derived",
-            "patterns:\n  source: \"table:///a/*.table\"\nquery: \"SELECT 1\"\n",
-        );
-        let config2 = setup.write_apply_config(
-            "b.yaml",
-            "sql-derived-table",
-            "/data/derived",
-            "patterns:\n  source: \"table:///b/*.table\"\nquery: \"SELECT 2\"\n",
-        );
-
-        let result = apply_command(
-            &setup.ship_context,
-            &[
-                config1.to_string_lossy().to_string(),
-                config2.to_string_lossy().to_string(),
-            ],
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("duplicate path"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_apply_missing_file_error() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        let result = apply_command(
-            &setup.ship_context,
-            &["/nonexistent/config.yaml".to_string()],
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to read"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_apply_no_files_error() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        let result = apply_command(&setup.ship_context, &[]).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no files specified")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_apply_auto_creates_parent_dirs() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        // Apply to a deeply nested path — parents should be auto-created
-        let config_path = setup.write_apply_config(
-            "deep.yaml",
-            "sql-derived-table",
-            "/system/etc/deep/nested/derived",
-            "patterns:\n  source: \"table:///data/*.table\"\nquery: \"SELECT * FROM source\"\n",
-        );
-
-        apply_command(
-            &setup.ship_context,
-            &[config_path.to_string_lossy().to_string()],
-        )
-        .await?;
-
-        assert!(setup.node_exists("/system/etc/deep/nested/derived").await);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_apply_multiple_files() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        let config1 = setup.write_apply_config(
-            "a.yaml",
-            "sql-derived-table",
-            "/data/derived-a",
-            "patterns:\n  source: \"table:///a/*.table\"\nquery: \"SELECT 1\"\n",
-        );
-        let config2 = setup.write_apply_config(
-            "b.yaml",
-            "sql-derived-table",
-            "/data/derived-b",
-            "patterns:\n  source: \"table:///b/*.table\"\nquery: \"SELECT 2\"\n",
-        );
-
-        apply_command(
-            &setup.ship_context,
-            &[
-                config1.to_string_lossy().to_string(),
-                config2.to_string_lossy().to_string(),
-            ],
-        )
-        .await?;
-
-        assert!(setup.node_exists("/data/derived-a").await);
-        assert!(setup.node_exists("/data/derived-b").await);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_apply_invalid_factory() -> Result<()> {
-        let setup = TestSetup::new().await?;
-
-        let config_path =
-            setup.write_apply_config("bad.yaml", "nonexistent-factory", "/data/bad", "foo: bar\n");
-
-        let result = apply_command(
-            &setup.ship_context,
-            &[config_path.to_string_lossy().to_string()],
-        )
-        .await;
-
-        assert!(result.is_err());
-        // Node should not exist
-        assert!(!setup.node_exists("/data/bad").await);
-
-        Ok(())
-    }
-
-    // ---- mkdir kind tests ----
-
-    #[test]
-    fn test_parse_mkdir_config() {
-        let content = "kind: mkdir\npath: /\nversion: v1\n---\npaths:\n  - /system/etc\n  - /sources\n";
-        let (prelude, body) = parse_apply_file(content, "test.yaml").unwrap();
-        assert_eq!(prelude.kind, "mkdir");
-        let kind = parse_apply_kind(&prelude, &body, "test.yaml").unwrap();
-        assert!(matches!(kind, ApplyKind::Mkdir(_)));
+    fn test_parse_resource_copy() {
+        let yaml = "version: v1\nkind: copy\nmetadata:\n  path: /content\nspec:\n  source: \"host:///tmp/content\"\n";
+        let spec = parse_resource(yaml, "test.yaml", 0).unwrap();
+        assert_eq!(spec.path, "/content");
+        assert!(matches!(spec.kind, ApplyKind::Copy(_)));
     }
 
     #[test]
-    fn test_parse_mkdir_relative_path_error() {
-        let content = "kind: mkdir\npath: /\nversion: v1\n---\npaths:\n  - relative/path\n";
-        let (prelude, body) = parse_apply_file(content, "test.yaml").unwrap();
-        let result = parse_apply_kind(&prelude, &body, "test.yaml");
+    fn test_parse_resource_copy_invalid_source() {
+        let yaml = "version: v1\nkind: copy\nmetadata:\n  path: /content\nspec:\n  source: \"/local/path\"\n";
+        let result = parse_resource(yaml, "test.yaml", 0);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("absolute"));
+        assert!(result.unwrap_err().to_string().contains("host URL"));
+    }
+
+    #[test]
+    fn test_parse_resource_mknod() {
+        let yaml = "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT 1\"\n";
+        let spec = parse_resource(yaml, "test.yaml", 0).unwrap();
+        assert_eq!(spec.path, "/data/derived");
+        assert!(matches!(spec.kind, ApplyKind::Mknod { .. }));
+    }
+
+    // -- integration tests --
+
+    #[tokio::test]
+    async fn test_apply_mknod_create() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let path = setup.write_resource("derived.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT * FROM source\"\n",
+        );
+
+        apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;
+        assert!(setup.node_exists("/data/derived").await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_mknod_idempotent() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let path = setup.write_resource("derived.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT * FROM source\"\n",
+        );
+        let arg = path.to_string_lossy().to_string();
+
+        apply_command(&setup.ship_context, &[arg.clone()]).await?;
+        apply_command(&setup.ship_context, &[arg]).await?;
+        assert!(setup.node_exists("/data/derived").await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_mknod_update() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let p1 = setup.write_resource("d1.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT 1\"\n",
+        );
+        apply_command(&setup.ship_context, &[p1.to_string_lossy().to_string()]).await?;
+
+        let p2 = setup.write_resource("d2.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT 42\"\n",
+        );
+        apply_command(&setup.ship_context, &[p2.to_string_lossy().to_string()]).await?;
+
+        let config = setup.read_node_config("/data/derived").await;
+        let config_str = String::from_utf8(config).unwrap();
+        assert!(config_str.contains("42"));
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_apply_mkdir() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        let config_path = setup.write_apply_config(
-            "dirs.yaml",
-            "mkdir",
-            "/",
-            "paths:\n  - /system/etc\n  - /system/run\n  - /sources\n",
+        let path = setup.write_resource("dirs.yaml",
+            "version: v1\nkind: mkdir\nmetadata:\n  path: /system/etc\n",
         );
-
-        apply_command(
-            &setup.ship_context,
-            &[config_path.to_string_lossy().to_string()],
-        )
-        .await?;
-
+        apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;
         assert!(setup.node_exists("/system/etc").await);
-        assert!(setup.node_exists("/system/run").await);
-        assert!(setup.node_exists("/sources").await);
+        assert!(setup.node_exists("/system").await);
         Ok(())
     }
 
@@ -1277,77 +1110,86 @@ mod tests {
     async fn test_apply_mkdir_idempotent() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        let config_path = setup.write_apply_config(
-            "dirs.yaml",
-            "mkdir",
-            "/",
-            "paths:\n  - /mydir\n",
+        let path = setup.write_resource("dirs.yaml",
+            "version: v1\nkind: mkdir\nmetadata:\n  path: /mydir\n",
         );
-        let file_arg = config_path.to_string_lossy().to_string();
+        let arg = path.to_string_lossy().to_string();
 
-        // First apply creates
-        apply_command(&setup.ship_context, &[file_arg.clone()]).await?;
+        apply_command(&setup.ship_context, &[arg.clone()]).await?;
+        apply_command(&setup.ship_context, &[arg]).await?;
         assert!(setup.node_exists("/mydir").await);
-
-        // Second apply is unchanged
-        apply_command(&setup.ship_context, &[file_arg]).await?;
-        assert!(setup.node_exists("/mydir").await);
-
         Ok(())
     }
 
-    // ---- copy kind tests ----
-
-    #[test]
-    fn test_parse_copy_config() {
-        let content =
-            "kind: copy\npath: /content\nversion: v1\n---\nsource: \"host:///tmp/content\"\n";
-        let (prelude, body) = parse_apply_file(content, "test.yaml").unwrap();
-        assert_eq!(prelude.kind, "copy");
-        let kind = parse_apply_kind(&prelude, &body, "test.yaml").unwrap();
-        assert!(matches!(kind, ApplyKind::Copy(_)));
-    }
-
-    #[test]
-    fn test_parse_copy_invalid_source() {
-        let content =
-            "kind: copy\npath: /content\nversion: v1\n---\nsource: \"/local/path\"\n";
-        let (prelude, body) = parse_apply_file(content, "test.yaml").unwrap();
-        let result = parse_apply_kind(&prelude, &body, "test.yaml");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("host URL"));
-    }
-
-    // ---- mixed kind tests ----
-
     #[tokio::test]
-    async fn test_apply_mkdir_then_factory() -> Result<()> {
+    async fn test_apply_multi_resource_file() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        let mkdir_config = setup.write_apply_config(
-            "dirs.yaml",
-            "mkdir",
-            "/",
-            "paths:\n  - /data\n",
-        );
-        let factory_config = setup.write_apply_config(
-            "derived.yaml",
-            "sql-derived-table",
-            "/data/derived",
-            "patterns:\n  source: \"table:///data/*.table\"\nquery: \"SELECT * FROM source\"\n",
+        let path = setup.write_resource("multi.yaml",
+            "version: v1\nkind: mkdir\nmetadata:\n  path: /system/etc\n---\nversion: v1\nkind: mkdir\nmetadata:\n  path: /sources\n---\nversion: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT 1\"\n",
         );
 
-        apply_command(
-            &setup.ship_context,
-            &[
-                mkdir_config.to_string_lossy().to_string(),
-                factory_config.to_string_lossy().to_string(),
-            ],
-        )
-        .await?;
-
-        assert!(setup.node_exists("/data").await);
+        apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;
+        assert!(setup.node_exists("/system/etc").await);
+        assert!(setup.node_exists("/sources").await);
         assert!(setup.node_exists("/data/derived").await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_duplicate_path_error() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let path = setup.write_resource("dup.yaml",
+            "version: v1\nkind: mkdir\nmetadata:\n  path: /mydir\n---\nversion: v1\nkind: mkdir\nmetadata:\n  path: /mydir\n",
+        );
+
+        let result = apply_command(
+            &setup.ship_context,
+            &[path.to_string_lossy().to_string()],
+        ).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("duplicate path"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_no_files_error() -> Result<()> {
+        let setup = TestSetup::new().await?;
+        let result = apply_command(&setup.ship_context, &[]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no files"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_invalid_factory() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let path = setup.write_resource("bad.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/bad\nspec:\n  factory: nonexistent-factory\n  foo: bar\n",
+        );
+
+        let result = apply_command(
+            &setup.ship_context,
+            &[path.to_string_lossy().to_string()],
+        ).await;
+        assert!(result.is_err());
+        assert!(!setup.node_exists("/data/bad").await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_auto_creates_parent_dirs() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let path = setup.write_resource("deep.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /system/etc/deep/nested/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT * FROM source\"\n",
+        );
+
+        apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;
+        assert!(setup.node_exists("/system/etc/deep/nested/derived").await);
         Ok(())
     }
 }
