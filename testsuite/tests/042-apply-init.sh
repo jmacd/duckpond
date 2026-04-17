@@ -29,9 +29,10 @@ metadata:
   path: /data/derived-a
 spec:
   factory: sql-derived-table
-  patterns:
-    source: "table:///data/*.table"
-  query: "SELECT 1 AS value"
+  config:
+    patterns:
+      source: "table:///data/*.table"
+    query: "SELECT 1 AS value"
 ---
 version: v1
 kind: mknod
@@ -39,9 +40,10 @@ metadata:
   path: /data/derived-b
 spec:
   factory: sql-derived-table
-  patterns:
-    source: "table:///data/*.table"
-  query: "SELECT 2 AS value"
+  config:
+    patterns:
+      source: "table:///data/*.table"
+    query: "SELECT 2 AS value"
 YAML
 
 echo "Config file created"

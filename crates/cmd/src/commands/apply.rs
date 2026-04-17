@@ -80,12 +80,12 @@ struct ResourceMetadata {
 
 /// Spec for `kind: mknod` -- factory type plus factory-specific config.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MknodSpec {
     /// Factory type (e.g., "remote", "sitegen", "dynamic-dir")
     factory: String,
-    /// Remaining fields are the factory config
-    #[serde(flatten)]
-    config: serde_yaml::Mapping,
+    /// Factory-specific configuration (what was previously the config file body)
+    config: serde_yaml::Value,
 }
 
 /// Spec for `kind: copy`.
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn test_parse_resource_mknod() {
-        let yaml = "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT 1\"\n";
+        let yaml = "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT 1\"\n";
         let spec = parse_resource(yaml, "test.yaml", 0).unwrap();
         assert_eq!(spec.path, "/data/derived");
         assert!(matches!(spec.kind, ApplyKind::Mknod { .. }));
@@ -1050,7 +1050,7 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         let path = setup.write_resource("derived.yaml",
-            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT * FROM source\"\n",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT * FROM source\"\n",
         );
 
         apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;
@@ -1063,7 +1063,7 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         let path = setup.write_resource("derived.yaml",
-            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT * FROM source\"\n",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT * FROM source\"\n",
         );
         let arg = path.to_string_lossy().to_string();
 
@@ -1078,12 +1078,12 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         let p1 = setup.write_resource("d1.yaml",
-            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT 1\"\n",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT 1\"\n",
         );
         apply_command(&setup.ship_context, &[p1.to_string_lossy().to_string()]).await?;
 
         let p2 = setup.write_resource("d2.yaml",
-            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT 42\"\n",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT 42\"\n",
         );
         apply_command(&setup.ship_context, &[p2.to_string_lossy().to_string()]).await?;
 
@@ -1126,7 +1126,7 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         let path = setup.write_resource("multi.yaml",
-            "version: v1\nkind: mkdir\nmetadata:\n  path: /system/etc\n---\nversion: v1\nkind: mkdir\nmetadata:\n  path: /sources\n---\nversion: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT 1\"\n",
+            "version: v1\nkind: mkdir\nmetadata:\n  path: /system/etc\n---\nversion: v1\nkind: mkdir\nmetadata:\n  path: /sources\n---\nversion: v1\nkind: mknod\nmetadata:\n  path: /data/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT 1\"\n",
         );
 
         apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;
@@ -1185,7 +1185,7 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         let path = setup.write_resource("deep.yaml",
-            "version: v1\nkind: mknod\nmetadata:\n  path: /system/etc/deep/nested/derived\nspec:\n  factory: sql-derived-table\n  patterns:\n    source: \"table:///data/*.table\"\n  query: \"SELECT * FROM source\"\n",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /system/etc/deep/nested/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT * FROM source\"\n",
         );
 
         apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;

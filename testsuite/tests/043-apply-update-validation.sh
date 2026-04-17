@@ -25,9 +25,10 @@ metadata:
   path: /data/derived
 spec:
   factory: sql-derived-table
-  patterns:
-    source: "table:///data/*.table"
-  query: "SELECT 1 AS value"
+  config:
+    patterns:
+      source: "table:///data/*.table"
+    query: "SELECT 1 AS value"
 YAML
 
 INIT_OUT=$(pond apply -f /tmp/derived.yaml 2>&1)
@@ -48,9 +49,10 @@ metadata:
   path: /data/derived
 spec:
   factory: sql-derived-table
-  patterns:
-    source: "table:///data/*.table"
-  query: "SELECT 42 AS answer"
+  config:
+    patterns:
+      source: "table:///data/*.table"
+    query: "SELECT 42 AS answer"
 YAML
 
 UPDATE_OUT=$(pond apply -f /tmp/derived.yaml 2>&1)
@@ -71,6 +73,7 @@ metadata:
   path: /data/bad-node
 spec:
   factory: sql-derived-table
+  config:
   not_a_valid_key: "this should fail validation"
 YAML
 
@@ -96,9 +99,10 @@ metadata:
   path: /data/good-node
 spec:
   factory: sql-derived-table
-  patterns:
-    source: "table:///data/*.table"
-  query: "SELECT 99 AS good"
+  config:
+    patterns:
+      source: "table:///data/*.table"
+    query: "SELECT 99 AS good"
 YAML
 
 BATCH_OUT=$(pond apply -f /tmp/good.yaml /tmp/bad.yaml 2>&1 || true)
