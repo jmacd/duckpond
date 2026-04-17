@@ -1192,4 +1192,146 @@ mod tests {
         assert!(setup.node_exists("/system/etc/deep/nested/derived").await);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_apply_mknod_factory_type_mismatch() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        // Create a node with sql-derived-table
+        let p1 = setup.write_resource("d1.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/node\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT 1\"\n",
+        );
+        apply_command(&setup.ship_context, &[p1.to_string_lossy().to_string()]).await?;
+
+        // Try to apply with dynamic-dir factory at the same path
+        let p2 = setup.write_resource("d2.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/node\nspec:\n  factory: dynamic-dir\n  config:\n    entries:\n      - name: child\n        factory: sql-derived-table\n        config:\n          patterns:\n            source: \"table:///x/*.table\"\n          query: \"SELECT 1\"\n",
+        );
+        let result = apply_command(&setup.ship_context, &[p2.to_string_lossy().to_string()]).await;
+        assert!(result.is_err(), "should fail: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("mismatch") || err.contains("type"),
+            "error should mention type mismatch, got: {}",
+            err
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_mkdir_non_dir_conflict() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        // Create a factory node at /data/node
+        let p1 = setup.write_resource("node.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/node\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT 1\"\n",
+        );
+        apply_command(&setup.ship_context, &[p1.to_string_lossy().to_string()]).await?;
+
+        // Try to mkdir at that same path -- should fail (not a directory)
+        let p2 = setup.write_resource("dir.yaml",
+            "version: v1\nkind: mkdir\nmetadata:\n  path: /data/node\n",
+        );
+        let result = apply_command(&setup.ship_context, &[p2.to_string_lossy().to_string()]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_ordering_mkdir_before_mknod() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        // File lists mknod BEFORE mkdir, but apply should sort mkdir first
+        let path = setup.write_resource("reversed.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /custom/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT 1\"\n---\nversion: v1\nkind: mkdir\nmetadata:\n  path: /custom\n",
+        );
+
+        apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;
+        assert!(setup.node_exists("/custom").await);
+        assert!(setup.node_exists("/custom/derived").await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_empty_file_error() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let path = setup.write_resource("empty.yaml", "");
+        let result = apply_command(
+            &setup.ship_context,
+            &[path.to_string_lossy().to_string()],
+        ).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no YAML documents"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_mkdir_spec_rejected() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        // mkdir with a non-null spec should be rejected
+        let path = setup.write_resource("bad_mkdir.yaml",
+            "version: v1\nkind: mkdir\nmetadata:\n  path: /mydir\nspec:\n  extra: stuff\n",
+        );
+        let result = apply_command(
+            &setup.ship_context,
+            &[path.to_string_lossy().to_string()],
+        ).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mkdir does not accept a spec"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_mknod_missing_factory() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let path = setup.write_resource("no_factory.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/node\nspec:\n  config:\n    foo: bar\n",
+        );
+        let result = apply_command(
+            &setup.ship_context,
+            &[path.to_string_lossy().to_string()],
+        ).await;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_mknod_missing_spec() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let path = setup.write_resource("no_spec.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /data/node\n",
+        );
+        let result = apply_command(
+            &setup.ship_context,
+            &[path.to_string_lossy().to_string()],
+        ).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mknod requires a spec"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apply_multiple_files() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        let f1 = setup.write_resource("dirs.yaml",
+            "version: v1\nkind: mkdir\nmetadata:\n  path: /alpha\n",
+        );
+        let f2 = setup.write_resource("nodes.yaml",
+            "version: v1\nkind: mknod\nmetadata:\n  path: /alpha/derived\nspec:\n  factory: sql-derived-table\n  config:\n    patterns:\n      source: \"table:///data/*.table\"\n    query: \"SELECT 1\"\n",
+        );
+
+        apply_command(
+            &setup.ship_context,
+            &[f1.to_string_lossy().to_string(), f2.to_string_lossy().to_string()],
+        ).await?;
+        assert!(setup.node_exists("/alpha").await);
+        assert!(setup.node_exists("/alpha/derived").await);
+        Ok(())
+    }
 }
