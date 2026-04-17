@@ -238,12 +238,10 @@ fn parse_kind(doc: &ResourceDoc, source_file: &str, index: usize) -> Result<Appl
                     e
                 )
             })?;
-            let expanded = env_substitution::substitute_env_vars(&spec_yaml).map_err(|e| {
-                anyhow!("{}[{}]: env expansion failed: {}", source_file, index, e)
-            })?;
-            let config: CopySpec = serde_yaml::from_str(&expanded).map_err(|e| {
-                anyhow!("{}[{}]: invalid copy spec: {}", source_file, index, e)
-            })?;
+            let expanded = env_substitution::substitute_env_vars(&spec_yaml)
+                .map_err(|e| anyhow!("{}[{}]: env expansion failed: {}", source_file, index, e))?;
+            let config: CopySpec = serde_yaml::from_str(&expanded)
+                .map_err(|e| anyhow!("{}[{}]: invalid copy spec: {}", source_file, index, e))?;
 
             if !config.source.starts_with("host:///") && !config.source.starts_with("host+") {
                 return Err(anyhow!(
@@ -265,9 +263,8 @@ fn parse_kind(doc: &ResourceDoc, source_file: &str, index: usize) -> Result<Appl
                 )
             })?;
 
-            let mknod: MknodSpec = serde_yaml::from_value(spec_value.clone()).map_err(|e| {
-                anyhow!("{}[{}]: invalid mknod spec: {}", source_file, index, e)
-            })?;
+            let mknod: MknodSpec = serde_yaml::from_value(spec_value.clone())
+                .map_err(|e| anyhow!("{}[{}]: invalid mknod spec: {}", source_file, index, e))?;
 
             let raw_config = serde_yaml::to_string(&mknod.config).map_err(|e| {
                 anyhow!(
@@ -278,9 +275,8 @@ fn parse_kind(doc: &ResourceDoc, source_file: &str, index: usize) -> Result<Appl
                 )
             })?;
 
-            let expanded = env_substitution::substitute_env_vars(&raw_config).map_err(|e| {
-                anyhow!("{}[{}]: env expansion failed: {}", source_file, index, e)
-            })?;
+            let expanded = env_substitution::substitute_env_vars(&raw_config)
+                .map_err(|e| anyhow!("{}[{}]: env expansion failed: {}", source_file, index, e))?;
 
             _ = FactoryRegistry::validate_config(&mknod.factory, expanded.as_bytes()).map_err(
                 |e| {
@@ -361,7 +357,10 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
         order(&a.kind)
             .cmp(&order(&b.kind))
             .then_with(|| {
-                a.path.matches('/').count().cmp(&b.path.matches('/').count())
+                a.path
+                    .matches('/')
+                    .count()
+                    .cmp(&b.path.matches('/').count())
             })
             .then(a.path.cmp(&b.path))
     });
@@ -436,7 +435,9 @@ pub async fn apply_command(ship_context: &ShipContext, files: &[String]) -> Resu
             .map_err(|e| anyhow!("apply: failed to commit transaction: {}", e))?;
         log::info!(
             "apply: {} created, {} updated, {} unchanged",
-            created, updated, unchanged
+            created,
+            updated,
+            unchanged
         );
     } else {
         log::info!(
@@ -471,7 +472,17 @@ async fn apply_one(
             factory_type,
             raw_config,
             expanded_config,
-        } => apply_mknod(tx, fs, &spec.path, factory_type, raw_config, expanded_config).await,
+        } => {
+            apply_mknod(
+                tx,
+                fs,
+                &spec.path,
+                factory_type,
+                raw_config,
+                expanded_config,
+            )
+            .await
+        }
     }
 }
 
@@ -506,9 +517,10 @@ async fn apply_mkdir(fs: &tinyfs::FS, path: &str) -> Result<ApplyResult> {
                 }
             }
         } else {
-            _ = root.create_dir_path(&current_path).await.map_err(|e| {
-                anyhow!("failed to create directory '{}': {}", current_path, e)
-            })?;
+            _ = root
+                .create_dir_path(&current_path)
+                .await
+                .map_err(|e| anyhow!("failed to create directory '{}': {}", current_path, e))?;
             any_created = true;
         }
     }
@@ -589,7 +601,9 @@ async fn apply_mknod(
                 return Err(anyhow!(
                     "factory type mismatch at '{}': existing is '{}', apply specifies '{}'. \
                     Cannot change factory type in place; remove the node first.",
-                    path, factory_name, factory_type
+                    path,
+                    factory_name,
+                    factory_type
                 ));
             }
 
@@ -615,14 +629,20 @@ async fn apply_mknod(
             if node_id.entry_type() != entry_type {
                 return Err(anyhow!(
                     "entry type mismatch at '{}': existing {:?} vs factory '{}' {:?}",
-                    path, node_id.entry_type(), factory_type, entry_type
+                    path,
+                    node_id.entry_type(),
+                    factory_type,
+                    entry_type
                 ));
             }
 
             _ = root
                 .create_dynamic_path_with_overwrite(
-                    path, entry_type, factory_type,
-                    new_config_bytes.to_vec(), true,
+                    path,
+                    entry_type,
+                    factory_type,
+                    new_config_bytes.to_vec(),
+                    true,
                 )
                 .await
                 .map_err(|e| anyhow!("failed to update config at '{}': {}", path, e))?;
@@ -637,7 +657,9 @@ async fn apply_mknod(
 
             _ = root
                 .create_dynamic_path(
-                    path, entry_type, factory_type,
+                    path,
+                    entry_type,
+                    factory_type,
                     raw_config.as_bytes().to_vec(),
                 )
                 .await
@@ -709,7 +731,11 @@ async fn ensure_parent_dirs(root: &tinyfs::WD, path: &str) -> Result<()> {
             }
         } else {
             _ = root.create_dir_path(&current_path).await.map_err(|e| {
-                anyhow!("failed to create parent directory '{}': {}", current_path, e)
+                anyhow!(
+                    "failed to create parent directory '{}': {}",
+                    current_path,
+                    e
+                )
             })?;
         }
     }
@@ -749,7 +775,13 @@ async fn run_factory_init(
         context,
     )
     .await
-    .map_err(|e| anyhow!("factory initialization failed for '{}': {}", factory_type, e))?;
+    .map_err(|e| {
+        anyhow!(
+            "factory initialization failed for '{}': {}",
+            factory_type,
+            e
+        )
+    })?;
 
     Ok(())
 }
@@ -949,10 +981,7 @@ mod tests {
                 let (_, lookup) = root.resolve_path(pond_path).await.unwrap();
                 match lookup {
                     tinyfs::Lookup::Found(node) => {
-                        let config = fs_ref
-                            .get_dynamic_node_config(node.id())
-                            .await
-                            .unwrap();
+                        let config = fs_ref.get_dynamic_node_config(node.id()).await.unwrap();
                         config.map(|(_, bytes)| bytes).unwrap_or_default()
                     }
                     _ => panic!("Node not found: {}", pond_path),
@@ -1097,7 +1126,8 @@ mod tests {
     async fn test_apply_mkdir() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        let path = setup.write_resource("dirs.yaml",
+        let path = setup.write_resource(
+            "dirs.yaml",
             "version: v1\nkind: mkdir\nmetadata:\n  path: /system/etc\n",
         );
         apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await?;
@@ -1110,7 +1140,8 @@ mod tests {
     async fn test_apply_mkdir_idempotent() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        let path = setup.write_resource("dirs.yaml",
+        let path = setup.write_resource(
+            "dirs.yaml",
             "version: v1\nkind: mkdir\nmetadata:\n  path: /mydir\n",
         );
         let arg = path.to_string_lossy().to_string();
@@ -1144,10 +1175,8 @@ mod tests {
             "version: v1\nkind: mkdir\nmetadata:\n  path: /mydir\n---\nversion: v1\nkind: mkdir\nmetadata:\n  path: /mydir\n",
         );
 
-        let result = apply_command(
-            &setup.ship_context,
-            &[path.to_string_lossy().to_string()],
-        ).await;
+        let result =
+            apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duplicate path"));
@@ -1171,10 +1200,8 @@ mod tests {
             "version: v1\nkind: mknod\nmetadata:\n  path: /data/bad\nspec:\n  factory: nonexistent-factory\n  foo: bar\n",
         );
 
-        let result = apply_command(
-            &setup.ship_context,
-            &[path.to_string_lossy().to_string()],
-        ).await;
+        let result =
+            apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await;
         assert!(result.is_err());
         assert!(!setup.node_exists("/data/bad").await);
         Ok(())
@@ -1229,7 +1256,8 @@ mod tests {
         apply_command(&setup.ship_context, &[p1.to_string_lossy().to_string()]).await?;
 
         // Try to mkdir at that same path -- should fail (not a directory)
-        let p2 = setup.write_resource("dir.yaml",
+        let p2 = setup.write_resource(
+            "dir.yaml",
             "version: v1\nkind: mkdir\nmetadata:\n  path: /data/node\n",
         );
         let result = apply_command(&setup.ship_context, &[p2.to_string_lossy().to_string()]).await;
@@ -1258,12 +1286,15 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         let path = setup.write_resource("empty.yaml", "");
-        let result = apply_command(
-            &setup.ship_context,
-            &[path.to_string_lossy().to_string()],
-        ).await;
+        let result =
+            apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no YAML documents"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no YAML documents")
+        );
         Ok(())
     }
 
@@ -1272,15 +1303,19 @@ mod tests {
         let setup = TestSetup::new().await?;
 
         // mkdir with a non-null spec should be rejected
-        let path = setup.write_resource("bad_mkdir.yaml",
+        let path = setup.write_resource(
+            "bad_mkdir.yaml",
             "version: v1\nkind: mkdir\nmetadata:\n  path: /mydir\nspec:\n  extra: stuff\n",
         );
-        let result = apply_command(
-            &setup.ship_context,
-            &[path.to_string_lossy().to_string()],
-        ).await;
+        let result =
+            apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("mkdir does not accept a spec"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("mkdir does not accept a spec")
+        );
         Ok(())
     }
 
@@ -1291,10 +1326,8 @@ mod tests {
         let path = setup.write_resource("no_factory.yaml",
             "version: v1\nkind: mknod\nmetadata:\n  path: /data/node\nspec:\n  config:\n    foo: bar\n",
         );
-        let result = apply_command(
-            &setup.ship_context,
-            &[path.to_string_lossy().to_string()],
-        ).await;
+        let result =
+            apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await;
         assert!(result.is_err());
         Ok(())
     }
@@ -1303,15 +1336,19 @@ mod tests {
     async fn test_apply_mknod_missing_spec() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        let path = setup.write_resource("no_spec.yaml",
+        let path = setup.write_resource(
+            "no_spec.yaml",
             "version: v1\nkind: mknod\nmetadata:\n  path: /data/node\n",
         );
-        let result = apply_command(
-            &setup.ship_context,
-            &[path.to_string_lossy().to_string()],
-        ).await;
+        let result =
+            apply_command(&setup.ship_context, &[path.to_string_lossy().to_string()]).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("mknod requires a spec"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("mknod requires a spec")
+        );
         Ok(())
     }
 
@@ -1319,7 +1356,8 @@ mod tests {
     async fn test_apply_multiple_files() -> Result<()> {
         let setup = TestSetup::new().await?;
 
-        let f1 = setup.write_resource("dirs.yaml",
+        let f1 = setup.write_resource(
+            "dirs.yaml",
             "version: v1\nkind: mkdir\nmetadata:\n  path: /alpha\n",
         );
         let f2 = setup.write_resource("nodes.yaml",
@@ -1328,8 +1366,12 @@ mod tests {
 
         apply_command(
             &setup.ship_context,
-            &[f1.to_string_lossy().to_string(), f2.to_string_lossy().to_string()],
-        ).await?;
+            &[
+                f1.to_string_lossy().to_string(),
+                f2.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
         assert!(setup.node_exists("/alpha").await);
         assert!(setup.node_exists("/alpha/derived").await);
         Ok(())
