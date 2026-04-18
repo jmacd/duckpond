@@ -285,6 +285,37 @@ enum Commands {
         #[arg(long)]
         end_time: Option<String>,
     },
+    /// Emergency operations (destructive, use with care)
+    #[command(subcommand)]
+    Emergency(EmergencyCommand),
+}
+
+/// Emergency subcommands for destructive operations.
+#[derive(Debug, Subcommand)]
+enum EmergencyCommand {
+    /// Erase all objects in an S3 bucket. Requires --dangerous flag.
+    EraseBucket {
+        /// S3 bucket URL (e.g., "s3://water-staging")
+        url: String,
+        /// S3 endpoint (e.g., "http://localhost:9000" for MinIO)
+        #[arg(long)]
+        endpoint: String,
+        /// S3 region
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        /// S3 access key
+        #[arg(long)]
+        access_key: String,
+        /// S3 secret key
+        #[arg(long)]
+        secret_key: String,
+        /// Allow HTTP (non-TLS) connections
+        #[arg(long)]
+        allow_http: bool,
+        /// Required safety flag to confirm destructive operation
+        #[arg(long)]
+        dangerous: bool,
+    },
 }
 
 #[allow(clippy::print_stdout)]
@@ -463,6 +494,22 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Emergency(cmd) => match cmd {
+            EmergencyCommand::EraseBucket {
+                url,
+                endpoint,
+                region,
+                access_key,
+                secret_key,
+                allow_http,
+                dangerous,
+            } => {
+                commands::emergency::erase_bucket(
+                    &url, &endpoint, &region, &access_key, &secret_key, allow_http, dangerous,
+                )
+                .await
+            }
+        },
     };
 
     // Log peak memory usage

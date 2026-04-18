@@ -7,6 +7,7 @@ pub mod cat;
 pub mod control;
 pub mod copy;
 pub mod describe;
+pub mod emergency;
 pub mod export;
 // pub mod hydrovu;  // Removed: replaced by factory-based `pond run` command
 pub mod init;
