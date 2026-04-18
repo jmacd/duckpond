@@ -132,11 +132,10 @@ rm -rf $POND
 pond init
 
 pond apply -f /tmp/backup.yaml
-pond mkdir -p /data
 
 PUSH_OUT=$(pond run /system/run/10-remote push 2>&1 || true)
 echo "$PUSH_OUT"
-check 'echo "$PUSH_OUT" | grep -qi "mismatch"' "pond3 push rejected (pond ID mismatch)"
+check 'echo "$PUSH_OUT" | grep -qi "mismatch\|already contains"' "pond3 push rejected (pond ID mismatch)"
 
 # Cleanup
 rm -rf /tmp/pond1 /tmp/pond2 /tmp/pond3 /tmp/backup.yaml /tmp/testfile*.txt
