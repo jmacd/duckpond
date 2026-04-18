@@ -75,3 +75,45 @@ pub async fn erase_bucket(
     log::info!("Erased {} object(s) from '{}'", count, bucket);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_erase_bucket_requires_dangerous_flag() {
+        let result = erase_bucket(
+            "s3://test-bucket",
+            "http://localhost:9000",
+            "us-east-1",
+            "key",
+            "secret",
+            true,
+            false, // dangerous = false
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("--dangerous"));
+    }
+
+    #[tokio::test]
+    async fn test_erase_bucket_rejects_non_s3_url() {
+        let result = erase_bucket(
+            "file:///tmp/test",
+            "http://localhost:9000",
+            "us-east-1",
+            "key",
+            "secret",
+            true,
+            true,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("s3://"));
+    }
+}
