@@ -328,6 +328,18 @@ pond list /path/to/check  # ALWAYS verify results
 
 ## HARD RULES (Violations = Wasted Time)
 
+### Presubmit Checks (Run Before Every PR)
+
+**Always run all three before pushing:**
+
+```bash
+cargo fmt --all -- --check   # formatting (CI rejects diffs)
+cargo test --workspace        # all unit tests
+cargo clippy --workspace --all-features -- -D warnings  # lint (warnings = errors)
+```
+
+These match the CI pipeline exactly. Fix any issues before pushing.
+
 ### Source Code: ASCII Only
 
 **No emoji or non-ASCII characters in `.rs` files.** Use ASCII bracket tags for

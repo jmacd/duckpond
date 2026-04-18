@@ -253,6 +253,8 @@ async fn ensure_remote_table(config: &RemoteConfig) -> Result<(), RemoteError> {
     let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
     let storage_options = config.to_storage_options();
 
+    crate::s3_registration::register_s3_handlers();
+
     // Try to open first -- if it exists, we're done
     match RemoteTable::open_with_storage_options(path, storage_options.clone()).await {
         Ok(_) => {
@@ -260,12 +262,9 @@ async fn ensure_remote_table(config: &RemoteConfig) -> Result<(), RemoteError> {
             return Ok(());
         }
         Err(_) => {
-            // Table doesn't exist yet, create it
             log::info!("[INIT] Creating remote table at {}", path);
         }
     }
-
-    crate::s3_registration::register_s3_handlers();
 
     RemoteTable::create_with_storage_options(path, storage_options)
         .await
@@ -288,10 +287,16 @@ async fn ensure_remote_table(config: &RemoteConfig) -> Result<(), RemoteError> {
 async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(), RemoteError> {
     let config: RemoteConfig = serde_json::from_value(config)?;
 
-    // For backup (non-import) factories, ensure the remote table exists.
-    // This creates the S3 bucket path and Delta log on first setup.
+    // For backup (non-import) factories, try to ensure the remote table exists.
+    // This is best-effort: if the bucket doesn't exist yet, we log a warning
+    // and let the first push handle it.
     if config.import.is_none() {
-        ensure_remote_table(&config).await?;
+        if let Err(e) = ensure_remote_table(&config).await {
+            log::warn!(
+                "[INIT] Could not verify remote table (will retry on first push): {}",
+                e
+            );
+        }
         return Ok(());
     }
 
