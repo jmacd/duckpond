@@ -956,7 +956,7 @@ mod tests {
                 .unwrap();
 
             let result = {
-                let fs_ref: &tinyfs::FS = &*tx;
+                let fs_ref: &tinyfs::FS = &tx;
                 let root = fs_ref.root().await.unwrap();
                 root.exists(pond_path).await
             };
@@ -976,7 +976,7 @@ mod tests {
                 .unwrap();
 
             let result = {
-                let fs_ref: &tinyfs::FS = &*tx;
+                let fs_ref: &tinyfs::FS = &tx;
                 let root = fs_ref.root().await.unwrap();
                 let (_, lookup) = root.resolve_path(pond_path).await.unwrap();
                 match lookup {
@@ -1096,7 +1096,7 @@ mod tests {
         );
         let arg = path.to_string_lossy().to_string();
 
-        apply_command(&setup.ship_context, &[arg.clone()]).await?;
+        apply_command(&setup.ship_context, std::slice::from_ref(&arg)).await?;
         apply_command(&setup.ship_context, &[arg]).await?;
         assert!(setup.node_exists("/data/derived").await);
         Ok(())
@@ -1146,7 +1146,7 @@ mod tests {
         );
         let arg = path.to_string_lossy().to_string();
 
-        apply_command(&setup.ship_context, &[arg.clone()]).await?;
+        apply_command(&setup.ship_context, std::slice::from_ref(&arg)).await?;
         apply_command(&setup.ship_context, &[arg]).await?;
         assert!(setup.node_exists("/mydir").await);
         Ok(())

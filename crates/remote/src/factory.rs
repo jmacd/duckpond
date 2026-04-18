@@ -245,6 +245,41 @@ fn validate_remote_config(config_bytes: &[u8]) -> tinyfs::Result<Value> {
         .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))
 }
 
+/// Ensure the remote Delta Lake table exists for backup factories.
+/// Creates the table on first setup. If the table already exists,
+/// this is a no-op. Does not require the S3 bucket to pre-exist --
+/// the Delta Lake create operation creates it implicitly via object_store.
+async fn ensure_remote_table(config: &RemoteConfig) -> Result<(), RemoteError> {
+    let path = config.url.strip_prefix("file://").unwrap_or(&config.url);
+    let storage_options = config.to_storage_options();
+
+    crate::s3_registration::register_s3_handlers();
+
+    // Try to open first -- if it exists, we're done
+    match RemoteTable::open_with_storage_options(path, storage_options.clone()).await {
+        Ok(_) => {
+            log::info!("[INIT] Remote table already exists at {}", path);
+            return Ok(());
+        }
+        Err(_) => {
+            log::info!("[INIT] Creating remote table at {}", path);
+        }
+    }
+
+    RemoteTable::create_with_storage_options(path, storage_options)
+        .await
+        .map_err(|e| {
+            RemoteError::Configuration(format!(
+                "Failed to create remote table at {}: {}. \
+                 If using MinIO, ensure the bucket exists.",
+                path, e
+            ))
+        })?;
+
+    log::info!("[INIT] Remote table created at {}", path);
+    Ok(())
+}
+
 /// Initialize hook for remote factory.
 /// For import-mode factories, reads the foreign backup to discover the
 /// partition ID for source_path, then creates the local directory
@@ -252,10 +287,20 @@ fn validate_remote_config(config_bytes: &[u8]) -> tinyfs::Result<Value> {
 async fn initialize_remote(config: Value, context: FactoryContext) -> Result<(), RemoteError> {
     let config: RemoteConfig = serde_json::from_value(config)?;
 
-    let import_config = match &config.import {
-        Some(ic) => ic,
-        None => return Ok(()), // Not an import factory, nothing to do
-    };
+    // For backup (non-import) factories, try to ensure the remote table exists.
+    // This is best-effort: if the bucket doesn't exist yet, we log a warning
+    // and let the first push handle it.
+    if config.import.is_none() {
+        if let Err(e) = ensure_remote_table(&config).await {
+            log::warn!(
+                "[INIT] Could not verify remote table (will retry on first push): {}",
+                e
+            );
+        }
+        return Ok(());
+    }
+
+    let import_config = config.import.as_ref().unwrap();
 
     // Parse source_path: strip /** suffix for recursive mode
     let (source_base, recursive) = if import_config.source_path.ends_with("/**") {
