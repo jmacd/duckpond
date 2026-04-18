@@ -6,8 +6,8 @@
 
 use anyhow::{Result, anyhow};
 use futures::TryStreamExt;
-use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
+use object_store::aws::AmazonS3Builder;
 use std::sync::Arc;
 
 /// Erase all objects in an S3 bucket.
@@ -94,10 +94,7 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("--dangerous"));
+        assert!(result.unwrap_err().to_string().contains("--dangerous"));
     }
 
     #[tokio::test]

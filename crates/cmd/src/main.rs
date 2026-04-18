@@ -505,7 +505,13 @@ async fn main() -> Result<()> {
                 dangerous,
             } => {
                 commands::emergency::erase_bucket(
-                    &url, &endpoint, &region, &access_key, &secret_key, allow_http, dangerous,
+                    &url,
+                    &endpoint,
+                    &region,
+                    &access_key,
+                    &secret_key,
+                    allow_http,
+                    dangerous,
                 )
                 .await
             }
