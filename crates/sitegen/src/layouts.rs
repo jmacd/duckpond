@@ -27,11 +27,16 @@ fn build_id() -> String {
     }
 }
 
-/// Footer markup showing the build identifier.
-fn build_footer() -> Markup {
+/// Footer markup showing optional custom text and the build identifier.
+fn build_footer(custom: Option<&str>) -> Markup {
     html! {
         footer class="build-footer" {
-            small { (build_id()) }
+            small {
+                @if let Some(text) = custom {
+                    (text) " | "
+                }
+                (build_id())
+            }
         }
     }
 }
@@ -97,6 +102,8 @@ pub struct LayoutContext<'a> {
     pub feed_url: Option<&'a str>,
     /// GitHub repository URL, shown as icon in top bar. Omitted if None.
     pub github_url: Option<&'a str>,
+    /// Custom footer text (e.g., "Made in Mendocino"). Shown before build ID.
+    pub footer: Option<&'a str>,
 }
 
 /// Apply a named layout to rendered content.
@@ -169,7 +176,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 }
                 script src=(format!("{}chart.js", ctx.root_base_url)) type="module" {}
                 script src=(format!("{}overlay.js", ctx.root_base_url)) type="module" {}
-                (build_footer())
+                (build_footer(ctx.footer))
             }
         }
     }
@@ -201,7 +208,7 @@ fn logs_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 script src="/log-viewer.js" type="module" {}
-                (build_footer())
+                (build_footer(ctx.footer))
             }
         }
     }
@@ -232,7 +239,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                (build_footer())
+                (build_footer(ctx.footer))
             }
         }
     }
@@ -271,7 +278,7 @@ fn blog_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                (build_footer())
+                (build_footer(ctx.footer))
             }
         }
     }
@@ -328,7 +335,7 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                (build_footer())
+                (build_footer(ctx.footer))
             }
         }
     }
@@ -350,6 +357,7 @@ mod tests {
             date: None,
             feed_url: None,
             github_url: Some("https://github.com/test/repo"),
+            footer: None,
         };
         let html = apply_layout("default", &ctx);
         assert!(html.contains("<!DOCTYPE html>"));
@@ -366,6 +374,7 @@ mod tests {
         // Without github_url, no GitHub icon
         let ctx_no_gh = LayoutContext {
             github_url: None,
+            footer: None,
             ..ctx
         };
         let html2 = apply_layout("default", &ctx_no_gh);
@@ -387,6 +396,7 @@ mod tests {
             date: None,
             feed_url: None,
             github_url: None,
+            footer: None,
         };
         let html = apply_layout("data", &ctx);
         assert!(html.contains("chart.js")); // Glue code present
@@ -418,6 +428,7 @@ mod tests {
             date: None,
             feed_url: None,
             github_url: None,
+            footer: None,
         };
         let html = apply_layout("nonexistent", &ctx);
         assert!(html.contains("top-bar"), "Default layout uses top bar");
@@ -435,6 +446,7 @@ mod tests {
             date: None,
             feed_url: None,
             github_url: None,
+            footer: None,
         };
         let html = apply_layout("page", &ctx);
         assert!(html.contains("content-page"), "Page layout class");
@@ -461,6 +473,7 @@ mod tests {
             date: Some("2025-03-10"),
             feed_url: Some("/feed.xml"),
             github_url: None,
+            footer: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("top-bar"), "Expected top bar: {}", html);
@@ -517,6 +530,7 @@ mod tests {
             date: None,
             feed_url: None,
             github_url: None,
+            footer: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("blog-post"), "Expected blog-post: {}", html);

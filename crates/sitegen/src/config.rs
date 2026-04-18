@@ -65,6 +65,11 @@ pub struct SiteConfig {
     /// and generates into a subdirectory of the output.
     #[serde(default)]
     pub subsites: Vec<SubsiteConfig>,
+    /// Custom text shown in the page footer alongside the build identifier.
+    /// Example: `footer: "Made in Mendocino"` renders as
+    /// "Made in Mendocino | DuckPond v0.39.0".
+    #[serde(default)]
+    pub footer: Option<String>,
 }
 
 impl SiteConfig {

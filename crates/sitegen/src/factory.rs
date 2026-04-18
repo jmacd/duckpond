@@ -1053,6 +1053,7 @@ fn generate_site(
                 date: fm.date.as_deref(),
                 feed_url: feed_url.as_deref(),
                 github_url: config.site.github_url.as_deref(),
+                footer: config.footer.as_deref(),
             },
         );
 
@@ -1366,6 +1367,7 @@ mod tests {
             }),
             theme: std::collections::BTreeMap::new(),
             subsites: vec![],
+            footer: None,
         };
 
         let mut content = BTreeMap::new();
@@ -1472,6 +1474,7 @@ mod tests {
             feed: None,
             theme: std::collections::BTreeMap::new(),
             subsites: vec![],
+            footer: None,
         };
         let content = BTreeMap::new();
 
