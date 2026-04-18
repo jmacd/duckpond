@@ -131,9 +131,26 @@ export POND=/tmp/pond3
 rm -rf $POND
 pond init
 
-pond apply -f /tmp/backup.yaml
+# Put backup at /etc/remote (not /system/run/) to avoid auto-push
+cat > /tmp/backup3.yaml << EOF
+version: v1
+kind: mknod
+metadata:
+  path: /etc/remote
+spec:
+  factory: remote
+  config:
+    url: "${BUCKET_URL}"
+    endpoint: "${MINIO_ENDPOINT}"
+    region: "us-east-1"
+    access_key: "${MINIO_ROOT_USER}"
+    secret_key: "${MINIO_ROOT_PASSWORD}"
+    allow_http: true
+EOF
 
-PUSH_OUT=$(pond run /system/run/10-remote push 2>&1 || true)
+pond apply -f /tmp/backup3.yaml
+
+PUSH_OUT=$(pond run /etc/remote push 2>&1 || true)
 echo "$PUSH_OUT"
 check 'echo "$PUSH_OUT" | grep -qi "mismatch\|already contains"' "pond3 push rejected (pond ID mismatch)"
 
