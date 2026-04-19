@@ -207,7 +207,7 @@ fn logs_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                script src="/log-viewer.js" type="module" {}
+                script src=(format!("{}log-viewer.js", ctx.root_base_url)) type="module" {}
                 (build_footer(ctx.footer))
             }
         }
@@ -539,5 +539,35 @@ mod tests {
             "No date element expected: {}",
             html
         );
+    }
+
+    #[test]
+    fn test_logs_layout_uses_root_base_url() {
+        let ctx = LayoutContext {
+            title: "System Logs",
+            site_title: "Noyo Harbor",
+            base_url: "/noyo-harbor/",
+            root_base_url: "/",
+            content: "<div id=\"log-viewer\"></div>",
+            sidebar: Some("<ul><li>Nav</li></ul>"),
+            date: None,
+            feed_url: None,
+            github_url: None,
+            footer: None,
+        };
+        let html = apply_layout("logs", &ctx);
+        assert!(
+            html.contains("/log-viewer.js"),
+            "Log viewer script present: {}",
+            html
+        );
+        assert!(
+            !html.contains("\"/noyo-harbor/log-viewer.js\""),
+            "Log viewer should use root_base_url, not base_url: {}",
+            html
+        );
+        assert!(html.contains("type=\"module\""), "Module script: {}", html);
+        assert!(html.contains("class=\"sidebar\""), "Sidebar present");
+        assert!(!html.contains("chart.js"), "No chart.js in logs layout");
     }
 }

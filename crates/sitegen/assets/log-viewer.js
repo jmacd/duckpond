@@ -27,15 +27,14 @@ async function main() {
   // Show loading state
   container.innerHTML = '<p class="log-status">Loading logs...</p>';
 
-  // Load DuckDB-WASM
-  const duckdb = await import(
-    "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm"
-  );
-
-  const DUCKDB_BUNDLES = duckdb.getJsDelivrBundles();
-  const bundle = await duckdb.selectBundle(DUCKDB_BUNDLES);
-  const worker = await duckdb.createWorker(bundle.mainWorker);
-  const logger = new duckdb.ConsoleLogger();
+  // Load DuckDB-WASM from local vendor files (offline-capable)
+  const duckdb = await import(/* @vite-ignore */ "./vendor/duckdb-browser.mjs");
+  const bundle = {
+    mainModule: new URL("./vendor/duckdb-eh.wasm", import.meta.url).href,
+    mainWorker: new URL("./vendor/duckdb-browser-eh.worker.js", import.meta.url).href,
+  };
+  const worker = new Worker(bundle.mainWorker);
+  const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
   const db = new duckdb.AsyncDuckDB(logger, worker);
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
   const conn = await db.connect();
