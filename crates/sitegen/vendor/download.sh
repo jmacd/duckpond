@@ -5,7 +5,11 @@
 # After that, sitegen generates sites that work fully offline
 # with no CDN dependency.
 #
+# If brotli and gzip are available, pre-compressed (.br, .gz) variants
+# are created alongside the originals for production serving.
+#
 # Prerequisites: Node.js >= 18, npm
+# Optional: brotli (for .br pre-compression), gzip (for .gz)
 #
 # Usage:
 #   cd crates/sitegen/vendor && bash download.sh
@@ -52,9 +56,39 @@ export * as d3 from "d3";
 EOF
 npx esbuild _plot.mjs --bundle --format=esm --outfile="${DIST_DIR}/plot-d3-bundle.mjs" --minify 2>&1
 
-# -- Cleanup --
+# -- Cleanup work directory --
 cd "${SCRIPT_DIR}"
 rm -rf "${WORK_DIR}"
+
+# -- Pre-compress for production serving --
+# Brotli and gzip pre-compressed files let Caddy/nginx serve compressed
+# responses without on-the-fly compression overhead. These are optional;
+# the site works without them, just with larger transfers.
+
+HAS_BROTLI=false
+HAS_GZIP=false
+if command -v brotli >/dev/null 2>&1; then
+    HAS_BROTLI=true
+fi
+if command -v gzip >/dev/null 2>&1; then
+    HAS_GZIP=true
+fi
+
+if [ "$HAS_BROTLI" = true ] || [ "$HAS_GZIP" = true ]; then
+    echo "Pre-compressing vendor files..."
+    for f in "${DIST_DIR}"/*.mjs "${DIST_DIR}"/*.js "${DIST_DIR}"/*.wasm; do
+        [ -f "$f" ] || continue
+        if [ "$HAS_BROTLI" = true ]; then
+            brotli -k -q 11 "$f"
+        fi
+        if [ "$HAS_GZIP" = true ]; then
+            gzip -k -9 "$f"
+        fi
+    done
+else
+    echo "Note: brotli/gzip not found; skipping pre-compression."
+    echo "  Install brotli for smaller production downloads."
+fi
 
 echo ""
 echo "=== Vendor files ready ==="
