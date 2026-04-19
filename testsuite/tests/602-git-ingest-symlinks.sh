@@ -1,8 +1,8 @@
 #!/bin/bash
 # EXPERIMENT: Git-ingest factory — symlinks and nested directories
 # DESCRIPTION: Test that symlinks and deeply nested directory trees
-#              from git are correctly mirrored in the pond.
-# EXPECTED: Symlinks appear as symlinks in the pond, nested dirs created.
+#              from git are correctly exposed via the dynamic dir.
+# EXPECTED: Symlinks appear as symlinks, nested dirs traversable.
 set -e
 
 echo "=== Experiment: Git-Ingest Symlinks and Nested Dirs ==="
@@ -36,7 +36,6 @@ pond init
 cat > /tmp/git-ingest.yaml << EOF
 url: file://${REPO_DIR}
 ref: main
-pond_path: content
 EOF
 
 pond mkdir /system
@@ -48,11 +47,11 @@ RUST_LOG=info pond run /system/etc/gitrepo pull
 # --- Verify structure ---------------------------------------------------------
 echo ""
 echo "=== Full listing ==="
-pond list /content/**
+pond list /system/etc/gitrepo/**
 
 echo ""
 echo "=== Verify nested file ==="
-CONTENT=$(pond cat /content/a/b/c/deep.txt)
+CONTENT=$(pond cat /system/etc/gitrepo/a/b/c/deep.txt)
 if [ "$CONTENT" = "deep file" ]; then
     echo "a/b/c/deep.txt: CORRECT"
 else
@@ -60,7 +59,7 @@ else
     exit 1
 fi
 
-CONTENT=$(pond cat /content/a/b/mid.txt)
+CONTENT=$(pond cat /system/etc/gitrepo/a/b/mid.txt)
 if [ "$CONTENT" = "level-b file" ]; then
     echo "a/b/mid.txt: CORRECT"
 else
@@ -72,7 +71,7 @@ echo ""
 echo "=== Verify symlinks ==="
 # Symlinks should exist and be readable
 # (pond cat follows symlinks)
-CONTENT=$(pond cat /content/link-to-root.txt)
+CONTENT=$(pond cat /system/etc/gitrepo/link-to-root.txt)
 if [ "$CONTENT" = "root file" ]; then
     echo "link-to-root.txt -> root.txt: CORRECT"
 else

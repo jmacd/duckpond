@@ -1,8 +1,8 @@
 #!/bin/bash
 # EXPERIMENT: Git-ingest factory — status command
-# DESCRIPTION: Verify the status subcommand reports sync state correctly
+# DESCRIPTION: Verify the status subcommand reports state correctly
 #              before and after pulling.
-# EXPECTED: Status shows "not yet synced" before pull, shows commit SHA after.
+# EXPECTED: Status shows "not yet fetched" before pull, shows commit info after.
 set -e
 
 echo "=== Experiment: Git-Ingest Status Command ==="
@@ -28,7 +28,6 @@ pond init
 cat > /tmp/git-ingest.yaml << EOF
 url: file://${REPO_DIR}
 ref: main
-pond_path: data
 EOF
 
 pond mkdir /system
@@ -39,10 +38,10 @@ pond mknod git-ingest /system/etc/src --config-path /tmp/git-ingest.yaml
 echo ""
 echo "--- Status before pull ---"
 RUST_LOG=info pond run /system/etc/src status 2>&1 | tee /tmp/status1.log
-if grep -q "not yet synced" /tmp/status1.log; then
+if grep -q "not yet fetched" /tmp/status1.log; then
     echo "Pre-pull status: CORRECT"
 else
-    echo "FAIL: Expected 'not yet synced'"
+    echo "FAIL: Expected 'not yet fetched'"
     exit 1
 fi
 
@@ -55,18 +54,22 @@ RUST_LOG=info pond run /system/etc/src pull
 echo ""
 echo "--- Status after pull ---"
 RUST_LOG=info pond run /system/etc/src status 2>&1 | tee /tmp/status2.log
-if grep -q "$COMMIT_SHA" /tmp/status2.log; then
-    echo "Post-pull status shows commit SHA: CORRECT"
+if grep -q "at commit" /tmp/status2.log; then
+    echo "Post-pull status shows commit: CORRECT"
 else
-    echo "FAIL: Expected commit SHA in status"
+    echo "FAIL: Expected commit info in status"
     cat /tmp/status2.log
     exit 1
 fi
 
-if grep -q "entries: 1" /tmp/status2.log; then
-    echo "Post-pull entry count: CORRECT"
+# --- Verify file is readable via dynamic dir ----------------------------------
+echo ""
+echo "--- Verify content ---"
+CONTENT=$(pond cat /system/etc/src/hello.txt)
+if [ "$CONTENT" = "hello" ]; then
+    echo "hello.txt: CORRECT"
 else
-    echo "FAIL: Expected 'entries: 1'"
+    echo "FAIL: hello.txt (got: $CONTENT)"
     exit 1
 fi
 

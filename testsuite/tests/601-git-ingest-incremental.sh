@@ -1,9 +1,9 @@
 #!/bin/bash
-# EXPERIMENT: Git-ingest factory — incremental update
-# DESCRIPTION: Pull from git, modify the repo, pull again. Verify that
-#              new/changed files appear and deleted files are removed.
-# EXPECTED: Second pull adds new file, updates changed file, removes
-#           deleted file. Unchanged files remain.
+# EXPERIMENT: Git-ingest factory — incremental update via dynamic dir
+# DESCRIPTION: Pull from git, modify the repo, pull again. Since the
+#              dynamic dir reads from the bare repo, changes are visible
+#              immediately after fetch.
+# EXPECTED: Second pull reflects new/changed/deleted files in the tree.
 set -e
 
 echo "=== Experiment: Git-Ingest Incremental Update ==="
@@ -32,7 +32,6 @@ pond init
 cat > /tmp/git-ingest.yaml << EOF
 url: file://${REPO_DIR}
 ref: main
-pond_path: blog
 EOF
 
 pond mkdir /system
@@ -43,10 +42,10 @@ echo "--- First pull ---"
 RUST_LOG=info pond run /system/etc/gitblog pull
 
 # Verify initial state
-CONTENT=$(pond cat /blog/post1.md)
+CONTENT=$(pond cat /system/etc/gitblog/post1.md)
 [ "$CONTENT" = "Post one" ] && echo "post1.md: CORRECT" || { echo "FAIL: post1.md"; exit 1; }
 
-CONTENT=$(pond cat /blog/delete-me.md)
+CONTENT=$(pond cat /system/etc/gitblog/delete-me.md)
 [ "$CONTENT" = "To be deleted" ] && echo "delete-me.md: CORRECT" || { echo "FAIL: delete-me.md"; exit 1; }
 
 # --- Modify the git repo -----------------------------------------------------
@@ -58,7 +57,7 @@ git add -A
 git commit -m "Update, add, and delete"
 cd /
 
-# --- Second pull --------------------------------------------------------------
+# --- Second pull (fetch updates) ---------------------------------------------
 echo ""
 echo "--- Second pull ---"
 RUST_LOG=info pond run /system/etc/gitblog pull
@@ -68,7 +67,7 @@ echo ""
 echo "=== Verification ==="
 
 # Updated file
-CONTENT=$(pond cat /blog/post1.md)
+CONTENT=$(pond cat /system/etc/gitblog/post1.md)
 if [ "$CONTENT" = "Post one UPDATED" ]; then
     echo "post1.md updated: CORRECT"
 else
@@ -77,7 +76,7 @@ else
 fi
 
 # Unchanged file
-CONTENT=$(pond cat /blog/post2.md)
+CONTENT=$(pond cat /system/etc/gitblog/post2.md)
 if [ "$CONTENT" = "Post two" ]; then
     echo "post2.md unchanged: CORRECT"
 else
@@ -86,7 +85,7 @@ else
 fi
 
 # New file
-CONTENT=$(pond cat /blog/post3.md)
+CONTENT=$(pond cat /system/etc/gitblog/post3.md)
 if [ "$CONTENT" = "Brand new post" ]; then
     echo "post3.md added: CORRECT"
 else
@@ -95,26 +94,16 @@ else
 fi
 
 # Deleted file should be gone
-if pond cat /blog/delete-me.md 2>/dev/null; then
+if pond cat /system/etc/gitblog/delete-me.md 2>/dev/null; then
     echo "FAIL: delete-me.md should have been removed"
     exit 1
 else
     echo "delete-me.md removed: CORRECT"
 fi
 
-# --- Third pull (no-op) -------------------------------------------------------
 echo ""
-echo "--- Third pull (should be no-op) ---"
-RUST_LOG=info pond run /system/etc/gitblog pull 2>&1 | tee /tmp/pull3.log
-if grep -q "nothing to do" /tmp/pull3.log; then
-    echo "No-op pull: CORRECT"
-else
-    echo "WARNING: Third pull was not detected as no-op"
-fi
-
-echo ""
-echo "=== Listing /blog/ ==="
-pond list /blog/
+echo "=== Listing /system/etc/gitblog/ ==="
+pond list /system/etc/gitblog/
 
 echo ""
 echo "=== Experiment Complete ==="

@@ -1,11 +1,11 @@
 #!/bin/bash
-# EXPERIMENT: Git-ingest factory — basic pull from local repo
-# DESCRIPTION: Create a local git repo, configure git-ingest factory,
-#              pull files into the pond, verify they appear correctly.
-# EXPECTED: Files from git appear in the pond with correct content.
+# EXPERIMENT: Git-ingest factory — basic pull and dynamic dir listing
+# DESCRIPTION: Create a local git repo, configure git-ingest factory as
+#              a dynamic directory, pull to cache, verify files are readable.
+# EXPECTED: After pull, the dynamic dir lists git tree and pond cat reads blobs.
 set -e
 
-echo "=== Experiment: Git-Ingest Basic Pull ==="
+echo "=== Experiment: Git-Ingest Dynamic Dir ==="
 
 # --- Create a local git repo with some files --------------------------------
 REPO_DIR=/tmp/test-blog
@@ -34,7 +34,6 @@ pond init
 cat > /tmp/git-ingest.yaml << EOF
 url: file://${REPO_DIR}
 ref: main
-pond_path: site/content
 EOF
 
 pond mkdir /system
@@ -42,22 +41,22 @@ pond mkdir /system/etc
 pond mknod git-ingest /system/etc/blog --config-path /tmp/git-ingest.yaml
 echo "Created git-ingest factory node"
 
-# --- Pull from git -----------------------------------------------------------
+# --- Pull from git (fetch into bare cache) -----------------------------------
 RUST_LOG=info pond run /system/etc/blog pull
 
-# --- Verify files appeared in the pond ---------------------------------------
+# --- Verify files appear via dynamic dir -------------------------------------
 echo ""
-echo "=== Listing /site/content/ ==="
-pond list /site/content/
+echo "=== Listing /system/etc/blog/ ==="
+pond list /system/etc/blog/
 
 echo ""
-echo "=== Listing /site/content/posts/ ==="
-pond list /site/content/posts/
+echo "=== Listing /system/etc/blog/posts/ ==="
+pond list /system/etc/blog/posts/
 
 echo ""
 echo "=== Verify file contents ==="
 
-README_CONTENT=$(pond cat /site/content/README.md)
+README_CONTENT=$(pond cat /system/etc/blog/README.md)
 if [ "$README_CONTENT" = "# My Blog" ]; then
     echo "README.md: CORRECT"
 else
@@ -65,7 +64,7 @@ else
     exit 1
 fi
 
-FIRST_CONTENT=$(pond cat /site/content/posts/first.md)
+FIRST_CONTENT=$(pond cat /system/etc/blog/posts/first.md)
 if [ "$FIRST_CONTENT" = "Hello, world!" ]; then
     echo "posts/first.md: CORRECT"
 else
@@ -73,18 +72,13 @@ else
     exit 1
 fi
 
-CSS_CONTENT=$(pond cat /site/content/assets/style.css)
+CSS_CONTENT=$(pond cat /system/etc/blog/assets/style.css)
 if [ "$CSS_CONTENT" = "body { color: black; }" ]; then
     echo "assets/style.css: CORRECT"
 else
     echo "assets/style.css: WRONG (got: $CSS_CONTENT)"
     exit 1
 fi
-
-echo ""
-echo "=== Verify manifest exists ==="
-pond list /site/content/.git-manifest
-echo "Manifest found"
 
 echo ""
 echo "=== Experiment Complete ==="

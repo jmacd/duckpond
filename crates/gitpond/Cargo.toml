@@ -20,7 +20,9 @@ doctest = false
 
 [dependencies]
 # Workspace dependencies
+async-trait.workspace = true
 clap.workspace = true
+futures.workspace = true
 linkme.workspace = true
 log.workspace = true
 paste.workspace = true

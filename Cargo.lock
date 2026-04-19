@@ -2438,7 +2438,9 @@ dependencies = [
 name = "gitpond"
 version = "0.41.0"
 dependencies = [
+ "async-trait",
  "clap",
+ "futures",
  "gix",
  "linkme",
  "log",

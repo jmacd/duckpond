@@ -135,6 +135,18 @@ impl<'a> StewardTransactionGuard<'a> {
         self.state()?.get_factory_for_node(id).await
     }
 
+    /// Get the factory name and config bytes for a dynamic node.
+    ///
+    /// Works for both file-based and directory-based dynamic nodes.
+    /// Returns `Ok(Some((factory_name, config_bytes)))` if the node
+    /// has factory config, `Ok(None)` otherwise.
+    pub async fn get_dynamic_node_config(
+        &self,
+        id: tinyfs::FileID,
+    ) -> Result<Option<(String, Vec<u8>)>, tlogfs::TLogFSError> {
+        self.state()?.get_dynamic_node_config(id).await
+    }
+
     /// Query oplog records for a filesystem node.
     ///
     /// Returns the version history entries for the given file.
