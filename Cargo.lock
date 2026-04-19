@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "cmd"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2436,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "gitpond"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -3368,7 +3368,7 @@ checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
 name = "hydrovu"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -4640,7 +4640,7 @@ dependencies = [
 
 [[package]]
 name = "provider"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5064,7 +5064,7 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 
 [[package]]
 name = "remote"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5570,7 +5570,7 @@ checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
 
 [[package]]
 name = "sitegen"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "chrono",
  "clap",
@@ -5679,7 +5679,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "steward"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5951,7 +5951,7 @@ dependencies = [
 
 [[package]]
 name = "tinyfs"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -6011,7 +6011,7 @@ checksum = "b130bd8a58c163224b44e217b4239ca7b927d82bf6cc2fea1fc561d15056e3f7"
 
 [[package]]
 name = "tlogfs"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -6381,7 +6381,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "utilities"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "arrow",
  "arrow-array",
