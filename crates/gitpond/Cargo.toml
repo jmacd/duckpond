@@ -31,6 +31,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 tinyfs.workspace = true
 provider.workspace = true
+utilities.workspace = true
 tokio.workspace = true
 
 # Git support (pure Rust)

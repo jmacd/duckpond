@@ -2451,6 +2451,7 @@ dependencies = [
  "serde_yaml",
  "tinyfs",
  "tokio",
+ "utilities",
 ]
 
 [[package]]

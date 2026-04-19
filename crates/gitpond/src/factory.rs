@@ -97,8 +97,17 @@ fn parse_command(ctx: ExecutionContext) -> Result<GitIngestCommand, tinyfs::Erro
 }
 
 /// Create a dynamic directory for reading the git tree.
+///
+/// The stored mknod config may contain `${env:VAR}` placeholders
+/// (expansion normally happens in `pond run`, but `create_directory`
+/// is called at filesystem-open time, not through `pond run`).
 fn create_directory(config: Value, context: FactoryContext) -> TinyFSResult<tinyfs::DirHandle> {
-    let config: GitIngestConfig = serde_json::from_value(config)
+    // Re-serialize to YAML, expand env vars, then deserialize.
+    let raw_yaml = serde_json::to_string(&config)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config: {}", e)))?;
+    let expanded = utilities::env_substitution::substitute_env_vars(&raw_yaml)
+        .map_err(|e| tinyfs::Error::Other(format!("Env expansion failed: {}", e)))?;
+    let config: GitIngestConfig = serde_json::from_str(&expanded)
         .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
 
     let pond_path = context
