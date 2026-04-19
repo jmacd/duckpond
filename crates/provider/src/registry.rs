@@ -302,7 +302,15 @@ impl FactoryRegistry {
         let factory = Self::get_factory(factory_name)
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
 
-        let config_value = (factory.validate_config)(config)?;
+        // Expand ${env:VAR} placeholders before validation/deserialization.
+        // Configs are stored raw; `pond run` expands them for executable
+        // factories, but create_directory is called at filesystem-open time.
+        let config_str = std::str::from_utf8(config)
+            .map_err(|e| tinyfs::Error::Other(format!("Config is not valid UTF-8: {}", e)))?;
+        let expanded = utilities::env_substitution::substitute_env_vars(config_str)
+            .map_err(|e| tinyfs::Error::Other(format!("Env expansion failed: {}", e)))?;
+
+        let config_value = (factory.validate_config)(expanded.as_bytes())?;
 
         if let Some(create_fn) = factory.create_directory {
             create_fn(config_value, context)
@@ -323,7 +331,13 @@ impl FactoryRegistry {
         let factory = Self::get_factory(factory_name)
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
 
-        let config_value = (factory.validate_config)(config)?;
+        // Expand ${env:VAR} placeholders (same as create_directory).
+        let config_str = std::str::from_utf8(config)
+            .map_err(|e| tinyfs::Error::Other(format!("Config is not valid UTF-8: {}", e)))?;
+        let expanded = utilities::env_substitution::substitute_env_vars(config_str)
+            .map_err(|e| tinyfs::Error::Other(format!("Env expansion failed: {}", e)))?;
+
+        let config_value = (factory.validate_config)(expanded.as_bytes())?;
 
         if let Some(create_fn) = factory.create_file {
             create_fn(config_value, context).await
