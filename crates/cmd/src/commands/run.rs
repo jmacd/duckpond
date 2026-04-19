@@ -252,8 +252,18 @@ async fn run_pond_command_impl(
             )
         })?;
 
-    // Read the configuration file contents
-    let config_bytes = {
+    // Read the configuration.
+    // For file-based dynamic nodes, read via async_reader_path.
+    // For directory-based dynamic nodes (e.g., git-ingest), retrieve
+    // config from the oplog via get_dynamic_node_config.
+    let config_bytes = if config_node.entry_type().is_directory() {
+        let (_factory, config) = tx
+            .get_dynamic_node_config(node_id)
+            .await
+            .with_context(|| format!("Failed to get dynamic config for: {}", config_path))?
+            .ok_or_else(|| anyhow!("Directory node has no dynamic config: {}", config_path))?;
+        config
+    } else {
         let mut reader = root
             .async_reader_path(config_path)
             .await

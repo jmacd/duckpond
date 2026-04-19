@@ -509,4 +509,121 @@ query: "SELECT * FROM source LIMIT 10"
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_get_dynamic_node_config_directory() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        // Create a git-ingest config (DirectoryDynamic factory)
+        let config_path = setup.temp_dir.path().join("git_config.yaml");
+        let config_content = "url: https://github.com/user/repo.git\nref: main\n";
+        fs::write(&config_path, config_content)?;
+
+        // Create the directory dynamic node
+        let result = mknod_command(
+            &setup.ship_context,
+            "git-ingest",
+            "/test_git_config",
+            &config_path.to_string_lossy(),
+            false,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "mknod git-ingest should succeed: {:?}",
+            result.err()
+        );
+
+        // Retrieve the config via get_dynamic_node_config
+        let mut ship = setup.ship_context.open_pond().await?;
+        let tx = ship
+            .begin_read(&steward::PondUserMetadata::new(vec![
+                "test_config".to_string(),
+            ]))
+            .await?;
+
+        // Resolve the node to get its FileID
+        let root = tx.root().await?;
+        let (_wd, lookup) = root.resolve_path("/test_git_config").await?;
+        let node = match lookup {
+            tinyfs::Lookup::Found(n) => n,
+            _ => panic!("Node not found"),
+        };
+
+        // Get the dynamic config
+        let config_result = tx.get_dynamic_node_config(node.id()).await?;
+        assert!(
+            config_result.is_some(),
+            "get_dynamic_node_config should return config for DirectoryDynamic"
+        );
+
+        let (factory_name, config_bytes) = config_result.unwrap();
+        assert_eq!(factory_name, "git-ingest");
+        assert_eq!(
+            String::from_utf8_lossy(&config_bytes),
+            config_content,
+            "Config bytes should match the stored YAML"
+        );
+
+        _ = tx.commit().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_dynamic_node_config_file() -> Result<()> {
+        let setup = TestSetup::new().await?;
+
+        // Create an sql-derived-table config (FileDynamic factory)
+        let config_path = setup.create_factory_config()?;
+        let config_content = fs::read_to_string(&config_path)?;
+
+        // Create the file dynamic node
+        let result = mknod_command(
+            &setup.ship_context,
+            "sql-derived-table",
+            "/test_sql_config",
+            &config_path.to_string_lossy(),
+            false,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "mknod sql-derived-table should succeed: {:?}",
+            result.err()
+        );
+
+        // Retrieve the config via get_dynamic_node_config
+        let mut ship = setup.ship_context.open_pond().await?;
+        let tx = ship
+            .begin_read(&steward::PondUserMetadata::new(vec![
+                "test_config".to_string(),
+            ]))
+            .await?;
+
+        let root = tx.root().await?;
+        let (_wd, lookup) = root.resolve_path("/test_sql_config").await?;
+        let node = match lookup {
+            tinyfs::Lookup::Found(n) => n,
+            _ => panic!("Node not found"),
+        };
+
+        let config_result = tx.get_dynamic_node_config(node.id()).await?;
+        assert!(
+            config_result.is_some(),
+            "get_dynamic_node_config should return config for file-based factories"
+        );
+
+        let (factory_name, config_bytes) = config_result.unwrap();
+        assert_eq!(factory_name, "sql-derived-table");
+        assert_eq!(
+            String::from_utf8_lossy(&config_bytes),
+            config_content,
+            "Config bytes should match the stored YAML"
+        );
+
+        _ = tx.commit().await?;
+
+        Ok(())
+    }
 }

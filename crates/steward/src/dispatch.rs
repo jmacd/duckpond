@@ -271,6 +271,22 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Get the factory name and config bytes for a dynamic node.
+    ///
+    /// Works for both file-based and directory-based dynamic nodes.
+    pub async fn get_dynamic_node_config(
+        &self,
+        id: tinyfs::FileID,
+    ) -> Result<Option<(String, Vec<u8>)>, tlogfs::TLogFSError> {
+        match self {
+            Transaction::Pond(guard) => guard.get_dynamic_node_config(id).await,
+            Transaction::Host(host) => host
+                .get_dynamic_node_config(id)
+                .await
+                .map_err(tlogfs::TLogFSError::TinyFS),
+        }
+    }
+
     // -- Access to the underlying guard (for pond-specific operations) --
 
     /// Get the underlying `StewardTransactionGuard` if this is a Pond transaction.

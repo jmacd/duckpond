@@ -3,14 +3,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Git-ingest factory registration and execution.
+//!
+//! Registers as both a dynamic directory factory (for reads) and an
+//! executable factory (for `pond run pull` to fetch from the remote).
 
 use crate::git;
-use crate::sync;
+use crate::tree::GitRootDirectory;
 use log::info;
-use provider::{ExecutionContext, FactoryContext, register_executable_factory};
+use provider::{ExecutionContext, FactoryContext};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tinyfs::{EntryType, Result as TinyFSResult};
+use std::future::Future;
+use std::pin::Pin;
+use tinyfs::Result as TinyFSResult;
 
 use clap::{Parser, Subcommand};
 
@@ -23,10 +28,10 @@ struct GitIngestCommand {
 
 #[derive(Debug, Subcommand)]
 enum GitIngestSubcommand {
-    /// Pull changes from git into the pond
+    /// Pull changes from git (fetch + resolve)
     Pull,
 
-    /// Push mode (no-op for git-ingest -- git is read-only source)
+    /// Push mode (no-op for git-ingest -- git is a read-only source)
     Push,
 
     /// Show current sync status
@@ -44,8 +49,11 @@ pub struct GitIngestConfig {
     #[serde(rename = "ref")]
     pub git_ref: String,
 
-    /// Destination path within the pond (relative to pond root)
-    pub pond_path: String,
+    /// Optional path prefix filter.  When set, only files under this
+    /// directory in the git tree are synced, with the prefix stripped
+    /// from their paths.
+    #[serde(default)]
+    pub prefix: Option<String>,
 }
 
 impl GitIngestConfig {
@@ -57,10 +65,22 @@ impl GitIngestConfig {
         if self.git_ref.is_empty() {
             return Err(tinyfs::Error::Other("ref cannot be empty".to_string()));
         }
-        if self.pond_path.is_empty() {
-            return Err(tinyfs::Error::Other(
-                "pond_path cannot be empty".to_string(),
-            ));
+        if let Some(ref prefix) = self.prefix {
+            if prefix.is_empty() {
+                return Err(tinyfs::Error::Other(
+                    "prefix must not be empty (omit the field instead)".to_string(),
+                ));
+            }
+            if prefix.starts_with('/') || prefix.ends_with('/') {
+                return Err(tinyfs::Error::Other(
+                    "prefix must not start or end with '/'".to_string(),
+                ));
+            }
+            if prefix.contains("..") {
+                return Err(tinyfs::Error::Other(
+                    "prefix must not contain '..'".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -76,64 +96,35 @@ fn parse_command(ctx: ExecutionContext) -> Result<GitIngestCommand, tinyfs::Erro
         .map_err(|e| tinyfs::Error::Other(format!("Command parse error: {}", e)))
 }
 
+/// Create a dynamic directory for reading the git tree.
+fn create_directory(config: Value, context: FactoryContext) -> TinyFSResult<tinyfs::DirHandle> {
+    let config: GitIngestConfig = serde_json::from_value(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+
+    let pond_path = context
+        .context
+        .pond_path()
+        .ok_or_else(|| {
+            tinyfs::Error::Other(
+                "git-ingest requires a real pond (pond_path not available)".to_string(),
+            )
+        })?
+        .to_path_buf();
+
+    let node_id = context.file_id.node_id().to_string();
+    let repo_path = git::bare_repo_path(&pond_path, &node_id);
+
+    let root_dir = GitRootDirectory::new(repo_path, config.git_ref, config.prefix, context.file_id);
+
+    Ok(root_dir.create_handle())
+}
+
 /// Initialize factory (called once per dynamic node creation)
 async fn initialize(_config: Value, _context: FactoryContext) -> Result<(), tinyfs::Error> {
     Ok(())
 }
 
-/// Pond path for the manifest file, stored inside the synced directory
-fn manifest_pond_path(config: &GitIngestConfig) -> String {
-    format!("{}/.git-manifest", config.pond_path)
-}
-
-/// Read manifest from the pond filesystem, or return empty if not found
-async fn read_manifest(
-    context: &FactoryContext,
-    config: &GitIngestConfig,
-) -> Result<git::GitManifest, tinyfs::Error> {
-    let fs = context.context.filesystem();
-    let root = fs.root().await?;
-    let path = manifest_pond_path(config);
-
-    match root.read_file_path_to_vec(&path).await {
-        Ok(data) => git::GitManifest::from_bytes(&data),
-        Err(tinyfs::Error::NotFound(_)) => Ok(git::GitManifest::empty()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Write manifest to the pond filesystem (atomic with other pond changes)
-async fn write_manifest(
-    context: &FactoryContext,
-    config: &GitIngestConfig,
-    manifest: &git::GitManifest,
-) -> Result<(), tinyfs::Error> {
-    let fs = context.context.filesystem();
-    let root = fs.root().await?;
-    let path = manifest_pond_path(config);
-    let data = manifest.to_bytes()?;
-
-    // Ensure the destination directory exists
-    let _ = root.create_dir_all(&config.pond_path).await?;
-
-    // Use async_writer_path_with_type: creates if missing, appends new version if exists
-    use tokio::io::AsyncWriteExt;
-    let mut writer = root
-        .async_writer_path_with_type(&path, EntryType::FilePhysicalVersion)
-        .await?;
-    writer
-        .write_all(&data)
-        .await
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to write manifest: {}", e)))?;
-    writer
-        .shutdown()
-        .await
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to finalize manifest: {}", e)))?;
-
-    Ok(())
-}
-
-/// Execute the git-ingest factory
+/// Execute the git-ingest factory (pull/status commands)
 pub async fn execute(
     config: Value,
     context: FactoryContext,
@@ -144,7 +135,6 @@ pub async fn execute(
 
     let cmd = parse_command(ctx)?;
 
-    // Get the pond path on disk from the provider context
     let pond_path = context
         .context
         .pond_path()
@@ -162,90 +152,73 @@ pub async fn execute(
             info!("git-ingest: 'push' mode is a no-op (git is a read-only source)");
             Ok(())
         }
-        Some(GitIngestSubcommand::Status) => execute_status(&context, &config).await,
-        Some(GitIngestSubcommand::Pull) | None => {
-            execute_pull(&context, &pond_path, &node_id, &config).await
-        }
+        Some(GitIngestSubcommand::Status) => execute_status(&pond_path, &node_id, &config),
+        Some(GitIngestSubcommand::Pull) | None => execute_pull(&pond_path, &node_id, &config),
     }
 }
 
 /// Show sync status
-async fn execute_status(
-    context: &FactoryContext,
-    config: &GitIngestConfig,
-) -> Result<(), tinyfs::Error> {
-    let manifest = read_manifest(context, config).await?;
-
-    if manifest.commit_sha.is_empty() {
-        log::info!("git-ingest: not yet synced");
-    } else {
-        log::info!("git-ingest: synced at {}", manifest.commit_sha);
-        log::info!("  entries: {}", manifest.entries.len());
-    }
-    log::info!("  url: {}", config.url);
-    log::info!("  ref: {}", config.git_ref);
-    log::info!("  pond_path: {}", config.pond_path);
-    Ok(())
-}
-
-/// Pull changes from git into the pond
-async fn execute_pull(
-    context: &FactoryContext,
+fn execute_status(
     pond_path: &std::path::Path,
     node_id: &str,
     config: &GitIngestConfig,
 ) -> Result<(), tinyfs::Error> {
-    info!(
-        "git-ingest pull: {} (ref: {}) -> {}",
-        config.url, config.git_ref, config.pond_path
-    );
+    let repo_path = git::bare_repo_path(pond_path, node_id);
+
+    if repo_path.exists() {
+        match git::resolve_tree_at_ref(&repo_path, &config.git_ref) {
+            Ok(_) => {
+                let repo = git::open_repo(&repo_path)?;
+                let commit_sha = git::fetch_and_resolve(&repo_path, &config.url, &config.git_ref)
+                    .unwrap_or_else(|_| "unknown".to_string());
+                drop(repo);
+                log::info!(
+                    "git-ingest: at commit {}",
+                    &commit_sha[..12.min(commit_sha.len())]
+                );
+            }
+            Err(_) => {
+                log::info!("git-ingest: repo cached but ref not yet resolved");
+            }
+        }
+    } else {
+        log::info!("git-ingest: not yet fetched");
+    }
+    log::info!("  url: {}", config.url);
+    log::info!("  ref: {}", config.git_ref);
+    if let Some(ref prefix) = config.prefix {
+        log::info!("  prefix: {}", prefix);
+    }
+    Ok(())
+}
+
+/// Pull changes from git (fetch only -- tree is served dynamically)
+fn execute_pull(
+    pond_path: &std::path::Path,
+    node_id: &str,
+    config: &GitIngestConfig,
+) -> Result<(), tinyfs::Error> {
+    info!("git-ingest pull: {} (ref: {})", config.url, config.git_ref,);
 
     // Ensure the git cache directory exists
     let git_dir = pond_path.join("git");
     std::fs::create_dir_all(&git_dir)
         .map_err(|e| tinyfs::Error::Other(format!("Failed to create git dir: {}", e)))?;
 
-    // Fetch and resolve the ref to a commit SHA
+    // Fetch and resolve the ref
     let repo_path = git::bare_repo_path(pond_path, node_id);
     let commit_sha = git::fetch_and_resolve(&repo_path, &config.url, &config.git_ref)?;
     info!("Resolved {} -> {}", config.git_ref, &commit_sha[..12]);
 
-    // Load the existing manifest from the pond (transactional)
-    let old_manifest = read_manifest(context, config).await?;
-
-    // Check if anything changed
-    if old_manifest.commit_sha == commit_sha {
-        info!("Already at commit {}, nothing to do", &commit_sha[..12]);
-        return Ok(());
+    // Verify prefix is valid if configured
+    if let Some(ref prefix) = config.prefix {
+        let repo = git::open_repo(&repo_path)?;
+        let tree_oid = git::resolve_tree_at_ref(&repo_path, &config.git_ref)?;
+        let _ = git::navigate_to_prefix(&repo, &tree_oid, prefix)?;
+        info!("Prefix '{}' verified in tree", prefix);
     }
 
-    // Walk the new tree
-    let new_manifest = git::walk_tree(pond_path, node_id, &commit_sha)?;
-    info!(
-        "Tree has {} entries (was {})",
-        new_manifest.entries.len(),
-        old_manifest.entries.len()
-    );
-
-    // Compute diff
-    let changes = sync::diff_manifests(&old_manifest, &new_manifest);
-    if changes.is_empty() {
-        info!("No file changes detected (tree structure unchanged)");
-        write_manifest(context, config, &new_manifest).await?;
-        return Ok(());
-    }
-
-    info!("Applying {} changes to pond", changes.len());
-
-    // Apply changes
-    let stats =
-        sync::apply_changes(context, pond_path, node_id, &config.pond_path, &changes).await?;
-
-    info!("Sync complete: {}", stats);
-
-    // Save updated manifest to pond (commits atomically with file changes)
-    write_manifest(context, config, &new_manifest).await?;
-
+    info!("Fetch complete, tree will be served dynamically");
     Ok(())
 }
 
@@ -260,14 +233,48 @@ fn validate_config(config: &[u8]) -> TinyFSResult<Value> {
         .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config: {}", e)))
 }
 
-// Register the factory
-register_executable_factory!(
-    name: "git-ingest",
-    description: "Pull files from a git repository branch into the pond",
-    validate: validate_config,
-    initialize: initialize,
-    execute: execute
-);
+// --- Dual registration: dynamic directory + executable ---
+//
+// The standard macros only support one or the other. We manually
+// construct the DynamicFactory entry to get both capabilities.
+
+fn initialize_wrapper(
+    config: Value,
+    context: FactoryContext,
+) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>> {
+    Box::pin(async move {
+        initialize(config, context)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    })
+}
+
+fn execute_wrapper(
+    config: Value,
+    context: FactoryContext,
+    ctx: ExecutionContext,
+) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>> {
+    Box::pin(async move {
+        execute(config, context, ctx)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    })
+}
+
+#[allow(unsafe_code)]
+#[linkme::distributed_slice(provider::registry::DYNAMIC_FACTORIES)]
+static FACTORY_GIT_INGEST: provider::registry::DynamicFactory =
+    provider::registry::DynamicFactory {
+        name: "git-ingest",
+        description: "Mount a git repository branch as a dynamic directory in the pond",
+        create_directory: Some(create_directory),
+        create_file: None,
+        validate_config,
+        try_as_queryable: None,
+        initialize: Some(initialize_wrapper),
+        execute: Some(execute_wrapper),
+        apply_table_transform: None,
+    };
 
 #[cfg(test)]
 mod tests {
@@ -278,7 +285,7 @@ mod tests {
         let config = GitIngestConfig {
             url: "https://github.com/user/blog.git".to_string(),
             git_ref: "main".to_string(),
-            pond_path: "site/content".to_string(),
+            prefix: None,
         };
         config.validate().expect("valid config should pass");
     }
@@ -288,7 +295,7 @@ mod tests {
         let config = GitIngestConfig {
             url: String::new(),
             git_ref: "main".to_string(),
-            pond_path: "site/content".to_string(),
+            prefix: None,
         };
         assert!(config.validate().is_err());
     }
@@ -298,22 +305,86 @@ mod tests {
         let config = GitIngestConfig {
             url: "https://github.com/user/blog.git".to_string(),
             git_ref: String::new(),
-            pond_path: "site/content".to_string(),
+            prefix: None,
         };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_validate_config_yaml() {
-        let yaml = b"url: https://github.com/user/blog.git\nref: main\npond_path: site/content\n";
+        let yaml = b"url: https://github.com/user/blog.git\nref: main\n";
         let result = validate_config(yaml);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_config_yaml_unknown_field() {
-        let yaml = b"url: https://github.com/user/blog.git\nref: main\npond_path: site/content\nextra: bad\n";
+        let yaml = b"url: https://github.com/user/blog.git\nref: main\nextra: bad\n";
         let result = validate_config(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_config_with_prefix() {
+        let config = GitIngestConfig {
+            url: "https://github.com/user/repo.git".to_string(),
+            git_ref: "main".to_string(),
+            prefix: Some("site".to_string()),
+        };
+        config.validate().expect("valid prefix");
+    }
+
+    #[test]
+    fn test_validate_config_prefix_leading_slash() {
+        let config = GitIngestConfig {
+            url: "https://github.com/user/repo.git".to_string(),
+            git_ref: "main".to_string(),
+            prefix: Some("/site".to_string()),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_config_prefix_trailing_slash() {
+        let config = GitIngestConfig {
+            url: "https://github.com/user/repo.git".to_string(),
+            git_ref: "main".to_string(),
+            prefix: Some("site/".to_string()),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_config_prefix_dotdot() {
+        let config = GitIngestConfig {
+            url: "https://github.com/user/repo.git".to_string(),
+            git_ref: "main".to_string(),
+            prefix: Some("../etc".to_string()),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_config_prefix_empty() {
+        let config = GitIngestConfig {
+            url: "https://github.com/user/repo.git".to_string(),
+            git_ref: "main".to_string(),
+            prefix: Some(String::new()),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_config_yaml_with_prefix() {
+        let yaml = b"url: https://github.com/user/repo.git\nref: main\nprefix: site/content\n";
+        let result = validate_config(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_config_yaml_without_prefix() {
+        let yaml = b"url: https://github.com/user/repo.git\nref: main\n";
+        let result = validate_config(yaml);
+        assert!(result.is_ok());
     }
 }

@@ -326,6 +326,15 @@ impl HostTransaction {
         Ok(None)
     }
 
+    /// Get the factory name and config bytes for a dynamic node.
+    /// Host transactions don't have dynamic nodes, so this always returns None.
+    pub async fn get_dynamic_node_config(
+        &self,
+        _id: tinyfs::FileID,
+    ) -> Result<Option<(String, Vec<u8>)>, tinyfs::Error> {
+        Ok(None)
+    }
+
     /// Get the debug metadata for this transaction.
     #[must_use]
     pub fn meta(&self) -> &PondUserMetadata {

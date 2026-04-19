@@ -4,11 +4,11 @@
 
 //! Git-Ingest Factory
 //!
-//! Pulls files from a git repository branch into the pond filesystem.
+//! Mounts a git repository branch as a dynamic directory in the pond.
 //! Maintains a bare repo cache at `{POND}/git/{node-id}.git/` for
-//! efficient incremental fetches. Tracks synced state via a manifest
-//! file alongside the bare repo.
+//! efficient incremental fetches. The git tree is served lazily --
+//! no files are copied into the pond.
 
 mod factory;
-mod git;
-mod sync;
+pub(crate) mod git;
+pub(crate) mod tree;

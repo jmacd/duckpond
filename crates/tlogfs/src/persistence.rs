@@ -862,6 +862,16 @@ impl State {
         self.inner.lock().await.get_factory_for_node(id).await
     }
 
+    /// Get the factory name and config bytes for a dynamic node.
+    ///
+    /// Works for both file-based and directory-based dynamic nodes.
+    pub async fn get_dynamic_node_config(
+        &self,
+        id: FileID,
+    ) -> Result<Option<(String, Vec<u8>)>, TLogFSError> {
+        self.inner.lock().await.get_dynamic_node_config(id).await
+    }
+
     /// Create a ProviderContext from this State
     ///
     /// This allows State to be used with factories that expect a ProviderContext.
@@ -2792,42 +2802,9 @@ impl InnerState {
                 && record.part_id == id.part_id()
                 && let Some(factory_type) = &record.factory
             {
-                // For directories, config is in extended_attributes
-                // For files, config is in content
-                let config_content = if record.file_type == EntryType::DirectoryDynamic {
-                    // Extract from extended_attributes
-                    if let Some(attrs_json) = &record.extended_attributes {
-                        let attrs: serde_json::Value =
-                            serde_json::from_str(attrs_json).map_err(|e| {
-                                TLogFSError::ArrowMessage(format!(
-                                    "Invalid JSON in extended_attributes: {}",
-                                    e
-                                ))
-                            })?;
-                        if let Some(config_b64) =
-                            attrs.get("factory_config").and_then(|v| v.as_str())
-                        {
-                            base64::Engine::decode(
-                                &base64::engine::general_purpose::STANDARD,
-                                config_b64,
-                            )
-                            .map_err(|e| {
-                                TLogFSError::ArrowMessage(format!(
-                                    "Invalid base64 in factory_config: {}",
-                                    e
-                                ))
-                            })?
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                } else {
-                    // For files, use verified content field
-                    record.verified_content_required()?.to_vec()
-                };
-
+                // Config is stored in content field for all dynamic node types
+                // (new_dynamic_node stores config in content for both files and directories)
+                let config_content = record.verified_content_required()?.to_vec();
                 return Ok(Some((factory_type.clone(), config_content)));
             }
         }
@@ -2838,40 +2815,7 @@ impl InnerState {
         if let Some(record) = records.first()
             && let Some(factory_type) = &record.factory
         {
-            // For directories, config is in extended_attributes
-            // For files, config is in content
-            let config_content = if record.file_type == EntryType::DirectoryDynamic {
-                // Extract from extended_attributes
-                if let Some(attrs_json) = &record.extended_attributes {
-                    let attrs: serde_json::Value =
-                        serde_json::from_str(attrs_json).map_err(|e| {
-                            TLogFSError::ArrowMessage(format!(
-                                "Invalid JSON in extended_attributes: {}",
-                                e
-                            ))
-                        })?;
-                    if let Some(config_b64) = attrs.get("factory_config").and_then(|v| v.as_str()) {
-                        base64::Engine::decode(
-                            &base64::engine::general_purpose::STANDARD,
-                            config_b64,
-                        )
-                        .map_err(|e| {
-                            TLogFSError::ArrowMessage(format!(
-                                "Invalid base64 in factory_config: {}",
-                                e
-                            ))
-                        })?
-                    } else {
-                        return Ok(None);
-                    }
-                } else {
-                    return Ok(None);
-                }
-            } else {
-                // For files, use verified content field
-                record.verified_content_required()?.to_vec()
-            };
-
+            let config_content = record.verified_content_required()?.to_vec();
             Ok(Some((factory_type.clone(), config_content)))
         } else {
             Ok(None)

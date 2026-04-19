@@ -4,62 +4,25 @@
 
 //! Git operations using gix (pure Rust).
 //!
-//! Manages bare repo init/open/fetch and tree walking.
+//! Manages bare repo init/open/fetch, and provides lazy tree
+//! navigation helpers for the dynamic directory implementation.
 
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// An entry in the git tree manifest
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManifestEntry {
-    /// Git object ID (hex string)
-    pub oid: String,
-    /// Entry kind
-    pub kind: EntryKind,
-    /// Unix file mode (e.g., 0o100644 for regular file, 0o120000 for symlink)
-    pub mode: u32,
-}
-
-/// Kind of entry in the manifest
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Kind of entry in a git tree
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     File,
     Symlink,
     Directory,
 }
 
-/// Full manifest tracking the synced state of a git repo
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitManifest {
-    /// The commit SHA that was last synced
-    pub commit_sha: String,
-    /// Map of relative path -> manifest entry
-    pub entries: BTreeMap<String, ManifestEntry>,
-}
-
-impl GitManifest {
-    /// Create an empty manifest (for first sync)
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            commit_sha: String::new(),
-            entries: BTreeMap::new(),
-        }
-    }
-
-    /// Deserialize manifest from JSON bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self, tinyfs::Error> {
-        serde_json::from_slice(data)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to parse manifest: {}", e)))
-    }
-
-    /// Serialize manifest to JSON bytes
-    pub fn to_bytes(&self) -> Result<Vec<u8>, tinyfs::Error> {
-        serde_json::to_vec_pretty(self)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize manifest: {}", e)))
-    }
+/// A single child entry from a git tree (single-level listing).
+#[derive(Debug, Clone)]
+pub struct TreeChild {
+    pub name: String,
+    pub oid: String,
+    pub kind: EntryKind,
 }
 
 /// Get the path to the bare repo for a given factory node
@@ -75,7 +38,6 @@ pub fn fetch_and_resolve(
     url: &str,
     git_ref: &str,
 ) -> Result<String, tinyfs::Error> {
-    // Clone or open+fetch the bare repo
     let repo = if repo_path.exists() {
         let repo = open_bare_repo(repo_path)?;
         fetch_remote(&repo)?;
@@ -84,18 +46,13 @@ pub fn fetch_and_resolve(
         clone_bare_repo(repo_path, url)?
     };
 
-    // Resolve ref from local refs (populated by clone or fetch)
     resolve_local_ref(&repo, git_ref)
 }
 
-/// Walk the tree at the given commit and build a manifest
-pub fn walk_tree(
-    pond_path: &Path,
-    node_id: &str,
-    commit_sha: &str,
-) -> Result<GitManifest, tinyfs::Error> {
-    let repo_path = bare_repo_path(pond_path, node_id);
-    let repo = open_bare_repo(&repo_path)?;
+/// Resolve a git ref to the root tree OID (ref -> commit -> tree).
+pub fn resolve_tree_at_ref(repo_path: &Path, git_ref: &str) -> Result<String, tinyfs::Error> {
+    let repo = open_repo(repo_path)?;
+    let commit_sha = resolve_local_ref(&repo, git_ref)?;
 
     let oid = gix::ObjectId::from_hex(commit_sha.as_bytes())
         .map_err(|e| tinyfs::Error::Other(format!("Invalid commit SHA: {}", e)))?;
@@ -106,26 +63,168 @@ pub fn walk_tree(
         .try_into_commit()
         .map_err(|e| tinyfs::Error::Other(format!("Object is not a commit: {}", e)))?;
 
-    let tree = commit
-        .tree()
+    let tree_id = commit
+        .tree_id()
         .map_err(|e| tinyfs::Error::Other(format!("Failed to get tree: {}", e)))?;
 
-    let mut entries = BTreeMap::new();
-    walk_tree_recursive(&repo, &tree, "", &mut entries)?;
-
-    Ok(GitManifest {
-        commit_sha: commit_sha.to_string(),
-        entries,
-    })
+    Ok(tree_id.to_hex().to_string())
 }
 
-/// Read the content of a blob by OID
-pub fn read_blob(pond_path: &Path, node_id: &str, oid_hex: &str) -> Result<Vec<u8>, tinyfs::Error> {
-    let repo_path = bare_repo_path(pond_path, node_id);
-    let repo = open_bare_repo(&repo_path)?;
+/// Navigate from a tree OID through a prefix path to a subtree.
+///
+/// For example, `navigate_to_prefix(repo, tree_oid, "site/content")`
+/// walks tree -> "site" subtree -> "content" subtree.
+pub fn navigate_to_prefix(
+    repo: &gix::Repository,
+    tree_oid_hex: &str,
+    prefix: &str,
+) -> Result<String, tinyfs::Error> {
+    let mut current_oid = parse_oid(tree_oid_hex)?;
 
-    let oid = gix::ObjectId::from_hex(oid_hex.as_bytes())
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid OID: {}", e)))?;
+    for segment in prefix.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+
+        let tree_obj = repo
+            .find_object(current_oid)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to find tree: {}", e)))?;
+        let tree = tree_obj
+            .try_into_tree()
+            .map_err(|e| tinyfs::Error::Other(format!("Object is not a tree: {}", e)))?;
+
+        let mut found = false;
+        for entry_ref in tree.iter() {
+            let entry = entry_ref
+                .map_err(|e| tinyfs::Error::Other(format!("Failed to read tree entry: {}", e)))?;
+            let name = std::str::from_utf8(entry.filename())
+                .map_err(|e| tinyfs::Error::Other(format!("Non-UTF8 filename: {}", e)))?;
+            if name == segment {
+                if entry.mode().kind() != gix::object::tree::EntryKind::Tree {
+                    return Err(tinyfs::Error::Other(format!(
+                        "Prefix segment '{}' is not a directory",
+                        segment
+                    )));
+                }
+                current_oid = entry.oid().to_owned();
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return Err(tinyfs::Error::NotFound(
+                format!("Prefix segment '{}' not found in tree", segment).into(),
+            ));
+        }
+    }
+
+    Ok(current_oid.to_hex().to_string())
+}
+
+/// List the immediate children of a git tree (single level, lazy).
+pub fn list_tree_children(
+    repo_path: &Path,
+    tree_oid_hex: &str,
+) -> Result<Vec<TreeChild>, tinyfs::Error> {
+    let repo = open_repo(repo_path)?;
+    let oid = parse_oid(tree_oid_hex)?;
+
+    let tree_obj = repo
+        .find_object(oid)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to find tree: {}", e)))?;
+    let tree = tree_obj
+        .try_into_tree()
+        .map_err(|e| tinyfs::Error::Other(format!("Object is not a tree: {}", e)))?;
+
+    let mut children = Vec::new();
+    for entry_ref in tree.iter() {
+        let entry = entry_ref
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to read tree entry: {}", e)))?;
+
+        let name = std::str::from_utf8(entry.filename())
+            .map_err(|e| tinyfs::Error::Other(format!("Non-UTF8 filename: {}", e)))?;
+
+        let oid_hex = entry.oid().to_hex().to_string();
+
+        let kind = match entry.mode().kind() {
+            gix::object::tree::EntryKind::Tree => EntryKind::Directory,
+            gix::object::tree::EntryKind::Link => EntryKind::Symlink,
+            gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable => {
+                EntryKind::File
+            }
+            _ => {
+                log::debug!(
+                    "Skipping unsupported entry type at {}: mode={:#o}",
+                    name,
+                    entry.mode().value()
+                );
+                continue;
+            }
+        };
+
+        children.push(TreeChild {
+            name: name.to_string(),
+            oid: oid_hex,
+            kind,
+        });
+    }
+
+    Ok(children)
+}
+
+/// Look up a single child by name in a git tree.
+pub fn get_tree_child(
+    repo_path: &Path,
+    tree_oid_hex: &str,
+    name: &str,
+) -> Result<Option<TreeChild>, tinyfs::Error> {
+    let repo = open_repo(repo_path)?;
+    let oid = parse_oid(tree_oid_hex)?;
+
+    let tree_obj = repo
+        .find_object(oid)
+        .map_err(|e| tinyfs::Error::Other(format!("Failed to find tree: {}", e)))?;
+    let tree = tree_obj
+        .try_into_tree()
+        .map_err(|e| tinyfs::Error::Other(format!("Object is not a tree: {}", e)))?;
+
+    for entry_ref in tree.iter() {
+        let entry = entry_ref
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to read tree entry: {}", e)))?;
+
+        let entry_name = std::str::from_utf8(entry.filename())
+            .map_err(|e| tinyfs::Error::Other(format!("Non-UTF8 filename: {}", e)))?;
+
+        if entry_name != name {
+            continue;
+        }
+
+        let oid_hex = entry.oid().to_hex().to_string();
+
+        let kind = match entry.mode().kind() {
+            gix::object::tree::EntryKind::Tree => EntryKind::Directory,
+            gix::object::tree::EntryKind::Link => EntryKind::Symlink,
+            gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable => {
+                EntryKind::File
+            }
+            _ => return Ok(None),
+        };
+
+        return Ok(Some(TreeChild {
+            name: name.to_string(),
+            oid: oid_hex,
+            kind,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Read the content of a blob by OID from a repo path.
+pub fn read_blob(repo_path: &Path, oid_hex: &str) -> Result<Vec<u8>, tinyfs::Error> {
+    let repo = open_repo(repo_path)?;
+    let oid = parse_oid(oid_hex)?;
 
     let object = repo
         .find_object(oid)
@@ -134,18 +233,37 @@ pub fn read_blob(pond_path: &Path, node_id: &str, oid_hex: &str) -> Result<Vec<u
     Ok(object.data.to_vec())
 }
 
-/// Read a symlink target (blob content interpreted as text)
-pub fn read_symlink_target(
-    pond_path: &Path,
-    node_id: &str,
+/// Read a symlink target from a repo path (blob content as UTF-8).
+pub fn read_symlink_target_from_repo(
+    repo_path: &Path,
     oid_hex: &str,
 ) -> Result<String, tinyfs::Error> {
-    let data = read_blob(pond_path, node_id, oid_hex)?;
+    let data = read_blob(repo_path, oid_hex)?;
     String::from_utf8(data)
         .map_err(|e| tinyfs::Error::Other(format!("Symlink target is not valid UTF-8: {}", e)))
 }
 
-// --- Internal helpers ---
+// --- Helpers ---
+
+fn parse_oid(hex: &str) -> Result<gix::ObjectId, tinyfs::Error> {
+    gix::ObjectId::from_hex(hex.as_bytes())
+        .map_err(|e| tinyfs::Error::Other(format!("Invalid OID: {}", e)))
+}
+
+/// Open a bare repo (public for use by tree.rs).
+pub fn open_repo(path: &Path) -> Result<gix::Repository, tinyfs::Error> {
+    gix::open(path).map_err(|e| {
+        tinyfs::Error::Other(format!(
+            "Failed to open bare repo at {}: {}",
+            path.display(),
+            e
+        ))
+    })
+}
+
+fn open_bare_repo(path: &Path) -> Result<gix::Repository, tinyfs::Error> {
+    open_repo(path)
+}
 
 fn clone_bare_repo(path: &Path, url: &str) -> Result<gix::Repository, tinyfs::Error> {
     log::info!("Cloning bare repo from {} to {}", url, path.display());
@@ -158,16 +276,6 @@ fn clone_bare_repo(path: &Path, url: &str) -> Result<gix::Repository, tinyfs::Er
         .map_err(|e| tinyfs::Error::Other(format!("Clone fetch failed: {}", e)))?;
 
     Ok(repo)
-}
-
-fn open_bare_repo(path: &Path) -> Result<gix::Repository, tinyfs::Error> {
-    gix::open(path).map_err(|e| {
-        tinyfs::Error::Other(format!(
-            "Failed to open bare repo at {}: {}",
-            path.display(),
-            e
-        ))
-    })
 }
 
 fn fetch_remote(repo: &gix::Repository) -> Result<(), tinyfs::Error> {
@@ -190,7 +298,6 @@ fn fetch_remote(repo: &gix::Repository) -> Result<(), tinyfs::Error> {
 }
 
 fn resolve_local_ref(repo: &gix::Repository, git_ref: &str) -> Result<String, tinyfs::Error> {
-    // Try remote tracking ref first (updated by fetch), then local branch, tag, direct
     let candidates = [
         format!("refs/remotes/origin/{}", git_ref),
         format!("refs/heads/{}", git_ref),
@@ -207,7 +314,6 @@ fn resolve_local_ref(repo: &gix::Repository, git_ref: &str) -> Result<String, ti
         }
     }
 
-    // If git_ref looks like a full SHA, try it directly
     if git_ref.len() >= 40
         && let Ok(oid) = gix::ObjectId::from_hex(git_ref.as_bytes())
         && repo.find_object(oid).is_ok()
@@ -219,79 +325,4 @@ fn resolve_local_ref(repo: &gix::Repository, git_ref: &str) -> Result<String, ti
         "Failed to resolve ref '{}': not found in local refs",
         git_ref
     )))
-}
-
-fn walk_tree_recursive(
-    repo: &gix::Repository,
-    tree: &gix::Tree<'_>,
-    prefix: &str,
-    entries: &mut BTreeMap<String, ManifestEntry>,
-) -> Result<(), tinyfs::Error> {
-    for entry_ref in tree.iter() {
-        let entry = entry_ref
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to read tree entry: {}", e)))?;
-
-        let name = std::str::from_utf8(entry.filename())
-            .map_err(|e| tinyfs::Error::Other(format!("Non-UTF8 filename: {}", e)))?;
-
-        let path = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{}/{}", prefix, name)
-        };
-
-        let mode = entry.mode().value() as u32;
-        let oid = entry.oid().to_hex().to_string();
-
-        match entry.mode().kind() {
-            gix::object::tree::EntryKind::Tree => {
-                // Record the directory entry
-                let _ = entries.insert(
-                    path.clone(),
-                    ManifestEntry {
-                        oid: oid.clone(),
-                        kind: EntryKind::Directory,
-                        mode,
-                    },
-                );
-
-                // Recurse into subdirectory
-                let sub_obj = repo.find_object(entry.oid()).map_err(|e| {
-                    tinyfs::Error::Other(format!("Failed to find tree object: {}", e))
-                })?;
-                let sub_tree = sub_obj
-                    .try_into_tree()
-                    .map_err(|e| tinyfs::Error::Other(format!("Object is not a tree: {}", e)))?;
-                walk_tree_recursive(repo, &sub_tree, &path, entries)?;
-            }
-            gix::object::tree::EntryKind::Link => {
-                let _ = entries.insert(
-                    path,
-                    ManifestEntry {
-                        oid,
-                        kind: EntryKind::Symlink,
-                        mode,
-                    },
-                );
-            }
-            gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable => {
-                let _ = entries.insert(
-                    path,
-                    ManifestEntry {
-                        oid,
-                        kind: EntryKind::File,
-                        mode,
-                    },
-                );
-            }
-            _ => {
-                log::debug!(
-                    "Skipping unsupported entry type at {}: mode={:#o}",
-                    path,
-                    mode
-                );
-            }
-        }
-    }
-    Ok(())
 }
