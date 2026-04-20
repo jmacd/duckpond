@@ -329,6 +329,72 @@ impl Provider {
         let file_id = node_path.id();
         let node_id = file_id.node_id();
 
+        // Dynamic files (e.g., git-ingest blobs) are ephemeral and have no
+        // persistence records.  Read them directly via their File handle and
+        // synthesize a single version from metadata.
+        if file_id.entry_type().is_dynamic() {
+            let file_node = node_path
+                .as_file()
+                .await
+                .map_err(|e| Error::InvalidUrl(format!("Dynamic node is not a file: {}", e)))?;
+
+            let metadata = file_node
+                .metadata()
+                .await
+                .map_err(|e| Error::InvalidUrl(format!("Failed to get metadata: {}", e)))?;
+
+            let version_info = tinyfs::FileVersionInfo {
+                version: metadata.version,
+                timestamp: metadata.timestamp,
+                size: metadata.size.unwrap_or(0),
+                blake3: metadata.blake3.clone(),
+                entry_type: metadata.entry_type,
+                extended_metadata: None,
+            };
+
+            // Check if already cached
+            let uncached = crate::format_cache::find_uncached_versions(
+                cache_dir,
+                scheme,
+                &node_id,
+                std::slice::from_ref(&version_info),
+            );
+
+            if !uncached.is_empty() {
+                log::info!(
+                    "[SAVE] Format cache: writing dynamic file {}://{}",
+                    scheme,
+                    path
+                );
+
+                // Read content via async_reader
+                let reader = file_node.async_reader().await.map_err(|e| {
+                    Error::InvalidUrl(format!("Failed to read dynamic file: {}", e))
+                })?;
+
+                let reader: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>> = reader;
+
+                // Apply decompression if needed
+                let reader = crate::format::compression::decompress(reader, url.compression())?;
+
+                // Parse through format provider
+                let (schema, stream) = format_provider.open_stream(reader, url).await?;
+
+                // Stream to cache Parquet
+                let _ = crate::format_cache::cache_write_version(
+                    cache_dir,
+                    scheme,
+                    &node_id,
+                    &version_info,
+                    schema,
+                    stream,
+                )
+                .await?;
+            }
+
+            return Ok((node_id, vec![version_info]));
+        }
+
         let persistence = self
             .provider_context
             .as_ref()

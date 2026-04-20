@@ -3331,6 +3331,14 @@ impl InnerState {
     async fn list_file_versions(&mut self, id: FileID) -> TinyFSResult<Vec<FileVersionInfo>> {
         debug!("list_file_versions called for id={id}");
 
+        assert!(
+            !id.entry_type().is_dynamic(),
+            "list_file_versions called with dynamic FileID {id} (entry_type={:?}). \
+             Dynamic files are ephemeral and have no oplog records. \
+             Callers must handle dynamic files without querying the persistence layer.",
+            id.entry_type()
+        );
+
         let mut records = self
             .query_records(id)
             .await
