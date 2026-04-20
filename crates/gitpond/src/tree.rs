@@ -47,6 +47,7 @@ impl GitRootDirectory {
         }
     }
 
+    #[must_use]
     pub fn create_handle(self) -> DirHandle {
         DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }

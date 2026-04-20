@@ -11,4 +11,4 @@
 
 mod factory;
 pub(crate) mod git;
-pub(crate) mod tree;
+pub mod tree;

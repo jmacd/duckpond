@@ -58,12 +58,14 @@ pub fn cache_version_path(
     node_id: &tinyfs::NodeID,
     version: &FileVersionInfo,
 ) -> PathBuf {
-    let blake3 = version
-        .blake3
-        .as_deref()
-        .expect("blake3 must be Some for file data versions -- format cache requires content hash");
-    cache_node_dir(cache_dir, scheme, node_id)
-        .join(format!("v{}_{}.parquet", version.version, blake3))
+    // Physical files use blake3 content hash for cache invalidation.
+    // Dynamic files use their NodeID short string instead — the NodeID is
+    // already deterministic (derived from content identity, e.g., git blob OID).
+    let key = match version.blake3.as_deref() {
+        Some(hash) => hash.to_string(),
+        None => node_id.to_short_string(),
+    };
+    cache_node_dir(cache_dir, scheme, node_id).join(format!("v{}_{}.parquet", version.version, key))
 }
 
 /// Check which versions are missing from the cache.
