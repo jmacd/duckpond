@@ -71,7 +71,7 @@ fi
 # --- Read CSV through format provider (the bug we fixed) ---------------------
 echo ""
 echo "=== SQL query via csv:// format provider ==="
-RESULT=$(pond cat --sql "SELECT temperature, humidity FROM input0 ORDER BY temperature LIMIT 3" csv:///sensors/sensors.csv)
+RESULT=$(pond cat --sql "SELECT temperature, humidity FROM source ORDER BY temperature LIMIT 3" csv:///sensors/sensors.csv)
 echo "$RESULT"
 
 # Verify we got data back (not "No versions found" error)
