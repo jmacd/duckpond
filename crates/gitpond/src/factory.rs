@@ -8,7 +8,7 @@
 //! executable factory (for `pond run pull` to fetch from the remote).
 
 use crate::git;
-use crate::tree::GitRootDirectory;
+use crate::tree::{AutoCloneInfo, GitRootDirectory};
 use log::info;
 use provider::{ExecutionContext, FactoryContext};
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,16 @@ fn create_directory(config: Value, context: FactoryContext) -> TinyFSResult<tiny
     let node_id = context.file_id.node_id().to_string();
     let repo_path = git::bare_repo_path(&pond_path, &node_id);
 
-    let root_dir = GitRootDirectory::new(repo_path, config.git_ref, config.prefix, context.file_id);
+    let root_dir = GitRootDirectory::new(
+        repo_path,
+        config.git_ref,
+        config.prefix,
+        context.file_id,
+        Some(AutoCloneInfo {
+            url: config.url,
+            pond_path,
+        }),
+    );
 
     Ok(root_dir.create_handle())
 }
