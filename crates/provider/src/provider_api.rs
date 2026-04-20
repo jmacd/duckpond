@@ -347,7 +347,7 @@ impl Provider {
                 version: metadata.version,
                 timestamp: metadata.timestamp,
                 size: metadata.size.unwrap_or(0),
-                blake3: metadata.blake3.clone(),
+                blake3: None,
                 entry_type: metadata.entry_type,
                 extended_metadata: None,
             };
