@@ -208,14 +208,11 @@ pub fn ensure_glob_symlinks(
             continue; // Skip versions not yet cached
         }
 
-        let blake3 = version
-            .blake3
-            .as_deref()
-            .expect("blake3 must be Some for file data versions");
-        let link_name = glob_dir.join(format!(
-            "{}_v{}_{}.parquet",
-            node_id, version.version, blake3
-        ));
+        let key = match version.blake3.as_deref() {
+            Some(hash) => hash.to_string(),
+            None => node_id.to_short_string(),
+        };
+        let link_name = glob_dir.join(format!("{}_v{}_{}.parquet", node_id, version.version, key));
 
         if !link_name.exists() {
             #[cfg(unix)]

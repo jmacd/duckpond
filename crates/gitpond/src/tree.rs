@@ -20,6 +20,14 @@ use tinyfs::{
     SymlinkHandle,
 };
 
+/// Info needed to auto-clone a bare repo on first access (cross-pond import).
+pub struct AutoCloneInfo {
+    /// Git remote URL
+    pub url: String,
+    /// Pond root directory (for creating {pond}/git/)
+    pub pond_path: PathBuf,
+}
+
 /// Top-level dynamic directory for a git-ingest mount point.
 ///
 /// Holds the git ref name (not a resolved OID), so every access
@@ -29,6 +37,9 @@ pub struct GitRootDirectory {
     git_ref: String,
     prefix: Option<String>,
     file_id: tinyfs::FileID,
+    /// If set, auto-clone the repo on first access when the bare repo
+    /// doesn't exist (cross-pond import case).
+    auto_clone: Option<AutoCloneInfo>,
 }
 
 impl GitRootDirectory {
@@ -38,12 +49,14 @@ impl GitRootDirectory {
         git_ref: String,
         prefix: Option<String>,
         file_id: tinyfs::FileID,
+        auto_clone: Option<AutoCloneInfo>,
     ) -> Self {
         Self {
             repo_path,
             git_ref,
             prefix,
             file_id,
+            auto_clone,
         }
     }
 
@@ -52,8 +65,34 @@ impl GitRootDirectory {
         DirHandle::new(Arc::new(tokio::sync::Mutex::new(Box::new(self))))
     }
 
+    /// Ensure the bare repo exists, cloning on first access if needed.
+    fn ensure_repo(&self) -> tinyfs::Result<()> {
+        if self.repo_path.exists() {
+            return Ok(());
+        }
+        let clone_info = self.auto_clone.as_ref().ok_or_else(|| {
+            tinyfs::Error::Other(format!(
+                "Bare repo not found at {} and no auto-clone info available. \
+                 Run 'pond run <path> pull' to fetch.",
+                self.repo_path.display()
+            ))
+        })?;
+
+        log::info!(
+            "git-ingest: bare repo not found, cloning from {} (ref: {})",
+            clone_info.url,
+            self.git_ref
+        );
+        let git_dir = clone_info.pond_path.join("git");
+        std::fs::create_dir_all(&git_dir)
+            .map_err(|e| tinyfs::Error::Other(format!("Failed to create git dir: {}", e)))?;
+        let _ = git::fetch_and_resolve(&self.repo_path, &clone_info.url, &self.git_ref)?;
+        Ok(())
+    }
+
     /// Resolve the ref to a tree OID, applying prefix navigation.
     fn resolve_tree(&self) -> tinyfs::Result<String> {
+        self.ensure_repo()?;
         let tree_oid = git::resolve_tree_at_ref(&self.repo_path, &self.git_ref)?;
 
         if let Some(ref prefix) = self.prefix {
