@@ -895,3 +895,10 @@ h3:hover .anchor {
 .log-notice td { color: var(--green); }
 .log-info td  { color: var(--fg); }
 .log-debug td { color: var(--fg-muted); }
+
+/* Build footer */
+.build-footer {
+  text-align: center;
+  padding: 2rem 1rem 1rem;
+  color: var(--fg-muted);
+}
