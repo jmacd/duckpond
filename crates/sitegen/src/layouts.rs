@@ -184,10 +184,10 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                             (PreEscaped(ctx.content))
                         }
                     }
+                    (build_footer(ctx.footer))
                 }
                 script src=(format!("{}chart.js", ctx.root_base_url)) type="module" {}
                 script src=(format!("{}overlay.js", ctx.root_base_url)) type="module" {}
-                (build_footer(ctx.footer))
             }
         }
     }
@@ -217,9 +217,9 @@ fn logs_layout(ctx: &LayoutContext) -> Markup {
                             (PreEscaped(ctx.content))
                         }
                     }
+                    (build_footer(ctx.footer))
                 }
                 script src=(format!("{}log-viewer.js", ctx.root_base_url)) type="module" {}
-                (build_footer(ctx.footer))
             }
         }
     }
@@ -249,8 +249,8 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                             (PreEscaped(ctx.content))
                         }
                     }
+                    (build_footer(ctx.footer))
                 }
-                (build_footer(ctx.footer))
             }
         }
     }
@@ -288,8 +288,8 @@ fn blog_layout(ctx: &LayoutContext) -> Markup {
                             (PreEscaped(ctx.content))
                         }
                     }
+                    (build_footer(ctx.footer))
                 }
-                (build_footer(ctx.footer))
             }
         }
     }
@@ -345,8 +345,8 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                             (PreEscaped(ctx.content))
                         }
                     }
+                    (build_footer(ctx.footer))
                 }
-                (build_footer(ctx.footer))
             }
         }
     }
