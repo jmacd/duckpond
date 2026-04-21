@@ -264,13 +264,42 @@ pub async fn execute(
                 }
             } else {
                 // host_active.size > pond_active.cumulative_size
-                // Normal append case - no rotation check needed
-                // Prefix verification happens later in ingest_append
-                debug!(
-                    "Active file {} grew from {} to {} bytes - will process as append",
-                    active_filename, pond_active.cumulative_size, host_active.size
-                );
-                false
+                // Usually a normal append, but could also be a rotation where
+                // the new file already grew past the old tracked size.
+                // Check the prefix to distinguish.
+                if pond_active.cumulative_size > 0 {
+                    let mut prefix_file = std::fs::File::open(&host_active.path)
+                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                    let mut prefix_content = vec![0u8; pond_active.cumulative_size as usize];
+                    use std::io::Read;
+                    prefix_file
+                        .read_exact(&mut prefix_content)
+                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+
+                    let mut hasher = IncrementalHashState::new();
+                    hasher.ingest(&prefix_content);
+                    let host_blake3 = hasher.root_hash().to_hex().to_string();
+
+                    if host_blake3 == pond_active.blake3 {
+                        debug!(
+                            "Active file {} grew from {} to {} bytes - prefix matches, normal append",
+                            active_filename, pond_active.cumulative_size, host_active.size
+                        );
+                        false
+                    } else {
+                        info!(
+                            "Active file {} grew from {} to {} bytes but prefix changed - checking for rotation",
+                            active_filename, pond_active.cumulative_size, host_active.size
+                        );
+                        true
+                    }
+                } else {
+                    debug!(
+                        "Active file {} grew from 0 to {} bytes - first content",
+                        active_filename, host_active.size
+                    );
+                    false
+                }
             };
 
             if might_be_rotated {

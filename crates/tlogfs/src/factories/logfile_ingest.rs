@@ -54,6 +54,7 @@ mod integration_tests {
     use provider::{ExecutionContext, FactoryContext};
     use std::path::PathBuf;
     use tempfile::TempDir;
+    use tinyfs::persistence::PersistenceLayer;
     use tokio::fs;
 
     /// Test fixture for simulating a growing logfile
@@ -776,33 +777,28 @@ mod integration_tests {
             let state = tx
                 .state()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let entries = state
-                .query_records(file_id)
+
+            // Use metadata() which extracts the cumulative blake3 from
+            // SeriesOutboard for FilePhysicalSeries entries.
+            let metadata = state
+                .metadata(file_id)
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-            assert!(!entries.is_empty(), "No OplogEntry records found for file");
-
-            // Get the latest version's entry
-            let latest_entry = entries
-                .iter()
-                .max_by_key(|e| e.version)
-                .expect("No entries found");
-
-            // 4. Verify OplogEntry.blake3 field
-            let stored_blake3 = latest_entry
+            // 4. Verify metadata.blake3 (cumulative for FilePhysicalSeries)
+            let stored_blake3 = metadata
                 .blake3
                 .as_ref()
-                .expect("OplogEntry.blake3 should be set for FilePhysicalSeries");
+                .expect("metadata.blake3 should be set for FilePhysicalSeries");
 
             assert_eq!(
                 stored_blake3, &expected_blake3,
-                "OplogEntry.blake3 mismatch!\n  Expected: {}\n  Stored:   {}",
+                "metadata.blake3 mismatch!\n  Expected: {}\n  Stored:   {}",
                 expected_blake3, stored_blake3
             );
 
-            // 5. Verify SeriesOutboard.cumulative_blake3 (if bao_outboard present)
-            if let Some(bao_bytes) = latest_entry.get_bao_outboard() {
+            // 5. Verify SeriesOutboard.cumulative_blake3
+            if let Some(bao_bytes) = &metadata.bao_outboard {
                 let series_outboard =
                     utilities::bao_outboard::SeriesOutboard::from_bytes(bao_bytes).map_err(
                         |e| std::io::Error::other(format!("Failed to parse SeriesOutboard: {}", e)),
@@ -1459,25 +1455,19 @@ mod integration_tests {
                 }
 
                 // CRITICAL: Verify TinyFS metadata blake3 matches computed blake3
-                // This ensures multi-version FilePhysicalSeries has correct checksums
+                // This ensures multi-version FilePhysicalSeries has correct checksums.
+                // Use metadata() which returns the cumulative blake3 from SeriesOutboard.
                 let state = tx
                     .state()
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
-                let entries = state
-                    .query_records(file_id)
+                let file_metadata: tinyfs::NodeMetadata = state
+                    .metadata(file_id)
                     .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    .map_err(|e: tinyfs::Error| std::io::Error::other(e.to_string()))?;
 
-                let latest_entry = entries.iter().max_by_key(|e| e.version).ok_or_else(|| {
+                let stored_blake3 = file_metadata.blake3.as_ref().ok_or_else(|| {
                     std::io::Error::other(format!(
-                        "No OplogEntry records found for {}",
-                        expected.filename
-                    ))
-                })?;
-
-                let stored_blake3 = latest_entry.blake3.as_ref().ok_or_else(|| {
-                    std::io::Error::other(format!(
-                        "METADATA MISSING: {} has no blake3 in OplogEntry",
+                        "METADATA MISSING: {} has no blake3",
                         expected.filename
                     ))
                 })?;
@@ -1485,12 +1475,12 @@ mod integration_tests {
                 if stored_blake3 != &expected.blake3 {
                     return Err(std::io::Error::other(format!(
                         "METADATA BLAKE3 MISMATCH for {}:\n  expected (computed): {}\n  stored (TinyFS):     {}\n  version: {}",
-                        expected.filename, expected.blake3, stored_blake3, latest_entry.version
+                        expected.filename, expected.blake3, stored_blake3, file_metadata.version
                     )));
                 }
 
-                // Also verify SeriesOutboard.cumulative_blake3 if present
-                if let Some(bao_bytes) = latest_entry.get_bao_outboard() {
+                // Also verify SeriesOutboard.cumulative_blake3
+                if let Some(bao_bytes) = &file_metadata.bao_outboard {
                     let series_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(
                         bao_bytes,
                     )

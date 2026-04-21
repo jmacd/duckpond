@@ -638,10 +638,30 @@ impl OplogEntry {
     /// Extract consolidated metadata
     #[must_use]
     pub fn metadata(&self) -> tinyfs::NodeMetadata {
+        // For FilePhysicalSeries, the canonical blake3 is the cumulative hash
+        // stored in SeriesOutboard, not the per-version hash in self.blake3.
+        // Every written version has a SeriesOutboard computed in poll_shutdown.
+        let blake3 = if self.file_type == EntryType::FilePhysicalSeries {
+            if let Some(bao) = &self.bao_outboard {
+                let so = utilities::bao_outboard::SeriesOutboard::from_bytes(bao)
+                    .expect("FilePhysicalSeries bao_outboard must be valid SeriesOutboard");
+                Some(
+                    blake3::Hash::from_bytes(so.cumulative_blake3)
+                        .to_hex()
+                        .to_string(),
+                )
+            } else {
+                // No bao_outboard yet — this is a pending/unwritten file.
+                self.blake3.clone()
+            }
+        } else {
+            self.blake3.clone()
+        };
+
         tinyfs::NodeMetadata {
             version: self.version as u64,
-            size: self.size.map(|s| s as u64), // Cast i64 back to u64 for tinyfs interface
-            blake3: self.blake3.clone(),
+            size: self.size.map(|s| s as u64),
+            blake3,
             bao_outboard: self.bao_outboard.clone(),
             entry_type: self.file_type,
             timestamp: self.timestamp,
@@ -737,16 +757,10 @@ impl OplogEntry {
     /// but that would be error-prone. Coupling the outboard storage with blake3
     /// update ensures consistency.
     pub fn set_bao_outboard(&mut self, outboard: Vec<u8>) {
-        // For FilePhysicalSeries, the blake3 field MUST be the cumulative hash.
-        // Extract it from SeriesOutboard.cumulative_blake3 to maintain this invariant.
-        // See bao-tree-design.md for the full explanation of cumulative vs per-version hashing.
-        if self.file_type == EntryType::FilePhysicalSeries
-            && let Ok(series_outboard) =
-                utilities::bao_outboard::SeriesOutboard::from_bytes(&outboard)
-        {
-            let hash = blake3::Hash::from_bytes(series_outboard.cumulative_blake3);
-            self.blake3 = Some(hash.to_hex().to_string());
-        }
+        // Store the bao_outboard. For FilePhysicalSeries, the cumulative blake3
+        // lives inside SeriesOutboard.cumulative_blake3 and is extracted by
+        // metadata() on read. We do NOT overwrite self.blake3 here because
+        // large files use self.blake3 as the storage key for lookup.
         self.bao_outboard = Some(outboard);
     }
 

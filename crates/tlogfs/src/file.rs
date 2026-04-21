@@ -4,7 +4,7 @@
 
 use crate::persistence::State;
 use async_trait::async_trait;
-use log::{debug, error};
+use log::{debug, error, warn};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -146,13 +146,61 @@ impl File for OpLogFile {
         let persistence = self.state.clone();
         let file_id = self.id;
         let transaction_state = self.transaction_state.clone();
+        let options = persistence.large_file_options().clone();
 
-        Ok(Box::pin(OpLogFileWriter::new(
+        // For FilePhysicalSeries appends, resume bao-tree state from previous version
+        // so that cumulative_blake3 is correct for all file sizes.
+        let storage = if entry_type == tinyfs::EntryType::FilePhysicalSeries
+            && allocated_version > 1
+        {
+            let prev_outboard = metadata.bao_outboard.as_ref().and_then(|bao_bytes| {
+                utilities::bao_outboard::SeriesOutboard::from_bytes(bao_bytes).ok()
+            });
+
+            match prev_outboard {
+                Some(prev) => {
+                    let pending_len = (prev.cumulative_size
+                        % utilities::bao_outboard::BLOCK_SIZE as u64)
+                        as usize;
+
+                    let verified_pending = if pending_len > 0 {
+                        read_pending_bytes(&persistence, file_id, allocated_version, pending_len)
+                            .await?
+                    } else {
+                        Vec::new()
+                    };
+
+                    crate::large_files::HybridWriter::resume_from_with_options(
+                        store_path,
+                        &prev,
+                        &verified_pending,
+                        options,
+                    )
+                    .map_err(|e| {
+                        TinyFSError::Other(format!(
+                            "Failed to resume bao state for series append: {e}"
+                        ))
+                    })?
+                }
+                None => {
+                    warn!(
+                        "FilePhysicalSeries version {} has no valid bao_outboard, \
+                         cumulative_blake3 may be incorrect",
+                        allocated_version - 1
+                    );
+                    crate::large_files::HybridWriter::with_options(store_path, options)
+                }
+            }
+        } else {
+            crate::large_files::HybridWriter::with_options(store_path, options)
+        };
+
+        Ok(Box::pin(OpLogFileWriter::with_storage(
             persistence,
             file_id,
             transaction_state,
             entry_type,
-            store_path,
+            storage,
             allocated_version,
         )))
     }
@@ -164,6 +212,70 @@ impl File for OpLogFile {
     fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
         Some(self)
     }
+}
+
+/// Read the pending tail bytes from previous versions of a FilePhysicalSeries.
+///
+/// The pending bytes are the last `pending_len` bytes of the cumulative content
+/// (all versions concatenated). They are needed to correctly resume the bao-tree
+/// incremental hash state.
+///
+/// Reads versions backward from the most recent, collecting enough tail bytes.
+async fn read_pending_bytes(
+    state: &State,
+    file_id: FileID,
+    allocated_version: i64,
+    pending_len: usize,
+) -> tinyfs::Result<Vec<u8>> {
+    debug!(
+        "Reading {} pending bytes for file {} (versions 1..{})",
+        pending_len,
+        file_id,
+        allocated_version - 1
+    );
+
+    let mut collected: Vec<u8> = Vec::with_capacity(pending_len);
+
+    // Walk versions backward from the most recent
+    let mut version = (allocated_version - 1) as u64;
+    while collected.len() < pending_len && version >= 1 {
+        let version_content = state.read_file_version(file_id, version).await?;
+        let needed = pending_len - collected.len();
+
+        if version_content.len() >= needed {
+            // This version has enough bytes — take from the tail
+            let start = version_content.len() - needed;
+            // Prepend to collected (we're walking backward)
+            let mut new_collected = version_content[start..].to_vec();
+            new_collected.extend_from_slice(&collected);
+            collected = new_collected;
+        } else {
+            // Take the entire version and keep looking
+            let mut new_collected = version_content;
+            new_collected.extend_from_slice(&collected);
+            collected = new_collected;
+        }
+
+        if version == 0 {
+            break;
+        }
+        version -= 1;
+    }
+
+    if collected.len() != pending_len {
+        return Err(TinyFSError::Other(format!(
+            "Could not read {} pending bytes from file {} versions: only got {} bytes",
+            pending_len,
+            file_id,
+            collected.len()
+        )));
+    }
+
+    debug!(
+        "Successfully read {} pending bytes for file {}",
+        pending_len, file_id
+    );
+    Ok(collected)
 }
 
 /// Writer integrated with Delta Lake transactions
@@ -185,17 +297,16 @@ pub struct OpLogFileWriter {
 impl Unpin for OpLogFileWriter {}
 
 impl OpLogFileWriter {
-    fn new(
+    fn with_storage(
         state: State,
         file_id: FileID,
         transaction_state: Arc<RwLock<TransactionWriteState>>,
         entry_type: tinyfs::EntryType,
-        store_path: std::path::PathBuf,
+        storage: crate::large_files::HybridWriter,
         allocated_version: i64,
     ) -> Self {
-        let options = state.large_file_options().clone();
         Self {
-            storage: crate::large_files::HybridWriter::with_options(store_path, options),
+            storage,
             state,
             file_id,
             transaction_state,
@@ -414,46 +525,15 @@ impl AsyncWrite for OpLogFileWriter {
                                 let prev_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
                                     .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize previous bao_outboard: {}", e)))?;
 
-                                // Determine if we can efficiently read pending bytes
-                                // For small cumulative sizes, read all previous content to get pending bytes
-                                // For large cumulative sizes, fall back to from_incremental_state (cumulative_blake3 will be wrong)
-                                let can_read_pending = prev_outboard.cumulative_size < 10 * 1024 * 1024; // 10MB threshold
-
-                                if can_read_pending && !content.is_empty() {
-                                    // SMALL CUMULATIVE: Read previous content to compute proper cumulative hash
-                                    let pending_len = (prev_outboard.cumulative_size % utilities::bao_outboard::BLOCK_SIZE as u64) as usize;
-                                    let verified_pending = if pending_len > 0 {
-                                        // Read all previous content and take the last pending_len bytes
-                                        let mut reader = state.async_file_reader(file_id).await
-                                            .map_err(|e| tinyfs::Error::Other(format!("Failed to read previous content: {}", e)))?;
-                                        use tokio::io::AsyncReadExt;
-                                        let mut all_content = Vec::with_capacity(prev_outboard.cumulative_size as usize);
-                                        let _ = reader.read_to_end(&mut all_content).await
-                                            .map_err(|e| tinyfs::Error::Other(format!("Failed to read previous content: {}", e)))?;
-                                        // Take the last pending_len bytes
-                                        let pending_start = all_content.len().saturating_sub(pending_len);
-                                        all_content[pending_start..].to_vec()
-                                    } else {
-                                        Vec::new()
-                                    };
-
-                                    // Use append_version with proper cumulative hash
-                                    utilities::bao_outboard::SeriesOutboard::append_version(
-                                        &prev_outboard,
-                                        &verified_pending,
-                                        &content,
-                                    )
-                                } else {
-                                    // LARGE FILE: Content is stored externally, use from_incremental_state
-                                    // NOTE: The cumulative_blake3 will be incorrect for large file appends
-                                    // because we can't efficiently resume without the pending bytes.
-                                    // cumulative_size is still correct.
-                                    utilities::bao_outboard::SeriesOutboard::from_incremental_state(
-                                        &prev_outboard,
-                                        &bao_state,
-                                        content_len as u64,
-                                    )
-                                }
+                                // The HybridWriter's bao_state was resumed from the
+                                // previous frontier in async_writer(), so
+                                // from_incremental_state produces the correct
+                                // cumulative_blake3 for all file sizes.
+                                utilities::bao_outboard::SeriesOutboard::from_incremental_state(
+                                    &prev_outboard,
+                                    &bao_state,
+                                    content_len as u64,
+                                )
                             } else {
                                 // First version - use bao_state from HybridWriter
                                 // This correctly handles large files where content is empty but
