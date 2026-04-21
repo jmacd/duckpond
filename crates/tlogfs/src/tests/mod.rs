@@ -2062,6 +2062,279 @@ async fn test_file_physical_series_version_concatenation() {
     log::debug!("- Read back yielded concatenated content in correct order");
 }
 
+/// Regression test: cumulative_blake3 must be correct for FilePhysicalSeries
+/// with externally stored large content (>= 64KB per version).
+///
+/// Previously, when a version's content exceeded the 64KB large file threshold,
+/// HybridWriter stored it externally and `content` was empty in poll_shutdown.
+/// The old code path fell through to `from_incremental_state()` with a fresh
+/// (non-resumed) bao_state, producing an incorrect cumulative_blake3.
+///
+/// The fix resumes the HybridWriter's bao_hasher from the previous version's
+/// frontier at writer creation time, so from_incremental_state() now produces
+/// correct results regardless of whether content is inline or external.
+///
+/// This test writes large versions (>64KB) to a FilePhysicalSeries and verifies
+/// that the stored cumulative_blake3 matches a fresh computation over all
+/// concatenated content.
+#[tokio::test]
+async fn test_file_physical_series_cumulative_blake3_large_versions() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    log::debug!("=== Testing FilePhysicalSeries Cumulative BLAKE3 for Large Versions ===");
+
+    let store_path = test_dir();
+
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence");
+
+    let file_path = "data/station.json";
+
+    // Track cumulative content for verification
+    let mut cumulative_content = Vec::new();
+
+    // Version 1: 100KB — exceeds 64KB large file threshold, stored externally.
+    // Non-block-aligned to create pending bytes (100_000 % 16384 = 1696 pending).
+    {
+        let v1: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        cumulative_content.extend_from_slice(&v1);
+
+        let tx = persistence.begin_test().await.expect("begin tx 1");
+        let wd = tx.root().await.expect("root 1");
+        _ = wd.create_dir_path("data").await.expect("create data dir");
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("writer v1");
+        writer.write_all(&v1).await.expect("write v1");
+        writer.shutdown().await.expect("shutdown v1");
+        tx.commit_test().await.expect("commit v1");
+
+        log::debug!(
+            "[OK] v1: {} bytes, pending={}",
+            cumulative_content.len(),
+            cumulative_content.len() % 16384
+        );
+    }
+
+    // Verify v1 cumulative blake3
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative_content).await;
+
+    // Version 2: 80KB — also large/external. Cumulative = 180KB.
+    // Pending = 180_000 % 16384 = 14128 bytes.
+    {
+        let v2: Vec<u8> = (0..80_000u32).map(|i| ((i + 7) % 241) as u8).collect();
+        cumulative_content.extend_from_slice(&v2);
+
+        let tx = persistence.begin_test().await.expect("begin tx 2");
+        let wd = tx.root().await.expect("root 2");
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("writer v2");
+        writer.write_all(&v2).await.expect("write v2");
+        writer.shutdown().await.expect("shutdown v2");
+        tx.commit_test().await.expect("commit v2");
+
+        log::debug!(
+            "[OK] v2: {} bytes cumulative, pending={}",
+            cumulative_content.len(),
+            cumulative_content.len() % 16384
+        );
+    }
+
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative_content).await;
+
+    // Version 3: small inline append (100 bytes). Tests pending bytes from
+    // a large external version being read correctly via read_file_version.
+    {
+        let v3: Vec<u8> = vec![0xFFu8; 100];
+        cumulative_content.extend_from_slice(&v3);
+
+        let tx = persistence.begin_test().await.expect("begin tx 3");
+        let wd = tx.root().await.expect("root 3");
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("writer v3");
+        writer.write_all(&v3).await.expect("write v3");
+        writer.shutdown().await.expect("shutdown v3");
+        tx.commit_test().await.expect("commit v3");
+
+        log::debug!(
+            "[OK] v3: {} bytes cumulative (small append after large), pending={}",
+            cumulative_content.len(),
+            cumulative_content.len() % 16384
+        );
+    }
+
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative_content).await;
+
+    // Version 4: append that fills to exact block boundary.
+    {
+        let current_pending = cumulative_content.len() % 16384;
+        let boundary_fill = if current_pending > 0 {
+            16384 - current_pending
+        } else {
+            0
+        };
+        if boundary_fill > 0 {
+            let v4: Vec<u8> = (0..boundary_fill).map(|i| ((i + 13) % 233) as u8).collect();
+            cumulative_content.extend_from_slice(&v4);
+
+            let tx = persistence.begin_test().await.expect("begin tx 4");
+            let wd = tx.root().await.expect("root 4");
+
+            use tokio::io::AsyncWriteExt;
+            let mut writer = wd
+                .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+                .await
+                .expect("writer v4");
+            writer.write_all(&v4).await.expect("write v4");
+            writer.shutdown().await.expect("shutdown v4");
+            tx.commit_test().await.expect("commit v4");
+
+            assert_eq!(cumulative_content.len() % 16384, 0);
+            log::debug!(
+                "[OK] v4: {} bytes cumulative (exact block boundary), pending=0",
+                cumulative_content.len()
+            );
+
+            verify_cumulative_blake3(&mut persistence, file_path, &cumulative_content).await;
+        }
+    }
+
+    // Version 5: 120KB after block boundary — exercises resumption with pending=0.
+    {
+        let v5: Vec<u8> = (0..120_000u32).map(|i| ((i + 19) % 239) as u8).collect();
+        cumulative_content.extend_from_slice(&v5);
+
+        let tx = persistence.begin_test().await.expect("begin tx 5");
+        let wd = tx.root().await.expect("root 5");
+
+        use tokio::io::AsyncWriteExt;
+        let mut writer = wd
+            .async_writer_path_with_type(file_path, tinyfs::EntryType::FilePhysicalSeries)
+            .await
+            .expect("writer v5");
+        writer.write_all(&v5).await.expect("write v5");
+        writer.shutdown().await.expect("shutdown v5");
+        tx.commit_test().await.expect("commit v5");
+
+        log::debug!(
+            "[OK] v5: {} bytes cumulative (large after boundary), pending={}",
+            cumulative_content.len(),
+            cumulative_content.len() % 16384
+        );
+    }
+
+    verify_cumulative_blake3(&mut persistence, file_path, &cumulative_content).await;
+
+    // Read back and verify concatenated content
+    {
+        let tx = persistence.begin_test().await.expect("begin read tx");
+        let wd = tx.root().await.expect("root read");
+
+        let content = wd
+            .read_file_path_to_vec(file_path)
+            .await
+            .expect("Failed to read file");
+
+        assert_eq!(
+            content.len(),
+            cumulative_content.len(),
+            "Content length mismatch"
+        );
+        assert_eq!(content, cumulative_content, "Content bytes mismatch");
+
+        tx.commit_test().await.expect("commit read tx");
+    }
+
+    log::debug!("\n[OK] TEST PASSED!");
+    log::debug!(
+        "- Wrote 5 versions ({} bytes total) with large external content",
+        cumulative_content.len()
+    );
+    log::debug!("- Cumulative blake3 correct after each version");
+    log::debug!("- Concatenated content verified");
+}
+
+/// Helper: verify that the stored cumulative_blake3 for a FilePhysicalSeries
+/// matches a fresh computation over the expected content.
+async fn verify_cumulative_blake3(
+    persistence: &mut OpLogPersistence,
+    file_path: &str,
+    expected_content: &[u8],
+) {
+    use tinyfs::persistence::PersistenceLayer;
+
+    let tx = persistence.begin_test().await.expect("begin verify tx");
+    let wd = tx.root().await.expect("root verify");
+
+    let file_node = wd.get_node_path(file_path).await.expect("File not found");
+    let file_id = file_node.id();
+
+    let state = tx.state().expect("state");
+    let metadata = state.metadata(file_id).await.expect("metadata");
+
+    // Compute expected cumulative blake3 using IncrementalHashState
+    let mut hash_state = utilities::bao_outboard::IncrementalHashState::new();
+    hash_state.ingest(expected_content);
+    let expected_blake3 = hash_state.root_hash().to_hex().to_string();
+
+    // Verify OplogEntry.blake3
+    let stored_blake3 = metadata
+        .blake3
+        .as_ref()
+        .expect("metadata.blake3 should be set");
+
+    assert_eq!(
+        stored_blake3,
+        &expected_blake3,
+        "Stored cumulative_blake3 doesn't match fresh computation!\n  Expected: {}\n  Stored:   {}\n  Content:  {} bytes",
+        expected_blake3,
+        stored_blake3,
+        expected_content.len()
+    );
+
+    // Verify SeriesOutboard.cumulative_blake3
+    if let Some(bao_bytes) = &metadata.bao_outboard {
+        let series_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(bao_bytes)
+            .expect("parse SeriesOutboard");
+
+        let outboard_blake3 = blake3::Hash::from_bytes(series_outboard.cumulative_blake3)
+            .to_hex()
+            .to_string();
+
+        assert_eq!(
+            outboard_blake3, expected_blake3,
+            "SeriesOutboard.cumulative_blake3 mismatch!\n  Expected: {}\n  Outboard: {}",
+            expected_blake3, outboard_blake3
+        );
+
+        assert_eq!(
+            series_outboard.cumulative_size,
+            expected_content.len() as u64,
+            "SeriesOutboard.cumulative_size mismatch"
+        );
+    }
+
+    tx.commit_test().await.expect("commit verify tx");
+
+    log::debug!(
+        "  blake3 verified: {}... ({} bytes)",
+        &expected_blake3[..16],
+        expected_content.len()
+    );
+}
+
 /// Test FilePhysicalSeries with CSV format provider and DataFusion SQL queries
 /// This verifies the full integration: write multiple CSV versions, read via csv:// URL, query with SQL
 #[tokio::test]

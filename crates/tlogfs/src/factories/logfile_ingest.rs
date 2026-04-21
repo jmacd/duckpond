@@ -54,6 +54,7 @@ mod integration_tests {
     use provider::{ExecutionContext, FactoryContext};
     use std::path::PathBuf;
     use tempfile::TempDir;
+    use tinyfs::persistence::PersistenceLayer;
     use tokio::fs;
 
     /// Test fixture for simulating a growing logfile
@@ -776,33 +777,28 @@ mod integration_tests {
             let state = tx
                 .state()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let entries = state
-                .query_records(file_id)
+
+            // Use metadata() which extracts the cumulative blake3 from
+            // SeriesOutboard for FilePhysicalSeries entries.
+            let metadata = state
+                .metadata(file_id)
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-            assert!(!entries.is_empty(), "No OplogEntry records found for file");
-
-            // Get the latest version's entry
-            let latest_entry = entries
-                .iter()
-                .max_by_key(|e| e.version)
-                .expect("No entries found");
-
-            // 4. Verify OplogEntry.blake3 field
-            let stored_blake3 = latest_entry
+            // 4. Verify metadata.blake3 (cumulative for FilePhysicalSeries)
+            let stored_blake3 = metadata
                 .blake3
                 .as_ref()
-                .expect("OplogEntry.blake3 should be set for FilePhysicalSeries");
+                .expect("metadata.blake3 should be set for FilePhysicalSeries");
 
             assert_eq!(
                 stored_blake3, &expected_blake3,
-                "OplogEntry.blake3 mismatch!\n  Expected: {}\n  Stored:   {}",
+                "metadata.blake3 mismatch!\n  Expected: {}\n  Stored:   {}",
                 expected_blake3, stored_blake3
             );
 
-            // 5. Verify SeriesOutboard.cumulative_blake3 (if bao_outboard present)
-            if let Some(bao_bytes) = latest_entry.get_bao_outboard() {
+            // 5. Verify SeriesOutboard.cumulative_blake3
+            if let Some(bao_bytes) = &metadata.bao_outboard {
                 let series_outboard =
                     utilities::bao_outboard::SeriesOutboard::from_bytes(bao_bytes).map_err(
                         |e| std::io::Error::other(format!("Failed to parse SeriesOutboard: {}", e)),
@@ -1209,6 +1205,80 @@ mod integration_tests {
         log::info!("\n[OK] All block boundary blake3 validation tests passed!");
     }
 
+    #[tokio::test]
+    async fn test_blake3_validation_large_cumulative_multi_version() {
+        //! Regression test for cumulative_blake3 correctness on large files.
+        //!
+        //! Previously, files with cumulative_size > 10MB used a code path
+        //! (from_incremental_state with a non-resumed bao_state) that stored
+        //! an incorrect cumulative_blake3. This caused logfile-ingest prefix
+        //! verification to fail with spurious "File may have been rotated"
+        //! errors.
+        //!
+        //! This test writes multiple versions through the logfile-ingest factory
+        //! that push cumulative size past the former 10MB threshold, and verifies
+        //! blake3 correctness after each append. It uses version sizes under the
+        //! large file threshold (64KB) so content stays inline, while the
+        //! cumulative size grows large through many appends.
+
+        let temp_dir = TempDir::new().unwrap();
+        let active_path = temp_dir.path().join("station.json");
+
+        let config = LogfileIngestConfig {
+            active_pattern: active_path.to_string_lossy().to_string(),
+            archived_pattern: "".to_string(),
+            pond_path: "logs/large_cumulative".to_string(),
+        };
+
+        let pond = PondSimulator::new(&config).await.unwrap();
+        let verifier = Blake3Verifier::new(pond.store_path(), pond.pond_id.clone());
+
+        let mut cumulative = Vec::new();
+
+        // Write 200 versions of ~60KB each (just under 64KB large file threshold).
+        // Cumulative total: ~12MB, well past the former 10MB threshold.
+        // Each version has non-block-aligned size to exercise pending byte handling.
+        for i in 0..200 {
+            // ~60KB per version, varying sizes to hit different pending alignments
+            let version_size = 60_000 + (i * 37) % 1000;
+            let append: Vec<u8> = (0..version_size)
+                .map(|j| ((j as u64 * 251 + i as u64 * 173) % 256) as u8)
+                .collect();
+            cumulative.extend_from_slice(&append);
+            fs::write(&active_path, &cumulative).await.unwrap();
+
+            pond.execute_factory(&config).await.unwrap();
+
+            // Verify blake3 at key milestones: first, around the old threshold, and last
+            if i == 0 || i == 99 || i == 149 || i == 199 {
+                verifier
+                    .verify_file_blake3("logs/large_cumulative", "station.json", &cumulative)
+                    .await
+                    .unwrap();
+                log::info!(
+                    "[OK] v{}: {} bytes cumulative ({} versions), pending={}",
+                    i + 1,
+                    cumulative.len(),
+                    i + 1,
+                    cumulative.len() % 16384
+                );
+            }
+        }
+
+        // Verify final version count
+        let version_count = verifier
+            .get_version_count("logs/large_cumulative", "station.json")
+            .await
+            .unwrap();
+        assert_eq!(version_count, 200, "Expected 200 versions");
+
+        log::info!(
+            "\n[OK] Large cumulative blake3 validation passed! {} versions, {} bytes total",
+            version_count,
+            cumulative.len()
+        );
+    }
+
     // =========================================================================
     // SCENARIO-BASED TEST FIXTURE
     // =========================================================================
@@ -1459,25 +1529,19 @@ mod integration_tests {
                 }
 
                 // CRITICAL: Verify TinyFS metadata blake3 matches computed blake3
-                // This ensures multi-version FilePhysicalSeries has correct checksums
+                // This ensures multi-version FilePhysicalSeries has correct checksums.
+                // Use metadata() which returns the cumulative blake3 from SeriesOutboard.
                 let state = tx
                     .state()
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
-                let entries = state
-                    .query_records(file_id)
+                let file_metadata: tinyfs::NodeMetadata = state
+                    .metadata(file_id)
                     .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    .map_err(|e: tinyfs::Error| std::io::Error::other(e.to_string()))?;
 
-                let latest_entry = entries.iter().max_by_key(|e| e.version).ok_or_else(|| {
+                let stored_blake3 = file_metadata.blake3.as_ref().ok_or_else(|| {
                     std::io::Error::other(format!(
-                        "No OplogEntry records found for {}",
-                        expected.filename
-                    ))
-                })?;
-
-                let stored_blake3 = latest_entry.blake3.as_ref().ok_or_else(|| {
-                    std::io::Error::other(format!(
-                        "METADATA MISSING: {} has no blake3 in OplogEntry",
+                        "METADATA MISSING: {} has no blake3",
                         expected.filename
                     ))
                 })?;
@@ -1485,12 +1549,12 @@ mod integration_tests {
                 if stored_blake3 != &expected.blake3 {
                     return Err(std::io::Error::other(format!(
                         "METADATA BLAKE3 MISMATCH for {}:\n  expected (computed): {}\n  stored (TinyFS):     {}\n  version: {}",
-                        expected.filename, expected.blake3, stored_blake3, latest_entry.version
+                        expected.filename, expected.blake3, stored_blake3, file_metadata.version
                     )));
                 }
 
-                // Also verify SeriesOutboard.cumulative_blake3 if present
-                if let Some(bao_bytes) = latest_entry.get_bao_outboard() {
+                // Also verify SeriesOutboard.cumulative_blake3
+                if let Some(bao_bytes) = &file_metadata.bao_outboard {
                     let series_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(
                         bao_bytes,
                     )
