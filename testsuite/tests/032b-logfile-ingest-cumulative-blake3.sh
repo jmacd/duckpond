@@ -143,18 +143,19 @@ check "[ '${POND_HASH4}' = '${HOST_HASH3}' ]" \
     "phase 4: blake3 unchanged after no-op run"
 
 #############################
-# PHASE 5: Prefix verification succeeds (the original bug symptom)
+# PHASE 5: Grow past 10MB cumulative (the production failure size)
 #############################
 
 echo ""
-echo "=== Phase 5: Another append — prefix verification must pass ==="
+echo "=== Phase 5: Grow file to >10MB cumulative ==="
 
-for i in $(seq 811 900); do
-    printf '{"ts":"2024-01-04T00:%02d:%02dZ","level":"INFO","msg":"Entry %04d padding-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}\n' $((i/60)) $((i%60)) $i
+# Append ~10MB in one shot — each line ~130 bytes, need ~80000 lines
+for i in $(seq 811 81000); do
+    printf '{"ts":"2024-02-%02dT%02d:%02d:%02dZ","level":"INFO","msg":"Bulk entry %06d padding-to-fill-line-to-approximately-one-hundred-and-thirty-bytes-xxxxxxxxxxxxxxxxxxxx"}\n' $((i%28+1)) $((i/3600%24)) $((i/60%60)) $((i%60)) $i
 done >> /var/log/testapp/app.log
 
 SIZE5=$(wc -c < /var/log/testapp/app.log | tr -d ' ')
-echo "  File size: ${SIZE5} bytes"
+echo "  File size: ${SIZE5} bytes (~$((SIZE5/1024/1024))MB)"
 
 pond run /system/run/10-logs 2>/tmp/run5.log
 
@@ -164,15 +165,43 @@ check "! grep -q 'Prefix verification failed' /tmp/run5.log" \
 check "! grep -q 'rotated during ingestion' /tmp/run5.log" \
     "phase 5: no spurious rotation error"
 
-pond cat /logs/app/app.log > /tmp/pond5.out
-check "diff /var/log/testapp/app.log /tmp/pond5.out" \
-    "phase 5: pond content matches host (${SIZE5} bytes)"
-
 POND_HASH5=$(pond run /system/run/10-logs b3sum 2>/dev/null | grep 'app.log' | awk '{print $1}')
 HOST_HASH5=$(b3sum /var/log/testapp/app.log | awk '{print $1}')
 
 check "[ '${POND_HASH5}' = '${HOST_HASH5}' ]" \
-    "phase 5: final cumulative blake3 correct (${HOST_HASH5:0:16}...)"
+    "phase 5: cumulative blake3 correct at ~$((SIZE5/1024/1024))MB (${HOST_HASH5:0:16}...)"
+
+#############################
+# PHASE 6: One more append after 10MB — prefix verification must still pass
+#############################
+
+echo ""
+echo "=== Phase 6: Append after 10MB — prefix verification ==="
+
+for i in $(seq 81001 81100); do
+    printf '{"ts":"2024-03-01T00:%02d:%02dZ","level":"WARN","msg":"Post-10MB entry %06d"}\n' $((i/60%60)) $((i%60)) $i
+done >> /var/log/testapp/app.log
+
+SIZE6=$(wc -c < /var/log/testapp/app.log | tr -d ' ')
+echo "  File size: ${SIZE6} bytes"
+
+pond run /system/run/10-logs 2>/tmp/run6.log
+
+check "! grep -q 'Prefix verification failed' /tmp/run6.log" \
+    "phase 6: no prefix verification failure after >10MB"
+
+check "! grep -q 'rotated during ingestion' /tmp/run6.log" \
+    "phase 6: no spurious rotation error"
+
+pond cat /logs/app/app.log > /tmp/pond6.out
+check "diff /var/log/testapp/app.log /tmp/pond6.out" \
+    "phase 6: pond content matches host (${SIZE6} bytes)"
+
+POND_HASH6=$(pond run /system/run/10-logs b3sum 2>/dev/null | grep 'app.log' | awk '{print $1}')
+HOST_HASH6=$(b3sum /var/log/testapp/app.log | awk '{print $1}')
+
+check "[ '${POND_HASH6}' = '${HOST_HASH6}' ]" \
+    "phase 6: final cumulative blake3 correct (${HOST_HASH6:0:16}...)"
 
 echo ""
 echo "=== All phases complete ==="
