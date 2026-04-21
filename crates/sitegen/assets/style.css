@@ -902,3 +902,17 @@ h3:hover .anchor {
   padding: 2rem 1rem 1rem;
   color: var(--fg-muted);
 }
+
+/* Site banner (logo header) */
+.site-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: center;
+  padding: 1.5rem 1rem 1rem;
+}
+
+.site-banner img {
+  max-width: 600px;
+  width: 100%;
+  height: auto;
+}

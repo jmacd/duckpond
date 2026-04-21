@@ -52,6 +52,19 @@ fn build_footer(custom: Option<&str>) -> Markup {
     }
 }
 
+/// Header banner markup showing a centered full-width logo image.
+///
+/// The image path is relative to `base_url` (e.g., `"img/logo.svg"`).
+fn build_header(image: Option<&str>, base_url: &str) -> Markup {
+    html! {
+        @if let Some(src) = image {
+            header class="site-banner" {
+                img src=(format!("{}{}", base_url, src)) alt="Site banner";
+            }
+        }
+    }
+}
+
 /// GitHub icon SVG, used in the top bar of all layouts.
 const GITHUB_SVG: &str = r#"<svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>"#;
 
@@ -115,6 +128,9 @@ pub struct LayoutContext<'a> {
     pub github_url: Option<&'a str>,
     /// Custom footer text (e.g., "Made in Mendocino"). Shown before build ID.
     pub footer: Option<&'a str>,
+    /// Image path for a full-width centered banner at the top of every page.
+    /// Rendered relative to `base_url` (e.g., `"img/logo.svg"`).
+    pub header: Option<&'a str>,
 }
 
 /// Apply a named layout to rendered content.
@@ -172,6 +188,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -205,6 +222,7 @@ fn logs_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -237,6 +255,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -270,6 +289,7 @@ fn blog_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -333,6 +353,7 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -369,6 +390,7 @@ mod tests {
             feed_url: None,
             github_url: Some("https://github.com/test/repo"),
             footer: None,
+            header: None,
         };
         let html = apply_layout("default", &ctx);
         assert!(html.contains("<!DOCTYPE html>"));
@@ -386,6 +408,7 @@ mod tests {
         let ctx_no_gh = LayoutContext {
             github_url: None,
             footer: None,
+            header: None,
             ..ctx
         };
         let html2 = apply_layout("default", &ctx_no_gh);
@@ -408,6 +431,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("data", &ctx);
         assert!(html.contains("chart.js")); // Glue code present
@@ -440,6 +464,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("nonexistent", &ctx);
         assert!(html.contains("top-bar"), "Default layout uses top bar");
@@ -458,6 +483,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("page", &ctx);
         assert!(html.contains("content-page"), "Page layout class");
@@ -485,6 +511,7 @@ mod tests {
             feed_url: Some("/feed.xml"),
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("top-bar"), "Expected top bar: {}", html);
@@ -542,6 +569,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("blog-post"), "Expected blog-post: {}", html);
@@ -565,6 +593,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("logs", &ctx);
         assert!(

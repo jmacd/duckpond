@@ -401,6 +401,7 @@ mod tests {
             theme: std::collections::BTreeMap::new(),
             subsites: vec![],
             footer: None,
+            header: None,
         }
     }
 
@@ -560,6 +561,7 @@ mod tests {
             theme: std::collections::BTreeMap::new(),
             subsites: vec![],
             footer: None,
+            header: None,
         };
 
         let exports = BTreeMap::new();
