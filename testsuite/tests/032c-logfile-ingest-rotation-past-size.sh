@@ -15,7 +15,7 @@
 #   4. Ingest the new active file from scratch
 #
 set -e
-source /test/../helpers/check.sh 2>/dev/null || source "$(dirname "$0")/../helpers/check.sh"
+source check.sh
 
 echo "=== Test: Rotation Where New File Grew Past Old Size ==="
 echo ""

@@ -11,7 +11,7 @@
 #   been rotated" errors.
 #
 set -e
-source /test/../helpers/check.sh 2>/dev/null || source "$(dirname "$0")/../helpers/check.sh"
+source check.sh
 
 echo "=== Test: Logfile Ingest Cumulative BLAKE3 ==="
 echo ""
