@@ -28,11 +28,22 @@ fn build_id() -> String {
 }
 
 /// Footer markup showing optional custom text and the build identifier.
+///
+/// The custom text supports `${DATE}` which is replaced with the
+/// generation date (e.g. "April 20, 2026").
 fn build_footer(custom: Option<&str>) -> Markup {
+    let expanded = custom.map(|text| {
+        if text.contains("${DATE}") {
+            let date = chrono::Local::now().format("%B %-d, %Y").to_string();
+            text.replace("${DATE}", &date)
+        } else {
+            text.to_string()
+        }
+    });
     html! {
         footer class="build-footer" {
             small {
-                @if let Some(text) = custom {
+                @if let Some(ref text) = expanded {
                     (text) " | "
                 }
                 (build_id())
