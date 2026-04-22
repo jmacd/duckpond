@@ -70,6 +70,11 @@ pub struct SiteConfig {
     /// "Made in Mendocino | DuckPond v0.39.0".
     #[serde(default)]
     pub footer: Option<String>,
+    /// Image path for a full-width centered banner at the top of every page.
+    /// Path is relative to `base_url` (e.g., `"img/logo.svg"`).
+    /// If absent, no banner is rendered.
+    #[serde(default)]
+    pub header: Option<String>,
 }
 
 impl SiteConfig {

@@ -120,6 +120,70 @@ pub fn substitute_env_vars(input: &str) -> Result<String, EnvSubstError> {
     Ok(output)
 }
 
+/// Like [`substitute_env_vars`], but lenient: unresolvable `${env:VAR}`
+/// references (no default, variable not set) are passed through verbatim
+/// instead of causing an error. This is useful when expanding multi-document
+/// config files where only a subset of env vars need to resolve.
+#[must_use]
+pub fn substitute_env_vars_lenient(input: &str) -> String {
+    match substitute_env_vars(input) {
+        Ok(expanded) => expanded,
+        Err(_) => {
+            // Re-run with a lenient approach: replace resolvable refs,
+            // pass through unresolvable ones.
+            let mut output = String::with_capacity(input.len());
+            let mut rest = input;
+
+            while let Some(pos) = rest.find('$') {
+                output.push_str(&rest[..pos]);
+                rest = &rest[pos..];
+
+                if rest.starts_with("$$") {
+                    output.push('$');
+                    rest = &rest[2..];
+                    continue;
+                }
+
+                if rest.starts_with("${")
+                    && let Some(close) = rest[2..].find('}')
+                {
+                    let inner = &rest[2..2 + close];
+
+                    if let Some(spec) = inner.strip_prefix("env:") {
+                        let (var_name, default) = match spec.find(":-") {
+                            Some(p) => (&spec[..p], Some(&spec[p + 2..])),
+                            None => (spec, None),
+                        };
+
+                        match std::env::var(var_name) {
+                            Ok(v) => output.push_str(&v),
+                            Err(_) => match default {
+                                Some(d) => output.push_str(d),
+                                None => {
+                                    // Pass through verbatim
+                                    output.push_str(&rest[..2 + close + 1]);
+                                }
+                            },
+                        }
+
+                        rest = &rest[2 + close + 1..];
+                    } else {
+                        output.push_str(&rest[..2 + close + 1]);
+                        rest = &rest[2 + close + 1..];
+                    }
+                    continue;
+                }
+
+                output.push('$');
+                rest = &rest[1..];
+            }
+
+            output.push_str(rest);
+            output
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {

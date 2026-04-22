@@ -895,3 +895,24 @@ h3:hover .anchor {
 .log-notice td { color: var(--green); }
 .log-info td  { color: var(--fg); }
 .log-debug td { color: var(--fg-muted); }
+
+/* Build footer */
+.build-footer {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 2rem 1rem 1rem;
+  color: var(--fg-muted);
+}
+
+/* Site banner (logo header) */
+.site-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: center;
+  padding: 1.5rem 1rem 1rem;
+}
+
+.site-banner img {
+  width: 100%;
+  height: auto;
+}

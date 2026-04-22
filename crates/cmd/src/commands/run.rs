@@ -117,7 +117,16 @@ async fn run_host_command(
 
     // Expand env references (${env:VAR}) at runtime so that
     // config files can reference environment variables for secrets.
-    let config_bytes = expand_config_templates(&config_bytes, host_path)?;
+    // Use lenient expansion so multi-doc pond configs (where only the
+    // factory section's vars need to resolve) don't fail on unrelated
+    // env refs in other documents.
+    let config_str = std::str::from_utf8(&config_bytes)
+        .with_context(|| format!("Config file is not valid UTF-8: {}", host_path))?;
+    let config_bytes = if env_substitution::has_env_refs(config_str) {
+        env_substitution::substitute_env_vars_lenient(config_str).into_bytes()
+    } else {
+        config_bytes
+    };
 
     // Resolve the config node's FileID for the factory context.
     // On the host filesystem the FileID is deterministic from the path.

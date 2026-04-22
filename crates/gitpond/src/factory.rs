@@ -9,7 +9,7 @@
 
 use crate::git;
 use crate::tree::{AutoCloneInfo, GitRootDirectory};
-use log::info;
+use log::{debug, info};
 use provider::{ExecutionContext, FactoryContext};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -217,7 +217,7 @@ fn execute_pull(
     // Fetch and resolve the ref
     let repo_path = git::bare_repo_path(pond_path, node_id);
     let commit_sha = git::fetch_and_resolve(&repo_path, &config.url, &config.git_ref)?;
-    info!("Resolved {} -> {}", config.git_ref, &commit_sha[..12]);
+    debug!("Resolved {} -> {}", config.git_ref, &commit_sha[..12]);
 
     // Verify prefix is valid if configured
     if let Some(ref prefix) = config.prefix {

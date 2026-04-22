@@ -46,6 +46,9 @@ enum SitegenSubcommand {
     Build {
         /// Output directory for generated files
         output_dir: String,
+        /// Quick mode: skip data exports and subsites (content pages only)
+        #[arg(long)]
+        quick: bool,
     },
 }
 
@@ -54,11 +57,60 @@ enum SitegenSubcommand {
 // ---------------------------------------------------------------------------
 
 fn validate_config(config: &[u8]) -> tinyfs::Result<Value> {
-    let config: SiteConfig = serde_yaml::from_slice(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid site.yaml: {}", e)))?;
+    // Try parsing as standalone SiteConfig first
+    if let Ok(config) = serde_yaml::from_slice::<SiteConfig>(config) {
+        return serde_json::to_value(&config)
+            .map_err(|e| tinyfs::Error::Other(format!("Config serialization error: {}", e)));
+    }
 
-    serde_json::to_value(&config)
-        .map_err(|e| tinyfs::Error::Other(format!("Config serialization error: {}", e)))
+    // Fall back: extract sitegen config from a multi-doc pond config file.
+    // Looks for a document with `kind: mknod` and `spec.factory: sitegen`,
+    // then uses `spec.config` as the SiteConfig.
+    extract_sitegen_from_pond_config(config)
+}
+
+/// Extract the sitegen factory config from a multi-document pond config file.
+///
+/// Scans YAML documents for one with `kind: mknod` and `spec.factory: sitegen`,
+/// then parses `spec.config` as a `SiteConfig`. This lets `host+sitegen://`
+/// read directly from `config/site.yaml` without a separate config file.
+fn extract_sitegen_from_pond_config(config: &[u8]) -> tinyfs::Result<Value> {
+    let config_str = std::str::from_utf8(config)
+        .map_err(|e| tinyfs::Error::Other(format!("Non-UTF8 config: {}", e)))?;
+
+    for doc in serde_yaml::Deserializer::from_str(config_str) {
+        let value = match Value::deserialize(doc) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if value.get("kind").and_then(|v| v.as_str()) != Some("mknod") {
+            continue;
+        }
+
+        let factory = value
+            .get("spec")
+            .and_then(|s| s.get("factory"))
+            .and_then(|f| f.as_str());
+
+        if factory != Some("sitegen") {
+            continue;
+        }
+
+        if let Some(inner_config) = value.get("spec").and_then(|s| s.get("config")) {
+            let site_config: SiteConfig =
+                serde_json::from_value(inner_config.clone()).map_err(|e| {
+                    tinyfs::Error::Other(format!("Invalid sitegen config in pond YAML: {}", e))
+                })?;
+
+            return serde_json::to_value(&site_config)
+                .map_err(|e| tinyfs::Error::Other(format!("Config serialization error: {}", e)));
+        }
+    }
+
+    Err(tinyfs::Error::Other(
+        "No sitegen factory config found in YAML (expected standalone SiteConfig or pond config with factory: sitegen)".to_string(),
+    ))
 }
 
 async fn initialize(_config: Value, _context: FactoryContext) -> Result<(), tinyfs::Error> {
@@ -81,100 +133,120 @@ async fn execute(
         SitegenCommand::try_parse_from(args).map_err(|e| tinyfs::Error::Other(format!("{}", e)))?;
 
     match cmd.command {
-        SitegenSubcommand::Build { output_dir } => {
+        SitegenSubcommand::Build { output_dir, quick } => {
             let output_path = std::path::PathBuf::from(&output_dir);
             let root = context.root().await?;
             let provider_ctx = &context.context;
 
-            // Build the main site
-            build_site_from_root(
-                &config,
-                &root,
-                provider_ctx,
-                &output_path,
-                &config.site.base_url,
-            )
-            .await?;
-
-            // Write shared build assets (base CSS, JS, vendor) once
-            write_shared_assets(&output_path)?;
-
-            // Write per-site theme overrides
-            write_theme_css(&output_path, &config.theme)?;
-
-            // Build subsites from imported ponds
-            for subsite in &config.subsites {
-                info!("Building subsite '{}'...", subsite.name);
-
-                // Read sub-site config from the imported pond
-                let config_full_path = format!("{}{}", subsite.path, subsite.config);
-                let config_bytes = root
-                    .read_file_path_to_vec(&config_full_path)
-                    .await
-                    .map_err(|e| {
-                        tinyfs::Error::Other(format!(
-                            "Cannot read subsite config '{}': {}",
-                            config_full_path, e
-                        ))
-                    })?;
-                let mut sub_config: SiteConfig =
-                    serde_yaml::from_slice(&config_bytes).map_err(|e| {
-                        tinyfs::Error::Other(format!(
-                            "Invalid subsite config '{}': {}",
-                            config_full_path, e
-                        ))
-                    })?;
-
-                // Override base_url if specified, rewriting sidebar links
-                // to match the new mount point.
-                if let Some(ref base_url) = subsite.base_url {
-                    let old_base = sub_config.site.base_url.clone();
-                    sub_config.site.base_url = base_url.clone();
-                    if old_base != *base_url {
-                        sub_config.rewrite_sidebar_urls(&old_base, base_url);
-                    }
-                }
-
-                // Derive output subdirectory from base_url relative to parent.
-                // e.g. parent base="/staging/", subsite base="/staging/noyo-harbor/"
-                // → subdir = "noyo-harbor"
-                let parent_base = config.site.base_url.trim_matches('/');
-                let sub_base = subsite
-                    .base_url
-                    .as_deref()
-                    .unwrap_or(&subsite.name)
-                    .trim_matches('/');
-                let subdir = sub_base
-                    .strip_prefix(parent_base)
-                    .unwrap_or(sub_base)
-                    .trim_start_matches('/');
-                let subsite_output = output_path.join(subdir);
-                std::fs::create_dir_all(&subsite_output).map_err(|e| {
-                    tinyfs::Error::Other(format!("mkdir {:?}: {}", subsite_output, e))
-                })?;
-
-                // Create WD scoped to the mount point
-                let subsite_wd = root.open_dir_path(&subsite.path).await.map_err(|e| {
-                    tinyfs::Error::Other(format!(
-                        "Cannot open subsite path '{}': {}",
-                        subsite.path, e
-                    ))
-                })?;
-                let subsite_root = subsite_wd.as_root();
+            if quick {
+                info!("Quick mode: skipping exports and subsites");
+                // Clear exports and subsites so build_site_from_root skips them
+                let mut quick_config = config;
+                quick_config.exports.clear();
+                quick_config.subsites.clear();
 
                 build_site_from_root(
-                    &sub_config,
-                    &subsite_root,
+                    &quick_config,
+                    &root,
                     provider_ctx,
-                    &subsite_output,
+                    &output_path,
+                    &quick_config.site.base_url,
+                )
+                .await?;
+
+                write_shared_assets(&output_path)?;
+                write_theme_css(&output_path, &quick_config.theme)?;
+            } else {
+                // Build the main site
+                build_site_from_root(
+                    &config,
+                    &root,
+                    provider_ctx,
+                    &output_path,
                     &config.site.base_url,
                 )
                 .await?;
 
-                // Write per-subsite theme overrides
-                write_theme_css(&subsite_output, &sub_config.theme)?;
+                // Write shared build assets (base CSS, JS, vendor) once
+                write_shared_assets(&output_path)?;
 
-                info!("Subsite '{}' built at {:?}", subsite.name, subsite_output);
+                // Write per-site theme overrides
+                write_theme_css(&output_path, &config.theme)?;
+
+                // Build subsites from imported ponds
+                for subsite in &config.subsites {
+                    info!("Building subsite '{}'...", subsite.name);
+
+                    // Read sub-site config from the imported pond
+                    let config_full_path = format!("{}{}", subsite.path, subsite.config);
+                    let config_bytes = root
+                        .read_file_path_to_vec(&config_full_path)
+                        .await
+                        .map_err(|e| {
+                            tinyfs::Error::Other(format!(
+                                "Cannot read subsite config '{}': {}",
+                                config_full_path, e
+                            ))
+                        })?;
+                    let mut sub_config: SiteConfig = serde_yaml::from_slice(&config_bytes)
+                        .map_err(|e| {
+                            tinyfs::Error::Other(format!(
+                                "Invalid subsite config '{}': {}",
+                                config_full_path, e
+                            ))
+                        })?;
+
+                    // Override base_url if specified, rewriting sidebar links
+                    // to match the new mount point.
+                    if let Some(ref base_url) = subsite.base_url {
+                        let old_base = sub_config.site.base_url.clone();
+                        sub_config.site.base_url = base_url.clone();
+                        if old_base != *base_url {
+                            sub_config.rewrite_sidebar_urls(&old_base, base_url);
+                        }
+                    }
+
+                    // Derive output subdirectory from base_url relative to parent.
+                    // e.g. parent base="/staging/", subsite base="/staging/noyo-harbor/"
+                    // → subdir = "noyo-harbor"
+                    let parent_base = config.site.base_url.trim_matches('/');
+                    let sub_base = subsite
+                        .base_url
+                        .as_deref()
+                        .unwrap_or(&subsite.name)
+                        .trim_matches('/');
+                    let subdir = sub_base
+                        .strip_prefix(parent_base)
+                        .unwrap_or(sub_base)
+                        .trim_start_matches('/');
+                    let subsite_output = output_path.join(subdir);
+                    std::fs::create_dir_all(&subsite_output).map_err(|e| {
+                        tinyfs::Error::Other(format!("mkdir {:?}: {}", subsite_output, e))
+                    })?;
+
+                    // Create WD scoped to the mount point
+                    let subsite_wd = root.open_dir_path(&subsite.path).await.map_err(|e| {
+                        tinyfs::Error::Other(format!(
+                            "Cannot open subsite path '{}': {}",
+                            subsite.path, e
+                        ))
+                    })?;
+                    let subsite_root = subsite_wd.as_root();
+
+                    build_site_from_root(
+                        &sub_config,
+                        &subsite_root,
+                        provider_ctx,
+                        &subsite_output,
+                        &config.site.base_url,
+                    )
+                    .await?;
+
+                    // Write per-subsite theme overrides
+                    write_theme_css(&subsite_output, &sub_config.theme)?;
+
+                    info!("Subsite '{}' built at {:?}", subsite.name, subsite_output);
+                }
             }
 
             Ok(())
@@ -1084,6 +1156,7 @@ fn generate_site(
                 feed_url: feed_url.as_deref(),
                 github_url: config.site.github_url.as_deref(),
                 footer: config.footer.as_deref(),
+                header: config.header.as_deref(),
             },
         );
 
@@ -1398,6 +1471,7 @@ mod tests {
             theme: std::collections::BTreeMap::new(),
             subsites: vec![],
             footer: None,
+            header: None,
         };
 
         let mut content = BTreeMap::new();
@@ -1505,6 +1579,7 @@ mod tests {
             theme: std::collections::BTreeMap::new(),
             subsites: vec![],
             footer: None,
+            header: None,
         };
         let content = BTreeMap::new();
 

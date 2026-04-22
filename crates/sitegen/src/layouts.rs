@@ -27,15 +27,44 @@ fn build_id() -> String {
     }
 }
 
-/// Footer markup showing optional custom text and the build identifier.
+/// Footer markup from the configured footer text.
+///
+/// Supports variable expansion in the text:
+/// - `${DATE}` — generation date (e.g. "April 20, 2026")
+/// - `${BUILD}` — build identifier (e.g. "DuckPond v0.47.0")
+///
+/// If no footer text is configured, the footer element is omitted entirely.
 fn build_footer(custom: Option<&str>) -> Markup {
+    let expanded = custom.map(|text| {
+        let mut result = text.to_string();
+        if result.contains("${DATE}") {
+            let date = chrono::Local::now().format("%B %-d, %Y").to_string();
+            result = result.replace("${DATE}", &date);
+        }
+        if result.contains("${BUILD}") {
+            result = result.replace("${BUILD}", &build_id());
+        }
+        result
+    });
     html! {
-        footer class="build-footer" {
-            small {
-                @if let Some(text) = custom {
-                    (text) " | "
+        @if let Some(ref text) = expanded {
+            footer class="build-footer" {
+                small {
+                    (text)
                 }
-                (build_id())
+            }
+        }
+    }
+}
+
+/// Header banner markup showing a centered full-width logo image.
+///
+/// The image path is relative to `base_url` (e.g., `"img/logo.svg"`).
+fn build_header(image: Option<&str>, base_url: &str) -> Markup {
+    html! {
+        @if let Some(src) = image {
+            header class="site-banner" {
+                img src=(format!("{}{}", base_url, src)) alt="Site banner";
             }
         }
     }
@@ -104,6 +133,9 @@ pub struct LayoutContext<'a> {
     pub github_url: Option<&'a str>,
     /// Custom footer text (e.g., "Made in Mendocino"). Shown before build ID.
     pub footer: Option<&'a str>,
+    /// Image path for a full-width centered banner at the top of every page.
+    /// Rendered relative to `base_url` (e.g., `"img/logo.svg"`).
+    pub header: Option<&'a str>,
 }
 
 /// Apply a named layout to rendered content.
@@ -161,6 +193,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -174,9 +207,9 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
+                (build_footer(ctx.footer))
                 script src=(format!("{}chart.js", ctx.root_base_url)) type="module" {}
                 script src=(format!("{}overlay.js", ctx.root_base_url)) type="module" {}
-                (build_footer(ctx.footer))
             }
         }
     }
@@ -194,6 +227,7 @@ fn logs_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -207,8 +241,8 @@ fn logs_layout(ctx: &LayoutContext) -> Markup {
                         }
                     }
                 }
-                script src=(format!("{}log-viewer.js", ctx.root_base_url)) type="module" {}
                 (build_footer(ctx.footer))
+                script src=(format!("{}log-viewer.js", ctx.root_base_url)) type="module" {}
             }
         }
     }
@@ -226,6 +260,7 @@ fn page_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -259,6 +294,7 @@ fn blog_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -322,6 +358,7 @@ fn default_layout(ctx: &LayoutContext) -> Markup {
                 (common_head(ctx))
             }
             body {
+                (build_header(ctx.header, ctx.base_url))
                 @if let Some(sidebar_html) = ctx.sidebar {
                     nav class="sidebar" {
                         (PreEscaped(sidebar_html))
@@ -358,6 +395,7 @@ mod tests {
             feed_url: None,
             github_url: Some("https://github.com/test/repo"),
             footer: None,
+            header: None,
         };
         let html = apply_layout("default", &ctx);
         assert!(html.contains("<!DOCTYPE html>"));
@@ -375,6 +413,7 @@ mod tests {
         let ctx_no_gh = LayoutContext {
             github_url: None,
             footer: None,
+            header: None,
             ..ctx
         };
         let html2 = apply_layout("default", &ctx_no_gh);
@@ -397,6 +436,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("data", &ctx);
         assert!(html.contains("chart.js")); // Glue code present
@@ -429,6 +469,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("nonexistent", &ctx);
         assert!(html.contains("top-bar"), "Default layout uses top bar");
@@ -447,6 +488,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("page", &ctx);
         assert!(html.contains("content-page"), "Page layout class");
@@ -474,6 +516,7 @@ mod tests {
             feed_url: Some("/feed.xml"),
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("top-bar"), "Expected top bar: {}", html);
@@ -531,6 +574,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("blog", &ctx);
         assert!(html.contains("blog-post"), "Expected blog-post: {}", html);
@@ -554,6 +598,7 @@ mod tests {
             feed_url: None,
             github_url: None,
             footer: None,
+            header: None,
         };
         let html = apply_layout("logs", &ctx);
         assert!(
