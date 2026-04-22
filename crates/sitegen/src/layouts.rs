@@ -27,26 +27,31 @@ fn build_id() -> String {
     }
 }
 
-/// Footer markup showing optional custom text and the build identifier.
+/// Footer markup from the configured footer text.
 ///
-/// The custom text supports `${DATE}` which is replaced with the
-/// generation date (e.g. "April 20, 2026").
+/// Supports variable expansion in the text:
+/// - `${DATE}` — generation date (e.g. "April 20, 2026")
+/// - `${BUILD}` — build identifier (e.g. "DuckPond v0.47.0")
+///
+/// If no footer text is configured, the footer element is omitted entirely.
 fn build_footer(custom: Option<&str>) -> Markup {
     let expanded = custom.map(|text| {
-        if text.contains("${DATE}") {
+        let mut result = text.to_string();
+        if result.contains("${DATE}") {
             let date = chrono::Local::now().format("%B %-d, %Y").to_string();
-            text.replace("${DATE}", &date)
-        } else {
-            text.to_string()
+            result = result.replace("${DATE}", &date);
         }
+        if result.contains("${BUILD}") {
+            result = result.replace("${BUILD}", &build_id());
+        }
+        result
     });
     html! {
-        footer class="build-footer" {
-            small {
-                @if let Some(ref text) = expanded {
-                    (text) " | "
+        @if let Some(ref text) = expanded {
+            footer class="build-footer" {
+                small {
+                    (text)
                 }
-                (build_id())
             }
         }
     }
