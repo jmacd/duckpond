@@ -126,6 +126,7 @@ impl HostSteward {
 
         // Read all config files from host filesystem (only needs temp context)
         let mut spec_configs: Vec<(String, String, Vec<u8>)> = Vec::new();
+        let mut dir_overlays: HashMap<String, tinyfs::Node> = HashMap::new();
         for spec in specs {
             if spec.remaining_path().is_some() {
                 return Err(StewardError::ControlTable(format!(
@@ -136,6 +137,41 @@ impl HostSteward {
 
             let mount_name = spec.root_component().to_string();
             let factory_name = resolve_factory_alias(&spec.factory_name);
+
+            // "dir" pseudo-factory: bind-mount a host directory directly.
+            // No config file needed — config_path IS the host directory path.
+            if factory_name == "dir" {
+                let dir_path = hostmount.root_path().join(&spec.config_path);
+                if !dir_path.is_dir() {
+                    return Err(StewardError::ControlTable(format!(
+                        "Host directory '{}' does not exist (mount '{}')",
+                        dir_path.display(),
+                        spec.mount_path
+                    )));
+                }
+
+                let mount_id_bytes = format!("hostmount:{}:dir", mount_name);
+                let parent_part_id = tinyfs::PartID::from_node_id(tinyfs::FileID::root().node_id());
+                let child_file_id = tinyfs::FileID::from_content(
+                    parent_part_id,
+                    tinyfs::EntryType::DirectoryPhysical,
+                    mount_id_bytes.as_bytes(),
+                    tinyfs::local_pond_uuid(),
+                );
+
+                let dir_handle =
+                    tinyfs::hostmount::HostDirectory::new_handle(dir_path.clone(), child_file_id);
+                let node =
+                    tinyfs::Node::new(child_file_id, tinyfs::NodeType::Directory(dir_handle));
+                _ = dir_overlays.insert(mount_name.clone(), node);
+
+                log::info!(
+                    "[HOST] Mounted directory '{}' at '/{}'",
+                    dir_path.display(),
+                    mount_name
+                );
+                continue;
+            }
 
             log::debug!(
                 "[HOST] Processing mount: {} -> factory={}, config={}",
@@ -176,10 +212,18 @@ impl HostSteward {
             spec_configs.push((mount_name, factory_name, config_bytes));
         }
 
+        // If there are only dir bind-mounts and no factory specs, skip
+        // the two-phase factory construction.
+        if spec_configs.is_empty() {
+            return Ok(dir_overlays);
+        }
+
         // Phase 1: Create factory nodes with temporary context.
         // These nodes let us build the OverlayPersistence structure.
-        let phase1_overlays =
+        let mut phase1_overlays =
             Self::create_overlay_nodes(&spec_configs, &temp_provider_context).await?;
+        // Include dir mounts so factories can see them in phase 1
+        phase1_overlays.extend(dir_overlays.clone());
 
         // Build the OverlayPersistence with Phase 1 nodes so we can
         // create a ProviderContext that sees ALL mounts.
@@ -193,8 +237,11 @@ impl HostSteward {
 
         // Phase 2: Recreate factory nodes with the full overlay context.
         // Now each factory can resolve paths to sibling overlays.
-        let final_overlays =
+        let mut final_overlays =
             Self::create_overlay_nodes(&spec_configs, &overlay_provider_context).await?;
+
+        // Merge in dir bind-mounts (these don't need factory context)
+        final_overlays.extend(dir_overlays);
 
         Ok(final_overlays)
     }

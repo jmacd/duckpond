@@ -169,23 +169,25 @@ pub struct MountSpec {
 impl MountSpec {
     /// Parse a mount specification from `--hostmount` flag value.
     ///
-    /// Format: `<mount_path>=host+<factory>:///<config_path>`
+    /// Supports two formats:
+    ///   - Factory URL: `<mount_path>=host+<factory>:///<config_path>`
+    ///   - Bare directory: `<mount_path>=<host_path>` (shorthand for `host+dir:///<host_path>`)
     ///
     /// Examples:
     ///   `/reduced=host+dyndir:///reduce.yaml`
-    ///   `/reduced=host+dynamic-dir:///reduce.yaml`
+    ///   `/content=site/content`     (equivalent to `/content=host+dir:///site/content`)
     pub fn parse(spec: &str) -> std::result::Result<Self, String> {
         // Split on '=' to get mount_path and URL
         let parts: Vec<&str> = spec.splitn(2, '=').collect();
         if parts.len() != 2 {
             return Err(format!(
-                "Invalid mount spec '{}': expected <mount_path>=host+<factory>:///<config_path>",
+                "Invalid mount spec '{}': expected <mount_path>=<host_path> or <mount_path>=host+<factory>:///<config_path>",
                 spec
             ));
         }
 
         let mount_path = parts[0].to_string();
-        let url_part = parts[1];
+        let rhs = parts[1];
 
         // Validate mount path starts with /
         if !mount_path.starts_with('/') {
@@ -195,48 +197,55 @@ impl MountSpec {
             ));
         }
 
-        // Parse the URL part: host+<factory>:///<config_path>
-        // Strip the "host+" prefix
-        let url_without_host = if let Some(stripped) = url_part.strip_prefix("host+") {
-            stripped
+        // If the RHS starts with "host+", parse as factory URL.
+        // Otherwise treat as a bare directory path (sugar for host+dir:///).
+        if let Some(url_without_host) = rhs.strip_prefix("host+") {
+            // Split on ":///" to get factory name and config path
+            let url_parts: Vec<&str> = url_without_host.splitn(2, ":///").collect();
+            if url_parts.len() != 2 {
+                return Err(format!(
+                    "Invalid mount URL '{}': expected host+<factory>:///<config_path>",
+                    rhs
+                ));
+            }
+
+            let factory_name = url_parts[0].to_string();
+            let config_path = url_parts[1].to_string();
+
+            if factory_name.is_empty() {
+                return Err(format!(
+                    "Invalid mount URL '{}': factory name cannot be empty",
+                    rhs
+                ));
+            }
+
+            if config_path.is_empty() {
+                return Err(format!(
+                    "Invalid mount URL '{}': config path cannot be empty",
+                    rhs
+                ));
+            }
+
+            Ok(Self {
+                mount_path,
+                factory_name,
+                config_path,
+            })
         } else {
-            return Err(format!(
-                "Invalid mount URL '{}': must start with 'host+'",
-                url_part
-            ));
-        };
+            // Bare path: /content=site/content → factory="dir", config_path="site/content"
+            if rhs.is_empty() {
+                return Err(format!(
+                    "Invalid mount spec '{}': host path cannot be empty",
+                    spec
+                ));
+            }
 
-        // Split on ":///" to get factory name and config path
-        let url_parts: Vec<&str> = url_without_host.splitn(2, ":///").collect();
-        if url_parts.len() != 2 {
-            return Err(format!(
-                "Invalid mount URL '{}': expected host+<factory>:///<config_path>",
-                url_part
-            ));
+            Ok(Self {
+                mount_path,
+                factory_name: "dir".to_string(),
+                config_path: rhs.to_string(),
+            })
         }
-
-        let factory_name = url_parts[0].to_string();
-        let config_path = url_parts[1].to_string();
-
-        if factory_name.is_empty() {
-            return Err(format!(
-                "Invalid mount URL '{}': factory name cannot be empty",
-                url_part
-            ));
-        }
-
-        if config_path.is_empty() {
-            return Err(format!(
-                "Invalid mount URL '{}': config path cannot be empty",
-                url_part
-            ));
-        }
-
-        Ok(Self {
-            mount_path,
-            factory_name,
-            config_path,
-        })
     }
 
     /// Get the first path component of the mount path (the root-level name).
@@ -292,9 +301,30 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_mount_spec_no_host_prefix() {
-        let result = MountSpec::parse("/reduced=dyndir:///reduce.yaml");
-        assert!(result.is_err());
+    fn test_parse_mount_spec_bare_path_is_dir() {
+        // Bare path without host+ prefix is shorthand for host+dir:///
+        let spec = MountSpec::parse("/content=site/content").unwrap();
+        assert_eq!(spec.mount_path, "/content");
+        assert_eq!(spec.factory_name, "dir");
+        assert_eq!(spec.config_path, "site/content");
+        assert_eq!(spec.root_component(), "content");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_bare_path_absolute() {
+        let spec = MountSpec::parse("/img=/opt/data/images").unwrap();
+        assert_eq!(spec.mount_path, "/img");
+        assert_eq!(spec.factory_name, "dir");
+        assert_eq!(spec.config_path, "/opt/data/images");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_explicit_dir_factory() {
+        // Explicit host+dir:/// syntax
+        let spec = MountSpec::parse("/content=host+dir:///site/content").unwrap();
+        assert_eq!(spec.mount_path, "/content");
+        assert_eq!(spec.factory_name, "dir");
+        assert_eq!(spec.config_path, "site/content");
     }
 
     #[test]
