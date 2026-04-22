@@ -898,6 +898,7 @@ h3:hover .anchor {
 
 /* Build footer */
 .build-footer {
+  grid-column: 1 / -1;
   text-align: center;
   padding: 2rem 1rem 1rem;
   color: var(--fg-muted);
@@ -912,7 +913,6 @@ h3:hover .anchor {
 }
 
 .site-banner img {
-  max-width: 600px;
   width: 100%;
   height: auto;
 }
