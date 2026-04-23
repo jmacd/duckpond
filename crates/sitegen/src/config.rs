@@ -88,15 +88,22 @@ impl SiteConfig {
             }
         }
 
+        fn rewrite_children(children: &mut [SidebarChild], old: &str, new: &str) {
+            for child in children {
+                if let Some(h) = &mut child.href {
+                    rewrite(h, old, new);
+                }
+                rewrite_children(&mut child.children, old, new);
+            }
+        }
+
         for entry in &mut self.sidebar {
             match entry {
                 SidebarEntry::WithChildren { href, children, .. } => {
                     if let Some(h) = href {
                         rewrite(h, old_base, new_base);
                     }
-                    for child in children {
-                        rewrite(&mut child.href, old_base, new_base);
-                    }
+                    rewrite_children(children, old_base, new_base);
                 }
                 SidebarEntry::DirectLink { href, .. } => {
                     rewrite(href, old_base, new_base);
@@ -311,13 +318,23 @@ impl SidebarEntry {
 }
 
 /// A child item in a sidebar entry with sub-navigation.
+///
+/// Supports recursive nesting: a child may have its own children, enabling
+/// arbitrary-depth sidebar trees. `href` is optional; a child without an
+/// href but with children renders as a section heading that links to its
+/// first descendant leaf.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SidebarChild {
     /// Display label
     pub label: String,
-    /// Direct URL path (e.g., "/data/well-depth.html")
-    pub href: String,
+    /// Direct URL path (e.g., "/data/well-depth.html").
+    /// Optional: parent-only entries (those with children) may omit href.
+    #[serde(default)]
+    pub href: Option<String>,
+    /// Nested sub-navigation items. Empty for leaf entries.
+    #[serde(default)]
+    pub children: Vec<SidebarChild>,
 }
 
 /// A sub-site to generate recursively from an imported pond.
@@ -497,8 +514,8 @@ sidebar:
         assert_eq!(config.sidebar[2].children().len(), 2);
         assert_eq!(config.sidebar[2].children()[0].label, "Well Depth");
         assert_eq!(
-            config.sidebar[2].children()[0].href,
-            "/data/well-depth.html"
+            config.sidebar[2].children()[0].href.as_deref(),
+            Some("/data/well-depth.html")
         );
         assert_eq!(config.sidebar[3].label(), "Thanks");
     }
