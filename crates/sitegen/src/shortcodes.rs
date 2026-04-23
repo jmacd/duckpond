@@ -11,7 +11,7 @@
 //! Uses our own shortcode parser (in `crate::markdown`) with closures that
 //! capture an `Arc<ShortcodeContext>` with DuckPond data.
 
-use crate::config::SidebarEntry;
+use crate::config::{SidebarChild, SidebarEntry};
 use crate::markdown::{ShortcodeArgs, Shortcodes};
 use crate::routes::ContentPage;
 use std::collections::BTreeMap;
@@ -403,6 +403,97 @@ fn render_breadcrumb(breadcrumbs: &[(String, String)]) -> String {
     html
 }
 
+/// Return the first usable href found when traversing children depth-first.
+///
+/// Used when a section heading has no direct href: clicking the heading
+/// navigates to the first descendant leaf.
+fn first_leaf_href(children: &[SidebarChild]) -> Option<&str> {
+    for child in children {
+        if let Some(h) = child.href.as_deref() {
+            return Some(h);
+        }
+        if let Some(h) = first_leaf_href(&child.children) {
+            return Some(h);
+        }
+    }
+    None
+}
+
+/// Whether `child` or any of its descendants matches `current_path`.
+fn any_descendant_active(child: &SidebarChild, current_path: &str) -> bool {
+    if let Some(h) = child.href.as_deref()
+        && h == current_path
+    {
+        return true;
+    }
+    child
+        .children
+        .iter()
+        .any(|c| any_descendant_active(c, current_path))
+}
+
+/// Recursively render a sidebar child and its nested sub-navigation.
+///
+/// `indent` controls whitespace prefixing so the emitted HTML is readable.
+fn render_child(html: &mut String, child: &SidebarChild, current_path: &str, indent: usize) {
+    let pad = "  ".repeat(indent);
+    let c_has_children = !child.children.is_empty();
+    let c_own_active = child
+        .href
+        .as_deref()
+        .map(|h| h == current_path)
+        .unwrap_or(false);
+    let c_descendant_active = child
+        .children
+        .iter()
+        .any(|c| any_descendant_active(c, current_path));
+    let c_active = c_own_active || c_descendant_active;
+    let c_class = if c_active { " class=\"active\"" } else { "" };
+    let c_aria = if c_own_active {
+        " aria-current=\"page\""
+    } else {
+        ""
+    };
+
+    // Resolve the href: own href first, else first descendant leaf.
+    let href_owned;
+    let href: &str = if let Some(h) = child.href.as_deref() {
+        h
+    } else if let Some(h) = first_leaf_href(&child.children) {
+        href_owned = h.to_string();
+        &href_owned
+    } else {
+        ""
+    };
+
+    if c_has_children {
+        let heading_cls = if child.href.is_none() {
+            " class=\"nav-heading\""
+        } else {
+            ""
+        };
+        html.push_str(&format!(
+            "{}<li{}><a href=\"{}\"{}{}>{}</a>\n",
+            pad, c_class, href, c_aria, heading_cls, child.label
+        ));
+        let sub_class = if c_active {
+            "subnav expanded"
+        } else {
+            "subnav"
+        };
+        html.push_str(&format!("{}  <ul class=\"{}\">\n", pad, sub_class));
+        for grand in &child.children {
+            render_child(html, grand, current_path, indent + 2);
+        }
+        html.push_str(&format!("{}  </ul>\n{}</li>\n", pad, pad));
+    } else {
+        html.push_str(&format!(
+            "{}<li{}><a href=\"{}\"{}>{}</a></li>\n",
+            pad, c_class, href, c_aria, child.label
+        ));
+    }
+}
+
 /// Render a navigation list for content pages (ordered by weight).
 ///
 /// When `sidebar_sections` is defined in site.yaml, renders pills in the
@@ -458,7 +549,9 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
 
             if let Some(parent_href) = resolved_href {
                 let parent_active = ctx.current_path == parent_href;
-                let child_active = children.iter().any(|c| ctx.current_path == c.href);
+                let child_active = children
+                    .iter()
+                    .any(|c| any_descendant_active(c, &ctx.current_path));
                 let is_active = parent_active || child_active;
                 let li_class = if is_active { " class=\"active\"" } else { "" };
                 let aria = if parent_active {
@@ -484,25 +577,17 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                     };
                     html.push_str(&format!("    <ul class=\"{}\">\n", sub_class));
                     for child in children {
-                        let c_active = ctx.current_path == child.href;
-                        let c_class = if c_active { " class=\"active\"" } else { "" };
-                        let c_aria = if c_active {
-                            " aria-current=\"page\""
-                        } else {
-                            ""
-                        };
-                        html.push_str(&format!(
-                            "      <li{}><a href=\"{}\"{}>{}</a></li>\n",
-                            c_class, child.href, c_aria, child.label
-                        ));
+                        render_child(&mut html, child, &ctx.current_path, 3);
                     }
                     html.push_str("    </ul>\n  </li>\n");
                 }
             } else if !children.is_empty() {
                 // Section heading with children but no resolved href --
                 // link to the first child so clicking expands the section.
-                let first_href = &children[0].href;
-                let child_active = children.iter().any(|c| ctx.current_path == c.href);
+                let first_href = first_leaf_href(children).unwrap_or("").to_string();
+                let child_active = children
+                    .iter()
+                    .any(|c| any_descendant_active(c, &ctx.current_path));
                 let li_class = if child_active {
                     " class=\"active\""
                 } else {
@@ -519,17 +604,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                 };
                 html.push_str(&format!("    <ul class=\"{}\">\n", sub_class));
                 for child in children {
-                    let c_active = ctx.current_path == child.href;
-                    let c_class = if c_active { " class=\"active\"" } else { "" };
-                    let c_aria = if c_active {
-                        " aria-current=\"page\""
-                    } else {
-                        ""
-                    };
-                    html.push_str(&format!(
-                        "      <li{}><a href=\"{}\"{}>{}</a></li>\n",
-                        c_class, child.href, c_aria, child.label
-                    ));
+                    render_child(&mut html, child, &ctx.current_path, 3);
                 }
                 html.push_str("    </ul>\n  </li>\n");
             }
@@ -1293,11 +1368,13 @@ mod tests {
                     children: vec![
                         SidebarChild {
                             label: "Well Depth".to_string(),
-                            href: "/data/well-depth.html".to_string(),
+                            href: Some("/data/well-depth.html".to_string()),
+                            children: vec![],
                         },
                         SidebarChild {
                             label: "Tank Level".to_string(),
-                            href: "/data/tank-level.html".to_string(),
+                            href: Some("/data/tank-level.html".to_string()),
+                            children: vec![],
                         },
                     ],
                 },
