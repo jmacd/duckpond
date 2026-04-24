@@ -3,8 +3,6 @@ name: Rust CI
 on:
   push:
     branches: [ "main" ]
-    tags:
-      - 'v*'
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
@@ -92,17 +90,20 @@ jobs:
         run: |
           IMAGE_ID=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
-          
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             VERSION=pr-${{ github.event.pull_request.number }}
+            EXTRA_TAG=""
           else
-            VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-            [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
-            [ "$VERSION" == "main" ] && VERSION=latest
+            # push to main or workflow_dispatch on main
+            VERSION=latest
+            EXTRA_TAG=sha-${SHORT_SHA}
           fi
-          
+
           echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "extra_tag=$EXTRA_TAG" >> $GITHUB_OUTPUT
       
       - name: Free up disk space before build
         run: |
@@ -118,17 +119,28 @@ jobs:
           podman build \
             -t ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }} \
             -f Dockerfile .
-      
+          if [ -n "${{ steps.meta.outputs.extra_tag }}" ]; then
+            podman tag \
+              ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }} \
+              ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.extra_tag }}-${{ matrix.arch }}
+          fi
+
       - name: Push container image
         id: push
         run: |
           podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }}
+          if [ -n "${{ steps.meta.outputs.extra_tag }}" ]; then
+            podman push ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.extra_tag }}-${{ matrix.arch }}
+          fi
           DIGEST=$(podman inspect ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }} --format '{{.Digest}}')
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-      
+
       - name: Sign container image with Sigstore
         run: |
           cosign sign --yes ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.version }}-${{ matrix.arch }}
+          if [ -n "${{ steps.meta.outputs.extra_tag }}" ]; then
+            cosign sign --yes ${{ steps.meta.outputs.image_id }}:${{ steps.meta.outputs.extra_tag }}-${{ matrix.arch }}
+          fi
 
   comment-pr:
     name: Comment PR with Image Tags

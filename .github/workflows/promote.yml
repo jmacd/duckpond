@@ -1,0 +1,91 @@
+name: Promote Image to Prod
+
+# Retags an existing multi-arch image set (no rebuild) as `:prod-<arch>`,
+# and stamps a dated rollback handle `:prod-YYYYMMDD-HHMMSS-<arch>`.
+#
+# Digests are preserved (crane cp copies by manifest, not by rebuild).
+# Typical usage: run with default `source: latest` once staging looks good.
+# Rollback: run again with `source: sha-abc1234` or `source: prod-20260101-120000`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source tag prefix to promote (e.g. latest, sha-abc1234, prod-20260101-120000)'
+        required: true
+        default: 'latest'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/duckpond
+
+jobs:
+  promote:
+    name: Promote ${{ github.event.inputs.source }} -> prod
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # For Sigstore signing
+
+    steps:
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.6.0
+
+      - name: Log in to Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | crane auth login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Log in to Container Registry (Cosign)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Compute image references
+        id: refs
+        run: |
+          IMAGE_ID=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+          STAMP=$(date -u +%Y%m%d-%H%M%S)
+          echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
+          echo "stamp=$STAMP" >> $GITHUB_OUTPUT
+
+      - name: Promote (retag by digest)
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.refs.outputs.image_id }}"
+          SRC="${{ github.event.inputs.source }}"
+          STAMP="${{ steps.refs.outputs.stamp }}"
+          for ARCH in amd64 arm64; do
+            SRC_REF="${IMAGE}:${SRC}-${ARCH}"
+            PROD_REF="${IMAGE}:prod-${ARCH}"
+            STAMPED_REF="${IMAGE}:prod-${STAMP}-${ARCH}"
+            echo "=== Promoting ${SRC_REF}"
+            DIGEST=$(crane digest "${SRC_REF}")
+            echo "    digest: ${DIGEST}"
+            crane cp "${SRC_REF}" "${PROD_REF}"
+            crane cp "${SRC_REF}" "${STAMPED_REF}"
+            echo "prod_${ARCH}_digest=${DIGEST}" >> $GITHUB_OUTPUT
+          done
+
+      - name: Sign promoted images with Sigstore
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.refs.outputs.image_id }}"
+          STAMP="${{ steps.refs.outputs.stamp }}"
+          for ARCH in amd64 arm64; do
+            cosign sign --yes "${IMAGE}:prod-${ARCH}"
+            cosign sign --yes "${IMAGE}:prod-${STAMP}-${ARCH}"
+          done
+
+      - name: Summary
+        run: |
+          IMAGE="${{ steps.refs.outputs.image_id }}"
+          STAMP="${{ steps.refs.outputs.stamp }}"
+          {
+            echo "## Promoted \`${{ github.event.inputs.source }}\` → \`prod\`"
+            echo ""
+            echo "Rollback handle: \`${IMAGE}:prod-${STAMP}-<arch>\`"
+            echo ""
+            echo "Prod hosts will pull the new image on their next systemd timer tick (\`--pull=newer\`)."
+          } >> $GITHUB_STEP_SUMMARY
