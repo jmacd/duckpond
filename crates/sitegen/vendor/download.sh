@@ -79,10 +79,10 @@ if [ "$HAS_BROTLI" = true ] || [ "$HAS_GZIP" = true ]; then
     for f in "${DIST_DIR}"/*.mjs "${DIST_DIR}"/*.js "${DIST_DIR}"/*.wasm; do
         [ -f "$f" ] || continue
         if [ "$HAS_BROTLI" = true ]; then
-            brotli -k -q 11 "$f"
+            brotli -f -k -q 11 "$f"
         fi
         if [ "$HAS_GZIP" = true ]; then
-            gzip -k -9 "$f"
+            gzip -f -k -9 "$f"
         fi
     done
 else
