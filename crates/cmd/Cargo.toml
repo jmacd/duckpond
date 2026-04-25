@@ -22,6 +22,48 @@ doctest = false
 name = "pond"
 path = "src/main.rs"
 
+# Debian package built by `cargo deb -p cmd` on the duckpond repo
+# (typically run on watershop natively for the arm64 fleet).  The deb
+# ships the pond binary plus the sitegen vendor blobs (DuckDB-WASM,
+# Observable Plot, D3) at /usr/share/duckpond/vendor/, which is the
+# FHS path searched by sitegen::factory::find_vendor_dir() at runtime.
+#
+# Run `make vendor` (in the repo root) before `cargo deb` so the
+# vendor/dist/ tree exists -- cargo-deb will fail loudly if a listed
+# asset is missing.
+#
+# We intentionally do NOT depend on podman; this deb is meant for
+# native installs on small machines where containers are too heavy.
+[package.metadata.deb]
+name = "duckpond"
+maintainer = "Joshua MacDonald <jmacd@users.noreply.github.com>"
+copyright = "2025 Caspar Water Company, Apache-2.0"
+extended-description = """\
+DuckPond is a local-first data management tool for small industrial
+systems built on Apache Arrow, DataFusion, and Delta Lake.  This
+package installs the `pond` CLI plus the sitegen browser-side vendor
+assets (DuckDB-WASM, Observable Plot, D3) needed for chart rendering.
+"""
+section = "utils"
+priority = "optional"
+depends = "libc6, ca-certificates"
+assets = [
+    ["target/release/pond",                              "usr/bin/",                       "755"],
+    ["../sitegen/vendor/dist/duckdb-eh.wasm",            "usr/share/duckpond/vendor/",     "644"],
+    ["../sitegen/vendor/dist/duckdb-browser.mjs",        "usr/share/duckpond/vendor/",     "644"],
+    ["../sitegen/vendor/dist/duckdb-browser-eh.worker.js","usr/share/duckpond/vendor/",    "644"],
+    ["../sitegen/vendor/dist/plot-d3-bundle.mjs",        "usr/share/duckpond/vendor/",     "644"],
+    ["../sitegen/vendor/dist/duckdb-eh.wasm.gz",         "usr/share/duckpond/vendor/",     "644"],
+    ["../sitegen/vendor/dist/duckdb-browser.mjs.gz",     "usr/share/duckpond/vendor/",     "644"],
+    ["../sitegen/vendor/dist/duckdb-browser-eh.worker.js.gz","usr/share/duckpond/vendor/", "644"],
+    ["../sitegen/vendor/dist/plot-d3-bundle.mjs.gz",     "usr/share/duckpond/vendor/",     "644"],
+    ["../sitegen/vendor/dist/duckdb-eh.wasm.br",         "usr/share/duckpond/vendor/",     "644"],
+    ["../sitegen/vendor/dist/duckdb-browser.mjs.br",     "usr/share/duckpond/vendor/",     "644"],
+    ["../sitegen/vendor/dist/duckdb-browser-eh.worker.js.br","usr/share/duckpond/vendor/", "644"],
+    ["../sitegen/vendor/dist/plot-d3-bundle.mjs.br",     "usr/share/duckpond/vendor/",     "644"],
+    ["../../README.md",                                  "usr/share/doc/duckpond/README", "644"],
+]
+
 [dependencies]
 anyhow = { workspace = true }
 arrow = { workspace = true }

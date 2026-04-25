@@ -959,6 +959,14 @@ fn find_vendor_dir() -> Option<std::path::PathBuf> {
         return Some(system.to_path_buf());
     }
 
+    // 3b. FHS install location (cargo-deb-built .deb installs here,
+    //     since /usr/share/ is the standard path for arch-independent
+    //     read-only data on Debian/Ubuntu).
+    let fhs = std::path::Path::new("/usr/share/duckpond/vendor");
+    if fhs.join("duckdb-eh.wasm").exists() {
+        return Some(fhs.to_path_buf());
+    }
+
     // 4. User cache
     if let Ok(home) = std::env::var("HOME") {
         let cache = std::path::PathBuf::from(home).join(".cache/duckpond/vendor");
