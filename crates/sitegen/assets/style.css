@@ -73,8 +73,15 @@ html {
 body {
   margin: 0;
   display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-columns: 1fr;
   min-height: 100vh;
+}
+
+/* Two-column layout only when a sidebar nav is actually present.
+   Without this, pages with no sidebar get their <main> placed in
+   the narrow sidebar column instead of spanning the full width. */
+body:has(> .sidebar) {
+  grid-template-columns: var(--sidebar-width) 1fr;
 }
 
 a { color: var(--accent-light); }
