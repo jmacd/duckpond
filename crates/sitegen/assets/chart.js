@@ -29,6 +29,25 @@
   }
   if (!manifest || manifest.length === 0) return;
 
+  // Optional metric instrument-kind registry, emitted by sitegen alongside
+  // the chart-data manifest.  Keys are `<param>.<unit>` (chart-grouping
+  // suffix); values are "counter" | "updowncounter" | "gauge".  Counter
+  // metrics are plotted as a first-difference rate per scope; everything
+  // else is plotted as-is.  Missing or empty registry => all metrics treated
+  // as gauges (no transforms), matching legacy behaviour.
+  const registryEl = document.querySelector('script.chart-registry[type="application/json"]');
+  let metricKinds = {};
+  if (registryEl) {
+    try {
+      metricKinds = JSON.parse(registryEl.textContent) || {};
+    } catch (e) {
+      metricKinds = {};
+    }
+  }
+  function kindFor(chartKey) {
+    return metricKinds[chartKey] || "gauge";
+  }
+
   // ── State ──────────────────────────────────────────────────────────────────
 
   // Time range options (label, days).
@@ -364,6 +383,40 @@
     "#db2777", "#0891b2", "#ea580c", "#4f46e5",
   ];
 
+  // Compute first-difference rate (units/second) per column for monotonic
+  // counters.  Negative deltas are treated as counter resets and emit null.
+  // Returns a parallel array of rows; the first row is dropped (no prior
+  // sample to diff against).
+  function computeCounterRates(data, columns) {
+    const out = [];
+    let prev = null;
+    for (const row of data) {
+      const t = row.timestamp;
+      const tMs = typeof t === "bigint" ? Number(t / 1000000n)
+        : (t instanceof Date ? t.getTime() : new Date(t).getTime());
+      if (prev) {
+        const dtSec = (tMs - prev.tMs) / 1000;
+        if (dtSec > 0) {
+          const newRow = { timestamp: row.timestamp };
+          for (const col of columns) {
+            const a = row[col], b = prev.row[col];
+            if (a != null && b != null) {
+              const av = typeof a === "bigint" ? Number(a) : Number(a);
+              const bv = typeof b === "bigint" ? Number(b) : Number(b);
+              const delta = av - bv;
+              newRow[col] = delta >= 0 ? delta / dtSec : null;
+            } else {
+              newRow[col] = null;
+            }
+          }
+          out.push(newRow);
+        }
+      }
+      prev = { tMs, row };
+    }
+    return out;
+  }
+
   // ── Brush-to-zoom ─────────────────────────────────────────────────────────
 
   // Attach a brush overlay to a chart wrapper.  The overlay sits on top of
@@ -455,6 +508,20 @@
     const plotAreaWidth = width - marginLeft - 20; // 20 = right margin
 
     for (const [chartKey, series] of charts) {
+      // Counter metrics (e.g. committed.txn_ids) are monotonic counts;
+      // graphing the raw value yields a meaningless cumulative staircase.
+      // Apply a per-scope first-difference rate transform so the y-axis
+      // reflects current activity (events/second).  Updowncounters and
+      // gauges plot as-is.
+      const isCounter = kindFor(chartKey) === "counter";
+      const allCols = [];
+      for (const s of series) {
+        if (s.avg) allCols.push(s.avg);
+        if (s.min) allCols.push(s.min);
+        if (s.max) allCols.push(s.max);
+      }
+      const plotData = isCounter ? computeCounterRates(data, allCols) : data;
+
       const marks = [];
       series.forEach((s, i) => {
         const color = palette[i % palette.length];
@@ -462,7 +529,7 @@
 
         if (s.min && s.max) {
           marks.push(
-            Plot.areaY(data, {
+            Plot.areaY(plotData, {
               x: d => toDate(d.timestamp),
               y1: d => d[s.min] != null ? Number(d[s.min]) : NaN,
               y2: d => d[s.max] != null ? Number(d[s.max]) : NaN,
@@ -475,7 +542,7 @@
 
         if (s.avg) {
           marks.push(
-            Plot.line(data, {
+            Plot.line(plotData, {
               x: d => toDate(d.timestamp),
               y: d => d[s.avg] != null ? Number(d[s.avg]) : NaN,
               defined: d => d[s.avg] != null,
@@ -516,7 +583,12 @@
           grid: true,
           domain: [domainBegin, domainEnd],
         },
-        y: { label: keyParts[keyParts.length - 1] || "", grid: true },
+        y: {
+          label: isCounter
+            ? `${keyParts[keyParts.length - 1] || ""}/s`
+            : (keyParts[keyParts.length - 1] || ""),
+          grid: true,
+        },
         marks,
       });
 

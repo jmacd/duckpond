@@ -402,6 +402,7 @@ mod tests {
             subsites: vec![],
             footer: None,
             header: None,
+            metric_registry: std::collections::BTreeMap::new(),
         }
     }
 
@@ -562,6 +563,7 @@ mod tests {
             subsites: vec![],
             footer: None,
             header: None,
+            metric_registry: std::collections::BTreeMap::new(),
         };
 
         let exports = BTreeMap::new();

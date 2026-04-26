@@ -1131,6 +1131,7 @@ fn generate_site(
             breadcrumbs: job.breadcrumbs.clone(),
             base_url: config.site.base_url.clone(),
             sidebar_sections: config.sidebar.clone(),
+            metric_registry: config.metric_registry.clone(),
         });
 
         // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
@@ -1336,6 +1337,7 @@ fn render_partial(
                 breadcrumbs: vec![],
                 base_url: config.site.base_url.clone(),
                 sidebar_sections: config.sidebar.clone(),
+                metric_registry: config.metric_registry.clone(),
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);
@@ -1480,6 +1482,7 @@ mod tests {
             subsites: vec![],
             footer: None,
             header: None,
+            metric_registry: std::collections::BTreeMap::new(),
         };
 
         let mut content = BTreeMap::new();
@@ -1588,6 +1591,7 @@ mod tests {
             subsites: vec![],
             footer: None,
             header: None,
+            metric_registry: std::collections::BTreeMap::new(),
         };
         let content = BTreeMap::new();
 

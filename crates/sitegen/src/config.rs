@@ -75,6 +75,24 @@ pub struct SiteConfig {
     /// If absent, no banner is rendered.
     #[serde(default)]
     pub header: Option<String>,
+    /// Metric instrument-kind registry, keyed by metric name (the
+    /// `<param>.<unit>` portion of a wide column name).  Values are
+    /// OpenTelemetry instrument kinds: `counter`, `updowncounter`,
+    /// or `gauge`.  Default kind is `gauge`; only non-gauge entries
+    /// need to appear here.
+    ///
+    /// chart.js reads this map and applies a per-kind transform:
+    ///   counter         -> first-difference per scope, plot rate
+    ///   updowncounter   -> plot value as-is (today; future: sum
+    ///                       across scopes for spatial aggregation)
+    ///   gauge / missing -> plot value as-is (latest/avg)
+    ///
+    /// The canonical source of truth for each project should be a
+    /// Weaver semconv registry (e.g. caspar.water's
+    /// `config/semconv/duckpond-pond.yaml`); mirror its
+    /// non-gauge entries here.
+    #[serde(default)]
+    pub metric_registry: std::collections::BTreeMap<String, String>,
 }
 
 impl SiteConfig {
