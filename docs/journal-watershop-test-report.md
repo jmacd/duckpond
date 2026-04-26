@@ -4,6 +4,15 @@
 **Machine:** watershop.local (Debian 12.13, aarch64, CIX P1)
 **Duration:** ~24 hours continuous operation
 
+> **Historical note (2026-04):** the `linux/` configs referenced
+> throughout this report were retired after this test concluded.
+> The successor production deployment lives in
+> [`caspar.water`](https://github.com/jmacd/caspar.water) under
+> `config/watershop-selfmon.yaml` (selfmon ingest pipeline) and
+> `terraform/station/watershop/` (provisioning).  The pond binary
+> is now distributed as a `.deb` (`cargo deb -p cmd`) built natively
+> on watershop, replacing the podman-image-extract path.
+
 ## Summary
 
 First real-world deployment of the `journal-ingest` factory and `jsonlogs`
