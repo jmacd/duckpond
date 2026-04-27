@@ -93,6 +93,13 @@ pub struct SiteConfig {
     /// non-gauge entries here.
     #[serde(default)]
     pub metric_registry: std::collections::BTreeMap<String, String>,
+
+    /// Optional human-readable caption per chart, keyed by `<param>.<unit>`
+    /// (the same key used in `metric_registry`).  When present, the
+    /// dashboard renders the caption directly beneath the corresponding
+    /// chart.  Missing entries render no caption.
+    #[serde(default)]
+    pub metric_captions: std::collections::BTreeMap<String, String>,
 }
 
 impl SiteConfig {

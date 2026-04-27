@@ -403,6 +403,7 @@ mod tests {
             footer: None,
             header: None,
             metric_registry: std::collections::BTreeMap::new(),
+            metric_captions: std::collections::BTreeMap::new(),
         }
     }
 
@@ -564,6 +565,7 @@ mod tests {
             footer: None,
             header: None,
             metric_registry: std::collections::BTreeMap::new(),
+            metric_captions: std::collections::BTreeMap::new(),
         };
 
         let exports = BTreeMap::new();

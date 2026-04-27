@@ -923,3 +923,13 @@ h3:hover .anchor {
   width: 100%;
   height: auto;
 }
+
+/* Per-chart caption rendered beneath each chart in the selfmon /
+ * dashboard layout.  Set via SiteConfig.metric_captions and emitted
+ * by the {{ chart }} shortcode (chart.js renders one <p> per chart). */
+.chart .chart-caption {
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 1.25rem;
+  line-height: 1.4;
+}

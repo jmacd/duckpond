@@ -5,7 +5,7 @@
 // DuckPond sitegen — chart.js
 // Reads the chart-data JSON manifest, loads .parquet files via DuckDB-WASM,
 // renders time-series line charts with Observable Plot.
-// Supports duration buttons (1W … 1Y) and click-drag brush-to-zoom.
+// Supports duration buttons (12h … 7d) and click-drag brush-to-zoom.
 //
 // LAZY LOADING: Parquet files are fetched on demand — only the files needed
 // for the current resolution and visible time window are loaded. Each
@@ -48,16 +48,48 @@
     return metricKinds[chartKey] || "gauge";
   }
 
+  // Optional per-chart caption strings, also emitted by sitegen.  Keys
+  // match `metricKinds`; values are plain text rendered beneath each
+  // chart.  Missing entries render no caption.
+  const captionsEl = document.querySelector('script.chart-captions[type="application/json"]');
+  let metricCaptions = {};
+  if (captionsEl) {
+    try {
+      metricCaptions = JSON.parse(captionsEl.textContent) || {};
+    } catch (e) {
+      metricCaptions = {};
+    }
+  }
+
+  // IEC byte formatter for `<param>.bytes` y-axes.  Picks the largest
+  // unit whose magnitude keeps the displayed value below 1024 and uses
+  // up to one fractional digit.  `null`/`NaN` render as the empty
+  // string so Plot's tickFormat doesn't blow up on missing data.
+  function formatBytes(v) {
+    if (v == null || !isFinite(v)) return "";
+    const sign = v < 0 ? "-" : "";
+    let n = Math.abs(v);
+    const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    const digits = (n >= 100 || i === 0) ? 0 : 1;
+    return `${sign}${n.toFixed(digits)} ${units[i]}`;
+  }
+
   // ── State ──────────────────────────────────────────────────────────────────
 
-  // Time range options (label, days).
-  // Buttons are filtered at render time — only ranges that fit the actual
-  // data span are shown.
+  // Time range options (label, days).  Short (selfmon-style) and long
+  // (water/noyo-style) sets coexist; `visibleRanges` (below) hides
+  // buttons that don't fit the actual data span, so each dashboard
+  // sees only the ranges that make sense for it.  Default is chosen
+  // adaptively based on dataSpanDays.
   const ranges = [
-    ["1W", 7], ["2W", 14], ["1M", 30], ["3M", 90],
-    ["6M", 180], ["1Y", 365], ["2Y", 730], ["5Y", 1826],
+    ["12h", 0.5], ["24h", 1], ["2d", 2], ["7d", 7],
+    ["2W", 14], ["1M", 30], ["3M", 90], ["6M", 180],
+    ["1Y", 365], ["2Y", 730], ["5Y", 1826],
   ];
-  let activeDays = 90;  // Default: 3 months
+  // Will be reassigned after dataSpanDays is computed below.
+  let activeDays = 90;
 
   // Custom zoom range (set by brush, cleared by Reset or duration button)
   // When non-null, overrides the duration-button window.
@@ -83,6 +115,19 @@
   const btnBar = document.createElement("div");
   btnBar.className = "duration-buttons";
   toolbar.appendChild(btnBar);
+
+  // Pick an adaptive default based on the data span so high-frequency
+  // dashboards (selfmon, span ~hours-days) default to "24h" while
+  // low-frequency ones (water/noyo, span months-years) default to "3M".
+  if (dataSpanDays >= 30) {
+    activeDays = 90;
+  } else if (dataSpanDays >= 7) {
+    activeDays = 7;
+  } else if (dataSpanDays >= 1) {
+    activeDays = 1;
+  } else if (isFinite(dataSpanDays)) {
+    activeDays = 0.5;
+  }
 
   // Only show buttons whose window fits within the data span (with a small
   // margin — show the button if data covers at least 50% of the window).
@@ -119,7 +164,7 @@
     hideResetBtn();
     // Re-activate the current duration button
     btnBar.querySelectorAll("button").forEach(b => {
-      b.classList.toggle("active", parseInt(b.dataset.days) === activeDays);
+      b.classList.toggle("active", parseFloat(b.dataset.days) === activeDays);
     });
     renderChart();
   };
@@ -385,34 +430,49 @@
 
   // Compute first-difference rate (units/second) per column for monotonic
   // counters.  Negative deltas are treated as counter resets and emit null.
-  // Returns a parallel array of rows; the first row is dropped (no prior
-  // sample to diff against).
+  //
+  // Tracks `prev` PER COLUMN (not per row) because the cross-pond
+  // `timeseries-join` produces a FULL OUTER JOIN on `timestamp`: most
+  // rows have non-null values for only one pond's columns.  A row-scoped
+  // `prev` would treat almost every cell as null.  Per-column tracking
+  // forward-looks across null rows so each column's rate is computed
+  // from its previous non-null sample.
+  //
+  // Output rows preserve `data`'s timestamps; cells are null until both
+  // a prior and current sample exist for that column.  The first row
+  // is therefore all-null and Plot's `defined` predicate elides it.
   function computeCounterRates(data, columns) {
     const out = [];
-    let prev = null;
+    const prevByCol = new Map();  // col -> { tMs, value }
     for (const row of data) {
       const t = row.timestamp;
       const tMs = typeof t === "bigint" ? Number(t / 1000000n)
         : (t instanceof Date ? t.getTime() : new Date(t).getTime());
-      if (prev) {
-        const dtSec = (tMs - prev.tMs) / 1000;
-        if (dtSec > 0) {
-          const newRow = { timestamp: row.timestamp };
-          for (const col of columns) {
-            const a = row[col], b = prev.row[col];
-            if (a != null && b != null) {
-              const av = typeof a === "bigint" ? Number(a) : Number(a);
-              const bv = typeof b === "bigint" ? Number(b) : Number(b);
-              const delta = av - bv;
-              newRow[col] = delta >= 0 ? delta / dtSec : null;
-            } else {
-              newRow[col] = null;
-            }
-          }
-          out.push(newRow);
+      const newRow = { timestamp: row.timestamp };
+      for (const col of columns) {
+        const a = row[col];
+        if (a == null) {
+          newRow[col] = null;
+          continue;
         }
+        const av = typeof a === "bigint" ? Number(a) : Number(a);
+        const prev = prevByCol.get(col);
+        if (prev) {
+          const dtSec = (tMs - prev.tMs) / 1000;
+          if (dtSec > 0) {
+            const delta = av - prev.value;
+            newRow[col] = delta >= 0 ? delta / dtSec : null;
+          } else {
+            newRow[col] = null;
+          }
+        } else {
+          newRow[col] = null;
+        }
+        // Only update prev on non-null current values so null rows
+        // don't truncate the lookback window.
+        prevByCol.set(col, { tMs, value: av });
       }
-      prev = { tMs, row };
+      out.push(newRow);
     }
     return out;
   }
@@ -572,6 +632,15 @@
           `<span style="color:${l.color}">&#9679;</span> ${l.label}`
         ).join("&emsp;")}</span>`;
 
+      const unit = keyParts[keyParts.length - 1] || "";
+      const isBytes = unit === "bytes";
+      const yLabel = isCounter ? `${unit}/s` : unit;
+      // Humanize byte y-axes for both raw values (`bytes`) and rates
+      // (`bytes/s`) so users see KiB / MiB instead of "0,000,000".
+      const yTickFormat = isBytes
+        ? (isCounter ? (v) => `${formatBytes(v)}/s` : formatBytes)
+        : undefined;
+
       const plot = Plot.plot({
         width,
         height: 300,
@@ -584,10 +653,9 @@
           domain: [domainBegin, domainEnd],
         },
         y: {
-          label: isCounter
-            ? `${keyParts[keyParts.length - 1] || ""}/s`
-            : (keyParts[keyParts.length - 1] || ""),
+          label: yLabel,
           grid: true,
+          ...(yTickFormat ? { tickFormat: yTickFormat } : {}),
         },
         marks,
       });
@@ -596,6 +664,17 @@
       wrapper.className = "chart";
       wrapper.appendChild(header);
       wrapper.appendChild(plot);
+
+      // Caption (textContent only -- never innerHTML -- to avoid
+      // injection via config-supplied strings).
+      const captionText = metricCaptions[chartKey];
+      if (captionText) {
+        const cap = document.createElement("p");
+        cap.className = "chart-caption";
+        cap.textContent = captionText;
+        wrapper.appendChild(cap);
+      }
+
       container.appendChild(wrapper);
 
       // Attach brush-to-zoom on the rendered SVG

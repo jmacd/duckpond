@@ -77,6 +77,11 @@ pub struct ShortcodeContext {
     /// updowncounter | gauge.  Empty map = all metrics treated as
     /// gauges (no transforms).
     pub metric_registry: BTreeMap<String, String>,
+
+    /// Per-chart caption strings keyed by `<param>.<unit>` (matches the
+    /// chart.js chartKey).  Plumbed through from
+    /// `SiteConfig.metric_captions`; empty map = no captions rendered.
+    pub metric_captions: BTreeMap<String, String>,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -105,7 +110,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
     {
         let c = ctx.clone();
         shortcodes.register("chart", move |_args: &ShortcodeArgs| {
-            render_chart(&c.datafiles, &c.metric_registry)
+            render_chart(&c.datafiles, &c.metric_registry, &c.metric_captions)
         });
     }
 
@@ -265,7 +270,11 @@ fn prefix_with_base_url(base_url: &str, path: &str) -> String {
 ///     by `<param>.<unit>` (only emitted if the registry is
 ///     non-empty, to keep chart-data layout unchanged for legacy
 ///     dashboards).
-fn render_chart(datafiles: &[ExportedFile], registry: &BTreeMap<String, String>) -> String {
+fn render_chart(
+    datafiles: &[ExportedFile],
+    registry: &BTreeMap<String, String>,
+    captions: &BTreeMap<String, String>,
+) -> String {
     if datafiles.is_empty() {
         return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
     }
@@ -296,12 +305,23 @@ fn render_chart(datafiles: &[ExportedFile], registry: &BTreeMap<String, String>)
         )
     };
 
+    let captions_block = if captions.is_empty() {
+        String::new()
+    } else {
+        let captions_json = serde_json::to_string(captions).unwrap_or_else(|_| "{}".to_string());
+        format!(
+            "<script type=\"application/json\" class=\"chart-captions\">{}</script>",
+            captions_json
+        )
+    };
+
     format!(
         "<div class=\"chart-container\" id=\"chart\">\
          <script type=\"application/json\" class=\"chart-data\">{}</script>\
          {}\
+         {}\
          </div>",
-        json, registry_block
+        json, registry_block, captions_block
     )
 }
 
@@ -939,6 +959,7 @@ mod tests {
             base_url: "/".to_string(),
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -950,7 +971,7 @@ mod tests {
 
     #[test]
     fn test_render_chart_empty() {
-        let html = render_chart(&[], &BTreeMap::new());
+        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new());
         assert!(html.contains("No data files"));
     }
 
@@ -964,7 +985,7 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files, &BTreeMap::new());
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new());
         assert!(html.contains("chart-container"));
         assert!(html.contains("data.parquet"));
         // Empty registry -> no chart-registry script element.
@@ -985,7 +1006,7 @@ mod tests {
             ("committed.txn_ids".to_string(), "counter".to_string()),
             ("size.bytes".to_string(), "updowncounter".to_string()),
         ]);
-        let html = render_chart(&files, &registry);
+        let html = render_chart(&files, &registry, &BTreeMap::new());
         assert!(html.contains("chart-registry"));
         assert!(html.contains("\"committed.txn_ids\":\"counter\""));
         assert!(html.contains("\"size.bytes\":\"updowncounter\""));
@@ -1019,6 +1040,7 @@ mod tests {
             base_url: "/".to_string(),
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -1084,6 +1106,7 @@ mod tests {
             base_url: "/".to_string(),
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -1165,6 +1188,7 @@ mod tests {
             base_url: "/".to_string(),
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -1301,6 +1325,7 @@ mod tests {
                 SidebarEntry::Simple("Water".to_string()),
             ],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // All three present with sidebar label text (not page title)
@@ -1356,6 +1381,7 @@ mod tests {
             base_url: "/".to_string(),
             sidebar_sections: vec![SidebarEntry::Simple("Water".to_string())],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(
@@ -1429,6 +1455,7 @@ mod tests {
                 },
             ],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
@@ -1497,6 +1524,7 @@ mod tests {
             base_url: "/".to_string(),
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([
@@ -1582,6 +1610,7 @@ mod tests {
             base_url: "/".to_string(),
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
         };
 
         let html = render_blog_grid(&ctx, "pages", "Blog");
