@@ -44,6 +44,38 @@ pub struct ExportContext {
     pub by_key: BTreeMap<String, Vec<ExportedFile>>,
 }
 
+/// One pond's "systemctl status"-style summary, computed at sitegen
+/// render time by `factory::run_status_grid_queries` and rendered as
+/// an HTML card by the `pond_status_grid` shortcode.
+///
+/// All time fields are microseconds since epoch (the units used by
+/// systemd's `__REALTIME_TIMESTAMP`).  `peak_rss_bytes` is parsed from
+/// the pond CLI's `Peak memory usage: NN.NN MB` exit line.  Any field
+/// may be `None` if the corresponding event hasn't been seen yet.
+#[derive(Debug, Clone)]
+pub struct PondStatus {
+    /// Systemd unit name (e.g. `pond@water-prod.service`,
+    /// `pond-selfmon@watershop-selfmon.service`).
+    pub unit: String,
+    /// Most-recent journal entry seen for this unit (microseconds).
+    pub last_seen_us: Option<i64>,
+    /// Most-recent "Started ..." MESSAGE (microseconds + text).
+    pub last_started_us: Option<i64>,
+    pub last_started_msg: Option<String>,
+    /// Most-recent exit-style MESSAGE -- one of "Deactivated...",
+    /// "Failed...", "Stopped...".  Used to surface the last run's
+    /// outcome in the card.
+    pub last_exit_us: Option<i64>,
+    pub last_exit_msg: Option<String>,
+    /// Peak resident-set size of the most recent run, in bytes,
+    /// parsed from "Peak memory usage: NN.NN MB" lines.  Reported in
+    /// bytes for consistency with semconv's `By` unit.
+    pub peak_rss_bytes: Option<u64>,
+    /// Tail of the most-recent N MESSAGE lines (oldest -> newest)
+    /// regardless of run boundary.
+    pub tail_messages: Vec<String>,
+}
+
 /// Context passed to shortcodes during rendering.
 ///
 /// Each template page gets its own `ShortcodeContext`, wrapped in `Arc` and
@@ -82,6 +114,19 @@ pub struct ShortcodeContext {
     /// chart.js chartKey).  Plumbed through from
     /// `SiteConfig.metric_captions`; empty map = no captions rendered.
     pub metric_captions: BTreeMap<String, String>,
+
+    /// Per-pond status records produced by
+    /// `factory::run_status_grid_queries` when `SiteConfig.status_grid`
+    /// is set.  The `pond_status_grid` shortcode renders these as an
+    /// HTML card grid; an empty list renders an empty-state message
+    /// and `None` (the `status_grid` config absent) renders nothing.
+    pub pond_statuses: Option<Vec<PondStatus>>,
+
+    /// UTC timestamp at which the page was rendered, used by the
+    /// `pond_status_grid` shortcode to bake a "last refreshed" line
+    /// into the static HTML output.  Format: ISO 8601, second
+    /// resolution (e.g. `2026-04-27T21:00:00Z`).
+    pub generated_at: String,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -195,6 +240,18 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
             let content_name = args.get_str("content").unwrap_or("");
             let section = args.get_str("section").unwrap_or("");
             render_blog_grid(&c, content_name, section)
+        });
+    }
+
+    // {{ pond_status_grid /}} -- render the per-pond systemctl-style
+    // status cards baked at sitegen time from journal data.  See
+    // `render_pond_status_grid` for HTML structure; the data source is
+    // `factory::run_status_grid_queries` driven by
+    // `SiteConfig.status_grid`.
+    {
+        let c = ctx.clone();
+        shortcodes.register("pond_status_grid", move |_args: &ShortcodeArgs| {
+            render_pond_status_grid(c.pond_statuses.as_deref(), &c.generated_at)
         });
     }
 
@@ -390,6 +447,136 @@ fn render_log_viewer(datafiles: &[ExportedFile]) -> String {
          </div>",
         json
     )
+}
+
+/// Format microseconds-since-epoch as a compact UTC ISO-8601 string.
+/// Returns "—" for None.  Uses chrono only to avoid depending on
+/// time-formatting elsewhere in sitegen.
+fn fmt_micros_utc(us: Option<i64>) -> String {
+    match us {
+        Some(us) => {
+            let secs = us / 1_000_000;
+            let nanos = ((us % 1_000_000) * 1_000) as u32;
+            chrono::DateTime::from_timestamp(secs, nanos)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "—".to_string())
+        }
+        None => "—".to_string(),
+    }
+}
+
+/// Humanize a byte count with IEC units (KiB / MiB / GiB ...) for
+/// display in pond status cards.  Mirrors `formatBytes` in
+/// `assets/chart.js` so server-rendered status and client-rendered
+/// charts agree on units.
+fn fmt_bytes_iec(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut n = bytes as f64;
+    let mut i = 0;
+    while n >= 1024.0 && i < UNITS.len() - 1 {
+        n /= 1024.0;
+        i += 1;
+    }
+    if i == 0 || n >= 100.0 {
+        format!("{:.0} {}", n, UNITS[i])
+    } else {
+        format!("{:.1} {}", n, UNITS[i])
+    }
+}
+
+/// Render the pond status grid as static HTML.
+///
+/// `statuses == None` means `SiteConfig.status_grid` was not configured
+/// for this site; we render nothing rather than a confusing empty grid.
+/// `statuses == Some(empty)` means the grid is configured but no
+/// journal data matched -- we render an empty-state message so the
+/// page is still useful on first boot.
+fn render_pond_status_grid(statuses: Option<&[PondStatus]>, generated_at: &str) -> String {
+    let Some(statuses) = statuses else {
+        return String::new();
+    };
+
+    let mut out = String::new();
+    out.push_str("<div class=\"pond-status-grid-wrap\">");
+    out.push_str(&format!(
+        "<p class=\"pond-status-generated-at\">Generated at {} (refreshes when sitegen runs).</p>",
+        html_escape(generated_at),
+    ));
+
+    if statuses.is_empty() {
+        out.push_str(
+            "<p class=\"pond-status-empty\">\
+             No pond status data available yet.  \
+             Once the journal-ingest factory has captured logs for the \
+             configured units, status cards will appear here.\
+             </p>",
+        );
+        out.push_str("</div>");
+        return out;
+    }
+
+    out.push_str("<div class=\"pond-status-grid\">");
+    for s in statuses {
+        out.push_str("<section class=\"pond-status-card\">");
+        out.push_str(&format!(
+            "<h3 class=\"pond-status-unit\">{}</h3>",
+            html_escape(&s.unit),
+        ));
+
+        out.push_str("<dl class=\"pond-status-meta\">");
+        out.push_str(&format!(
+            "<dt>Last seen</dt><dd>{}</dd>",
+            html_escape(&fmt_micros_utc(s.last_seen_us)),
+        ));
+        out.push_str(&format!(
+            "<dt>Last started</dt><dd>{}{}</dd>",
+            html_escape(&fmt_micros_utc(s.last_started_us)),
+            if let Some(msg) = &s.last_started_msg {
+                format!(
+                    "<br><span class=\"pond-status-msg\">{}</span>",
+                    html_escape(msg)
+                )
+            } else {
+                String::new()
+            },
+        ));
+        out.push_str(&format!(
+            "<dt>Last exit</dt><dd>{}{}</dd>",
+            html_escape(&fmt_micros_utc(s.last_exit_us)),
+            if let Some(msg) = &s.last_exit_msg {
+                format!(
+                    "<br><span class=\"pond-status-msg\">{}</span>",
+                    html_escape(msg)
+                )
+            } else {
+                String::new()
+            },
+        ));
+        out.push_str(&format!(
+            "<dt>Peak RSS</dt><dd>{}</dd>",
+            match s.peak_rss_bytes {
+                Some(b) => html_escape(&fmt_bytes_iec(b)),
+                None => "—".to_string(),
+            },
+        ));
+        out.push_str("</dl>");
+
+        if s.tail_messages.is_empty() {
+            out.push_str("<p class=\"pond-status-tail-empty\">No recent log lines.</p>");
+        } else {
+            out.push_str("<pre class=\"pond-status-tail\">");
+            for msg in &s.tail_messages {
+                out.push_str(&html_escape(msg));
+                out.push('\n');
+            }
+            out.push_str("</pre>");
+        }
+
+        out.push_str("</section>");
+    }
+    out.push_str("</div>");
+    out.push_str("</div>");
+    out
 }
 
 /// Render a navigation list for a named collection.
@@ -960,6 +1147,8 @@ mod tests {
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -1041,6 +1230,8 @@ mod tests {
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -1107,6 +1298,8 @@ mod tests {
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -1189,6 +1382,8 @@ mod tests {
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -1326,6 +1521,8 @@ mod tests {
             ],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // All three present with sidebar label text (not page title)
@@ -1382,6 +1579,8 @@ mod tests {
             sidebar_sections: vec![SidebarEntry::Simple("Water".to_string())],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(
@@ -1456,6 +1655,8 @@ mod tests {
             ],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
@@ -1525,6 +1726,8 @@ mod tests {
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([
@@ -1611,6 +1814,8 @@ mod tests {
             sidebar_sections: vec![],
             metric_registry: BTreeMap::new(),
             metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
 
         let html = render_blog_grid(&ctx, "pages", "Blog");

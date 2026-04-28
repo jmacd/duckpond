@@ -100,6 +100,48 @@ pub struct SiteConfig {
     /// chart.  Missing entries render no caption.
     #[serde(default)]
     pub metric_captions: std::collections::BTreeMap<String, String>,
+
+    /// Optional pond status grid configuration.  When present, sitegen
+    /// runs DataFusion queries against the configured journal data at
+    /// render time and exposes per-unit status to the
+    /// `{{ pond_status_grid /}}` shortcode as static HTML cards.
+    /// See `StatusGridConfig` for fields.
+    #[serde(default)]
+    pub status_grid: Option<StatusGridConfig>,
+}
+
+/// Config for the per-pond systemd status card grid.
+///
+/// Sitegen lists journal `.jsonl` files matching `journal_pattern`, filters
+/// the basenames against `unit_globs`, and for each surviving unit runs
+/// two SQL queries: a status query (latest event, latest "Started" /
+/// exit / "Peak memory usage" lines) and a tail query (most recent
+/// `tail_lines` MESSAGE values).  Results are rendered as static HTML
+/// cards by the `pond_status_grid` shortcode; refresh requires
+/// re-running sitegen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusGridConfig {
+    /// URL pattern resolving to the journal `.jsonl` files written by
+    /// the `journal-ingest` factory, e.g.
+    /// `"jsonlogs:///logs/journal/*.jsonl"`.
+    pub journal_pattern: String,
+
+    /// Shell-style globs (matched against the journal file basename
+    /// without the `.jsonl` suffix) selecting which units to render.
+    /// Examples: `["user-pond@*.service",
+    /// "user-pond-selfmon@*.service"]`.  Empty list disables filtering
+    /// (every journal file becomes a card -- usually not what you want).
+    #[serde(default)]
+    pub unit_globs: Vec<String>,
+
+    /// Number of MESSAGE lines to render in the tail block per card.
+    #[serde(default = "default_tail_lines")]
+    pub tail_lines: usize,
+}
+
+fn default_tail_lines() -> usize {
+    10
 }
 
 impl SiteConfig {

@@ -28,6 +28,7 @@ clap.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 chrono.workspace = true
+datafusion.workspace = true
 humantime = { workspace = true }
 pulldown-cmark.workspace = true
 maud.workspace = true
