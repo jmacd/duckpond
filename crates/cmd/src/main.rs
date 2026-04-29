@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use common::ShipContext;
 use panic_alloc::PanicOnLargeAlloc;
 use std::path::PathBuf;
+use std::time::Instant;
 
 mod commands;
 mod common;
@@ -351,6 +352,17 @@ async fn main() -> Result<()> {
         original_args.clone(),
     );
 
+    // Capture the path/args of the `Run` subcommand (if any) so we can
+    // emit a structured "Run summary" log line at process exit naming
+    // the factory and elapsed time.  See commands::run_summary.
+    let run_meta: Option<(String, Vec<String>)> = if let Commands::Run { path, args } = &cli.command
+    {
+        Some((path.clone(), args.clone()))
+    } else {
+        None
+    };
+    let started = Instant::now();
+
     let result = match cli.command {
         Commands::Init {
             from_backup,
@@ -521,6 +533,26 @@ async fn main() -> Result<()> {
     // Log peak memory usage
     let peak_mem = PEAK_ALLOC.peak_usage_as_mb();
     log::info!("Peak memory usage: {:.2} MB", peak_mem);
+
+    // For `pond run`, also emit a structured one-line summary that
+    // names the resolved factory.  This is what selfmon/observability
+    // grep for when correlating ticks with their factories: the bare
+    // CLI args ("/system/etc/measure/septic-prod push") don't tell
+    // you which factory ran.
+    if let Some((path, args)) = run_meta {
+        let factory = commands::run_summary::take_factory().unwrap_or_else(|| "-".to_string());
+        let elapsed = started.elapsed();
+        let outcome = if result.is_ok() { "ok" } else { "err" };
+        log::info!(
+            "Run summary  path={}  factory={}  args={:?}  elapsed_s={:.3}  peak_mem_mb={:.2}  outcome={}",
+            path,
+            factory,
+            args,
+            elapsed.as_secs_f64(),
+            peak_mem,
+            outcome,
+        );
+    }
 
     // Print large allocations report
     PEAK_ALLOC.print_large_allocs();

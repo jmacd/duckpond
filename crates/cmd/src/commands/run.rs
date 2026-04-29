@@ -57,6 +57,7 @@ async fn run_host_command(
         .map_err(|e| anyhow!("Failed to parse URL '{}': {}", config_path, e))?;
 
     let factory_name = url.scheme().to_string();
+    super::run_summary::record_factory(&factory_name);
 
     // Validate that the scheme is actually a factory (not a format provider or builtin)
     match provider::SchemeRegistry::classify(&factory_name) {
@@ -260,6 +261,7 @@ async fn run_pond_command_impl(
                 config_path
             )
         })?;
+    super::run_summary::record_factory(&factory_name);
 
     // Read the configuration.
     // For file-based dynamic nodes, read via async_reader_path.
