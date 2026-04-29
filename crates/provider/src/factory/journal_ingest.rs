@@ -72,6 +72,14 @@ pub struct JournalIngestConfig {
     /// The value is interpreted as microseconds since Unix epoch.
     #[serde(default = "default_timestamp_field")]
     pub timestamp_field: String,
+
+    /// Extra command-line arguments appended to every `journalctl`
+    /// invocation.  Useful for e.g. `["--merge"]` to pull both the
+    /// system journal and the per-user journal of the invoking user
+    /// (which is what surfaces user-scope units like
+    /// `pond@water-prod.service` to the ingester).  Default: empty.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
 }
 
 fn default_journalctl_command() -> String {
@@ -176,6 +184,8 @@ async fn collect_journal_entries(
     if let Some(cursor_val) = cursor {
         cmd_args.push(format!("--after-cursor={}", cursor_val));
     }
+
+    cmd_args.extend(config.extra_args.iter().cloned());
 
     info!(
         "Spawning: {} {}",
@@ -580,6 +590,7 @@ mod tests {
             journalctl_command: "journalctl".to_string(),
             collect_kernel: true,
             timestamp_field: "__REALTIME_TIMESTAMP".to_string(),
+            extra_args: vec![],
         };
         assert!(config.validate().is_ok());
     }
@@ -591,6 +602,7 @@ mod tests {
             journalctl_command: "journalctl".to_string(),
             collect_kernel: true,
             timestamp_field: "__REALTIME_TIMESTAMP".to_string(),
+            extra_args: vec![],
         };
         assert!(config.validate().is_err());
     }
