@@ -334,8 +334,21 @@ fn determine_filename(entry: &Value, collect_kernel: bool) -> String {
         return KERNEL_FILENAME.to_string();
     }
 
-    // Group by _SYSTEMD_UNIT if present
+    // Group by _SYSTEMD_UNIT if present.  The exception is the user
+    // manager service (`user@<uid>.service`) when the entry also
+    // carries a `_SYSTEMD_USER_UNIT`: that combination identifies an
+    // entry belonging to a user-scope unit (e.g. `pond@water-prod`)
+    // when journalctl is invoked with `--merge`.  Without this
+    // override every user-scope entry would land in a single
+    // `user@<uid>.service.jsonl` blob, defeating per-unit analysis.
     if let Some(unit) = entry.get("_SYSTEMD_UNIT").and_then(|v| v.as_str()) {
+        let is_user_manager = unit.starts_with("user@") && unit.ends_with(".service");
+        if is_user_manager
+            && let Some(user_unit) = entry.get("_SYSTEMD_USER_UNIT").and_then(|v| v.as_str())
+        {
+            let safe_name = user_unit.replace('/', "-");
+            return format!("user-{}.jsonl", safe_name);
+        }
         // Sanitize unit name for use as filename
         // systemd units are already mostly filename-safe, just replace / with -
         let safe_name = unit.replace('/', "-");
@@ -661,6 +674,34 @@ mod tests {
             determine_filename(&entry, true),
             "user-pulseaudio.service.jsonl"
         );
+    }
+
+    #[test]
+    fn test_determine_filename_user_manager_with_user_unit() {
+        // journalctl --merge tags user-scope entries with both
+        // _SYSTEMD_UNIT=user@<uid>.service and the actual user unit
+        // in _SYSTEMD_USER_UNIT.  Without the override we'd dump
+        // every user-scope entry into a single user@<uid>.jsonl.
+        let entry: Value = serde_json::from_str(
+            r#"{"_SYSTEMD_UNIT":"user@1001.service","_SYSTEMD_USER_UNIT":"pond@water-prod.service","MESSAGE":"test","_TRANSPORT":"stdout"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            determine_filename(&entry, true),
+            "user-pond@water-prod.service.jsonl"
+        );
+    }
+
+    #[test]
+    fn test_determine_filename_user_manager_without_user_unit() {
+        // The user manager itself logs entries that lack
+        // _SYSTEMD_USER_UNIT (e.g. session lifecycle); those should
+        // still file under user@<uid>.service.jsonl.
+        let entry: Value = serde_json::from_str(
+            r#"{"_SYSTEMD_UNIT":"user@1001.service","MESSAGE":"Started session","_TRANSPORT":"journal"}"#,
+        )
+        .unwrap();
+        assert_eq!(determine_filename(&entry, true), "user@1001.service.jsonl");
     }
 
     #[test]
