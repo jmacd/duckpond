@@ -17,6 +17,26 @@ use crate::routes::ContentPage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Build the canonical href for a content page.
+///
+/// Uses the page's `url_path` (recorded by route expansion) when
+/// available and falls back to `/{slug}` for pages that aren't bound
+/// to a route. The result is `<base_url><path>.html` with `base_url`
+/// trimmed of any trailing slash.
+fn content_page_href(base_url: &str, page: &ContentPage) -> String {
+    let base = base_url.trim_end_matches('/');
+    let path = if page.url_path.is_empty() {
+        format!("/{}", page.slug)
+    } else {
+        page.url_path.clone()
+    };
+    if base.is_empty() {
+        format!("{}.html", path)
+    } else {
+        format!("{}{}.html", base, path)
+    }
+}
+
 /// One exported data file with capture groups and time range.
 ///
 /// This is the typed struct that shortcodes receive directly -- no JSON
@@ -737,15 +757,6 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
     if !ctx.sidebar_sections.is_empty() {
         let pages = ctx.content_pages.get(content_name).map(|v| v.as_slice());
 
-        let base = ctx.base_url.trim_end_matches('/');
-        let page_href = |slug: &str| -> String {
-            if base.is_empty() || base == "/" {
-                format!("/{}.html", slug)
-            } else {
-                format!("{}/{}.html", base, slug)
-            }
-        };
-
         let mut html = String::from("<ul>\n");
         for entry in &ctx.sidebar_sections {
             let label = entry.label();
@@ -772,7 +783,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                             .iter()
                             .find(|p| !p.hidden && p.title.contains(label))
                     })
-                    .map(|page| page_href(&page.slug))
+                    .map(|page| content_page_href(&ctx.base_url, page))
             };
 
             if let Some(parent_href) = resolved_href {
@@ -852,20 +863,9 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         return format!("<!-- content_nav: content '{}' is empty -->", content_name);
     }
 
-    let base = ctx.base_url.trim_end_matches('/');
-
-    // Build href for a page
-    let page_href = |slug: &str| -> String {
-        if base.is_empty() || base == "/" {
-            format!("/{}.html", slug)
-        } else {
-            format!("{}/{}.html", base, slug)
-        }
-    };
-
     // Render a single <li> for a page, with an optional display label override.
     let render_li = |page: &ContentPage, label: &str, indent: &str| -> String {
-        let href = page_href(&page.slug);
+        let href = content_page_href(&ctx.base_url, page);
         let is_active = ctx.current_path == href;
         let li_class = if is_active { " class=\"active\"" } else { "" };
         let aria = if is_active {
@@ -899,7 +899,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         sections.iter().find_map(|(key, section_pages)| {
             if section_pages
                 .iter()
-                .any(|p| ctx.current_path == page_href(&p.slug))
+                .any(|p| ctx.current_path == content_page_href(&ctx.base_url, p))
             {
                 Some(key.clone())
             } else {
@@ -1045,20 +1045,10 @@ fn render_blog_grid(ctx: &ShortcodeContext, content_name: &str, section: &str) -
         (None, None) => a.weight.cmp(&b.weight),
     });
 
-    let base = ctx.base_url.trim_end_matches('/');
-
-    let page_href = |slug: &str| -> String {
-        if base.is_empty() || base == "/" {
-            format!("/{}.html", slug)
-        } else {
-            format!("{}/{}.html", base, slug)
-        }
-    };
-
     let mut html = String::from("<div class=\"blog-grid\">\n");
 
     for post in &posts {
-        let href = page_href(&post.slug);
+        let href = content_page_href(&ctx.base_url, post);
         html.push_str("  <a class=\"blog-card\" href=\"");
         html.push_str(&href);
         html.push_str("\">\n");
@@ -1262,6 +1252,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "History".to_string(),
@@ -1273,6 +1264,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Hidden Page".to_string(),
@@ -1284,6 +1276,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         let ctx = ShortcodeContext {
@@ -1346,6 +1339,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "History".to_string(),
@@ -1357,6 +1351,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Blog".to_string(),
@@ -1368,6 +1363,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         let ctx = ShortcodeContext {
@@ -1478,6 +1474,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Blog".to_string(),
@@ -1489,6 +1486,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 // Page title is longer than sidebar label
@@ -1501,6 +1499,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         // Sidebar labels: short names that match within page titles.
@@ -1554,6 +1553,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Water".to_string(),
@@ -1565,6 +1565,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         let ctx = ShortcodeContext {
@@ -1610,6 +1611,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Monitoring".to_string(),
@@ -1621,6 +1623,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
 
@@ -1767,6 +1770,7 @@ mod tests {
                 date: Some("2024-01-15".to_string()),
                 summary: Some("An older post".to_string()),
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "New Post".to_string(),
@@ -1778,6 +1782,7 @@ mod tests {
                 date: Some("2025-03-10".to_string()),
                 summary: Some("A newer post".to_string()),
                 image: Some("/img/hero.jpg".to_string()),
+                url_path: "/blog/new-post".to_string(),
             },
             ContentPage {
                 title: "Not a Blog".to_string(),
@@ -1789,6 +1794,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Hidden Blog".to_string(),
@@ -1800,6 +1806,7 @@ mod tests {
                 date: Some("2025-02-01".to_string()),
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         let ctx = ShortcodeContext {
@@ -1863,10 +1870,16 @@ mod tests {
         );
         // Summary present
         assert!(html.contains("A newer post"), "Expected summary: {}", html);
-        // Links are correct
+        // Links use url_path when set (nested route mount)
         assert!(
-            html.contains("href=\"/new-post.html\""),
-            "Expected correct href: {}",
+            html.contains("href=\"/blog/new-post.html\""),
+            "Expected url_path-based href: {}",
+            html
+        );
+        // Falls back to /{slug} when url_path is empty
+        assert!(
+            html.contains("href=\"/old-post.html\""),
+            "Expected fallback href for old-post: {}",
             html
         );
     }

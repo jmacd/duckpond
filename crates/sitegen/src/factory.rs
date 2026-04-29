@@ -290,7 +290,8 @@ async fn build_site_from_root(
     let mut file_cache: BTreeMap<String, String> = BTreeMap::new();
 
     // Collect all page paths from route expansion
-    let jobs = routes::expand_routes(config, &exports, &content);
+    let expansion = routes::expand_routes(config, &exports, &content);
+    let jobs = expansion.jobs;
     for job in &jobs {
         if !file_cache.contains_key(&job.page_source) {
             let data = root
@@ -1045,6 +1046,7 @@ async fn run_content_stages(
                 date: fm.date,
                 summary: fm.summary,
                 image: fm.image,
+                url_path: String::new(),
             });
         }
 
@@ -1367,7 +1369,9 @@ fn generate_site(
     };
 
     // Expand the route tree into page jobs
-    let jobs = routes::expand_routes(config, exports, content);
+    let expansion = routes::expand_routes(config, exports, content);
+    let jobs = expansion.jobs;
+    let content_urls = expansion.content_urls;
     info!("Route expansion: {} pages to generate", jobs.len());
 
     // Build collections for navigation shortcodes
@@ -1376,9 +1380,34 @@ fn generate_site(
     // Build content_pages map for content_nav shortcode.
     // Includes both explicit content pages and synthetic entries from
     // template routes so that export-based pages are navigable.
+    // Stamp each page's `url_path` with the canonical URL discovered
+    // during route expansion so shortcodes/feeds build correct links
+    // regardless of where a content stage is mounted.
     let mut content_pages: BTreeMap<String, Vec<ContentPage>> = content
         .iter()
-        .map(|(name, ctx)| (name.clone(), ctx.pages.clone()))
+        .map(|(name, ctx)| {
+            let urls = content_urls.get(name);
+            let pages: Vec<ContentPage> = ctx
+                .pages
+                .iter()
+                .map(|p| {
+                    let mut p = p.clone();
+                    p.url_path = urls
+                        .and_then(|m| m.get(&p.source_path).cloned())
+                        .unwrap_or_else(|| {
+                            log::warn!(
+                                "Content page '{}' in collection '{}' is not bound to any content route; falling back to '/{}' for links",
+                                p.source_path,
+                                name,
+                                p.slug
+                            );
+                            format!("/{}", p.slug)
+                        });
+                    p
+                })
+                .collect();
+            (name.clone(), pages)
+        })
         .collect();
     for (name, pages) in routes::build_template_content_pages(config, exports) {
         content_pages.entry(name).or_default().extend(pages);
@@ -1494,7 +1523,7 @@ fn generate_site(
 
     // Generate RSS feed if site_url is configured
     if config.site.site_url.is_some() {
-        generate_feed(config, content, output_dir)?;
+        generate_feed(config, &content_pages, output_dir)?;
     } else {
         info!("RSS feed skipped: site.site_url not configured");
     }
@@ -1517,7 +1546,7 @@ fn generate_site(
 /// descending, and writes `feed.xml` to the output directory.
 fn generate_feed(
     config: &SiteConfig,
-    content: &BTreeMap<String, ContentContext>,
+    content_pages: &BTreeMap<String, Vec<ContentPage>>,
     output_dir: &Path,
 ) -> Result<(), GenerateError> {
     let site_url = config
@@ -1536,11 +1565,11 @@ fn generate_feed(
     // Find the content stage to use
     let content_name = feed_config
         .and_then(|f| f.content.as_deref())
-        .or_else(|| content.keys().next().map(|s| s.as_str()));
+        .or_else(|| content_pages.keys().next().map(|s| s.as_str()));
 
     let pages = match content_name {
-        Some(name) => match content.get(name) {
-            Some(ctx) => &ctx.pages,
+        Some(name) => match content_pages.get(name) {
+            Some(pages) => pages,
             None => {
                 warn!("RSS feed: content stage '{}' not found, skipping", name);
                 return Ok(());
@@ -1569,7 +1598,16 @@ fn generate_feed(
     let items: Vec<rss::Item> = blog_posts
         .iter()
         .map(|page| {
-            let link = format!("{}{}/{}.html", site_url, base, page.slug);
+            // Use the canonical URL recorded by route expansion so that
+            // posts mounted under a nested route (e.g. /blog/<slug>)
+            // get the correct link, falling back to the bare slug for
+            // pages outside the route tree.
+            let path = if page.url_path.is_empty() {
+                format!("/{}", page.slug)
+            } else {
+                page.url_path.clone()
+            };
+            let link = format!("{}{}{}.html", site_url, base, path);
             let pub_date = page.date.as_deref().and_then(iso_date_to_rfc2822);
 
             let mut item = rss::Item::default();
@@ -1804,60 +1842,62 @@ mod tests {
             status_grid: None,
         };
 
-        let mut content = BTreeMap::new();
-        content.insert(
+        let mut content_pages: BTreeMap<String, Vec<ContentPage>> = BTreeMap::new();
+        content_pages.insert(
             "pages".to_string(),
-            ContentContext {
-                pages: vec![
-                    ContentPage {
-                        title: "First Post".to_string(),
-                        slug: "first-post".to_string(),
-                        weight: 100,
-                        hidden: false,
-                        section: Some("Blog".to_string()),
-                        source_path: "/content/first-post.md".to_string(),
-                        date: Some("2025-01-15".to_string()),
-                        summary: Some("My first post".to_string()),
-                        image: None,
-                    },
-                    ContentPage {
-                        title: "Second Post".to_string(),
-                        slug: "second-post".to_string(),
-                        weight: 100,
-                        hidden: false,
-                        section: Some("Blog".to_string()),
-                        source_path: "/content/second-post.md".to_string(),
-                        date: Some("2025-02-20".to_string()),
-                        summary: None,
-                        image: None,
-                    },
-                    ContentPage {
-                        title: "Hidden Post".to_string(),
-                        slug: "hidden".to_string(),
-                        weight: 100,
-                        hidden: true,
-                        section: Some("Blog".to_string()),
-                        source_path: "/content/hidden.md".to_string(),
-                        date: Some("2025-03-01".to_string()),
-                        summary: None,
-                        image: None,
-                    },
-                    ContentPage {
-                        title: "Not Blog".to_string(),
-                        slug: "about".to_string(),
-                        weight: 100,
-                        hidden: false,
-                        section: Some("Main".to_string()),
-                        source_path: "/content/about.md".to_string(),
-                        date: None,
-                        summary: None,
-                        image: None,
-                    },
-                ],
-            },
+            vec![
+                ContentPage {
+                    title: "First Post".to_string(),
+                    slug: "first-post".to_string(),
+                    weight: 100,
+                    hidden: false,
+                    section: Some("Blog".to_string()),
+                    source_path: "/content/first-post.md".to_string(),
+                    date: Some("2025-01-15".to_string()),
+                    summary: Some("My first post".to_string()),
+                    image: None,
+                    url_path: "/blog/first-post".to_string(),
+                },
+                ContentPage {
+                    title: "Second Post".to_string(),
+                    slug: "second-post".to_string(),
+                    weight: 100,
+                    hidden: false,
+                    section: Some("Blog".to_string()),
+                    source_path: "/content/second-post.md".to_string(),
+                    date: Some("2025-02-20".to_string()),
+                    summary: None,
+                    image: None,
+                    url_path: "/blog/second-post".to_string(),
+                },
+                ContentPage {
+                    title: "Hidden Post".to_string(),
+                    slug: "hidden".to_string(),
+                    weight: 100,
+                    hidden: true,
+                    section: Some("Blog".to_string()),
+                    source_path: "/content/hidden.md".to_string(),
+                    date: Some("2025-03-01".to_string()),
+                    summary: None,
+                    image: None,
+                    url_path: "/blog/hidden".to_string(),
+                },
+                ContentPage {
+                    title: "Not Blog".to_string(),
+                    slug: "about".to_string(),
+                    weight: 100,
+                    hidden: false,
+                    section: Some("Main".to_string()),
+                    source_path: "/content/about.md".to_string(),
+                    date: None,
+                    summary: None,
+                    image: None,
+                    url_path: "/about".to_string(),
+                },
+            ],
         );
 
-        generate_feed(&config, &content, output_dir.path()).unwrap();
+        generate_feed(&config, &content_pages, output_dir.path()).unwrap();
 
         let feed_path = output_dir.path().join("feed.xml");
         assert!(feed_path.exists(), "feed.xml should be created");
@@ -1878,7 +1918,16 @@ mod tests {
             xml
         );
         assert!(!xml.contains("Not Blog"), "Non-blog excluded: {}", xml);
-        assert!(xml.contains("first-post.html"), "First post link: {}", xml);
+        assert!(
+            xml.contains("https://example.com/blog/first-post.html"),
+            "First post link uses url_path: {}",
+            xml
+        );
+        assert!(
+            xml.contains("https://example.com/blog/second-post.html"),
+            "Second post link uses url_path: {}",
+            xml
+        );
         assert!(xml.contains("My first post"), "First post summary: {}", xml);
         // Second Post should appear before First Post (date desc)
         let second_pos = xml.find("Second Post").unwrap();
@@ -1914,7 +1963,7 @@ mod tests {
             metric_captions: std::collections::BTreeMap::new(),
             status_grid: None,
         };
-        let content = BTreeMap::new();
+        let content: BTreeMap<String, Vec<ContentPage>> = BTreeMap::new();
 
         // Should error because site_url is missing
         let result = generate_feed(&config, &content, output_dir.path());

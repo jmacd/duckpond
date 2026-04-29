@@ -33,6 +33,11 @@ pub struct ContentPage {
     pub summary: Option<String>,
     /// Image URL for blog card hero image
     pub image: Option<String>,
+    /// Absolute path component of the page's emitted URL, with leading
+    /// `/`, no `.html` extension, and no `base_url` prefix
+    /// (e.g. `/blog/herewego` or `/water`). Populated by route
+    /// expansion; empty when the page is not bound to a route.
+    pub url_path: String,
 }
 
 /// All discovered content pages for one content stage, sorted by (weight, title).
@@ -56,6 +61,22 @@ pub struct PageJob {
     pub breadcrumbs: Vec<(String, String)>,
 }
 
+/// Index of canonical URL paths for content-stage pages discovered
+/// during route expansion. Keyed first by content-stage name, then
+/// by the page's `source_path`. Values are absolute URL path
+/// components (with leading `/`, no `.html`, no `base_url` prefix).
+pub type ContentUrlIndex = BTreeMap<String, BTreeMap<String, String>>;
+
+/// Result of route expansion: the flat job list plus an index of
+/// canonical URLs for content-stage pages so other components
+/// (shortcodes, RSS feed) can build correct links regardless of
+/// where a content stage is mounted in the route tree.
+#[derive(Debug, Clone, Default)]
+pub struct RouteExpansion {
+    pub jobs: Vec<PageJob>,
+    pub content_urls: ContentUrlIndex,
+}
+
 /// Expand the config route tree into a flat list of page jobs.
 ///
 /// Template routes are expanded using export results: one page per unique
@@ -65,8 +86,9 @@ pub fn expand_routes(
     config: &SiteConfig,
     exports: &BTreeMap<String, ExportContext>,
     content: &BTreeMap<String, ContentContext>,
-) -> Vec<PageJob> {
+) -> RouteExpansion {
     let mut jobs = Vec::new();
+    let mut content_urls: ContentUrlIndex = BTreeMap::new();
     let base = config.site.base_url.trim_end_matches('/').to_string();
     let home_url = if base.is_empty() || base == "/" {
         "/".to_string()
@@ -76,13 +98,23 @@ pub fn expand_routes(
     let breadcrumbs = vec![("Home".to_string(), home_url)];
 
     for route in &config.routes {
-        expand_route(route, "", &breadcrumbs, &base, exports, content, &mut jobs);
+        expand_route(
+            route,
+            "",
+            &breadcrumbs,
+            &base,
+            exports,
+            content,
+            &mut jobs,
+            &mut content_urls,
+        );
     }
 
-    jobs
+    RouteExpansion { jobs, content_urls }
 }
 
 /// Recursively expand a single route node and its children.
+#[allow(clippy::too_many_arguments)]
 fn expand_route(
     route: &RouteConfig,
     parent_path: &str,
@@ -91,6 +123,7 @@ fn expand_route(
     exports: &BTreeMap<String, ExportContext>,
     content: &BTreeMap<String, ContentContext>,
     jobs: &mut Vec<PageJob>,
+    content_urls: &mut ContentUrlIndex,
 ) {
     match route.route_type {
         RouteType::Static => {
@@ -137,6 +170,7 @@ fn expand_route(
                     exports,
                     content,
                     jobs,
+                    content_urls,
                 );
             }
         }
@@ -193,6 +227,7 @@ fn expand_route(
                         exports,
                         content,
                         jobs,
+                        content_urls,
                     );
                 }
             }
@@ -213,6 +248,7 @@ fn expand_route(
             };
 
             // One page per content file, sorted by (weight, title)
+            let urls = content_urls.entry(content_name.to_string()).or_default();
             for page in &content_ctx.pages {
                 let url_path = if parent_path.is_empty() {
                     format!("/{}", page.slug)
@@ -220,6 +256,25 @@ fn expand_route(
                     format!("{}/{}", parent_path, page.slug)
                 };
                 let output_path = format!("{}.html", url_path.trim_start_matches('/'));
+
+                // Record canonical URL for this page. If the same source
+                // file is mounted by multiple content routes, keep the
+                // first URL and warn -- ambiguous link targets are a
+                // config bug worth surfacing.
+                if let Some(existing) = urls.get(&page.source_path) {
+                    if existing != &url_path {
+                        log::warn!(
+                            "Content '{}' source '{}' is mounted at both '{}' and '{}'; using '{}' for links",
+                            content_name,
+                            page.source_path,
+                            existing,
+                            url_path,
+                            existing
+                        );
+                    }
+                } else {
+                    urls.insert(page.source_path.clone(), url_path.clone());
+                }
 
                 let mut breadcrumbs = parent_breadcrumbs.to_vec();
                 let url = prefix_base(base_url, &url_path);
@@ -303,6 +358,7 @@ pub fn build_template_content_pages(
                                 date: None,
                                 summary: None,
                                 image: None,
+                                url_path,
                             }
                         })
                         .collect();
@@ -443,7 +499,7 @@ mod tests {
         let config = test_config();
         let exports = test_exports();
         let content = BTreeMap::new();
-        let jobs = expand_routes(&config, &exports, &content);
+        let jobs = expand_routes(&config, &exports, &content).jobs;
 
         // Should have: index.html, params/index.html, params/Temperature.html, params/DO.html
         assert_eq!(jobs.len(), 4);
@@ -456,7 +512,7 @@ mod tests {
         let config = test_config();
         let exports = test_exports();
         let content = BTreeMap::new();
-        let jobs = expand_routes(&config, &exports, &content);
+        let jobs = expand_routes(&config, &exports, &content).jobs;
 
         let template_jobs: Vec<_> = jobs.iter().filter(|j| !j.captures.is_empty()).collect();
         assert_eq!(template_jobs.len(), 2);
@@ -474,7 +530,7 @@ mod tests {
         let config = test_config();
         let exports = test_exports();
         let content = BTreeMap::new();
-        let jobs = expand_routes(&config, &exports, &content);
+        let jobs = expand_routes(&config, &exports, &content).jobs;
 
         // Template route should have: Home > params > Temperature
         let temp_job = jobs
@@ -515,6 +571,7 @@ mod tests {
                         date: None,
                         summary: None,
                         image: None,
+                        url_path: String::new(),
                     },
                     ContentPage {
                         title: "History".to_string(),
@@ -526,6 +583,7 @@ mod tests {
                         date: None,
                         summary: None,
                         image: None,
+                        url_path: String::new(),
                     },
                 ],
             },
@@ -571,7 +629,7 @@ mod tests {
         };
 
         let exports = BTreeMap::new();
-        let jobs = expand_routes(&config, &exports, &content);
+        let jobs = expand_routes(&config, &exports, &content).jobs;
 
         // index.html + water.html + history.html
         assert_eq!(jobs.len(), 3);
@@ -602,6 +660,7 @@ mod tests {
                         date: None,
                         summary: None,
                         image: None,
+                        url_path: String::new(),
                     },
                     ContentPage {
                         title: "Secret".to_string(),
@@ -613,6 +672,7 @@ mod tests {
                         date: None,
                         summary: None,
                         image: None,
+                        url_path: String::new(),
                     },
                 ],
             },
