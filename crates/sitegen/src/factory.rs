@@ -685,7 +685,7 @@ async fn query_pond_status(
             MAX(CASE WHEN MESSAGE LIKE 'Deactivated %' OR MESSAGE LIKE 'Stopped %' OR MESSAGE LIKE 'Failed %' OR MESSAGE LIKE '% exited %' THEN ts END) AS last_exit_us, \
             MAX(CASE WHEN MESSAGE LIKE 'Deactivated %' OR MESSAGE LIKE 'Stopped %' OR MESSAGE LIKE 'Failed %' OR MESSAGE LIKE '% exited %' THEN MESSAGE END) AS last_exit_msg, \
             MAX(CASE WHEN MESSAGE LIKE 'Peak memory usage:%' THEN MESSAGE END) AS last_peak_msg \
-         FROM (SELECT CAST(__REALTIME_TIMESTAMP AS BIGINT) AS ts, MESSAGE FROM {}) t",
+         FROM (SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {}) t",
         table_name
     );
 
@@ -735,7 +735,7 @@ async fn query_pond_status(
     // Tail query: most recent N messages, oldest -> newest in display.
     let tail_sql = format!(
         "SELECT MESSAGE FROM (\
-            SELECT CAST(__REALTIME_TIMESTAMP AS BIGINT) AS ts, MESSAGE FROM {} \
+            SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {} \
             ORDER BY ts DESC LIMIT {}\
          ) t ORDER BY ts ASC",
         table_name, tail_lines
