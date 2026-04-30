@@ -341,7 +341,7 @@ async fn run_pond_command_impl(
 
     // If this is a remote import factory, load import partitions from control table
     if factory_name == "remote"
-        && let Ok(remote_config) = serde_json::from_slice::<remote::RemoteConfig>(&config_bytes)
+        && let Ok(remote_config) = serde_yaml::from_slice::<remote::RemoteConfig>(&config_bytes)
         && let Some(ref import_config) = remote_config.import
     {
         // Parse the source_path to get the factory key (top-level part_id).
@@ -365,14 +365,27 @@ async fn run_pond_command_impl(
 
         if let Ok(Some(entry)) = parent_wd.get(dir_name).await {
             let factory_key = entry.id().part_id().to_string();
-            if let Ok(partitions) = tx.query_import_partitions(&factory_key).await
-                && !partitions.is_empty()
-            {
-                log::info!(
-                    "Loaded {} cached import partition(s) from control table",
-                    partitions.len()
-                );
-                factory_context = factory_context.with_import_partitions(partitions);
+            match tx.query_import_partitions(&factory_key).await {
+                Ok(partitions) if !partitions.is_empty() => {
+                    log::info!(
+                        "Loaded {} cached import partition(s) from control table",
+                        partitions.len()
+                    );
+                    factory_context = factory_context.with_import_partitions(partitions);
+                }
+                Ok(_) => {
+                    log::debug!(
+                        "No cached import partitions found for factory_key={}",
+                        factory_key
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to query import partitions for {}: {}",
+                        factory_key,
+                        e
+                    );
+                }
             }
         }
     }
