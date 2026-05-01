@@ -1732,45 +1732,56 @@ async fn execute_import(
     }
     log::info!("   Updated watermark to {}", new_watermark);
 
-    // Step 6: Download large files from the remote backup.
-    // Large files are stored with POND-FILE bundles and referenced by
-    // BLAKE3 hash from the imported partition data.
-    let pond_path = state.store_path().await;
-    let all_remote_files = remote_table.list_files("").await?;
-    let mut large_downloaded = 0;
-    for (bundle_id, path, pond_txn_id, _size) in &all_remote_files {
-        if !path.starts_with("_large_files/") {
-            continue;
-        }
-        let large_file_fs_path = pond_path.join(path);
-        if large_file_fs_path.exists() {
-            continue;
-        }
-        if let Some(parent) = large_file_fs_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                RemoteError::TableOperation(format!(
-                    "Failed to create _large_files directory: {}",
-                    e
-                ))
-            })?;
-        }
-        let mut output = Vec::new();
-        remote_table
-            .read_file(bundle_id, path, *pond_txn_id, &mut output)
+    // Step 6: Download large files newly referenced by this import.
+    //
+    // Large files are content-addressed (BLAKE3) and stored under
+    // `_large_files/` in the remote bucket; the imported partition
+    // parquet just contains the hash refs.  We only need to reconcile
+    // when this tick actually pulled new partition data -- a watermark
+    // advance with zero file downloads cannot have introduced new hash
+    // refs, so there's nothing to fetch.  Skipping the manifest scan
+    // here matters because it's a few-MB Delta query on the order of
+    // every-tick if not gated.
+    if downloaded > 0 {
+        let pond_path = state.store_path().await;
+        // Filter the manifest scan at the SQL level to only the
+        // _large_files/ subset rather than pulling the entire
+        // remote_files manifest and discarding ~99% client-side.
+        let large_remote_files = remote_table
+            .list_files_with_path_prefix("", "_large_files/")
             .await?;
-        tokio::fs::write(&large_file_fs_path, &output)
-            .await
-            .map_err(|e| {
-                RemoteError::TableOperation(format!(
-                    "Failed to write {}: {}",
-                    large_file_fs_path.display(),
-                    e
-                ))
-            })?;
-        large_downloaded += 1;
-    }
-    if large_downloaded > 0 {
-        log::info!("   Downloaded {} large file(s)", large_downloaded);
+        let mut large_downloaded = 0;
+        for (bundle_id, path, pond_txn_id, _size) in &large_remote_files {
+            let large_file_fs_path = pond_path.join(path);
+            if large_file_fs_path.exists() {
+                continue;
+            }
+            if let Some(parent) = large_file_fs_path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    RemoteError::TableOperation(format!(
+                        "Failed to create _large_files directory: {}",
+                        e
+                    ))
+                })?;
+            }
+            let mut output = Vec::new();
+            remote_table
+                .read_file(bundle_id, path, *pond_txn_id, &mut output)
+                .await?;
+            tokio::fs::write(&large_file_fs_path, &output)
+                .await
+                .map_err(|e| {
+                    RemoteError::TableOperation(format!(
+                        "Failed to write {}: {}",
+                        large_file_fs_path.display(),
+                        e
+                    ))
+                })?;
+            large_downloaded += 1;
+        }
+        if large_downloaded > 0 {
+            log::info!("   Downloaded {} large file(s)", large_downloaded);
+        }
     }
 
     log::info!(

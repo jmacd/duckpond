@@ -570,15 +570,51 @@ impl RemoteTable {
     ///
     /// # Errors
     /// Returns error if query fails
-    pub async fn list_files(&self, _pond_id: &str) -> Result<Vec<(String, String, i64, i64)>> {
-        let df = self
-            .session_context
-            .sql(
+    pub async fn list_files(&self, pond_id: &str) -> Result<Vec<(String, String, i64, i64)>> {
+        self.list_files_with_path_prefix(pond_id, "").await
+    }
+
+    /// Like `list_files`, but additionally filters at the SQL level by a
+    /// path prefix.  The prefix is matched against the `path` column with
+    /// `LIKE '<prefix>%'`, so callers that only care about, e.g., the
+    /// `_large_files/` subset don't pull the entire manifest just to throw
+    /// most of it away.
+    ///
+    /// # Arguments
+    /// * `_pond_id` - currently unused (manifest is shared across ponds in this client)
+    /// * `path_prefix` - path prefix filter; empty string matches all paths
+    ///
+    /// # Errors
+    /// Returns error if query fails or if `path_prefix` contains a single
+    /// quote (would break the SQL string literal).
+    pub async fn list_files_with_path_prefix(
+        &self,
+        _pond_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<(String, String, i64, i64)>> {
+        if path_prefix.contains('\'') {
+            return Err(RemoteError::TableOperation(format!(
+                "list_files_with_path_prefix: path_prefix may not contain single quotes: {:?}",
+                path_prefix
+            )));
+        }
+
+        let sql = if path_prefix.is_empty() {
+            "SELECT DISTINCT bundle_id, path, pond_txn_id, total_size 
+                 FROM remote_files 
+                 ORDER BY path"
+                .to_string()
+        } else {
+            format!(
                 "SELECT DISTINCT bundle_id, path, pond_txn_id, total_size 
                  FROM remote_files 
+                 WHERE path LIKE '{}%' 
                  ORDER BY path",
+                path_prefix
             )
-            .await?;
+        };
+
+        let df = self.session_context.sql(&sql).await?;
 
         let batches = df.collect().await?;
 
