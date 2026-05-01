@@ -18,6 +18,7 @@ pub mod mkdir;
 pub mod mknod;
 pub mod recover;
 pub mod run;
+pub mod run_summary;
 pub mod show;
 pub mod temporal;
 

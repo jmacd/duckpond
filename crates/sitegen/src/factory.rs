@@ -19,7 +19,7 @@ use crate::config::SiteConfig;
 use crate::layouts::{self, LayoutContext};
 use crate::markdown::{preprocess_shortcodes, render_markdown};
 use crate::routes::{self, ContentContext, ContentPage};
-use crate::shortcodes::{self, ExportContext, ShortcodeContext};
+use crate::shortcodes::{self, ExportContext, PondStatus, ShortcodeContext};
 use log::{debug, info, warn};
 use provider::{ExecutionContext, FactoryContext, register_executable_factory};
 use serde::Deserialize;
@@ -277,11 +277,21 @@ async fn build_site_from_root(
     // Run content stages
     let content = run_content_stages(config, root).await?;
 
+    // Run pond status grid queries (no-op when not configured).
+    // We compute these once per site build and pass them through to
+    // every page; the shortcode renders nothing when the option is
+    // None, so unrelated pages aren't affected.
+    let pond_statuses = run_status_grid_queries(config, root, provider_ctx).await?;
+    let generated_at = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
+
     // Pre-read all files from the pond into a map
     let mut file_cache: BTreeMap<String, String> = BTreeMap::new();
 
     // Collect all page paths from route expansion
-    let jobs = routes::expand_routes(config, &exports, &content);
+    let expansion = routes::expand_routes(config, &exports, &content);
+    let jobs = expansion.jobs;
     for job in &jobs {
         if !file_cache.contains_key(&job.page_source) {
             let data = root
@@ -352,6 +362,8 @@ async fn build_site_from_root(
         &read_pond_file,
         output_dir,
         root_base_url,
+        pond_statuses,
+        &generated_at,
     )
     .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
 
@@ -520,6 +532,298 @@ async fn run_format_provider_export(
     }
 
     Ok(by_key)
+}
+
+/// Run the pond status grid queries (when `SiteConfig.status_grid` is
+/// set), producing one `PondStatus` per matching journal `.jsonl` file.
+///
+/// Returns `Ok(None)` when the feature isn't configured -- the
+/// shortcode renders nothing in that case.  An empty `Vec` means the
+/// feature *is* configured but discovery turned up zero files
+/// (e.g. journal-ingest hasn't run yet); the shortcode renders an
+/// empty-state.
+async fn run_status_grid_queries(
+    config: &SiteConfig,
+    root: &tinyfs::WD,
+    provider_ctx: &tinyfs::ProviderContext,
+) -> Result<Option<Vec<PondStatus>>, tinyfs::Error> {
+    let Some(grid_cfg) = &config.status_grid else {
+        return Ok(None);
+    };
+
+    // Parse the configured journal_pattern URL once to extract the
+    // scheme and the path glob.  We use TinyFS collect_matches() (not
+    // UrlPatternMatcher) for discovery so we can match unit_globs
+    // against basenames before paying for a TableProvider per file.
+    let pattern_url = provider::Url::parse(&grid_cfg.journal_pattern).map_err(|e| {
+        tinyfs::Error::Other(format!(
+            "status_grid: invalid journal_pattern '{}': {}",
+            grid_cfg.journal_pattern, e
+        ))
+    })?;
+    let scheme = pattern_url.scheme().to_string();
+    let path_pattern = pattern_url.path().to_string();
+
+    let matches = match root.collect_matches(&path_pattern).await {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                "status_grid: collect_matches('{}') failed: {}",
+                path_pattern, e
+            );
+            return Ok(Some(Vec::new()));
+        }
+    };
+
+    // Filter basenames against unit_globs (simple `*` wildcard).
+    let unit_globs: Vec<&str> = grid_cfg.unit_globs.iter().map(String::as_str).collect();
+    let matches_unit = |unit: &str| -> bool {
+        if unit_globs.is_empty() {
+            return true;
+        }
+        unit_globs.iter().any(|g| simple_glob_match(g, unit))
+    };
+
+    let fs = provider_ctx.filesystem();
+    let provider = provider::Provider::new(Arc::new(fs)).with_root(root.clone());
+    let matcher = provider::UrlPatternMatcher::new(provider);
+    let ctx = &provider_ctx.datafusion_session;
+    let tail_lines = grid_cfg.tail_lines;
+
+    let mut statuses: Vec<PondStatus> = Vec::new();
+
+    for (np, _captures) in &matches {
+        let basename = np.basename();
+        let unit = basename.trim_end_matches(".jsonl").to_string();
+        if !matches_unit(&unit) {
+            continue;
+        }
+
+        let path_str = np.path().to_string_lossy().to_string();
+        let file_url = format!("{}://{}", scheme, path_str);
+
+        let table_provider = match matcher
+            .provider()
+            .create_table_provider(&file_url, ctx)
+            .await
+        {
+            Ok(tp) => tp,
+            Err(e) => {
+                warn!(
+                    "status_grid: create_table_provider('{}') failed: {}",
+                    file_url, e
+                );
+                continue;
+            }
+        };
+
+        // Use a per-file unique table name so concurrent registrations
+        // don't collide and stale registrations don't leak through.
+        let table_name = format!(
+            "status_grid_{}",
+            unit.replace(
+                [
+                    '@', '.', '-', ':', '/', '\\', ' ', '+', '=', ',', ';', '(', ')',
+                ],
+                "_"
+            )
+        );
+        if let Err(e) = ctx.register_table(
+            datafusion::sql::TableReference::bare(table_name.as_str()),
+            table_provider,
+        ) {
+            warn!(
+                "status_grid: register_table('{}') failed: {}",
+                table_name, e
+            );
+            continue;
+        }
+
+        let status = match query_pond_status(ctx, &table_name, &unit, tail_lines).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("status_grid: query for '{}' failed: {}", unit, e);
+                let _ = ctx
+                    .deregister_table(datafusion::sql::TableReference::bare(table_name.as_str()));
+                continue;
+            }
+        };
+
+        let _ = ctx.deregister_table(datafusion::sql::TableReference::bare(table_name.as_str()));
+        statuses.push(status);
+    }
+
+    statuses.sort_by(|a, b| a.unit.cmp(&b.unit));
+    Ok(Some(statuses))
+}
+
+/// Run the per-unit DataFusion queries for the status grid.
+///
+/// `table_name` must already be registered in `ctx` as the journal
+/// table for this unit (single-file `jsonlogs://` provider).  The
+/// table schema has all-Utf8 columns including `__REALTIME_TIMESTAMP`
+/// (microseconds since epoch as a string) and `MESSAGE`.
+async fn query_pond_status(
+    ctx: &datafusion::prelude::SessionContext,
+    table_name: &str,
+    unit: &str,
+    tail_lines: usize,
+) -> Result<PondStatus, tinyfs::Error> {
+    use datafusion::arrow::array::{Array, Int64Array, StringArray};
+
+    let to_err = |e: datafusion::error::DataFusionError, q: &str| -> tinyfs::Error {
+        tinyfs::Error::Other(format!("status_grid sql ({}): {}", q, e))
+    };
+
+    // Combined status query: pick MAX(ts) overall, then MAX(ts)
+    // restricted to each MESSAGE class via filtered MAX.  Cast ts to
+    // BIGINT once.
+    let status_sql = format!(
+        "SELECT \
+            MAX(ts) AS last_seen, \
+            MAX(CASE WHEN MESSAGE LIKE 'Started %' THEN ts END) AS last_started_us, \
+            MAX(CASE WHEN MESSAGE LIKE 'Started %' THEN MESSAGE END) AS last_started_msg, \
+            MAX(CASE WHEN MESSAGE LIKE 'Deactivated %' OR MESSAGE LIKE 'Stopped %' OR MESSAGE LIKE 'Failed %' OR MESSAGE LIKE '% exited %' THEN ts END) AS last_exit_us, \
+            MAX(CASE WHEN MESSAGE LIKE 'Deactivated %' OR MESSAGE LIKE 'Stopped %' OR MESSAGE LIKE 'Failed %' OR MESSAGE LIKE '% exited %' THEN MESSAGE END) AS last_exit_msg, \
+            MAX(CASE WHEN MESSAGE LIKE 'Peak memory usage:%' THEN MESSAGE END) AS last_peak_msg \
+         FROM (SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {}) t",
+        table_name
+    );
+
+    let df = ctx
+        .sql(&status_sql)
+        .await
+        .map_err(|e| to_err(e, "status"))?;
+    let batches = df.collect().await.map_err(|e| to_err(e, "status"))?;
+
+    let get_i64 =
+        |batches: &[datafusion::arrow::record_batch::RecordBatch], col: usize| -> Option<i64> {
+            batches.iter().find_map(|b| {
+                if b.num_rows() == 0 {
+                    return None;
+                }
+                let arr = b.column(col).as_any().downcast_ref::<Int64Array>()?;
+                if arr.is_null(0) {
+                    None
+                } else {
+                    Some(arr.value(0))
+                }
+            })
+        };
+    let get_str =
+        |batches: &[datafusion::arrow::record_batch::RecordBatch], col: usize| -> Option<String> {
+            batches.iter().find_map(|b| {
+                if b.num_rows() == 0 {
+                    return None;
+                }
+                let arr = b.column(col).as_any().downcast_ref::<StringArray>()?;
+                if arr.is_null(0) {
+                    None
+                } else {
+                    Some(arr.value(0).to_string())
+                }
+            })
+        };
+
+    let last_seen_us = get_i64(&batches, 0);
+    let last_started_us = get_i64(&batches, 1);
+    let last_started_msg = get_str(&batches, 2);
+    let last_exit_us = get_i64(&batches, 3);
+    let last_exit_msg = get_str(&batches, 4);
+    let last_peak_msg = get_str(&batches, 5);
+    let peak_rss_bytes = last_peak_msg.as_deref().and_then(parse_peak_memory_bytes);
+
+    // Tail query: most recent N messages, oldest -> newest in display.
+    let tail_sql = format!(
+        "SELECT MESSAGE FROM (\
+            SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {} \
+            ORDER BY ts DESC LIMIT {}\
+         ) t ORDER BY ts ASC",
+        table_name, tail_lines
+    );
+    let df = ctx.sql(&tail_sql).await.map_err(|e| to_err(e, "tail"))?;
+    let batches = df.collect().await.map_err(|e| to_err(e, "tail"))?;
+    let mut tail_messages: Vec<String> = Vec::new();
+    for b in &batches {
+        if b.num_columns() == 0 {
+            continue;
+        }
+        if let Some(arr) = b.column(0).as_any().downcast_ref::<StringArray>() {
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    tail_messages.push(arr.value(i).to_string());
+                }
+            }
+        }
+    }
+
+    Ok(PondStatus {
+        unit: unit.to_string(),
+        last_seen_us,
+        last_started_us,
+        last_started_msg,
+        last_exit_us,
+        last_exit_msg,
+        peak_rss_bytes,
+        tail_messages,
+    })
+}
+
+/// Parse "Peak memory usage: 12.34 MB" / "Peak memory usage: 1.5 GB"
+/// (and KB/B variants) into a byte count.  Returns `None` for any
+/// unrecognized shape -- callers fall back to "unknown" in the UI.
+fn parse_peak_memory_bytes(msg: &str) -> Option<u64> {
+    let rest = msg.strip_prefix("Peak memory usage:")?.trim();
+    let mut it = rest.split_whitespace();
+    let num_str = it.next()?;
+    let unit = it.next().unwrap_or("B");
+    let num: f64 = num_str.parse().ok()?;
+    let mult: f64 = match unit.to_ascii_uppercase().as_str() {
+        "B" | "BYTES" => 1.0,
+        "K" | "KB" | "KIB" => 1024.0,
+        "M" | "MB" | "MIB" => 1024.0 * 1024.0,
+        "G" | "GB" | "GIB" => 1024.0 * 1024.0 * 1024.0,
+        "T" | "TB" | "TIB" => 1024.0_f64.powi(4),
+        _ => return None,
+    };
+    let bytes = (num * mult).round();
+    if bytes.is_finite() && bytes >= 0.0 {
+        Some(bytes as u64)
+    } else {
+        None
+    }
+}
+
+/// Minimal shell-style glob matcher (supports `*` only) used to filter
+/// journal basenames against `status_grid.unit_globs`.  Sufficient for
+/// systemd template-unit names like `user-pond@*.service`; we
+/// intentionally avoid pulling in a full glob crate just for this.
+fn simple_glob_match(pattern: &str, s: &str) -> bool {
+    // Iterative two-pointer scan with backtracking on `*`.
+    let p = pattern.as_bytes();
+    let t = s.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut match_idx): (Option<usize>, usize) = (None, 0);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            match_idx = ti;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(sp) = star {
+            pi = sp + 1;
+            match_idx += 1;
+            ti = match_idx;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 /// Export queryable pond files (original path: bare glob patterns).
@@ -742,6 +1046,7 @@ async fn run_content_stages(
                 date: fm.date,
                 summary: fm.summary,
                 image: fm.image,
+                url_path: String::new(),
             });
         }
 
@@ -959,6 +1264,14 @@ fn find_vendor_dir() -> Option<std::path::PathBuf> {
         return Some(system.to_path_buf());
     }
 
+    // 3b. FHS install location (cargo-deb-built .deb installs here,
+    //     since /usr/share/ is the standard path for arch-independent
+    //     read-only data on Debian/Ubuntu).
+    let fhs = std::path::Path::new("/usr/share/duckpond/vendor");
+    if fhs.join("duckdb-eh.wasm").exists() {
+        return Some(fhs.to_path_buf());
+    }
+
     // 4. User cache
     if let Ok(home) = std::env::var("HOME") {
         let cache = std::path::PathBuf::from(home).join(".cache/duckpond/vendor");
@@ -1036,6 +1349,7 @@ fn default_weight() -> i32 {
 }
 
 /// Generate the complete static site.
+#[allow(clippy::too_many_arguments)]
 fn generate_site(
     config: &SiteConfig,
     exports: &BTreeMap<String, ExportContext>,
@@ -1043,6 +1357,8 @@ fn generate_site(
     read_pond_file: &dyn Fn(&str) -> Result<String, String>,
     output_dir: &Path,
     root_base_url: &str,
+    pond_statuses: Option<Vec<PondStatus>>,
+    generated_at: &str,
 ) -> Result<(), GenerateError> {
     // Compute feed URL if site_url is configured
     let feed_url = if config.site.site_url.is_some() {
@@ -1053,7 +1369,9 @@ fn generate_site(
     };
 
     // Expand the route tree into page jobs
-    let jobs = routes::expand_routes(config, exports, content);
+    let expansion = routes::expand_routes(config, exports, content);
+    let jobs = expansion.jobs;
+    let content_urls = expansion.content_urls;
     info!("Route expansion: {} pages to generate", jobs.len());
 
     // Build collections for navigation shortcodes
@@ -1062,9 +1380,34 @@ fn generate_site(
     // Build content_pages map for content_nav shortcode.
     // Includes both explicit content pages and synthetic entries from
     // template routes so that export-based pages are navigable.
+    // Stamp each page's `url_path` with the canonical URL discovered
+    // during route expansion so shortcodes/feeds build correct links
+    // regardless of where a content stage is mounted.
     let mut content_pages: BTreeMap<String, Vec<ContentPage>> = content
         .iter()
-        .map(|(name, ctx)| (name.clone(), ctx.pages.clone()))
+        .map(|(name, ctx)| {
+            let urls = content_urls.get(name);
+            let pages: Vec<ContentPage> = ctx
+                .pages
+                .iter()
+                .map(|p| {
+                    let mut p = p.clone();
+                    p.url_path = urls
+                        .and_then(|m| m.get(&p.source_path).cloned())
+                        .unwrap_or_else(|| {
+                            log::warn!(
+                                "Content page '{}' in collection '{}' is not bound to any content route; falling back to '/{}' for links",
+                                p.source_path,
+                                name,
+                                p.slug
+                            );
+                            format!("/{}", p.slug)
+                        });
+                    p
+                })
+                .collect();
+            (name.clone(), pages)
+        })
         .collect();
     for (name, pages) in routes::build_template_content_pages(config, exports) {
         content_pages.entry(name).or_default().extend(pages);
@@ -1086,6 +1429,8 @@ fn generate_site(
             &collections,
             &content_pages,
             &current_path,
+            &pond_statuses,
+            generated_at,
         );
         let raw_md = read_pond_file(&job.page_source)
             .map_err(|e| GenerateError(format!("Cannot read '{}': {}", job.page_source, e)))?;
@@ -1123,6 +1468,10 @@ fn generate_site(
             breadcrumbs: job.breadcrumbs.clone(),
             base_url: config.site.base_url.clone(),
             sidebar_sections: config.sidebar.clone(),
+            metric_registry: config.metric_registry.clone(),
+            metric_captions: config.metric_captions.clone(),
+            pond_statuses: pond_statuses.clone(),
+            generated_at: generated_at.to_string(),
         });
 
         // Rewrite {{ $0 }} -> {{ cap0 }}, nav-list -> nav_list, etc.
@@ -1174,7 +1523,7 @@ fn generate_site(
 
     // Generate RSS feed if site_url is configured
     if config.site.site_url.is_some() {
-        generate_feed(config, content, output_dir)?;
+        generate_feed(config, &content_pages, output_dir)?;
     } else {
         info!("RSS feed skipped: site.site_url not configured");
     }
@@ -1197,7 +1546,7 @@ fn generate_site(
 /// descending, and writes `feed.xml` to the output directory.
 fn generate_feed(
     config: &SiteConfig,
-    content: &BTreeMap<String, ContentContext>,
+    content_pages: &BTreeMap<String, Vec<ContentPage>>,
     output_dir: &Path,
 ) -> Result<(), GenerateError> {
     let site_url = config
@@ -1216,11 +1565,11 @@ fn generate_feed(
     // Find the content stage to use
     let content_name = feed_config
         .and_then(|f| f.content.as_deref())
-        .or_else(|| content.keys().next().map(|s| s.as_str()));
+        .or_else(|| content_pages.keys().next().map(|s| s.as_str()));
 
     let pages = match content_name {
-        Some(name) => match content.get(name) {
-            Some(ctx) => &ctx.pages,
+        Some(name) => match content_pages.get(name) {
+            Some(pages) => pages,
             None => {
                 warn!("RSS feed: content stage '{}' not found, skipping", name);
                 return Ok(());
@@ -1249,7 +1598,16 @@ fn generate_feed(
     let items: Vec<rss::Item> = blog_posts
         .iter()
         .map(|page| {
-            let link = format!("{}{}/{}.html", site_url, base, page.slug);
+            // Use the canonical URL recorded by route expansion so that
+            // posts mounted under a nested route (e.g. /blog/<slug>)
+            // get the correct link, falling back to the bare slug for
+            // pages outside the route tree.
+            let path = if page.url_path.is_empty() {
+                format!("/{}", page.slug)
+            } else {
+                page.url_path.clone()
+            };
+            let link = format!("{}{}{}.html", site_url, base, path);
             let pub_date = page.date.as_deref().and_then(iso_date_to_rfc2822);
 
             let mut item = rss::Item::default();
@@ -1305,6 +1663,7 @@ fn iso_date_to_rfc2822(iso: &str) -> Option<String> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn render_partial(
     config: &SiteConfig,
     name: &str,
@@ -1312,6 +1671,8 @@ fn render_partial(
     collections: &BTreeMap<String, Vec<String>>,
     content_pages: &BTreeMap<String, Vec<ContentPage>>,
     current_path: &str,
+    pond_statuses: &Option<Vec<PondStatus>>,
+    generated_at: &str,
 ) -> Option<String> {
     let path = config.partials.get(name)?;
     match read_pond_file(path) {
@@ -1328,6 +1689,10 @@ fn render_partial(
                 breadcrumbs: vec![],
                 base_url: config.site.base_url.clone(),
                 sidebar_sections: config.sidebar.clone(),
+                metric_registry: config.metric_registry.clone(),
+                metric_captions: config.metric_captions.clone(),
+                pond_statuses: pond_statuses.clone(),
+                generated_at: generated_at.to_string(),
             });
             let preprocessed = shortcodes::preprocess_variables(&md);
             let sc = shortcodes::register_shortcodes(sc_ctx);
@@ -1472,62 +1837,67 @@ mod tests {
             subsites: vec![],
             footer: None,
             header: None,
+            metric_registry: std::collections::BTreeMap::new(),
+            metric_captions: std::collections::BTreeMap::new(),
+            status_grid: None,
         };
 
-        let mut content = BTreeMap::new();
-        content.insert(
+        let mut content_pages: BTreeMap<String, Vec<ContentPage>> = BTreeMap::new();
+        content_pages.insert(
             "pages".to_string(),
-            ContentContext {
-                pages: vec![
-                    ContentPage {
-                        title: "First Post".to_string(),
-                        slug: "first-post".to_string(),
-                        weight: 100,
-                        hidden: false,
-                        section: Some("Blog".to_string()),
-                        source_path: "/content/first-post.md".to_string(),
-                        date: Some("2025-01-15".to_string()),
-                        summary: Some("My first post".to_string()),
-                        image: None,
-                    },
-                    ContentPage {
-                        title: "Second Post".to_string(),
-                        slug: "second-post".to_string(),
-                        weight: 100,
-                        hidden: false,
-                        section: Some("Blog".to_string()),
-                        source_path: "/content/second-post.md".to_string(),
-                        date: Some("2025-02-20".to_string()),
-                        summary: None,
-                        image: None,
-                    },
-                    ContentPage {
-                        title: "Hidden Post".to_string(),
-                        slug: "hidden".to_string(),
-                        weight: 100,
-                        hidden: true,
-                        section: Some("Blog".to_string()),
-                        source_path: "/content/hidden.md".to_string(),
-                        date: Some("2025-03-01".to_string()),
-                        summary: None,
-                        image: None,
-                    },
-                    ContentPage {
-                        title: "Not Blog".to_string(),
-                        slug: "about".to_string(),
-                        weight: 100,
-                        hidden: false,
-                        section: Some("Main".to_string()),
-                        source_path: "/content/about.md".to_string(),
-                        date: None,
-                        summary: None,
-                        image: None,
-                    },
-                ],
-            },
+            vec![
+                ContentPage {
+                    title: "First Post".to_string(),
+                    slug: "first-post".to_string(),
+                    weight: 100,
+                    hidden: false,
+                    section: Some("Blog".to_string()),
+                    source_path: "/content/first-post.md".to_string(),
+                    date: Some("2025-01-15".to_string()),
+                    summary: Some("My first post".to_string()),
+                    image: None,
+                    url_path: "/blog/first-post".to_string(),
+                },
+                ContentPage {
+                    title: "Second Post".to_string(),
+                    slug: "second-post".to_string(),
+                    weight: 100,
+                    hidden: false,
+                    section: Some("Blog".to_string()),
+                    source_path: "/content/second-post.md".to_string(),
+                    date: Some("2025-02-20".to_string()),
+                    summary: None,
+                    image: None,
+                    url_path: "/blog/second-post".to_string(),
+                },
+                ContentPage {
+                    title: "Hidden Post".to_string(),
+                    slug: "hidden".to_string(),
+                    weight: 100,
+                    hidden: true,
+                    section: Some("Blog".to_string()),
+                    source_path: "/content/hidden.md".to_string(),
+                    date: Some("2025-03-01".to_string()),
+                    summary: None,
+                    image: None,
+                    url_path: "/blog/hidden".to_string(),
+                },
+                ContentPage {
+                    title: "Not Blog".to_string(),
+                    slug: "about".to_string(),
+                    weight: 100,
+                    hidden: false,
+                    section: Some("Main".to_string()),
+                    source_path: "/content/about.md".to_string(),
+                    date: None,
+                    summary: None,
+                    image: None,
+                    url_path: "/about".to_string(),
+                },
+            ],
         );
 
-        generate_feed(&config, &content, output_dir.path()).unwrap();
+        generate_feed(&config, &content_pages, output_dir.path()).unwrap();
 
         let feed_path = output_dir.path().join("feed.xml");
         assert!(feed_path.exists(), "feed.xml should be created");
@@ -1548,7 +1918,16 @@ mod tests {
             xml
         );
         assert!(!xml.contains("Not Blog"), "Non-blog excluded: {}", xml);
-        assert!(xml.contains("first-post.html"), "First post link: {}", xml);
+        assert!(
+            xml.contains("https://example.com/blog/first-post.html"),
+            "First post link uses url_path: {}",
+            xml
+        );
+        assert!(
+            xml.contains("https://example.com/blog/second-post.html"),
+            "Second post link uses url_path: {}",
+            xml
+        );
         assert!(xml.contains("My first post"), "First post summary: {}", xml);
         // Second Post should appear before First Post (date desc)
         let second_pos = xml.find("Second Post").unwrap();
@@ -1580,8 +1959,11 @@ mod tests {
             subsites: vec![],
             footer: None,
             header: None,
+            metric_registry: std::collections::BTreeMap::new(),
+            metric_captions: std::collections::BTreeMap::new(),
+            status_grid: None,
         };
-        let content = BTreeMap::new();
+        let content: BTreeMap<String, Vec<ContentPage>> = BTreeMap::new();
 
         // Should error because site_url is missing
         let result = generate_feed(&config, &content, output_dir.path());

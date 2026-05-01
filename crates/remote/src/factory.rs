@@ -1482,7 +1482,65 @@ async fn execute_import(
     let local_table = state.table().await;
     let local_store = local_table.object_store();
 
-    // Step 1: Determine which partition IDs to import.
+    // Step 1: Resolve the local mount-point entry to get its part_id.
+    // For physical foreign dirs (the only case execute_import handles)
+    // this part_id equals the foreign top-level partition's id and is
+    // the canonical factory_key under which both mknod and run.rs cache
+    // partition records.  Computing it once here lets the writer use
+    // the same key regardless of whether part_ids_to_import comes from
+    // cache (unordered) or fresh discovery.
+    let fs = tinyfs::FS::new(state.clone())
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to create FS: {}", e)))?;
+    let root = fs
+        .root()
+        .await
+        .map_err(|e| RemoteError::TableOperation(format!("Failed to get root: {}", e)))?;
+
+    let local_path = std::path::Path::new(&import_config.local_path);
+    let parent_path = local_path.parent().unwrap_or(std::path::Path::new("/"));
+    let dir_name = local_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            RemoteError::Configuration(format!(
+                "Invalid import local_path '{}': cannot extract directory name",
+                import_config.local_path
+            ))
+        })?;
+
+    let parent_wd = if parent_path == std::path::Path::new("/") {
+        root.clone()
+    } else {
+        root.open_dir_path(parent_path).await.map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to open parent of import path: {}", e))
+        })?
+    };
+
+    let parent_entries = state
+        .query_directory_entries_by_id(&parent_wd.node_path().id())
+        .await
+        .map_err(|e| {
+            RemoteError::TableOperation(format!("Failed to read parent directory entries: {}", e))
+        })?;
+
+    let import_entry = parent_entries
+        .iter()
+        .find(|e| e.name == dir_name)
+        .ok_or_else(|| {
+            RemoteError::TableOperation(format!(
+                "Import path {} not found in parent directory. Run mknod first.",
+                import_config.local_path
+            ))
+        })?;
+
+    // For physical foreign dirs the entry's child_node_id IS the
+    // partition id (FileID::from_physical_dir_node_id sets part_id ==
+    // node_id), and equals the foreign_part_id mknod recorded under
+    // factory_node_id.  Anchor all reads/writes here.
+    let factory_key = import_entry.child_node_id.to_string();
+
+    // Step 2: Determine which partition IDs to import.
     // If the import config has a pre-discovered partition list (from mknod),
     // use it directly. Otherwise, read the parent directory entry to get
     // the top-level part_id, and for recursive imports also read the
@@ -1512,57 +1570,7 @@ async fn execute_import(
         );
         import_config.partitions.clone()
     } else {
-        // Discover from local directory entry (top-level) and foreign OpLog (children)
-        let fs = tinyfs::FS::new(state.clone())
-            .await
-            .map_err(|e| RemoteError::TableOperation(format!("Failed to create FS: {}", e)))?;
-        let root = fs
-            .root()
-            .await
-            .map_err(|e| RemoteError::TableOperation(format!("Failed to get root: {}", e)))?;
-
-        let local_path = std::path::Path::new(&import_config.local_path);
-        let parent_path = local_path.parent().unwrap_or(std::path::Path::new("/"));
-        let dir_name = local_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| {
-                RemoteError::Configuration(format!(
-                    "Invalid import local_path '{}': cannot extract directory name",
-                    import_config.local_path
-                ))
-            })?;
-
-        let parent_wd = if parent_path == std::path::Path::new("/") {
-            root.clone()
-        } else {
-            root.open_dir_path(parent_path).await.map_err(|e| {
-                RemoteError::TableOperation(format!("Failed to open parent of import path: {}", e))
-            })?
-        };
-
-        let parent_entries = state
-            .query_directory_entries_by_id(&parent_wd.node_path().id())
-            .await
-            .map_err(|e| {
-                RemoteError::TableOperation(format!(
-                    "Failed to read parent directory entries: {}",
-                    e
-                ))
-            })?;
-
-        let import_entry = parent_entries
-            .iter()
-            .find(|e| e.name == dir_name)
-            .ok_or_else(|| {
-                RemoteError::TableOperation(format!(
-                    "Import path {} not found in parent directory. Run mknod first.",
-                    import_config.local_path
-                ))
-            })?;
-
-        let top_part_id = import_entry.child_node_id.to_string();
-        let mut ids = vec![top_part_id.clone()];
+        let mut ids = vec![factory_key.clone()];
 
         // For recursive imports, read the foreign OpLog to discover all
         // descendant partitions at any depth.
@@ -1703,64 +1711,77 @@ async fn execute_import(
             "   Registered {} file(s) for Delta commit at transaction end",
             files_to_register.len()
         );
-
-        // Record updated watermark via import metadata (flows through Delta commit)
-        let new_watermark = new_txn_seqs.last().copied().unwrap_or(watermark);
-        let factory_key = part_ids_to_import.first().cloned().unwrap_or_default();
-        for pid in &part_ids_to_import {
-            state
-                .add_import_metadata(tlogfs::ImportPartitionRecord {
-                    factory_node_id: factory_key.clone(),
-                    foreign_part_id: pid.clone(),
-                    foreign_pond_id: String::new(),
-                    watermark_txn_seq: new_watermark,
-                })
-                .await;
-        }
-        log::info!("   Updated watermark to {}", new_watermark);
     } else {
-        log::info!("   [OK] All files already up to date");
+        log::info!("   [OK] All matching files already up to date");
     }
 
-    // Step 6: Download large files from the remote backup.
-    // Large files are stored with POND-FILE bundles and referenced by
-    // BLAKE3 hash from the imported partition data.
-    let pond_path = state.store_path().await;
-    let all_remote_files = remote_table.list_files("").await?;
-    let mut large_downloaded = 0;
-    for (bundle_id, path, pond_txn_id, _size) in &all_remote_files {
-        if !path.starts_with("_large_files/") {
-            continue;
-        }
-        let large_file_fs_path = pond_path.join(path);
-        if large_file_fs_path.exists() {
-            continue;
-        }
-        if let Some(parent) = large_file_fs_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                RemoteError::TableOperation(format!(
-                    "Failed to create _large_files directory: {}",
-                    e
-                ))
-            })?;
-        }
-        let mut output = Vec::new();
-        remote_table
-            .read_file(bundle_id, path, *pond_txn_id, &mut output)
-            .await?;
-        tokio::fs::write(&large_file_fs_path, &output)
-            .await
-            .map_err(|e| {
-                RemoteError::TableOperation(format!(
-                    "Failed to write {}: {}",
-                    large_file_fs_path.display(),
-                    e
-                ))
-            })?;
-        large_downloaded += 1;
+    // Always advance the watermark when we successfully walked new
+    // transactions, even if zero matching files were downloaded.  Without
+    // this, a foreign-side commit that didn't touch any of our imported
+    // partitions would be re-walked every tick forever.
+    let new_watermark = new_txn_seqs.last().copied().unwrap_or(watermark);
+    for pid in &part_ids_to_import {
+        state
+            .add_import_metadata(tlogfs::ImportPartitionRecord {
+                factory_node_id: factory_key.clone(),
+                foreign_part_id: pid.clone(),
+                foreign_pond_id: String::new(),
+                watermark_txn_seq: new_watermark,
+            })
+            .await;
     }
-    if large_downloaded > 0 {
-        log::info!("   Downloaded {} large file(s)", large_downloaded);
+    log::info!("   Updated watermark to {}", new_watermark);
+
+    // Step 6: Download large files newly referenced by this import.
+    //
+    // Large files are content-addressed (BLAKE3) and stored under
+    // `_large_files/` in the remote bucket; the imported partition
+    // parquet just contains the hash refs.  We only need to reconcile
+    // when this tick actually pulled new partition data -- a watermark
+    // advance with zero file downloads cannot have introduced new hash
+    // refs, so there's nothing to fetch.  Skipping the manifest scan
+    // here matters because it's a few-MB Delta query on the order of
+    // every-tick if not gated.
+    if downloaded > 0 {
+        let pond_path = state.store_path().await;
+        // Filter the manifest scan at the SQL level to only the
+        // _large_files/ subset rather than pulling the entire
+        // remote_files manifest and discarding ~99% client-side.
+        let large_remote_files = remote_table
+            .list_files_with_path_prefix("", "_large_files/")
+            .await?;
+        let mut large_downloaded = 0;
+        for (bundle_id, path, pond_txn_id, _size) in &large_remote_files {
+            let large_file_fs_path = pond_path.join(path);
+            if large_file_fs_path.exists() {
+                continue;
+            }
+            if let Some(parent) = large_file_fs_path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    RemoteError::TableOperation(format!(
+                        "Failed to create _large_files directory: {}",
+                        e
+                    ))
+                })?;
+            }
+            let mut output = Vec::new();
+            remote_table
+                .read_file(bundle_id, path, *pond_txn_id, &mut output)
+                .await?;
+            tokio::fs::write(&large_file_fs_path, &output)
+                .await
+                .map_err(|e| {
+                    RemoteError::TableOperation(format!(
+                        "Failed to write {}: {}",
+                        large_file_fs_path.display(),
+                        e
+                    ))
+                })?;
+            large_downloaded += 1;
+        }
+        if large_downloaded > 0 {
+            log::info!("   Downloaded {} large file(s)", large_downloaded);
+        }
     }
 
     log::info!(

@@ -301,7 +301,7 @@ fn blog_layout(ctx: &LayoutContext) -> Markup {
                     }
                 }
                 main class="content-page" {
-                    (top_bar(Some("Blog"), Some("blog.html"), ctx.feed_url, ctx.github_url))
+                    (top_bar(Some("Blog"), Some(&format!("{}blog.html", ctx.base_url)), ctx.feed_url, ctx.github_url))
                     article class="blog-post" {
                         header class="blog-post-header" {
                             @if let Some(ref date) = date_display {

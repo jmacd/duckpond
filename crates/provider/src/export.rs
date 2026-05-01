@@ -316,7 +316,22 @@ pub async fn export_table_provider_to_parquet(
         )
     };
 
-    // Create output directory
+    // Wipe any previous export output for this stage.  DataFusion's
+    // `COPY ... PARTITIONED BY` writes files with random UUID-style names
+    // and never overwrites; without this, every sitegen run accumulates
+    // another full snapshot in each partition directory (a 259x duplicate
+    // explosion was observed on a 60s-tick selfmon pond).  An export is
+    // a full regenerate from source -- prior outputs are unconditionally
+    // stale.
+    if export_dir.exists() {
+        std::fs::remove_dir_all(export_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to clear stale export dir '{}': {}",
+                export_dir.display(),
+                e
+            )
+        })?;
+    }
     std::fs::create_dir_all(export_dir)?;
 
     let ctx = &provider_ctx.datafusion_session;

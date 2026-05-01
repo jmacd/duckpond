@@ -1,3 +1,0 @@
-pond_path: /logs/watershop
-journalctl_command: journalctl
-collect_kernel: true

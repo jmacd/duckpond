@@ -1,6 +1,0 @@
-url: "s3://duckpond-linux"
-region: "us-east-1"
-allow_http: true
-endpoint: "${env:MINIO_ENDPOINT:-http://watershop.casparwater.us:9000}"
-access_key: "${env:MINIO_ACCESS_KEY}"
-secret_key: "${env:MINIO_SECRET_KEY}"

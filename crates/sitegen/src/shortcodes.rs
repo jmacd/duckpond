@@ -17,6 +17,26 @@ use crate::routes::ContentPage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Build the canonical href for a content page.
+///
+/// Uses the page's `url_path` (recorded by route expansion) when
+/// available and falls back to `/{slug}` for pages that aren't bound
+/// to a route. The result is `<base_url><path>.html` with `base_url`
+/// trimmed of any trailing slash.
+fn content_page_href(base_url: &str, page: &ContentPage) -> String {
+    let base = base_url.trim_end_matches('/');
+    let path = if page.url_path.is_empty() {
+        format!("/{}", page.slug)
+    } else {
+        page.url_path.clone()
+    };
+    if base.is_empty() {
+        format!("{}.html", path)
+    } else {
+        format!("{}{}.html", base, path)
+    }
+}
+
 /// One exported data file with capture groups and time range.
 ///
 /// This is the typed struct that shortcodes receive directly -- no JSON
@@ -42,6 +62,38 @@ pub struct ExportedFile {
 pub struct ExportContext {
     /// Files grouped by the $0 capture value
     pub by_key: BTreeMap<String, Vec<ExportedFile>>,
+}
+
+/// One pond's "systemctl status"-style summary, computed at sitegen
+/// render time by `factory::run_status_grid_queries` and rendered as
+/// an HTML card by the `pond_status_grid` shortcode.
+///
+/// All time fields are microseconds since epoch (the units used by
+/// systemd's `__REALTIME_TIMESTAMP`).  `peak_rss_bytes` is parsed from
+/// the pond CLI's `Peak memory usage: NN.NN MB` exit line.  Any field
+/// may be `None` if the corresponding event hasn't been seen yet.
+#[derive(Debug, Clone)]
+pub struct PondStatus {
+    /// Systemd unit name (e.g. `pond@water-prod.service`,
+    /// `pond-selfmon@watershop-selfmon.service`).
+    pub unit: String,
+    /// Most-recent journal entry seen for this unit (microseconds).
+    pub last_seen_us: Option<i64>,
+    /// Most-recent "Started ..." MESSAGE (microseconds + text).
+    pub last_started_us: Option<i64>,
+    pub last_started_msg: Option<String>,
+    /// Most-recent exit-style MESSAGE -- one of "Deactivated...",
+    /// "Failed...", "Stopped...".  Used to surface the last run's
+    /// outcome in the card.
+    pub last_exit_us: Option<i64>,
+    pub last_exit_msg: Option<String>,
+    /// Peak resident-set size of the most recent run, in bytes,
+    /// parsed from "Peak memory usage: NN.NN MB" lines.  Reported in
+    /// bytes for consistency with semconv's `By` unit.
+    pub peak_rss_bytes: Option<u64>,
+    /// Tail of the most-recent N MESSAGE lines (oldest -> newest)
+    /// regardless of run boundary.
+    pub tail_messages: Vec<String>,
 }
 
 /// Context passed to shortcodes during rendering.
@@ -71,6 +123,30 @@ pub struct ShortcodeContext {
     /// When non-empty, `content_nav` renders pills in this order,
     /// with optional sub-navigation for entries that have children.
     pub sidebar_sections: Vec<SidebarEntry>,
+    /// Metric instrument-kind registry passed through from
+    /// SiteConfig.metric_registry.  Keyed by `<param>.<unit>` (the
+    /// chart.js chartKey for wide-column data).  Values: counter |
+    /// updowncounter | gauge.  Empty map = all metrics treated as
+    /// gauges (no transforms).
+    pub metric_registry: BTreeMap<String, String>,
+
+    /// Per-chart caption strings keyed by `<param>.<unit>` (matches the
+    /// chart.js chartKey).  Plumbed through from
+    /// `SiteConfig.metric_captions`; empty map = no captions rendered.
+    pub metric_captions: BTreeMap<String, String>,
+
+    /// Per-pond status records produced by
+    /// `factory::run_status_grid_queries` when `SiteConfig.status_grid`
+    /// is set.  The `pond_status_grid` shortcode renders these as an
+    /// HTML card grid; an empty list renders an empty-state message
+    /// and `None` (the `status_grid` config absent) renders nothing.
+    pub pond_statuses: Option<Vec<PondStatus>>,
+
+    /// UTC timestamp at which the page was rendered, used by the
+    /// `pond_status_grid` shortcode to bake a "last refreshed" line
+    /// into the static HTML output.  Format: ISO 8601, second
+    /// resolution (e.g. `2026-04-27T21:00:00Z`).
+    pub generated_at: String,
 }
 
 /// Build a `Shortcodes` instance with all built-in shortcodes registered.
@@ -99,7 +175,7 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
     {
         let c = ctx.clone();
         shortcodes.register("chart", move |_args: &ShortcodeArgs| {
-            render_chart(&c.datafiles)
+            render_chart(&c.datafiles, &c.metric_registry, &c.metric_captions)
         });
     }
 
@@ -187,6 +263,18 @@ pub fn register_shortcodes(ctx: Arc<ShortcodeContext>) -> Shortcodes {
         });
     }
 
+    // {{ pond_status_grid /}} -- render the per-pond systemctl-style
+    // status cards baked at sitegen time from journal data.  See
+    // `render_pond_status_grid` for HTML structure; the data source is
+    // `factory::run_status_grid_queries` driven by
+    // `SiteConfig.status_grid`.
+    {
+        let c = ctx.clone();
+        shortcodes.register("pond_status_grid", move |_args: &ShortcodeArgs| {
+            render_pond_status_grid(c.pond_statuses.as_deref(), &c.generated_at)
+        });
+    }
+
     shortcodes
 }
 
@@ -253,9 +341,17 @@ fn prefix_with_base_url(base_url: &str, path: &str) -> String {
 
 /// Render a chart container with inline datafile manifest.
 ///
-/// Emits a `<div class="chart-container">` with a `<script type="application/json">`
-/// block containing the file manifest. Client-side chart.js reads this.
-fn render_chart(datafiles: &[ExportedFile]) -> String {
+/// Emits two `<script type="application/json">` blocks:
+///   - `class="chart-data"` -- the data-file manifest (existing).
+///   - `class="chart-registry"` -- metric instrument-kind map keyed
+///     by `<param>.<unit>` (only emitted if the registry is
+///     non-empty, to keep chart-data layout unchanged for legacy
+///     dashboards).
+fn render_chart(
+    datafiles: &[ExportedFile],
+    registry: &BTreeMap<String, String>,
+    captions: &BTreeMap<String, String>,
+) -> String {
     if datafiles.is_empty() {
         return "<div class=\"chart-container\"><p>No data files available.</p></div>".to_string();
     }
@@ -276,11 +372,33 @@ fn render_chart(datafiles: &[ExportedFile]) -> String {
 
     let json = serde_json::to_string(&files_json).unwrap_or_else(|_| "[]".to_string());
 
+    let registry_block = if registry.is_empty() {
+        String::new()
+    } else {
+        let registry_json = serde_json::to_string(registry).unwrap_or_else(|_| "{}".to_string());
+        format!(
+            "<script type=\"application/json\" class=\"chart-registry\">{}</script>",
+            registry_json
+        )
+    };
+
+    let captions_block = if captions.is_empty() {
+        String::new()
+    } else {
+        let captions_json = serde_json::to_string(captions).unwrap_or_else(|_| "{}".to_string());
+        format!(
+            "<script type=\"application/json\" class=\"chart-captions\">{}</script>",
+            captions_json
+        )
+    };
+
     format!(
         "<div class=\"chart-container\" id=\"chart\">\
          <script type=\"application/json\" class=\"chart-data\">{}</script>\
+         {}\
+         {}\
          </div>",
-        json
+        json, registry_block, captions_block
     )
 }
 
@@ -349,6 +467,136 @@ fn render_log_viewer(datafiles: &[ExportedFile]) -> String {
          </div>",
         json
     )
+}
+
+/// Format microseconds-since-epoch as a compact UTC ISO-8601 string.
+/// Returns "—" for None.  Uses chrono only to avoid depending on
+/// time-formatting elsewhere in sitegen.
+fn fmt_micros_utc(us: Option<i64>) -> String {
+    match us {
+        Some(us) => {
+            let secs = us / 1_000_000;
+            let nanos = ((us % 1_000_000) * 1_000) as u32;
+            chrono::DateTime::from_timestamp(secs, nanos)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "—".to_string())
+        }
+        None => "—".to_string(),
+    }
+}
+
+/// Humanize a byte count with IEC units (KiB / MiB / GiB ...) for
+/// display in pond status cards.  Mirrors `formatBytes` in
+/// `assets/chart.js` so server-rendered status and client-rendered
+/// charts agree on units.
+fn fmt_bytes_iec(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut n = bytes as f64;
+    let mut i = 0;
+    while n >= 1024.0 && i < UNITS.len() - 1 {
+        n /= 1024.0;
+        i += 1;
+    }
+    if i == 0 || n >= 100.0 {
+        format!("{:.0} {}", n, UNITS[i])
+    } else {
+        format!("{:.1} {}", n, UNITS[i])
+    }
+}
+
+/// Render the pond status grid as static HTML.
+///
+/// `statuses == None` means `SiteConfig.status_grid` was not configured
+/// for this site; we render nothing rather than a confusing empty grid.
+/// `statuses == Some(empty)` means the grid is configured but no
+/// journal data matched -- we render an empty-state message so the
+/// page is still useful on first boot.
+fn render_pond_status_grid(statuses: Option<&[PondStatus]>, generated_at: &str) -> String {
+    let Some(statuses) = statuses else {
+        return String::new();
+    };
+
+    let mut out = String::new();
+    out.push_str("<div class=\"pond-status-grid-wrap\">");
+    out.push_str(&format!(
+        "<p class=\"pond-status-generated-at\">Generated at {} (refreshes when sitegen runs).</p>",
+        html_escape(generated_at),
+    ));
+
+    if statuses.is_empty() {
+        out.push_str(
+            "<p class=\"pond-status-empty\">\
+             No pond status data available yet.  \
+             Once the journal-ingest factory has captured logs for the \
+             configured units, status cards will appear here.\
+             </p>",
+        );
+        out.push_str("</div>");
+        return out;
+    }
+
+    out.push_str("<div class=\"pond-status-grid\">");
+    for s in statuses {
+        out.push_str("<section class=\"pond-status-card\">");
+        out.push_str(&format!(
+            "<h3 class=\"pond-status-unit\">{}</h3>",
+            html_escape(&s.unit),
+        ));
+
+        out.push_str("<dl class=\"pond-status-meta\">");
+        out.push_str(&format!(
+            "<dt>Last seen</dt><dd>{}</dd>",
+            html_escape(&fmt_micros_utc(s.last_seen_us)),
+        ));
+        out.push_str(&format!(
+            "<dt>Last started</dt><dd>{}{}</dd>",
+            html_escape(&fmt_micros_utc(s.last_started_us)),
+            if let Some(msg) = &s.last_started_msg {
+                format!(
+                    "<br><span class=\"pond-status-msg\">{}</span>",
+                    html_escape(msg)
+                )
+            } else {
+                String::new()
+            },
+        ));
+        out.push_str(&format!(
+            "<dt>Last exit</dt><dd>{}{}</dd>",
+            html_escape(&fmt_micros_utc(s.last_exit_us)),
+            if let Some(msg) = &s.last_exit_msg {
+                format!(
+                    "<br><span class=\"pond-status-msg\">{}</span>",
+                    html_escape(msg)
+                )
+            } else {
+                String::new()
+            },
+        ));
+        out.push_str(&format!(
+            "<dt>Peak RSS</dt><dd>{}</dd>",
+            match s.peak_rss_bytes {
+                Some(b) => html_escape(&fmt_bytes_iec(b)),
+                None => "—".to_string(),
+            },
+        ));
+        out.push_str("</dl>");
+
+        if s.tail_messages.is_empty() {
+            out.push_str("<p class=\"pond-status-tail-empty\">No recent log lines.</p>");
+        } else {
+            out.push_str("<pre class=\"pond-status-tail\">");
+            for msg in &s.tail_messages {
+                out.push_str(&html_escape(msg));
+                out.push('\n');
+            }
+            out.push_str("</pre>");
+        }
+
+        out.push_str("</section>");
+    }
+    out.push_str("</div>");
+    out.push_str("</div>");
+    out
 }
 
 /// Render a navigation list for a named collection.
@@ -509,15 +757,6 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
     if !ctx.sidebar_sections.is_empty() {
         let pages = ctx.content_pages.get(content_name).map(|v| v.as_slice());
 
-        let base = ctx.base_url.trim_end_matches('/');
-        let page_href = |slug: &str| -> String {
-            if base.is_empty() || base == "/" {
-                format!("/{}.html", slug)
-            } else {
-                format!("{}/{}.html", base, slug)
-            }
-        };
-
         let mut html = String::from("<ul>\n");
         for entry in &ctx.sidebar_sections {
             let label = entry.label();
@@ -544,7 +783,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
                             .iter()
                             .find(|p| !p.hidden && p.title.contains(label))
                     })
-                    .map(|page| page_href(&page.slug))
+                    .map(|page| content_page_href(&ctx.base_url, page))
             };
 
             if let Some(parent_href) = resolved_href {
@@ -624,20 +863,9 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         return format!("<!-- content_nav: content '{}' is empty -->", content_name);
     }
 
-    let base = ctx.base_url.trim_end_matches('/');
-
-    // Build href for a page
-    let page_href = |slug: &str| -> String {
-        if base.is_empty() || base == "/" {
-            format!("/{}.html", slug)
-        } else {
-            format!("{}/{}.html", base, slug)
-        }
-    };
-
     // Render a single <li> for a page, with an optional display label override.
     let render_li = |page: &ContentPage, label: &str, indent: &str| -> String {
-        let href = page_href(&page.slug);
+        let href = content_page_href(&ctx.base_url, page);
         let is_active = ctx.current_path == href;
         let li_class = if is_active { " class=\"active\"" } else { "" };
         let aria = if is_active {
@@ -671,7 +899,7 @@ fn render_content_nav(ctx: &ShortcodeContext, content_name: &str) -> String {
         sections.iter().find_map(|(key, section_pages)| {
             if section_pages
                 .iter()
-                .any(|p| ctx.current_path == page_href(&p.slug))
+                .any(|p| ctx.current_path == content_page_href(&ctx.base_url, p))
             {
                 Some(key.clone())
             } else {
@@ -817,20 +1045,10 @@ fn render_blog_grid(ctx: &ShortcodeContext, content_name: &str, section: &str) -
         (None, None) => a.weight.cmp(&b.weight),
     });
 
-    let base = ctx.base_url.trim_end_matches('/');
-
-    let page_href = |slug: &str| -> String {
-        if base.is_empty() || base == "/" {
-            format!("/{}.html", slug)
-        } else {
-            format!("{}/{}.html", base, slug)
-        }
-    };
-
     let mut html = String::from("<div class=\"blog-grid\">\n");
 
     for post in &posts {
-        let href = page_href(&post.slug);
+        let href = content_page_href(&ctx.base_url, post);
         html.push_str("  <a class=\"blog-card\" href=\"");
         html.push_str(&href);
         html.push_str("\">\n");
@@ -917,6 +1135,10 @@ mod tests {
             ],
             base_url: "/".to_string(),
             sidebar_sections: vec![],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         });
 
         let shortcodes = register_shortcodes(ctx);
@@ -928,7 +1150,7 @@ mod tests {
 
     #[test]
     fn test_render_chart_empty() {
-        let html = render_chart(&[]);
+        let html = render_chart(&[], &BTreeMap::new(), &BTreeMap::new());
         assert!(html.contains("No data files"));
     }
 
@@ -942,9 +1164,31 @@ mod tests {
             start_time: 100,
             end_time: 200,
         }];
-        let html = render_chart(&files);
+        let html = render_chart(&files, &BTreeMap::new(), &BTreeMap::new());
         assert!(html.contains("chart-container"));
         assert!(html.contains("data.parquet"));
+        // Empty registry -> no chart-registry script element.
+        assert!(!html.contains("chart-registry"));
+    }
+
+    #[test]
+    fn test_render_chart_with_registry() {
+        let files = vec![ExportedFile {
+            path: "data.parquet".to_string(),
+            file: "data/data.parquet".to_string(),
+            captures: vec!["Temp".to_string()],
+            temporal: BTreeMap::new(),
+            start_time: 100,
+            end_time: 200,
+        }];
+        let registry = BTreeMap::from([
+            ("committed.txn_ids".to_string(), "counter".to_string()),
+            ("size.bytes".to_string(), "updowncounter".to_string()),
+        ]);
+        let html = render_chart(&files, &registry, &BTreeMap::new());
+        assert!(html.contains("chart-registry"));
+        assert!(html.contains("\"committed.txn_ids\":\"counter\""));
+        assert!(html.contains("\"size.bytes\":\"updowncounter\""));
     }
 
     #[test]
@@ -974,6 +1218,10 @@ mod tests {
             breadcrumbs: vec![],
             base_url: "/".to_string(),
             sidebar_sections: vec![],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_nav_list(&ctx, "params", "/params");
         assert!(html.contains("Temperature"));
@@ -1004,6 +1252,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "History".to_string(),
@@ -1015,6 +1264,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Hidden Page".to_string(),
@@ -1026,6 +1276,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         let ctx = ShortcodeContext {
@@ -1038,6 +1289,10 @@ mod tests {
             breadcrumbs: vec![],
             base_url: "/".to_string(),
             sidebar_sections: vec![],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Hidden page excluded
@@ -1084,6 +1339,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "History".to_string(),
@@ -1095,6 +1351,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Blog".to_string(),
@@ -1106,6 +1363,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         let ctx = ShortcodeContext {
@@ -1118,6 +1376,10 @@ mod tests {
             breadcrumbs: vec![],
             base_url: "/".to_string(),
             sidebar_sections: vec![],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // Active section is expanded
@@ -1212,6 +1474,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Blog".to_string(),
@@ -1223,6 +1486,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 // Page title is longer than sidebar label
@@ -1235,6 +1499,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         // Sidebar labels: short names that match within page titles.
@@ -1253,6 +1518,10 @@ mod tests {
                 SidebarEntry::Simple("History".to_string()),
                 SidebarEntry::Simple("Water".to_string()),
             ],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         // All three present with sidebar label text (not page title)
@@ -1284,6 +1553,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Water".to_string(),
@@ -1295,6 +1565,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         let ctx = ShortcodeContext {
@@ -1307,6 +1578,10 @@ mod tests {
             breadcrumbs: vec![],
             base_url: "/".to_string(),
             sidebar_sections: vec![SidebarEntry::Simple("Water".to_string())],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(
@@ -1336,6 +1611,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Monitoring".to_string(),
@@ -1347,6 +1623,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
 
@@ -1379,6 +1656,10 @@ mod tests {
                     ],
                 },
             ],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
         let html = render_content_nav(&ctx, "pages");
         assert!(html.contains(">Monitoring<"), "Parent present: {}", html);
@@ -1446,6 +1727,10 @@ mod tests {
             breadcrumbs: vec![],
             base_url: "/".to_string(),
             sidebar_sections: vec![],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
 
         let args = ShortcodeArgs::from_map(HashMap::from([
@@ -1485,6 +1770,7 @@ mod tests {
                 date: Some("2024-01-15".to_string()),
                 summary: Some("An older post".to_string()),
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "New Post".to_string(),
@@ -1496,6 +1782,7 @@ mod tests {
                 date: Some("2025-03-10".to_string()),
                 summary: Some("A newer post".to_string()),
                 image: Some("/img/hero.jpg".to_string()),
+                url_path: "/blog/new-post".to_string(),
             },
             ContentPage {
                 title: "Not a Blog".to_string(),
@@ -1507,6 +1794,7 @@ mod tests {
                 date: None,
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
             ContentPage {
                 title: "Hidden Blog".to_string(),
@@ -1518,6 +1806,7 @@ mod tests {
                 date: Some("2025-02-01".to_string()),
                 summary: None,
                 image: None,
+                url_path: String::new(),
             },
         ];
         let ctx = ShortcodeContext {
@@ -1530,6 +1819,10 @@ mod tests {
             breadcrumbs: vec![],
             base_url: "/".to_string(),
             sidebar_sections: vec![],
+            metric_registry: BTreeMap::new(),
+            metric_captions: BTreeMap::new(),
+            pond_statuses: None,
+            generated_at: String::new(),
         };
 
         let html = render_blog_grid(&ctx, "pages", "Blog");
@@ -1577,10 +1870,16 @@ mod tests {
         );
         // Summary present
         assert!(html.contains("A newer post"), "Expected summary: {}", html);
-        // Links are correct
+        // Links use url_path when set (nested route mount)
         assert!(
-            html.contains("href=\"/new-post.html\""),
-            "Expected correct href: {}",
+            html.contains("href=\"/blog/new-post.html\""),
+            "Expected url_path-based href: {}",
+            html
+        );
+        // Falls back to /{slug} when url_path is empty
+        assert!(
+            html.contains("href=\"/old-post.html\""),
+            "Expected fallback href for old-post: {}",
             html
         );
     }
