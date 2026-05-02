@@ -752,9 +752,9 @@ async fn query_pond_status(
     let tail_sql = format!(
         "SELECT MESSAGE FROM (\
             SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {} \
-            WHERE MESSAGE NOT LIKE '=== Large Allocations%' \
-              AND MESSAGE NOT LIKE '=== Total:%large allocations%' \
-              AND MESSAGE NOT LIKE '  #%MB @ 0x%' \
+            WHERE \"MESSAGE\" NOT LIKE '=== Large Allocations%' \
+              AND \"MESSAGE\" NOT LIKE '=== Total:%large allocations%' \
+              AND \"MESSAGE\" NOT LIKE '  #%MB @ 0x%' \
             ORDER BY ts DESC LIMIT {}\
          ) t ORDER BY ts ASC",
         table_name, tail_lines
