@@ -675,17 +675,26 @@ async fn query_pond_status(
         tinyfs::Error::Other(format!("status_grid sql ({}): {}", q, e))
     };
 
-    // Combined status query: pick MAX(ts) overall, then MAX(ts)
-    // restricted to each MESSAGE class via filtered MAX.  Cast ts to
-    // BIGINT once.
+    // Combined status query.  We extract:
+    //   * last_seen_us       -- MAX(ts) overall
+    //   * last_ok_us/msg     -- last `Run summary ... outcome=ok` line
+    //   * last_err_us/msg    -- last `Run summary ... outcome=err` line
+    //   * last_peak_msg      -- last `Peak memory usage: ...` line
+    //
+    // The earlier `Started %` / `Stopped %` / `Failed %` patterns came
+    // from systemd itself and are emitted under `_SYSTEMD_UNIT=init.scope`
+    // (not the unit's own journal), so they never appeared in a
+    // per-unit `.jsonl` and the fields were always blank.  The
+    // `Run summary` line is emitted by pond on every run and is the
+    // authoritative outcome marker.
     let status_sql = format!(
         "SELECT \
             MAX(ts) AS last_seen, \
-            MAX(CASE WHEN MESSAGE LIKE 'Started %' THEN ts END) AS last_started_us, \
-            MAX(CASE WHEN MESSAGE LIKE 'Started %' THEN MESSAGE END) AS last_started_msg, \
-            MAX(CASE WHEN MESSAGE LIKE 'Deactivated %' OR MESSAGE LIKE 'Stopped %' OR MESSAGE LIKE 'Failed %' OR MESSAGE LIKE '% exited %' THEN ts END) AS last_exit_us, \
-            MAX(CASE WHEN MESSAGE LIKE 'Deactivated %' OR MESSAGE LIKE 'Stopped %' OR MESSAGE LIKE 'Failed %' OR MESSAGE LIKE '% exited %' THEN MESSAGE END) AS last_exit_msg, \
-            MAX(CASE WHEN MESSAGE LIKE 'Peak memory usage:%' THEN MESSAGE END) AS last_peak_msg \
+            MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN ts END) AS last_ok_us, \
+            MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=ok%' THEN MESSAGE END) AS last_ok_msg, \
+            MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN ts END) AS last_err_us, \
+            MAX(CASE WHEN MESSAGE LIKE '%Run summary %outcome=err%' THEN MESSAGE END) AS last_err_msg, \
+            MAX(CASE WHEN MESSAGE LIKE '%Peak memory usage:%' THEN MESSAGE END) AS last_peak_msg \
          FROM (SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {}) t",
         table_name
     );
@@ -726,17 +735,26 @@ async fn query_pond_status(
         };
 
     let last_seen_us = get_i64(&batches, 0);
-    let last_started_us = get_i64(&batches, 1);
-    let last_started_msg = get_str(&batches, 2);
-    let last_exit_us = get_i64(&batches, 3);
-    let last_exit_msg = get_str(&batches, 4);
+    let last_ok_us = get_i64(&batches, 1);
+    let last_ok_msg = get_str(&batches, 2);
+    let last_err_us = get_i64(&batches, 3);
+    let last_err_msg = get_str(&batches, 4);
     let last_peak_msg = get_str(&batches, 5);
     let peak_rss_bytes = last_peak_msg.as_deref().and_then(parse_peak_memory_bytes);
 
     // Tail query: most recent N messages, oldest -> newest in display.
+    //
+    // Filter out the verbose memory-profile diagnostic that pond emits
+    // on every run -- lines like `=== Large Allocations ...`,
+    // `=== Total: N large allocations ===`, and `  #N: NN.NN MB @ 0x...`.
+    // These crowd out the meaningful Run summary / error lines and make
+    // every healthy pond look like it's crashing.
     let tail_sql = format!(
         "SELECT MESSAGE FROM (\
             SELECT CAST(\"__REALTIME_TIMESTAMP\" AS BIGINT) AS ts, \"MESSAGE\" AS MESSAGE FROM {} \
+            WHERE MESSAGE NOT LIKE '=== Large Allocations%' \
+              AND MESSAGE NOT LIKE '=== Total:%large allocations%' \
+              AND MESSAGE NOT LIKE '  #%MB @ 0x%' \
             ORDER BY ts DESC LIMIT {}\
          ) t ORDER BY ts ASC",
         table_name, tail_lines
@@ -760,10 +778,10 @@ async fn query_pond_status(
     Ok(PondStatus {
         unit: unit.to_string(),
         last_seen_us,
-        last_started_us,
-        last_started_msg,
-        last_exit_us,
-        last_exit_msg,
+        last_ok_us,
+        last_ok_msg,
+        last_err_us,
+        last_err_msg,
         peak_rss_bytes,
         tail_messages,
     })
