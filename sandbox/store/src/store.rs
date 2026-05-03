@@ -13,6 +13,8 @@ use arrow_array::{
 use chrono::Utc;
 use datafusion::execution::context::SessionContext;
 use deltalake::DeltaTable;
+use deltalake::kernel::schema::partitions::{PartitionFilter, PartitionValue};
+use deltalake::operations::optimize::OptimizeType;
 use deltalake::protocol::SaveMode;
 use log::debug;
 use url::Url;
@@ -459,6 +461,78 @@ impl Store {
             })
             .collect();
         Ok(strategy.compute(&refs))
+    }
+
+    /// Run Delta Lake's `optimize(Compact)` over the table, optionally
+    /// restricted to a single `partition_key` value via `filter`.
+    ///
+    /// Compaction merges small parquet files into bigger ones to reduce
+    /// per-table overhead.  It must NOT change the logical content of
+    /// any partition; the steward asserts this by snapshotting per-
+    /// partition checksums before and after.
+    ///
+    /// Returns metrics describing how many files were added/removed.
+    /// Both being zero means optimize found nothing to do (empty table,
+    /// nonexistent filter, or already-optimal layout).
+    pub async fn compact(&mut self, filter: Option<&str>) -> Result<CompactMetrics> {
+        let filters: Vec<PartitionFilter> = match filter {
+            Some(value) => vec![PartitionFilter {
+                key: schema::col::PARTITION_KEY.to_string(),
+                value: PartitionValue::Equal(value.to_string()),
+            }],
+            None => Vec::new(),
+        };
+
+        let (new_table, metrics) = self
+            .table
+            .clone()
+            .optimize()
+            .with_type(OptimizeType::Compact)
+            .with_filters(&filters)
+            .await?;
+
+        debug!(
+            "store compact: filter={:?} version {:?} -> {:?} files +{}/-{}",
+            filter,
+            self.table.version(),
+            new_table.version(),
+            metrics.num_files_added,
+            metrics.num_files_removed,
+        );
+
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+
+        Ok(CompactMetrics {
+            num_files_added: metrics.num_files_added,
+            num_files_removed: metrics.num_files_removed,
+        })
+    }
+
+    /// Return the object-store paths of every parquet data file
+    /// referenced by the current table version, sorted.  Useful for
+    /// verifying that compaction with a partition filter only touched
+    /// the requested partition.
+    pub fn data_files(&self) -> Result<Vec<String>> {
+        let mut out: Vec<String> = self.table.get_file_uris()?.collect();
+        out.sort();
+        Ok(out)
+    }
+}
+
+/// Metrics returned by [`Store::compact`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactMetrics {
+    /// Number of new (merged) parquet files Delta wrote.
+    pub num_files_added: u64,
+    /// Number of small parquet files Delta marked Removed.
+    pub num_files_removed: u64,
+}
+
+impl CompactMetrics {
+    /// `true` iff Delta did not actually change the file set.
+    pub fn is_noop(&self) -> bool {
+        self.num_files_added == 0 && self.num_files_removed == 0
     }
 }
 

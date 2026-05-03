@@ -262,15 +262,7 @@ impl Steward {
         // partitions' checksums (which are the same as they were at
         // parent_seq) so partition_checksums_at(txn_seq) is a complete
         // snapshot.
-        let all_partitions = self.store.partitions().await?;
-        let mut checksums: PartitionChecksums = HashMap::new();
-        for partition in &all_partitions {
-            let cs = self
-                .store
-                .compute_partition_checksum(partition, &*self.checksum_strategy)
-                .await?;
-            checksums.insert(partition.clone(), cs);
-        }
+        let checksums = self.snapshot_all_partition_checksums().await?;
 
         let metadata = DataCommittedMetadata {
             partition_checksums: checksums
@@ -364,6 +356,199 @@ impl Steward {
     pub(crate) fn pond_path(&self) -> &Path {
         &self.pond_path
     }
+
+    /// Run a Delta-level compaction over the store and record the
+    /// lifecycle in the control table.
+    ///
+    /// Allocates a `txn_seq` and writes a `Begin` record before the
+    /// compaction, mirroring `begin_write`.  Then:
+    ///
+    /// - If `Store::compact` returns an error, writes a `Failed` record
+    ///   with the error reason and returns the error.
+    /// - If compaction was a no-op (zero files added/removed -- empty
+    ///   table, nonexistent partition filter, or already-optimal layout),
+    ///   writes a `Completed` record.  `last_committed_seq` does NOT
+    ///   advance, because no new Delta commit was produced.
+    /// - Otherwise snapshots per-partition checksums before and after
+    ///   the optimize, asserts they are equal (compaction must be
+    ///   logically transparent), then writes a `DataCommitted` record
+    ///   with `commit_kind = Compact`.
+    ///
+    /// `filter`, when set, restricts compaction to a single
+    /// `partition_key` value.  Other partitions' data files are
+    /// untouched.
+    ///
+    /// The returned [`CommitOutcome`] always carries
+    /// `commit_kind = Compact` regardless of whether the underlying
+    /// transaction recorded `DataCommitted` or `Completed`; callers
+    /// distinguish via `had_data` (true => real Delta commit).
+    pub async fn compact(&mut self, filter: Option<&str>) -> Result<CommitOutcome> {
+        // 1. Allocate seq and write Begin (mirror begin_write prologue).
+        let txn_seq = self.last_write_seq + 1;
+        let txn_id = new_txn_id();
+        let started = Utc::now().timestamp_micros();
+        self.control
+            .write_record(ControlRecord {
+                record_kind: RecordKind::Begin,
+                txn_seq,
+                txn_id: txn_id.clone(),
+                commit_kind: None,
+                parent_seq: None,
+                duration_ms: None,
+                ts_micros: started,
+                metadata_json: "{}".to_string(),
+            })
+            .await?;
+        self.last_write_seq = txn_seq;
+        let parent_seq = match self.control.last_committed_seq().await? {
+            0 => None,
+            n => Some(n),
+        };
+
+        // 2. Snapshot pre-compaction checksums for every known partition.
+        let pre = self.snapshot_all_partition_checksums().await?;
+
+        // 3. Run optimize.  On error, record Failed and return.
+        let metrics = match self.store.compact(filter).await {
+            Ok(m) => m,
+            Err(e) => {
+                let reason = format!("compact failed: {}", e);
+                let now = Utc::now().timestamp_micros();
+                let duration_ms = ((now - started) / 1000).max(0);
+                let mut meta = HashMap::new();
+                meta.insert("reason".to_string(), reason);
+                let _ = self
+                    .control
+                    .write_record(ControlRecord {
+                        record_kind: RecordKind::Failed,
+                        txn_seq,
+                        txn_id,
+                        commit_kind: None,
+                        parent_seq,
+                        duration_ms: Some(duration_ms),
+                        ts_micros: now,
+                        metadata_json: serde_json::to_string(&meta)?,
+                    })
+                    .await;
+                return Err(e.into());
+            }
+        };
+
+        // 4. No-op compact: write Completed, do NOT advance last_committed_seq.
+        if metrics.is_noop() {
+            let now = Utc::now().timestamp_micros();
+            let duration_ms = ((now - started) / 1000).max(0);
+            self.control
+                .write_record(ControlRecord {
+                    record_kind: RecordKind::Completed,
+                    txn_seq,
+                    txn_id,
+                    commit_kind: None,
+                    parent_seq,
+                    duration_ms: Some(duration_ms),
+                    ts_micros: now,
+                    metadata_json: "{}".to_string(),
+                })
+                .await?;
+            return Ok(CommitOutcome {
+                txn_seq,
+                had_data: false,
+                partition_checksums: pre,
+                commit_kind: CommitKind::Compact,
+            });
+        }
+
+        // 5. Real compaction: snapshot post and assert invariance.
+        let post = self.snapshot_all_partition_checksums().await?;
+        assert_compaction_invariant(&pre, &post)?;
+
+        // 6. Record DataCommitted with kind=Compact.
+        let metadata = DataCommittedMetadata {
+            partition_checksums: post
+                .iter()
+                .map(|(k, v)| (k.clone(), ChecksumValue::from(v)))
+                .collect(),
+        };
+        let metadata_json = serde_json::to_string(&metadata)?;
+        let now = Utc::now().timestamp_micros();
+        let duration_ms = ((now - started) / 1000).max(0);
+        self.control
+            .write_record(ControlRecord {
+                record_kind: RecordKind::DataCommitted,
+                txn_seq,
+                txn_id,
+                commit_kind: Some(CommitKind::Compact),
+                parent_seq,
+                duration_ms: Some(duration_ms),
+                ts_micros: now,
+                metadata_json,
+            })
+            .await?;
+
+        Ok(CommitOutcome {
+            txn_seq,
+            had_data: true,
+            partition_checksums: post,
+            commit_kind: CommitKind::Compact,
+        })
+    }
+
+    /// Helper: snapshot every known partition's content checksum
+    /// using the steward's strategy.
+    async fn snapshot_all_partition_checksums(&self) -> Result<PartitionChecksums> {
+        let partitions = self.store.partitions().await?;
+        let mut out: PartitionChecksums = HashMap::new();
+        for p in partitions {
+            let cs = self
+                .store
+                .compute_partition_checksum(&p, &*self.checksum_strategy)
+                .await?;
+            out.insert(p, cs);
+        }
+        Ok(out)
+    }
+}
+
+/// Verify that `pre` and `post` represent the same logical content:
+/// same set of partition keys AND identical checksum bytes per key.
+/// Compaction must NOT change either.  Returns
+/// `StewardError::Invariant` describing the first mismatch found.
+fn assert_compaction_invariant(pre: &PartitionChecksums, post: &PartitionChecksums) -> Result<()> {
+    if pre.len() != post.len() {
+        return Err(crate::error::StewardError::Invariant(format!(
+            "compaction changed partition count: pre={} post={}",
+            pre.len(),
+            post.len(),
+        )));
+    }
+    for (p, pre_cs) in pre {
+        match post.get(p) {
+            Some(post_cs) if post_cs == pre_cs => {}
+            Some(post_cs) => {
+                return Err(crate::error::StewardError::Invariant(format!(
+                    "compaction altered partition {:?} checksum: pre={} post={}",
+                    p,
+                    pre_cs.hex(),
+                    post_cs.hex(),
+                )));
+            }
+            None => {
+                return Err(crate::error::StewardError::Invariant(format!(
+                    "compaction removed partition {:?}",
+                    p
+                )));
+            }
+        }
+    }
+    for p in post.keys() {
+        if !pre.contains_key(p) {
+            return Err(crate::error::StewardError::Invariant(format!(
+                "compaction introduced new partition {:?}",
+                p
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Re-compute the per-partition checksums at the current state and

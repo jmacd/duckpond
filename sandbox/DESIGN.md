@@ -129,25 +129,33 @@ do NOT advance `last_committed_seq`.  Empty/no-op writes get a
 `last_write_seq` from `MAX(any record kind)` so the next allocation
 skips orphans.
 
-### 2.4 Compaction (planned, not yet implemented)
+### 2.4 Compaction
 
 A compaction runs Delta `optimize().with_type(Compact)` to merge
 small parquets in a partition.  The Delta commit contains `Add` actions
 for the new big parquet and `Remove` actions for the small ones.
 
-The steward's `compact()` method:
+The steward's `compact(filter)` method:
 1. Allocates a new `txn_seq`.
 2. Records `Begin`.
-3. Snapshots each touched partition's checksum **before** the optimize.
-4. Runs `optimize`.
-5. Recomputes the same partitions' checksums **after**.
-6. **Asserts** that pre and post checksums are equal -- compaction
-   must NOT change logical content.  An inequality is a bug; surface
-   loudly.
-7. Writes `DataCommitted` with `commit_kind = Compact`.
+3. Snapshots every known partition's checksum **before** the optimize.
+4. Runs `Store::compact(filter)` (a thin wrapper over delta-rs's
+   `optimize().with_type(Compact)`, optionally restricted to one
+   partition_key value).  On error: writes `Failed`, returns the error.
+5. Inspects the metrics:
+   - **No-op** (zero files added or removed -- empty pond, nonexistent
+     filter, or already-optimal layout): writes `Completed`.
+     `last_committed_seq` does NOT advance.  No new Delta commit was
+     produced, so there is no new restart point either.
+   - **Real work**: snapshots every partition's checksum **after**,
+     asserts pre and post are equal (per-partition AND set-equality of
+     keys).  An inequality is a bug; surface loudly via
+     `StewardError::Invariant`.  Writes `DataCommitted` with
+     `commit_kind = Compact` and the post snapshot.
 
-Compaction commits are normal Delta commits and live alongside Write
-commits in the same `txn_seq` sequence.
+Real-work compaction commits are normal Delta commits and live alongside
+Write commits in the same `txn_seq` sequence.  Both kinds of commits
+qualify as restart points for downstream consumers.
 
 ### 2.5 Remote sync model
 
@@ -356,6 +364,8 @@ Store::list(partition) -> Vec<(String, Vec<u8>)>
 Store::partitions() -> Vec<String>
 Store::partition_leaves(partition) -> Vec<(String, [u8; 32])>
 Store::compute_partition_checksum(partition, &strategy) -> Checksum
+Store::compact(filter: Option<&str>) -> CompactMetrics  // delta optimize(Compact)
+Store::data_files() -> Vec<String>            // current Delta version's files
 Store::last_txn_seq() -> i64
 Store::delta_version() -> i64
 ```
@@ -390,6 +400,8 @@ WriteGuard::put / delete / commit -> CommitOutcome / abort
 Steward::begin_read() -> ReadGuard
 ReadGuard::get / list / partitions
 
+Steward::compact(filter: Option<&str>) -> CommitOutcome  // Compact lifecycle
+
 Steward::log(limit) -> Vec<ControlRecord>
 Steward::last_write_seq() / last_committed_seq()
 Steward::partition_checksums_at(txn_seq) -> Option<PartitionChecksums>
@@ -416,8 +428,9 @@ Skeleton crates with smoke tests only.  Real work in upcoming todos.
 
 ### 3.3 Test inventory
 
-72 tests total across all sandbox crates.  All passing, all under both
-checksum strategies where applicable.
+84 tests total across all sandbox crates (was 72 before `compact-op`;
++11 new compact tests, +1 net other counts adjustment).  All passing,
+all under both checksum strategies where applicable.
 
 | Crate / file | Count | What it covers |
 |---|---|---|
@@ -429,9 +442,10 @@ checksum strategies where applicable.
 | store/tests/checksum_integration.rs (integration) | 11 | order-independent across stores (Merkle, Homomorphic), tombstone-neutral, cross-partition isolation, value-change detection, empty-partition stability, two strategies disagree on same state |
 | steward/src/control_table.rs (unit) | 3 | Arrow vs Delta schema agreement, RecordKind serialization roundtrip, ChecksumValue serialization roundtrip |
 | steward/tests/steward.rs (integration) | 18 | lifecycle records (Begin/DataCommitted/Failed/Completed), parent_seq tracking, no-op->Completed, abort, read guards write nothing, txn_seq monotonicity across all outcomes, partition checksums carry forward, orphan-Begin recovery, config_set/get/list latest-wins, persistence across re-open, log limit, verify_local under both strategies, verify on empty pond, put-after-delete-then-verify |
+| steward/tests/compact.rs (integration) | 11 | get/list unchanged after compact, real-work compact -> DataCommitted(Compact), per-partition checksum invariance, partition filter touches only that partition (verified via Store::data_files), empty-pond compact -> Completed (no-op), nonexistent-filter compact -> Completed, parent_seq points at last write, Homomorphic strategy invariance, tombstones survive compaction, interleaved write/compact/write/compact lifecycle, persistence across re-open |
 | remote/src/lib.rs | 1 | smoke (placeholder) |
 | tests/src/lib.rs | 1 | smoke (placeholder) |
-| **Total** | **72** | |
+| **Total** | **84** | |
 
 ### 3.4 CI integration
 
@@ -462,8 +476,8 @@ sandbox entirely.
 | store-schema | done | Store + put/delete/get/list/apply_batch + 19 integration tests |
 | checksum-trait | done | trait + Merkle + Homomorphic + 11 store-bridging tests |
 | steward-lifecycle | done | Steward + control table + WriteGuard/ReadGuard + verify_local + 18 tests |
-| compact-op | pending | next on the critical path |
-| remote-push | pending | depends on compact-op |
+| compact-op | done | Store::compact + Store::data_files + Steward::compact (no-op vs real-work lifecycle, partition filter, error -> Failed) + 11 tests |
+| remote-push | pending | next on the critical path |
 | remote-pull | pending | depends on remote-push |
 | restart-from-compact | pending | depends on remote-pull |
 | remote-retention | pending | depends on remote-push |
@@ -474,50 +488,42 @@ sandbox entirely.
 | benchmarks | pending | depends on checksum-trait (UNBLOCKED, can run any time) |
 | sandbox-design-doc | pending | depends on integration-tests, property-tests, benchmarks |
 
-5 of 16 done.
+6 of 16 done.
 
 ---
 
 ## 5. Next steps in detail
 
-### 5.1 `compact-op` (next on critical path)
+### 5.1 `compact-op` (done)
 
-**Goal**: add `Steward::compact()` that runs Delta optimize, asserts
-checksum invariance, and writes a `DataCommitted` row with
-`commit_kind = Compact`.
+Implementation summary:
 
-**Files to touch**:
-
-- `sandbox/steward/src/steward.rs`: new `compact()` method.
-- `sandbox/store/src/store.rs`: expose a way to run optimize on the
-  store's underlying Delta table (e.g., `Store::compact_partition`
-  taking an optional partition filter).  Mirrors duckpond's
-  `maintenance::maintain_table` pattern.
-- `sandbox/steward/tests/`: new tests covering:
-  - Compaction does not change `get`/`list` output for any key.
-  - Compaction does not change `last_committed_seq`'s checksums.
-  - Compaction emits exactly one `Begin` and one `DataCommitted` with
+- `Store::compact(filter: Option<&str>) -> CompactMetrics` wraps
+  delta-rs `optimize().with_type(Compact)` with an optional
+  `PartitionFilter` on `partition_key`.  Returns the file
+  add/remove counts so callers can detect no-ops.
+- `Store::data_files() -> Vec<String>` enumerates the parquet files
+  referenced by the current Delta version (used by tests to verify
+  partition-filtered compaction only touches the requested partition).
+- `Steward::compact(filter: Option<&str>) -> CommitOutcome`:
+  allocates a `txn_seq`, writes `Begin`, snapshots pre-checksums,
+  runs `Store::compact`.  Three terminal branches:
+  - Error -> `Failed` record, error returned.
+  - No-op (zero files added or removed) -> `Completed` record;
+    `last_committed_seq` does not advance.
+  - Real work -> snapshot post-checksums, assert `pre == post`
+    (per-partition AND set-equality), write `DataCommitted` with
     `commit_kind = Compact`.
-  - Compaction with `--partition` filter only touches that partition.
-  - Compacting an empty pond is a safe no-op.
-  - The "checksums must match" assertion fires if we manually corrupt
-    state (defensive test).
 
-**Interaction with the rest**:
+The `CommitOutcome` always carries `commit_kind = Compact`; callers
+distinguish the no-op case via `had_data = false`.
 
-- `compact()` allocates a `txn_seq` like any write.  This means a
-  Compact commit is interspersed with Write commits in the txn_seq
-  sequence.  `last_committed_seq` reflects whichever was most recent.
-- Pre and post checksums must use the SAME strategy as the steward was
-  constructed with (the steward owns the strategy via `StewardOptions`).
-- Delta-rs's `optimize` API needs verification at our version (0.30);
-  partition filters may or may not be exposed cleanly.  Fall back to
-  whole-table optimize if needed; the design tolerates it.
+11 tests in `steward/tests/compact.rs` cover happy paths under both
+checksum strategies, partition-filter scoping, both no-op branches,
+tombstone preservation, interleaved writes/compactions, and re-open
+persistence.
 
-**Estimated scope**: ~150 lines code + ~150 lines tests, plus
-investigation of the delta-rs optimize API surface.
-
-### 5.2 `remote-push`
+### 5.2 `remote-push` (next on critical path)
 
 **Goal**: implement `Remote::create / open / push`.  The push runs
 manually (operator-triggered); auto-push-on-commit is a separate later

@@ -29,4 +29,4 @@ pub mod schema;
 mod store;
 
 pub use error::{Result, StoreError};
-pub use store::{Op, Store};
+pub use store::{CompactMetrics, Op, Store};

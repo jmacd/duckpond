@@ -462,8 +462,8 @@ impl ControlTable {
                     RecordKind::DataCommitted | RecordKind::Failed | RecordKind::Completed
                 )
             });
-            if !has_terminal && let Some(begin) =
-                recs.iter().find(|r| r.record_kind == RecordKind::Begin)
+            if !has_terminal
+                && let Some(begin) = recs.iter().find(|r| r.record_kind == RecordKind::Begin)
             {
                 out.push((*begin).clone());
             }
