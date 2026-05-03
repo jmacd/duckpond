@@ -159,103 +159,202 @@ qualify as restart points for downstream consumers.
 
 ### 2.5 Remote sync model
 
-The "remote" is another local Delta Lake table at a different
-filesystem path.  Same shape as an S3 bucket, accessed via
-`object_store::LocalFileSystem`.  When the design maps back to
-duckpond, swapping for `S3` is a config change; the mechanics here do
-not change.
+The "remote" is a single Delta Lake table hosting one pond family.
+**One remote = one pond.**  Operators who want consolidation use
+multiple buckets; the schema does not multiplex stores.  Production
+deployments swap `LocalFileSystem` for `S3` as a config change; the
+schema is identical.
 
-Bucket layout:
+The remote's `store_id` -- a UUIDv4 minted at `Steward::create` and
+persisted in the source pond's local control table as a setting --
+lives in Delta table properties under the `sandbox.store_id` key, set
+once at `Remote::create`.  A consumer reads it on `Remote::open` and
+either verifies it matches its own `store_id` or uses it to bootstrap
+a fresh replica.
 
-```text
-<remote-root>/
-  _delta_log/                                Delta log of the remote table
-  bundle=<store_id>/txn=<seq>/
-    manifest.json                            kind, parent_seq, partition_checksums, file_list
-    data/part-*.parquet                      copies of the source's Delta data files
-    log/<seq>.json                           copy of the source's Delta commit log
-```
+Bandwidth is not the primary motivation for the remote format.
+Atomicity is: when bundle bytes live IN the remote Delta table's
+rows, the Delta commit IS the atomic boundary for the whole bundle.
+A push either makes everything visible or nothing; there are no
+torn-bundle states to clean up, and Delta's own vacuum/checkpoint
+machinery is the only retention mechanism we need.
 
-`manifest.json` is a small JSON sidecar with everything needed for
-retention walking and pull dispatch without reading the bundle's data:
+#### 2.5.1 Schema
 
-```json
-{
-  "store_id": "...",
-  "txn_seq": 42,
-  "parent_seq": 41,
-  "kind": "Compact",
-  "partition_checksums": {
-    "p1": {"kind": "merkle", "hex": "..."},
-    "p2": {"kind": "merkle", "hex": "..."}
-  },
-  "data_files": [{"path": "data/part-001.parquet", "size": 12345}],
-  "log_file": "log/42.json"
+The remote table has ONE partition column, `partition_kind`, taking
+three values.  All other columns are Parquet-native scalars; no JSON,
+no Map, no nested Struct.
+
+| `partition_kind` | Holds | Rows per push |
+|---|---|---|
+| `manifest` | bundle header (commit_kind, parent_seq, ts_micros) | 1 |
+| `checksum` | per-source-partition content checksum | N (= source pond partition count) |
+| `data` | per-chunk file content + add/remove markers | C (= sum of chunks across all files in the bundle) |
+
+Constants:
+
+- `CHUNK_SIZE_BYTES = 16 * 1024 * 1024` (16 MB; only the last chunk
+  of a file is short)
+- `BLAKE3_LEN = 32`
+
+Full Arrow schema (all variant-specific columns nullable):
+
+| column | type | populated on |
+|---|---|---|
+| `partition_kind` | Utf8 | every row -- partition column |
+| `txn_seq` | Int64 | every row |
+| `ts_micros` | Int64 | every row |
+| `commit_kind` | Utf8 | `manifest` (`"write"` / `"compact"`) |
+| `parent_seq` | Int64 | `manifest` (0 if root) |
+| `partition_key` | Utf8 | `checksum` |
+| `checksum_kind` | Utf8 | `checksum` (`"merkle"` / `"homomorphic"`) |
+| `checksum_bytes` | Binary | `checksum` (32 bytes) |
+| `file_path` | Utf8 | `data` |
+| `file_action` | Utf8 | `data` (`"add"` / `"remove"`) |
+| `file_size` | Int64 | `data` (0 for remove markers) |
+| `file_blake3` | Binary | `data` (32 bytes; zero for remove) |
+| `chunk_count` | Int64 | `data` (0 for remove markers) |
+| `chunk_id` | Int64 | `data` (0..chunk_count-1; 0 for remove) |
+| `chunk_data` | Binary | `data` (<= 16 MB; empty for remove) |
+| `chunk_blake3` | Binary | `data` (32 bytes; zero for remove) |
+
+In-memory representation makes the union shape unrepresentable-when-
+invalid via an enum:
+
+```rust
+struct RemoteRow {
+    txn_seq: i64,
+    ts_micros: i64,
+    body: RowBody,
+}
+
+enum RowBody {
+    Manifest {
+        commit_kind: CommitKind,
+        parent_seq: i64,
+    },
+    Checksum {
+        partition_key: String,
+        checksum_kind: ChecksumKind,
+        checksum_bytes: [u8; BLAKE3_LEN],
+    },
+    DataAdd {
+        file_path: String,
+        file_size: i64,
+        file_blake3: [u8; BLAKE3_LEN],
+        chunk_count: i64,
+        chunk_id: i64,
+        chunk_data: Vec<u8>,
+        chunk_blake3: [u8; BLAKE3_LEN],
+    },
+    DataRemove {
+        file_path: String,
+    },
 }
 ```
 
-#### 2.5.1 Push
+Serialization to Arrow `RecordBatch`: match on `body`, populate that
+variant's columns, null the rest.  Deserialization from Arrow: read
+`partition_kind` (and `file_action` for data rows), dispatch to the
+variant constructor, validate that expected columns are non-null and
+irrelevant ones are null.  An unexpected combination is a loud
+`RemoteError::Schema` -- it would indicate a foreign writer.
 
-After each successful commit, push backs up the new bundle:
+#### 2.5.2 Standard queries
 
-1. Read the latest local `DataCommitted` record (kind, parent_seq,
-   partition_checksums).
-2. Build the manifest.
-3. Upload manifest, data files, and commit log to
-   `bundle=<id>/txn=<seq>/`.
-4. Write a Delta commit on the remote table referencing the new bundle.
+| Operation | Plan |
+|---|---|
+| List bundles | `WHERE partition_kind = 'manifest' ORDER BY txn_seq` |
+| Latest seq | `MAX(txn_seq) WHERE partition_kind = 'manifest'` |
+| Verify bundle N's checksums | `WHERE partition_kind = 'checksum' AND txn_seq = N` |
+| List files in bundle N | `WHERE partition_kind = 'data' AND txn_seq = N AND chunk_id = 0`, project away `chunk_data` |
+| Pull a single file | `WHERE partition_kind = 'data' AND txn_seq = N AND file_path = X ORDER BY chunk_id` |
+| Push | one Delta commit: 1 manifest + N checksum + C data rows across three partitions atomically |
+| Retention | `DELETE WHERE txn_seq < horizon`, then vacuum |
 
-`last_pushed_seq` (per remote) is tracked as a setting in the local
-control table so subsequent pushes are O(M) where M is the number of
-unpushed transactions (usually 1).
+#### 2.5.3 Push
 
-#### 2.5.2 Pull
+For each new locally-committed bundle (Write or Compact):
 
-A consumer pulls bundles in `txn_seq` order from `last_pulled_seq + 1`
-to the remote's current `txn_seq`.  For each bundle, dispatch on
-`kind`:
+1. Read the source's Delta data files added by this `txn_seq`.
+2. Stream each file in 16 MB chunks.  For each chunk: BLAKE3-hash the
+   chunk, accumulate a file-level BLAKE3, emit one `DataAdd` row.
+3. (Compact only) For each removed file: emit one `DataRemove` row,
+   binary fields empty.
+4. Snapshot partition_checksums from the local control table's
+   `DataCommitted` record for this `txn_seq` -> emit N `Checksum`
+   rows.
+5. Emit one `Manifest` row with `commit_kind`, `parent_seq`,
+   `ts_micros`.
+6. Single Delta commit on the remote inserting all rows together.
+7. Update source steward's `last_pushed_seq:<remote_url>` setting.
 
-- **Write bundle**: download data files + log, apply to local Delta
-  table, recompute affected partition checksums, compare to manifest.
-  Mismatch -> abort.
-- **Compact bundle, mirror mode** (default): download merged parquets,
-  apply Add/Remove, recompute checksums, compare.  Local layout
-  matches source.
-- **Compact bundle, independent mode** (opt-in via `pull_mode` config):
-  skip data download, advance `last_pulled_seq`, recompute checksum
-  from local content (which already represents the same logical state),
-  compare to manifest.  Consumer keeps its own physical layout and is
-  responsible for its own compaction schedule.
-- **Compact bundle, consumer behind retention**: this commit IS the
-  starting point.  Download merged parquets, set
-  `last_pulled_seq = txn_seq`, do NOT replay missing prior bundles.
-  Used for fresh restore or when retention pruned earlier bundles.
+If step 6 fails, no rows appear on the remote; retry pushes the same
+content (idempotent, because the bundle's content is deterministic
+from `txn_seq`).  Local control-table records
+`PostPushPending` -> `PostPushStarted` -> `PostPushCompleted` /
+`PostPushFailed` make resumption deterministic across crashes.
 
-#### 2.5.3 Retention
+`last_pushed_seq:<remote_url>` is keyed by remote URL so a single
+source can push to multiple remotes (e.g., primary R2 + offsite
+archive) and track each independently.
+
+#### 2.5.4 Pull
+
+Consumer walks bundles in `txn_seq` order from `last_pulled_seq + 1`
+to the remote's MAX manifest seq.  For each bundle, dispatch on
+`commit_kind`:
+
+- **Write bundle**: for each `DataAdd` row, reassemble chunks
+  (verify per-chunk BLAKE3 incrementally, then file-level BLAKE3 at
+  end) -> apply to local Delta.  Recompute affected partition
+  checksums; compare to bundle's checksum rows.  Mismatch -> abort.
+- **Compact bundle, mirror mode** (default): apply `DataAdd` and
+  `DataRemove` actions via `CommitBuilder` on the local Delta table.
+  Recompute checksums; compare.  Mismatch -> abort.
+- **Compact bundle, independent mode** (opt-in via `pull_mode`
+  setting): skip data rows; read only checksum rows.  Recompute local
+  checksums; compare.  Advance `last_pulled_seq`.  Consumer keeps its
+  own physical layout and is responsible for its own compaction.
+- **Compact bundle, restart from compact**: when consumer's
+  `last_pulled_seq` is below the retention horizon AND this is the
+  oldest available compact bundle.  Apply `DataAdd` rows wholesale
+  (no preceding state to merge with), set
+  `last_pulled_seq = txn_seq`.  Used for fresh restore or when
+  retention pruned earlier bundles.
+
+#### 2.5.5 Retention
 
 `Remote::maintain` with `vacuum_pre_compaction = true`:
 
-1. Find the last N Compact bundles (default N=2 from
+1. Find the last N compact bundles (default N=2 from
    `remote_compaction_retention` setting).
 2. Horizon = oldest of those N's `txn_seq`.
-3. Delete bundles with `txn_seq < horizon`.
-4. Refuse if N < 1 or fewer than N Compact bundles exist (would leave
-   no restart point).
+3. `DELETE FROM remote WHERE txn_seq < horizon` -- single Delta
+   commit, atomically removes manifest + checksum + data rows for all
+   older bundles.
+4. delta-rs `vacuum` prunes the now-unreferenced parquet row groups.
+5. Refuse if N < 1 or fewer than N compact bundles exist (would
+   leave no restart point).
 
 Once a consumer falls below the horizon, its next pull returns an
 explicit error directing the operator to run `restore_reinit` (wipe
-local + bootstrap from oldest available compact bundle).
+local + bootstrap from oldest available compact bundle, the
+restart-from-compact path above).
 
-#### 2.5.4 Verification
+#### 2.5.6 Verification
 
 `verify_local`: re-derive each partition's checksum from current data
 and compare against the `partition_checksums` recorded on the latest
 `DataCommitted` record.  Implemented and tested.
 
-`verify_against_remote`: pull the latest manifest's checksums per
-partition and compare to local recomputation.  Walks back to identify
-the `txn_seq` at which divergence first appeared.  Planned, not yet
-implemented.
+`verify_against_remote`: for each `partition_key`, fetch latest
+bundle's checksum row from the remote
+(`WHERE partition_kind = 'checksum' AND partition_key = X ORDER BY txn_seq DESC LIMIT 1`),
+compare to local recomputation.  To find the divergence point, walk
+back through manifest rows in descending `txn_seq` order; the first
+bundle whose checksums all match local recomputation is the boundary.
+Planned, not yet implemented.
 
 ### 2.6 Coupling and safety rules
 
@@ -280,8 +379,17 @@ Carrying forward from the design discussions:
 
 What flows back:
 
-- The bundle manifest format and `kind`-tagged push: extends
-  `crates/remote`.
+- The three-partition (`manifest` / `checksum` / `data`) remote
+  schema: replaces or augments duckpond's `ChunkedFileRecord`
+  schema in `crates/remote/src/schema.rs`.  The chunked-row idea is
+  already there in duckpond; the sandbox refines it with explicit
+  `partition_kind` separation, atomic-Delta-commit push, and
+  in-Delta retention.
+- Chunk size: sandbox uses a 16 MB constant; duckpond's existing
+  range is 4-64 MB.  Sandbox skips BLAKE3 outboard data (per-chunk
+  hash + per-file root hash only); duckpond keeps outboard for
+  cryptographically-verifiable chunk-streaming.  Adding
+  `chunk_outboard: Binary` is a one-column extension if needed.
 - Per-partition checksum primitive: new module in `crates/tlogfs`
   (where `OplogEntry` rows live; "partition" = `part_id`).
 - Per-commit checksum recording: extends control table schema in
@@ -525,41 +633,44 @@ persistence.
 
 ### 5.2 `remote-push` (next on critical path)
 
-**Goal**: implement `Remote::create / open / push`.  The push runs
-manually (operator-triggered); auto-push-on-commit is a separate later
-todo.  After push, the remote bucket directory contains a Delta table
-plus per-bundle subdirectories.
+**Goal**: implement `Remote::create / open / push(steward)`.  Push
+runs manually (operator-triggered); auto-push-on-commit is a separate
+later todo.  After push, the remote bucket contains exactly one Delta
+table whose rows ARE the bundle content (see §2.5).
 
 **Files to write**:
 
-- `sandbox/remote/src/error.rs`: error type.
-- `sandbox/remote/src/manifest.rs`: `BundleManifest` struct,
-  serde-JSON encoding, schema for the remote Delta table (one row per
-  bundle).
-- `sandbox/remote/src/remote.rs`: `Remote` type, `push` method,
-  `list_bundles`, `latest_seq`, `oldest_available_seq`.
-- `sandbox/remote/tests/push.rs`: tests covering happy-path bundle
-  upload, manifest format, idempotent re-push, push of empty pond.
+- `sandbox/remote/src/error.rs`: `RemoteError` enum.
+- `sandbox/remote/src/schema.rs`: Arrow + Delta schemas for the
+  three-partition `manifest` / `checksum` / `data` table; the
+  `RowBody` enum and converters to/from `RecordBatch`.
+- `sandbox/remote/src/chunking.rs`: `CHUNK_SIZE_BYTES = 16 * 1024 * 1024`,
+  streaming chunker that takes a parquet file path and yields
+  `(chunk_id, chunk_count, chunk_data, chunk_blake3,
+  file_blake3_running)` tuples.
+- `sandbox/remote/src/remote.rs`: `Remote` type with `create` /
+  `open` / `push` / `list_bundles` / `latest_seq` /
+  `oldest_available_seq` / `store_id`.
+- `sandbox/remote/tests/push.rs`: happy path, idempotent re-push,
+  push of empty pond, partition-kind row-shape invariants, schema
+  round-trip, chunking boundary cases (file exactly 16 MB, file
+  smaller than 16 MB, file spanning multiple chunks).
 
-**Schema for the remote Delta table** (mirrors duckpond's chunked
-record schema in spirit, simpler in detail):
+**`store_id` storage**: `store_id` is minted at `Steward::create` as
+a fresh UUIDv4 and persisted via `config_set("store_id", ...)` (or
+supplied via a new `StewardOptions::store_id: Option<Uuid>` for the
+restore-from-compact path).  `Steward::store_id()` exposes it.  At
+`Remote::create`, the source's `store_id` is written as a Delta
+table property `sandbox.store_id = <uuid>` via
+`CreateBuilder::with_configuration`.  At `Remote::open`, read it
+from `DeltaTable::metadata().configuration` and require non-empty;
+expose via `Remote::store_id()`.  A consumer opening a remote whose
+`store_id` differs from its own local `store_id` is an explicit
+`RemoteError::StoreIdMismatch` (catches "wrong bucket configured").
 
-| column | type | notes |
-|---|---|---|
-| store_id | Utf8 | partition column |
-| txn_seq | Int64 | bundle id within a store |
-| kind | Utf8 | "write" or "compact" |
-| parent_seq | Int64 | predecessor or 0 |
-| ts_micros | Int64 | when pushed |
-| manifest_path | Utf8 | relative path to manifest.json in the bucket |
-
-The actual data files live as plain parquet objects under
-`bundle=<store_id>/txn=<seq>/data/`.  The Delta table is just an
-index for fast listing.
-
-**Tracking last_pushed_seq**: stored as a steward setting,
-`last_pushed_seq:<remote_id>`.  Remote_id is the `store_id` of the
-target remote (one steward can push to multiple remotes).
+**Tracking `last_pushed_seq`**: stored as a steward setting,
+`last_pushed_seq:<remote_url>`.  One source can push to multiple
+remotes (e.g., R2 + offsite archive); the URL discriminates.
 
 ### 5.3 `remote-pull`
 
@@ -618,24 +729,19 @@ These are noted in the plan and worth restating:
    overhead.  Both are correct; the tradeoff is performance vs
    security.
 
-2. **Bundle manifest as JSON sidecar vs Delta record?**  Currently
-   plan uses both: a small Delta table for indexing + a JSON file per
-   bundle for the full manifest payload.  This may be simplifiable
-   once we see how queries against it actually look.
-
-3. **Independent-mode pull and physical layout drift.**  A consumer
+2. **Independent-mode pull and physical layout drift.**  A consumer
    in independent mode will accumulate small parquets until it
    compacts itself.  Verify the prototype demonstrates this is
    operationally sane before recommending the mode for any real
    consumer.
 
-4. **Crash recovery in the prototype.**  Steward records the
+3. **Crash recovery in the prototype.**  Steward records the
    lifecycle to detect incomplete transactions.  Recovery currently
    just *reports* them; it does not auto-roll-back or auto-replay.
    For the prototype this is fine; for duckpond we'd need a deliberate
    recovery story.
 
-5. **Concurrency.**  Multiple processes against the same store
+4. **Concurrency.**  Multiple processes against the same store
    should serialize via filesystem lock; not yet implemented.  Pull
    from one remote by multiple consumers should not block; should
    work today since pulls are read-only against the remote.
