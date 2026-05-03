@@ -283,3 +283,108 @@ async fn keys_with_sql_metacharacters_roundtrip() {
     let listed = store.list("p").await.unwrap();
     assert_eq!(listed, vec![(weird.to_string(), b"v".to_vec())]);
 }
+
+#[tokio::test]
+async fn actions_at_version_returns_adds_for_a_write() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut store = Store::create(dir.path()).await.unwrap();
+    let _ = store.put("p", "k", b"v".to_vec()).await.unwrap();
+    let v = store.delta_version();
+    assert!(v > 0, "version advanced past initial");
+
+    let (adds, removes) = store.actions_at_version(v).await.unwrap();
+    assert!(!adds.is_empty(), "write produces at least one Add action");
+    assert!(removes.is_empty(), "first write has no Remove actions");
+    for add in &adds {
+        assert!(add.size > 0, "Add reports a positive file size");
+        assert!(!add.path.is_empty(), "Add has a path");
+    }
+
+    // Add paths must be a subset of the table's current data files
+    // (they were just added; nothing's been removed).
+    let current: std::collections::HashSet<_> = store
+        .data_files()
+        .unwrap()
+        .into_iter()
+        // Strip any Url scheme prefix; data_files returns absolute
+        // file:// URIs while Add paths are relative.
+        .map(|p| {
+            p.rsplit_once('/')
+                .map(|(_, name)| name.to_string())
+                .unwrap_or(p)
+        })
+        .collect();
+    for add in &adds {
+        let leaf = add
+            .path
+            .rsplit_once('/')
+            .map(|(_, name)| name.to_string())
+            .unwrap_or_else(|| add.path.clone());
+        assert!(
+            current.contains(&leaf),
+            "Add file leaf `{}` (full `{}`) appears in current data_files",
+            leaf,
+            add.path,
+        );
+    }
+}
+
+#[tokio::test]
+async fn actions_at_version_returns_adds_and_removes_for_a_compact() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut store = Store::create(dir.path()).await.unwrap();
+    // Three small writes -> three small parquets in partition `p`.
+    for i in 0..3 {
+        let _ = store
+            .put("p", &format!("k{}", i), b"v".to_vec())
+            .await
+            .unwrap();
+    }
+    let pre_version = store.delta_version();
+    let metrics = store.compact(None).await.unwrap();
+
+    if metrics.is_noop() {
+        // delta-rs decided nothing to merge for these tiny files; can't
+        // exercise the Adds-and-Removes assertion. Still verify the
+        // pre-compact write's actions are reachable.
+        let (adds, removes) = store.actions_at_version(pre_version).await.unwrap();
+        assert!(!adds.is_empty());
+        assert!(removes.is_empty());
+        return;
+    }
+
+    let post_version = store.delta_version();
+    assert!(post_version > pre_version, "compact advanced version");
+
+    let (adds, removes) = store.actions_at_version(post_version).await.unwrap();
+    assert!(
+        !adds.is_empty(),
+        "compact recorded at least one Add (merged)"
+    );
+    assert!(
+        !removes.is_empty(),
+        "compact recorded Removes for the small parquets it merged",
+    );
+    assert_eq!(
+        adds.len() as u64,
+        metrics.num_files_added,
+        "Add count matches metrics.num_files_added",
+    );
+    assert_eq!(
+        removes.len() as u64,
+        metrics.num_files_removed,
+        "Remove count matches metrics.num_files_removed",
+    );
+}
+
+#[tokio::test]
+async fn actions_at_version_errors_on_missing_version() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let store = Store::create(dir.path()).await.unwrap();
+    // No writes; delta-rs only has the initial schema commit at version 0.
+    let result = store.actions_at_version(99).await;
+    assert!(result.is_err(), "missing version errors");
+}

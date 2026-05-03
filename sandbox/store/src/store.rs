@@ -518,6 +518,65 @@ impl Store {
         out.sort();
         Ok(out)
     }
+
+    /// Read the Add and Remove file actions recorded in the Delta
+    /// commit log entry for a specific `version`.  Returns
+    /// `(adds, removes)`.  `Metadata`, `Protocol`, `CommitInfo`,
+    /// `Cdc`, `Txn`, and `DomainMetadata` actions are filtered out --
+    /// `remote-push` only cares about file deltas.
+    ///
+    /// `version` must be a real Delta version on this table; an out-of-
+    /// range version returns [`StoreError::Invariant`].
+    ///
+    /// Paths in the returned `AddPath`/`RemovePath` are URI-decoded
+    /// strings relative to the table root (delta-rs's deserializer
+    /// already percent-decodes them; consumers can pass them straight
+    /// into `object_store::path::Path::from`).
+    pub async fn actions_at_version(
+        &self,
+        version: i64,
+    ) -> Result<(Vec<AddPath>, Vec<RemovePath>)> {
+        let bytes = self
+            .table
+            .log_store()
+            .read_commit_entry(version)
+            .await?
+            .ok_or_else(|| {
+                StoreError::Invariant(format!("no Delta commit log entry at version {}", version))
+            })?;
+        let actions = deltalake::logstore::get_actions(version, &bytes)?;
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+        for action in actions {
+            match action {
+                deltalake::kernel::Action::Add(a) => adds.push(AddPath {
+                    path: a.path,
+                    size: a.size,
+                }),
+                deltalake::kernel::Action::Remove(r) => removes.push(RemovePath { path: r.path }),
+                _ => {}
+            }
+        }
+        Ok((adds, removes))
+    }
+}
+
+/// A file added by a Delta commit, as reported by
+/// [`Store::actions_at_version`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddPath {
+    /// URI-decoded path relative to the table root.
+    pub path: String,
+    /// File size in bytes.
+    pub size: i64,
+}
+
+/// A file removed by a Delta commit, as reported by
+/// [`Store::actions_at_version`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovePath {
+    /// URI-decoded path relative to the table root.
+    pub path: String,
 }
 
 /// Metrics returned by [`Store::compact`].
