@@ -475,6 +475,7 @@ Store::compute_partition_checksum(partition, &strategy) -> Checksum
 Store::compact(filter: Option<&str>) -> CompactMetrics  // delta optimize(Compact)
 Store::data_files() -> Vec<String>            // current Delta version's files
 Store::actions_at_version(version) -> (Vec<AddPath>, Vec<RemovePath>)  // Add/Remove for one Delta commit
+Store::commit_actions(actions, op) -> i64                              // explicit Add/Remove commit (used by remote-pull)
 Store::last_txn_seq() -> i64
 Store::delta_version() -> i64
 ```
@@ -514,7 +515,19 @@ Steward::compact(filter: Option<&str>) -> CommitOutcome  // Compact lifecycle
 Steward::log(limit) -> Vec<ControlRecord>
 Steward::last_write_seq() / last_committed_seq()
 Steward::partition_checksums_at(txn_seq) -> Option<PartitionChecksums>
+Steward::data_delta_version_at(txn_seq) -> Option<i64>
 Steward::incomplete_transactions() -> Vec<ControlRecord>
+
+Steward::store_id() -> Uuid
+
+// remote-push helpers
+Steward::data_committed_record(txn_seq) -> Option<ControlRecord>
+Steward::actions_at_version(version) -> (Vec<AddPath>, Vec<RemovePath>)
+Steward::read_data_file(rel_path) -> Vec<u8>
+Steward::record_post_push_pending/completed/failed(...)
+
+// remote-pull helper
+Steward::apply_pulled_bundle(txn_seq, commit_kind, parent_seq, adds, removes, partition_checksums)
 
 Steward::config_set / config_get / config_list
 
@@ -531,15 +544,27 @@ avoid Delta nullable-primitive quirks.  Free-form payloads (partition
 checksums, abort reasons, settings) go through a single
 `metadata_json` Utf8 column.
 
-#### 3.2.3 `sandbox-remote` and `sandbox-tests`
+#### 3.2.3 `sandbox-remote`
 
-Skeleton crates with smoke tests only.  Real work in upcoming todos.
+Public API:
+
+```rust
+Remote::create(path, store_id) / Remote::open(path)
+Remote::store_id() -> Uuid
+Remote::push(&mut self, &mut Steward, txn_seq) -> ()       // remote-push
+Remote::pull(&self, &mut Steward) -> PullReport            // remote-pull (mirror mode)
+Remote::list_bundles() -> Vec<BundleHeader>
+Remote::latest_seq() / oldest_available_seq() -> Option<i64>
+
+PullReport { bundles_applied: Vec<BundleHeader>, last_pulled_seq: i64 }
+```
+
+The `sandbox-tests` crate is still a smoke-only placeholder.
 
 ### 3.3 Test inventory
 
-84 tests total across all sandbox crates (was 72 before `compact-op`;
-+11 new compact tests, +1 net other counts adjustment).  All passing,
-all under both checksum strategies where applicable.
+161 tests total across all sandbox crates.  All passing, all under
+both checksum strategies where applicable.
 
 | Crate / file | Count | What it covers |
 |---|---|---|
@@ -552,13 +577,16 @@ all under both checksum strategies where applicable.
 | steward/src/control_table.rs (unit) | 3 | Arrow vs Delta schema agreement, RecordKind serialization roundtrip, ChecksumValue serialization roundtrip |
 | steward/tests/steward.rs (integration) | 27 | lifecycle records (Begin/DataCommitted/Failed/Completed), parent_seq tracking, no-op->Completed, abort, read guards write nothing, txn_seq monotonicity across all outcomes, partition checksums carry forward, orphan-Begin recovery, config_set/get/list latest-wins, persistence across re-open, log limit, verify_local under both strategies, verify on empty pond, put-after-delete-then-verify, store_id minted/persisted/overridable/legacy-error, data_delta_version recorded for write, not for failed/completed/no-op-compact, monotonic across writes, recorded for real compact |
 | steward/tests/compact.rs (integration) | 11 | get/list unchanged after compact, real-work compact -> DataCommitted(Compact), per-partition checksum invariance, partition filter touches only that partition (verified via Store::data_files), empty-pond compact -> Completed (no-op), nonexistent-filter compact -> Completed, parent_seq points at last write, Homomorphic strategy invariance, tombstones survive compaction, interleaved write/compact/write/compact lifecycle, persistence across re-open |
+| steward/tests/apply_pulled.rs (integration) | 8 | apply_pulled_bundle writes DataCommitted record on consumer, idempotent re-apply, last_write_seq advances, parent_seq chain across bundles, path validation rejects absolute / dotdot / missing-partition_key, partition_checksums recorded byte-exact |
+| steward/src/steward.rs (unit) | 8 | parse_partition_values: happy path, percent-encoded, absolute, dotdot, missing partition_key, multiple partition_key, HIVE null sentinel, empty path |
 | remote/src/schema.rs (unit) | 5 | arrow/Delta schemas agree, partition_kind constants distinct, CHUNK_SIZE_BYTES = 16 MiB, BLAKE3_LEN matches blake3 crate, RowBody partition_kind/file_action mapping |
 | remote/src/chunking.rs (unit) | 12 | empty input -> 1 empty chunk, file <= == > N*chunk_size boundaries, per-chunk and per-file BLAKE3 correctness, assemble round-trip and detection of bad-hash/out-of-order/wrong-size, chunk_file via temp file |
 | remote/tests/schema.rs (integration) | 9 | round-trip for every variant, full bundle, schema rejection of unknown partition_kind / manifest missing commit_kind / data unknown action, MILESTONE: multi-partition single-commit is one Delta version |
 | remote/tests/remote.rs (integration) | 8 | create+open store_id roundtrip, open of missing path errors, list/latest_seq/oldest_available_seq on empty, happy-path push, PostPushPending+Completed lifecycle, idempotent re-push, store_id mismatch error, NoSuchCommit on empty pond push |
 | remote/tests/push.rs (integration) | 6 | compact bundle has DataAdd + DataRemove rows, partition_checksums round-trip byte-exact, data rows reassemble to original parquet bytes (file_blake3 verified), multi-bundle ordering with parent_seq chain, open errors on corrupted UUID property, post-remote-commit crash recovery writes Completed |
+| remote/tests/pull.rs (integration) | 9 | happy-path round-trip, multi-bundle pull, idempotent re-pull when caught up, compact bundle pull (adds + removes both apply), per-bundle progress simulating partial-pull resumption, store_id mismatch error, behind-retention check exercised in no-gap path, DataCommitted records mirrored on consumer, state persists across consumer reopen |
 | tests/src/lib.rs | 1 | smoke (placeholder) |
-| **Total** | **136** | |
+| **Total** | **161** | |
 
 ### 3.4 CI integration
 
@@ -591,17 +619,17 @@ sandbox entirely.
 | steward-lifecycle | done | Steward + control table + WriteGuard/ReadGuard + verify_local + 18 tests |
 | compact-op | done | Store::compact + Store::data_files + Steward::compact (no-op vs real-work lifecycle, partition filter, error -> Failed) + 11 tests |
 | remote-push | done | Steward store_id, data_delta_version, Store::actions_at_version, sandbox-remote schema + chunking + Remote::create/open/push with PostPush* lifecycle + 14 push-related tests |
-| remote-pull | pending | next on the critical path |
-| restart-from-compact | pending | depends on remote-pull |
-| remote-retention | pending | depends on remote-push |
-| verify-cmd | pending | depends on remote-push (verify_against_remote half) |
+| remote-pull | done | Steward::apply_pulled_bundle (idempotent via consumer DataCommitted mirror, path validation, BLAKE3 chain trust eliminates post-commit recompute) + Remote::pull mirror-mode lifecycle (per-bundle progress, retention horizon check) + 17 pull-related tests |
+| restart-from-compact | pending | depends on remote-pull (UNBLOCKED) |
+| remote-retention | pending | depends on remote-push (UNBLOCKED) |
+| verify-cmd | pending | depends on remote-push (verify_against_remote half) (UNBLOCKED) |
 | library-api-coverage | pending | depends on remote-pull, remote-retention, verify-cmd |
 | integration-tests | pending | depends on restart-from-compact, library-api-coverage |
 | property-tests | pending | depends on remote-pull, remote-retention |
 | benchmarks | pending | depends on checksum-trait (UNBLOCKED, can run any time) |
 | sandbox-design-doc | pending | depends on integration-tests, property-tests, benchmarks |
 
-7 of 16 done.
+8 of 16 done.
 
 ---
 
