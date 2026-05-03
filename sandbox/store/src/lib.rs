@@ -3,18 +3,26 @@
 //! Delta-Lake-backed key/value store with per-partition content checksums.
 //!
 //! See `../README.md` for context.
+//!
+//! # Quick tour
+//!
+//! - [`Store`]: the Delta-Lake-backed table holding versioned key/value rows.
+//! - [`Op`]: a single Put or Delete in a batch.
+//! - [`StoreError`] / [`Result`]: the error type used throughout.
+//!
+//! # Schema
+//!
+//! See [`schema`] for the column layout.  Briefly: each row is one
+//! version of one item, partitioned by `partition_key`, with a
+//! BLAKE3-of-value field on every row to support per-partition content
+//! checksums (added in a later todo).
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-//! Placeholder - implementation lands in `store-schema` and `checksum-trait` todos.
+mod error;
+pub mod schema;
+mod store;
 
-#[cfg(test)]
-mod smoke {
-    #[test]
-    fn workspace_compiles() {
-        // This test exists so `cargo test` in the empty skeleton runs at
-        // least one passing test and we know the workspace plumbing is
-        // wired correctly.  Replaced by real tests as the crate fills in.
-    }
-}
+pub use error::{Result, StoreError};
+pub use store::{Op, Store};

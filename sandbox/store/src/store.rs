@@ -1,0 +1,426 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The [`Store`] type: a Delta-Lake-backed key-value store.
+//!
+//! See `lib.rs` for the public crate documentation.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use arrow_array::{
+    Array, BinaryArray, BooleanArray, Int64Array, RecordBatch, StringArray, StringViewArray,
+};
+use chrono::Utc;
+use datafusion::execution::context::SessionContext;
+use deltalake::DeltaTable;
+use deltalake::protocol::SaveMode;
+use log::debug;
+use url::Url;
+
+use crate::error::{Result, StoreError};
+use crate::schema;
+
+/// A single operation applied to the store within an [`Store::apply_batch`] call.
+#[derive(Debug, Clone)]
+pub enum Op {
+    /// Set `(partition, item_key)` to `value`.
+    Put {
+        /// Partition key.
+        partition: String,
+        /// Item key within the partition.
+        key: String,
+        /// Value bytes.
+        value: Vec<u8>,
+    },
+    /// Mark `(partition, item_key)` as deleted (tombstone).
+    Delete {
+        /// Partition key.
+        partition: String,
+        /// Item key within the partition.
+        key: String,
+    },
+}
+
+/// A Delta-Lake-backed key-value store.
+///
+/// Construction:
+///
+/// - [`Store::create`] makes a fresh table at `path` (errors if path exists).
+/// - [`Store::open`] opens an existing table.
+///
+/// Mutation goes through [`Store::apply_batch`], which writes one Delta
+/// commit containing all the supplied operations.  Convenience wrappers
+/// [`Store::put`] and [`Store::delete`] auto-allocate the next `txn_seq`
+/// and apply a single-op batch.
+///
+/// Reads ([`Store::get`], [`Store::list`], [`Store::partitions`]) execute
+/// DataFusion queries against the current table state.
+pub struct Store {
+    path: PathBuf,
+    table: DeltaTable,
+    /// Re-created and re-registered each time the table version changes.
+    session_ctx: Arc<SessionContext>,
+}
+
+const TABLE_NAME: &str = "source";
+
+impl Store {
+    /// Create a new store at `path`.  The directory is created if missing.
+    /// Errors if a Delta table already exists there.
+    pub async fn create(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&path)?;
+
+        let url = url_from_path(&path)?;
+        debug!("creating store at {}", url);
+
+        let table = DeltaTable::try_from_url(url)
+            .await?
+            .create()
+            .with_columns(schema::delta_columns())
+            .with_partition_columns(schema::partition_columns())
+            .with_save_mode(SaveMode::ErrorIfExists)
+            .await?;
+
+        let session_ctx = build_session_ctx(&table)?;
+
+        Ok(Self {
+            path,
+            table,
+            session_ctx,
+        })
+    }
+
+    /// Open an existing store at `path`.  Errors if no Delta table exists
+    /// there.
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let url = url_from_path(&path)?;
+        debug!("opening store at {}", url);
+
+        let table = deltalake::open_table(url).await?;
+        let session_ctx = build_session_ctx(&table)?;
+
+        Ok(Self {
+            path,
+            table,
+            session_ctx,
+        })
+    }
+
+    /// On-disk path the store was opened/created from.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Current Delta table version (incremented on every successful
+    /// commit, including writes that resulted in zero new rows).
+    pub fn delta_version(&self) -> i64 {
+        self.table.version().unwrap_or(0)
+    }
+
+    /// The largest `txn_seq` ever committed to this store, or `0` if the
+    /// store has never been written to.
+    pub async fn last_txn_seq(&self) -> Result<i64> {
+        let sql = format!(
+            "SELECT MAX({}) AS m FROM {}",
+            schema::col::TXN_SEQ,
+            TABLE_NAME
+        );
+        let batches = self.session_ctx.sql(&sql).await?.collect().await?;
+        let mut max: i64 = 0;
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let arr = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| {
+                    StoreError::Invariant("last_txn_seq: column 0 is not Int64".into())
+                })?;
+            if !arr.is_null(0) {
+                max = max.max(arr.value(0));
+            }
+        }
+        Ok(max)
+    }
+
+    /// Apply a batch of operations as one Delta commit.  All operations
+    /// share the supplied `txn_seq` and `ts_micros`.
+    ///
+    /// Within a single batch, multiple operations against the same
+    /// `(partition, key)` are coalesced -- the LAST operation in `ops`
+    /// wins.  This matches the semantics of a transaction that overwrites
+    /// the same key multiple times.
+    pub async fn apply_batch(&mut self, txn_seq: i64, ts_micros: i64, ops: Vec<Op>) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+
+        // Coalesce by (partition, key) keeping the last-seen op.
+        let mut by_key: std::collections::HashMap<(String, String), Op> =
+            std::collections::HashMap::new();
+        for op in ops {
+            let k = match &op {
+                Op::Put { partition, key, .. } => (partition.clone(), key.clone()),
+                Op::Delete { partition, key } => (partition.clone(), key.clone()),
+            };
+            _ = by_key.insert(k, op);
+        }
+
+        let n = by_key.len();
+        let mut partition_keys = Vec::with_capacity(n);
+        let mut item_keys = Vec::with_capacity(n);
+        let mut deleted = Vec::with_capacity(n);
+        let mut values: Vec<Vec<u8>> = Vec::with_capacity(n);
+        let mut blake3s: Vec<Vec<u8>> = Vec::with_capacity(n);
+
+        for op in by_key.into_values() {
+            match op {
+                Op::Put {
+                    partition,
+                    key,
+                    value,
+                } => {
+                    let hash = blake3::hash(&value);
+                    partition_keys.push(partition);
+                    item_keys.push(key);
+                    deleted.push(false);
+                    blake3s.push(hash.as_bytes().to_vec());
+                    values.push(value);
+                }
+                Op::Delete { partition, key } => {
+                    // Tombstone: empty value, BLAKE3 of empty bytes.
+                    let empty: Vec<u8> = Vec::new();
+                    let hash = blake3::hash(&empty);
+                    partition_keys.push(partition);
+                    item_keys.push(key);
+                    deleted.push(true);
+                    blake3s.push(hash.as_bytes().to_vec());
+                    values.push(empty);
+                }
+            }
+        }
+
+        let txn_seqs = vec![txn_seq; n];
+        let timestamps = vec![ts_micros; n];
+
+        let schema = schema::arrow_schema();
+        let value_refs: Vec<&[u8]> = values.iter().map(|v| v.as_slice()).collect();
+        let blake3_refs: Vec<&[u8]> = blake3s.iter().map(|v| v.as_slice()).collect();
+        let partition_refs: Vec<&str> = partition_keys.iter().map(|s| s.as_str()).collect();
+        let item_refs: Vec<&str> = item_keys.iter().map(|s| s.as_str()).collect();
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(partition_refs)),
+                Arc::new(StringArray::from(item_refs)),
+                Arc::new(Int64Array::from(txn_seqs)),
+                Arc::new(BooleanArray::from(deleted)),
+                Arc::new(BinaryArray::from(value_refs)),
+                Arc::new(BinaryArray::from(blake3_refs)),
+                Arc::new(Int64Array::from(timestamps)),
+            ],
+        )?;
+
+        let new_table = self.table.clone().write(vec![batch]).await?;
+        debug!(
+            "store apply_batch: version {:?} -> {:?}, n_rows={}",
+            self.table.version(),
+            new_table.version(),
+            n
+        );
+        self.table = new_table;
+
+        // Re-build session context against the new table version.
+        self.session_ctx = build_session_ctx(&self.table)?;
+
+        Ok(())
+    }
+
+    /// Convenience: write a single Put using the next available `txn_seq`.
+    /// Prefer [`Store::apply_batch`] when writing multiple operations.
+    pub async fn put(&mut self, partition: &str, key: &str, value: Vec<u8>) -> Result<i64> {
+        let txn_seq = self.last_txn_seq().await? + 1;
+        let ts = Utc::now().timestamp_micros();
+        self.apply_batch(
+            txn_seq,
+            ts,
+            vec![Op::Put {
+                partition: partition.to_string(),
+                key: key.to_string(),
+                value,
+            }],
+        )
+        .await?;
+        Ok(txn_seq)
+    }
+
+    /// Convenience: write a single Delete using the next available `txn_seq`.
+    pub async fn delete(&mut self, partition: &str, key: &str) -> Result<i64> {
+        let txn_seq = self.last_txn_seq().await? + 1;
+        let ts = Utc::now().timestamp_micros();
+        self.apply_batch(
+            txn_seq,
+            ts,
+            vec![Op::Delete {
+                partition: partition.to_string(),
+                key: key.to_string(),
+            }],
+        )
+        .await?;
+        Ok(txn_seq)
+    }
+
+    /// Read the current value of `(partition, key)`, or `None` if the
+    /// item does not exist or has been tombstoned.
+    pub async fn get(&self, partition: &str, key: &str) -> Result<Option<Vec<u8>>> {
+        let sql = format!(
+            "SELECT {value}, {deleted} FROM {table} \
+             WHERE {pk} = '{p}' AND {ik} = '{k}' \
+             ORDER BY {seq} DESC LIMIT 1",
+            value = schema::col::VALUE,
+            deleted = schema::col::DELETED,
+            table = TABLE_NAME,
+            pk = schema::col::PARTITION_KEY,
+            ik = schema::col::ITEM_KEY,
+            seq = schema::col::TXN_SEQ,
+            p = sql_escape(partition),
+            k = sql_escape(key),
+        );
+
+        let batches = self.session_ctx.sql(&sql).await?.collect().await?;
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let value = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| StoreError::Invariant("get: value is not Binary".into()))?;
+            let deleted = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| StoreError::Invariant("get: deleted is not Boolean".into()))?;
+            if deleted.value(0) {
+                return Ok(None);
+            }
+            return Ok(Some(value.value(0).to_vec()));
+        }
+        Ok(None)
+    }
+
+    /// Return all live `(item_key, value)` pairs in `partition`, sorted
+    /// by `item_key`.
+    pub async fn list(&self, partition: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        let sql = format!(
+            "SELECT {ik}, {value} \
+             FROM ( \
+                SELECT {ik}, {value}, {deleted}, \
+                       ROW_NUMBER() OVER ( \
+                         PARTITION BY {ik} ORDER BY {seq} DESC \
+                       ) AS rn \
+                FROM {table} \
+                WHERE {pk} = '{p}' \
+             ) \
+             WHERE rn = 1 AND NOT {deleted} \
+             ORDER BY {ik}",
+            ik = schema::col::ITEM_KEY,
+            value = schema::col::VALUE,
+            deleted = schema::col::DELETED,
+            seq = schema::col::TXN_SEQ,
+            table = TABLE_NAME,
+            pk = schema::col::PARTITION_KEY,
+            p = sql_escape(partition),
+        );
+
+        let batches = self.session_ctx.sql(&sql).await?.collect().await?;
+        let mut out = Vec::new();
+        for batch in batches {
+            let keys = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| StoreError::Invariant("list: item_key is not Utf8".into()))?;
+            let values = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| StoreError::Invariant("list: value is not Binary".into()))?;
+            for i in 0..batch.num_rows() {
+                out.push((keys.value(i).to_string(), values.value(i).to_vec()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return the set of partition keys that contain at least one row
+    /// (live or tombstoned) in the current table state, sorted.
+    pub async fn partitions(&self) -> Result<Vec<String>> {
+        // CAST to Utf8 because Delta partition columns sometimes surface
+        // as Dictionary, LargeUtf8, or Utf8View in the Arrow result.
+        let sql = format!(
+            "SELECT DISTINCT CAST({pk} AS VARCHAR) AS pk \
+             FROM {table} ORDER BY pk",
+            pk = schema::col::PARTITION_KEY,
+            table = TABLE_NAME,
+        );
+        let batches = self.session_ctx.sql(&sql).await?.collect().await?;
+        let mut out = Vec::new();
+        for batch in batches {
+            collect_string_column(batch.column(0).as_ref(), &mut out)?;
+        }
+        Ok(out)
+    }
+}
+
+fn url_from_path(path: &Path) -> Result<Url> {
+    Url::from_directory_path(path)
+        .or_else(|_| Url::from_file_path(path))
+        .map_err(|_| StoreError::InvalidPath(path.display().to_string()))
+}
+
+fn build_session_ctx(table: &DeltaTable) -> Result<Arc<SessionContext>> {
+    let ctx = SessionContext::new();
+    _ = ctx.register_table(TABLE_NAME, Arc::new(table.clone()))?;
+    Ok(Arc::new(ctx))
+}
+
+/// Quote a value for SQL string literal embedding.  Doubles single quotes.
+/// (DataFusion's `sql()` API doesn't expose bind parameters; for the
+/// prototype this is fine because partition/item keys are not user-
+/// supplied attack vectors.)
+fn sql_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Append the contents of a string column to `out`, accepting both the
+/// `Utf8` (`StringArray`) and `Utf8View` (`StringViewArray`) Arrow
+/// representations that DataFusion may produce for `CAST AS VARCHAR`.
+fn collect_string_column(col: &dyn Array, out: &mut Vec<String>) -> Result<()> {
+    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+        for i in 0..arr.len() {
+            if !arr.is_null(i) {
+                out.push(arr.value(i).to_string());
+            }
+        }
+        return Ok(());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<StringViewArray>() {
+        for i in 0..arr.len() {
+            if !arr.is_null(i) {
+                out.push(arr.value(i).to_string());
+            }
+        }
+        return Ok(());
+    }
+    Err(StoreError::Invariant(format!(
+        "expected Utf8 or Utf8View column, got {:?}",
+        col.data_type()
+    )))
+}
