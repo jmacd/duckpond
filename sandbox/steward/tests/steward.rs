@@ -472,3 +472,108 @@ async fn legacy_pond_without_store_id_errors_on_open() {
         other => panic!("expected LegacyPond error, got {:?}", other.err()),
     }
 }
+
+#[tokio::test]
+async fn data_delta_version_recorded_on_write() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut s = Steward::create(dir.path()).await.unwrap();
+
+    {
+        let mut g = s.begin_write().await.unwrap();
+        g.put("p", "k", b"v".to_vec()).unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+
+    let v = s.data_delta_version_at(1).await.unwrap();
+    assert!(v.is_some(), "DataCommitted has a recorded delta version");
+    assert!(v.unwrap() > 0, "delta version advanced past initial");
+}
+
+#[tokio::test]
+async fn data_delta_version_not_recorded_for_failed_or_completed() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut s = Steward::create(dir.path()).await.unwrap();
+
+    // Aborted txn -> Failed -> no version.
+    {
+        let mut g = s.begin_write().await.unwrap();
+        g.put("p", "k", b"v".to_vec()).unwrap();
+        let _ = g.abort("nope").await.unwrap();
+    }
+    assert_eq!(s.data_delta_version_at(1).await.unwrap(), None);
+
+    // No-op write -> Completed -> no version.
+    {
+        let g = s.begin_write().await.unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+    assert_eq!(s.data_delta_version_at(2).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn data_delta_version_monotonic_across_writes() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut s = Steward::create(dir.path()).await.unwrap();
+
+    let mut last_version = 0i64;
+    for i in 0..3 {
+        let mut g = s.begin_write().await.unwrap();
+        g.put("p", &format!("k{}", i), b"v".to_vec()).unwrap();
+        let outcome = g.commit().await.unwrap();
+        let v = s
+            .data_delta_version_at(outcome.txn_seq)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            v > last_version,
+            "version {} > last {} at seq {}",
+            v,
+            last_version,
+            outcome.txn_seq
+        );
+        last_version = v;
+    }
+}
+
+#[tokio::test]
+async fn data_delta_version_recorded_on_real_compact() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut s = Steward::create(dir.path()).await.unwrap();
+    // Two writes to give compact something to merge.
+    for i in 0..2 {
+        let mut g = s.begin_write().await.unwrap();
+        g.put("p", &format!("k{}", i), b"v".to_vec()).unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+    let pre = s.data_delta_version_at(2).await.unwrap().unwrap();
+
+    let outcome = s.compact(None).await.unwrap();
+    if outcome.had_data {
+        let post = s.data_delta_version_at(outcome.txn_seq).await.unwrap();
+        assert!(post.is_some(), "real-work compact records a version");
+        assert!(
+            post.unwrap() > pre,
+            "compact's version is greater than prior write's version"
+        );
+    }
+    // No-op compact path is exercised separately in tests/compact.rs.
+}
+
+#[tokio::test]
+async fn data_delta_version_not_recorded_for_noop_compact() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut s = Steward::create(dir.path()).await.unwrap();
+    // No writes => nothing to compact => no-op => Completed (not DataCommitted).
+    let outcome = s.compact(None).await.unwrap();
+    assert!(!outcome.had_data, "empty pond compact is a no-op");
+    assert_eq!(
+        s.data_delta_version_at(outcome.txn_seq).await.unwrap(),
+        None
+    );
+}

@@ -132,6 +132,13 @@ pub struct DataCommittedMetadata {
     /// `partition_checksums_at(seq)` is a complete snapshot).
     #[serde(default)]
     pub partition_checksums: HashMap<String, ChecksumValue>,
+    /// The data store's Delta Lake version at the moment this commit
+    /// was recorded.  `remote-push` reads this to locate the
+    /// commit-log entry whose Add/Remove actions describe the bundle.
+    /// Older records (written before this field existed) deserialize
+    /// to `0`; treat that as "unknown".
+    #[serde(default)]
+    pub data_delta_version: i64,
 }
 
 /// Serialized form of [`Checksum`].
@@ -489,6 +496,23 @@ impl ControlTable {
             out.insert(k, Checksum::from(&v));
         }
         Ok(Some(out))
+    }
+
+    /// Resolve the data store's Delta Lake version at `txn_seq`.
+    /// Returns the `metadata.data_delta_version` field of the
+    /// `DataCommitted` record at that seq, or `None` if no such commit
+    /// exists.  Returns `Some(0)` for legacy records written before
+    /// this field existed.
+    pub async fn data_delta_version_at(&self, txn_seq: i64) -> Result<Option<i64>> {
+        let all = self.all_records().await?;
+        let rec = all
+            .iter()
+            .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq);
+        let Some(rec) = rec else {
+            return Ok(None);
+        };
+        let meta: DataCommittedMetadata = serde_json::from_str(&rec.metadata_json)?;
+        Ok(Some(meta.data_delta_version))
     }
 
     /// Set a configuration key/value.  Records a [`RecordKind::Setting`]

@@ -221,6 +221,14 @@ impl Steward {
         self.control.partition_checksums_at(txn_seq).await
     }
 
+    /// Resolve the data store's Delta Lake version at `txn_seq`.
+    /// Returns `None` if no `DataCommitted` record exists for that seq;
+    /// returns `Some(0)` for legacy records written before the
+    /// `data_delta_version` field existed.
+    pub async fn data_delta_version_at(&self, txn_seq: i64) -> Result<Option<i64>> {
+        self.control.data_delta_version_at(txn_seq).await
+    }
+
     /// Set a configuration key.
     pub async fn config_set(&mut self, key: &str, value: &str) -> Result<()> {
         self.control.config_set(key, value).await
@@ -315,6 +323,7 @@ impl Steward {
                 .iter()
                 .map(|(k, v)| (k.clone(), ChecksumValue::from(v)))
                 .collect(),
+            data_delta_version: self.store.delta_version(),
         };
         let metadata_json = serde_json::to_string(&metadata)?;
 
@@ -514,6 +523,7 @@ impl Steward {
                 .iter()
                 .map(|(k, v)| (k.clone(), ChecksumValue::from(v)))
                 .collect(),
+            data_delta_version: self.store.delta_version(),
         };
         let metadata_json = serde_json::to_string(&metadata)?;
         let now = Utc::now().timestamp_micros();
