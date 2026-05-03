@@ -23,12 +23,14 @@ use sandbox_steward::{CommitKind, Steward};
 use url::Url;
 use uuid::Uuid;
 
-use crate::chunking::chunk_bytes;
+use crate::chunking::{ChunkRecord, assemble_file, chunk_bytes};
 use crate::error::{RemoteError, Result};
 use crate::schema::{
     self, RemoteRow, RowBody, delta_columns, partition_columns, record_batch_to_rows,
     rows_to_record_batch,
 };
+use sandbox_steward::PartitionChecksums;
+use sandbox_store::checksum::Checksum;
 
 /// Delta table configuration key under which the source pond's
 /// `store_id` is recorded.  Set once at [`Remote::create`] and read on
@@ -57,6 +59,25 @@ pub struct BundleHeader {
     pub parent_seq: i64,
     /// When the bundle was pushed.
     pub ts_micros: i64,
+}
+
+/// Result of a successful [`Remote::pull`].
+#[derive(Debug, Clone)]
+pub struct PullReport {
+    /// Bundles applied during this pull, in seq order.  Empty if
+    /// the consumer was already caught up.
+    pub bundles_applied: Vec<BundleHeader>,
+    /// Consumer's `last_pulled_seq` after this pull.
+    pub last_pulled_seq: i64,
+}
+
+/// Steward setting key under which a consumer records the highest
+/// bundle seq it has pulled from a particular remote.  Discriminated
+/// by the remote's on-disk path so a single steward can pull from
+/// multiple remotes (e.g., primary + offsite archive) and track each
+/// independently.
+fn last_pulled_seq_key(remote_path: &Path) -> String {
+    format!("last_pulled_seq:{}", remote_path.display())
 }
 
 impl Remote {
@@ -235,6 +256,213 @@ impl Remote {
                 Err(e)
             }
         }
+    }
+
+    /// Pull all bundles from the remote that the consumer (`steward`)
+    /// has not yet applied.  Mirror mode only.
+    ///
+    /// See `../../DESIGN.md` §2.5.4.  Lifecycle:
+    /// 1. Verify the remote's `store_id` matches the steward's.
+    /// 2. Read consumer's `last_pulled_seq:<remote_url>` setting (0 if
+    ///    unset).
+    /// 3. Retention horizon check: error with [`RemoteError::BehindRetention`]
+    ///    if the remote has pruned bundles the consumer needs.
+    /// 4. List the remote's manifest rows; pick those with
+    ///    `txn_seq > last_pulled_seq`, sorted ascending.
+    /// 5. For each bundle in seq order:
+    ///    1. Read its data and checksum rows from the remote.
+    ///    2. Group `DataAdd` chunks by `file_path`; reassemble each
+    ///       file via `chunking::assemble_file` (verifies per-chunk
+    ///       and per-file BLAKE3 BEFORE writing).
+    ///    3. Collect `DataRemove` paths.
+    ///    4. Build the partition_checksums map from `Checksum` rows.
+    ///    5. Apply via `Steward::apply_pulled_bundle`.
+    ///    6. Update the consumer's `last_pulled_seq` setting to this
+    ///       bundle's seq AFTER the apply succeeds (per-bundle progress).
+    /// 6. Return [`PullReport`].
+    ///
+    /// Idempotent: a re-pull when the consumer is fully caught up
+    /// returns an empty `PullReport`.  A re-pull after a crash in the
+    /// middle of step 5 picks up from the last successfully-applied
+    /// bundle (`apply_pulled_bundle` itself short-circuits on
+    /// already-applied seqs as belt-and-suspenders).
+    pub async fn pull(&self, steward: &mut Steward) -> Result<PullReport> {
+        // 1. Verify store_id.
+        if self.store_id != steward.store_id() {
+            return Err(RemoteError::StoreIdMismatch {
+                remote: self.store_id,
+                steward: steward.store_id(),
+            });
+        }
+
+        // 2. Read consumer's last_pulled_seq for this remote URL.
+        let setting_key = last_pulled_seq_key(&self.path);
+        let last_pulled = match steward.config_get(&setting_key).await? {
+            None => 0i64,
+            Some(s) => s.parse::<i64>().map_err(|e| {
+                RemoteError::Schema(format!(
+                    "consumer setting `{}` is not a valid i64: `{}` ({})",
+                    setting_key, s, e
+                ))
+            })?,
+        };
+
+        // 3. Retention horizon check.
+        if let Some(oldest) = self.oldest_available_seq().await?
+            && oldest > last_pulled + 1
+        {
+            return Err(RemoteError::BehindRetention {
+                last_pulled,
+                oldest_available: oldest,
+            });
+        }
+
+        // 4. Pick bundles with seq > last_pulled.
+        let bundles: Vec<BundleHeader> = self
+            .list_bundles()
+            .await?
+            .into_iter()
+            .filter(|b| b.txn_seq > last_pulled)
+            .collect();
+
+        // 5. Apply each bundle in seq order with per-bundle progress.
+        let mut applied: Vec<BundleHeader> = Vec::with_capacity(bundles.len());
+        let mut highest = last_pulled;
+        for bundle in bundles {
+            let (adds, removes) = self.read_data_for_bundle(bundle.txn_seq).await?;
+            let partition_checksums = self.read_checksums_for_bundle(bundle.txn_seq).await?;
+            steward
+                .apply_pulled_bundle(
+                    bundle.txn_seq,
+                    bundle.commit_kind,
+                    bundle.parent_seq,
+                    adds,
+                    removes,
+                    partition_checksums,
+                )
+                .await?;
+            steward
+                .config_set(&setting_key, &bundle.txn_seq.to_string())
+                .await?;
+            highest = bundle.txn_seq;
+            applied.push(bundle);
+        }
+
+        Ok(PullReport {
+            bundles_applied: applied,
+            last_pulled_seq: highest,
+        })
+    }
+
+    /// Read all data rows for `txn_seq` from the remote, reassemble
+    /// each `DataAdd` file's chunks (verifying BLAKE3 in the
+    /// process), and return `(adds, removes)` where adds are
+    /// `(path, bytes)` and removes are paths.
+    async fn read_data_for_bundle(
+        &self,
+        txn_seq: i64,
+    ) -> Result<(Vec<(String, Vec<u8>)>, Vec<String>)> {
+        let sql = format!(
+            "SELECT * FROM {table} WHERE {kind} = '{d}' AND {seq} = {n}",
+            table = TABLE_NAME,
+            kind = schema::col::PARTITION_KIND,
+            d = schema::PARTITION_KIND_DATA,
+            seq = schema::col::TXN_SEQ,
+            n = txn_seq,
+        );
+        let batches: Vec<RecordBatch> = self.session_ctx.sql(&sql).await?.collect().await?;
+
+        // Group DataAdd chunks by file_path; collect DataRemove paths.
+        let mut chunks_by_path: HashMap<String, Vec<ChunkRecord>> = HashMap::new();
+        let mut size_and_hash: HashMap<String, (i64, [u8; schema::BLAKE3_LEN])> = HashMap::new();
+        let mut removes: Vec<String> = Vec::new();
+        for batch in &batches {
+            for row in record_batch_to_rows(batch)? {
+                match row.body {
+                    RowBody::DataAdd {
+                        file_path,
+                        file_size,
+                        file_blake3,
+                        chunk_id,
+                        chunk_data,
+                        chunk_blake3,
+                        ..
+                    } => {
+                        chunks_by_path
+                            .entry(file_path.clone())
+                            .or_default()
+                            .push(ChunkRecord {
+                                chunk_id,
+                                chunk_data,
+                                chunk_blake3,
+                            });
+                        let _ = size_and_hash.insert(file_path, (file_size, file_blake3));
+                    }
+                    RowBody::DataRemove { file_path } => removes.push(file_path),
+                    _ => {
+                        return Err(RemoteError::Schema(format!(
+                            "data partition contains a non-data row at txn_seq {}",
+                            txn_seq
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Sort chunks per file by chunk_id, then assemble.
+        let mut adds: Vec<(String, Vec<u8>)> = Vec::with_capacity(chunks_by_path.len());
+        for (path, mut chunks) in chunks_by_path {
+            chunks.sort_by_key(|c| c.chunk_id);
+            let (file_size, file_blake3) = size_and_hash.get(&path).copied().ok_or_else(|| {
+                RemoteError::Schema(format!(
+                    "missing file_size/file_blake3 for path {} at txn_seq {}",
+                    path, txn_seq
+                ))
+            })?;
+            let bytes = assemble_file(&chunks, file_size, &file_blake3)?;
+            adds.push((path, bytes));
+        }
+        // Stable order for tests.
+        adds.sort_by(|a, b| a.0.cmp(&b.0));
+        removes.sort();
+        Ok((adds, removes))
+    }
+
+    /// Read all checksum rows for `txn_seq` from the remote and
+    /// build a [`PartitionChecksums`] map.
+    async fn read_checksums_for_bundle(&self, txn_seq: i64) -> Result<PartitionChecksums> {
+        let sql = format!(
+            "SELECT * FROM {table} WHERE {kind} = '{c}' AND {seq} = {n}",
+            table = TABLE_NAME,
+            kind = schema::col::PARTITION_KIND,
+            c = schema::PARTITION_KIND_CHECKSUM,
+            seq = schema::col::TXN_SEQ,
+            n = txn_seq,
+        );
+        let batches: Vec<RecordBatch> = self.session_ctx.sql(&sql).await?.collect().await?;
+        let mut out = PartitionChecksums::new();
+        for batch in &batches {
+            for row in record_batch_to_rows(batch)? {
+                if let RowBody::Checksum {
+                    partition_key,
+                    checksum_kind,
+                    checksum_bytes,
+                } = row.body
+                {
+                    let prev = out.insert(
+                        partition_key.clone(),
+                        Checksum::new(checksum_kind, checksum_bytes.to_vec()),
+                    );
+                    if prev.is_some() {
+                        return Err(RemoteError::Schema(format!(
+                            "duplicate checksum row for partition `{}` at txn_seq {}",
+                            partition_key, txn_seq,
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn build_and_commit_bundle(

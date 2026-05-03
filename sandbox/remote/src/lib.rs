@@ -21,7 +21,7 @@ pub mod schema;
 
 pub use chunking::{ChunkRecord, ChunkedFile, assemble_file, chunk_bytes, chunk_file};
 pub use error::{RemoteError, Result};
-pub use remote::{BundleHeader, Remote, STORE_ID_PROPERTY};
+pub use remote::{BundleHeader, PullReport, Remote, STORE_ID_PROPERTY};
 pub use schema::{
     BLAKE3_LEN, CHECKSUM_KIND_HOMOMORPHIC, CHECKSUM_KIND_MERKLE, CHUNK_SIZE_BYTES,
     COMMIT_KIND_COMPACT, COMMIT_KIND_WRITE, FILE_ACTION_ADD, FILE_ACTION_REMOVE,

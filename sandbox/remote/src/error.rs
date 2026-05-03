@@ -58,6 +58,19 @@ pub enum RemoteError {
     /// `DataCommitted` record exists locally.
     #[error("no DataCommitted at txn_seq {0}")]
     NoSuchCommit(i64),
+
+    /// The consumer's `last_pulled_seq` is below the remote's oldest
+    /// available bundle: bundles between them have been pruned by
+    /// retention.  Recovery requires `restart-from-compact`.
+    #[error(
+        "consumer is below retention horizon: last_pulled={last_pulled}, oldest_available={oldest_available}"
+    )]
+    BehindRetention {
+        /// The consumer's last_pulled_seq before the failed pull.
+        last_pulled: i64,
+        /// The remote's oldest available bundle seq.
+        oldest_available: i64,
+    },
 }
 
 /// Convenience alias.
