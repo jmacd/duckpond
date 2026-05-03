@@ -71,6 +71,22 @@ pub enum RemoteError {
         /// The remote's oldest available bundle seq.
         oldest_available: i64,
     },
+
+    /// `Remote::maintain` was called with `keep_compact_bundles == 0`,
+    /// which would prune away all restart points.  Refused.
+    #[error("invalid retention: keep_compact_bundles must be >= 1, got {0}")]
+    InvalidRetention(usize),
+
+    /// `Remote::maintain` requires at least `need` compact bundles to
+    /// retain, but the remote has only `have`.  Refused (would leave
+    /// no restart point).
+    #[error("insufficient compact bundles: have {have}, need {need}")]
+    InsufficientCompactBundles {
+        /// How many compact bundles the remote currently has.
+        have: usize,
+        /// How many were requested for retention.
+        need: usize,
+    },
 }
 
 /// Convenience alias.

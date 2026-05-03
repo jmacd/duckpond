@@ -71,6 +71,40 @@ pub struct PullReport {
     pub last_pulled_seq: i64,
 }
 
+/// Options for [`Remote::maintain`].
+#[derive(Debug, Clone, Copy)]
+pub struct MaintainOptions {
+    /// Number of compact bundles to retain at the tail.  Must be
+    /// `>= 1` (refuses to leave no restart point).  Default 2.
+    pub keep_compact_bundles: usize,
+    /// If true, run delta-rs vacuum after the DELETE so unreferenced
+    /// parquet files are physically reclaimed.  Default true.
+    pub vacuum_after: bool,
+}
+
+impl Default for MaintainOptions {
+    fn default() -> Self {
+        Self {
+            keep_compact_bundles: 2,
+            vacuum_after: true,
+        }
+    }
+}
+
+/// Result of a successful [`Remote::maintain`].
+#[derive(Debug, Clone)]
+pub struct MaintainReport {
+    /// Bundles with `txn_seq < horizon` were deleted.  Equal to the
+    /// `txn_seq` of the Nth-most-recent compact bundle.
+    pub horizon: i64,
+    /// Count of (manifest + checksum + data) rows removed by the
+    /// DELETE commit.
+    pub rows_deleted: i64,
+    /// Count of parquet files reclaimed by vacuum (0 if
+    /// `vacuum_after = false`).
+    pub files_vacuumed: usize,
+}
+
 /// Steward setting key under which a consumer records the highest
 /// bundle seq it has pulled from a particular remote.  Discriminated
 /// by the remote's on-disk path so a single steward can pull from
@@ -352,6 +386,96 @@ impl Remote {
             bundles_applied: applied,
             last_pulled_seq: highest,
         })
+    }
+
+    /// Prune old bundles from the remote, retaining the last
+    /// [`MaintainOptions::keep_compact_bundles`] compact bundles as
+    /// restart points.  See `../../DESIGN.md` §2.5.5.
+    ///
+    /// Lifecycle:
+    /// 1. Validate `keep_compact_bundles >= 1`; else
+    ///    [`RemoteError::InvalidRetention`].
+    /// 2. List compact bundles; if fewer than `N` exist, refuse with
+    ///    [`RemoteError::InsufficientCompactBundles`] (would leave no
+    ///    restart point).
+    /// 3. Compute horizon = the Nth-most-recent compact bundle's
+    ///    `txn_seq`.  All bundles with `txn_seq < horizon` will be
+    ///    pruned; the Nth compact itself remains as the oldest
+    ///    restart point.
+    /// 4. Single Delta DELETE on the remote with predicate
+    ///    `txn_seq < horizon` -- atomically removes manifest +
+    ///    checksum + data rows for all pruned bundles.
+    /// 5. If `vacuum_after`, run delta-rs vacuum to reclaim parquet
+    ///    files no longer referenced by any active commit.
+    /// 6. Return [`MaintainReport`].
+    ///
+    /// Idempotent: a second call with the same options is a no-op
+    /// (horizon stays where it was; no rows match the predicate).
+    pub async fn maintain(&mut self, opts: MaintainOptions) -> Result<MaintainReport> {
+        // 1. Validate.
+        if opts.keep_compact_bundles == 0 {
+            return Err(RemoteError::InvalidRetention(0));
+        }
+
+        // 2. List compact bundles.
+        let bundles = self.list_bundles().await?;
+        let mut compacts: Vec<&BundleHeader> = bundles
+            .iter()
+            .filter(|b| matches!(b.commit_kind, CommitKind::Compact))
+            .collect();
+        compacts.sort_by_key(|b| b.txn_seq);
+        if compacts.len() < opts.keep_compact_bundles {
+            return Err(RemoteError::InsufficientCompactBundles {
+                have: compacts.len(),
+                need: opts.keep_compact_bundles,
+            });
+        }
+
+        // 3. horizon = Nth-most-recent compact's seq.
+        let horizon_index = compacts.len() - opts.keep_compact_bundles;
+        let horizon = compacts[horizon_index].txn_seq;
+
+        // 4. DELETE rows below horizon as one Delta commit.
+        let rows_deleted = self.delete_below_horizon(horizon).await?;
+
+        // 5. Optional vacuum.
+        let files_vacuumed = if opts.vacuum_after {
+            self.vacuum_zero_retention().await?
+        } else {
+            0
+        };
+
+        Ok(MaintainReport {
+            horizon,
+            rows_deleted,
+            files_vacuumed,
+        })
+    }
+
+    async fn delete_below_horizon(&mut self, horizon: i64) -> Result<i64> {
+        let predicate = format!("{} < {}", schema::col::TXN_SEQ, horizon);
+        let (new_table, metrics) = self
+            .table
+            .clone()
+            .delete()
+            .with_predicate(predicate)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(metrics.num_deleted_rows as i64)
+    }
+
+    async fn vacuum_zero_retention(&mut self) -> Result<usize> {
+        let (new_table, metrics) = self
+            .table
+            .clone()
+            .vacuum()
+            .with_retention_period(chrono::Duration::seconds(0))
+            .with_enforce_retention_duration(false)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(metrics.files_deleted.len())
     }
 
     /// Read all data rows for `txn_seq` from the remote, reassemble
