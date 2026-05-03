@@ -17,6 +17,7 @@ use deltalake::protocol::SaveMode;
 use log::debug;
 use url::Url;
 
+use crate::checksum;
 use crate::error::{Result, StoreError};
 use crate::schema;
 
@@ -376,6 +377,85 @@ impl Store {
             collect_string_column(batch.column(0).as_ref(), &mut out)?;
         }
         Ok(out)
+    }
+
+    /// Return all live (post-tombstone) `(item_key, value_blake3)`
+    /// pairs in `partition`, sorted by `item_key`.
+    ///
+    /// This is the canonical input to a [`PartitionChecksum`]; callers
+    /// generally use [`Store::compute_partition_checksum`] instead.
+    pub async fn partition_leaves(&self, partition: &str) -> Result<Vec<(String, [u8; 32])>> {
+        let sql = format!(
+            "SELECT {ik}, {blake3} \
+             FROM ( \
+                SELECT {ik}, {blake3}, {deleted}, \
+                       ROW_NUMBER() OVER ( \
+                         PARTITION BY {ik} ORDER BY {seq} DESC \
+                       ) AS rn \
+                FROM {table} \
+                WHERE {pk} = '{p}' \
+             ) \
+             WHERE rn = 1 AND NOT {deleted} \
+             ORDER BY {ik}",
+            ik = schema::col::ITEM_KEY,
+            blake3 = schema::col::VALUE_BLAKE3,
+            deleted = schema::col::DELETED,
+            seq = schema::col::TXN_SEQ,
+            table = TABLE_NAME,
+            pk = schema::col::PARTITION_KEY,
+            p = sql_escape(partition),
+        );
+        let batches = self.session_ctx.sql(&sql).await?.collect().await?;
+        let mut out: Vec<(String, [u8; 32])> = Vec::new();
+        for batch in batches {
+            let keys = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    StoreError::Invariant("partition_leaves: item_key not Utf8".into())
+                })?;
+            let blake3s = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| {
+                    StoreError::Invariant("partition_leaves: blake3 not Binary".into())
+                })?;
+            for i in 0..batch.num_rows() {
+                let key = keys.value(i).to_string();
+                let bytes = blake3s.value(i);
+                let arr = checksum::array_from_slice(bytes).ok_or_else(|| {
+                    StoreError::Invariant(format!(
+                        "partition_leaves: value_blake3 has length {} (expected 32)",
+                        bytes.len()
+                    ))
+                })?;
+                out.push((key, arr));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Compute the per-partition content checksum using the supplied
+    /// strategy.
+    ///
+    /// Convenience wrapper: reads [`Store::partition_leaves`] and feeds
+    /// them through the strategy.
+    pub async fn compute_partition_checksum<C: checksum::PartitionChecksum>(
+        &self,
+        partition: &str,
+        strategy: &C,
+    ) -> Result<checksum::Checksum> {
+        let leaves = self.partition_leaves(partition).await?;
+        let refs: Vec<checksum::Leaf<'_>> = leaves
+            .iter()
+            .map(|(k, h)| checksum::Leaf {
+                key: k.as_str(),
+                value_blake3: h,
+            })
+            .collect();
+        Ok(strategy.compute(&refs))
     }
 }
 
