@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "store",
+    "steward",
+    "remote",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# Internal sandbox crates
+sandbox-store = { path = "store" }
+sandbox-steward = { path = "steward" }
+sandbox-remote = { path = "remote" }
+
+# External (versions match duckpond/Cargo.toml where applicable)
+anyhow = "1.0.82"
+arrow = "57"
+arrow-array = "57"
+arrow-schema = "57"
+blake3 = "1.8"
+chrono = "0.4"
+datafusion = "51"
+deltalake = { version = "0.30", default-features = false, features = ["datafusion", "rustls"] }
+env_logger = "0.11"
+log = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+object_store = "0.12"
+parquet = "57"
+proptest = "1.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.8"
+thiserror = "2.0"
+tokio = { version = "1.32", features = ["macros", "rt", "rt-multi-thread", "io-util", "fs"] }
+url = "2.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.dev]
+# Match duckpond's preference for fast debug builds
+debug = 0
+
+[profile.test]
+debug = 0

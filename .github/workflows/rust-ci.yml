@@ -39,6 +39,27 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-features -- -D warnings
 
+  sandbox:
+    name: Sandbox Check, Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sandbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting (sandbox)
+        run: cargo fmt --all -- --check
+
+      - name: Run tests (sandbox)
+        run: cargo test --workspace
+
+      - name: Run clippy (sandbox)
+        run: cargo clippy --workspace --all-features -- -D warnings
+
   build-container:
     name: Build & Publish Container (${{ matrix.arch }})
     needs: check
