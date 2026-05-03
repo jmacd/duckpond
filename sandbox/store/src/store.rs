@@ -442,11 +442,14 @@ impl Store {
     ///
     /// Convenience wrapper: reads [`Store::partition_leaves`] and feeds
     /// them through the strategy.
-    pub async fn compute_partition_checksum<C: checksum::PartitionChecksum>(
+    pub async fn compute_partition_checksum<C>(
         &self,
         partition: &str,
         strategy: &C,
-    ) -> Result<checksum::Checksum> {
+    ) -> Result<checksum::Checksum>
+    where
+        C: checksum::PartitionChecksum + ?Sized,
+    {
         let leaves = self.partition_leaves(partition).await?;
         let refs: Vec<checksum::Leaf<'_>> = leaves
             .iter()

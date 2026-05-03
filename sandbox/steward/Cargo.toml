@@ -9,13 +9,18 @@ license.workspace = true
 sandbox-store.workspace = true
 
 anyhow.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
 chrono.workspace = true
+datafusion.workspace = true
 deltalake.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
