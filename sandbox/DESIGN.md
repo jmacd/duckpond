@@ -474,6 +474,7 @@ Store::partition_leaves(partition) -> Vec<(String, [u8; 32])>
 Store::compute_partition_checksum(partition, &strategy) -> Checksum
 Store::compact(filter: Option<&str>) -> CompactMetrics  // delta optimize(Compact)
 Store::data_files() -> Vec<String>            // current Delta version's files
+Store::actions_at_version(version) -> (Vec<AddPath>, Vec<RemovePath>)  // Add/Remove for one Delta commit
 Store::last_txn_seq() -> i64
 Store::delta_version() -> i64
 ```
@@ -546,14 +547,18 @@ all under both checksum strategies where applicable.
 | store/src/checksum/merkle.rs (unit) | 4 | empty-tree distinct from single-leaf, duplicate-key behavior, odd-count tree pairing, output is 32 bytes |
 | store/src/checksum/homomorphic.rs (unit) | 6 | u256 add/sub roundtrip, carry, borrow, commutativity, order independence, output is 32 bytes |
 | store/src/schema.rs (unit) | 3 | Arrow and Delta schemas agree, partition column constant, BLAKE3 length |
-| store/tests/store.rs (integration) | 19 | put/get/delete roundtrip, multi-version semantics, tombstones, list filtering, partition discovery, apply_batch coalescing, empty-batch no-op, cross-partition independence, SQL metacharacter safety |
+| store/tests/store.rs (integration) | 22 | put/get/delete roundtrip, multi-version semantics, tombstones, list filtering, partition discovery, apply_batch coalescing, empty-batch no-op, cross-partition independence, SQL metacharacter safety, actions_at_version for Write/Compact/missing |
 | store/tests/checksum_integration.rs (integration) | 11 | order-independent across stores (Merkle, Homomorphic), tombstone-neutral, cross-partition isolation, value-change detection, empty-partition stability, two strategies disagree on same state |
 | steward/src/control_table.rs (unit) | 3 | Arrow vs Delta schema agreement, RecordKind serialization roundtrip, ChecksumValue serialization roundtrip |
-| steward/tests/steward.rs (integration) | 18 | lifecycle records (Begin/DataCommitted/Failed/Completed), parent_seq tracking, no-op->Completed, abort, read guards write nothing, txn_seq monotonicity across all outcomes, partition checksums carry forward, orphan-Begin recovery, config_set/get/list latest-wins, persistence across re-open, log limit, verify_local under both strategies, verify on empty pond, put-after-delete-then-verify |
+| steward/tests/steward.rs (integration) | 27 | lifecycle records (Begin/DataCommitted/Failed/Completed), parent_seq tracking, no-op->Completed, abort, read guards write nothing, txn_seq monotonicity across all outcomes, partition checksums carry forward, orphan-Begin recovery, config_set/get/list latest-wins, persistence across re-open, log limit, verify_local under both strategies, verify on empty pond, put-after-delete-then-verify, store_id minted/persisted/overridable/legacy-error, data_delta_version recorded for write, not for failed/completed/no-op-compact, monotonic across writes, recorded for real compact |
 | steward/tests/compact.rs (integration) | 11 | get/list unchanged after compact, real-work compact -> DataCommitted(Compact), per-partition checksum invariance, partition filter touches only that partition (verified via Store::data_files), empty-pond compact -> Completed (no-op), nonexistent-filter compact -> Completed, parent_seq points at last write, Homomorphic strategy invariance, tombstones survive compaction, interleaved write/compact/write/compact lifecycle, persistence across re-open |
-| remote/src/lib.rs | 1 | smoke (placeholder) |
+| remote/src/schema.rs (unit) | 5 | arrow/Delta schemas agree, partition_kind constants distinct, CHUNK_SIZE_BYTES = 16 MiB, BLAKE3_LEN matches blake3 crate, RowBody partition_kind/file_action mapping |
+| remote/src/chunking.rs (unit) | 12 | empty input -> 1 empty chunk, file <= == > N*chunk_size boundaries, per-chunk and per-file BLAKE3 correctness, assemble round-trip and detection of bad-hash/out-of-order/wrong-size, chunk_file via temp file |
+| remote/tests/schema.rs (integration) | 9 | round-trip for every variant, full bundle, schema rejection of unknown partition_kind / manifest missing commit_kind / data unknown action, MILESTONE: multi-partition single-commit is one Delta version |
+| remote/tests/remote.rs (integration) | 8 | create+open store_id roundtrip, open of missing path errors, list/latest_seq/oldest_available_seq on empty, happy-path push, PostPushPending+Completed lifecycle, idempotent re-push, store_id mismatch error, NoSuchCommit on empty pond push |
+| remote/tests/push.rs (integration) | 6 | compact bundle has DataAdd + DataRemove rows, partition_checksums round-trip byte-exact, data rows reassemble to original parquet bytes (file_blake3 verified), multi-bundle ordering with parent_seq chain, open errors on corrupted UUID property, post-remote-commit crash recovery writes Completed |
 | tests/src/lib.rs | 1 | smoke (placeholder) |
-| **Total** | **84** | |
+| **Total** | **136** | |
 
 ### 3.4 CI integration
 
@@ -585,8 +590,8 @@ sandbox entirely.
 | checksum-trait | done | trait + Merkle + Homomorphic + 11 store-bridging tests |
 | steward-lifecycle | done | Steward + control table + WriteGuard/ReadGuard + verify_local + 18 tests |
 | compact-op | done | Store::compact + Store::data_files + Steward::compact (no-op vs real-work lifecycle, partition filter, error -> Failed) + 11 tests |
-| remote-push | pending | next on the critical path |
-| remote-pull | pending | depends on remote-push |
+| remote-push | done | Steward store_id, data_delta_version, Store::actions_at_version, sandbox-remote schema + chunking + Remote::create/open/push with PostPush* lifecycle + 14 push-related tests |
+| remote-pull | pending | next on the critical path |
 | restart-from-compact | pending | depends on remote-pull |
 | remote-retention | pending | depends on remote-push |
 | verify-cmd | pending | depends on remote-push (verify_against_remote half) |
@@ -596,7 +601,7 @@ sandbox entirely.
 | benchmarks | pending | depends on checksum-trait (UNBLOCKED, can run any time) |
 | sandbox-design-doc | pending | depends on integration-tests, property-tests, benchmarks |
 
-6 of 16 done.
+7 of 16 done.
 
 ---
 
