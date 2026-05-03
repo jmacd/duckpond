@@ -37,7 +37,7 @@ use sandbox_store::checksum::{Checksum, PartitionChecksum};
 use uuid::Uuid;
 
 use crate::control_table::{
-    ChecksumValue, CommitKind, ControlRecord, ControlTable, DataCommittedMetadata,
+    self, ChecksumValue, CommitKind, ControlRecord, ControlTable, DataCommittedMetadata,
     PartitionChecksums, RecordKind, new_txn_id,
 };
 use crate::error::{Result, StewardError};
@@ -227,6 +227,110 @@ impl Steward {
     /// `data_delta_version` field existed.
     pub async fn data_delta_version_at(&self, txn_seq: i64) -> Result<Option<i64>> {
         self.control.data_delta_version_at(txn_seq).await
+    }
+
+    /// Look up the `DataCommitted` record for `txn_seq`.  Returns
+    /// `None` if no such record exists (the txn was Failed,
+    /// Completed, no-op compact, or never allocated).
+    pub async fn data_committed_record(&self, txn_seq: i64) -> Result<Option<ControlRecord>> {
+        let log = self.control.all_records().await?;
+        Ok(log
+            .into_iter()
+            .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq))
+    }
+
+    /// Read the Add and Remove file actions recorded by the data
+    /// store at `version`.  Delegates to
+    /// [`sandbox_store::Store::actions_at_version`].
+    pub async fn actions_at_version(
+        &self,
+        version: i64,
+    ) -> Result<(Vec<sandbox_store::AddPath>, Vec<sandbox_store::RemovePath>)> {
+        Ok(self.store.actions_at_version(version).await?)
+    }
+
+    /// Read the bytes of a data-store-relative file path.  Used by
+    /// `remote-push` to slurp parquet files emitted by Delta commits.
+    pub fn read_data_file(&self, rel_path: &str) -> Result<Vec<u8>> {
+        let p = self.store.path().join(rel_path);
+        Ok(std::fs::read(p)?)
+    }
+
+    /// Write a `PostPushPending` record to the control table.  Returns
+    /// the freshly-generated `txn_id` so subsequent
+    /// `record_post_push_completed` / `record_post_push_failed` calls
+    /// can pair against it.
+    pub async fn record_post_push_pending(&mut self, txn_seq: i64) -> Result<String> {
+        let txn_id = control_table::new_txn_id();
+        let now = Utc::now().timestamp_micros();
+        self.control
+            .write_record(ControlRecord {
+                record_kind: RecordKind::PostPushPending,
+                txn_seq,
+                txn_id: txn_id.clone(),
+                commit_kind: None,
+                parent_seq: None,
+                duration_ms: None,
+                ts_micros: now,
+                metadata_json: "{}".to_string(),
+            })
+            .await?;
+        Ok(txn_id)
+    }
+
+    /// Write a `PostPushCompleted` record paired with a prior
+    /// `PostPushPending` (same `txn_id`).  `started_micros` is the
+    /// timestamp of the Pending record so duration can be computed.
+    pub async fn record_post_push_completed(
+        &mut self,
+        txn_seq: i64,
+        txn_id: String,
+        started_micros: i64,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_micros();
+        let duration_ms = ((now - started_micros) / 1000).max(0);
+        self.control
+            .write_record(ControlRecord {
+                record_kind: RecordKind::PostPushCompleted,
+                txn_seq,
+                txn_id,
+                commit_kind: None,
+                parent_seq: None,
+                duration_ms: Some(duration_ms),
+                ts_micros: now,
+                metadata_json: "{}".to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Write a `PostPushFailed` record paired with a prior
+    /// `PostPushPending` (same `txn_id`).  `reason` is recorded in
+    /// `metadata_json` as `{"reason":"..."}` for operator visibility.
+    pub async fn record_post_push_failed(
+        &mut self,
+        txn_seq: i64,
+        txn_id: String,
+        started_micros: i64,
+        reason: String,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_micros();
+        let duration_ms = ((now - started_micros) / 1000).max(0);
+        let mut meta = HashMap::new();
+        meta.insert("reason".to_string(), reason);
+        self.control
+            .write_record(ControlRecord {
+                record_kind: RecordKind::PostPushFailed,
+                txn_seq,
+                txn_id,
+                commit_kind: None,
+                parent_seq: None,
+                duration_ms: Some(duration_ms),
+                ts_micros: now,
+                metadata_json: serde_json::to_string(&meta)?,
+            })
+            .await?;
+        Ok(())
     }
 
     /// Set a configuration key.

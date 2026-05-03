@@ -25,6 +25,10 @@ pub enum RemoteError {
     #[error("arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
 
+    /// DataFusion error.
+    #[error("datafusion error: {0}")]
+    DataFusion(#[from] datafusion::error::DataFusionError),
+
     /// JSON encoding/decoding error.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
