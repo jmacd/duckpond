@@ -24,12 +24,14 @@ fn init_logger() {
 fn opts_merkle() -> StewardOptions {
     StewardOptions {
         checksum_strategy: Arc::new(sandbox_store::checksum::Merkle::new()),
+        ..Default::default()
     }
 }
 
 fn opts_homomorphic() -> StewardOptions {
     StewardOptions {
         checksum_strategy: Arc::new(sandbox_store::checksum::Homomorphic::new()),
+        ..Default::default()
     }
 }
 

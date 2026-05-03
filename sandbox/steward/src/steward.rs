@@ -34,13 +34,18 @@ use std::sync::Arc;
 use chrono::Utc;
 use sandbox_store::Store;
 use sandbox_store::checksum::{Checksum, PartitionChecksum};
+use uuid::Uuid;
 
 use crate::control_table::{
     ChecksumValue, CommitKind, ControlRecord, ControlTable, DataCommittedMetadata,
     PartitionChecksums, RecordKind, new_txn_id,
 };
-use crate::error::Result;
+use crate::error::{Result, StewardError};
 use crate::guard::{ReadGuard, WriteGuard, WriteGuardInner};
+
+/// Setting key under which the pond's `store_id` is persisted in the
+/// control table.  Set once at `Steward::create`; immutable thereafter.
+const STORE_ID_KEY: &str = "store_id";
 
 /// Result of a successful write commit.
 #[derive(Debug, Clone)]
@@ -62,6 +67,9 @@ pub struct CommitOutcome {
 /// the in-memory `last_write_seq` allocator.
 pub struct Steward {
     pond_path: PathBuf,
+    /// Pond family identity.  Set at `create`, loaded at `open`.
+    /// Immutable for the lifetime of the steward.
+    store_id: Uuid,
     /// Wrapped in `Arc<Mutex>` so `WriteGuard` can borrow it mutably
     /// while the steward holds a reference for read-after-commit.
     /// Not actually shared across threads; this is an internal
@@ -79,12 +87,19 @@ pub struct Steward {
 pub struct StewardOptions {
     /// Strategy for per-partition checksums.
     pub checksum_strategy: Arc<dyn PartitionChecksum>,
+    /// `store_id` to assign to a new pond.  `None` (the default) mints
+    /// a fresh UUIDv4 at `create`.  `Some(id)` is used to bootstrap a
+    /// replica with the same identity as the source (the
+    /// restart-from-compact path; not yet exercised by `open`, which
+    /// always reads from the persisted setting).
+    pub store_id: Option<Uuid>,
 }
 
 impl Default for StewardOptions {
     fn default() -> Self {
         Self {
             checksum_strategy: Arc::new(sandbox_store::checksum::Merkle::new()),
+            store_id: None,
         }
     }
 }
@@ -105,9 +120,14 @@ impl Steward {
         let data_path = pond_path.join("data");
         let control_path = pond_path.join("control");
         let store = Store::create(&data_path).await?;
-        let control = ControlTable::create(&control_path).await?;
+        let mut control = ControlTable::create(&control_path).await?;
+        let store_id = opts.store_id.unwrap_or_else(Uuid::new_v4);
+        control
+            .config_set(STORE_ID_KEY, &store_id.to_string())
+            .await?;
         Ok(Self {
             pond_path,
+            store_id,
             store,
             control,
             last_write_seq: 0,
@@ -122,6 +142,11 @@ impl Steward {
     }
 
     /// Open an existing pond with custom options.
+    ///
+    /// Errors with [`StewardError::LegacyPond`] if the pond's control
+    /// table does not contain a `store_id` setting.  The sandbox does
+    /// NOT silently backfill an identity for legacy ponds; an operator
+    /// must migrate or recreate.
     pub async fn open_with_options(
         pond_path: impl AsRef<Path>,
         opts: StewardOptions,
@@ -132,8 +157,22 @@ impl Steward {
         let store = Store::open(&data_path).await?;
         let control = ControlTable::open(&control_path).await?;
         let last_write_seq = control.last_txn_seq().await?;
+        let store_id_str = control.config_get(STORE_ID_KEY).await?.ok_or_else(|| {
+            StewardError::LegacyPond(format!(
+                "{}: no `{}` setting in control table",
+                pond_path.display(),
+                STORE_ID_KEY,
+            ))
+        })?;
+        let store_id = Uuid::parse_str(&store_id_str).map_err(|e| {
+            StewardError::Invariant(format!(
+                "control table contained malformed `{}` setting `{}`: {}",
+                STORE_ID_KEY, store_id_str, e,
+            ))
+        })?;
         Ok(Self {
             pond_path,
+            store_id,
             store,
             control,
             last_write_seq,
@@ -144,6 +183,13 @@ impl Steward {
     /// Path the pond was created/opened at.
     pub fn path(&self) -> &Path {
         &self.pond_path
+    }
+
+    /// The pond family's `store_id`.  Minted at `Steward::create` and
+    /// preserved across all clones (replicas restored from the same
+    /// remote bundle history share this identity).
+    pub fn store_id(&self) -> Uuid {
+        self.store_id
     }
 
     /// Most recent allocated `txn_seq` (across all kinds, not just

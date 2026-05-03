@@ -47,6 +47,13 @@ pub enum StewardError {
     /// misuse caught at runtime.
     #[error("api misuse: {0}")]
     ApiMisuse(String),
+
+    /// The pond was created without a `store_id` setting, so it
+    /// predates the identity invariant.  Sandbox does not perform
+    /// silent backfill; the operator must explicitly migrate or
+    /// recreate the pond.
+    #[error("legacy pond: {0}")]
+    LegacyPond(String),
 }
 
 /// Convenience alias.

@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use sandbox_steward::{CommitKind, RecordKind, Steward, StewardOptions, verify_local};
+use sandbox_steward::{
+    CommitKind, RecordKind, Steward, StewardError, StewardOptions, verify_local,
+};
 use tempfile::TempDir;
 
 fn init_logger() {
@@ -14,12 +16,14 @@ fn init_logger() {
 fn opts_merkle() -> StewardOptions {
     StewardOptions {
         checksum_strategy: Arc::new(sandbox_store::checksum::Merkle::new()),
+        ..Default::default()
     }
 }
 
 fn opts_homomorphic() -> StewardOptions {
     StewardOptions {
         checksum_strategy: Arc::new(sandbox_store::checksum::Homomorphic::new()),
+        ..Default::default()
     }
 }
 
@@ -304,7 +308,10 @@ async fn config_set_get_list() {
     let all = s.config_list().await.unwrap();
     assert_eq!(all.get("auto_compact"), Some(&"false".to_string()));
     assert_eq!(all.get("retention"), Some(&"5".to_string()));
-    assert_eq!(all.len(), 2);
+    // `store_id` is also a setting (minted at create); presence is
+    // checked here to document the invariant, but its exact value is
+    // not asserted (it's a UUIDv4).
+    assert!(all.contains_key("store_id"), "store_id setting present");
 }
 
 #[tokio::test]
@@ -398,4 +405,70 @@ async fn put_after_delete_then_verify() {
     assert_eq!(r.get("p", "k").await.unwrap(), Some(b"v2".to_vec()));
     let report = verify_local(&s).await.unwrap();
     assert!(report.ok);
+}
+
+#[tokio::test]
+async fn store_id_minted_on_create() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let s = Steward::create(dir.path()).await.unwrap();
+    let id = s.store_id();
+    assert_ne!(id, uuid::Uuid::nil(), "store_id is non-nil");
+    assert_eq!(id.get_version_num(), 4, "store_id is UUIDv4");
+}
+
+#[tokio::test]
+async fn store_id_persists_across_reopen() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let id_at_create = {
+        let s = Steward::create(dir.path()).await.unwrap();
+        s.store_id()
+    };
+    let s = Steward::open(dir.path()).await.unwrap();
+    assert_eq!(s.store_id(), id_at_create, "store_id stable across reopen");
+}
+
+#[tokio::test]
+async fn store_id_override_via_options() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let chosen = uuid::Uuid::new_v4();
+    let opts = StewardOptions {
+        store_id: Some(chosen),
+        ..Default::default()
+    };
+    let s = Steward::create_with_options(dir.path(), opts)
+        .await
+        .unwrap();
+    assert_eq!(s.store_id(), chosen);
+    drop(s);
+    // And it persists.
+    let s2 = Steward::open(dir.path()).await.unwrap();
+    assert_eq!(s2.store_id(), chosen);
+}
+
+#[tokio::test]
+async fn legacy_pond_without_store_id_errors_on_open() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let pond = dir.path();
+    // Construct a "legacy" pond by creating the underlying Store and
+    // ControlTable directly, bypassing Steward::create's `store_id`
+    // minting.  This simulates a pond produced before the identity
+    // invariant existed.
+    std::fs::create_dir_all(pond).unwrap();
+    let _ = sandbox_store::Store::create(&pond.join("data"))
+        .await
+        .unwrap();
+    let _ = sandbox_steward::control_table::ControlTable::create(&pond.join("control"))
+        .await
+        .unwrap();
+
+    match Steward::open(pond).await {
+        Err(StewardError::LegacyPond(msg)) => {
+            assert!(msg.contains("store_id"), "error mentions the missing key");
+        }
+        other => panic!("expected LegacyPond error, got {:?}", other.err()),
+    }
 }
