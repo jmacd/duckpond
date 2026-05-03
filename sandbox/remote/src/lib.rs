@@ -14,9 +14,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod chunking;
 mod error;
 pub mod schema;
 
+pub use chunking::{ChunkRecord, ChunkedFile, assemble_file, chunk_bytes, chunk_file};
 pub use error::{RemoteError, Result};
 pub use schema::{
     BLAKE3_LEN, CHECKSUM_KIND_HOMOMORPHIC, CHECKSUM_KIND_MERKLE, CHUNK_SIZE_BYTES,
