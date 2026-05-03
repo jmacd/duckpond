@@ -256,6 +256,150 @@ impl Steward {
         Ok(std::fs::read(p)?)
     }
 
+    /// Apply one bundle pulled from a remote, end-to-end:
+    ///
+    /// 1. Idempotence: if a `DataCommitted` record already exists at
+    ///    `txn_seq`, returns Ok(()) immediately (this bundle was
+    ///    applied by a prior pull attempt).
+    /// 2. Validates every add/remove path: must be relative, must
+    ///    not contain `..`, must contain exactly one
+    ///    `partition_key=<value>` Hive segment.  Percent-decodes the
+    ///    partition value.
+    /// 3. Writes each add's bytes to `<data_path>/<path>` (creating
+    ///    parent directories as needed).
+    /// 4. Builds `Action::Add` (with `data_change` per `commit_kind`:
+    ///    `true` for Write, `false` for Compact) and `Action::Remove`
+    ///    (`data_change = false`) and commits all actions in one
+    ///    Delta version on the data store.
+    /// 5. Writes a `DataCommitted` record on the consumer's control
+    ///    table mirroring the source bundle's metadata
+    ///    (txn_seq, commit_kind, parent_seq, partition_checksums,
+    ///    data_delta_version on the consumer).
+    /// 6. Updates `self.last_write_seq` to `max(self.last_write_seq,
+    ///    txn_seq)` so subsequent `begin_write` calls allocate
+    ///    seqs above any pulled history.
+    ///
+    /// Used by `Remote::pull` (in the sandbox-remote crate) for the
+    /// mirror-mode pull lifecycle.  See DESIGN.md §2.5.4.
+    pub async fn apply_pulled_bundle(
+        &mut self,
+        txn_seq: i64,
+        commit_kind: CommitKind,
+        parent_seq: i64,
+        adds: Vec<(String, Vec<u8>)>,
+        removes: Vec<String>,
+        partition_checksums: PartitionChecksums,
+    ) -> Result<()> {
+        // 1. Idempotence: skip if already applied.
+        if self.data_committed_record(txn_seq).await?.is_some() {
+            return Ok(());
+        }
+
+        // 2. Validate every path; reject anything suspicious.
+        let mut add_partition_values: Vec<HashMap<String, Option<String>>> =
+            Vec::with_capacity(adds.len());
+        for (path, _) in &adds {
+            add_partition_values.push(parse_partition_values(path)?);
+        }
+        for path in &removes {
+            // Removes still need validation; we don't need their
+            // partition_values in the Remove action (Remove can omit
+            // them per Delta protocol), but the path must still be
+            // safe.
+            let _ = parse_partition_values(path)?;
+        }
+
+        // 3. Write each add's bytes.
+        let data_path = self.store.path();
+        let mut add_sizes: Vec<i64> = Vec::with_capacity(adds.len());
+        for (rel_path, bytes) in &adds {
+            let abs = data_path.join(rel_path);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&abs, bytes)?;
+            add_sizes.push(bytes.len() as i64);
+        }
+
+        // 4. Build actions and commit one Delta version.
+        let now_ms = Utc::now().timestamp_millis();
+        let data_change_on_add = matches!(commit_kind, CommitKind::Write);
+        let mut actions: Vec<deltalake::kernel::Action> =
+            Vec::with_capacity(adds.len() + removes.len());
+        for ((path, _bytes), (size, partition_values)) in adds
+            .iter()
+            .zip(add_sizes.iter().zip(add_partition_values.into_iter()))
+        {
+            let add = deltalake::kernel::Add {
+                path: path.clone(),
+                partition_values,
+                size: *size,
+                modification_time: now_ms,
+                data_change: data_change_on_add,
+                ..Default::default()
+            };
+            actions.push(deltalake::kernel::Action::Add(add));
+        }
+        for path in &removes {
+            let remove = deltalake::kernel::Remove {
+                path: path.clone(),
+                data_change: false,
+                deletion_timestamp: Some(now_ms),
+                ..Default::default()
+            };
+            actions.push(deltalake::kernel::Action::Remove(remove));
+        }
+        let op = match commit_kind {
+            CommitKind::Write => deltalake::protocol::DeltaOperation::Write {
+                mode: deltalake::protocol::SaveMode::Append,
+                partition_by: Some(vec!["partition_key".to_string()]),
+                predicate: None,
+            },
+            CommitKind::Compact => deltalake::protocol::DeltaOperation::Optimize {
+                predicate: None,
+                target_size: 0,
+            },
+        };
+        let new_version = self.store.commit_actions(actions, op).await?;
+
+        // 5. Write a DataCommitted record on the consumer control
+        //    table mirroring the source's bundle metadata.
+        let metadata = DataCommittedMetadata {
+            partition_checksums: partition_checksums
+                .iter()
+                .map(|(k, v)| (k.clone(), ChecksumValue::from(v)))
+                .collect(),
+            data_delta_version: new_version,
+        };
+        let metadata_json = serde_json::to_string(&metadata)?;
+        let now_micros = Utc::now().timestamp_micros();
+        let parent_opt = if parent_seq == 0 {
+            None
+        } else {
+            Some(parent_seq)
+        };
+        self.control
+            .write_record(ControlRecord {
+                record_kind: RecordKind::DataCommitted,
+                txn_seq,
+                txn_id: control_table::new_txn_id(),
+                commit_kind: Some(commit_kind),
+                parent_seq: parent_opt,
+                duration_ms: Some(0),
+                ts_micros: now_micros,
+                metadata_json,
+            })
+            .await?;
+
+        // 6. Advance the in-memory allocator so subsequent
+        //    begin_write doesn't collide with pulled history.
+        if txn_seq > self.last_write_seq {
+            self.last_write_seq = txn_seq;
+        }
+
+        Ok(())
+    }
+
     /// Write a `PostPushPending` record to the control table.  Returns
     /// the freshly-generated `txn_id` so subsequent
     /// `record_post_push_completed` / `record_post_push_failed` calls
@@ -794,4 +938,139 @@ pub struct VerifyMismatch {
     pub recorded: Option<Checksum>,
     /// Checksum recomputed from the current data.
     pub live: Checksum,
+}
+
+/// Parse a Hive-style data file path of the form
+/// `partition_key=<value>/<file>` (with `<value>` possibly
+/// percent-encoded) into a Delta-protocol `partition_values` map.
+///
+/// Hardened against malformed / hostile input from a remote:
+/// rejects absolute paths, paths containing `..` segments, paths
+/// missing the partition_key= segment, paths with multiple
+/// partition_key= segments, and the `__HIVE_DEFAULT_PARTITION__`
+/// null sentinel (the sandbox-store schema's `partition_key` is
+/// non-nullable, so the sentinel should never appear).
+fn parse_partition_values(path: &str) -> Result<HashMap<String, Option<String>>> {
+    if path.is_empty() {
+        return Err(StewardError::Invariant("data path is empty".into()));
+    }
+    if path.starts_with('/') {
+        return Err(StewardError::Invariant(format!(
+            "data path is absolute: {:?}",
+            path
+        )));
+    }
+    let mut found: Option<String> = None;
+    for segment in path.split('/') {
+        if segment == ".." {
+            return Err(StewardError::Invariant(format!(
+                "data path contains `..` segment: {:?}",
+                path
+            )));
+        }
+        if let Some(rest) = segment.strip_prefix("partition_key=") {
+            if found.is_some() {
+                return Err(StewardError::Invariant(format!(
+                    "data path has multiple `partition_key=` segments: {:?}",
+                    path
+                )));
+            }
+            if rest == "__HIVE_DEFAULT_PARTITION__" {
+                return Err(StewardError::Invariant(format!(
+                    "partition_key is non-nullable in this schema; null sentinel at: {:?}",
+                    path
+                )));
+            }
+            // Percent-decode the partition value (Delta convention).
+            let decoded = percent_decode(rest).map_err(|e| {
+                StewardError::Invariant(format!("invalid percent-encoding in {:?}: {}", path, e))
+            })?;
+            found = Some(decoded);
+        }
+    }
+    let value = found.ok_or_else(|| {
+        StewardError::Invariant(format!(
+            "data path missing `partition_key=` segment: {:?}",
+            path
+        ))
+    })?;
+    let mut out = HashMap::new();
+    let _ = out.insert("partition_key".to_string(), Some(value));
+    Ok(out)
+}
+
+/// Minimal percent-decoder for Delta partition values.  We avoid
+/// pulling in `percent-encoding` as a dependency just for this; the
+/// sandbox kv store's keys never use exotic encodings.
+fn percent_decode(s: &str) -> std::result::Result<String, String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(format!("truncated escape at offset {}", i));
+            }
+            let h = char::from(bytes[i + 1])
+                .to_digit(16)
+                .ok_or_else(|| format!("bad hex digit at offset {}", i + 1))?;
+            let l = char::from(bytes[i + 2])
+                .to_digit(16)
+                .ok_or_else(|| format!("bad hex digit at offset {}", i + 2))?;
+            out.push(((h << 4) | l) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|e| format!("invalid UTF-8: {}", e))
+}
+
+#[cfg(test)]
+mod parse_partition_values_tests {
+    use super::*;
+
+    #[test]
+    fn happy_path() {
+        let pv = parse_partition_values("partition_key=p1/part-001.parquet").unwrap();
+        assert_eq!(pv.get("partition_key"), Some(&Some("p1".to_string())));
+    }
+
+    #[test]
+    fn percent_encoded_value() {
+        let pv = parse_partition_values("partition_key=p%201/part-001.parquet").unwrap();
+        assert_eq!(pv.get("partition_key"), Some(&Some("p 1".to_string())));
+    }
+
+    #[test]
+    fn rejects_absolute() {
+        assert!(parse_partition_values("/partition_key=p/x").is_err());
+    }
+
+    #[test]
+    fn rejects_dotdot() {
+        assert!(parse_partition_values("../partition_key=p/x").is_err());
+        assert!(parse_partition_values("partition_key=p/../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn rejects_missing_partition_key() {
+        assert!(parse_partition_values("part-001.parquet").is_err());
+    }
+
+    #[test]
+    fn rejects_multiple_partition_keys() {
+        assert!(parse_partition_values("partition_key=a/partition_key=b/x").is_err());
+    }
+
+    #[test]
+    fn rejects_null_sentinel() {
+        assert!(parse_partition_values("partition_key=__HIVE_DEFAULT_PARTITION__/x").is_err());
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(parse_partition_values("").is_err());
+    }
 }

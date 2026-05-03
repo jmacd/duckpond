@@ -559,6 +559,38 @@ impl Store {
         }
         Ok((adds, removes))
     }
+
+    /// Commit a set of explicit `Add` and `Remove` actions to the
+    /// data store as a single Delta version.  Used by
+    /// `Steward::apply_pulled_bundle` for `remote-pull`: the consumer
+    /// receives parquet bytes from the remote and needs to register
+    /// them with its local Delta table without going through the
+    /// regular `apply_batch` path (which would generate fresh
+    /// parquet files instead of mirroring the source's).
+    ///
+    /// `op` describes the operation for the commit log; pass
+    /// `DeltaOperation::Write { mode: Append, .. }` for Write
+    /// bundles or `DeltaOperation::Optimize { .. }` for Compact
+    /// bundles.
+    ///
+    /// Returns the new Delta version on the data store after the
+    /// commit.
+    pub async fn commit_actions(
+        &mut self,
+        actions: Vec<deltalake::kernel::Action>,
+        op: deltalake::protocol::DeltaOperation,
+    ) -> Result<i64> {
+        use deltalake::kernel::transaction::CommitBuilder;
+        let snapshot = self.table.snapshot()?;
+        let log_store = self.table.log_store();
+        let _result = CommitBuilder::default()
+            .with_actions(actions)
+            .build(Some(snapshot), log_store, op)
+            .await?;
+        self.table.update_state().await?;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(self.table.version().unwrap_or(0))
+    }
 }
 
 /// A file added by a Delta commit, as reported by
