@@ -553,17 +553,20 @@ Remote::create(path, store_id) / Remote::open(path)
 Remote::store_id() -> Uuid
 Remote::push(&mut self, &mut Steward, txn_seq) -> ()       // remote-push
 Remote::pull(&self, &mut Steward) -> PullReport            // remote-pull (mirror mode)
+Remote::maintain(&mut self, MaintainOptions) -> MaintainReport  // remote-retention
 Remote::list_bundles() -> Vec<BundleHeader>
 Remote::latest_seq() / oldest_available_seq() -> Option<i64>
 
-PullReport { bundles_applied: Vec<BundleHeader>, last_pulled_seq: i64 }
+PullReport      { bundles_applied: Vec<BundleHeader>, last_pulled_seq: i64 }
+MaintainOptions { keep_compact_bundles: usize (>=1), vacuum_after: bool }
+MaintainReport  { horizon: i64, rows_deleted: i64, files_vacuumed: usize }
 ```
 
 The `sandbox-tests` crate is still a smoke-only placeholder.
 
 ### 3.3 Test inventory
 
-161 tests total across all sandbox crates.  All passing, all under
+169 tests total across all sandbox crates.  All passing, all under
 both checksum strategies where applicable.
 
 | Crate / file | Count | What it covers |
@@ -585,8 +588,9 @@ both checksum strategies where applicable.
 | remote/tests/remote.rs (integration) | 8 | create+open store_id roundtrip, open of missing path errors, list/latest_seq/oldest_available_seq on empty, happy-path push, PostPushPending+Completed lifecycle, idempotent re-push, store_id mismatch error, NoSuchCommit on empty pond push |
 | remote/tests/push.rs (integration) | 6 | compact bundle has DataAdd + DataRemove rows, partition_checksums round-trip byte-exact, data rows reassemble to original parquet bytes (file_blake3 verified), multi-bundle ordering with parent_seq chain, open errors on corrupted UUID property, post-remote-commit crash recovery writes Completed |
 | remote/tests/pull.rs (integration) | 9 | happy-path round-trip, multi-bundle pull, idempotent re-pull when caught up, compact bundle pull (adds + removes both apply), per-bundle progress simulating partial-pull resumption, store_id mismatch error, behind-retention check exercised in no-gap path, DataCommitted records mirrored on consumer, state persists across consumer reopen |
+| remote/tests/maintain.rs (integration) | 8 | refuses keep=0, refuses when fewer compact bundles than keep, keep=1 prunes writes leaves compact, keep=2 keeps two compacts, idempotent re-maintain, vacuum disabled reports 0 files, vacuum enabled reclaims files, INTEGRATION: consumer below new horizon gets BehindRetention on pull |
 | tests/src/lib.rs | 1 | smoke (placeholder) |
-| **Total** | **161** | |
+| **Total** | **169** | |
 
 ### 3.4 CI integration
 
@@ -620,8 +624,8 @@ sandbox entirely.
 | compact-op | done | Store::compact + Store::data_files + Steward::compact (no-op vs real-work lifecycle, partition filter, error -> Failed) + 11 tests |
 | remote-push | done | Steward store_id, data_delta_version, Store::actions_at_version, sandbox-remote schema + chunking + Remote::create/open/push with PostPush* lifecycle + 14 push-related tests |
 | remote-pull | done | Steward::apply_pulled_bundle (idempotent via consumer DataCommitted mirror, path validation, BLAKE3 chain trust eliminates post-commit recompute) + Remote::pull mirror-mode lifecycle (per-bundle progress, retention horizon check) + 17 pull-related tests |
-| restart-from-compact | pending | depends on remote-pull (UNBLOCKED) |
-| remote-retention | pending | depends on remote-push (UNBLOCKED) |
+| remote-retention | done | Remote::maintain (DeleteBuilder predicate `txn_seq < horizon`, optional VacuumBuilder) + MaintainOptions/MaintainReport + InvalidRetention/InsufficientCompactBundles errors + 8 tests |
+| restart-from-compact | pending | depends on remote-pull (UNBLOCKED); enables the recovery path for consumers that get BehindRetention |
 | verify-cmd | pending | depends on remote-push (verify_against_remote half) (UNBLOCKED) |
 | library-api-coverage | pending | depends on remote-pull, remote-retention, verify-cmd |
 | integration-tests | pending | depends on restart-from-compact, library-api-coverage |
@@ -629,7 +633,7 @@ sandbox entirely.
 | benchmarks | pending | depends on checksum-trait (UNBLOCKED, can run any time) |
 | sandbox-design-doc | pending | depends on integration-tests, property-tests, benchmarks |
 
-8 of 16 done.
+9 of 16 done.
 
 ---
 
