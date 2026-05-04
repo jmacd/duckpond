@@ -640,7 +640,8 @@ both checksum strategies where applicable.
 | tests/src/lib.rs | 1 | smoke (placeholder) |
 | tests/tests/integration.rs | 18 | 5 base scenarios (roundtrip, two-consumer parity, long mixed sequence, multi-remote bug catch, full retention+restart loop) plus 13 systematic tests across 7 categories: scaling (5+ consumers, 30 writes), operation-order equivalence (push/pull timing), retention+restart cycles (3 rounds, restart twice, continue after restart), multi-remote (divergent retention with restart recovery, cross-remote pull idempotence), edge mixtures (abort/noop interleaved, source verify_local after every op), per-checkpoint invariants, and a 25-step scripted stress sequence with invariant checks at every meaningful checkpoint |
 | tests/tests/bounded.rs | 8 | bounded-growth invariant for all three components: source data dir steady state under periodic compact+vacuum (with control test showing unbounded growth without it), parquet count bounded, remote dir steady state under periodic maintain (with the push-before-vacuum ordering rule enforced), end-to-end long run keeps source+remote+consumer all bounded while consumer remains correct, control table same property under compact_control+vacuum_control (with control test) |
-| **Total** | **218** | |
+| tests/tests/properties.rs | 5 | proptest sweeps over random op sequences (Write/AbortWrite/NoopWrite/Compact, 16 cases each): consumer matches source after push+pull for every key, compact preserves logical content, only DataCommitted seqs are pushable (aborts/noops rejected), pull is idempotent (second pull applies no bundles), 15-25 step random sequence keeps source verify_local valid throughout and consumer matches after final push+pull. Each case prepends a fixed seed Write so seq 1 is always pushable (works around the BehindRetention check's inability to distinguish "seq N never had a bundle" from "seq N's bundle was pruned") |
+| **Total** | **223** | |
 
 ### 3.4 CI integration
 
@@ -679,11 +680,11 @@ sandbox entirely.
 | verify-cmd | done | verify_against_remote (compare consumer's live checksums to remote.latest_seq's recorded checksums; on mismatch walk back to find divergence_boundary) + Steward::compute_live_checksums + 8 tests |
 | library-api-coverage | done | audit + 8 gap-filling tests (verify_local drift detection, log limit, apply_pulled_bundle removes path direct test, read_data_file error path, Store::commit_actions direct test, push errors for Failed/Completed/no-op-compact seqs).  Skipped (documented): compact_failure_records_failed (delta-rs cannot inject optimize failure) |
 | integration-tests | done | 18 cross-component scenarios in sandbox-tests crate covering: 5 base scenarios; scaling (multi-consumer, many-write); operation-order equivalence (push timing, pull timing); retention/restart cycles; multi-remote with divergent retention; edge mixtures (abort/noop interleaved); per-checkpoint invariant assertions; 25-step deterministic stress.  Caught a real bug: push was not recording last_pushed_seq |
-| property-tests | pending | depends on remote-pull, remote-retention (UNBLOCKED) |
+| property-tests | done | 5 proptest sweeps over random op sequences (Write/AbortWrite/NoopWrite/Compact, 16 cases each): consumer matches source after push+pull, compact preserves logical content, only DataCommitted seqs are pushable, pull is idempotent, long random sequence keeps source verify_local valid. Each case prepends a fixed seed Write so seq 1 is always pushable (works around BehindRetention's inability to distinguish "seq N never had a bundle" from "seq N's bundle was pruned") |
 | benchmarks | pending | depends on checksum-trait (UNBLOCKED, can run any time) |
-| sandbox-design-doc | pending | depends on integration-tests (UNBLOCKED), property-tests, benchmarks |
+| sandbox-design-doc | pending | depends on integration-tests (UNBLOCKED), property-tests (UNBLOCKED), benchmarks |
 
-13 of 16 done.
+14 of 16 done.
 
 ---
 
