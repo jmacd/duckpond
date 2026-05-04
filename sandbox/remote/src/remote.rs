@@ -452,6 +452,123 @@ impl Remote {
         })
     }
 
+    /// Wipe `consumer_path` (after safety checks) and bootstrap a
+    /// fresh consumer pond from the remote's oldest available
+    /// compact bundle.  See `../../DESIGN.md` §2.5.4
+    /// "restart from compact" path.
+    ///
+    /// Recovery flow for a consumer that hits
+    /// [`RemoteError::BehindRetention`] on pull:
+    ///
+    /// ```ignore
+    /// match remote.pull(&mut consumer).await {
+    ///     Err(RemoteError::BehindRetention { .. }) => {
+    ///         let path = consumer.path().to_path_buf();
+    ///         drop(consumer);
+    ///         consumer = remote.restart_from_compact(&path).await?;
+    ///     }
+    ///     other => other?,
+    /// }
+    /// ```
+    ///
+    /// Lifecycle:
+    /// 1. Validate: remote has at least one compact bundle, else
+    ///    [`RemoteError::NoRestartPoint`].
+    /// 2. Pick the oldest compact bundle (the current retention
+    ///    horizon) as the baseline.
+    /// 3. Safety wipe: if `consumer_path` exists, require it to be
+    ///    a same-family pond (open as Steward; store_id must match
+    ///    the remote's).  Otherwise [`RemoteError::RestartPathNotPond`]
+    ///    or [`RemoteError::StoreIdMismatch`].  Then drop and
+    ///    recursively remove the directory.
+    /// 4. Create a fresh Steward at `consumer_path` with the remote's
+    ///    `store_id`.
+    /// 5. Read the baseline compact bundle's adds + checksums from
+    ///    the remote.
+    /// 6. Apply via `Steward::apply_pulled_bundle` with EMPTY removes
+    ///    -- the consumer is fresh, has no prior parquets to remove,
+    ///    and the compact's Adds alone reconstruct the source's
+    ///    logical state at that txn_seq (compaction is checksum-
+    ///    invariant by design, so the compact's recorded
+    ///    partition_checksums match the consumer's resulting state).
+    /// 7. Set the consumer's `last_pulled_seq:<remote_path>` setting
+    ///    to the baseline compact's seq.
+    /// 8. Call `self.pull(&mut consumer)` to apply all bundles after
+    ///    the baseline (catch up to latest).
+    /// 9. Return the new Steward.
+    pub async fn restart_from_compact(&self, consumer_path: &Path) -> Result<Steward> {
+        // 1. Validate: at least one compact bundle.
+        let bundles = self.list_bundles().await?;
+        let baseline = bundles
+            .iter()
+            .filter(|b| matches!(b.commit_kind, CommitKind::Compact))
+            .min_by_key(|b| b.txn_seq)
+            .ok_or(RemoteError::NoRestartPoint)?
+            .clone();
+
+        // 2./3. Safety wipe.
+        if consumer_path.exists() {
+            // Try to open as a Steward to confirm it's a pond.
+            match Steward::open(consumer_path).await {
+                Ok(existing) => {
+                    if existing.store_id() != self.store_id {
+                        return Err(RemoteError::StoreIdMismatch {
+                            remote: self.store_id,
+                            steward: existing.store_id(),
+                        });
+                    }
+                    drop(existing);
+                }
+                Err(e) => {
+                    return Err(RemoteError::RestartPathNotPond {
+                        path: consumer_path.display().to_string(),
+                        reason: format!("{}", e),
+                    });
+                }
+            }
+            std::fs::remove_dir_all(consumer_path)?;
+        }
+
+        // 4. Create fresh Steward with remote's store_id.
+        let mut consumer = Steward::create_with_options(
+            consumer_path,
+            sandbox_steward::StewardOptions {
+                store_id: Some(self.store_id),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        // 5. Read baseline compact bundle from remote.
+        let (adds, _removes_ignored) = self.read_data_for_bundle(baseline.txn_seq).await?;
+        let partition_checksums = self.read_checksums_for_bundle(baseline.txn_seq).await?;
+
+        // 6. Apply with empty removes.
+        consumer
+            .apply_pulled_bundle(
+                baseline.txn_seq,
+                baseline.commit_kind,
+                baseline.parent_seq,
+                adds,
+                Vec::new(),
+                partition_checksums,
+            )
+            .await?;
+
+        // 7. Set last_pulled_seq so subsequent pull doesn't re-apply
+        //    the baseline and doesn't trip the retention check.
+        let setting_key = last_pulled_seq_key(&self.path);
+        consumer
+            .config_set(&setting_key, &baseline.txn_seq.to_string())
+            .await?;
+
+        // 8. Catch up to latest.
+        let _report = self.pull(&mut consumer).await?;
+
+        // 9. Return the new Steward.
+        Ok(consumer)
+    }
+
     async fn delete_below_horizon(&mut self, horizon: i64) -> Result<i64> {
         let predicate = format!("{} < {}", schema::col::TXN_SEQ, horizon);
         let (new_table, metrics) = self

@@ -87,6 +87,22 @@ pub enum RemoteError {
         /// How many were requested for retention.
         need: usize,
     },
+
+    /// `Remote::restart_from_compact` was called but the remote has
+    /// no compact bundles to bootstrap from.
+    #[error("no restart point: remote has no compact bundles")]
+    NoRestartPoint,
+
+    /// `Remote::restart_from_compact` was asked to wipe a path that
+    /// is not a pond directory (or the pond there can't be opened).
+    /// Refuses to nuke arbitrary user files.
+    #[error("restart path is not a pond: {path}: {reason}")]
+    RestartPathNotPond {
+        /// The path that was checked.
+        path: String,
+        /// Why it failed validation.
+        reason: String,
+    },
 }
 
 /// Convenience alias.
