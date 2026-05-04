@@ -114,6 +114,13 @@ fn last_pulled_seq_key(remote_path: &Path) -> String {
     format!("last_pulled_seq:{}", remote_path.display())
 }
 
+/// Steward setting key under which a source records the highest
+/// bundle seq it has successfully pushed to a particular remote.
+/// Same discrimination by remote path as the pull setting.
+fn last_pushed_seq_key(remote_path: &Path) -> String {
+    format!("last_pushed_seq:{}", remote_path.display())
+}
+
 impl Remote {
     /// Create a fresh remote at `path` with the given `store_id`.
     /// Errors if a Delta table already exists at `path`.
@@ -280,6 +287,18 @@ impl Remote {
                 steward
                     .record_post_push_completed(txn_seq, txn_id, pending_started)
                     .await?;
+                // Update source's last_pushed_seq:<remote_path> to the
+                // MAX of (current setting, this txn_seq).  Operators
+                // typically push monotonically; the max protects
+                // against out-of-order pushes recording an older seq.
+                let key = last_pushed_seq_key(&self.path);
+                let current = match steward.config_get(&key).await? {
+                    Some(s) => s.parse::<i64>().unwrap_or(0),
+                    None => 0,
+                };
+                if txn_seq > current {
+                    steward.config_set(&key, &txn_seq.to_string()).await?;
+                }
                 Ok(())
             }
             Err(e) => {

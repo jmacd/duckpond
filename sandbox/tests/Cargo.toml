@@ -14,5 +14,9 @@ sandbox-remote.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true
 proptest.workspace = true
+sandbox-store.workspace = true
+sandbox-steward.workspace = true
+sandbox-remote.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+uuid.workspace = true
