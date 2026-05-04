@@ -69,6 +69,35 @@ pub struct CommitOutcome {
     pub commit_kind: CommitKind,
 }
 
+/// Inputs to [`Steward::apply_pulled_bundle`].  Bundling the parameters
+/// in a struct (rather than a long positional list) keeps callers
+/// stable as the bundle protocol evolves.
+#[derive(Debug, Clone)]
+pub struct PulledBundle {
+    /// Pond identity that authored this bundle (the foreign source's
+    /// `pond_id`).  In mirror mode this equals the consumer's local
+    /// `store_id`; in cross-pond import mode it is the foreign pond's
+    /// `pond_id`.
+    pub pond_id: Uuid,
+    /// Source's `txn_seq` for the bundle.  Per-pond namespaced --
+    /// recorded against `(pond_id, txn_seq)` in the consumer's control
+    /// table.
+    pub txn_seq: i64,
+    /// `Write` for write-bundles, `Compact` for compact-bundles.
+    pub commit_kind: CommitKind,
+    /// `0` if this bundle is the root for `pond_id`; otherwise the
+    /// previous DataCommitted seq for the same `pond_id`.
+    pub parent_seq: i64,
+    /// Parquet file paths and bytes added by this bundle.  Each path
+    /// must be of the form `pond_id=<uuid>/partition_key=<value>/<file>`
+    /// and the path's `pond_id=` segment MUST match `self.pond_id`.
+    pub adds: Vec<(String, Vec<u8>)>,
+    /// Parquet file paths removed by this bundle (only for Compact).
+    pub removes: Vec<String>,
+    /// The source's recorded per-partition checksums at this seq.
+    pub partition_checksums: PartitionChecksums,
+}
+
 /// The pond steward.  Owns the data store and the control table, plus
 /// the in-memory `last_write_seq` allocator.
 pub struct Steward {
@@ -242,11 +271,15 @@ impl Steward {
             .await
     }
 
-    /// Look up the `DataCommitted` record for `txn_seq`.  Returns
-    /// `None` if no such record exists (the txn was Failed,
+    /// Look up the `DataCommitted` record at `(pond_id, txn_seq)`.
+    /// Returns `None` if no such record exists (the txn was Failed,
     /// Completed, no-op compact, or never allocated).
-    pub async fn data_committed_record(&self, txn_seq: i64) -> Result<Option<ControlRecord>> {
-        let log = self.control.all_records().await?;
+    pub async fn data_committed_record(
+        &self,
+        pond_id: Uuid,
+        txn_seq: i64,
+    ) -> Result<Option<ControlRecord>> {
+        let log = self.control.all_records_for(pond_id).await?;
         Ok(log
             .into_iter()
             .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq))
@@ -319,42 +352,49 @@ impl Steward {
         self.control.vacuum().await
     }
 
-    /// Apply one bundle pulled from a remote, end-to-end:
+    /// Apply one bundle pulled from a remote, end-to-end.  See
+    /// [`PulledBundle`] for the input fields.
     ///
     /// 1. Idempotence: if a `DataCommitted` record already exists at
-    ///    `txn_seq`, returns Ok(()) immediately (this bundle was
-    ///    applied by a prior pull attempt).
-    /// 2. Validates every add/remove path: must be relative, must
-    ///    not contain `..`, must contain exactly one
-    ///    `partition_key=<value>` Hive segment.  Percent-decodes the
-    ///    partition value.
+    ///    `(bundle.pond_id, bundle.txn_seq)`, returns Ok(()) immediately
+    ///    (this bundle was applied by a prior pull attempt).
+    /// 2. Validates every add/remove path: must be relative, must not
+    ///    contain `..`, must contain exactly one
+    ///    `pond_id=<uuid>/partition_key=<value>` Hive segment pair.
+    ///    Each path's `pond_id=` segment MUST match `bundle.pond_id`.
     /// 3. Writes each add's bytes to `<data_path>/<path>` (creating
     ///    parent directories as needed).
     /// 4. Builds `Action::Add` (with `data_change` per `commit_kind`:
     ///    `true` for Write, `false` for Compact) and `Action::Remove`
-    ///    (`data_change = false`) and commits all actions in one
-    ///    Delta version on the data store.
+    ///    (`data_change = false`) and commits all actions in one Delta
+    ///    version on the data store.
     /// 5. Writes a `DataCommitted` record on the consumer's control
-    ///    table mirroring the source bundle's metadata
-    ///    (txn_seq, commit_kind, parent_seq, partition_checksums,
-    ///    data_delta_version on the consumer).
-    /// 6. Updates `self.last_write_seq` to `max(self.last_write_seq,
-    ///    txn_seq)` so subsequent `begin_write` calls allocate
-    ///    seqs above any pulled history.
+    ///    table at `(bundle.pond_id, bundle.txn_seq)` mirroring the
+    ///    source bundle's metadata.
+    /// 6. Advances `self.last_write_seq` to `max(self.last_write_seq,
+    ///    bundle.txn_seq)` ONLY when `bundle.pond_id == self.store_id`
+    ///    (mirror mode).  Foreign records have their own seq space and
+    ///    do not affect the local seq allocator.
     ///
-    /// Used by `Remote::pull` (in the sandbox-remote crate) for the
-    /// mirror-mode pull lifecycle.  See DESIGN.md §2.5.4.
-    pub async fn apply_pulled_bundle(
-        &mut self,
-        txn_seq: i64,
-        commit_kind: CommitKind,
-        parent_seq: i64,
-        adds: Vec<(String, Vec<u8>)>,
-        removes: Vec<String>,
-        partition_checksums: PartitionChecksums,
-    ) -> Result<()> {
+    /// Used by `Remote::pull` (in the sandbox-remote crate).  See
+    /// DESIGN.md §2.5.4.
+    pub async fn apply_pulled_bundle(&mut self, bundle: PulledBundle) -> Result<()> {
+        let PulledBundle {
+            pond_id,
+            txn_seq,
+            commit_kind,
+            parent_seq,
+            adds,
+            removes,
+            partition_checksums,
+        } = bundle;
+
         // 1. Idempotence: skip if already applied.
-        if self.data_committed_record(txn_seq).await?.is_some() {
+        if self
+            .data_committed_record(pond_id, txn_seq)
+            .await?
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -362,14 +402,36 @@ impl Steward {
         let mut add_partition_values: Vec<HashMap<String, Option<String>>> =
             Vec::with_capacity(adds.len());
         for (path, _) in &adds {
-            add_partition_values.push(parse_partition_values(path)?);
+            let pv = parse_partition_values(path)?;
+            // Cross-pond consistency check: the path's pond_id segment
+            // must match the bundle's pond_id (callers shouldn't be
+            // mixing ponds inside a single bundle).
+            let path_pond = pv.get("pond_id").and_then(|o| o.as_ref()).ok_or_else(|| {
+                StewardError::Invariant(format!("data path missing pond_id segment: {:?}", path))
+            })?;
+            if path_pond != &pond_id.to_string() {
+                return Err(StewardError::Invariant(format!(
+                    "data path pond_id `{}` does not match bundle pond_id `{}`: {:?}",
+                    path_pond, pond_id, path
+                )));
+            }
+            add_partition_values.push(pv);
         }
         for path in &removes {
             // Removes still need validation; we don't need their
             // partition_values in the Remove action (Remove can omit
             // them per Delta protocol), but the path must still be
             // safe.
-            let _ = parse_partition_values(path)?;
+            let pv = parse_partition_values(path)?;
+            let path_pond = pv.get("pond_id").and_then(|o| o.as_ref()).ok_or_else(|| {
+                StewardError::Invariant(format!("remove path missing pond_id segment: {:?}", path))
+            })?;
+            if path_pond != &pond_id.to_string() {
+                return Err(StewardError::Invariant(format!(
+                    "remove path pond_id `{}` does not match bundle pond_id `{}`: {:?}",
+                    path_pond, pond_id, path
+                )));
+            }
         }
 
         // 3. Write each add's bytes.
@@ -425,8 +487,9 @@ impl Steward {
         };
         let new_version = self.store.commit_actions(actions, op).await?;
 
-        // 5. Write a DataCommitted record on the consumer control
-        //    table mirroring the source's bundle metadata.
+        // 5. Write a DataCommitted record on the consumer control table
+        //    under the FOREIGN pond_id (mirror mode: it equals the local
+        //    pond_id; cross-pond import: it differs).
         let metadata = DataCommittedMetadata {
             partition_checksums: partition_checksums
                 .iter()
@@ -443,7 +506,7 @@ impl Steward {
         };
         self.control
             .write_record(ControlRecord {
-                pond_id: self.store_id,
+                pond_id,
                 record_kind: RecordKind::DataCommitted,
                 txn_seq,
                 txn_id: control_table::new_txn_id(),
@@ -455,9 +518,11 @@ impl Steward {
             })
             .await?;
 
-        // 6. Advance the in-memory allocator so subsequent
-        //    begin_write doesn't collide with pulled history.
-        if txn_seq > self.last_write_seq {
+        // 6. Advance the in-memory allocator ONLY when the pulled
+        //    bundle is in the local pond's seq space (mirror mode).
+        //    Foreign records live in their own (foreign_pond_id, seq)
+        //    namespace and do not collide with local writes.
+        if pond_id == self.store_id && txn_seq > self.last_write_seq {
             self.last_write_seq = txn_seq;
         }
 

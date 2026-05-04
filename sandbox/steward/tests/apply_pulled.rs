@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use sandbox_steward::control_table::ChecksumValue;
 use sandbox_steward::{
-    CommitKind, PartitionChecksums, RecordKind, Steward, StewardError, StewardOptions,
+    CommitKind, PartitionChecksums, PulledBundle, RecordKind, Steward, StewardError, StewardOptions,
 };
 use sandbox_store::checksum::{Checksum, ChecksumKind, Merkle};
 use tempfile::TempDir;
@@ -86,19 +86,24 @@ async fn apply_pulled_bundle_writes_data_committed_record() {
     let (path, bytes) = make_synthetic_add(consumer.store_id(), "p1", "k", b"hello").await;
     let checksums = checksums_for("p1");
     consumer
-        .apply_pulled_bundle(
-            1,
-            CommitKind::Write,
-            0,
-            vec![(path.clone(), bytes)],
-            vec![],
-            checksums.clone(),
-        )
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 1,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![(path.clone(), bytes)],
+            removes: vec![],
+            partition_checksums: checksums.clone(),
+        })
         .await
         .unwrap();
 
     // DataCommitted record present at txn_seq 1 with the right metadata.
-    let dc = consumer.data_committed_record(1).await.unwrap().unwrap();
+    let dc = consumer
+        .data_committed_record(consumer.store_id(), 1)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(dc.record_kind, RecordKind::DataCommitted);
     assert_eq!(dc.commit_kind, Some(CommitKind::Write));
     assert_eq!(dc.parent_seq, None, "first bundle has no parent");
@@ -131,21 +136,30 @@ async fn apply_pulled_bundle_is_idempotent_on_repeat() {
     let cs = checksums_for("p1");
 
     consumer
-        .apply_pulled_bundle(
-            1,
-            CommitKind::Write,
-            0,
-            vec![(path.clone(), bytes.clone())],
-            vec![],
-            cs.clone(),
-        )
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 1,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![(path.clone(), bytes.clone())],
+            removes: vec![],
+            partition_checksums: cs.clone(),
+        })
         .await
         .unwrap();
     let first_log_len = consumer.log(None).await.unwrap().len();
 
     // Re-apply: should be a no-op.
     consumer
-        .apply_pulled_bundle(1, CommitKind::Write, 0, vec![(path, bytes)], vec![], cs)
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 1,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![(path, bytes)],
+            removes: vec![],
+            partition_checksums: cs,
+        })
         .await
         .unwrap();
     let second_log_len = consumer.log(None).await.unwrap().len();
@@ -167,14 +181,15 @@ async fn apply_pulled_bundle_advances_last_write_seq_for_future_writes() {
 
     let (path, bytes) = make_synthetic_add(consumer.store_id(), "p1", "k", b"v").await;
     consumer
-        .apply_pulled_bundle(
-            5,
-            CommitKind::Write,
-            0,
-            vec![(path, bytes)],
-            vec![],
-            checksums_for("p1"),
-        )
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 5,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![(path, bytes)],
+            removes: vec![],
+            partition_checksums: checksums_for("p1"),
+        })
         .await
         .unwrap();
 
@@ -204,14 +219,15 @@ async fn apply_pulled_bundle_chains_parent_seq_across_multiple_bundles() {
             make_synthetic_add(consumer.store_id(), "p", &format!("k{}", seq), b"v").await;
         let parent = if seq == 1 { 0 } else { seq - 1 };
         consumer
-            .apply_pulled_bundle(
-                seq,
-                CommitKind::Write,
-                parent,
-                vec![(path, bytes)],
-                vec![],
-                checksums_for("p"),
-            )
+            .apply_pulled_bundle(PulledBundle {
+                pond_id: consumer.store_id(),
+                txn_seq: seq,
+                commit_kind: CommitKind::Write,
+                parent_seq: parent,
+                adds: vec![(path, bytes)],
+                removes: vec![],
+                partition_checksums: checksums_for("p"),
+            })
             .await
             .unwrap();
     }
@@ -240,14 +256,15 @@ async fn apply_pulled_bundle_rejects_absolute_path() {
         .unwrap();
 
     let result = consumer
-        .apply_pulled_bundle(
-            1,
-            CommitKind::Write,
-            0,
-            vec![("/etc/passwd".to_string(), vec![0u8; 4])],
-            vec![],
-            empty_checksums(),
-        )
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 1,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![("/etc/passwd".to_string(), vec![0u8; 4])],
+            removes: vec![],
+            partition_checksums: empty_checksums(),
+        })
         .await;
     match result {
         Err(StewardError::Invariant(msg)) => assert!(msg.contains("absolute"), "msg: {}", msg),
@@ -264,17 +281,21 @@ async fn apply_pulled_bundle_rejects_dotdot_path() {
         .unwrap();
 
     let result = consumer
-        .apply_pulled_bundle(
-            1,
-            CommitKind::Write,
-            0,
-            vec![(
-                "partition_key=p/../escape.parquet".to_string(),
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 1,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![(
+                format!(
+                    "pond_id={}/partition_key=p/../escape.parquet",
+                    consumer.store_id()
+                ),
                 vec![0u8; 4],
             )],
-            vec![],
-            empty_checksums(),
-        )
+            removes: vec![],
+            partition_checksums: empty_checksums(),
+        })
         .await;
     match result {
         Err(StewardError::Invariant(msg)) => assert!(msg.contains(".."), "msg: {}", msg),
@@ -291,14 +312,15 @@ async fn apply_pulled_bundle_rejects_missing_partition_key_segment() {
         .unwrap();
 
     let result = consumer
-        .apply_pulled_bundle(
-            1,
-            CommitKind::Write,
-            0,
-            vec![("part-001.parquet".to_string(), vec![0u8; 4])],
-            vec![],
-            empty_checksums(),
-        )
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 1,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![("part-001.parquet".to_string(), vec![0u8; 4])],
+            removes: vec![],
+            partition_checksums: empty_checksums(),
+        })
         .await;
     match result {
         Err(StewardError::Invariant(msg)) => {
@@ -335,14 +357,15 @@ async fn apply_pulled_bundle_records_partition_checksums_byte_exact() {
     );
 
     consumer
-        .apply_pulled_bundle(
-            1,
-            CommitKind::Write,
-            0,
-            vec![(path, bytes)],
-            vec![],
-            input_cs.clone(),
-        )
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 1,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![(path, bytes)],
+            removes: vec![],
+            partition_checksums: input_cs.clone(),
+        })
         .await
         .unwrap();
 
@@ -373,14 +396,15 @@ async fn apply_pulled_bundle_with_removes_drops_files_from_active_set() {
     // Bundle 1: Add a single file containing key "k".
     let (path, bytes) = make_synthetic_add(consumer.store_id(), "p", "k", b"v").await;
     consumer
-        .apply_pulled_bundle(
-            1,
-            CommitKind::Write,
-            0,
-            vec![(path.clone(), bytes)],
-            vec![],
-            checksums_for("p"),
-        )
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 1,
+            commit_kind: CommitKind::Write,
+            parent_seq: 0,
+            adds: vec![(path.clone(), bytes)],
+            removes: vec![],
+            partition_checksums: checksums_for("p"),
+        })
         .await
         .unwrap();
     {
@@ -390,14 +414,15 @@ async fn apply_pulled_bundle_with_removes_drops_files_from_active_set() {
 
     // Bundle 2: Compact-style remove (no Adds) to tombstone the file.
     consumer
-        .apply_pulled_bundle(
-            2,
-            CommitKind::Compact,
-            1,
-            vec![],
-            vec![path],
-            checksums_for("p"),
-        )
+        .apply_pulled_bundle(PulledBundle {
+            pond_id: consumer.store_id(),
+            txn_seq: 2,
+            commit_kind: CommitKind::Compact,
+            parent_seq: 1,
+            adds: vec![],
+            removes: vec![path],
+            partition_checksums: checksums_for("p"),
+        })
         .await
         .unwrap();
 

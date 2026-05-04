@@ -246,9 +246,10 @@ impl Remote {
             });
         }
 
-        // 2. Look up the source's DataCommitted record.
+        // 2. Look up the source's DataCommitted record.  Push is for
+        // own data only (mirror mode + push only own pond_id).
         let dc = steward
-            .data_committed_record(txn_seq)
+            .data_committed_record(steward.store_id(), txn_seq)
             .await?
             .ok_or(RemoteError::NoSuchCommit(txn_seq))?;
         let dc_meta: sandbox_steward::DataCommittedMetadata =
@@ -385,14 +386,15 @@ impl Remote {
             let (adds, removes) = self.read_data_for_bundle(bundle.txn_seq).await?;
             let partition_checksums = self.read_checksums_for_bundle(bundle.txn_seq).await?;
             steward
-                .apply_pulled_bundle(
-                    bundle.txn_seq,
-                    bundle.commit_kind,
-                    bundle.parent_seq,
+                .apply_pulled_bundle(sandbox_steward::PulledBundle {
+                    pond_id: self.store_id,
+                    txn_seq: bundle.txn_seq,
+                    commit_kind: bundle.commit_kind,
+                    parent_seq: bundle.parent_seq,
                     adds,
                     removes,
                     partition_checksums,
-                )
+                })
                 .await?;
             steward
                 .config_set(&setting_key, &bundle.txn_seq.to_string())
@@ -564,14 +566,15 @@ impl Remote {
 
         // 6. Apply with empty removes.
         consumer
-            .apply_pulled_bundle(
-                baseline.txn_seq,
-                baseline.commit_kind,
-                baseline.parent_seq,
+            .apply_pulled_bundle(sandbox_steward::PulledBundle {
+                pond_id: self.store_id,
+                txn_seq: baseline.txn_seq,
+                commit_kind: baseline.commit_kind,
+                parent_seq: baseline.parent_seq,
                 adds,
-                Vec::new(),
+                removes: Vec::new(),
                 partition_checksums,
-            )
+            })
             .await?;
 
         // 7. Set last_pulled_seq so subsequent pull doesn't re-apply

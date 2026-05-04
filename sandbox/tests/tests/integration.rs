@@ -36,7 +36,12 @@ async fn push_all_pending(source: &mut Steward, remote: &mut Remote) {
     let last_committed = source.last_committed_seq().await.unwrap();
     let pushed = remote.latest_seq().await.unwrap().unwrap_or(0);
     for seq in (pushed + 1)..=last_committed {
-        if source.data_committed_record(seq).await.unwrap().is_some() {
+        if source
+            .data_committed_record(source.store_id(), seq)
+            .await
+            .unwrap()
+            .is_some()
+        {
             remote.push(source, seq).await.unwrap();
         }
     }
@@ -333,7 +338,10 @@ async fn full_retention_and_restart_recovery_loop() {
     }
 
     let dc = consumer
-        .data_committed_record(consumer.last_committed_seq().await.unwrap())
+        .data_committed_record(
+            consumer.store_id(),
+            consumer.last_committed_seq().await.unwrap(),
+        )
         .await
         .unwrap()
         .unwrap();

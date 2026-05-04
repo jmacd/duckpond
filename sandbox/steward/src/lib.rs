@@ -31,5 +31,6 @@ pub use control_table::{
 pub use error::{Result, StewardError};
 pub use guard::{ReadGuard, WriteGuard};
 pub use steward::{
-    CommitOutcome, Steward, StewardOptions, VerifyMismatch, VerifyReport, verify_local,
+    CommitOutcome, PulledBundle, Steward, StewardOptions, VerifyMismatch, VerifyReport,
+    verify_local,
 };
