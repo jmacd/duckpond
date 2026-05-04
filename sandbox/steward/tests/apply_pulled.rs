@@ -28,15 +28,27 @@ fn opts() -> StewardOptions {
 
 /// Build a synthetic add: a tiny parquet file emitted by another
 /// steward that we can hand to apply_pulled_bundle.
-async fn make_synthetic_add(partition: &str, key: &str, value: &[u8]) -> (String, Vec<u8>) {
-    // The cleanest way to get a "parquet file the sandbox-store
-    // accepts" is to run a real steward, write a single value,
-    // grab the file from disk.  This makes the "add bytes" round-
-    // trippable through Store::get later.
+///
+/// `pond_id` is the pond identity to use for the source steward.  In
+/// mirror-mode tests, this MUST match the consumer's pond_id so that
+/// the resulting parquet's path layout (`pond_id=<id>/partition_key=...`)
+/// matches what the consumer expects.
+async fn make_synthetic_add(
+    pond_id: uuid::Uuid,
+    partition: &str,
+    key: &str,
+    value: &[u8],
+) -> (String, Vec<u8>) {
     let dir = TempDir::new().unwrap();
-    let mut s = Steward::create_with_options(dir.path(), opts())
-        .await
-        .unwrap();
+    let mut s = Steward::create_with_options(
+        dir.path(),
+        StewardOptions {
+            store_id: Some(pond_id),
+            checksum_strategy: Arc::new(Merkle::new()),
+        },
+    )
+    .await
+    .unwrap();
     {
         let mut g = s.begin_write().await.unwrap();
         g.put(partition, key, value.to_vec()).unwrap();
@@ -71,7 +83,7 @@ async fn apply_pulled_bundle_writes_data_committed_record() {
         .await
         .unwrap();
 
-    let (path, bytes) = make_synthetic_add("p1", "k", b"hello").await;
+    let (path, bytes) = make_synthetic_add(consumer.store_id(), "p1", "k", b"hello").await;
     let checksums = checksums_for("p1");
     consumer
         .apply_pulled_bundle(
@@ -115,7 +127,7 @@ async fn apply_pulled_bundle_is_idempotent_on_repeat() {
         .await
         .unwrap();
 
-    let (path, bytes) = make_synthetic_add("p1", "k", b"v").await;
+    let (path, bytes) = make_synthetic_add(consumer.store_id(), "p1", "k", b"v").await;
     let cs = checksums_for("p1");
 
     consumer
@@ -153,7 +165,7 @@ async fn apply_pulled_bundle_advances_last_write_seq_for_future_writes() {
         .await
         .unwrap();
 
-    let (path, bytes) = make_synthetic_add("p1", "k", b"v").await;
+    let (path, bytes) = make_synthetic_add(consumer.store_id(), "p1", "k", b"v").await;
     consumer
         .apply_pulled_bundle(
             5,
@@ -188,7 +200,8 @@ async fn apply_pulled_bundle_chains_parent_seq_across_multiple_bundles() {
         .unwrap();
 
     for seq in 1i64..=3 {
-        let (path, bytes) = make_synthetic_add("p", &format!("k{}", seq), b"v").await;
+        let (path, bytes) =
+            make_synthetic_add(consumer.store_id(), "p", &format!("k{}", seq), b"v").await;
         let parent = if seq == 1 { 0 } else { seq - 1 };
         consumer
             .apply_pulled_bundle(
@@ -289,7 +302,14 @@ async fn apply_pulled_bundle_rejects_missing_partition_key_segment() {
         .await;
     match result {
         Err(StewardError::Invariant(msg)) => {
-            assert!(msg.contains("partition_key"), "msg: {}", msg)
+            // Either the pond_id check fires first (path missing
+            // pond_id=) or the partition_key check fires (path
+            // missing partition_key=).  Either is acceptable.
+            assert!(
+                msg.contains("pond_id") || msg.contains("partition_key"),
+                "msg: {}",
+                msg
+            )
         }
         other => panic!("expected Invariant, got {:?}", other.err()),
     }
@@ -303,7 +323,7 @@ async fn apply_pulled_bundle_records_partition_checksums_byte_exact() {
         .await
         .unwrap();
 
-    let (path, bytes) = make_synthetic_add("p1", "k", b"v").await;
+    let (path, bytes) = make_synthetic_add(consumer.store_id(), "p1", "k", b"v").await;
     let mut input_cs = PartitionChecksums::new();
     let _ = input_cs.insert(
         "p1".to_string(),
@@ -351,7 +371,7 @@ async fn apply_pulled_bundle_with_removes_drops_files_from_active_set() {
         .unwrap();
 
     // Bundle 1: Add a single file containing key "k".
-    let (path, bytes) = make_synthetic_add("p", "k", b"v").await;
+    let (path, bytes) = make_synthetic_add(consumer.store_id(), "p", "k", b"v").await;
     consumer
         .apply_pulled_bundle(
             1,

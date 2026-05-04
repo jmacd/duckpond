@@ -262,12 +262,12 @@ impl Steward {
     /// `verify_against_remote` (in sandbox-remote) for drift
     /// detection without needing a recorded snapshot.
     pub async fn compute_live_checksums(&self) -> Result<PartitionChecksums> {
-        let partitions = self.store.partitions().await?;
+        let partitions = self.store.partitions(self.store_id).await?;
         let mut out = PartitionChecksums::new();
         for partition in partitions {
             let cs = self
                 .store
-                .compute_partition_checksum(&partition, &*self.checksum_strategy)
+                .compute_partition_checksum(self.store_id, &partition, &*self.checksum_strategy)
                 .await?;
             let _ = out.insert(partition, cs);
         }
@@ -402,7 +402,7 @@ impl Steward {
         let op = match commit_kind {
             CommitKind::Write => deltalake::protocol::DeltaOperation::Write {
                 mode: deltalake::protocol::SaveMode::Append,
-                partition_by: Some(vec!["partition_key".to_string()]),
+                partition_by: Some(vec!["pond_id".to_string(), "partition_key".to_string()]),
                 predicate: None,
             },
             CommitKind::Compact => deltalake::protocol::DeltaOperation::Optimize {
@@ -586,7 +586,7 @@ impl Steward {
 
     /// Begin a read transaction.  No control-table writes.
     pub async fn begin_read(&self) -> Result<ReadGuard<'_>> {
-        Ok(ReadGuard::new(&self.store))
+        Ok(ReadGuard::new(&self.store, self.store_id))
     }
 
     /// Internal: commit a write guard.  Caller is the guard itself.
@@ -605,7 +605,7 @@ impl Steward {
         if had_data {
             // Apply data writes.
             self.store
-                .apply_batch(txn_seq, started_micros, ops.clone())
+                .apply_batch(self.store_id, txn_seq, started_micros, ops.clone())
                 .await?;
         }
 
@@ -762,7 +762,7 @@ impl Steward {
         let pre = self.snapshot_all_partition_checksums().await?;
 
         // 3. Run optimize.  On error, record Failed and return.
-        let metrics = match self.store.compact(filter).await {
+        let metrics = match self.store.compact(self.store_id, filter).await {
             Ok(m) => m,
             Err(e) => {
                 let reason = format!("compact failed: {}", e);
@@ -850,12 +850,12 @@ impl Steward {
     /// Helper: snapshot every known partition's content checksum
     /// using the steward's strategy.
     async fn snapshot_all_partition_checksums(&self) -> Result<PartitionChecksums> {
-        let partitions = self.store.partitions().await?;
+        let partitions = self.store.partitions(self.store_id).await?;
         let mut out: PartitionChecksums = HashMap::new();
         for p in partitions {
             let cs = self
                 .store
-                .compute_partition_checksum(&p, &*self.checksum_strategy)
+                .compute_partition_checksum(self.store_id, &p, &*self.checksum_strategy)
                 .await?;
             out.insert(p, cs);
         }
@@ -920,13 +920,13 @@ pub async fn verify_local(steward: &Steward) -> Result<VerifyReport> {
         .partition_checksums_at(last_seq)
         .await?
         .unwrap_or_default();
-    let partitions = steward.store().partitions().await?;
+    let partitions = steward.store().partitions(steward.store_id()).await?;
     let mut mismatches = Vec::new();
     let strategy = steward.checksum_strategy();
     for partition in partitions {
         let live: Checksum = steward
             .store()
-            .compute_partition_checksum(&partition, strategy)
+            .compute_partition_checksum(steward.store_id(), &partition, strategy)
             .await?;
         match recorded.get(&partition) {
             Some(rec) if rec == &live => {}
@@ -948,7 +948,7 @@ pub async fn verify_local(steward: &Steward) -> Result<VerifyReport> {
     for (partition, rec) in &recorded {
         if !steward
             .store()
-            .partitions()
+            .partitions(steward.store_id())
             .await?
             .iter()
             .any(|p| p == partition)
@@ -991,15 +991,16 @@ pub struct VerifyMismatch {
 }
 
 /// Parse a Hive-style data file path of the form
-/// `partition_key=<value>/<file>` (with `<value>` possibly
-/// percent-encoded) into a Delta-protocol `partition_values` map.
+/// `pond_id=<uuid>/partition_key=<value>/<file>` (with `<value>`
+/// possibly percent-encoded) into a Delta-protocol `partition_values`
+/// map.
 ///
 /// Hardened against malformed / hostile input from a remote:
 /// rejects absolute paths, paths containing `..` segments, paths
-/// missing the partition_key= segment, paths with multiple
-/// partition_key= segments, and the `__HIVE_DEFAULT_PARTITION__`
-/// null sentinel (the sandbox-store schema's `partition_key` is
-/// non-nullable, so the sentinel should never appear).
+/// missing either `pond_id=` or `partition_key=` segments, paths with
+/// multiple of either, and the `__HIVE_DEFAULT_PARTITION__` null
+/// sentinel (both columns are non-nullable, so the sentinel should
+/// never appear).
 fn parse_partition_values(path: &str) -> Result<HashMap<String, Option<String>>> {
     if path.is_empty() {
         return Err(StewardError::Invariant("data path is empty".into()));
@@ -1010,7 +1011,8 @@ fn parse_partition_values(path: &str) -> Result<HashMap<String, Option<String>>>
             path
         )));
     }
-    let mut found: Option<String> = None;
+    let mut found_pond: Option<String> = None;
+    let mut found_partition: Option<String> = None;
     for segment in path.split('/') {
         if segment == ".." {
             return Err(StewardError::Invariant(format!(
@@ -1018,8 +1020,25 @@ fn parse_partition_values(path: &str) -> Result<HashMap<String, Option<String>>>
                 path
             )));
         }
-        if let Some(rest) = segment.strip_prefix("partition_key=") {
-            if found.is_some() {
+        if let Some(rest) = segment.strip_prefix("pond_id=") {
+            if found_pond.is_some() {
+                return Err(StewardError::Invariant(format!(
+                    "data path has multiple `pond_id=` segments: {:?}",
+                    path
+                )));
+            }
+            if rest == "__HIVE_DEFAULT_PARTITION__" {
+                return Err(StewardError::Invariant(format!(
+                    "pond_id is non-nullable in this schema; null sentinel at: {:?}",
+                    path
+                )));
+            }
+            let decoded = percent_decode(rest).map_err(|e| {
+                StewardError::Invariant(format!("invalid percent-encoding in {:?}: {}", path, e))
+            })?;
+            found_pond = Some(decoded);
+        } else if let Some(rest) = segment.strip_prefix("partition_key=") {
+            if found_partition.is_some() {
                 return Err(StewardError::Invariant(format!(
                     "data path has multiple `partition_key=` segments: {:?}",
                     path
@@ -1031,21 +1050,24 @@ fn parse_partition_values(path: &str) -> Result<HashMap<String, Option<String>>>
                     path
                 )));
             }
-            // Percent-decode the partition value (Delta convention).
             let decoded = percent_decode(rest).map_err(|e| {
                 StewardError::Invariant(format!("invalid percent-encoding in {:?}: {}", path, e))
             })?;
-            found = Some(decoded);
+            found_partition = Some(decoded);
         }
     }
-    let value = found.ok_or_else(|| {
+    let pond = found_pond.ok_or_else(|| {
+        StewardError::Invariant(format!("data path missing `pond_id=` segment: {:?}", path))
+    })?;
+    let partition = found_partition.ok_or_else(|| {
         StewardError::Invariant(format!(
             "data path missing `partition_key=` segment: {:?}",
             path
         ))
     })?;
     let mut out = HashMap::new();
-    let _ = out.insert("partition_key".to_string(), Some(value));
+    let _ = out.insert("pond_id".to_string(), Some(pond));
+    let _ = out.insert("partition_key".to_string(), Some(partition));
     Ok(out)
 }
 
@@ -1081,42 +1103,99 @@ fn percent_decode(s: &str) -> std::result::Result<String, String> {
 mod parse_partition_values_tests {
     use super::*;
 
+    const TEST_POND_ID: &str = "0000a1a1-0000-7000-8000-000000000000";
+
     #[test]
     fn happy_path() {
-        let pv = parse_partition_values("partition_key=p1/part-001.parquet").unwrap();
+        let pv = parse_partition_values(&format!(
+            "pond_id={}/partition_key=p1/part-001.parquet",
+            TEST_POND_ID
+        ))
+        .unwrap();
         assert_eq!(pv.get("partition_key"), Some(&Some("p1".to_string())));
+        assert_eq!(pv.get("pond_id"), Some(&Some(TEST_POND_ID.to_string())));
     }
 
     #[test]
     fn percent_encoded_value() {
-        let pv = parse_partition_values("partition_key=p%201/part-001.parquet").unwrap();
+        let pv = parse_partition_values(&format!(
+            "pond_id={}/partition_key=p%201/part-001.parquet",
+            TEST_POND_ID
+        ))
+        .unwrap();
         assert_eq!(pv.get("partition_key"), Some(&Some("p 1".to_string())));
     }
 
     #[test]
     fn rejects_absolute() {
-        assert!(parse_partition_values("/partition_key=p/x").is_err());
+        assert!(
+            parse_partition_values(&format!("/pond_id={}/partition_key=p/x", TEST_POND_ID))
+                .is_err()
+        );
     }
 
     #[test]
     fn rejects_dotdot() {
-        assert!(parse_partition_values("../partition_key=p/x").is_err());
-        assert!(parse_partition_values("partition_key=p/../etc/passwd").is_err());
+        assert!(
+            parse_partition_values(&format!("../pond_id={}/partition_key=p/x", TEST_POND_ID))
+                .is_err()
+        );
+        assert!(
+            parse_partition_values(&format!(
+                "pond_id={}/partition_key=p/../etc/passwd",
+                TEST_POND_ID
+            ))
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_missing_partition_key() {
         assert!(parse_partition_values("part-001.parquet").is_err());
+        assert!(
+            parse_partition_values(&format!("pond_id={}/part-001.parquet", TEST_POND_ID)).is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_missing_pond_id() {
+        assert!(parse_partition_values("partition_key=p/part-001.parquet").is_err());
     }
 
     #[test]
     fn rejects_multiple_partition_keys() {
-        assert!(parse_partition_values("partition_key=a/partition_key=b/x").is_err());
+        assert!(
+            parse_partition_values(&format!(
+                "pond_id={}/partition_key=a/partition_key=b/x",
+                TEST_POND_ID
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_pond_ids() {
+        assert!(
+            parse_partition_values(&format!(
+                "pond_id={}/pond_id={}/partition_key=p/x",
+                TEST_POND_ID, TEST_POND_ID
+            ))
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_null_sentinel() {
-        assert!(parse_partition_values("partition_key=__HIVE_DEFAULT_PARTITION__/x").is_err());
+        assert!(
+            parse_partition_values(&format!(
+                "pond_id={}/partition_key=__HIVE_DEFAULT_PARTITION__/x",
+                TEST_POND_ID
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_partition_values("pond_id=__HIVE_DEFAULT_PARTITION__/partition_key=p/x").is_err()
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ use deltalake::operations::optimize::OptimizeType;
 use deltalake::protocol::SaveMode;
 use log::debug;
 use url::Url;
+use uuid::Uuid;
 
 use crate::checksum;
 use crate::error::{Result, StoreError};
@@ -122,13 +123,16 @@ impl Store {
         self.table.version().unwrap_or(0)
     }
 
-    /// The largest `txn_seq` ever committed to this store, or `0` if the
-    /// store has never been written to.
-    pub async fn last_txn_seq(&self) -> Result<i64> {
+    /// The largest `txn_seq` ever committed to this store for `pond_id`,
+    /// or `0` if `pond_id` has never written here.  Use this to allocate
+    /// the next `txn_seq` for that pond when calling [`Store::apply_batch`].
+    pub async fn last_txn_seq(&self, pond_id: Uuid) -> Result<i64> {
         let sql = format!(
-            "SELECT MAX({}) AS m FROM {}",
-            schema::col::TXN_SEQ,
-            TABLE_NAME
+            "SELECT MAX({seq}) AS m FROM {table} WHERE {pid} = '{pid_v}'",
+            seq = schema::col::TXN_SEQ,
+            table = TABLE_NAME,
+            pid = schema::col::POND_ID,
+            pid_v = pond_id,
         );
         let batches = self.session_ctx.sql(&sql).await?.collect().await?;
         let mut max: i64 = 0;
@@ -151,13 +155,20 @@ impl Store {
     }
 
     /// Apply a batch of operations as one Delta commit.  All operations
-    /// share the supplied `txn_seq` and `ts_micros`.
+    /// share the supplied `pond_id`, `txn_seq`, and `ts_micros` -- one
+    /// batch represents one transaction by one pond.
     ///
     /// Within a single batch, multiple operations against the same
     /// `(partition, key)` are coalesced -- the LAST operation in `ops`
     /// wins.  This matches the semantics of a transaction that overwrites
     /// the same key multiple times.
-    pub async fn apply_batch(&mut self, txn_seq: i64, ts_micros: i64, ops: Vec<Op>) -> Result<()> {
+    pub async fn apply_batch(
+        &mut self,
+        pond_id: Uuid,
+        txn_seq: i64,
+        ts_micros: i64,
+        ops: Vec<Op>,
+    ) -> Result<()> {
         if ops.is_empty() {
             return Ok(());
         }
@@ -174,11 +185,14 @@ impl Store {
         }
 
         let n = by_key.len();
+        let mut pond_ids = Vec::with_capacity(n);
         let mut partition_keys = Vec::with_capacity(n);
         let mut item_keys = Vec::with_capacity(n);
         let mut deleted = Vec::with_capacity(n);
         let mut values: Vec<Vec<u8>> = Vec::with_capacity(n);
         let mut blake3s: Vec<Vec<u8>> = Vec::with_capacity(n);
+
+        let pond_id_str = pond_id.to_string();
 
         for op in by_key.into_values() {
             match op {
@@ -188,6 +202,7 @@ impl Store {
                     value,
                 } => {
                     let hash = blake3::hash(&value);
+                    pond_ids.push(pond_id_str.clone());
                     partition_keys.push(partition);
                     item_keys.push(key);
                     deleted.push(false);
@@ -198,6 +213,7 @@ impl Store {
                     // Tombstone: empty value, BLAKE3 of empty bytes.
                     let empty: Vec<u8> = Vec::new();
                     let hash = blake3::hash(&empty);
+                    pond_ids.push(pond_id_str.clone());
                     partition_keys.push(partition);
                     item_keys.push(key);
                     deleted.push(true);
@@ -213,12 +229,14 @@ impl Store {
         let schema = schema::arrow_schema();
         let value_refs: Vec<&[u8]> = values.iter().map(|v| v.as_slice()).collect();
         let blake3_refs: Vec<&[u8]> = blake3s.iter().map(|v| v.as_slice()).collect();
+        let pond_id_refs: Vec<&str> = pond_ids.iter().map(|s| s.as_str()).collect();
         let partition_refs: Vec<&str> = partition_keys.iter().map(|s| s.as_str()).collect();
         let item_refs: Vec<&str> = item_keys.iter().map(|s| s.as_str()).collect();
 
         let batch = RecordBatch::try_new(
             schema,
             vec![
+                Arc::new(StringArray::from(pond_id_refs)),
                 Arc::new(StringArray::from(partition_refs)),
                 Arc::new(StringArray::from(item_refs)),
                 Arc::new(Int64Array::from(txn_seqs)),
@@ -231,7 +249,8 @@ impl Store {
 
         let new_table = self.table.clone().write(vec![batch]).await?;
         debug!(
-            "store apply_batch: version {:?} -> {:?}, n_rows={}",
+            "store apply_batch: pond {} version {:?} -> {:?}, n_rows={}",
+            pond_id,
             self.table.version(),
             new_table.version(),
             n
@@ -244,12 +263,20 @@ impl Store {
         Ok(())
     }
 
-    /// Convenience: write a single Put using the next available `txn_seq`.
-    /// Prefer [`Store::apply_batch`] when writing multiple operations.
-    pub async fn put(&mut self, partition: &str, key: &str, value: Vec<u8>) -> Result<i64> {
-        let txn_seq = self.last_txn_seq().await? + 1;
+    /// Convenience: write a single Put using the next available `txn_seq`
+    /// for `pond_id`.  Prefer [`Store::apply_batch`] when writing
+    /// multiple operations.
+    pub async fn put(
+        &mut self,
+        pond_id: Uuid,
+        partition: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<i64> {
+        let txn_seq = self.last_txn_seq(pond_id).await? + 1;
         let ts = Utc::now().timestamp_micros();
         self.apply_batch(
+            pond_id,
             txn_seq,
             ts,
             vec![Op::Put {
@@ -262,11 +289,13 @@ impl Store {
         Ok(txn_seq)
     }
 
-    /// Convenience: write a single Delete using the next available `txn_seq`.
-    pub async fn delete(&mut self, partition: &str, key: &str) -> Result<i64> {
-        let txn_seq = self.last_txn_seq().await? + 1;
+    /// Convenience: write a single Delete using the next available
+    /// `txn_seq` for `pond_id`.
+    pub async fn delete(&mut self, pond_id: Uuid, partition: &str, key: &str) -> Result<i64> {
+        let txn_seq = self.last_txn_seq(pond_id).await? + 1;
         let ts = Utc::now().timestamp_micros();
         self.apply_batch(
+            pond_id,
             txn_seq,
             ts,
             vec![Op::Delete {
@@ -278,16 +307,18 @@ impl Store {
         Ok(txn_seq)
     }
 
-    /// Read the current value of `(partition, key)`, or `None` if the
-    /// item does not exist or has been tombstoned.
-    pub async fn get(&self, partition: &str, key: &str) -> Result<Option<Vec<u8>>> {
+    /// Read the current value of `(pond_id, partition, key)`, or `None`
+    /// if the item does not exist or has been tombstoned.
+    pub async fn get(&self, pond_id: Uuid, partition: &str, key: &str) -> Result<Option<Vec<u8>>> {
         let sql = format!(
             "SELECT {value}, {deleted} FROM {table} \
-             WHERE {pk} = '{p}' AND {ik} = '{k}' \
+             WHERE {pid} = '{pid_v}' AND {pk} = '{p}' AND {ik} = '{k}' \
              ORDER BY {seq} DESC LIMIT 1",
             value = schema::col::VALUE,
             deleted = schema::col::DELETED,
             table = TABLE_NAME,
+            pid = schema::col::POND_ID,
+            pid_v = pond_id,
             pk = schema::col::PARTITION_KEY,
             ik = schema::col::ITEM_KEY,
             seq = schema::col::TXN_SEQ,
@@ -318,9 +349,9 @@ impl Store {
         Ok(None)
     }
 
-    /// Return all live `(item_key, value)` pairs in `partition`, sorted
-    /// by `item_key`.
-    pub async fn list(&self, partition: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    /// Return all live `(item_key, value)` pairs in `(pond_id, partition)`,
+    /// sorted by `item_key`.
+    pub async fn list(&self, pond_id: Uuid, partition: &str) -> Result<Vec<(String, Vec<u8>)>> {
         let sql = format!(
             "SELECT {ik}, {value} \
              FROM ( \
@@ -329,7 +360,7 @@ impl Store {
                          PARTITION BY {ik} ORDER BY {seq} DESC \
                        ) AS rn \
                 FROM {table} \
-                WHERE {pk} = '{p}' \
+                WHERE {pid} = '{pid_v}' AND {pk} = '{p}' \
              ) \
              WHERE rn = 1 AND NOT {deleted} \
              ORDER BY {ik}",
@@ -338,6 +369,8 @@ impl Store {
             deleted = schema::col::DELETED,
             seq = schema::col::TXN_SEQ,
             table = TABLE_NAME,
+            pid = schema::col::POND_ID,
+            pid_v = pond_id,
             pk = schema::col::PARTITION_KEY,
             p = sql_escape(partition),
         );
@@ -363,15 +396,17 @@ impl Store {
     }
 
     /// Return the set of partition keys that contain at least one row
-    /// (live or tombstoned) in the current table state, sorted.
-    pub async fn partitions(&self) -> Result<Vec<String>> {
+    /// (live or tombstoned) for `pond_id`, sorted.
+    pub async fn partitions(&self, pond_id: Uuid) -> Result<Vec<String>> {
         // CAST to Utf8 because Delta partition columns sometimes surface
         // as Dictionary, LargeUtf8, or Utf8View in the Arrow result.
         let sql = format!(
             "SELECT DISTINCT CAST({pk} AS VARCHAR) AS pk \
-             FROM {table} ORDER BY pk",
+             FROM {table} WHERE {pid} = '{pid_v}' ORDER BY pk",
             pk = schema::col::PARTITION_KEY,
             table = TABLE_NAME,
+            pid = schema::col::POND_ID,
+            pid_v = pond_id,
         );
         let batches = self.session_ctx.sql(&sql).await?.collect().await?;
         let mut out = Vec::new();
@@ -381,12 +416,48 @@ impl Store {
         Ok(out)
     }
 
+    /// Return the set of `(pond_id, partition_key)` pairs in the store.
+    /// Useful for cross-pond inspection (e.g., listing all distinct
+    /// pond identities present in a multi-pond consumer).
+    pub async fn all_partitions(&self) -> Result<Vec<(Uuid, String)>> {
+        let sql = format!(
+            "SELECT DISTINCT CAST({pid} AS VARCHAR) AS pid, \
+                             CAST({pk} AS VARCHAR) AS pk \
+             FROM {table} ORDER BY pid, pk",
+            pid = schema::col::POND_ID,
+            pk = schema::col::PARTITION_KEY,
+            table = TABLE_NAME,
+        );
+        let batches = self.session_ctx.sql(&sql).await?.collect().await?;
+        let mut out = Vec::new();
+        for batch in batches {
+            let mut pids: Vec<String> = Vec::new();
+            let mut pks: Vec<String> = Vec::new();
+            collect_string_column(batch.column(0).as_ref(), &mut pids)?;
+            collect_string_column(batch.column(1).as_ref(), &mut pks)?;
+            for (pid_str, pk) in pids.into_iter().zip(pks.into_iter()) {
+                let pid = Uuid::parse_str(&pid_str).map_err(|e| {
+                    StoreError::Invariant(format!(
+                        "all_partitions: pond_id `{}` is not a valid UUID: {}",
+                        pid_str, e
+                    ))
+                })?;
+                out.push((pid, pk));
+            }
+        }
+        Ok(out)
+    }
+
     /// Return all live (post-tombstone) `(item_key, value_blake3)`
-    /// pairs in `partition`, sorted by `item_key`.
+    /// pairs in `(pond_id, partition)`, sorted by `item_key`.
     ///
     /// This is the canonical input to a [`PartitionChecksum`]; callers
     /// generally use [`Store::compute_partition_checksum`] instead.
-    pub async fn partition_leaves(&self, partition: &str) -> Result<Vec<(String, [u8; 32])>> {
+    pub async fn partition_leaves(
+        &self,
+        pond_id: Uuid,
+        partition: &str,
+    ) -> Result<Vec<(String, [u8; 32])>> {
         let sql = format!(
             "SELECT {ik}, {blake3} \
              FROM ( \
@@ -395,7 +466,7 @@ impl Store {
                          PARTITION BY {ik} ORDER BY {seq} DESC \
                        ) AS rn \
                 FROM {table} \
-                WHERE {pk} = '{p}' \
+                WHERE {pid} = '{pid_v}' AND {pk} = '{p}' \
              ) \
              WHERE rn = 1 AND NOT {deleted} \
              ORDER BY {ik}",
@@ -404,6 +475,8 @@ impl Store {
             deleted = schema::col::DELETED,
             seq = schema::col::TXN_SEQ,
             table = TABLE_NAME,
+            pid = schema::col::POND_ID,
+            pid_v = pond_id,
             pk = schema::col::PARTITION_KEY,
             p = sql_escape(partition),
         );
@@ -446,13 +519,14 @@ impl Store {
     /// them through the strategy.
     pub async fn compute_partition_checksum<C>(
         &self,
+        pond_id: Uuid,
         partition: &str,
         strategy: &C,
     ) -> Result<checksum::Checksum>
     where
         C: checksum::PartitionChecksum + ?Sized,
     {
-        let leaves = self.partition_leaves(partition).await?;
+        let leaves = self.partition_leaves(pond_id, partition).await?;
         let refs: Vec<checksum::Leaf<'_>> = leaves
             .iter()
             .map(|(k, h)| checksum::Leaf {
@@ -463,25 +537,33 @@ impl Store {
         Ok(strategy.compute(&refs))
     }
 
-    /// Run Delta Lake's `optimize(Compact)` over the table, optionally
-    /// restricted to a single `partition_key` value via `filter`.
+    /// Run Delta Lake's `optimize(Compact)` over the table for `pond_id`,
+    /// optionally restricted to a single `partition_key` value via
+    /// `filter`.
     ///
     /// Compaction merges small parquet files into bigger ones to reduce
     /// per-table overhead.  It must NOT change the logical content of
     /// any partition; the steward asserts this by snapshotting per-
     /// partition checksums before and after.
     ///
+    /// Because `pond_id` is a Delta partition column, restricting compact
+    /// to one pond_id is a hard guarantee that no foreign rows are
+    /// touched -- foreign data files are never opened.
+    ///
     /// Returns metrics describing how many files were added/removed.
-    /// Both being zero means optimize found nothing to do (empty table,
-    /// nonexistent filter, or already-optimal layout).
-    pub async fn compact(&mut self, filter: Option<&str>) -> Result<CompactMetrics> {
-        let filters: Vec<PartitionFilter> = match filter {
-            Some(value) => vec![PartitionFilter {
+    /// Both being zero means optimize found nothing to do (no rows for
+    /// this pond_id, nonexistent filter, or already-optimal layout).
+    pub async fn compact(&mut self, pond_id: Uuid, filter: Option<&str>) -> Result<CompactMetrics> {
+        let mut filters: Vec<PartitionFilter> = vec![PartitionFilter {
+            key: schema::col::POND_ID.to_string(),
+            value: PartitionValue::Equal(pond_id.to_string()),
+        }];
+        if let Some(value) = filter {
+            filters.push(PartitionFilter {
                 key: schema::col::PARTITION_KEY.to_string(),
                 value: PartitionValue::Equal(value.to_string()),
-            }],
-            None => Vec::new(),
-        };
+            });
+        }
 
         let (new_table, metrics) = self
             .table
@@ -492,7 +574,8 @@ impl Store {
             .await?;
 
         debug!(
-            "store compact: filter={:?} version {:?} -> {:?} files +{}/-{}",
+            "store compact: pond {} filter={:?} version {:?} -> {:?} files +{}/-{}",
+            pond_id,
             filter,
             self.table.version(),
             new_table.version(),

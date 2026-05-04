@@ -584,12 +584,14 @@ async fn data_delta_version_not_recorded_for_noop_compact() {
 async fn verify_local_detects_data_drift() {
     init_logger();
     let dir = TempDir::new().unwrap();
-    {
+    let pond_id = {
         let mut s = Steward::create(dir.path()).await.unwrap();
+        let pond_id = s.store_id();
         let mut g = s.begin_write().await.unwrap();
         g.put("p", "k", b"v1".to_vec()).unwrap();
         let _ = g.commit().await.unwrap();
-    }
+        pond_id
+    };
     // Tamper with the underlying data store directly, bypassing
     // the steward's lifecycle.  The steward's recorded checksums
     // at txn_seq=1 capture the pre-tamper state.
@@ -597,10 +599,11 @@ async fn verify_local_detects_data_drift() {
         let mut store = sandbox_store::Store::open(dir.path().join("data"))
             .await
             .unwrap();
-        let next_seq = store.last_txn_seq().await.unwrap() + 1;
+        let next_seq = store.last_txn_seq(pond_id).await.unwrap() + 1;
         let now = chrono::Utc::now().timestamp_micros();
         store
             .apply_batch(
+                pond_id,
                 next_seq,
                 now,
                 vec![sandbox_store::Op::Put {

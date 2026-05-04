@@ -4,9 +4,21 @@
 
 use sandbox_store::{Op, Store};
 use tempfile::TempDir;
+use uuid::Uuid;
 
 fn init_logger() {
     let _ = env_logger::builder().is_test(true).try_init();
+}
+
+/// Test pond_id "A".  Distinct from `pid_b()` so cross-pond mistakes
+/// surface in test failures rather than passing silently.
+fn pid_a() -> Uuid {
+    Uuid::from_u128(0xa1_0000_0000_0000_0000_0000_0000_0000)
+}
+
+/// Test pond_id "B".
+fn pid_b() -> Uuid {
+    Uuid::from_u128(0xb2_0000_0000_0000_0000_0000_0000_0000)
 }
 
 #[tokio::test]
@@ -17,8 +29,8 @@ async fn create_then_open_roundtrip() {
         let _store = Store::create(dir.path()).await.expect("create");
     }
     let store = Store::open(dir.path()).await.expect("open");
-    assert_eq!(store.last_txn_seq().await.unwrap(), 0);
-    assert!(store.partitions().await.unwrap().is_empty());
+    assert_eq!(store.last_txn_seq(pid_a()).await.unwrap(), 0);
+    assert!(store.partitions(pid_a()).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -35,9 +47,12 @@ async fn put_then_get_returns_value() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let seq = store.put("p1", "k1", b"hello".to_vec()).await.unwrap();
+    let seq = store
+        .put(pid_a(), "p1", "k1", b"hello".to_vec())
+        .await
+        .unwrap();
     assert_eq!(seq, 1);
-    let v = store.get("p1", "k1").await.unwrap();
+    let v = store.get(pid_a(), "p1", "k1").await.unwrap();
     assert_eq!(v, Some(b"hello".to_vec()));
 }
 
@@ -46,7 +61,7 @@ async fn get_returns_none_for_missing_partition() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let store = Store::create(dir.path()).await.unwrap();
-    let v = store.get("nope", "nope").await.unwrap();
+    let v = store.get(pid_a(), "nope", "nope").await.unwrap();
     assert_eq!(v, None);
 }
 
@@ -55,8 +70,11 @@ async fn get_returns_none_for_missing_key() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("p1", "k1", b"v1".to_vec()).await.unwrap();
-    let v = store.get("p1", "k2").await.unwrap();
+    let _ = store
+        .put(pid_a(), "p1", "k1", b"v1".to_vec())
+        .await
+        .unwrap();
+    let v = store.get(pid_a(), "p1", "k2").await.unwrap();
     assert_eq!(v, None);
 }
 
@@ -65,12 +83,21 @@ async fn put_overwrites_returns_latest() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("p1", "k1", b"v1".to_vec()).await.unwrap();
-    let _ = store.put("p1", "k1", b"v2".to_vec()).await.unwrap();
-    let _ = store.put("p1", "k1", b"v3".to_vec()).await.unwrap();
-    let v = store.get("p1", "k1").await.unwrap();
+    let _ = store
+        .put(pid_a(), "p1", "k1", b"v1".to_vec())
+        .await
+        .unwrap();
+    let _ = store
+        .put(pid_a(), "p1", "k1", b"v2".to_vec())
+        .await
+        .unwrap();
+    let _ = store
+        .put(pid_a(), "p1", "k1", b"v3".to_vec())
+        .await
+        .unwrap();
+    let v = store.get(pid_a(), "p1", "k1").await.unwrap();
     assert_eq!(v, Some(b"v3".to_vec()));
-    assert_eq!(store.last_txn_seq().await.unwrap(), 3);
+    assert_eq!(store.last_txn_seq(pid_a()).await.unwrap(), 3);
 }
 
 #[tokio::test]
@@ -78,9 +105,12 @@ async fn delete_makes_get_return_none() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("p1", "k1", b"v1".to_vec()).await.unwrap();
-    let _ = store.delete("p1", "k1").await.unwrap();
-    assert_eq!(store.get("p1", "k1").await.unwrap(), None);
+    let _ = store
+        .put(pid_a(), "p1", "k1", b"v1".to_vec())
+        .await
+        .unwrap();
+    let _ = store.delete(pid_a(), "p1", "k1").await.unwrap();
+    assert_eq!(store.get(pid_a(), "p1", "k1").await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -88,10 +118,19 @@ async fn put_after_delete_resurrects_item() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("p1", "k1", b"v1".to_vec()).await.unwrap();
-    let _ = store.delete("p1", "k1").await.unwrap();
-    let _ = store.put("p1", "k1", b"v2".to_vec()).await.unwrap();
-    assert_eq!(store.get("p1", "k1").await.unwrap(), Some(b"v2".to_vec()));
+    let _ = store
+        .put(pid_a(), "p1", "k1", b"v1".to_vec())
+        .await
+        .unwrap();
+    let _ = store.delete(pid_a(), "p1", "k1").await.unwrap();
+    let _ = store
+        .put(pid_a(), "p1", "k1", b"v2".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get(pid_a(), "p1", "k1").await.unwrap(),
+        Some(b"v2".to_vec())
+    );
 }
 
 #[tokio::test]
@@ -99,8 +138,8 @@ async fn delete_of_missing_key_is_a_tombstone_with_no_observable_effect() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.delete("p1", "ghost").await.unwrap();
-    assert_eq!(store.get("p1", "ghost").await.unwrap(), None);
+    let _ = store.delete(pid_a(), "p1", "ghost").await.unwrap();
+    assert_eq!(store.get(pid_a(), "p1", "ghost").await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -108,11 +147,11 @@ async fn list_returns_live_items_sorted_excluding_tombstones() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("p1", "b", b"B".to_vec()).await.unwrap();
-    let _ = store.put("p1", "a", b"A".to_vec()).await.unwrap();
-    let _ = store.put("p1", "c", b"C".to_vec()).await.unwrap();
-    let _ = store.delete("p1", "b").await.unwrap();
-    let listed = store.list("p1").await.unwrap();
+    let _ = store.put(pid_a(), "p1", "b", b"B".to_vec()).await.unwrap();
+    let _ = store.put(pid_a(), "p1", "a", b"A".to_vec()).await.unwrap();
+    let _ = store.put(pid_a(), "p1", "c", b"C".to_vec()).await.unwrap();
+    let _ = store.delete(pid_a(), "p1", "b").await.unwrap();
+    let listed = store.list(pid_a(), "p1").await.unwrap();
     assert_eq!(
         listed,
         vec![
@@ -127,7 +166,7 @@ async fn list_empty_partition_returns_empty_vec() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let store = Store::create(dir.path()).await.unwrap();
-    assert!(store.list("nope").await.unwrap().is_empty());
+    assert!(store.list(pid_a(), "nope").await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -135,10 +174,19 @@ async fn partitions_lists_all_keys_used() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("alpha", "k", b"v".to_vec()).await.unwrap();
-    let _ = store.put("beta", "k", b"v".to_vec()).await.unwrap();
-    let _ = store.put("alpha", "k2", b"v".to_vec()).await.unwrap();
-    let parts = store.partitions().await.unwrap();
+    let _ = store
+        .put(pid_a(), "alpha", "k", b"v".to_vec())
+        .await
+        .unwrap();
+    let _ = store
+        .put(pid_a(), "beta", "k", b"v".to_vec())
+        .await
+        .unwrap();
+    let _ = store
+        .put(pid_a(), "alpha", "k2", b"v".to_vec())
+        .await
+        .unwrap();
+    let parts = store.partitions(pid_a()).await.unwrap();
     assert_eq!(parts, vec!["alpha".to_string(), "beta".to_string()]);
 }
 
@@ -147,13 +195,16 @@ async fn partitions_includes_partitions_with_only_tombstones() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("ghosts", "k", b"v".to_vec()).await.unwrap();
-    let _ = store.delete("ghosts", "k").await.unwrap();
+    let _ = store
+        .put(pid_a(), "ghosts", "k", b"v".to_vec())
+        .await
+        .unwrap();
+    let _ = store.delete(pid_a(), "ghosts", "k").await.unwrap();
     assert_eq!(
-        store.partitions().await.unwrap(),
+        store.partitions(pid_a()).await.unwrap(),
         vec!["ghosts".to_string()]
     );
-    assert!(store.list("ghosts").await.unwrap().is_empty());
+    assert!(store.list(pid_a(), "ghosts").await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -165,6 +216,7 @@ async fn apply_batch_writes_one_commit_for_many_ops() {
     let v0 = store.delta_version();
     store
         .apply_batch(
+            pid_a(),
             42,
             1_700_000_000_000_000,
             vec![
@@ -189,10 +241,19 @@ async fn apply_batch_writes_one_commit_for_many_ops() {
         .unwrap();
     let v1 = store.delta_version();
     assert_eq!(v1, v0 + 1, "exactly one Delta commit for the batch");
-    assert_eq!(store.last_txn_seq().await.unwrap(), 42);
-    assert_eq!(store.get("p", "a").await.unwrap(), Some(b"A".to_vec()));
-    assert_eq!(store.get("p", "b").await.unwrap(), Some(b"B".to_vec()));
-    assert_eq!(store.get("q", "x").await.unwrap(), Some(b"X".to_vec()));
+    assert_eq!(store.last_txn_seq(pid_a()).await.unwrap(), 42);
+    assert_eq!(
+        store.get(pid_a(), "p", "a").await.unwrap(),
+        Some(b"A".to_vec())
+    );
+    assert_eq!(
+        store.get(pid_a(), "p", "b").await.unwrap(),
+        Some(b"B".to_vec())
+    );
+    assert_eq!(
+        store.get(pid_a(), "q", "x").await.unwrap(),
+        Some(b"X".to_vec())
+    );
 }
 
 #[tokio::test]
@@ -203,6 +264,7 @@ async fn apply_batch_coalesces_repeated_ops_on_same_key() {
 
     store
         .apply_batch(
+            pid_a(),
             1,
             0,
             vec![
@@ -229,7 +291,10 @@ async fn apply_batch_coalesces_repeated_ops_on_same_key() {
         )
         .await
         .unwrap();
-    assert_eq!(store.get("p", "k").await.unwrap(), Some(b"last".to_vec()));
+    assert_eq!(
+        store.get(pid_a(), "p", "k").await.unwrap(),
+        Some(b"last".to_vec())
+    );
 }
 
 #[tokio::test]
@@ -238,10 +303,10 @@ async fn apply_batch_empty_is_a_noop() {
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
     let v_before = store.delta_version();
-    store.apply_batch(99, 0, vec![]).await.unwrap();
+    store.apply_batch(pid_a(), 99, 0, vec![]).await.unwrap();
     let v_after = store.delta_version();
     assert_eq!(v_before, v_after, "empty batch must NOT produce a commit");
-    assert_eq!(store.last_txn_seq().await.unwrap(), 0);
+    assert_eq!(store.last_txn_seq(pid_a()).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -249,12 +314,24 @@ async fn cross_partition_writes_are_independent() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("p1", "k", b"v_p1".to_vec()).await.unwrap();
-    let _ = store.put("p2", "k", b"v_p2".to_vec()).await.unwrap();
-    assert_eq!(store.get("p1", "k").await.unwrap(), Some(b"v_p1".to_vec()));
-    assert_eq!(store.get("p2", "k").await.unwrap(), Some(b"v_p2".to_vec()));
-    assert_eq!(store.list("p1").await.unwrap().len(), 1);
-    assert_eq!(store.list("p2").await.unwrap().len(), 1);
+    let _ = store
+        .put(pid_a(), "p1", "k", b"v_p1".to_vec())
+        .await
+        .unwrap();
+    let _ = store
+        .put(pid_a(), "p2", "k", b"v_p2".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get(pid_a(), "p1", "k").await.unwrap(),
+        Some(b"v_p1".to_vec())
+    );
+    assert_eq!(
+        store.get(pid_a(), "p2", "k").await.unwrap(),
+        Some(b"v_p2".to_vec())
+    );
+    assert_eq!(store.list(pid_a(), "p1").await.unwrap().len(), 1);
+    assert_eq!(store.list(pid_a(), "p2").await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -262,14 +339,14 @@ async fn empty_value_is_distinguishable_from_tombstone() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("p", "k", Vec::new()).await.unwrap();
+    let _ = store.put(pid_a(), "p", "k", Vec::new()).await.unwrap();
     assert_eq!(
-        store.get("p", "k").await.unwrap(),
+        store.get(pid_a(), "p", "k").await.unwrap(),
         Some(Vec::new()),
         "empty-bytes value is a real value, not absence"
     );
-    let _ = store.delete("p", "k").await.unwrap();
-    assert_eq!(store.get("p", "k").await.unwrap(), None);
+    let _ = store.delete(pid_a(), "p", "k").await.unwrap();
+    assert_eq!(store.get(pid_a(), "p", "k").await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -278,9 +355,12 @@ async fn keys_with_sql_metacharacters_roundtrip() {
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
     let weird = "weird'key;--";
-    let _ = store.put("p", weird, b"v".to_vec()).await.unwrap();
-    assert_eq!(store.get("p", weird).await.unwrap(), Some(b"v".to_vec()));
-    let listed = store.list("p").await.unwrap();
+    let _ = store.put(pid_a(), "p", weird, b"v".to_vec()).await.unwrap();
+    assert_eq!(
+        store.get(pid_a(), "p", weird).await.unwrap(),
+        Some(b"v".to_vec())
+    );
+    let listed = store.list(pid_a(), "p").await.unwrap();
     assert_eq!(listed, vec![(weird.to_string(), b"v".to_vec())]);
 }
 
@@ -289,7 +369,7 @@ async fn actions_at_version_returns_adds_for_a_write() {
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
-    let _ = store.put("p", "k", b"v".to_vec()).await.unwrap();
+    let _ = store.put(pid_a(), "p", "k", b"v".to_vec()).await.unwrap();
     let v = store.delta_version();
     assert!(v > 0, "version advanced past initial");
 
@@ -338,12 +418,12 @@ async fn actions_at_version_returns_adds_and_removes_for_a_compact() {
     // Three small writes -> three small parquets in partition `p`.
     for i in 0..3 {
         let _ = store
-            .put("p", &format!("k{}", i), b"v".to_vec())
+            .put(pid_a(), "p", &format!("k{}", i), b"v".to_vec())
             .await
             .unwrap();
     }
     let pre_version = store.delta_version();
-    let metrics = store.compact(None).await.unwrap();
+    let metrics = store.compact(pid_a(), None).await.unwrap();
 
     if metrics.is_noop() {
         // delta-rs decided nothing to merge for these tiny files; can't
@@ -400,10 +480,11 @@ async fn commit_actions_directly_writes_add_remove() {
 
     use std::collections::HashMap;
     let mut partition_values = HashMap::new();
+    let _ = partition_values.insert("pond_id".to_string(), Some(pid_a().to_string()));
     let _ = partition_values.insert("partition_key".to_string(), Some("p".to_string()));
 
     let add = deltalake::kernel::Add {
-        path: "partition_key=p/test-001.parquet".to_string(),
+        path: format!("pond_id={}/partition_key=p/test-001.parquet", pid_a()),
         partition_values,
         size: 0,
         modification_time: 0,
@@ -416,7 +497,7 @@ async fn commit_actions_directly_writes_add_remove() {
             actions,
             deltalake::protocol::DeltaOperation::Write {
                 mode: deltalake::protocol::SaveMode::Append,
-                partition_by: Some(vec!["partition_key".to_string()]),
+                partition_by: Some(vec!["pond_id".to_string(), "partition_key".to_string()]),
                 predicate: None,
             },
         )
@@ -431,5 +512,90 @@ async fn commit_actions_directly_writes_add_remove() {
     let (adds, removes) = store.actions_at_version(new_version).await.unwrap();
     assert_eq!(adds.len(), 1, "one add committed");
     assert!(removes.is_empty(), "no removes");
-    assert_eq!(adds[0].path, "partition_key=p/test-001.parquet");
+    assert_eq!(
+        adds[0].path,
+        format!("pond_id={}/partition_key=p/test-001.parquet", pid_a())
+    );
+}
+
+#[tokio::test]
+async fn rows_are_isolated_by_pond_id() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut store = Store::create(dir.path()).await.unwrap();
+
+    // Two different ponds writing to the same (partition, key) namespace.
+    let _ = store
+        .put(pid_a(), "p1", "k", b"from_a".to_vec())
+        .await
+        .unwrap();
+    let _ = store
+        .put(pid_b(), "p1", "k", b"from_b".to_vec())
+        .await
+        .unwrap();
+
+    // Reads scoped to each pond return the right value.
+    assert_eq!(
+        store.get(pid_a(), "p1", "k").await.unwrap(),
+        Some(b"from_a".to_vec())
+    );
+    assert_eq!(
+        store.get(pid_b(), "p1", "k").await.unwrap(),
+        Some(b"from_b".to_vec())
+    );
+
+    // Listing is per-pond.
+    assert_eq!(store.list(pid_a(), "p1").await.unwrap().len(), 1);
+    assert_eq!(store.list(pid_b(), "p1").await.unwrap().len(), 1);
+
+    // Per-pond seq spaces.
+    assert_eq!(store.last_txn_seq(pid_a()).await.unwrap(), 1);
+    assert_eq!(store.last_txn_seq(pid_b()).await.unwrap(), 1);
+
+    // Both ponds appear in all_partitions.
+    let all = store.all_partitions().await.unwrap();
+    assert!(all.contains(&(pid_a(), "p1".to_string())));
+    assert!(all.contains(&(pid_b(), "p1".to_string())));
+}
+
+#[tokio::test]
+async fn compact_is_pond_scoped_only() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut store = Store::create(dir.path()).await.unwrap();
+
+    // Several small writes by pond A.
+    for i in 0..3 {
+        let _ = store
+            .put(pid_a(), "p", &format!("k{}", i), b"v".to_vec())
+            .await
+            .unwrap();
+    }
+    // One write by pond B in a same-named partition.
+    let _ = store.put(pid_b(), "p", "k0", b"vb".to_vec()).await.unwrap();
+
+    // Compact A's partition.  Pond B's data file must remain untouched.
+    let pre_files: std::collections::HashSet<_> = store.data_files().unwrap().into_iter().collect();
+    let _metrics = store.compact(pid_a(), Some("p")).await.unwrap();
+    let post_files: std::collections::HashSet<_> =
+        store.data_files().unwrap().into_iter().collect();
+
+    // B's content is still readable.
+    assert_eq!(
+        store.get(pid_b(), "p", "k0").await.unwrap(),
+        Some(b"vb".to_vec())
+    );
+
+    // Any file removed by compact must have been an A file (its path
+    // contains pond_id=A's UUID).  This is implicit in delta partition
+    // semantics but worth asserting once.
+    let removed: Vec<_> = pre_files.difference(&post_files).collect();
+    let pid_a_str = pid_a().to_string();
+    for f in removed {
+        assert!(
+            f.contains(&pid_a_str),
+            "compact removed a file not in pond A: {}",
+            f
+        );
+    }
 }

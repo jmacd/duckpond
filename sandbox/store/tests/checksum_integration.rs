@@ -13,15 +13,20 @@
 use sandbox_store::Store;
 use sandbox_store::checksum::{Checksum, Homomorphic, Merkle, PartitionChecksum};
 use tempfile::TempDir;
+use uuid::Uuid;
 
 fn init_logger() {
     let _ = env_logger::builder().is_test(true).try_init();
 }
 
+fn pid() -> Uuid {
+    Uuid::from_u128(0xa1_0000_0000_0000_0000_0000_0000_0000)
+}
+
 async fn populate_alpha(store: &mut Store) {
-    let _ = store.put("p", "a", b"A".to_vec()).await.unwrap();
-    let _ = store.put("p", "b", b"B".to_vec()).await.unwrap();
-    let _ = store.put("p", "c", b"C".to_vec()).await.unwrap();
+    let _ = store.put(pid(), "p", "a", b"A".to_vec()).await.unwrap();
+    let _ = store.put(pid(), "p", "b", b"B".to_vec()).await.unwrap();
+    let _ = store.put(pid(), "p", "c", b"C".to_vec()).await.unwrap();
 }
 
 /// Two stores reach the same logical state via different write orders.
@@ -31,20 +36,20 @@ async fn order_independent<C: PartitionChecksum>(c: &C) -> (Checksum, Checksum) 
     let dir2 = TempDir::new().unwrap();
 
     let mut s1 = Store::create(dir1.path()).await.unwrap();
-    let _ = s1.put("p", "a", b"A".to_vec()).await.unwrap();
-    let _ = s1.put("p", "b", b"B".to_vec()).await.unwrap();
-    let _ = s1.put("p", "c", b"C".to_vec()).await.unwrap();
+    let _ = s1.put(pid(), "p", "a", b"A".to_vec()).await.unwrap();
+    let _ = s1.put(pid(), "p", "b", b"B".to_vec()).await.unwrap();
+    let _ = s1.put(pid(), "p", "c", b"C".to_vec()).await.unwrap();
 
     let mut s2 = Store::create(dir2.path()).await.unwrap();
     // Different order, plus extra writes that get overwritten.
-    let _ = s2.put("p", "c", b"WRONG".to_vec()).await.unwrap();
-    let _ = s2.put("p", "a", b"A".to_vec()).await.unwrap();
-    let _ = s2.put("p", "c", b"C".to_vec()).await.unwrap();
-    let _ = s2.put("p", "b", b"OLD".to_vec()).await.unwrap();
-    let _ = s2.put("p", "b", b"B".to_vec()).await.unwrap();
+    let _ = s2.put(pid(), "p", "c", b"WRONG".to_vec()).await.unwrap();
+    let _ = s2.put(pid(), "p", "a", b"A".to_vec()).await.unwrap();
+    let _ = s2.put(pid(), "p", "c", b"C".to_vec()).await.unwrap();
+    let _ = s2.put(pid(), "p", "b", b"OLD".to_vec()).await.unwrap();
+    let _ = s2.put(pid(), "p", "b", b"B".to_vec()).await.unwrap();
 
-    let cs1 = s1.compute_partition_checksum("p", c).await.unwrap();
-    let cs2 = s2.compute_partition_checksum("p", c).await.unwrap();
+    let cs1 = s1.compute_partition_checksum(pid(), "p", c).await.unwrap();
+    let cs2 = s2.compute_partition_checksum(pid(), "p", c).await.unwrap();
     (cs1, cs2)
 }
 
@@ -68,15 +73,15 @@ async fn tombstone_neutral<C: PartitionChecksum>(c: &C) {
     let dir2 = TempDir::new().unwrap();
 
     let mut s1 = Store::create(dir1.path()).await.unwrap();
-    let _ = s1.put("p", "a", b"A".to_vec()).await.unwrap();
+    let _ = s1.put(pid(), "p", "a", b"A".to_vec()).await.unwrap();
 
     let mut s2 = Store::create(dir2.path()).await.unwrap();
-    let _ = s2.put("p", "a", b"A".to_vec()).await.unwrap();
-    let _ = s2.put("p", "b", b"B".to_vec()).await.unwrap();
-    let _ = s2.delete("p", "b").await.unwrap();
+    let _ = s2.put(pid(), "p", "a", b"A".to_vec()).await.unwrap();
+    let _ = s2.put(pid(), "p", "b", b"B".to_vec()).await.unwrap();
+    let _ = s2.delete(pid(), "p", "b").await.unwrap();
 
-    let cs1 = s1.compute_partition_checksum("p", c).await.unwrap();
-    let cs2 = s2.compute_partition_checksum("p", c).await.unwrap();
+    let cs1 = s1.compute_partition_checksum(pid(), "p", c).await.unwrap();
+    let cs2 = s2.compute_partition_checksum(pid(), "p", c).await.unwrap();
     assert_eq!(cs1, cs2, "deleted item must not influence checksum");
 }
 
@@ -98,12 +103,18 @@ async fn cross_partition_isolation<C: PartitionChecksum>(c: &C) {
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
     populate_alpha(&mut store).await;
-    let p_before = store.compute_partition_checksum("p", c).await.unwrap();
+    let p_before = store
+        .compute_partition_checksum(pid(), "p", c)
+        .await
+        .unwrap();
 
-    let _ = store.put("q", "x", b"XXX".to_vec()).await.unwrap();
-    let _ = store.put("q", "y", b"YYY".to_vec()).await.unwrap();
+    let _ = store.put(pid(), "q", "x", b"XXX".to_vec()).await.unwrap();
+    let _ = store.put(pid(), "q", "y", b"YYY".to_vec()).await.unwrap();
 
-    let p_after = store.compute_partition_checksum("p", c).await.unwrap();
+    let p_after = store
+        .compute_partition_checksum(pid(), "p", c)
+        .await
+        .unwrap();
     assert_eq!(
         p_before, p_after,
         "partition p must be unaffected by writes to partition q"
@@ -127,10 +138,19 @@ async fn value_change_detected<C: PartitionChecksum>(c: &C) {
     let dir = TempDir::new().unwrap();
     let mut store = Store::create(dir.path()).await.unwrap();
     populate_alpha(&mut store).await;
-    let before = store.compute_partition_checksum("p", c).await.unwrap();
+    let before = store
+        .compute_partition_checksum(pid(), "p", c)
+        .await
+        .unwrap();
 
-    let _ = store.put("p", "b", b"B-changed".to_vec()).await.unwrap();
-    let after = store.compute_partition_checksum("p", c).await.unwrap();
+    let _ = store
+        .put(pid(), "p", "b", b"B-changed".to_vec())
+        .await
+        .unwrap();
+    let after = store
+        .compute_partition_checksum(pid(), "p", c)
+        .await
+        .unwrap();
     assert_ne!(before, after);
 }
 
@@ -150,8 +170,14 @@ async fn homomorphic_value_change_detected() {
 async fn empty_partition_stable<C: PartitionChecksum>(c: &C) {
     let dir = TempDir::new().unwrap();
     let store = Store::create(dir.path()).await.unwrap();
-    let cs1 = store.compute_partition_checksum("never", c).await.unwrap();
-    let cs2 = store.compute_partition_checksum("never", c).await.unwrap();
+    let cs1 = store
+        .compute_partition_checksum(pid(), "never", c)
+        .await
+        .unwrap();
+    let cs2 = store
+        .compute_partition_checksum(pid(), "never", c)
+        .await
+        .unwrap();
     assert_eq!(cs1, cs2);
     assert_eq!(cs1.kind, c.kind());
 }
@@ -177,11 +203,11 @@ async fn two_strategies_produce_distinct_checksums_for_same_state() {
     let mut store = Store::create(dir.path()).await.unwrap();
     populate_alpha(&mut store).await;
     let m = store
-        .compute_partition_checksum("p", &Merkle::new())
+        .compute_partition_checksum(pid(), "p", &Merkle::new())
         .await
         .unwrap();
     let h = store
-        .compute_partition_checksum("p", &Homomorphic::new())
+        .compute_partition_checksum(pid(), "p", &Homomorphic::new())
         .await
         .unwrap();
     assert_ne!(m, h);

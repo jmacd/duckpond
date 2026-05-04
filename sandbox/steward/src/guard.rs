@@ -114,25 +114,29 @@ impl Drop for WriteGuard<'_> {
 /// A handle to a read-only view of the store.  No control-table writes.
 pub struct ReadGuard<'a> {
     store: &'a Store,
+    local_pond_id: uuid::Uuid,
 }
 
 impl<'a> ReadGuard<'a> {
-    pub(crate) fn new(store: &'a Store) -> Self {
-        Self { store }
+    pub(crate) fn new(store: &'a Store, local_pond_id: uuid::Uuid) -> Self {
+        Self {
+            store,
+            local_pond_id,
+        }
     }
 
-    /// Read the current value of `(partition, key)`.
+    /// Read the current value of `(partition, key)` from the local pond.
     pub async fn get(&self, partition: &str, key: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.store.get(partition, key).await?)
+        Ok(self.store.get(self.local_pond_id, partition, key).await?)
     }
 
-    /// List all live items in `partition`.
+    /// List all live items in `partition` for the local pond.
     pub async fn list(&self, partition: &str) -> Result<Vec<(String, Vec<u8>)>> {
-        Ok(self.store.list(partition).await?)
+        Ok(self.store.list(self.local_pond_id, partition).await?)
     }
 
-    /// All known partitions.
+    /// All known partitions for the local pond.
     pub async fn partitions(&self) -> Result<Vec<String>> {
-        Ok(self.store.partitions().await?)
+        Ok(self.store.partitions(self.local_pond_id).await?)
     }
 }

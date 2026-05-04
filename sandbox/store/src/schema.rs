@@ -2,23 +2,30 @@
 
 //! Schema definitions for the sandbox store.
 //!
-//! The store is a single Delta Lake table partitioned by `partition_key`.
-//! Each row is one version of one item:
+//! The store is a single Delta Lake table partitioned by
+//! `(pond_id, partition_key)`.  Each row is one version of one item:
 //!
 //! | column         | type      | notes                                    |
 //! |----------------|-----------|------------------------------------------|
-//! | partition_key  | Utf8      | Delta partition column                   |
+//! | pond_id        | Utf8      | Delta partition column; UUID of the pond |
+//! |                |           | that created this row                    |
+//! | partition_key  | Utf8      | Delta partition column; user-supplied    |
 //! | item_key       | Utf8      | item identifier within its partition     |
-//! | txn_seq        | Int64     | store-wide monotonic commit sequence     |
+//! | txn_seq        | Int64     | per-pond_id monotonic commit sequence    |
 //! | deleted        | Boolean   | tombstone marker; true = item removed    |
 //! | value          | Binary    | item bytes (zero-length when deleted)    |
 //! | value_blake3   | Binary    | BLAKE3 of `value` (32 bytes); fixed even |
 //! |                |           | for the empty-value case                 |
 //! | ts_micros      | Int64     | commit time, microseconds since unix ep  |
 //!
-//! Per-(partition_key, item_key) the row with the largest `txn_seq` is
-//! the live version.  If that row has `deleted = true`, the item is
-//! considered absent.
+//! Per-(pond_id, partition_key, item_key) the row with the largest
+//! `txn_seq` is the live version.  If that row has `deleted = true`,
+//! the item is considered absent.
+//!
+//! `pond_id` participates in physical partitioning so each parquet
+//! file holds rows from exactly one pond_id.  This guarantees that
+//! compaction never mixes pond_ids in a file (which would break
+//! push-filter at the file granularity).
 
 use std::sync::Arc;
 
@@ -29,11 +36,14 @@ use deltalake::kernel::{
 
 /// Column names.  Centralized to avoid stringly-typed bugs.
 pub mod col {
+    /// `pond_id` -- Delta partition column; UUID of the pond that created
+    /// this row.
+    pub const POND_ID: &str = "pond_id";
     /// `partition_key` -- Delta partition column.
     pub const PARTITION_KEY: &str = "partition_key";
     /// `item_key` -- the user-visible key within a partition.
     pub const ITEM_KEY: &str = "item_key";
-    /// `txn_seq` -- store-wide monotonic commit sequence.
+    /// `txn_seq` -- per-pond_id monotonic commit sequence.
     pub const TXN_SEQ: &str = "txn_seq";
     /// `deleted` -- tombstone marker.
     pub const DELETED: &str = "deleted";
@@ -49,13 +59,17 @@ pub mod col {
 pub const BLAKE3_LEN: usize = 32;
 
 /// Delta partition columns for the store table.
+///
+/// Order matches the column order in [`arrow_schema`] / [`delta_columns`]:
+/// `pond_id` first, then `partition_key`.
 pub fn partition_columns() -> Vec<&'static str> {
-    vec![col::PARTITION_KEY]
+    vec![col::POND_ID, col::PARTITION_KEY]
 }
 
 /// Arrow schema used for [`arrow_array::RecordBatch`] construction.
 pub fn arrow_schema() -> Arc<ArrowSchema> {
     Arc::new(ArrowSchema::new(vec![
+        Field::new(col::POND_ID, DataType::Utf8, false),
         Field::new(col::PARTITION_KEY, DataType::Utf8, false),
         Field::new(col::ITEM_KEY, DataType::Utf8, false),
         Field::new(col::TXN_SEQ, DataType::Int64, false),
@@ -72,6 +86,11 @@ pub fn arrow_schema() -> Arc<ArrowSchema> {
 /// nullability.  Tests assert this.
 pub fn delta_columns() -> Vec<DeltaStructField> {
     vec![
+        DeltaStructField::new(
+            col::POND_ID,
+            DeltaDataType::Primitive(PrimitiveType::String),
+            false,
+        ),
         DeltaStructField::new(
             col::PARTITION_KEY,
             DeltaDataType::Primitive(PrimitiveType::String),
@@ -132,9 +151,9 @@ mod tests {
     }
 
     #[test]
-    fn partition_key_is_a_partition_column() {
+    fn pond_id_and_partition_key_are_partition_columns() {
         let parts = partition_columns();
-        assert_eq!(parts, vec![col::PARTITION_KEY]);
+        assert_eq!(parts, vec![col::POND_ID, col::PARTITION_KEY]);
     }
 
     #[test]
