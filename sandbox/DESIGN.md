@@ -572,7 +572,7 @@ The `sandbox-tests` crate is still a smoke-only placeholder.
 
 ### 3.3 Test inventory
 
-184 tests total across all sandbox crates.  All passing, all under
+192 tests total across all sandbox crates.  All passing, all under
 both checksum strategies where applicable.
 
 | Crate / file | Count | What it covers |
@@ -581,24 +581,24 @@ both checksum strategies where applicable.
 | store/src/checksum/merkle.rs (unit) | 4 | empty-tree distinct from single-leaf, duplicate-key behavior, odd-count tree pairing, output is 32 bytes |
 | store/src/checksum/homomorphic.rs (unit) | 6 | u256 add/sub roundtrip, carry, borrow, commutativity, order independence, output is 32 bytes |
 | store/src/schema.rs (unit) | 3 | Arrow and Delta schemas agree, partition column constant, BLAKE3 length |
-| store/tests/store.rs (integration) | 22 | put/get/delete roundtrip, multi-version semantics, tombstones, list filtering, partition discovery, apply_batch coalescing, empty-batch no-op, cross-partition independence, SQL metacharacter safety, actions_at_version for Write/Compact/missing |
+| store/tests/store.rs (integration) | 23 | put/get/delete roundtrip, multi-version semantics, tombstones, list filtering, partition discovery, apply_batch coalescing, empty-batch no-op, cross-partition independence, SQL metacharacter safety, actions_at_version for Write/Compact/missing, commit_actions direct test |
 | store/tests/checksum_integration.rs (integration) | 11 | order-independent across stores (Merkle, Homomorphic), tombstone-neutral, cross-partition isolation, value-change detection, empty-partition stability, two strategies disagree on same state |
 | steward/src/control_table.rs (unit) | 3 | Arrow vs Delta schema agreement, RecordKind serialization roundtrip, ChecksumValue serialization roundtrip |
-| steward/tests/steward.rs (integration) | 27 | lifecycle records (Begin/DataCommitted/Failed/Completed), parent_seq tracking, no-op->Completed, abort, read guards write nothing, txn_seq monotonicity across all outcomes, partition checksums carry forward, orphan-Begin recovery, config_set/get/list latest-wins, persistence across re-open, log limit, verify_local under both strategies, verify on empty pond, put-after-delete-then-verify, store_id minted/persisted/overridable/legacy-error, data_delta_version recorded for write, not for failed/completed/no-op-compact, monotonic across writes, recorded for real compact |
+| steward/tests/steward.rs (integration) | 29 | lifecycle records (Begin/DataCommitted/Failed/Completed), parent_seq tracking, no-op->Completed, abort, read guards write nothing, txn_seq monotonicity across all outcomes, partition checksums carry forward, orphan-Begin recovery, config_set/get/list latest-wins, persistence across re-open, log limit, verify_local under both strategies + drift detection, verify on empty pond, put-after-delete-then-verify, store_id minted/persisted/overridable/legacy-error, data_delta_version recorded for write/compact, log_with_limit returns most recent N |
 | steward/tests/compact.rs (integration) | 11 | get/list unchanged after compact, real-work compact -> DataCommitted(Compact), per-partition checksum invariance, partition filter touches only that partition (verified via Store::data_files), empty-pond compact -> Completed (no-op), nonexistent-filter compact -> Completed, parent_seq points at last write, Homomorphic strategy invariance, tombstones survive compaction, interleaved write/compact/write/compact lifecycle, persistence across re-open |
-| steward/tests/apply_pulled.rs (integration) | 8 | apply_pulled_bundle writes DataCommitted record on consumer, idempotent re-apply, last_write_seq advances, parent_seq chain across bundles, path validation rejects absolute / dotdot / missing-partition_key, partition_checksums recorded byte-exact |
+| steward/tests/apply_pulled.rs (integration) | 10 | apply_pulled_bundle writes DataCommitted record on consumer, idempotent re-apply, last_write_seq advances, parent_seq chain across bundles, path validation rejects absolute / dotdot / missing-partition_key, partition_checksums recorded byte-exact, with-removes drops files from active set, read_data_file errors on missing path |
 | steward/src/steward.rs (unit) | 8 | parse_partition_values: happy path, percent-encoded, absolute, dotdot, missing partition_key, multiple partition_key, HIVE null sentinel, empty path |
 | remote/src/schema.rs (unit) | 5 | arrow/Delta schemas agree, partition_kind constants distinct, CHUNK_SIZE_BYTES = 16 MiB, BLAKE3_LEN matches blake3 crate, RowBody partition_kind/file_action mapping |
 | remote/src/chunking.rs (unit) | 12 | empty input -> 1 empty chunk, file <= == > N*chunk_size boundaries, per-chunk and per-file BLAKE3 correctness, assemble round-trip and detection of bad-hash/out-of-order/wrong-size, chunk_file via temp file |
 | remote/tests/schema.rs (integration) | 9 | round-trip for every variant, full bundle, schema rejection of unknown partition_kind / manifest missing commit_kind / data unknown action, MILESTONE: multi-partition single-commit is one Delta version |
-| remote/tests/remote.rs (integration) | 8 | create+open store_id roundtrip, open of missing path errors, list/latest_seq/oldest_available_seq on empty, happy-path push, PostPushPending+Completed lifecycle, idempotent re-push, store_id mismatch error, NoSuchCommit on empty pond push |
+| remote/tests/remote.rs (integration) | 11 | create+open store_id roundtrip, open of missing path errors, list/latest_seq/oldest_available_seq on empty, happy-path push, PostPushPending+Completed lifecycle, idempotent re-push, store_id mismatch error, NoSuchCommit on empty pond push, push errors on Failed / Completed / no-op-compact seqs |
 | remote/tests/push.rs (integration) | 6 | compact bundle has DataAdd + DataRemove rows, partition_checksums round-trip byte-exact, data rows reassemble to original parquet bytes (file_blake3 verified), multi-bundle ordering with parent_seq chain, open errors on corrupted UUID property, post-remote-commit crash recovery writes Completed |
 | remote/tests/pull.rs (integration) | 9 | happy-path round-trip, multi-bundle pull, idempotent re-pull when caught up, compact bundle pull (adds + removes both apply), per-bundle progress simulating partial-pull resumption, store_id mismatch error, behind-retention check exercised in no-gap path, DataCommitted records mirrored on consumer, state persists across consumer reopen |
 | remote/tests/maintain.rs (integration) | 8 | refuses keep=0, refuses when fewer compact bundles than keep, keep=1 prunes writes leaves compact, keep=2 keeps two compacts, idempotent re-maintain, vacuum disabled reports 0 files, vacuum enabled reclaims files, INTEGRATION: consumer below new horizon gets BehindRetention on pull |
 | remote/tests/restart.rs (integration) | 7 | refuses NoRestartPoint, bootstraps fresh consumer, wipes same-family pond, refuses different-family (StoreIdMismatch), refuses non-pond directory, INTEGRATION: BehindRetention -> restart recovery, idempotent re-pull after restart |
 | remote/tests/verify.rs (integration) | 8 | synced consumer ok, empty remote + empty consumer vacuous ok, empty remote + nonempty consumer not ok, store_id mismatch error, tampered consumer detected on partition, INTEGRATION: divergence_boundary walk identifies seq where consumer last agreed, no agreeing bundle returns None, compute_live_checksums consistency with partition_checksums_at |
 | tests/src/lib.rs | 1 | smoke (placeholder) |
-| **Total** | **184** | |
+| **Total** | **192** | |
 
 ### 3.4 CI integration
 
@@ -635,13 +635,13 @@ sandbox entirely.
 | remote-retention | done | Remote::maintain (DeleteBuilder predicate `txn_seq < horizon`, optional VacuumBuilder) + MaintainOptions/MaintainReport + InvalidRetention/InsufficientCompactBundles errors + 8 tests |
 | restart-from-compact | done | Remote::restart_from_compact (safety wipe + apply oldest compact baseline with empty Removes + catch-up pull) + NoRestartPoint/RestartPathNotPond errors + 7 tests including BehindRetention->recovery flow |
 | verify-cmd | done | verify_against_remote (compare consumer's live checksums to remote.latest_seq's recorded checksums; on mismatch walk back to find divergence_boundary) + Steward::compute_live_checksums + 8 tests |
-| library-api-coverage | pending | depends on remote-pull, remote-retention, verify-cmd (UNBLOCKED) |
-| integration-tests | pending | depends on restart-from-compact, library-api-coverage (UNBLOCKED) |
-| property-tests | pending | depends on remote-pull, remote-retention |
+| library-api-coverage | done | audit + 8 gap-filling tests (verify_local drift detection, log limit, apply_pulled_bundle removes path direct test, read_data_file error path, Store::commit_actions direct test, push errors for Failed/Completed/no-op-compact seqs).  Skipped (documented): compact_failure_records_failed (delta-rs cannot inject optimize failure) |
+| integration-tests | pending | depends on restart-from-compact (UNBLOCKED) |
+| property-tests | pending | depends on remote-pull, remote-retention (UNBLOCKED) |
 | benchmarks | pending | depends on checksum-trait (UNBLOCKED, can run any time) |
 | sandbox-design-doc | pending | depends on integration-tests, property-tests, benchmarks |
 
-11 of 16 done.
+12 of 16 done.
 
 ---
 
