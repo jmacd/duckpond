@@ -312,11 +312,27 @@ impl Remote {
         }
     }
 
-    /// Pull all bundles from the remote that the consumer (`steward`)
-    /// has not yet applied.  Mirror mode only.
+    /// Pull all new bundles from this remote into `steward`'s local
+    /// store and control table.
+    ///
+    /// Supports two operating modes by the relation between the
+    /// remote's `store_id` and the steward's:
+    ///
+    /// - **Mirror** (`remote.store_id == steward.store_id`): the
+    ///   pulled bundles are recorded under the consumer's own
+    ///   pond_id.  This is the standard replica/restart flow.
+    /// - **Cross-pond import** (`remote.store_id != steward.store_id`):
+    ///   the pulled bundles are recorded under the remote's pond_id
+    ///   in the consumer's per-pond_id seq space, alongside the
+    ///   consumer's own writes (which live under
+    ///   `steward.store_id`).  The consumer's own `Remote::push` to
+    ///   its own backup remote does NOT include these foreign rows
+    ///   (push iterates only `steward.store_id`'s seqs).  Downstream
+    ///   consumers wanting this foreign data attach the foreign
+    ///   remote directly.
     ///
     /// See `../../DESIGN.md` §2.5.4.  Lifecycle:
-    /// 1. Verify the remote's `store_id` matches the steward's.
+    /// 1. (No store_id equality check.)
     /// 2. Read consumer's `last_pulled_seq:<remote_url>` setting (0 if
     ///    unset).
     /// 3. Retention horizon check: error with [`RemoteError::BehindRetention`]
@@ -330,24 +346,16 @@ impl Remote {
     ///       and per-file BLAKE3 BEFORE writing).
     ///    3. Collect `DataRemove` paths.
     ///    4. Build the partition_checksums map from `Checksum` rows.
-    ///    5. Apply via `Steward::apply_pulled_bundle`.
+    ///    5. Apply via `Steward::apply_pulled_bundle` with
+    ///       `pond_id = self.store_id` (the remote's pond_id, i.e.,
+    ///       the foreign source's identity).
     ///    6. Update the consumer's `last_pulled_seq` setting to this
-    ///       bundle's seq AFTER the apply succeeds (per-bundle progress).
+    ///       bundle's seq AFTER the apply succeeds.
     /// 6. Return [`PullReport`].
-    ///
-    /// Idempotent: a re-pull when the consumer is fully caught up
-    /// returns an empty `PullReport`.  A re-pull after a crash in the
-    /// middle of step 5 picks up from the last successfully-applied
-    /// bundle (`apply_pulled_bundle` itself short-circuits on
-    /// already-applied seqs as belt-and-suspenders).
     pub async fn pull(&self, steward: &mut Steward) -> Result<PullReport> {
-        // 1. Verify store_id.
-        if self.store_id != steward.store_id() {
-            return Err(RemoteError::StoreIdMismatch {
-                remote: self.store_id,
-                steward: steward.store_id(),
-            });
-        }
+        // 1. (No store_id equality check.)  pull supports both mirror
+        //    and cross-pond import; the foreign pond_id (= self.store_id)
+        //    is recorded into apply_pulled_bundle as the bundle's owner.
 
         // 2. Read consumer's last_pulled_seq for this remote URL.
         let setting_key = last_pulled_seq_key(&self.path);
@@ -750,6 +758,32 @@ impl Remote {
 
         // 6. Get Add/Remove file actions.
         let (adds, removes) = steward.actions_at_version(version).await?;
+
+        // A3 push filter: every file in the bundle MUST belong to the
+        // local pond.  In normal operation this is guaranteed by
+        // construction (data_committed_record is per-pond_id, compact
+        // is per-pond_id, apply_batch stamps the local pond_id), but
+        // we assert it here as a defense-in-depth check against any
+        // future bug that would leak foreign rows into our own bundle.
+        let local_pond_str = format!("pond_id={}/", steward.store_id());
+        for add in &adds {
+            if !add.path.contains(&local_pond_str) {
+                return Err(RemoteError::Schema(format!(
+                    "push filter: add path `{}` is not in local pond {}",
+                    add.path,
+                    steward.store_id()
+                )));
+            }
+        }
+        for remove in &removes {
+            if !remove.path.contains(&local_pond_str) {
+                return Err(RemoteError::Schema(format!(
+                    "push filter: remove path `{}` is not in local pond {}",
+                    remove.path,
+                    steward.store_id()
+                )));
+            }
+        }
 
         let now = Utc::now().timestamp_micros();
         let mut rows: Vec<RemoteRow> =

@@ -218,41 +218,49 @@ async fn pull_per_bundle_progress_resumes_after_intermediate_failure() {
 }
 
 #[tokio::test]
-async fn pull_errors_on_store_id_mismatch() {
+async fn pull_with_different_store_id_imports_under_foreign_pond_id() {
+    // Previously this test asserted StoreIdMismatch.  After A3 the
+    // equality check is removed -- pull now supports cross-pond import.
+    // The pulled bundles land under the foreign pond_id.
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut source = Steward::create_with_options(dir.path().join("source"), opts())
         .await
         .unwrap();
-    let mut remote = Remote::create(dir.path().join("remote"), source.store_id())
+    let source_id = source.store_id();
+    let mut remote = Remote::create(dir.path().join("remote"), source_id)
         .await
         .unwrap();
     {
         let mut g = source.begin_write().await.unwrap();
-        g.put("p", "k", b"v".to_vec()).unwrap();
+        g.put("p", "k", b"hello".to_vec()).unwrap();
         let _ = g.commit().await.unwrap();
     }
     remote.push(&mut source, 1).await.unwrap();
 
-    // Consumer with a DIFFERENT store_id.
-    let other_id = Uuid::new_v4();
-    assert_ne!(other_id, source.store_id());
+    // Consumer with a DIFFERENT store_id (cross-pond import scenario).
+    let consumer_id = Uuid::new_v4();
+    assert_ne!(consumer_id, source_id);
     let mut consumer =
-        Steward::create_with_options(dir.path().join("consumer"), opts_with_store_id(other_id))
+        Steward::create_with_options(dir.path().join("consumer"), opts_with_store_id(consumer_id))
             .await
             .unwrap();
 
-    match remote.pull(&mut consumer).await {
-        Err(sandbox_remote::RemoteError::StoreIdMismatch {
-            remote: r,
-            steward: s,
-        }) => {
-            assert_eq!(r, source.store_id());
-            assert_eq!(s, other_id);
-        }
-        Ok(_) => panic!("expected StoreIdMismatch, got Ok"),
-        Err(other) => panic!("expected StoreIdMismatch, got {:?}", other),
-    }
+    let report = remote.pull(&mut consumer).await.unwrap();
+    assert_eq!(report.bundles_applied.len(), 1, "one bundle pulled");
+    assert_eq!(report.last_pulled_seq, 1);
+
+    // Foreign data is readable via Store directly, scoped to the
+    // SOURCE's pond_id (not the consumer's own).
+    let store = sandbox_store::Store::open(dir.path().join("consumer").join("data"))
+        .await
+        .unwrap();
+    let foreign_value = store.get(source_id, "p", "k").await.unwrap();
+    assert_eq!(foreign_value, Some(b"hello".to_vec()));
+
+    // The consumer's own pond_id has nothing.
+    let own_value = store.get(consumer_id, "p", "k").await.unwrap();
+    assert_eq!(own_value, None);
 }
 
 #[tokio::test]
