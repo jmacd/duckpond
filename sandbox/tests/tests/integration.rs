@@ -247,8 +247,8 @@ async fn multi_remote_push_keeps_both_in_sync() {
         "consumers from two remotes have equal live checksums",
     );
 
-    let key_a = format!("last_pushed_seq:{}", dir.path().join("remote_a").display());
-    let key_b = format!("last_pushed_seq:{}", dir.path().join("remote_b").display());
+    let key_a = format!("last_pushed_seq:{}", remote_a.url());
+    let key_b = format!("last_pushed_seq:{}", remote_b.url());
     assert!(
         source.config_get(&key_a).await.unwrap().is_some(),
         "source recorded last_pushed_seq for remote_a",

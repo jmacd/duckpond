@@ -11,7 +11,7 @@
 //! validate this against the steward's `store_id` first.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::{Array, RecordBatch};
@@ -40,8 +40,14 @@ pub const STORE_ID_PROPERTY: &str = "sandbox.store_id";
 const TABLE_NAME: &str = "remote";
 
 /// The remote-sync handle.  Wraps a Delta Lake table.
+///
+/// `url` is the canonical identifier for this remote -- a URL such
+/// as `file:///path/to/remote` or `s3://bucket/prefix`.  It also
+/// keys the consumer's `last_pulled_seq` and source's
+/// `last_pushed_seq` per-remote settings, so changing the URL
+/// effectively forks a fresh sync history.
 pub struct Remote {
-    path: PathBuf,
+    url: String,
     store_id: Uuid,
     table: DeltaTable,
     session_ctx: Arc<SessionContext>,
@@ -107,72 +113,110 @@ pub struct MaintainReport {
 
 /// Steward setting key under which a consumer records the highest
 /// bundle seq it has pulled from a particular remote.  Discriminated
-/// by the remote's on-disk path so a single steward can pull from
-/// multiple remotes (e.g., primary + offsite archive) and track each
-/// independently.
-fn last_pulled_seq_key(remote_path: &Path) -> String {
-    format!("last_pulled_seq:{}", remote_path.display())
+/// by the remote's URL so a single steward can pull from multiple
+/// remotes (e.g., primary + offsite archive, or several cross-pond
+/// imports) and track each independently.
+fn last_pulled_seq_key(remote_url: &str) -> String {
+    format!("last_pulled_seq:{}", remote_url)
 }
 
 /// Steward setting key under which a source records the highest
 /// bundle seq it has successfully pushed to a particular remote.
-/// Same discrimination by remote path as the pull setting.
-fn last_pushed_seq_key(remote_path: &Path) -> String {
-    format!("last_pushed_seq:{}", remote_path.display())
+/// Same discrimination by remote URL as the pull setting.
+fn last_pushed_seq_key(remote_url: &str) -> String {
+    format!("last_pushed_seq:{}", remote_url)
 }
 
 impl Remote {
-    /// Create a fresh remote at `path` with the given `store_id`.
-    /// Errors if a Delta table already exists at `path`.
+    /// Create a fresh remote backed by a local filesystem `path` with
+    /// the given `store_id`.  Errors if a Delta table already exists.
     pub async fn create(path: impl AsRef<Path>, store_id: Uuid) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         std::fs::create_dir_all(&path)?;
         let url = url_from_path(&path)?;
+        Self::create_at_url(url.as_str(), store_id, HashMap::new()).await
+    }
 
+    /// Create a fresh remote at `url` with the given `store_id` and
+    /// `storage_options` (e.g., S3 credentials).  Errors if a Delta
+    /// table already exists at the URL.
+    ///
+    /// Use this for S3-backed remotes:
+    /// ```ignore
+    /// let mut opts = HashMap::new();
+    /// opts.insert("AWS_ENDPOINT_URL".into(), "http://minio:9000".into());
+    /// opts.insert("AWS_ACCESS_KEY_ID".into(), "...".into());
+    /// opts.insert("AWS_SECRET_ACCESS_KEY".into(), "...".into());
+    /// opts.insert("AWS_REGION".into(), "us-east-1".into());
+    /// opts.insert("AWS_ALLOW_HTTP".into(), "true".into());
+    /// opts.insert("AWS_S3_LOCKING_PROVIDER".into(), "none".into());
+    /// opts.insert("AWS_S3_ALLOW_UNSAFE_RENAME".into(), "true".into());
+    /// let remote = Remote::create_at_url("s3://bucket/prefix", store_id, opts).await?;
+    /// ```
+    ///
+    /// `deltalake_aws::register_handlers(None)` MUST have been called
+    /// once at process startup before any S3 URL is used.
+    pub async fn create_at_url(
+        url: &str,
+        store_id: Uuid,
+        storage_options: HashMap<String, String>,
+    ) -> Result<Self> {
         let mut config: HashMap<String, Option<String>> = HashMap::new();
         let _ = config.insert(STORE_ID_PROPERTY.to_string(), Some(store_id.to_string()));
 
-        let table = DeltaTable::try_from_url(url)
+        let parsed_url = url::Url::parse(url)
+            .map_err(|e| RemoteError::Schema(format!("invalid remote URL `{}`: {}", url, e)))?;
+        let table = DeltaTable::try_from_url_with_storage_options(parsed_url, storage_options)
             .await?
             .create()
             .with_columns(delta_columns())
             .with_partition_columns(partition_columns())
             .with_save_mode(SaveMode::ErrorIfExists)
             .with_configuration(config)
-            // Our `sandbox.store_id` is a custom property; without
-            // this delta-rs rejects the key as unknown.
             .with_raise_if_key_not_exists(false)
             .await?;
 
         let session_ctx = build_session_ctx(&table)?;
         Ok(Self {
-            path,
+            url: url.to_string(),
             store_id,
             table,
             session_ctx,
         })
     }
 
-    /// Open an existing remote at `path`.  Reads `store_id` from the
-    /// Delta table's `sandbox.store_id` configuration property; errors
-    /// if it is missing or unparseable.
+    /// Open an existing remote at filesystem `path`.  Reads `store_id`
+    /// from the Delta table's `sandbox.store_id` configuration property;
+    /// errors if missing or unparseable.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let url = url_from_path(&path)?;
-        let table = deltalake::open_table(url).await?;
+        Self::open_at_url(url.as_str(), HashMap::new()).await
+    }
+
+    /// Open an existing remote at `url` with `storage_options`.  Use
+    /// this for S3-backed remotes (see [`Self::create_at_url`] for
+    /// the option keys).
+    pub async fn open_at_url(url: &str, storage_options: HashMap<String, String>) -> Result<Self> {
+        let parsed_url = url::Url::parse(url)
+            .map_err(|e| RemoteError::Schema(format!("invalid remote URL `{}`: {}", url, e)))?;
+        let table = deltalake::open_table_with_storage_options(parsed_url, storage_options).await?;
         let store_id = read_store_id(&table)?;
         let session_ctx = build_session_ctx(&table)?;
         Ok(Self {
-            path,
+            url: url.to_string(),
             store_id,
             table,
             session_ctx,
         })
     }
 
-    /// On-disk path the remote was created/opened from.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// Canonical URL identifying this remote (e.g.,
+    /// `file:///path/to/remote` or `s3://bucket/prefix`).  Also keys
+    /// the per-remote `last_pushed_seq` / `last_pulled_seq` settings
+    /// in steward control tables.
+    pub fn url(&self) -> &str {
+        &self.url
     }
 
     /// The remote's recorded `store_id`.
@@ -292,7 +336,7 @@ impl Remote {
                 // MAX of (current setting, this txn_seq).  Operators
                 // typically push monotonically; the max protects
                 // against out-of-order pushes recording an older seq.
-                let key = last_pushed_seq_key(&self.path);
+                let key = last_pushed_seq_key(&self.url);
                 let current = match steward.config_get(&key).await? {
                     Some(s) => s.parse::<i64>().unwrap_or(0),
                     None => 0,
@@ -358,7 +402,7 @@ impl Remote {
         //    is recorded into apply_pulled_bundle as the bundle's owner.
 
         // 2. Read consumer's last_pulled_seq for this remote URL.
-        let setting_key = last_pulled_seq_key(&self.path);
+        let setting_key = last_pulled_seq_key(&self.url);
         let last_pulled = match steward.config_get(&setting_key).await? {
             None => 0i64,
             Some(s) => s.parse::<i64>().map_err(|e| {
@@ -587,7 +631,7 @@ impl Remote {
 
         // 7. Set last_pulled_seq so subsequent pull doesn't re-apply
         //    the baseline and doesn't trip the retention check.
-        let setting_key = last_pulled_seq_key(&self.path);
+        let setting_key = last_pulled_seq_key(&self.url);
         consumer
             .config_set(&setting_key, &baseline.txn_seq.to_string())
             .await?;
@@ -658,7 +702,7 @@ impl Remote {
         //    pull does not skip the baseline.  Setting to "0" puts us
         //    "below" the baseline; the apply below records seq baseline
         //    and the post-apply set restores it.
-        let setting_key = last_pulled_seq_key(&self.path);
+        let setting_key = last_pulled_seq_key(&self.url);
         consumer.config_set(&setting_key, "0").await?;
 
         // 5. Apply the baseline compact bundle.

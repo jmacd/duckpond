@@ -193,7 +193,7 @@ async fn pull_per_bundle_progress_resumes_after_intermediate_failure() {
     // Simulate "consumer pulled bundle 1 only" by manually setting
     // last_pulled_seq via the public config_set API (mirroring what a
     // mid-pull crash would have produced via per-bundle progress).
-    let setting_key = format!("last_pulled_seq:{}", dir.path().join("remote").display());
+    let setting_key = format!("last_pulled_seq:{}", remote.url());
     consumer.config_set(&setting_key, "1").await.unwrap();
     // Apply bundle 1 manually via apply_pulled_bundle by re-running
     // the read/decode logic through pull on a fresh consumer first

@@ -17,6 +17,7 @@
 pub mod chunking;
 mod error;
 mod remote;
+mod s3_registration;
 pub mod schema;
 pub mod verify;
 
@@ -25,6 +26,7 @@ pub use error::{RemoteError, Result};
 pub use remote::{
     BundleHeader, MaintainOptions, MaintainReport, PullReport, Remote, STORE_ID_PROPERTY,
 };
+pub use s3_registration::register_s3_handlers;
 pub use schema::{
     BLAKE3_LEN, CHECKSUM_KIND_HOMOMORPHIC, CHECKSUM_KIND_MERKLE, CHUNK_SIZE_BYTES,
     COMMIT_KIND_COMPACT, COMMIT_KIND_WRITE, FILE_ACTION_ADD, FILE_ACTION_REMOVE,
