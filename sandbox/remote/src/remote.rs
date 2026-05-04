@@ -671,7 +671,10 @@ impl Remote {
 
     /// Read all checksum rows for `txn_seq` from the remote and
     /// build a [`PartitionChecksums`] map.
-    async fn read_checksums_for_bundle(&self, txn_seq: i64) -> Result<PartitionChecksums> {
+    pub(crate) async fn read_checksums_for_bundle(
+        &self,
+        txn_seq: i64,
+    ) -> Result<PartitionChecksums> {
         let sql = format!(
             "SELECT * FROM {table} WHERE {kind} = '{c}' AND {seq} = {n}",
             table = TABLE_NAME,

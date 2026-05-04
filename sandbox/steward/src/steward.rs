@@ -256,6 +256,24 @@ impl Steward {
         Ok(std::fs::read(p)?)
     }
 
+    /// Compute the current live partition_checksums for every
+    /// partition known to the data store, using the steward's
+    /// configured checksum strategy.  Used by `verify_local` and by
+    /// `verify_against_remote` (in sandbox-remote) for drift
+    /// detection without needing a recorded snapshot.
+    pub async fn compute_live_checksums(&self) -> Result<PartitionChecksums> {
+        let partitions = self.store.partitions().await?;
+        let mut out = PartitionChecksums::new();
+        for partition in partitions {
+            let cs = self
+                .store
+                .compute_partition_checksum(&partition, &*self.checksum_strategy)
+                .await?;
+            let _ = out.insert(partition, cs);
+        }
+        Ok(out)
+    }
+
     /// Apply one bundle pulled from a remote, end-to-end:
     ///
     /// 1. Idempotence: if a `DataCommitted` record already exists at

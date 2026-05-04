@@ -18,6 +18,7 @@ pub mod chunking;
 mod error;
 mod remote;
 pub mod schema;
+pub mod verify;
 
 pub use chunking::{ChunkRecord, ChunkedFile, assemble_file, chunk_bytes, chunk_file};
 pub use error::{RemoteError, Result};
@@ -30,6 +31,7 @@ pub use schema::{
     PARTITION_KIND_CHECKSUM, PARTITION_KIND_DATA, PARTITION_KIND_MANIFEST, RemoteRow, RowBody,
     arrow_schema, delta_columns, partition_columns, record_batch_to_rows, rows_to_record_batch,
 };
+pub use verify::{RemoteVerifyMismatch, RemoteVerifyReport, verify_against_remote};
 
 #[cfg(test)]
 mod smoke {
