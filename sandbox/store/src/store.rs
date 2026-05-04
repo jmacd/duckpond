@@ -591,6 +591,30 @@ impl Store {
         self.session_ctx = build_session_ctx(&self.table)?;
         Ok(self.table.version().unwrap_or(0))
     }
+
+    /// Run delta-rs vacuum on this store to reclaim disk space from
+    /// parquet files that no longer have any active Add reference
+    /// (e.g., merged-away files after compact, or files removed by
+    /// pulled compact bundles).
+    ///
+    /// Uses retention period = 0 with `enforce_retention_duration =
+    /// false` to make vacuum synchronous-friendly for the prototype.
+    /// Production deployments should pick a real retention period
+    /// (the Delta default is 7 days).
+    ///
+    /// Returns the count of files reclaimed.
+    pub async fn vacuum(&mut self) -> Result<usize> {
+        let (new_table, metrics) = self
+            .table
+            .clone()
+            .vacuum()
+            .with_retention_period(chrono::Duration::seconds(0))
+            .with_enforce_retention_duration(false)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(metrics.files_deleted.len())
+    }
 }
 
 /// A file added by a Delta commit, as reported by

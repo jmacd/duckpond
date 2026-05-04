@@ -274,6 +274,20 @@ impl Steward {
         Ok(out)
     }
 
+    /// Reclaim disk space on the data store by running delta-rs
+    /// vacuum.  After `compact()` removes the small parquets via
+    /// Delta tombstones, those files are still on disk until vacuum
+    /// physically deletes them.  `vacuum` returns the count of
+    /// reclaimed files.
+    ///
+    /// Mirrors the vacuum that `Remote::maintain` does on the
+    /// remote.  Together with periodic `compact()`, this keeps the
+    /// source's data dir size bounded by the logical state size,
+    /// not the cumulative write history.
+    pub async fn vacuum(&mut self) -> Result<usize> {
+        Ok(self.store.vacuum().await?)
+    }
+
     /// Apply one bundle pulled from a remote, end-to-end:
     ///
     /// 1. Idempotence: if a `DataCommitted` record already exists at
