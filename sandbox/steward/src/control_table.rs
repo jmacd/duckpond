@@ -102,9 +102,19 @@ impl CommitKind {
 /// One control-table row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlRecord {
+    /// Pond identity that owns this record.  For local lifecycle and
+    /// PostPush records, this is the local pond's id.  For records
+    /// mirroring a foreign pond (i.e., a `DataCommitted` written by
+    /// `apply_pulled_bundle`), this is the foreign pond's id.  For
+    /// `Setting` records (per-replica config), this is the local pond
+    /// instance's id.  Stored as the canonical lowercase-hyphenated
+    /// UUID string.
+    pub pond_id: Uuid,
     /// Lifecycle kind.
     pub record_kind: RecordKind,
     /// Transaction sequence (or `0` for [`RecordKind::Setting`]).
+    /// Per-pond_id namespaced -- two different pond_ids may share a
+    /// `txn_seq` value without collision.
     pub txn_seq: i64,
     /// Transaction id (UUID v4) for lifecycle records, or the setting
     /// key for `Setting` records.
@@ -174,6 +184,7 @@ impl From<&ChecksumValue> for Checksum {
 
 const TABLE_NAME: &str = "control";
 
+const COL_POND_ID: &str = "pond_id";
 const COL_RECORD_KIND: &str = "record_kind";
 const COL_TXN_SEQ: &str = "txn_seq";
 const COL_TXN_ID: &str = "txn_id";
@@ -191,6 +202,7 @@ fn arrow_schema() -> Arc<ArrowSchema> {
     // explicit `has_*` boolean columns alongside; a `0` in `parent_seq`
     // when `has_parent_seq=false` is meaningless.
     Arc::new(ArrowSchema::new(vec![
+        Field::new(COL_POND_ID, DataType::Utf8, false),
         Field::new(COL_RECORD_KIND, DataType::Utf8, false),
         Field::new(COL_TXN_SEQ, DataType::Int64, false),
         Field::new(COL_TXN_ID, DataType::Utf8, false),
@@ -207,6 +219,11 @@ fn arrow_schema() -> Arc<ArrowSchema> {
 
 fn delta_columns() -> Vec<DeltaStructField> {
     vec![
+        DeltaStructField::new(
+            COL_POND_ID,
+            DeltaDataType::Primitive(PrimitiveType::String),
+            false,
+        ),
         DeltaStructField::new(
             COL_RECORD_KIND,
             DeltaDataType::Primitive(PrimitiveType::String),
@@ -353,6 +370,7 @@ impl ControlTable {
         let schema = arrow_schema();
         let n = 1;
 
+        let pond_ids = vec![record.pond_id.to_string()];
         let record_kinds = vec![record.record_kind.as_str().to_string()];
         let txn_seqs = vec![record.txn_seq];
         let txn_ids = vec![record.txn_id.clone()];
@@ -375,6 +393,7 @@ impl ControlTable {
         let batch = RecordBatch::try_new(
             schema,
             vec![
+                Arc::new(StringArray::from(pond_ids)),
                 Arc::new(StringArray::from(record_kinds)),
                 Arc::new(Int64Array::from(txn_seqs)),
                 Arc::new(StringArray::from(txn_ids)),
@@ -395,12 +414,28 @@ impl ControlTable {
         Ok(())
     }
 
-    /// All records, ordered by `(txn_seq ASC, ts_micros ASC)`.
+    /// All records, ordered by `(txn_seq ASC, ts_micros ASC)`.  Returns
+    /// records from ALL pond_ids (cross-pond inspection).  Use
+    /// [`Self::all_records_for`] to scope to a single pond.
     pub async fn all_records(&self) -> Result<Vec<ControlRecord>> {
+        self.all_records_inner(None).await
+    }
+
+    /// All records for `pond_id`, ordered by `(txn_seq ASC, ts_micros ASC)`.
+    pub async fn all_records_for(&self, pond_id: Uuid) -> Result<Vec<ControlRecord>> {
+        self.all_records_inner(Some(pond_id)).await
+    }
+
+    async fn all_records_inner(&self, pond_id: Option<Uuid>) -> Result<Vec<ControlRecord>> {
+        let where_clause = pond_id
+            .map(|p| format!("WHERE {pid} = '{p}' ", pid = COL_POND_ID, p = p))
+            .unwrap_or_default();
         let sql = format!(
-            "SELECT {rk}, {ts}, {tid}, {ck}, {hck}, {ps}, {hps}, {dm}, {hdm}, {tsm}, {md} \
+            "SELECT {pid}, {rk}, {ts}, {tid}, {ck}, {hck}, {ps}, {hps}, {dm}, {hdm}, {tsm}, {md} \
              FROM {table} \
+             {where_clause}\
              ORDER BY {ts} ASC, {tsm} ASC",
+            pid = COL_POND_ID,
             rk = COL_RECORD_KIND,
             ts = COL_TXN_SEQ,
             tid = COL_TXN_ID,
@@ -413,6 +448,7 @@ impl ControlTable {
             tsm = COL_TS_MICROS,
             md = COL_METADATA_JSON,
             table = TABLE_NAME,
+            where_clause = where_clause,
         );
         let batches = self.session_ctx.sql(&sql).await?.collect().await?;
         let mut out = Vec::new();
@@ -422,20 +458,26 @@ impl ControlTable {
         Ok(out)
     }
 
-    /// Records of a specific kind, oldest-first.
-    pub async fn records_of_kind(&self, kind: RecordKind) -> Result<Vec<ControlRecord>> {
-        let all = self.all_records().await?;
+    /// Records of a specific kind for `pond_id`, oldest-first.
+    pub async fn records_of_kind(
+        &self,
+        pond_id: Uuid,
+        kind: RecordKind,
+    ) -> Result<Vec<ControlRecord>> {
+        let all = self.all_records_for(pond_id).await?;
         Ok(all.into_iter().filter(|r| r.record_kind == kind).collect())
     }
 
     /// Largest `txn_seq` recorded in any kind of record (Begin or
-    /// later).  `0` if the table is empty (no transactions yet).
-    pub async fn last_txn_seq(&self) -> Result<i64> {
+    /// later) for `pond_id`.  `0` if `pond_id` has no records.
+    pub async fn last_txn_seq(&self, pond_id: Uuid) -> Result<i64> {
         let sql = format!(
             "SELECT MAX({ts}) AS m FROM {table} \
-             WHERE {rk} != '{setting}'",
+             WHERE {pid} = '{p}' AND {rk} != '{setting}'",
             ts = COL_TXN_SEQ,
             table = TABLE_NAME,
+            pid = COL_POND_ID,
+            p = pond_id,
             rk = COL_RECORD_KIND,
             setting = RecordKind::Setting.as_str(),
         );
@@ -457,13 +499,16 @@ impl ControlTable {
         Ok(max)
     }
 
-    /// Largest `txn_seq` for which a `DataCommitted` record exists.
-    pub async fn last_committed_seq(&self) -> Result<i64> {
+    /// Largest `txn_seq` for which a `DataCommitted` record exists for
+    /// `pond_id`.
+    pub async fn last_committed_seq(&self, pond_id: Uuid) -> Result<i64> {
         let sql = format!(
             "SELECT MAX({ts}) AS m FROM {table} \
-             WHERE {rk} = '{kind}'",
+             WHERE {pid} = '{p}' AND {rk} = '{kind}'",
             ts = COL_TXN_SEQ,
             table = TABLE_NAME,
+            pid = COL_POND_ID,
+            p = pond_id,
             rk = COL_RECORD_KIND,
             kind = RecordKind::DataCommitted.as_str(),
         );
@@ -485,11 +530,11 @@ impl ControlTable {
         Ok(max)
     }
 
-    /// Records that look like they may belong to incomplete transactions:
-    /// `Begin` rows with no matching terminal record (`DataCommitted`,
-    /// `Failed`, or `Completed`) for the same `txn_seq`.
-    pub async fn incomplete_transactions(&self) -> Result<Vec<ControlRecord>> {
-        let all = self.all_records().await?;
+    /// Records that look like they may belong to incomplete transactions
+    /// for `pond_id`: `Begin` rows with no matching terminal record
+    /// (`DataCommitted`, `Failed`, or `Completed`) for the same `txn_seq`.
+    pub async fn incomplete_transactions(&self, pond_id: Uuid) -> Result<Vec<ControlRecord>> {
+        let all = self.all_records_for(pond_id).await?;
         let mut by_seq: HashMap<i64, Vec<&ControlRecord>> = HashMap::new();
         for r in &all {
             if matches!(r.record_kind, RecordKind::Setting) {
@@ -515,11 +560,16 @@ impl ControlTable {
         Ok(out)
     }
 
-    /// Resolve the partition_checksums map at `txn_seq`.  Returns the
-    /// `metadata.partition_checksums` field of the `DataCommitted`
-    /// record at that seq, or `None` if no such commit exists.
-    pub async fn partition_checksums_at(&self, txn_seq: i64) -> Result<Option<PartitionChecksums>> {
-        let all = self.all_records().await?;
+    /// Resolve the partition_checksums map at `(pond_id, txn_seq)`.
+    /// Returns the `metadata.partition_checksums` field of the
+    /// `DataCommitted` record at that seq, or `None` if no such commit
+    /// exists for that pond_id.
+    pub async fn partition_checksums_at(
+        &self,
+        pond_id: Uuid,
+        txn_seq: i64,
+    ) -> Result<Option<PartitionChecksums>> {
+        let all = self.all_records_for(pond_id).await?;
         let rec = all
             .iter()
             .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq);
@@ -534,13 +584,12 @@ impl ControlTable {
         Ok(Some(out))
     }
 
-    /// Resolve the data store's Delta Lake version at `txn_seq`.
-    /// Returns the `metadata.data_delta_version` field of the
-    /// `DataCommitted` record at that seq, or `None` if no such commit
-    /// exists.  Returns `Some(0)` for legacy records written before
-    /// this field existed.
-    pub async fn data_delta_version_at(&self, txn_seq: i64) -> Result<Option<i64>> {
-        let all = self.all_records().await?;
+    /// Resolve the data store's Delta Lake version at
+    /// `(pond_id, txn_seq)`.  Returns the `metadata.data_delta_version`
+    /// field of the `DataCommitted` record at that seq, or `None` if
+    /// no such commit exists.
+    pub async fn data_delta_version_at(&self, pond_id: Uuid, txn_seq: i64) -> Result<Option<i64>> {
+        let all = self.all_records_for(pond_id).await?;
         let rec = all
             .iter()
             .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == txn_seq);
@@ -551,13 +600,16 @@ impl ControlTable {
         Ok(Some(meta.data_delta_version))
     }
 
-    /// Set a configuration key/value.  Records a [`RecordKind::Setting`]
-    /// row.
-    pub async fn config_set(&mut self, key: &str, value: &str) -> Result<()> {
+    /// Set a configuration key/value scoped to `pond_id`.  Records a
+    /// [`RecordKind::Setting`] row.  Settings are pond-instance state
+    /// (e.g., `last_pulled_seq:<remote>`); the Steward always uses its
+    /// local pond_id when calling this.
+    pub async fn config_set(&mut self, pond_id: Uuid, key: &str, value: &str) -> Result<()> {
         let mut meta = HashMap::new();
         meta.insert("v".to_string(), value.to_string());
         let metadata_json = serde_json::to_string(&meta)?;
         let rec = ControlRecord {
+            pond_id,
             record_kind: RecordKind::Setting,
             txn_seq: 0,
             txn_id: key.to_string(),
@@ -570,17 +622,17 @@ impl ControlTable {
         self.write_record(rec).await
     }
 
-    /// Read the current value of `key`, or `None` if never set.
-    pub async fn config_get(&self, key: &str) -> Result<Option<String>> {
-        let map = self.config_list().await?;
+    /// Read the current value of `(pond_id, key)`, or `None` if never set.
+    pub async fn config_get(&self, pond_id: Uuid, key: &str) -> Result<Option<String>> {
+        let map = self.config_list(pond_id).await?;
         Ok(map.get(key).cloned())
     }
 
-    /// Read all current settings (latest-write-wins per key).
-    pub async fn config_list(&self) -> Result<HashMap<String, String>> {
+    /// Read all current settings for `pond_id` (latest-write-wins per key).
+    pub async fn config_list(&self, pond_id: Uuid) -> Result<HashMap<String, String>> {
         // Latest-write-wins per key.  Walk all Setting records and
         // overlay in `ts_micros` order.
-        let all = self.all_records().await?;
+        let all = self.all_records_for(pond_id).await?;
         let mut settings: Vec<(i64, String, String)> = Vec::new();
         for rec in all.iter().filter(|r| r.record_kind == RecordKind::Setting) {
             let map: HashMap<String, String> = serde_json::from_str(&rec.metadata_json)?;
@@ -686,6 +738,7 @@ fn decode_records(batch: &RecordBatch, out: &mut Vec<ControlRecord>) -> Result<(
             .ok_or_else(|| StewardError::Invariant(format!("missing column {}", name)))
     };
 
+    let i_pid = need(COL_POND_ID)?;
     let i_rk = need(COL_RECORD_KIND)?;
     let i_ts = need(COL_TXN_SEQ)?;
     let i_tid = need(COL_TXN_ID)?;
@@ -699,6 +752,13 @@ fn decode_records(batch: &RecordBatch, out: &mut Vec<ControlRecord>) -> Result<(
     let i_md = need(COL_METADATA_JSON)?;
 
     for row in 0..batch.num_rows() {
+        let pond_id_str = read_string(batch.column(i_pid).as_ref(), row)?;
+        let pond_id = Uuid::parse_str(&pond_id_str).map_err(|e| {
+            StewardError::Invariant(format!(
+                "control table pond_id `{}` is not a valid UUID: {}",
+                pond_id_str, e
+            ))
+        })?;
         let rk = parse_record_kind(&read_string(batch.column(i_rk).as_ref(), row)?)?;
         let txn_seq = read_i64(batch.column(i_ts).as_ref(), row)?;
         let txn_id = read_string(batch.column(i_tid).as_ref(), row)?;
@@ -726,6 +786,7 @@ fn decode_records(batch: &RecordBatch, out: &mut Vec<ControlRecord>) -> Result<(
         let ts_micros = read_i64(batch.column(i_tsm).as_ref(), row)?;
         let metadata_json = read_string(batch.column(i_md).as_ref(), row)?;
         out.push(ControlRecord {
+            pond_id,
             record_kind: rk,
             txn_seq,
             txn_id,

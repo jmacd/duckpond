@@ -47,6 +47,12 @@ use crate::guard::{ReadGuard, WriteGuard, WriteGuardInner};
 /// control table.  Set once at `Steward::create`; immutable thereafter.
 const STORE_ID_KEY: &str = "store_id";
 
+/// Well-known pond_id used for bootstrap-time settings that must be
+/// readable BEFORE the local pond_id is known.  Currently only
+/// `STORE_ID_KEY` uses this.  Other settings (e.g.,
+/// `last_pulled_seq:<remote>`) are scoped to the local pond_id.
+const BOOTSTRAP_POND_ID: Uuid = Uuid::nil();
+
 /// Result of a successful write commit.
 #[derive(Debug, Clone)]
 pub struct CommitOutcome {
@@ -123,7 +129,7 @@ impl Steward {
         let mut control = ControlTable::create(&control_path).await?;
         let store_id = opts.store_id.unwrap_or_else(Uuid::new_v4);
         control
-            .config_set(STORE_ID_KEY, &store_id.to_string())
+            .config_set(BOOTSTRAP_POND_ID, STORE_ID_KEY, &store_id.to_string())
             .await?;
         Ok(Self {
             pond_path,
@@ -156,20 +162,23 @@ impl Steward {
         let control_path = pond_path.join("control");
         let store = Store::open(&data_path).await?;
         let control = ControlTable::open(&control_path).await?;
-        let last_write_seq = control.last_txn_seq().await?;
-        let store_id_str = control.config_get(STORE_ID_KEY).await?.ok_or_else(|| {
-            StewardError::LegacyPond(format!(
-                "{}: no `{}` setting in control table",
-                pond_path.display(),
-                STORE_ID_KEY,
-            ))
-        })?;
+        let store_id_str = control
+            .config_get(BOOTSTRAP_POND_ID, STORE_ID_KEY)
+            .await?
+            .ok_or_else(|| {
+                StewardError::LegacyPond(format!(
+                    "{}: no `{}` setting in control table",
+                    pond_path.display(),
+                    STORE_ID_KEY,
+                ))
+            })?;
         let store_id = Uuid::parse_str(&store_id_str).map_err(|e| {
             StewardError::Invariant(format!(
                 "control table contained malformed `{}` setting `{}`: {}",
                 STORE_ID_KEY, store_id_str, e,
             ))
         })?;
+        let last_write_seq = control.last_txn_seq(store_id).await?;
         Ok(Self {
             pond_path,
             store_id,
@@ -200,7 +209,7 @@ impl Steward {
 
     /// Most recent `txn_seq` for which a `DataCommitted` record exists.
     pub async fn last_committed_seq(&self) -> Result<i64> {
-        self.control.last_committed_seq().await
+        self.control.last_committed_seq(self.store_id).await
     }
 
     /// All control-table records, oldest first.  Optional limit returns
@@ -218,7 +227,9 @@ impl Steward {
 
     /// Resolve the partition_checksums map at `txn_seq`.
     pub async fn partition_checksums_at(&self, txn_seq: i64) -> Result<Option<PartitionChecksums>> {
-        self.control.partition_checksums_at(txn_seq).await
+        self.control
+            .partition_checksums_at(self.store_id, txn_seq)
+            .await
     }
 
     /// Resolve the data store's Delta Lake version at `txn_seq`.
@@ -226,7 +237,9 @@ impl Steward {
     /// returns `Some(0)` for legacy records written before the
     /// `data_delta_version` field existed.
     pub async fn data_delta_version_at(&self, txn_seq: i64) -> Result<Option<i64>> {
-        self.control.data_delta_version_at(txn_seq).await
+        self.control
+            .data_delta_version_at(self.store_id, txn_seq)
+            .await
     }
 
     /// Look up the `DataCommitted` record for `txn_seq`.  Returns
@@ -430,6 +443,7 @@ impl Steward {
         };
         self.control
             .write_record(ControlRecord {
+                pond_id: self.store_id,
                 record_kind: RecordKind::DataCommitted,
                 txn_seq,
                 txn_id: control_table::new_txn_id(),
@@ -459,6 +473,7 @@ impl Steward {
         let now = Utc::now().timestamp_micros();
         self.control
             .write_record(ControlRecord {
+                pond_id: self.store_id,
                 record_kind: RecordKind::PostPushPending,
                 txn_seq,
                 txn_id: txn_id.clone(),
@@ -485,6 +500,7 @@ impl Steward {
         let duration_ms = ((now - started_micros) / 1000).max(0);
         self.control
             .write_record(ControlRecord {
+                pond_id: self.store_id,
                 record_kind: RecordKind::PostPushCompleted,
                 txn_seq,
                 txn_id,
@@ -514,6 +530,7 @@ impl Steward {
         meta.insert("reason".to_string(), reason);
         self.control
             .write_record(ControlRecord {
+                pond_id: self.store_id,
                 record_kind: RecordKind::PostPushFailed,
                 txn_seq,
                 txn_id,
@@ -529,22 +546,22 @@ impl Steward {
 
     /// Set a configuration key.
     pub async fn config_set(&mut self, key: &str, value: &str) -> Result<()> {
-        self.control.config_set(key, value).await
+        self.control.config_set(self.store_id, key, value).await
     }
 
     /// Read a configuration key.  `None` if never set.
     pub async fn config_get(&self, key: &str) -> Result<Option<String>> {
-        self.control.config_get(key).await
+        self.control.config_get(self.store_id, key).await
     }
 
     /// All current settings (latest-write-wins per key).
     pub async fn config_list(&self) -> Result<HashMap<String, String>> {
-        self.control.config_list().await
+        self.control.config_list(self.store_id).await
     }
 
     /// Incomplete transactions (Begin without terminal record).
     pub async fn incomplete_transactions(&self) -> Result<Vec<ControlRecord>> {
-        self.control.incomplete_transactions().await
+        self.control.incomplete_transactions(self.store_id).await
     }
 
     /// Begin a write transaction.  Allocates the next `txn_seq`,
@@ -555,6 +572,7 @@ impl Steward {
         let now = Utc::now().timestamp_micros();
         self.control
             .write_record(ControlRecord {
+                pond_id: self.store_id,
                 record_kind: RecordKind::Begin,
                 txn_seq,
                 txn_id: txn_id.clone(),
@@ -566,7 +584,7 @@ impl Steward {
             })
             .await?;
         self.last_write_seq = txn_seq;
-        let parent_seq = self.control.last_committed_seq().await?;
+        let parent_seq = self.control.last_committed_seq(self.store_id).await?;
         let parent_seq = if parent_seq == 0 {
             None
         } else {
@@ -631,6 +649,7 @@ impl Steward {
         if had_data {
             self.control
                 .write_record(ControlRecord {
+                    pond_id: self.store_id,
                     record_kind: RecordKind::DataCommitted,
                     txn_seq,
                     txn_id,
@@ -647,6 +666,7 @@ impl Steward {
             // terminal lifecycle record so the txn isn't "incomplete".
             self.control
                 .write_record(ControlRecord {
+                    pond_id: self.store_id,
                     record_kind: RecordKind::Completed,
                     txn_seq,
                     txn_id,
@@ -679,6 +699,7 @@ impl Steward {
         meta.insert("reason".to_string(), reason);
         self.control
             .write_record(ControlRecord {
+                pond_id: self.store_id,
                 record_kind: RecordKind::Failed,
                 txn_seq: inner.txn_seq,
                 txn_id: inner.txn_id,
@@ -742,6 +763,7 @@ impl Steward {
         let started = Utc::now().timestamp_micros();
         self.control
             .write_record(ControlRecord {
+                pond_id: self.store_id,
                 record_kind: RecordKind::Begin,
                 txn_seq,
                 txn_id: txn_id.clone(),
@@ -753,7 +775,7 @@ impl Steward {
             })
             .await?;
         self.last_write_seq = txn_seq;
-        let parent_seq = match self.control.last_committed_seq().await? {
+        let parent_seq = match self.control.last_committed_seq(self.store_id).await? {
             0 => None,
             n => Some(n),
         };
@@ -773,6 +795,7 @@ impl Steward {
                 let _ = self
                     .control
                     .write_record(ControlRecord {
+                        pond_id: self.store_id,
                         record_kind: RecordKind::Failed,
                         txn_seq,
                         txn_id,
@@ -793,6 +816,7 @@ impl Steward {
             let duration_ms = ((now - started) / 1000).max(0);
             self.control
                 .write_record(ControlRecord {
+                    pond_id: self.store_id,
                     record_kind: RecordKind::Completed,
                     txn_seq,
                     txn_id,
@@ -828,6 +852,7 @@ impl Steward {
         let duration_ms = ((now - started) / 1000).max(0);
         self.control
             .write_record(ControlRecord {
+                pond_id: self.store_id,
                 record_kind: RecordKind::DataCommitted,
                 txn_seq,
                 txn_id,

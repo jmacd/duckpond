@@ -308,10 +308,13 @@ async fn config_set_get_list() {
     let all = s.config_list().await.unwrap();
     assert_eq!(all.get("auto_compact"), Some(&"false".to_string()));
     assert_eq!(all.get("retention"), Some(&"5".to_string()));
-    // `store_id` is also a setting (minted at create); presence is
-    // checked here to document the invariant, but its exact value is
-    // not asserted (it's a UUIDv4).
-    assert!(all.contains_key("store_id"), "store_id setting present");
+    // `store_id` is now stored under a well-known bootstrap pond_id
+    // (Uuid::nil()) so it's readable BEFORE the local pond_id is known,
+    // and does NOT appear in the local pond's config_list.
+    assert!(
+        !all.contains_key("store_id"),
+        "store_id setting is bootstrap-scoped, not local-pond-scoped"
+    );
 }
 
 #[tokio::test]
