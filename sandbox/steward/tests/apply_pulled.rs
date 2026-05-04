@@ -339,3 +339,63 @@ async fn apply_pulled_bundle_records_partition_checksums_byte_exact() {
     }
     let _ = HashMap::<String, ()>::new();
 }
+
+// ---- library-api-coverage gap-filling tests ----
+
+#[tokio::test]
+async fn apply_pulled_bundle_with_removes_drops_files_from_active_set() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut consumer = Steward::create_with_options(dir.path(), opts())
+        .await
+        .unwrap();
+
+    // Bundle 1: Add a single file containing key "k".
+    let (path, bytes) = make_synthetic_add("p", "k", b"v").await;
+    consumer
+        .apply_pulled_bundle(
+            1,
+            CommitKind::Write,
+            0,
+            vec![(path.clone(), bytes)],
+            vec![],
+            checksums_for("p"),
+        )
+        .await
+        .unwrap();
+    {
+        let r = consumer.begin_read().await.unwrap();
+        assert_eq!(r.get("p", "k").await.unwrap(), Some(b"v".to_vec()));
+    }
+
+    // Bundle 2: Compact-style remove (no Adds) to tombstone the file.
+    consumer
+        .apply_pulled_bundle(
+            2,
+            CommitKind::Compact,
+            1,
+            vec![],
+            vec![path],
+            checksums_for("p"),
+        )
+        .await
+        .unwrap();
+
+    // After remove, "k" is no longer accessible (no other file has
+    // an active row for it).
+    let r = consumer.begin_read().await.unwrap();
+    assert_eq!(r.get("p", "k").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn read_data_file_errors_on_missing_path() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let s = Steward::create(dir.path()).await.unwrap();
+    let result = s.read_data_file("partition_key=nope/missing.parquet");
+    assert!(result.is_err(), "missing file should error");
+    match result {
+        Err(StewardError::Io(_)) => {}
+        other => panic!("expected Io error, got {:?}", other.err()),
+    }
+}

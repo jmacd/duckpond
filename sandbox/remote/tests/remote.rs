@@ -178,3 +178,60 @@ async fn push_errors_on_missing_data_committed() {
         other => panic!("expected NoSuchCommit, got {:?}", other),
     }
 }
+
+// ---- library-api-coverage: push errors for non-DataCommitted record kinds ----
+
+#[tokio::test]
+async fn push_errors_on_failed_seq() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut steward = Steward::create(dir.path().join("pond")).await.unwrap();
+    {
+        let mut g = steward.begin_write().await.unwrap();
+        g.put("p", "k", b"v".to_vec()).unwrap();
+        let _ = g.abort("intentional").await.unwrap(); // -> Failed at seq 1
+    }
+    let mut remote = Remote::create(dir.path().join("remote"), steward.store_id())
+        .await
+        .unwrap();
+    match remote.push(&mut steward, 1).await {
+        Err(sandbox_remote::RemoteError::NoSuchCommit(seq)) => assert_eq!(seq, 1),
+        other => panic!("expected NoSuchCommit(1), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn push_errors_on_completed_no_op_seq() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut steward = Steward::create(dir.path().join("pond")).await.unwrap();
+    {
+        let g = steward.begin_write().await.unwrap();
+        let _ = g.commit().await.unwrap(); // empty -> Completed at seq 1
+    }
+    let mut remote = Remote::create(dir.path().join("remote"), steward.store_id())
+        .await
+        .unwrap();
+    match remote.push(&mut steward, 1).await {
+        Err(sandbox_remote::RemoteError::NoSuchCommit(seq)) => assert_eq!(seq, 1),
+        other => panic!("expected NoSuchCommit(1), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn push_errors_on_noop_compact_seq() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut steward = Steward::create(dir.path().join("pond")).await.unwrap();
+    let outcome = steward.compact(None).await.unwrap();
+    assert!(!outcome.had_data, "empty pond compact is a no-op");
+    let mut remote = Remote::create(dir.path().join("remote"), steward.store_id())
+        .await
+        .unwrap();
+    match remote.push(&mut steward, outcome.txn_seq).await {
+        Err(sandbox_remote::RemoteError::NoSuchCommit(seq)) => {
+            assert_eq!(seq, outcome.txn_seq)
+        }
+        other => panic!("expected NoSuchCommit, got {:?}", other),
+    }
+}

@@ -388,3 +388,48 @@ async fn actions_at_version_errors_on_missing_version() {
     let result = store.actions_at_version(99).await;
     assert!(result.is_err(), "missing version errors");
 }
+
+// ---- library-api-coverage gap-filling test ----
+
+#[tokio::test]
+async fn commit_actions_directly_writes_add_remove() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut store = Store::create(dir.path()).await.unwrap();
+    let initial_version = store.delta_version();
+
+    use std::collections::HashMap;
+    let mut partition_values = HashMap::new();
+    let _ = partition_values.insert("partition_key".to_string(), Some("p".to_string()));
+
+    let add = deltalake::kernel::Add {
+        path: "partition_key=p/test-001.parquet".to_string(),
+        partition_values,
+        size: 0,
+        modification_time: 0,
+        data_change: true,
+        ..Default::default()
+    };
+    let actions = vec![deltalake::kernel::Action::Add(add)];
+    let new_version = store
+        .commit_actions(
+            actions,
+            deltalake::protocol::DeltaOperation::Write {
+                mode: deltalake::protocol::SaveMode::Append,
+                partition_by: Some(vec!["partition_key".to_string()]),
+                predicate: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        new_version > initial_version,
+        "commit_actions advanced delta version"
+    );
+
+    let (adds, removes) = store.actions_at_version(new_version).await.unwrap();
+    assert_eq!(adds.len(), 1, "one add committed");
+    assert!(removes.is_empty(), "no removes");
+    assert_eq!(adds[0].path, "partition_key=p/test-001.parquet");
+}

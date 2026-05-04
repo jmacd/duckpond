@@ -577,3 +577,66 @@ async fn data_delta_version_not_recorded_for_noop_compact() {
         None
     );
 }
+
+// ---- library-api-coverage gap-filling tests ----
+
+#[tokio::test]
+async fn verify_local_detects_data_drift() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    {
+        let mut s = Steward::create(dir.path()).await.unwrap();
+        let mut g = s.begin_write().await.unwrap();
+        g.put("p", "k", b"v1".to_vec()).unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+    // Tamper with the underlying data store directly, bypassing
+    // the steward's lifecycle.  The steward's recorded checksums
+    // at txn_seq=1 capture the pre-tamper state.
+    {
+        let mut store = sandbox_store::Store::open(dir.path().join("data"))
+            .await
+            .unwrap();
+        let next_seq = store.last_txn_seq().await.unwrap() + 1;
+        let now = chrono::Utc::now().timestamp_micros();
+        store
+            .apply_batch(
+                next_seq,
+                now,
+                vec![sandbox_store::Op::Put {
+                    partition: "p".into(),
+                    key: "tamper".into(),
+                    value: b"injected".to_vec(),
+                }],
+            )
+            .await
+            .unwrap();
+    }
+    let s = Steward::open(dir.path()).await.unwrap();
+    let report = verify_local(&s).await.unwrap();
+    assert!(!report.ok, "drifted store fails verify_local");
+    assert!(
+        !report.mismatches.is_empty(),
+        "at least one partition mismatch reported"
+    );
+}
+
+#[tokio::test]
+async fn log_with_limit_returns_most_recent_n() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut s = Steward::create(dir.path()).await.unwrap();
+    for i in 0..5 {
+        let mut g = s.begin_write().await.unwrap();
+        g.put("p", &format!("k{}", i), b"v".to_vec()).unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+    let all = s.log(None).await.unwrap();
+    let limited = s.log(Some(3)).await.unwrap();
+    assert_eq!(limited.len(), 3, "limit honored");
+    assert!(all.len() > limited.len());
+    // The limited slice equals the last 3 records.
+    let last_three: Vec<&_> = all.iter().rev().take(3).rev().collect();
+    let limited_refs: Vec<&_> = limited.iter().collect();
+    assert_eq!(last_three, limited_refs);
+}
