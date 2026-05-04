@@ -612,6 +612,82 @@ impl Remote {
         Ok(metrics.num_deleted_rows as i64)
     }
 
+    /// Per-pond_id `restart_from_compact` for an EXISTING consumer
+    /// Steward.  Drops only the data and lifecycle records belonging
+    /// to `self.store_id` (this remote's pond identity) on the
+    /// consumer, then re-bootstraps from the oldest compact bundle
+    /// and catches up via `pull`.
+    ///
+    /// Mirror mode (`consumer.store_id == self.store_id`): drops all
+    /// the consumer's own data and lifecycle records.  Roughly
+    /// equivalent to `restart_from_compact(consumer_path)` on a
+    /// fresh dir, but operates in place on an open Steward.
+    ///
+    /// Cross-pond import (`consumer.store_id != self.store_id`):
+    /// drops only the foreign pond's data and records on the
+    /// consumer.  The consumer's own data and any other foreign
+    /// imports are unaffected.  Use this to recover one foreign
+    /// import without disturbing siblings.
+    ///
+    /// Lifecycle:
+    /// 1. Validate: at least one compact bundle on remote, else
+    ///    [`RemoteError::NoRestartPoint`].
+    /// 2. Pick the oldest compact bundle as the baseline.
+    /// 3. `consumer.drop_pond_data(self.store_id)` -- clears that
+    ///    pond's footprint on the consumer's data and control tables.
+    /// 4. Reset the consumer's `last_pulled_seq:<remote_path>`
+    ///    setting to 0 so subsequent pull starts from the baseline.
+    /// 5. Apply the baseline compact bundle via `apply_pulled_bundle`
+    ///    with empty removes.
+    /// 6. Set `last_pulled_seq:<remote_path>` to the baseline seq.
+    /// 7. Call `self.pull(consumer)` to catch up to latest.
+    pub async fn restart_pond_from_compact(&self, consumer: &mut Steward) -> Result<()> {
+        // 1./2. Find the baseline compact bundle.
+        let bundles = self.list_bundles().await?;
+        let baseline = bundles
+            .iter()
+            .filter(|b| matches!(b.commit_kind, CommitKind::Compact))
+            .min_by_key(|b| b.txn_seq)
+            .ok_or(RemoteError::NoRestartPoint)?
+            .clone();
+
+        // 3. Drop the foreign pond's footprint on the consumer.
+        consumer.drop_pond_data(self.store_id).await?;
+
+        // 4. Reset the per-remote pull-progress setting so the next
+        //    pull does not skip the baseline.  Setting to "0" puts us
+        //    "below" the baseline; the apply below records seq baseline
+        //    and the post-apply set restores it.
+        let setting_key = last_pulled_seq_key(&self.path);
+        consumer.config_set(&setting_key, "0").await?;
+
+        // 5. Apply the baseline compact bundle.
+        let (adds, _removes_ignored) = self.read_data_for_bundle(baseline.txn_seq).await?;
+        let partition_checksums = self.read_checksums_for_bundle(baseline.txn_seq).await?;
+        consumer
+            .apply_pulled_bundle(sandbox_steward::PulledBundle {
+                pond_id: self.store_id,
+                txn_seq: baseline.txn_seq,
+                commit_kind: baseline.commit_kind,
+                parent_seq: baseline.parent_seq,
+                adds,
+                removes: Vec::new(),
+                partition_checksums,
+            })
+            .await?;
+
+        // 6. Set last_pulled_seq so subsequent pull starts after the
+        //    baseline.
+        consumer
+            .config_set(&setting_key, &baseline.txn_seq.to_string())
+            .await?;
+
+        // 7. Catch up to latest.
+        let _report = self.pull(consumer).await?;
+
+        Ok(())
+    }
+
     async fn vacuum_zero_retention(&mut self) -> Result<usize> {
         let (new_table, metrics) = self
             .table

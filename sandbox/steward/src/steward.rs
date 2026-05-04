@@ -359,6 +359,31 @@ impl Steward {
         self.control.vacuum().await
     }
 
+    /// Drop all data and control records belonging to `pond_id` from
+    /// this consumer.  Used to wipe a foreign import's footprint
+    /// before re-bootstrapping it from a remote (the per-pond_id
+    /// counterpart to `Remote::restart_from_compact`).
+    ///
+    /// Mirror mode: passing `self.store_id` clears all of the
+    /// consumer's own data and lifecycle records.  This effectively
+    /// resets the consumer's identity-bound state -- callers usually
+    /// instead use `Remote::restart_from_compact(consumer_path)`
+    /// which wipes the entire pond directory and creates a fresh
+    /// Steward (cleaner for the bootstrap case).
+    ///
+    /// Cross-pond import: passing a foreign pond_id clears only
+    /// that pond's data and lifecycle records on the consumer.  The
+    /// consumer's own data and other foreign imports are unaffected.
+    ///
+    /// This call does NOT clear pond-instance settings (e.g.,
+    /// `last_pulled_seq:<remote>`).  The caller is responsible for
+    /// resetting those if needed.
+    pub async fn drop_pond_data(&mut self, pond_id: Uuid) -> Result<()> {
+        self.store.drop_pond_data(pond_id).await?;
+        self.control.drop_pond_records(pond_id).await?;
+        Ok(())
+    }
+
     /// Apply one bundle pulled from a remote, end-to-end.  See
     /// [`PulledBundle`] for the input fields.
     ///

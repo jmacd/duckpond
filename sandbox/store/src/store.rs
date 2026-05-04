@@ -698,6 +698,30 @@ impl Store {
         self.session_ctx = build_session_ctx(&self.table)?;
         Ok(metrics.files_deleted.len())
     }
+
+    /// Delete all rows belonging to `pond_id` from the data store.
+    /// Used by the per-pond_id `restart_from_compact` recovery
+    /// pathway when a foreign import has fallen behind the source's
+    /// retention or has otherwise diverged.
+    ///
+    /// Because `pond_id` is a Delta partition column, this delete
+    /// operates at file granularity: only files in
+    /// `pond_id=<pond_id>/...` partitions are removed.  Other
+    /// pond_ids' files are not touched.
+    ///
+    /// Returns the new Delta version after the delete commit.
+    pub async fn drop_pond_data(&mut self, pond_id: Uuid) -> Result<i64> {
+        let predicate = format!("{} = '{}'", schema::col::POND_ID, pond_id);
+        let (new_table, _metrics) = self
+            .table
+            .clone()
+            .delete()
+            .with_predicate(predicate)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(self.table.version().unwrap_or(0))
+    }
 }
 
 /// A file added by a Delta commit, as reported by

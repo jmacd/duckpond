@@ -365,6 +365,26 @@ impl ControlTable {
         Ok(metrics.files_deleted.len())
     }
 
+    /// Delete all records belonging to `pond_id` from the control
+    /// table.  Used by the per-pond_id `restart_from_compact`
+    /// recovery pathway when a foreign import is being re-bootstrapped.
+    ///
+    /// Setting records (per-pond instance config) are NOT deleted by
+    /// this call -- they are written under the local pond_id and live
+    /// in the pond's own seq space, untouched by foreign-pond drops.
+    pub async fn drop_pond_records(&mut self, pond_id: Uuid) -> Result<()> {
+        let predicate = format!("{} = '{}'", COL_POND_ID, pond_id);
+        let (new_table, _metrics) = self
+            .table
+            .clone()
+            .delete()
+            .with_predicate(predicate)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(())
+    }
+
     /// Append a single record to the control table.
     pub async fn write_record(&mut self, record: ControlRecord) -> Result<()> {
         let schema = arrow_schema();

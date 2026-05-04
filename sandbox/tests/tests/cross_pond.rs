@@ -205,6 +205,142 @@ async fn cross_pond_verify_against_remote_scopes_to_remote_pond_id() {
 }
 
 #[tokio::test]
+async fn cross_pond_restart_drops_only_one_imports_data() {
+    // A imports both B and C.  Then we restart A's import of B (via
+    // restart_pond_from_compact on B's remote).  A's own data and
+    // A's import of C must both be untouched.
+    init_logger();
+    let dir = TempDir::new().unwrap();
+
+    // Pond B writes multiple commits so compact has something to merge.
+    let mut pond_b = Steward::create_with_options(dir.path().join("pond_b"), opts())
+        .await
+        .unwrap();
+    let pond_b_id = pond_b.store_id();
+    let mut remote_b = Remote::create(dir.path().join("remote_b"), pond_b_id)
+        .await
+        .unwrap();
+    for i in 1..=3i64 {
+        let mut g = pond_b.begin_write().await.unwrap();
+        g.put(
+            "p",
+            &format!("k{}", i),
+            format!("from-B-{}", i).into_bytes(),
+        )
+        .unwrap();
+        let _ = g.commit().await.unwrap();
+        remote_b.push(&mut pond_b, i).await.unwrap();
+    }
+    let outcome = pond_b.compact(None).await.unwrap();
+    assert!(
+        outcome.had_data,
+        "compact merged multiple files (not a no-op)"
+    );
+    remote_b.push(&mut pond_b, outcome.txn_seq).await.unwrap();
+
+    // Pond C writes multiple commits, then compacts.
+    let mut pond_c = Steward::create_with_options(dir.path().join("pond_c"), opts())
+        .await
+        .unwrap();
+    let pond_c_id = pond_c.store_id();
+    let mut remote_c = Remote::create(dir.path().join("remote_c"), pond_c_id)
+        .await
+        .unwrap();
+    for i in 1..=3i64 {
+        let mut g = pond_c.begin_write().await.unwrap();
+        g.put(
+            "q",
+            &format!("k{}", i),
+            format!("from-C-{}", i).into_bytes(),
+        )
+        .unwrap();
+        let _ = g.commit().await.unwrap();
+        remote_c.push(&mut pond_c, i).await.unwrap();
+    }
+    let outcome_c = pond_c.compact(None).await.unwrap();
+    assert!(outcome_c.had_data);
+    remote_c.push(&mut pond_c, outcome_c.txn_seq).await.unwrap();
+
+    // Pond A imports both B and C, plus has its own data.
+    let mut pond_a = Steward::create_with_options(dir.path().join("pond_a"), opts())
+        .await
+        .unwrap();
+    let pond_a_id = pond_a.store_id();
+    {
+        let mut g = pond_a.begin_write().await.unwrap();
+        g.put("local", "x", b"A-only".to_vec()).unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+    remote_b.pull(&mut pond_a).await.unwrap();
+    remote_c.pull(&mut pond_a).await.unwrap();
+
+    // Verify all three present in A.
+    let store_a = Store::open(dir.path().join("pond_a").join("data"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store_a.get(pond_a_id, "local", "x").await.unwrap(),
+        Some(b"A-only".to_vec())
+    );
+    assert_eq!(
+        store_a.get(pond_b_id, "p", "k1").await.unwrap(),
+        Some(b"from-B-1".to_vec())
+    );
+    assert_eq!(
+        store_a.get(pond_c_id, "q", "k1").await.unwrap(),
+        Some(b"from-C-1".to_vec())
+    );
+
+    // Restart A's import of B.  Should drop only B's data and
+    // re-bootstrap from B's remote's compact baseline.
+    remote_b
+        .restart_pond_from_compact(&mut pond_a)
+        .await
+        .unwrap();
+
+    // Reopen the store to see post-delete state.
+    let store_a2 = Store::open(dir.path().join("pond_a").join("data"))
+        .await
+        .unwrap();
+
+    // A's own data: still there.
+    assert_eq!(
+        store_a2.get(pond_a_id, "local", "x").await.unwrap(),
+        Some(b"A-only".to_vec()),
+        "A's own data must not be touched by restart of B import"
+    );
+    // A's import of C: still there.
+    assert_eq!(
+        store_a2.get(pond_c_id, "q", "k1").await.unwrap(),
+        Some(b"from-C-1".to_vec()),
+        "A's import of C must not be touched by restart of B import"
+    );
+    // A's import of B: present again (re-bootstrapped from B's compact
+    // baseline + catch-up).
+    for i in 1..=3i64 {
+        assert_eq!(
+            store_a2
+                .get(pond_b_id, "p", &format!("k{}", i))
+                .await
+                .unwrap(),
+            Some(format!("from-B-{}", i).into_bytes()),
+            "B's data k{} restored from compact baseline + catch-up",
+            i
+        );
+    }
+
+    // verify_against_remote on B's remote should pass.
+    let report = sandbox_remote::verify_against_remote(&remote_b, &pond_a)
+        .await
+        .unwrap();
+    assert!(
+        report.ok,
+        "post-restart verify of B import is ok: {:?}",
+        report.mismatches
+    );
+}
+
+#[tokio::test]
 async fn imported_data_does_not_advance_local_seq_allocator() {
     init_logger();
     let dir = TempDir::new().unwrap();
