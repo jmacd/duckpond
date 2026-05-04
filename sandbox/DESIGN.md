@@ -375,7 +375,43 @@ Carrying forward from the design discussions:
 6. **Consumer mirror mode is the default.**  Independent mode is
    opt-in and demands the consumer compact its own copy.
 
-### 2.7 Mapping back to duckpond (after the prototype proves out)
+### 2.7 Bounded growth: the headline correctness property
+
+Every component must reach a bounded steady-state on disk under
+periodic maintenance.  No ever-increasing parquet counts, no
+ever-increasing data sizes, no commit log that grows without
+limit.  This is the most important property of the design.
+
+Three components, three maintenance loops:
+
+| Component | Compact | Vacuum | API |
+|---|---|---|---|
+| Source data store | merges small parquets into bigger ones | reclaims tombstoned parquet files | `Steward::compact()` + `Steward::vacuum()` |
+| Source control table | merges small parquets (audit history is unchanged) | reclaims tombstoned parquet files | `Steward::compact_control()` + `Steward::vacuum_control()` |
+| Remote | DELETE rows below retention horizon | reclaims tombstoned parquets | `Remote::maintain(MaintainOptions { vacuum_after: true, .. })` |
+
+Per-component invariants verified by tests in
+`sandbox-tests/tests/bounded.rs`:
+
+- The on-disk size of each component reaches steady state when its
+  maintenance loop runs periodically (late-cycle size at most 4-5x
+  the early-cycle size, typically much less).
+- Without maintenance, size grows roughly linearly with cycle count
+  (>4x ratio over 25 cycles).
+- The active parquet file count stays bounded under maintenance
+  (under 30 files for runs that would accumulate 60+ without).
+- An end-to-end long run with all maintenance loops applied keeps
+  source, remote, and consumer all bounded simultaneously, while
+  the consumer remains correct (every key returns its expected
+  value at every cycle).
+
+The ordering constraint between push and vacuum (§2.6 rule #4) is
+the critical correctness rule that makes this work: vacuuming a
+file before push has captured it would lose data.  Tests enforce
+"push immediately after every commit, vacuum only after pushes
+have captured the data."
+
+### 2.8 Mapping back to duckpond (after the prototype proves out)
 
 What flows back:
 
@@ -476,6 +512,7 @@ Store::compact(filter: Option<&str>) -> CompactMetrics  // delta optimize(Compac
 Store::data_files() -> Vec<String>            // current Delta version's files
 Store::actions_at_version(version) -> (Vec<AddPath>, Vec<RemovePath>)  // Add/Remove for one Delta commit
 Store::commit_actions(actions, op) -> i64                              // explicit Add/Remove commit (used by remote-pull)
+Store::vacuum() -> usize                                               // delta-rs vacuum on the data store
 Store::last_txn_seq() -> i64
 Store::delta_version() -> i64
 ```
@@ -511,6 +548,9 @@ Steward::begin_read() -> ReadGuard
 ReadGuard::get / list / partitions
 
 Steward::compact(filter: Option<&str>) -> CommitOutcome  // Compact lifecycle
+Steward::vacuum() -> usize                               // delta-rs vacuum on the data store
+Steward::compact_control() -> (u64, u64)                 // optimize on the control table
+Steward::vacuum_control() -> usize                       // delta-rs vacuum on the control table
 
 Steward::log(limit) -> Vec<ControlRecord>
 Steward::last_write_seq() / last_committed_seq()
@@ -572,7 +612,7 @@ The `sandbox-tests` crate is still a smoke-only placeholder.
 
 ### 3.3 Test inventory
 
-210 tests total across all sandbox crates.  All passing, all under
+218 tests total across all sandbox crates.  All passing, all under
 both checksum strategies where applicable.
 
 | Crate / file | Count | What it covers |
@@ -599,7 +639,8 @@ both checksum strategies where applicable.
 | remote/tests/verify.rs (integration) | 8 | synced consumer ok, empty remote + empty consumer vacuous ok, empty remote + nonempty consumer not ok, store_id mismatch error, tampered consumer detected on partition, INTEGRATION: divergence_boundary walk identifies seq where consumer last agreed, no agreeing bundle returns None, compute_live_checksums consistency with partition_checksums_at |
 | tests/src/lib.rs | 1 | smoke (placeholder) |
 | tests/tests/integration.rs | 18 | 5 base scenarios (roundtrip, two-consumer parity, long mixed sequence, multi-remote bug catch, full retention+restart loop) plus 13 systematic tests across 7 categories: scaling (5+ consumers, 30 writes), operation-order equivalence (push/pull timing), retention+restart cycles (3 rounds, restart twice, continue after restart), multi-remote (divergent retention with restart recovery, cross-remote pull idempotence), edge mixtures (abort/noop interleaved, source verify_local after every op), per-checkpoint invariants, and a 25-step scripted stress sequence with invariant checks at every meaningful checkpoint |
-| **Total** | **210** | |
+| tests/tests/bounded.rs | 8 | bounded-growth invariant for all three components: source data dir steady state under periodic compact+vacuum (with control test showing unbounded growth without it), parquet count bounded, remote dir steady state under periodic maintain (with the push-before-vacuum ordering rule enforced), end-to-end long run keeps source+remote+consumer all bounded while consumer remains correct, control table same property under compact_control+vacuum_control (with control test) |
+| **Total** | **218** | |
 
 ### 3.4 CI integration
 
