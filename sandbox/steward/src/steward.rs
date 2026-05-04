@@ -303,17 +303,24 @@ impl Steward {
     }
 
     /// Compute the current live partition_checksums for every
-    /// partition known to the data store, using the steward's
-    /// configured checksum strategy.  Used by `verify_local` and by
-    /// `verify_against_remote` (in sandbox-remote) for drift
+    /// partition belonging to `pond_id`, using the steward's
+    /// configured checksum strategy.
+    ///
+    /// In mirror mode, `pond_id == steward.store_id` and this is the
+    /// pond's own data.  In cross-pond import mode, `pond_id` may be
+    /// a foreign pond's id (whose data lives in the consumer's local
+    /// table tagged with the foreign pond_id).
+    ///
+    /// Used by `verify_local` (with the local store_id) and by
+    /// `verify_against_remote` (with the remote's store_id) for drift
     /// detection without needing a recorded snapshot.
-    pub async fn compute_live_checksums(&self) -> Result<PartitionChecksums> {
-        let partitions = self.store.partitions(self.store_id).await?;
+    pub async fn compute_live_checksums(&self, pond_id: Uuid) -> Result<PartitionChecksums> {
+        let partitions = self.store.partitions(pond_id).await?;
         let mut out = PartitionChecksums::new();
         for partition in partitions {
             let cs = self
                 .store
-                .compute_partition_checksum(self.store_id, &partition, &*self.checksum_strategy)
+                .compute_partition_checksum(pond_id, &partition, &*self.checksum_strategy)
                 .await?;
             let _ = out.insert(partition, cs);
         }

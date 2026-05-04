@@ -160,6 +160,51 @@ async fn cross_pond_import_basic_flow() {
 }
 
 #[tokio::test]
+async fn cross_pond_verify_against_remote_scopes_to_remote_pond_id() {
+    // After A4, verify_against_remote is scoped to remote.store_id().
+    // For a consumer that imports B, verify(remote_b, consumer)
+    // succeeds even though consumer.store_id != remote_b.store_id,
+    // because the verify compares the consumer's B-pond_id partitions
+    // against B's remote.
+    init_logger();
+    let dir = TempDir::new().unwrap();
+
+    // Pond B writes; pushes.
+    let mut pond_b = Steward::create_with_options(dir.path().join("pond_b"), opts())
+        .await
+        .unwrap();
+    let mut remote_b = Remote::create(dir.path().join("remote_b"), pond_b.store_id())
+        .await
+        .unwrap();
+    {
+        let mut g = pond_b.begin_write().await.unwrap();
+        g.put("foo", "x", b"v".to_vec()).unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+    remote_b.push(&mut pond_b, 1).await.unwrap();
+
+    // Pond A imports B.  A's own pond_id != B's.
+    let mut pond_a = Steward::create_with_options(dir.path().join("pond_a"), opts())
+        .await
+        .unwrap();
+    assert_ne!(pond_a.store_id(), pond_b.store_id());
+    remote_b.pull(&mut pond_a).await.unwrap();
+
+    // verify_against_remote(remote_b, &pond_a) should pass: A has B's
+    // data exactly as B's remote recorded it.
+    let report = sandbox_remote::verify_against_remote(&remote_b, &pond_a)
+        .await
+        .unwrap();
+    assert!(
+        report.ok,
+        "cross-pond verify ok: A has B's data matching B's remote, mismatches: {:?}",
+        report.mismatches
+    );
+    assert_eq!(report.remote_latest_seq, Some(1));
+    assert!(report.divergence_boundary.is_none());
+}
+
+#[tokio::test]
 async fn imported_data_does_not_advance_local_seq_allocator() {
     init_logger();
     let dir = TempDir::new().unwrap();

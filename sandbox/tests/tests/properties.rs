@@ -107,8 +107,14 @@ async fn consumer_matches_source_for_every_key(
     source: &Steward,
     consumer: &Steward,
 ) -> Result<(), String> {
-    let cs_source = source.compute_live_checksums().await.unwrap();
-    let cs_consumer = consumer.compute_live_checksums().await.unwrap();
+    let cs_source = source
+        .compute_live_checksums(source.store_id())
+        .await
+        .unwrap();
+    let cs_consumer = consumer
+        .compute_live_checksums(consumer.store_id())
+        .await
+        .unwrap();
     if cs_source != cs_consumer {
         return Err(format!(
             "live checksums differ: source = {:?}, consumer = {:?}",

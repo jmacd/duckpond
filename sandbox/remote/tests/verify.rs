@@ -124,7 +124,12 @@ async fn verify_returns_not_ok_when_empty_remote_but_consumer_has_data() {
 }
 
 #[tokio::test]
-async fn verify_errors_on_store_id_mismatch() {
+async fn verify_with_different_store_id_reports_missing_foreign_data() {
+    // Previously this test asserted StoreIdMismatch.  After A4 verify
+    // is scoped to the remote's pond_id; the consumer's own store_id
+    // is irrelevant.  When a consumer has NO data for the remote's
+    // pond_id, verify reports ok=false with mismatches recording
+    // every partition the remote knows about (consumer side empty).
     init_logger();
     let dir = TempDir::new().unwrap();
     let mut source = Steward::create_with_options(
@@ -147,20 +152,32 @@ async fn verify_errors_on_store_id_mismatch() {
     remote.push(&mut source, 1).await.unwrap();
 
     let other_id = Uuid::new_v4();
+    assert_ne!(other_id, source.store_id());
     let other = Steward::create_with_options(dir.path().join("other"), opts_with_id(other_id))
         .await
         .unwrap();
 
-    match verify_against_remote(&remote, &other).await {
-        Err(RemoteError::StoreIdMismatch {
-            remote: r,
-            steward: s,
-        }) => {
-            assert_eq!(r, source.store_id());
-            assert_eq!(s, other_id);
-        }
-        Ok(rep) => panic!("expected StoreIdMismatch, got Ok: {:?}", rep),
-        Err(other) => panic!("expected StoreIdMismatch, got {:?}", other),
+    let report = verify_against_remote(&remote, &other).await.unwrap();
+    assert!(
+        !report.ok,
+        "consumer has no data for foreign pond_id; remote does: not ok"
+    );
+    assert_eq!(report.remote_latest_seq, Some(1));
+    assert!(
+        !report.mismatches.is_empty(),
+        "remote-side partitions are reported as mismatches when consumer has none"
+    );
+    for m in &report.mismatches {
+        assert!(
+            m.consumer_live.is_none(),
+            "consumer side empty for partition {}",
+            m.partition
+        );
+        assert!(
+            m.remote_recorded.is_some(),
+            "remote side present for partition {}",
+            m.partition
+        );
     }
 }
 
@@ -320,7 +337,7 @@ async fn verify_consumer_with_compute_live_checksums_matches_verify_local_path()
         g.put("p2", "k2", b"v2".to_vec()).unwrap();
         let _ = g.commit().await.unwrap();
     }
-    let live = s.compute_live_checksums().await.unwrap();
+    let live = s.compute_live_checksums(s.store_id()).await.unwrap();
     let recorded = s.partition_checksums_at(1).await.unwrap().unwrap();
     assert_eq!(live, recorded, "live == recorded right after commit");
     let _ = Merkle::new().kind(); // silence import

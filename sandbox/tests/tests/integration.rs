@@ -140,13 +140,16 @@ async fn two_consumers_have_byte_equal_partition_checksums_after_pull() {
     let _ = remote.pull(&mut c1).await.unwrap();
     let _ = remote.pull(&mut c2).await.unwrap();
 
-    let cs1 = c1.compute_live_checksums().await.unwrap();
-    let cs2 = c2.compute_live_checksums().await.unwrap();
+    let cs1 = c1.compute_live_checksums(c1.store_id()).await.unwrap();
+    let cs2 = c2.compute_live_checksums(c2.store_id()).await.unwrap();
     assert!(
         checksums_equal(&cs1, &cs2),
         "two consumers reach byte-equal partition checksums",
     );
-    let cs_source = source.compute_live_checksums().await.unwrap();
+    let cs_source = source
+        .compute_live_checksums(source.store_id())
+        .await
+        .unwrap();
     assert!(
         checksums_equal(&cs1, &cs_source),
         "consumers also match source's live checksums",
@@ -182,8 +185,14 @@ async fn long_mixed_write_compact_sequence_propagates_correctly() {
     push_all_pending(&mut source, &mut remote).await;
     let _ = remote.pull(&mut consumer).await.unwrap();
 
-    let cs_consumer = consumer.compute_live_checksums().await.unwrap();
-    let cs_source = source.compute_live_checksums().await.unwrap();
+    let cs_consumer = consumer
+        .compute_live_checksums(consumer.store_id())
+        .await
+        .unwrap();
+    let cs_source = source
+        .compute_live_checksums(source.store_id())
+        .await
+        .unwrap();
     assert!(
         checksums_equal(&cs_consumer, &cs_source),
         "consumer mirrors source after long mixed sequence",
@@ -231,8 +240,8 @@ async fn multi_remote_push_keeps_both_in_sync() {
     let _ = remote_a.pull(&mut c_a).await.unwrap();
     let _ = remote_b.pull(&mut c_b).await.unwrap();
 
-    let cs_a = c_a.compute_live_checksums().await.unwrap();
-    let cs_b = c_b.compute_live_checksums().await.unwrap();
+    let cs_a = c_a.compute_live_checksums(c_a.store_id()).await.unwrap();
+    let cs_b = c_b.compute_live_checksums(c_b.store_id()).await.unwrap();
     assert!(
         checksums_equal(&cs_a, &cs_b),
         "consumers from two remotes have equal live checksums",
@@ -320,8 +329,14 @@ async fn full_retention_and_restart_recovery_loop() {
         v.mismatches
     );
 
-    let cs_source = source.compute_live_checksums().await.unwrap();
-    let cs_consumer = consumer.compute_live_checksums().await.unwrap();
+    let cs_source = source
+        .compute_live_checksums(source.store_id())
+        .await
+        .unwrap();
+    let cs_consumer = consumer
+        .compute_live_checksums(consumer.store_id())
+        .await
+        .unwrap();
     assert!(
         checksums_equal(&cs_consumer, &cs_source),
         "consumer's live checksums match source's after full recovery loop",
@@ -383,9 +398,12 @@ async fn five_consumers_pull_and_have_equal_checksums() {
         consumers.push(c);
     }
 
-    let cs_source = source.compute_live_checksums().await.unwrap();
+    let cs_source = source
+        .compute_live_checksums(source.store_id())
+        .await
+        .unwrap();
     for (i, c) in consumers.iter().enumerate() {
-        let cs = c.compute_live_checksums().await.unwrap();
+        let cs = c.compute_live_checksums(c.store_id()).await.unwrap();
         assert!(
             checksums_equal(&cs, &cs_source),
             "consumer {} matches source",
@@ -498,8 +516,8 @@ async fn push_per_write_vs_push_batched_yield_same_consumer_state() {
     let _ = rem_a.pull(&mut c_a).await.unwrap();
     let _ = rem_b.pull(&mut c_b).await.unwrap();
 
-    let cs_a = c_a.compute_live_checksums().await.unwrap();
-    let cs_b = c_b.compute_live_checksums().await.unwrap();
+    let cs_a = c_a.compute_live_checksums(c_a.store_id()).await.unwrap();
+    let cs_b = c_b.compute_live_checksums(c_b.store_id()).await.unwrap();
     assert!(
         checksums_equal(&cs_a, &cs_b),
         "push timing is irrelevant to final consumer state"
@@ -536,8 +554,14 @@ async fn consumer_pulls_each_vs_pulls_batched_yield_same_state() {
     // c_batch pulls only at the end.
     let _ = remote.pull(&mut c_batch).await.unwrap();
 
-    let cs_each = c_each.compute_live_checksums().await.unwrap();
-    let cs_batch = c_batch.compute_live_checksums().await.unwrap();
+    let cs_each = c_each
+        .compute_live_checksums(c_each.store_id())
+        .await
+        .unwrap();
+    let cs_batch = c_batch
+        .compute_live_checksums(c_batch.store_id())
+        .await
+        .unwrap();
     assert!(
         checksums_equal(&cs_each, &cs_batch),
         "pull timing is irrelevant to final consumer state",
@@ -600,8 +624,14 @@ async fn multiple_retention_rounds_with_pulls_between_each() {
     }
 
     // Final state: consumer matches source.
-    let cs_consumer = consumer.compute_live_checksums().await.unwrap();
-    let cs_source = source.compute_live_checksums().await.unwrap();
+    let cs_consumer = consumer
+        .compute_live_checksums(consumer.store_id())
+        .await
+        .unwrap();
+    let cs_source = source
+        .compute_live_checksums(source.store_id())
+        .await
+        .unwrap();
     assert!(checksums_equal(&cs_consumer, &cs_source));
 }
 
@@ -629,13 +659,19 @@ async fn restart_twice_is_idempotent_in_final_state() {
     let consumer_path = dir.path().join("consumer");
     // First restart from a non-existent path.
     let consumer = remote.restart_from_compact(&consumer_path).await.unwrap();
-    let cs_first = consumer.compute_live_checksums().await.unwrap();
+    let cs_first = consumer
+        .compute_live_checksums(consumer.store_id())
+        .await
+        .unwrap();
     drop(consumer);
 
     // Second restart from the same path.  Should wipe + re-bootstrap;
     // final state must be byte-identical (modulo timestamps).
     let consumer = remote.restart_from_compact(&consumer_path).await.unwrap();
-    let cs_second = consumer.compute_live_checksums().await.unwrap();
+    let cs_second = consumer
+        .compute_live_checksums(consumer.store_id())
+        .await
+        .unwrap();
 
     assert!(
         checksums_equal(&cs_first, &cs_second),
@@ -750,9 +786,12 @@ async fn divergent_retention_per_remote_both_consumers_correct() {
             .unwrap();
     let _ = rem_b.pull(&mut c_b).await.unwrap();
 
-    let cs_a = c_a.compute_live_checksums().await.unwrap();
-    let cs_b = c_b.compute_live_checksums().await.unwrap();
-    let cs_source = source.compute_live_checksums().await.unwrap();
+    let cs_a = c_a.compute_live_checksums(c_a.store_id()).await.unwrap();
+    let cs_b = c_b.compute_live_checksums(c_b.store_id()).await.unwrap();
+    let cs_source = source
+        .compute_live_checksums(source.store_id())
+        .await
+        .unwrap();
     assert!(
         checksums_equal(&cs_a, &cs_source),
         "consumer A (post-restart from rem_a) matches source"

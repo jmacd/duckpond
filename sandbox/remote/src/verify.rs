@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use sandbox_steward::{PartitionChecksums, Steward};
 use sandbox_store::checksum::Checksum;
 
-use crate::error::{RemoteError, Result};
+use crate::error::Result;
 use crate::remote::Remote;
 
 /// Result of [`verify_against_remote`].
@@ -53,15 +53,24 @@ pub struct RemoteVerifyMismatch {
     pub consumer_live: Option<Checksum>,
 }
 
-/// Compare `steward`'s CURRENT data against the latest recorded
-/// checksums on `remote`.
+/// Compare `steward`'s CURRENT data for the pond owned by `remote`
+/// (i.e., partitions in the consumer's local table whose pond_id
+/// equals `remote.store_id()`) against the latest recorded checksums
+/// on `remote`.
 ///
-/// The Steward's `store_id` must match the remote's; otherwise
-/// [`RemoteError::StoreIdMismatch`].
+/// Supports both mirror and cross-pond import modes:
+/// - **Mirror**: `remote.store_id == steward.store_id`.  Verifies the
+///   consumer's own data matches its own remote.
+/// - **Cross-pond import**: `remote.store_id != steward.store_id`.
+///   Verifies the foreign pond's mirrored data on the consumer
+///   matches the foreign pond's remote.
+///
+/// In both cases the partition set examined on the consumer side is
+/// `consumer.compute_live_checksums(remote.store_id())`.
 ///
 /// If the remote has no bundles, returns a report with
-/// `remote_latest_seq = None` and `ok` true iff the consumer's data
-/// store is also empty (nothing to verify against).
+/// `remote_latest_seq = None` and `ok` true iff the consumer has no
+/// data for `remote.store_id()` either (nothing to verify against).
 ///
 /// If a mismatch is found at the remote's latest seq, walks back
 /// through manifest history (descending seq) to identify the most
@@ -72,14 +81,11 @@ pub async fn verify_against_remote(
     remote: &Remote,
     steward: &Steward,
 ) -> Result<RemoteVerifyReport> {
-    if remote.store_id() != steward.store_id() {
-        return Err(RemoteError::StoreIdMismatch {
-            remote: remote.store_id(),
-            steward: steward.store_id(),
-        });
-    }
+    // Note: no equality check on store_ids.  Verify is scoped to the
+    // remote's pond_id; the steward's own pond_id is irrelevant
+    // (cross-pond consumer holds many pond_ids of data).
 
-    let live: PartitionChecksums = steward.compute_live_checksums().await?;
+    let live: PartitionChecksums = steward.compute_live_checksums(remote.store_id()).await?;
 
     let bundles = remote.list_bundles().await?;
     let Some(latest) = bundles.iter().max_by_key(|b| b.txn_seq) else {
