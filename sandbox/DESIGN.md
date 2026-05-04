@@ -572,7 +572,7 @@ The `sandbox-tests` crate is still a smoke-only placeholder.
 
 ### 3.3 Test inventory
 
-197 tests total across all sandbox crates.  All passing, all under
+210 tests total across all sandbox crates.  All passing, all under
 both checksum strategies where applicable.
 
 | Crate / file | Count | What it covers |
@@ -598,8 +598,8 @@ both checksum strategies where applicable.
 | remote/tests/restart.rs (integration) | 7 | refuses NoRestartPoint, bootstraps fresh consumer, wipes same-family pond, refuses different-family (StoreIdMismatch), refuses non-pond directory, INTEGRATION: BehindRetention -> restart recovery, idempotent re-pull after restart |
 | remote/tests/verify.rs (integration) | 8 | synced consumer ok, empty remote + empty consumer vacuous ok, empty remote + nonempty consumer not ok, store_id mismatch error, tampered consumer detected on partition, INTEGRATION: divergence_boundary walk identifies seq where consumer last agreed, no agreeing bundle returns None, compute_live_checksums consistency with partition_checksums_at |
 | tests/src/lib.rs | 1 | smoke (placeholder) |
-| tests/tests/integration.rs | 5 | full roundtrip across multiple push/pull cycles, two consumers reach byte-equal checksums, long mixed write+compact sequence propagates, multi-remote push keeps both in sync (caught a real bug: push wasn't updating last_pushed_seq), full retention + BehindRetention + restart_from_compact + verify_against_remote recovery loop |
-| **Total** | **197** | |
+| tests/tests/integration.rs | 18 | 5 base scenarios (roundtrip, two-consumer parity, long mixed sequence, multi-remote bug catch, full retention+restart loop) plus 13 systematic tests across 7 categories: scaling (5+ consumers, 30 writes), operation-order equivalence (push/pull timing), retention+restart cycles (3 rounds, restart twice, continue after restart), multi-remote (divergent retention with restart recovery, cross-remote pull idempotence), edge mixtures (abort/noop interleaved, source verify_local after every op), per-checkpoint invariants, and a 25-step scripted stress sequence with invariant checks at every meaningful checkpoint |
+| **Total** | **210** | |
 
 ### 3.4 CI integration
 
@@ -637,7 +637,7 @@ sandbox entirely.
 | restart-from-compact | done | Remote::restart_from_compact (safety wipe + apply oldest compact baseline with empty Removes + catch-up pull) + NoRestartPoint/RestartPathNotPond errors + 7 tests including BehindRetention->recovery flow |
 | verify-cmd | done | verify_against_remote (compare consumer's live checksums to remote.latest_seq's recorded checksums; on mismatch walk back to find divergence_boundary) + Steward::compute_live_checksums + 8 tests |
 | library-api-coverage | done | audit + 8 gap-filling tests (verify_local drift detection, log limit, apply_pulled_bundle removes path direct test, read_data_file error path, Store::commit_actions direct test, push errors for Failed/Completed/no-op-compact seqs).  Skipped (documented): compact_failure_records_failed (delta-rs cannot inject optimize failure) |
-| integration-tests | done | 5 cross-component scenarios in sandbox-tests crate: roundtrip cycles, two-consumer parity, long mixed write+compact sequence, multi-remote, full retention+BehindRetention+restart+verify recovery loop.  Caught and fixed a real bug: push was not recording last_pushed_seq |
+| integration-tests | done | 18 cross-component scenarios in sandbox-tests crate covering: 5 base scenarios; scaling (multi-consumer, many-write); operation-order equivalence (push timing, pull timing); retention/restart cycles; multi-remote with divergent retention; edge mixtures (abort/noop interleaved); per-checkpoint invariant assertions; 25-step deterministic stress.  Caught a real bug: push was not recording last_pushed_seq |
 | property-tests | pending | depends on remote-pull, remote-retention (UNBLOCKED) |
 | benchmarks | pending | depends on checksum-trait (UNBLOCKED, can run any time) |
 | sandbox-design-doc | pending | depends on integration-tests (UNBLOCKED), property-tests, benchmarks |
