@@ -374,3 +374,142 @@ async fn end_to_end_bounded_long_run_keeps_all_components_bounded() {
     bounded("remote dir", &remote_sizes);
     bounded("consumer data dir", &consumer_sizes);
 }
+
+// ============================================================================
+// Control-table bounded growth (the third leg).
+//
+// Every begin_write/commit/abort/compact/push/config_set adds one
+// or more records to the steward's control table.  Without periodic
+// compact_control + vacuum_control, the control table grows
+// unboundedly even if the data store is well-maintained.
+// ============================================================================
+
+#[tokio::test]
+async fn control_table_size_steady_state_under_periodic_compact_and_vacuum() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut source = Steward::create_with_options(dir.path().join("source"), opts())
+        .await
+        .unwrap();
+    let control_dir = dir.path().join("source").join("control");
+
+    // Each cycle: 5 writes plus a config_set bump.  Don't touch the
+    // data store's compact/vacuum so the control table is the only
+    // moving part.
+    const CYCLES: usize = 20;
+    let mut sizes_per_cycle: Vec<u64> = Vec::with_capacity(CYCLES);
+
+    for cycle in 0..CYCLES {
+        for k in 0..5 {
+            let mut g = source.begin_write().await.unwrap();
+            g.put("p", &format!("k{}_{}", cycle, k), b"v".to_vec())
+                .unwrap();
+            let _ = g.commit().await.unwrap();
+        }
+        // Bump a setting too (latest-write-wins; old setting records
+        // are pure history once superseded).
+        source
+            .config_set("counter", &cycle.to_string())
+            .await
+            .unwrap();
+
+        // Compact + vacuum the control table every 3 cycles.
+        if cycle % 3 == 2 {
+            let _ = source.compact_control().await.unwrap();
+            let _ = source.vacuum_control().await.unwrap();
+        }
+        sizes_per_cycle.push(dir_size(&control_dir));
+    }
+
+    let early_max = *sizes_per_cycle[..5].iter().max().unwrap();
+    let late_max = *sizes_per_cycle[15..].iter().max().unwrap();
+    // The control table grows because each commit writes a
+    // DataCommitted record; compact merges parquets, vacuum
+    // reclaims tombstoned files.  delta-rs's compact has minimum-
+    // size heuristics that may leave some growth visible for tiny
+    // test data, so we use a generous 4x bound -- matches the
+    // data-dir test.
+    assert!(
+        late_max <= early_max.saturating_mul(4),
+        "control table did not reach steady state: early_max = {} bytes, \
+         late_max = {} bytes, ratio = {:.2}.  Sizes per cycle: {:?}",
+        early_max,
+        late_max,
+        late_max as f64 / early_max as f64,
+        sizes_per_cycle,
+    );
+}
+
+#[tokio::test]
+async fn control_table_grows_significantly_without_compact_and_vacuum_control() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut source = Steward::create_with_options(dir.path().join("source"), opts())
+        .await
+        .unwrap();
+    let control_dir = dir.path().join("source").join("control");
+
+    const CYCLES: usize = 25;
+    let mut sizes_per_cycle: Vec<u64> = Vec::with_capacity(CYCLES);
+    for cycle in 0..CYCLES {
+        for k in 0..5 {
+            let mut g = source.begin_write().await.unwrap();
+            g.put("p", &format!("k{}_{}", cycle, k), b"v".to_vec())
+                .unwrap();
+            let _ = g.commit().await.unwrap();
+        }
+        source
+            .config_set("counter", &cycle.to_string())
+            .await
+            .unwrap();
+        sizes_per_cycle.push(dir_size(&control_dir));
+    }
+
+    let early_max = *sizes_per_cycle[..5].iter().max().unwrap();
+    let late_max = *sizes_per_cycle[20..].iter().max().unwrap();
+    assert!(
+        late_max > early_max.saturating_mul(4),
+        "expected significant unbounded control-table growth without \
+         compact_control + vacuum_control, but late_max = {} only \
+         {:.2}x larger than early_max = {}",
+        late_max,
+        late_max as f64 / early_max as f64,
+        early_max,
+    );
+}
+
+#[tokio::test]
+async fn control_table_parquet_count_bounded_under_periodic_maintenance() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut source = Steward::create_with_options(dir.path().join("source"), opts())
+        .await
+        .unwrap();
+    let control_dir = dir.path().join("source").join("control");
+
+    const CYCLES: usize = 12;
+    let mut counts: Vec<usize> = Vec::with_capacity(CYCLES);
+
+    for cycle in 0..CYCLES {
+        for k in 0..3 {
+            let mut g = source.begin_write().await.unwrap();
+            g.put("p", &format!("k{}_{}", cycle, k), b"v".to_vec())
+                .unwrap();
+            let _ = g.commit().await.unwrap();
+        }
+        if cycle % 2 == 1 {
+            let _ = source.compact_control().await.unwrap();
+            let _ = source.vacuum_control().await.unwrap();
+        }
+        counts.push(parquet_count(&control_dir));
+    }
+
+    let late_max = *counts[8..].iter().max().unwrap();
+    // 12 cycles * 3 commits + a few infrastructure records.  Without
+    // maintenance, ~36 parquets would accumulate.  With it, capped.
+    assert!(
+        late_max < 30,
+        "control table parquet count not bounded: counts = {:?}",
+        counts
+    );
+}

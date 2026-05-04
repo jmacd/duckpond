@@ -288,6 +288,24 @@ impl Steward {
         Ok(self.store.vacuum().await?)
     }
 
+    /// Compact the steward's CONTROL table (separate from the data
+    /// store).  Every begin_write/commit/abort/compact/push/config_set
+    /// adds a record, so the control table itself grows without
+    /// bound unless periodically maintained.  This wraps delta-rs
+    /// optimize on the control table; logical content is unchanged
+    /// (the audit log is append-only).  Returns
+    /// (num_files_added, num_files_removed).
+    pub async fn compact_control(&mut self) -> Result<(u64, u64)> {
+        self.control.compact().await
+    }
+
+    /// Reclaim disk on the control table by running delta-rs vacuum.
+    /// Symmetric counterpart to `vacuum()` for the data store.
+    /// Returns the count of files reclaimed.
+    pub async fn vacuum_control(&mut self) -> Result<usize> {
+        self.control.vacuum().await
+    }
+
     /// Apply one bundle pulled from a remote, end-to-end:
     ///
     /// 1. Idempotence: if a `DataCommitted` record already exists at

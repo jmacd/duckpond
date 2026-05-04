@@ -312,6 +312,42 @@ impl ControlTable {
         &self.path
     }
 
+    /// Run delta-rs `optimize(Compact)` on the control table to merge
+    /// small parquets into larger ones.  Logical content is unchanged
+    /// (control records are append-only audit history).  Returns
+    /// `(num_files_added, num_files_removed)` so callers can detect
+    /// no-ops.
+    pub async fn compact(&mut self) -> Result<(u64, u64)> {
+        use deltalake::operations::optimize::OptimizeType;
+        let (new_table, metrics) = self
+            .table
+            .clone()
+            .optimize()
+            .with_type(OptimizeType::Compact)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok((metrics.num_files_added, metrics.num_files_removed))
+    }
+
+    /// Run delta-rs vacuum on the control table to physically reclaim
+    /// parquets that are no longer referenced by any active commit
+    /// (e.g., the small parquets tombstoned by `compact`).  Uses
+    /// retention=0 / enforce=false, matching the prototype defaults
+    /// used elsewhere.  Returns the count of files reclaimed.
+    pub async fn vacuum(&mut self) -> Result<usize> {
+        let (new_table, metrics) = self
+            .table
+            .clone()
+            .vacuum()
+            .with_retention_period(chrono::Duration::seconds(0))
+            .with_enforce_retention_duration(false)
+            .await?;
+        self.table = new_table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(metrics.files_deleted.len())
+    }
+
     /// Append a single record to the control table.
     pub async fn write_record(&mut self, record: ControlRecord) -> Result<()> {
         let schema = arrow_schema();
