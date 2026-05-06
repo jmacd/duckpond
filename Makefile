@@ -28,12 +28,6 @@ help:
 	@echo "    make fmt            Check formatting"
 	@echo "    make check          All of: fmt, clippy, test"
 	@echo ""
-	@echo "  Sandbox prototype (separate workspace at sandbox/)"
-	@echo "    make sandbox-check  All of: sandbox-fmt, sandbox-clippy, sandbox-test"
-	@echo "    make sandbox-test   Run sandbox unit tests"
-	@echo "    make sandbox-fmt    Check sandbox formatting"
-	@echo "    make sandbox-clippy Run sandbox clippy lints"
-	@echo ""
 	@echo "  Vendor (one-time, requires network)"
 	@echo "    make vendor         Download JS deps (DuckDB-WASM, Plot, D3)"
 	@echo ""
@@ -72,23 +66,6 @@ fmt:
 	cargo fmt --check
 
 check: fmt clippy test
-
-# ── Sandbox prototype (separate workspace under sandbox/) ────────────────
-
-.PHONY: sandbox sandbox-test sandbox-clippy sandbox-fmt sandbox-check
-
-sandbox: sandbox-check
-
-sandbox-test:
-	cd sandbox && cargo test --workspace
-
-sandbox-clippy:
-	cd sandbox && cargo clippy --workspace --all-features -- -D warnings
-
-sandbox-fmt:
-	cd sandbox && cargo fmt --check
-
-sandbox-check: sandbox-fmt sandbox-clippy sandbox-test
 
 # ── Vendor dependencies ──────────────────────────────────────────────────
 
