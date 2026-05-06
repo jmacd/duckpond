@@ -19,7 +19,7 @@ use crate::config::SiteConfig;
 use crate::layouts::{self, LayoutContext};
 use crate::markdown::{preprocess_shortcodes, render_markdown};
 use crate::routes::{self, ContentContext, ContentPage};
-use crate::shortcodes::{self, ExportContext, PondStatus, ShortcodeContext};
+use crate::shortcodes::{self, ExportContext, Health, PondStatus, ShortcodeContext, classify};
 use log::{debug, info, warn};
 use provider::{ExecutionContext, FactoryContext, register_executable_factory};
 use serde::Deserialize;
@@ -585,10 +585,20 @@ async fn run_status_grid_queries(
     };
 
     let fs = provider_ctx.filesystem();
-    let provider = provider::Provider::new(Arc::new(fs)).with_root(root.clone());
-    let matcher = provider::UrlPatternMatcher::new(provider);
+    // Format-provider URLs (jsonlogs://) only need a root-bound
+    // Provider; builtin schemes (series://) require a full
+    // ProviderContext.  We build both: `journal_provider` for the
+    // jsonlogs:// per-unit journal lookup, and `perf_provider` for
+    // the series:// per-pond perf-series lookup when configured.
+    let journal_provider = provider::Provider::new(Arc::new(fs.clone())).with_root(root.clone());
+    let journal_matcher = provider::UrlPatternMatcher::new(journal_provider);
+    let perf_provider =
+        provider::Provider::with_context(Arc::new(fs), Arc::new(provider_ctx.clone()))
+            .with_root(root.clone());
     let ctx = &provider_ctx.datafusion_session;
     let tail_lines = grid_cfg.tail_lines;
+    let perf_pattern = grid_cfg.perf_pattern.as_deref();
+    let now_us = chrono::Utc::now().timestamp_micros();
 
     let mut statuses: Vec<PondStatus> = Vec::new();
 
@@ -602,7 +612,7 @@ async fn run_status_grid_queries(
         let path_str = np.path().to_string_lossy().to_string();
         let file_url = format!("{}://{}", scheme, path_str);
 
-        let table_provider = match matcher
+        let table_provider = match journal_matcher
             .provider()
             .create_table_provider(&file_url, ctx)
             .await
@@ -639,7 +649,7 @@ async fn run_status_grid_queries(
             continue;
         }
 
-        let status = match query_pond_status(ctx, &table_name, &unit, tail_lines).await {
+        let mut status = match query_pond_status(ctx, &table_name, &unit, tail_lines).await {
             Ok(s) => s,
             Err(e) => {
                 warn!("status_grid: query for '{}' failed: {}", unit, e);
@@ -650,11 +660,134 @@ async fn run_status_grid_queries(
         };
 
         let _ = ctx.deregister_table(datafusion::sql::TableReference::bare(table_name.as_str()));
+
+        // Enrich with perf-series data when configured.  Failures are
+        // logged at warn level and leave the perf fields as None,
+        // which in turn keeps `health` at Unknown -- the page still
+        // renders, the card just lacks a colour.
+        if let Some(pattern) = perf_pattern
+            && let Some(pond_name) = extract_pond_name(&unit)
+        {
+            let perf_url = pattern.replace("{pond}", pond_name);
+            populate_perf_fields(&perf_provider, ctx, &perf_url, &mut status).await;
+        }
+
+        status.health = classify(
+            now_us,
+            status.last_ok_us,
+            status.last_err_us,
+            status.timer_active,
+            status.timer_interval_s,
+        );
+
         statuses.push(status);
     }
 
     statuses.sort_by(|a, b| a.unit.cmp(&b.unit));
     Ok(Some(statuses))
+}
+
+/// Extract the bare pond name (the `{pond}` placeholder substitution)
+/// from a systemd unit basename.  Strips the systemd template prefixes
+/// `user-pond-selfmon@` and `user-pond@`, then the `.service` suffix.
+/// Returns `None` for any unit that doesn't match the expected shape
+/// -- the caller leaves `Health::Unknown` rather than guessing.
+fn extract_pond_name(unit: &str) -> Option<&str> {
+    let stripped = unit
+        .strip_prefix("user-pond-selfmon@")
+        .or_else(|| unit.strip_prefix("user-pond@"))
+        .or_else(|| unit.strip_prefix("pond-selfmon@"))
+        .or_else(|| unit.strip_prefix("pond@"))?;
+    Some(stripped.strip_suffix(".service").unwrap_or(stripped))
+}
+
+/// Look up the per-pond perf series and fill in `timer_active`,
+/// `last_run_seconds_ago`, `timer_interval_s` on `status`.  All
+/// failures are warned and swallowed; missing perf data is not a
+/// build error.  Registers the table under a per-unit name so
+/// concurrent invocations don't collide.
+async fn populate_perf_fields(
+    perf_provider: &provider::Provider,
+    ctx: &datafusion::prelude::SessionContext,
+    perf_url: &str,
+    status: &mut PondStatus,
+) {
+    use datafusion::arrow::array::{Array, Int64Array};
+
+    let table_provider = match perf_provider.create_table_provider(perf_url, ctx).await {
+        Ok(tp) => tp,
+        Err(e) => {
+            warn!(
+                "status_grid: perf provider for '{}' failed: {}",
+                perf_url, e
+            );
+            return;
+        }
+    };
+
+    let perf_table = format!(
+        "status_grid_perf_{}",
+        status.unit.replace(
+            [
+                '@', '.', '-', ':', '/', '\\', ' ', '+', '=', ',', ';', '(', ')',
+            ],
+            "_"
+        )
+    );
+    if let Err(e) = ctx.register_table(
+        datafusion::sql::TableReference::bare(perf_table.as_str()),
+        table_provider,
+    ) {
+        warn!(
+            "status_grid: perf register_table('{}') failed: {}",
+            perf_table, e
+        );
+        return;
+    }
+
+    let sql = format!(
+        "SELECT \"timer.active\" AS timer_active, \
+                \"last_run.seconds_ago\" AS last_run_seconds_ago, \
+                \"timer.interval_s\" AS timer_interval_s \
+         FROM {} \
+         ORDER BY timestamp DESC LIMIT 1",
+        perf_table
+    );
+    let result = async {
+        let df = ctx.sql(&sql).await?;
+        df.collect().await
+    }
+    .await;
+
+    let _ = ctx.deregister_table(datafusion::sql::TableReference::bare(perf_table.as_str()));
+
+    let batches = match result {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("status_grid: perf query for '{}' failed: {}", perf_url, e);
+            return;
+        }
+    };
+
+    let get_i64 = |col: usize| -> Option<i64> {
+        batches.iter().find_map(|b| {
+            if b.num_rows() == 0 {
+                return None;
+            }
+            let arr = b.column(col).as_any().downcast_ref::<Int64Array>()?;
+            if arr.is_null(0) {
+                None
+            } else {
+                Some(arr.value(0))
+            }
+        })
+    };
+
+    if let Some(v) = get_i64(0) {
+        status.timer_active = Some(v != 0);
+    }
+    status.last_run_seconds_ago = get_i64(1);
+    status.timer_interval_s = get_i64(2).filter(|&v| v > 0);
 }
 
 /// Run the per-unit DataFusion queries for the status grid.
@@ -784,6 +917,10 @@ async fn query_pond_status(
         last_err_msg,
         peak_rss_bytes,
         tail_messages,
+        timer_active: None,
+        last_run_seconds_ago: None,
+        timer_interval_s: None,
+        health: Health::Unknown,
     })
 }
 
@@ -1129,12 +1266,14 @@ fn write_shared_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
     static CHART_JS: &str = include_str!("../assets/chart.js");
     static OVERLAY_JS: &str = include_str!("../assets/overlay.js");
     static LOG_VIEWER_JS: &str = include_str!("../assets/log-viewer.js");
+    static RELATIVE_TIME_JS: &str = include_str!("../assets/relative-time.js");
 
     for (name, content) in [
         ("style.css", STYLE_CSS),
         ("chart.js", CHART_JS),
         ("overlay.js", OVERLAY_JS),
         ("log-viewer.js", LOG_VIEWER_JS),
+        ("relative-time.js", RELATIVE_TIME_JS),
     ] {
         let path = output_dir.join(name);
         std::fs::write(&path, content.as_bytes())
@@ -1763,6 +1902,53 @@ impl std::error::Error for GenerateError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_pond_name_user_pond() {
+        assert_eq!(
+            extract_pond_name("user-pond@water-staging.service"),
+            Some("water-staging")
+        );
+    }
+
+    #[test]
+    fn extract_pond_name_user_pond_selfmon() {
+        assert_eq!(
+            extract_pond_name("user-pond-selfmon@watershop-selfmon.service"),
+            Some("watershop-selfmon")
+        );
+    }
+
+    #[test]
+    fn extract_pond_name_pond_without_user_prefix() {
+        // System-scope variants (no `user-` prefix) should also work
+        // for forward compatibility with non-user systemd contexts.
+        assert_eq!(
+            extract_pond_name("pond@noyo-prod.service"),
+            Some("noyo-prod")
+        );
+        assert_eq!(
+            extract_pond_name("pond-selfmon@something.service"),
+            Some("something")
+        );
+    }
+
+    #[test]
+    fn extract_pond_name_unknown_returns_none() {
+        assert_eq!(extract_pond_name("caddy.service"), None);
+        assert_eq!(extract_pond_name("init.scope"), None);
+        assert_eq!(extract_pond_name(""), None);
+    }
+
+    #[test]
+    fn extract_pond_name_handles_missing_service_suffix() {
+        // Some emitters may strip the `.service` suffix already; the
+        // helper should still return the bare pond name.
+        assert_eq!(
+            extract_pond_name("user-pond@water-staging"),
+            Some("water-staging")
+        );
+    }
 
     #[test]
     fn test_split_frontmatter() {

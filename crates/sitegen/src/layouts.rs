@@ -210,6 +210,7 @@ fn data_layout(ctx: &LayoutContext) -> Markup {
                 (build_footer(ctx.footer))
                 script src=(format!("{}chart.js", ctx.root_base_url)) type="module" {}
                 script src=(format!("{}overlay.js", ctx.root_base_url)) type="module" {}
+                script src=(format!("{}relative-time.js", ctx.root_base_url)) type="module" {}
             }
         }
     }

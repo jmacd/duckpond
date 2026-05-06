@@ -119,6 +119,12 @@ pub struct SiteConfig {
 /// `tail_lines` MESSAGE values).  Results are rendered as static HTML
 /// cards by the `pond_status_grid` shortcode; refresh requires
 /// re-running sitegen.
+///
+/// When `perf_pattern` is set, sitegen ALSO queries each unit's perf
+/// series for the latest `(timer.active, last_run.seconds_ago,
+/// timer.interval_s)` tuple.  Those values feed the per-card health
+/// classification (green/yellow/red) and Timer/Period/Last-run
+/// metadata lines in the rendered HTML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusGridConfig {
@@ -138,6 +144,22 @@ pub struct StatusGridConfig {
     /// Number of MESSAGE lines to render in the tail block per card.
     #[serde(default = "default_tail_lines")]
     pub tail_lines: usize,
+
+    /// Optional URL pattern (with `{pond}` placeholder) resolving to
+    /// the per-pond perf series produced by `measure-pond.sh` +
+    /// `sql-derived-series`.  When set, sitegen reads the latest
+    /// `(timer.active, last_run.seconds_ago, timer.interval_s)` row
+    /// per unit and uses it for health classification.  When the
+    /// lookup fails for an individual unit (missing series, unparsable
+    /// data, etc.) the card stays at `Health::Unknown` rather than
+    /// failing the build.
+    ///
+    /// `{pond}` is the unit's bare pond name -- the basename with
+    /// `user-pond@` / `user-pond-selfmon@` prefix and `.service`
+    /// suffix stripped.  Example value:
+    /// `"series:///derived/p-{pond}"`.
+    #[serde(default)]
+    pub perf_pattern: Option<String>,
 }
 
 fn default_tail_lines() -> usize {
