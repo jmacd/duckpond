@@ -45,6 +45,9 @@ chrono = { workspace = true }
 tlogfs = { workspace = true }
 steward = { workspace = true }
 provider = { workspace = true }
+sync-remote = { workspace = true }
+sync-store = { workspace = true }
+sync-steward = { workspace = true }
 tinyfs = { workspace = true }
 utilities = { workspace = true }
 clap = { workspace = true }
