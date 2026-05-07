@@ -2,7 +2,17 @@
 
 ## Status
 
-Plan agreed; phased execution to begin with D1.
+Plan agreed; phased execution begun.
+
+| Phase | Status | Commit |
+|---|---|---|
+| Plan | done | `c2b8cc68` (this doc) |
+| D1: relocate sandbox crates | done | `bd965792` |
+| D2: prep (sync-* deps wired) | done | `6c75e025` |
+| D2: substantive refactor | **pending** | — |
+| D3-D6 | pending | — |
+
+Active branch: `jmacd/sandbox_sync` (formerly `jmacd/50`).
 
 ## Background
 
@@ -279,6 +289,105 @@ phases.  Each phase leaves the system buildable and tested.
 **Risk**: control-table schema migration on existing local ponds
 (should be acceptable — test suite uses fresh ponds; user
 deployments treated as fresh).
+
+#### D2 implementation notes (decisions made during initial work)
+
+These decisions emerged from the interactive design session that
+produced this document but were not initially captured in the steps
+above.  Recorded here so a fresh session can resume D2 cleanly.
+
+**Lean schema decision**: drop the rich captures from the duckpond
+ControlTable schema entirely.  Specifically, do NOT carry these
+columns over into the sync_steward-backed wrapper:
+
+- `cli_args`, `environment` (CLI invocation context)
+- `factory_modes` column-denormalization (modes go in
+  `config_set("factory_mode:<name>", ...)` per-pond_id)
+- `factory_node_id`, `foreign_part_id`, `foreign_pond_id`,
+  `watermark_txn_seq` (import state — gone in D5)
+- `parent_txn_seq`, `execution_seq`, `factory_name`,
+  `config_path` (post-commit task tracking)
+
+The sync_steward lean schema (`pond_id`, `txn_seq`, `txn_id`,
+`record_kind`, `commit_kind`, `parent_seq`, `duration_ms`,
+`ts_micros`, `metadata_json`) is sufficient.  Anything that
+genuinely needs to travel goes in `metadata_json`; reads that
+required dedicated columns get rewritten or dropped.
+
+**Display drops**: `cmd/control.rs` and `cmd/show.rs` currently
+display a "Command:" line showing `cli_args`.  Drop those displays
+during D2 (or replace with "(not captured)" placeholder) since the
+data is no longer in the schema.
+
+**Drop entirely**: import-state methods on `ControlTable`.  D5's
+cross-pond model uses row-level pond_id on tlogfs OplogEntry rows
+and does not need per-import control-table records.
+
+**Pond identity** stays in the control table during D2 as a
+sync_steward `config_set` entry under
+`BOOTSTRAP_POND_ID = Uuid::nil()` (the convention the sandbox
+prototype already uses).  D5 moves it to the bootstrap row in the
+data Delta table.
+
+**File-by-file checklist** for D2 substantive work:
+
+- `crates/steward/src/control_table.rs`: rewrite as a thin wrapper
+  around `sync_steward::ControlTable` (~1639 lines → likely ~400
+  lines).  Drop `TransactionRecord` struct, drop the rich Arrow
+  schema, drop import-state methods.
+- `crates/steward/src/ship.rs`: simplify all `record_*` call sites
+  (~10 sites).  Methods like `record_begin/data_committed/failed/
+  completed` no longer need the rich `PondTxnMetadata`; just
+  txn_seq + duration_ms + (for committed) data_fs_version.
+- `crates/steward/src/guard.rs`: simplify `record_failed`,
+  `record_data_committed`, `record_completed` call sites (~5).
+- `crates/cmd/src/commands/control.rs`: drop `cli_args` display,
+  drop the per-transaction `Command:` line.
+- `crates/cmd/src/commands/show.rs`: drop `cli_args` display.
+- `crates/cmd/src/commands/run.rs`: update `factory_modes` /
+  `pond_metadata` accessors.
+- `crates/cmd/src/commands/init.rs`: update `set_factory_mode` /
+  `get_factory_mode` calls.
+- `crates/cmd/src/commands/replicate_test_simple.rs`: update
+  `get_pond_metadata`, `get_last_write_sequence` calls.
+- `crates/cmd/src/commands/control_test.rs`: many test calls;
+  update or rewrite.
+- `crates/steward/tests/test_post_commit_factory.rs`: update.
+
+**Method name mapping** (duckpond → sync_steward):
+
+| duckpond ControlTable | sync_steward equivalent |
+|---|---|
+| `record_begin(txn_meta, …)` | `write_record(ControlRecord { kind: Begin, pond_id: local, … })` |
+| `record_data_committed(…, data_fs_version, …)` | `write_record(ControlRecord { kind: DataCommitted, …, metadata_json: data_delta_version=… })` |
+| `record_failed(…, error, …)` | `write_record(ControlRecord { kind: Failed, metadata_json: reason=… })` |
+| `record_completed(…)` | `write_record(ControlRecord { kind: Completed, … })` |
+| `record_post_commit_pending` | `write_record(ControlRecord { kind: PostPushPending, … })` (note rename) |
+| `record_post_commit_started` | `write_record(ControlRecord { kind: PostPushStarted, … })` |
+| `record_post_commit_completed` | `write_record(ControlRecord { kind: PostPushCompleted, … })` |
+| `record_post_commit_failed` | `write_record(ControlRecord { kind: PostPushFailed, … })` |
+| `set_factory_mode(name, mode)` | `config_set(local_pond_id, "factory_mode:" + name, mode)` |
+| `get_factory_mode(name)` | `config_get(local_pond_id, "factory_mode:" + name)` |
+| `factory_modes()` (HashMap) | iterate `config_list(local_pond_id)` filtering keys with `"factory_mode:"` prefix |
+| `set_setting(k, v)` | `config_set(local_pond_id, k, v)` |
+| `get_setting(k)` | `config_get(local_pond_id, k)` |
+| `settings()` | `config_list(local_pond_id)` |
+| `get_last_write_sequence()` | `last_txn_seq(local_pond_id)` |
+| `find_incomplete_transactions()` | `incomplete_transactions(local_pond_id)` |
+| `record_import_*` | DROP (D5 handles imports differently) |
+
+**Acceptance criteria** for D2 complete:
+- `crates/steward/src/control_table.rs` is a thin wrapper around
+  `sync_steward::ControlTable`.
+- The full duckpond test suite passes (1192+ tests at start of
+  D2; expect a slightly different count after rewrites).
+- `cargo fmt`, `cargo clippy --workspace --all-features -- -D warnings`
+  clean.
+- `pond log` and `pond control` commands still work; the
+  "Command: <args>" display is gone or shows a placeholder.
+- New per-pond_id behavior is reachable via `last_txn_seq(pond_id)`
+  and similar — but no callers need it yet (cross-pond import
+  arrives in D5).
 
 ### D3: Add `verify` and `restart` operations
 
