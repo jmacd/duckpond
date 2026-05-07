@@ -22,6 +22,19 @@
   --green: #059669;
   --green-wash: #ecfdf5;
 
+  /* Health palette for the pond status grid (selfmon).  Reuses the
+     existing green so a healthy card matches the rest of the theme;
+     yellow/red are added here as semantic aliases.  Sites can
+     override these via the `theme:` map in site.yaml. */
+  --status-green: var(--green);
+  --status-green-wash: var(--green-wash);
+  --status-yellow: #d97706;
+  --status-yellow-wash: #fef3c7;
+  --status-red: #dc2626;
+  --status-red-wash: #fee2e2;
+  --status-unknown: #94a3b8;
+  --status-unknown-wash: #f1f5f9;
+
   /* Sidebar nav buttons */
   --nav-btn: rgba(50, 250, 200, 0.965);
   --nav-btn-hover: rgba(224, 224, 224, 0.965);
@@ -955,9 +968,40 @@ h3:hover .anchor {
 
 .pond-status-card {
   border: 1px solid var(--border, #ccc);
+  border-left: 4px solid var(--status-unknown);
   border-radius: 6px;
   padding: 0.75rem 1rem;
   background: var(--card-bg, #fafafa);
+}
+
+.pond-status-card.health-green {
+  border-left-color: var(--status-green);
+  background: var(--status-green-wash);
+}
+
+.pond-status-card.health-yellow {
+  border-left-color: var(--status-yellow);
+  background: var(--status-yellow-wash);
+}
+
+.pond-status-card.health-red {
+  border-left-color: var(--status-red);
+  background: var(--status-red-wash);
+}
+
+.pond-status-card.health-unknown {
+  border-left-color: var(--status-unknown);
+  background: var(--status-unknown-wash);
+}
+
+.pond-status-meta time {
+  font-variant-numeric: tabular-nums;
+}
+
+.pond-status-meta .rel-time {
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+  margin-left: 0.4rem;
 }
 
 .pond-status-unit {
