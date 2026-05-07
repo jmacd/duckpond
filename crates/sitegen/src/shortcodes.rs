@@ -79,14 +79,17 @@ pub struct PondStatus {
     pub unit: String,
     /// Most-recent journal entry seen for this unit (microseconds).
     pub last_seen_us: Option<i64>,
-    /// Most-recent "Started ..." MESSAGE (microseconds + text).
-    pub last_started_us: Option<i64>,
-    pub last_started_msg: Option<String>,
-    /// Most-recent exit-style MESSAGE -- one of "Deactivated...",
-    /// "Failed...", "Stopped...".  Used to surface the last run's
-    /// outcome in the card.
-    pub last_exit_us: Option<i64>,
-    pub last_exit_msg: Option<String>,
+    /// Most-recent successful run (microseconds + the pond
+    /// `Run summary ... outcome=ok` MESSAGE that anchored it).  These
+    /// are emitted by pond on every run, so they're authoritative for
+    /// per-unit journals (unlike systemd's "Started" lines, which live
+    /// under `_SYSTEMD_UNIT=init.scope`).
+    pub last_ok_us: Option<i64>,
+    pub last_ok_msg: Option<String>,
+    /// Most-recent failed run (microseconds + the pond
+    /// `Run summary ... outcome=err` MESSAGE).
+    pub last_err_us: Option<i64>,
+    pub last_err_msg: Option<String>,
     /// Peak resident-set size of the most recent run, in bytes,
     /// parsed from "Peak memory usage: NN.NN MB" lines.  Reported in
     /// bytes for consistency with semconv's `By` unit.
@@ -94,6 +97,110 @@ pub struct PondStatus {
     /// Tail of the most-recent N MESSAGE lines (oldest -> newest)
     /// regardless of run boundary.
     pub tail_messages: Vec<String>,
+    /// Latest value of `timer.active` from the per-pond perf series
+    /// (1/0).  `Some(false)` flips the card to red because no future
+    /// runs are scheduled.  `None` when the perf-series lookup
+    /// failed or `StatusGridConfig.perf_pattern` is unset.
+    pub timer_active: Option<bool>,
+    /// Latest value of `last_run.seconds_ago` from the perf series.
+    /// `-1` means "no parseable exit timestamp" (never run, currently
+    /// running, or systemctl parse failure) -- not a reliable
+    /// "currently running" signal on its own; the renderer surfaces
+    /// it as a "Last run" row but the health classifier ignores it.
+    pub last_run_seconds_ago: Option<i64>,
+    /// Latest value of `timer.interval_s` from the perf series
+    /// (`OnUnitActiveSec` in seconds).  Drives the staleness threshold
+    /// (`2 * timer_interval_s`) for the yellow/green boundary.  `None`
+    /// or `Some(0)` keeps the card at `Health::Unknown` for staleness.
+    pub timer_interval_s: Option<i64>,
+    /// Computed health classification (green/yellow/red/unknown).
+    /// Assigned by `factory::run_status_grid_queries` from `classify`.
+    pub health: Health,
+}
+
+/// Three-color health classification for a pond status card, computed
+/// at sitegen render time from the journal- and perf-series-derived
+/// fields on `PondStatus`.
+///
+/// Renders as a `health-{green,yellow,red,unknown}` CSS class on the
+/// card section so the page stylesheet can colour the left border /
+/// background per state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    /// Last successful run is recent (within `2 * timer_interval_s`)
+    /// and there is no fresher failure.
+    Green,
+    /// Last successful run is older than `2 * timer_interval_s` --
+    /// the unit is overdue.
+    Yellow,
+    /// Most recent terminal event was a failure
+    /// (`last_err_us > last_ok_us` or no `last_ok_us` at all), or the
+    /// timer is inactive.
+    Red,
+    /// Insufficient data to classify -- typically means
+    /// `perf_pattern` is unset, the perf-series lookup failed, or
+    /// the unit has no `timer.interval_s` value yet.
+    Unknown,
+}
+
+impl Health {
+    /// CSS class suffix for HTML rendering -- `health-green` etc.
+    pub fn css_class(self) -> &'static str {
+        match self {
+            Health::Green => "health-green",
+            Health::Yellow => "health-yellow",
+            Health::Red => "health-red",
+            Health::Unknown => "health-unknown",
+        }
+    }
+}
+
+/// Compute the health classification for a single pond status card.
+///
+/// Pure function over the inputs so it is easy to unit-test.  Inputs
+/// mirror the corresponding fields on `PondStatus`; `now_us` is the
+/// page-build wall clock in microseconds since epoch (used for the
+/// staleness comparison).
+///
+/// Rules, in evaluation order:
+///   1. `Red` when `timer_active == Some(false)` (the timer unit is
+///      stopped/disabled, so no further runs are scheduled).
+///   2. `Red` when `last_err_us` is Some and either `last_ok_us` is
+///      None or `last_err_us > last_ok_us` (most recent terminal
+///      event was a failure).
+///   3. `Yellow` when we know the interval and `last_ok_us` is older
+///      than `2 * timer_interval_s` ("overdue").
+///   4. `Green` when we have a `last_ok_us` and a positive
+///      `timer_interval_s` and the staleness check above passed.
+///   5. `Unknown` otherwise (e.g. perf data missing, no successful
+///      run yet, interval not configured).
+pub fn classify(
+    now_us: i64,
+    last_ok_us: Option<i64>,
+    last_err_us: Option<i64>,
+    timer_active: Option<bool>,
+    timer_interval_s: Option<i64>,
+) -> Health {
+    if matches!(timer_active, Some(false)) {
+        return Health::Red;
+    }
+    if let Some(err_us) = last_err_us
+        && last_ok_us.is_none_or(|ok_us| err_us > ok_us)
+    {
+        return Health::Red;
+    }
+    let Some(interval_s) = timer_interval_s.filter(|&s| s > 0) else {
+        return Health::Unknown;
+    };
+    let Some(ok_us) = last_ok_us else {
+        return Health::Unknown;
+    };
+    let stale_threshold_us = interval_s.saturating_mul(2).saturating_mul(1_000_000);
+    if now_us.saturating_sub(ok_us) > stale_threshold_us {
+        Health::Yellow
+    } else {
+        Health::Green
+    }
 }
 
 /// Context passed to shortcodes during rendering.
@@ -469,20 +576,55 @@ fn render_log_viewer(datafiles: &[ExportedFile]) -> String {
     )
 }
 
-/// Format microseconds-since-epoch as a compact UTC ISO-8601 string.
-/// Returns "—" for None.  Uses chrono only to avoid depending on
-/// time-formatting elsewhere in sitegen.
-fn fmt_micros_utc(us: Option<i64>) -> String {
+/// Render microseconds-since-epoch as a `<time>` element carrying both
+/// a UTC ISO-8601 fallback string and the raw microseconds in a
+/// `data-utc-us` attribute.  The companion `relative-time.js` rewrites
+/// these elements client-side to the visitor's local time and a
+/// "X minutes ago" relative label that ticks every 30 s without a
+/// page reload.  When `us` is `None` we render an em-dash rather than
+/// an empty `<time>` so the script has nothing to convert.
+fn fmt_time_marker(us: Option<i64>) -> String {
     match us {
         Some(us) => {
             let secs = us / 1_000_000;
             let nanos = ((us % 1_000_000) * 1_000) as u32;
-            chrono::DateTime::from_timestamp(secs, nanos)
+            let iso = chrono::DateTime::from_timestamp(secs, nanos)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_default();
+            let display = chrono::DateTime::from_timestamp(secs, nanos)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                .unwrap_or_else(|| "—".to_string())
+                .unwrap_or_else(|| "—".to_string());
+            format!(
+                "<time datetime=\"{}\" data-utc-us=\"{}\">{}</time>",
+                html_escape(&iso),
+                us,
+                html_escape(&display),
+            )
         }
         None => "—".to_string(),
     }
+}
+
+/// Format an integer second count as a coarse human-readable duration
+/// for the static "Period" row on each card (the `relative-time.js`
+/// script doesn't touch this -- the value isn't a wall-clock instant).
+fn fmt_seconds_coarse(s: i64) -> String {
+    if s <= 0 {
+        return "—".to_string();
+    }
+    if s < 90 {
+        return format!("{} s", s);
+    }
+    let mins = (s + 30) / 60;
+    if mins < 90 {
+        return format!("{} min", mins);
+    }
+    let hours = (s + 1800) / 3600;
+    if hours < 48 {
+        return format!("{} h", hours);
+    }
+    let days = (s + 43200) / 86400;
+    format!("{} d", days)
 }
 
 /// Humanize a byte count with IEC units (KiB / MiB / GiB ...) for
@@ -537,7 +679,10 @@ fn render_pond_status_grid(statuses: Option<&[PondStatus]>, generated_at: &str) 
 
     out.push_str("<div class=\"pond-status-grid\">");
     for s in statuses {
-        out.push_str("<section class=\"pond-status-card\">");
+        out.push_str(&format!(
+            "<section class=\"pond-status-card {}\">",
+            s.health.css_class(),
+        ));
         out.push_str(&format!(
             "<h3 class=\"pond-status-unit\">{}</h3>",
             html_escape(&s.unit),
@@ -545,32 +690,47 @@ fn render_pond_status_grid(statuses: Option<&[PondStatus]>, generated_at: &str) 
 
         out.push_str("<dl class=\"pond-status-meta\">");
         out.push_str(&format!(
+            "<dt>Last ok</dt><dd>{}{}</dd>",
+            fmt_time_marker(s.last_ok_us),
+            if let Some(msg) = &s.last_ok_msg {
+                format!(
+                    "<br><span class=\"pond-status-msg\">{}</span>",
+                    html_escape(&sanitize_inline(msg))
+                )
+            } else {
+                String::new()
+            },
+        ));
+        out.push_str(&format!(
+            "<dt>Last err</dt><dd>{}{}</dd>",
+            fmt_time_marker(s.last_err_us),
+            if let Some(msg) = &s.last_err_msg {
+                format!(
+                    "<br><span class=\"pond-status-msg\">{}</span>",
+                    html_escape(&sanitize_inline(msg))
+                )
+            } else {
+                String::new()
+            },
+        ));
+        out.push_str(&format!(
+            "<dt>Timer</dt><dd>{}</dd>",
+            match s.timer_active {
+                Some(true) => "active",
+                Some(false) => "inactive",
+                None => "—",
+            },
+        ));
+        out.push_str(&format!(
+            "<dt>Period</dt><dd>{}</dd>",
+            html_escape(&match s.timer_interval_s {
+                Some(s) => fmt_seconds_coarse(s),
+                None => "—".to_string(),
+            }),
+        ));
+        out.push_str(&format!(
             "<dt>Last seen</dt><dd>{}</dd>",
-            html_escape(&fmt_micros_utc(s.last_seen_us)),
-        ));
-        out.push_str(&format!(
-            "<dt>Last started</dt><dd>{}{}</dd>",
-            html_escape(&fmt_micros_utc(s.last_started_us)),
-            if let Some(msg) = &s.last_started_msg {
-                format!(
-                    "<br><span class=\"pond-status-msg\">{}</span>",
-                    html_escape(msg)
-                )
-            } else {
-                String::new()
-            },
-        ));
-        out.push_str(&format!(
-            "<dt>Last exit</dt><dd>{}{}</dd>",
-            html_escape(&fmt_micros_utc(s.last_exit_us)),
-            if let Some(msg) = &s.last_exit_msg {
-                format!(
-                    "<br><span class=\"pond-status-msg\">{}</span>",
-                    html_escape(msg)
-                )
-            } else {
-                String::new()
-            },
+            fmt_time_marker(s.last_seen_us),
         ));
         out.push_str(&format!(
             "<dt>Peak RSS</dt><dd>{}</dd>",
@@ -586,7 +746,12 @@ fn render_pond_status_grid(statuses: Option<&[PondStatus]>, generated_at: &str) 
         } else {
             out.push_str("<pre class=\"pond-status-tail\">");
             for msg in &s.tail_messages {
-                out.push_str(&html_escape(msg));
+                // Collapse each multi-line MESSAGE to a single line so
+                // the surrounding markdown renderer doesn't see blank
+                // lines inside the <pre> block and end the HTML block
+                // there (which would wrap subsequent log text in
+                // unwanted <p> tags).
+                out.push_str(&html_escape(&sanitize_inline(msg)));
                 out.push('\n');
             }
             out.push_str("</pre>");
@@ -984,6 +1149,20 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Collapse a possibly multi-line log MESSAGE to a single trimmed line.
+///
+/// Pond's stderr error messages can span multiple lines (e.g.
+/// `Error: Transaction aborted:\nExecution failed for factory ...`).
+/// When such a string is emitted into a `<pre>` block inside a
+/// markdown-rendered document, the embedded blank line(s) cause
+/// CommonMark's HTML-block parser to terminate the block early and
+/// wrap subsequent text in `<p>` tags, producing visibly broken
+/// markup.  Replacing every run of whitespace (including embedded
+/// newlines) with a single space keeps each tail entry on one line.
+fn sanitize_inline(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Format an ISO 8601 date string (e.g. "2024-06-15") for display.
@@ -1890,5 +2069,177 @@ mod tests {
         assert_eq!(format_date("1995-06-15"), "June 15, 1995");
         assert_eq!(format_date("2024-01-01"), "January 1, 2024");
         assert_eq!(format_date("bad-date"), "bad-date");
+    }
+
+    // ── Health classification ──────────────────────────────────────
+
+    /// 5 minutes worth of microseconds, used as a reference "now".
+    const NOW_US: i64 = 1_700_000_000_000_000;
+    const ONE_MIN_US: i64 = 60 * 1_000_000;
+
+    #[test]
+    fn classify_green_when_recent_ok_and_no_err() {
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 5 * ONE_MIN_US), // last_ok 5min ago
+            None,
+            Some(true),
+            Some(600), // 10min interval -> 20min stale threshold
+        );
+        assert_eq!(h, Health::Green);
+    }
+
+    #[test]
+    fn classify_yellow_when_ok_older_than_two_intervals() {
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 25 * ONE_MIN_US), // last_ok 25min ago
+            None,
+            Some(true),
+            Some(600), // 20min threshold
+        );
+        assert_eq!(h, Health::Yellow);
+    }
+
+    #[test]
+    fn classify_red_when_err_more_recent_than_ok() {
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 5 * ONE_MIN_US),
+            Some(NOW_US - 1 * ONE_MIN_US),
+            Some(true),
+            Some(600),
+        );
+        assert_eq!(h, Health::Red);
+    }
+
+    #[test]
+    fn classify_red_when_err_only() {
+        let h = classify(
+            NOW_US,
+            None,
+            Some(NOW_US - 1 * ONE_MIN_US),
+            Some(true),
+            Some(600),
+        );
+        assert_eq!(h, Health::Red);
+    }
+
+    #[test]
+    fn classify_red_when_timer_inactive() {
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 1 * ONE_MIN_US),
+            None,
+            Some(false),
+            Some(600),
+        );
+        assert_eq!(h, Health::Red);
+    }
+
+    #[test]
+    fn classify_unknown_without_interval() {
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 1 * ONE_MIN_US),
+            None,
+            Some(true),
+            None,
+        );
+        assert_eq!(h, Health::Unknown);
+    }
+
+    #[test]
+    fn classify_unknown_with_zero_interval() {
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 1 * ONE_MIN_US),
+            None,
+            Some(true),
+            Some(0),
+        );
+        assert_eq!(h, Health::Unknown);
+    }
+
+    #[test]
+    fn classify_unknown_without_last_ok() {
+        let h = classify(NOW_US, None, None, Some(true), Some(600));
+        assert_eq!(h, Health::Unknown);
+    }
+
+    #[test]
+    fn classify_red_takes_priority_over_yellow_for_inactive_timer() {
+        // Even a stale ok with no err should still be Red when the
+        // timer is stopped -- inactive trumps overdue.
+        let h = classify(
+            NOW_US,
+            Some(NOW_US - 60 * ONE_MIN_US),
+            None,
+            Some(false),
+            Some(600),
+        );
+        assert_eq!(h, Health::Red);
+    }
+
+    // ── render_pond_status_grid output ─────────────────────────────
+
+    fn status_for(unit: &str, health: Health) -> PondStatus {
+        PondStatus {
+            unit: unit.to_string(),
+            last_seen_us: Some(NOW_US),
+            last_ok_us: Some(NOW_US - 30 * 1_000_000),
+            last_ok_msg: Some("Run summary outcome=ok".to_string()),
+            last_err_us: None,
+            last_err_msg: None,
+            peak_rss_bytes: Some(123 * 1024 * 1024),
+            tail_messages: vec!["hello".to_string()],
+            timer_active: Some(true),
+            last_run_seconds_ago: Some(30),
+            timer_interval_s: Some(60),
+            health,
+        }
+    }
+
+    #[test]
+    fn render_emits_health_class_per_card() {
+        let statuses = vec![
+            status_for("a.service", Health::Green),
+            status_for("b.service", Health::Yellow),
+            status_for("c.service", Health::Red),
+            status_for("d.service", Health::Unknown),
+        ];
+        let html = render_pond_status_grid(Some(&statuses), "2026-05-04 22:00:00 UTC");
+        assert!(html.contains("pond-status-card health-green"), "{}", html);
+        assert!(html.contains("pond-status-card health-yellow"), "{}", html);
+        assert!(html.contains("pond-status-card health-red"), "{}", html);
+        assert!(html.contains("pond-status-card health-unknown"), "{}", html);
+    }
+
+    #[test]
+    fn render_emits_time_markers_with_data_utc_us() {
+        let statuses = vec![status_for("a.service", Health::Green)];
+        let html = render_pond_status_grid(Some(&statuses), "2026-05-04 22:00:00 UTC");
+        assert!(
+            html.contains("data-utc-us=\""),
+            "expected <time data-utc-us> markers, got: {}",
+            html
+        );
+        // The em-dash render path is used for None timestamps; ensure
+        // we did not emit empty <time> elements.
+        assert!(!html.contains("<time></time>"), "{}", html);
+    }
+
+    #[test]
+    fn render_emits_period_and_timer_rows() {
+        let statuses = vec![status_for("a.service", Health::Green)];
+        let html = render_pond_status_grid(Some(&statuses), "2026-05-04 22:00:00 UTC");
+        assert!(html.contains("<dt>Timer</dt>"), "{}", html);
+        assert!(html.contains("<dt>Period</dt>"), "{}", html);
+    }
+
+    #[test]
+    fn render_returns_empty_when_statuses_none() {
+        let html = render_pond_status_grid(None, "2026-05-04 22:00:00 UTC");
+        assert!(html.is_empty());
     }
 }
