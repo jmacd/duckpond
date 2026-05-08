@@ -72,6 +72,7 @@ arrow-cast = { workspace = true }
 arrow-csv = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+billing = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }

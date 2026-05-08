@@ -11,10 +11,11 @@ members = [
 "crates/remote",
 "crates/sitegen",
 "crates/gitpond",
+"crates/billing",
 ]
 
 [workspace.package]
-version = "0.50.0"
+version = "0.51.0"
 edition = "2024"
 authors = ["DuckPond Contributors"]
 homepage = "https://github.com/duckpond"
@@ -35,6 +36,7 @@ provider = { path = "crates/provider" }
 utilities = { path = "crates/utilities" }
 remote = { path = "crates/remote" }
 sitegen = { path = "crates/sitegen" }
+billing = { path = "crates/billing" }
 
 anyhow = "1.0.82"
 arrow = { version = "57", default-features = false, features = ["prettyprint", "ipc"] }
