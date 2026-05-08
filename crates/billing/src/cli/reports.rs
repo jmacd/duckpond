@@ -92,7 +92,7 @@ pub async fn who_owes(wd: &WD, as_of: Option<&str>, min: &str) -> Result<()> {
             rows.push((c.customer_id, c, bal, oldest));
         }
     }
-    rows.sort_by(|a, b| b.2.cmp(&a.2)); // sort desc by balance
+    rows.sort_by_key(|b| std::cmp::Reverse(b.2)); // sort desc by balance
 
     log::info!(
         "{:>4}  {:<24}  {:>14}  {:<12}  contact / connections",
