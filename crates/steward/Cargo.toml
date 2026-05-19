@@ -35,6 +35,8 @@ provider = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
+sync-steward = { workspace = true }
+sync-store = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }

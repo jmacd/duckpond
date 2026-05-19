@@ -1,0 +1,43 @@
+[package]
+name = "sync-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description.workspace = true
+
+[dependencies]
+sync-store.workspace = true
+sync-steward.workspace = true
+
+anyhow.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+datafusion.workspace = true
+deltalake.workspace = true
+log.workspace = true
+object_store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+datafusion.workspace = true
+env_logger.workspace = true
+sync-store.workspace = true
+sync-steward.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+url.workspace = true

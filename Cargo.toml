@@ -12,10 +12,14 @@ members = [
 "crates/sitegen",
 "crates/gitpond",
 "crates/billing",
+"crates/sync-store",
+"crates/sync-steward",
+"crates/sync-remote",
+"crates/sync-tests",
 ]
 
 [workspace.package]
-version = "0.51.0"
+version = "0.52.0"
 edition = "2024"
 authors = ["DuckPond Contributors"]
 homepage = "https://github.com/duckpond"
@@ -37,6 +41,9 @@ utilities = { path = "crates/utilities" }
 remote = { path = "crates/remote" }
 sitegen = { path = "crates/sitegen" }
 billing = { path = "crates/billing" }
+sync-store = { path = "crates/sync-store" }
+sync-steward = { path = "crates/sync-steward" }
+sync-remote = { path = "crates/sync-remote" }
 
 anyhow = "1.0.82"
 arrow = { version = "57", default-features = false, features = ["prettyprint", "ipc"] }
@@ -95,11 +102,15 @@ tempfile = "3.8"
 
 thiserror = "2.0.12"
 tl = "0.7.8"
-tokio = { version = "1.32", features = ["io-util", "rt"] }
+tokio = { version = "1.32", features = ["io-util", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 url = "2.5"
 percent-encoding = "2.3"
+uuid = { version = "1.10", features = ["v4", "serde"] }
 uuid7 = { version = "1.0", features = ["serde"] }
+num-bigint = "0.4"
+num-traits = "0.2"
+proptest = "1.4"
 pulldown-cmark = "0.12"
 maud = "0.27.0"
 rss = "2"

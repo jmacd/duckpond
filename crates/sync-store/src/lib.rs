@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Delta-Lake-backed key/value store with per-partition content checksums.
+//!
+//! See `../README.md` for context.
+//!
+//! # Quick tour
+//!
+//! - [`Store`]: the Delta-Lake-backed table holding versioned key/value rows.
+//! - [`Op`]: a single Put or Delete in a batch.
+//! - [`StoreError`] / [`Result`]: the error type used throughout.
+//! - [`checksum::PartitionChecksum`]: the strategy trait for computing
+//!   per-partition content checksums; two impls
+//!   ([`checksum::Merkle`], [`checksum::Homomorphic`]).
+//!
+//! # Schema
+//!
+//! See [`schema`] for the column layout.  Briefly: each row is one
+//! version of one item, partitioned by `partition_key`, with a
+//! BLAKE3-of-value field on every row to support per-partition content
+//! checksums.
+
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
+
+pub mod checksum;
+mod error;
+pub mod schema;
+mod store;
+
+pub use error::{Result, StoreError};
+pub use store::{AddPath, CompactMetrics, Op, RemovePath, Store};
