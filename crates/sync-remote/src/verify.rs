@@ -7,11 +7,12 @@
 
 use std::collections::BTreeSet;
 
-use sync_steward::{PartitionChecksums, Steward};
+use sync_steward::PartitionChecksums;
 use sync_store::checksum::Checksum;
 
 use crate::error::Result;
 use crate::remote::Remote;
+use crate::steward_trait::RemoteSteward;
 
 /// Result of [`verify_against_remote`].
 #[derive(Debug, Clone)]
@@ -77,9 +78,9 @@ pub struct RemoteVerifyMismatch {
 /// recent prior bundle whose recorded checksums match the consumer
 /// exactly.  This is reported as `divergence_boundary` so the
 /// operator can identify when drift began.
-pub async fn verify_against_remote(
+pub async fn verify_against_remote<S: RemoteSteward + ?Sized>(
     remote: &Remote,
-    steward: &Steward,
+    steward: &S,
 ) -> Result<RemoteVerifyReport> {
     // Note: no equality check on store_ids.  Verify is scoped to the
     // remote's pond_id; the steward's own pond_id is irrelevant

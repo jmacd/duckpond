@@ -19,6 +19,7 @@ mod error;
 mod remote;
 mod s3_registration;
 pub mod schema;
+mod steward_trait;
 pub mod verify;
 
 pub use chunking::{ChunkRecord, ChunkedFile, assemble_file, chunk_bytes, chunk_file};
@@ -33,6 +34,7 @@ pub use schema::{
     PARTITION_KIND_CHECKSUM, PARTITION_KIND_DATA, PARTITION_KIND_MANIFEST, RemoteRow, RowBody,
     arrow_schema, delta_columns, partition_columns, record_batch_to_rows, rows_to_record_batch,
 };
+pub use steward_trait::RemoteSteward;
 pub use verify::{RemoteVerifyMismatch, RemoteVerifyReport, verify_against_remote};
 
 #[cfg(test)]

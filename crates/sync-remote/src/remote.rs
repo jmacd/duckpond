@@ -29,6 +29,7 @@ use crate::schema::{
     self, RemoteRow, RowBody, delta_columns, partition_columns, record_batch_to_rows,
     rows_to_record_batch,
 };
+use crate::steward_trait::RemoteSteward;
 use sync_steward::PartitionChecksums;
 use sync_store::checksum::Checksum;
 
@@ -281,7 +282,11 @@ impl Remote {
     /// Idempotent: if the manifest row for `txn_seq` already exists on
     /// the remote, returns `Ok(())` immediately (and writes a
     /// `PostPushCompleted` if missing locally).
-    pub async fn push(&mut self, steward: &mut Steward, txn_seq: i64) -> Result<()> {
+    pub async fn push<S: RemoteSteward + ?Sized>(
+        &mut self,
+        steward: &mut S,
+        txn_seq: i64,
+    ) -> Result<()> {
         // 1. Verify store_id matches.
         if self.store_id != steward.store_id() {
             return Err(RemoteError::StoreIdMismatch {
@@ -395,7 +400,7 @@ impl Remote {
     ///    6. Update the consumer's `last_pulled_seq` setting to this
     ///       bundle's seq AFTER the apply succeeds.
     /// 6. Return [`PullReport`].
-    pub async fn pull(&self, steward: &mut Steward) -> Result<PullReport> {
+    pub async fn pull<S: RemoteSteward + ?Sized>(&self, steward: &mut S) -> Result<PullReport> {
         // 1. (No store_id equality check.)  pull supports both mirror
         //    and cross-pond import; the foreign pond_id (= self.store_id)
         //    is recorded into apply_pulled_bundle as the bundle's owner.
@@ -684,7 +689,10 @@ impl Remote {
     ///    with empty removes.
     /// 6. Set `last_pulled_seq:<remote_path>` to the baseline seq.
     /// 7. Call `self.pull(consumer)` to catch up to latest.
-    pub async fn restart_pond_from_compact(&self, consumer: &mut Steward) -> Result<()> {
+    pub async fn restart_pond_from_compact<S: RemoteSteward + ?Sized>(
+        &self,
+        consumer: &mut S,
+    ) -> Result<()> {
         // 1./2. Find the baseline compact bundle.
         let bundles = self.list_bundles().await?;
         let baseline = bundles
@@ -858,9 +866,9 @@ impl Remote {
         Ok(out)
     }
 
-    async fn build_and_commit_bundle(
+    async fn build_and_commit_bundle<S: RemoteSteward + ?Sized>(
         &mut self,
-        steward: &Steward,
+        steward: &S,
         dc_meta: &sync_steward::DataCommittedMetadata,
         txn_seq: i64,
         commit_kind: CommitKind,
@@ -1017,9 +1025,9 @@ impl Remote {
     /// (a previous push committed remotely but crashed before
     /// recording PostPushCompleted), write a Completed now to close
     /// the lifecycle.  No-op otherwise.
-    async fn reconcile_post_push_after_idempotent_skip(
+    async fn reconcile_post_push_after_idempotent_skip<S: RemoteSteward + ?Sized>(
         &self,
-        steward: &mut Steward,
+        steward: &mut S,
         txn_seq: i64,
     ) -> Result<()> {
         let log = steward.log(None).await?;

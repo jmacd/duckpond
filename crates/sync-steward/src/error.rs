@@ -54,6 +54,14 @@ pub enum StewardError {
     /// recreate the pond.
     #[error("legacy pond: {0}")]
     LegacyPond(String),
+
+    /// Error originating from an external [`crate::Steward`]-like
+    /// adapter (e.g. duckpond's tlogfs-backed `RemoteSteward` impl).
+    /// Used to carry arbitrary error types across the trait
+    /// boundary without coupling sync-steward to consumer-specific
+    /// error hierarchies.
+    #[error("adapter error: {0}")]
+    Adapter(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Convenience alias.

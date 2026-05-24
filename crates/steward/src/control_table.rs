@@ -440,6 +440,134 @@ impl ControlTable {
         self.inner.write_record(record).await.map_err(map_err)
     }
 
+    // -------- Sync-remote integration surface --------
+    //
+    // The methods below are used by the D4 sync-remote adapter
+    // (`crate::remote_adapter::ShipRemoteSteward`) and mirror the
+    // native sync_steward::Steward API exactly (raw txn_ids, no
+    // factory_name/execution_seq attached, no key-prefix munging).
+    // They are also useful for any other consumer that needs the
+    // unprefixed config namespace and direct PostPush lifecycle.
+
+    /// Local pond_id as a [`uuid::Uuid`] (the format `sync_steward`
+    /// uses).  Convenience for callers that want to interoperate with
+    /// sync_steward APIs without re-deriving the conversion.
+    #[must_use]
+    pub fn pond_id_uuid(&self) -> StdUuid {
+        pond_id_to_std(&self.pond_metadata.pond_id)
+    }
+
+    /// Borrow the underlying `sync_steward::ControlTable` for
+    /// adapters that need to call its native API directly (e.g.
+    /// `data_committed_record(pond_id, txn_seq)` from the
+    /// sync-remote adapter).
+    #[must_use]
+    pub fn inner(&self) -> &sync_steward::ControlTable {
+        &self.inner
+    }
+
+    /// Mutable view of the underlying `sync_steward::ControlTable`.
+    pub fn inner_mut(&mut self) -> &mut sync_steward::ControlTable {
+        &mut self.inner
+    }
+
+    /// Write a `PostPushPending` lifecycle record for the local
+    /// pond_id and return the assigned `txn_id` so subsequent
+    /// `PostPushCompleted`/`PostPushFailed` calls can pair against
+    /// it.  Records have no `factory_name`/`execution_seq`/etc.
+    /// metadata (cf. the `record_post_commit_*` family which packs
+    /// that into `metadata_json`).
+    pub async fn record_post_push_pending(&mut self, txn_seq: i64) -> Result<String, StewardError> {
+        let txn_id = new_txn_id();
+        let record = ControlRecord {
+            pond_id: self.pond_id_uuid(),
+            record_kind: RecordKind::PostPushPending,
+            txn_seq,
+            txn_id: txn_id.clone(),
+            commit_kind: None,
+            parent_seq: None,
+            duration_ms: None,
+            ts_micros: Utc::now().timestamp_micros(),
+            metadata_json: "{}".to_string(),
+        };
+        self.inner.write_record(record).await.map_err(map_err)?;
+        Ok(txn_id)
+    }
+
+    /// Write a `PostPushCompleted` record paired with a prior
+    /// `PostPushPending` (same `txn_id`).  Duration is computed from
+    /// `pending_started_micros`.
+    pub async fn record_post_push_completed(
+        &mut self,
+        txn_seq: i64,
+        txn_id: String,
+        pending_started_micros: i64,
+    ) -> Result<(), StewardError> {
+        let now = Utc::now().timestamp_micros();
+        let duration_ms = ((now - pending_started_micros) / 1000).max(0);
+        let record = ControlRecord {
+            pond_id: self.pond_id_uuid(),
+            record_kind: RecordKind::PostPushCompleted,
+            txn_seq,
+            txn_id,
+            commit_kind: None,
+            parent_seq: None,
+            duration_ms: Some(duration_ms),
+            ts_micros: now,
+            metadata_json: "{}".to_string(),
+        };
+        self.inner.write_record(record).await.map_err(map_err)
+    }
+
+    /// Write a `PostPushFailed` record paired with a prior
+    /// `PostPushPending` (same `txn_id`).  `reason` is captured under
+    /// `metadata_json.reason`.
+    pub async fn record_post_push_failed(
+        &mut self,
+        txn_seq: i64,
+        txn_id: String,
+        pending_started_micros: i64,
+        reason: String,
+    ) -> Result<(), StewardError> {
+        let now = Utc::now().timestamp_micros();
+        let duration_ms = ((now - pending_started_micros) / 1000).max(0);
+        let metadata_json = serde_json::to_string(&serde_json::json!({"reason": reason}))
+            .unwrap_or_else(|_| "{}".into());
+        let record = ControlRecord {
+            pond_id: self.pond_id_uuid(),
+            record_kind: RecordKind::PostPushFailed,
+            txn_seq,
+            txn_id,
+            commit_kind: None,
+            parent_seq: None,
+            duration_ms: Some(duration_ms),
+            ts_micros: now,
+            metadata_json,
+        };
+        self.inner.write_record(record).await.map_err(map_err)
+    }
+
+    /// Raw per-replica setting read (no prefix munging).  Used by
+    /// the sync-remote adapter for keys like `last_pulled_seq:<url>`
+    /// and `last_pushed_seq:<url>` which must match the sync_steward
+    /// key format exactly.  See [`Self::get_setting`] for the
+    /// duckpond user-facing API (which adds a `"setting:"` prefix).
+    pub async fn raw_config_get(&self, key: &str) -> Result<Option<String>, StewardError> {
+        self.inner
+            .config_get(self.pond_id_uuid(), key)
+            .await
+            .map_err(map_err)
+    }
+
+    /// Raw per-replica setting write (no prefix munging).  Companion
+    /// to [`Self::raw_config_get`].
+    pub async fn raw_config_set(&mut self, key: &str, value: &str) -> Result<(), StewardError> {
+        self.inner
+            .config_set(self.pond_id_uuid(), key, value)
+            .await
+            .map_err(map_err)
+    }
+
     // -------- Queries --------
 
     /// Highest committed write sequence number, or 0 if none.  Replaces
