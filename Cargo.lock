@@ -881,6 +881,7 @@ dependencies = [
  "serde_yaml",
  "sitegen",
  "steward",
+ "sync-remote",
  "tempfile",
  "tinyfs",
  "tlogfs",

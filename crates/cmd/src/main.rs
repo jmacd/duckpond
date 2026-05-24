@@ -91,6 +91,48 @@ struct Cli {
     command: Commands,
 }
 
+/// Remote management subcommands (D4: replaces `/system/run/<N>-remote`
+/// factory configs with `/sys/remotes/<name>` YAML attachments).
+#[derive(Debug, Subcommand)]
+enum RemoteCommand {
+    /// Attach a new remote and persist its config under `/sys/remotes/<name>`.
+    Add {
+        /// Logical name for the remote (e.g., "origin", "backup-s3").
+        name: String,
+        /// Remote URL (`file:///path` or `s3://bucket/prefix`).
+        url: String,
+        /// Operating mode for this remote (push, pull, or both).
+        #[arg(long, default_value = "push")]
+        mode: String,
+        /// AWS region (S3 only).
+        #[arg(long)]
+        region: Option<String>,
+        /// S3 access key id.
+        #[arg(long = "access-key-id", alias = "access-key")]
+        access_key_id: Option<String>,
+        /// S3 secret access key.
+        #[arg(long = "secret-access-key", alias = "secret-key")]
+        secret_access_key: Option<String>,
+        /// Custom S3 endpoint (e.g., for MinIO or R2).
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Allow plain HTTP (required for local MinIO).
+        #[arg(long)]
+        allow_http: bool,
+        /// Replace an existing remote attachment of the same name.
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Remove a remote attachment and clear its watermarks.
+    Remove {
+        /// Logical name of the remote to remove.
+        name: String,
+    },
+    /// List all attached remotes.
+    List,
+}
+
+/// Pond user commands.
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new pond
@@ -136,6 +178,22 @@ enum Commands {
         /// Base64-encoded remote config for recovery (use same as pond init --config)
         #[arg(long)]
         config: Option<String>,
+    },
+    /// Push pending local transactions to one or more remotes (D4).
+    Push {
+        /// Remote name (from `pond remote add`).  Omit to push every remote
+        /// in `push` or `both` mode.
+        name: Option<String>,
+    },
+    /// Pull new bundles from one or more remotes (D4).
+    Pull {
+        /// Remote name.  Omit to pull every remote in `pull` or `both` mode.
+        name: Option<String>,
+    },
+    /// Manage remote attachments under `/sys/remotes/` (D4).
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
     },
     /// Show or set pond configuration
     Config {
@@ -399,6 +457,40 @@ async fn main() -> Result<()> {
         Commands::Sync { name, config } => {
             commands::sync_command(&ship_context, name, config).await
         }
+        Commands::Push { name } => commands::push_command(&ship_context, name).await,
+        Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
+        Commands::Remote { command } => match command {
+            RemoteCommand::Add {
+                name,
+                url,
+                mode,
+                region,
+                access_key_id,
+                secret_access_key,
+                endpoint,
+                allow_http,
+                overwrite,
+            } => {
+                let parsed_mode = commands::RemoteMode::parse(&mode)?;
+                commands::add_remote_command(
+                    &ship_context,
+                    &name,
+                    &url,
+                    parsed_mode,
+                    region,
+                    access_key_id,
+                    secret_access_key,
+                    endpoint,
+                    allow_http,
+                    overwrite,
+                )
+                .await
+            }
+            RemoteCommand::Remove { name } => {
+                commands::remove_remote_command(&ship_context, &name).await
+            }
+            RemoteCommand::List => commands::list_remotes_command(&ship_context).await,
+        },
         Commands::Config { command } => {
             let control_mode = match command {
                 Some(ConfigCommand::Set { key, value }) => {

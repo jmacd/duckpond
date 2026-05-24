@@ -103,3 +103,28 @@ pub fn get_control_path(pond_path: &Path) -> PathBuf {
 pub fn get_git_path(pond_path: &Path) -> PathBuf {
     pond_path.join("git")
 }
+
+// ---------------------------------------------------------------------------
+// In-pond filesystem conventions used by D4 (`pond remote add/push/pull`).
+//
+// Remote attachments live as small YAML files under `/sys/remotes/<name>`.
+// The directory `/sys/` is reserved for system metadata; D4 only writes
+// `/sys/remotes/*` but future D-phases may add more siblings (e.g. `/sys/keys/`).
+//
+// Per-remote runtime state — `last_pushed_seq:<url>`, `last_pulled_seq:<url>`,
+// `remote_mode:<name>` — is stored in the control table's settings map via
+// `ControlTable::raw_config_{get,set}`, NOT in the YAML config (so that
+// pushing the config to a backup never accidentally ships local watermarks).
+
+/// Filesystem directory holding `/sys/` metadata files (D4+).
+pub const SYS_DIR: &str = "/sys";
+
+/// Filesystem directory holding remote attachment configs.  Each child is a
+/// YAML file named `<remote-name>` containing a [`RemoteAttachment`] (see
+/// `crates/cmd/src/commands/remote.rs`).
+pub const SYS_REMOTES_DIR: &str = "/sys/remotes";
+
+/// Control-table raw_config key prefix for "what mode does remote `<name>`
+/// operate in" (`push`, `pull`, or `both`).  Format the full key as
+/// `format!("{REMOTE_MODE_PREFIX}{name}")`.
+pub const REMOTE_MODE_PREFIX: &str = "remote_mode:";
