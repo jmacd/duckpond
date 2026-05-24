@@ -284,16 +284,14 @@ impl<'a> StewardTransactionGuard<'a> {
             .version();
 
         // Step 1: Transaction metadata was already provided at begin()
-        // Extract import metadata before commit consumes the transaction state
-        let import_metadata = if let Some(ref tx) = self.data_tx {
-            if let Ok(state) = tx.state() {
-                state.pending_import_metadata().await
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
+        // The previous control-table-backed import watermark tracking
+        // (`pending_import_metadata` -> `record_import_partition` /
+        // `update_import_watermark`) was removed in D2 of the
+        // remote-redesign because the lean control-table schema does
+        // not carry per-import state.  Cross-pond import will be
+        // reintroduced in D5 via row-level `pond_id` partitioning of
+        // tlogfs; until then the old import-state callbacks are
+        // no-ops.
 
         // Step 2: Extract the underlying transaction guard and commit it
         let data_tx = self.take_transaction().ok_or_else(|| {
@@ -344,51 +342,6 @@ impl<'a> StewardTransactionGuard<'a> {
 
                 // Mark as committed
                 self.committed = true;
-
-                // Write import state to control table if any
-                if !import_metadata.is_empty() {
-                    debug!(
-                        "Recording {} import partition(s) in control table",
-                        import_metadata.len()
-                    );
-                    for record in &import_metadata {
-                        if record.watermark_txn_seq > 0 {
-                            // Update existing partition watermark
-                            if let Err(e) = self
-                                .control_table
-                                .update_import_watermark(
-                                    &record.factory_node_id,
-                                    &record.foreign_part_id,
-                                    record.watermark_txn_seq,
-                                )
-                                .await
-                            {
-                                log::warn!(
-                                    "Failed to update import watermark for {}: {}",
-                                    record.foreign_part_id,
-                                    e
-                                );
-                            }
-                        } else {
-                            // Initial partition registration
-                            if let Err(e) = self
-                                .control_table
-                                .record_import_partition(
-                                    &record.factory_node_id,
-                                    &record.foreign_part_id,
-                                    &record.foreign_pond_id,
-                                )
-                                .await
-                            {
-                                log::warn!(
-                                    "Failed to record import partition {}: {}",
-                                    record.foreign_part_id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
 
                 // Run post-commit factories for write transactions
                 // This happens AFTER commit but uses a NEW transaction

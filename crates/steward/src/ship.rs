@@ -1092,19 +1092,21 @@ mod tests {
                 .await
                 .expect("Recovery should not be needed after successful recovery");
 
-            // Verify the recovered transaction descriptor matches what we expected
-            assert_eq!(
-                recovered_txn_meta.user.args,
-                vec![
-                    "pond".to_string(),
-                    "copy".to_string(),
-                    "source.txt".to_string(),
-                    "dest.txt".to_string()
-                ]
+            // Verify the recovered transaction descriptor.  In the
+            // post-D2 lean schema the control table no longer persists
+            // CLI args, so the recovered metadata carries the original
+            // txn_seq and txn_id but an empty args vec.  Recovery
+            // tooling that needs the original command must source it
+            // from the data Delta commit metadata (`pond_txn`).
+            assert!(
+                recovered_txn_meta.user.args.is_empty(),
+                "Post-D2 control table does not persist CLI args; \
+                 recovered args must be empty, got {:?}",
+                recovered_txn_meta.user.args
             );
             assert_eq!(
-                recovered_txn_meta.user.args.first().map(|s| s.as_str()),
-                Some("pond")
+                recovered_txn_meta.txn_seq, 2,
+                "Recovered txn_seq must match the incomplete write (root=1, this=2)"
             );
 
             // Verify the data file still exists (use read transaction)

@@ -435,7 +435,7 @@ impl Store {
             let mut pks: Vec<String> = Vec::new();
             collect_string_column(batch.column(0).as_ref(), &mut pids)?;
             collect_string_column(batch.column(1).as_ref(), &mut pks)?;
-            for (pid_str, pk) in pids.into_iter().zip(pks.into_iter()) {
+            for (pid_str, pk) in pids.into_iter().zip(pks) {
                 let pid = Uuid::parse_str(&pid_str).map_err(|e| {
                     StoreError::Invariant(format!(
                         "all_partitions: pond_id `{}` is not a valid UUID: {}",

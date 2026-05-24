@@ -483,9 +483,8 @@ impl Steward {
         let data_change_on_add = matches!(commit_kind, CommitKind::Write);
         let mut actions: Vec<deltalake::kernel::Action> =
             Vec::with_capacity(adds.len() + removes.len());
-        for ((path, _bytes), (size, partition_values)) in adds
-            .iter()
-            .zip(add_sizes.iter().zip(add_partition_values.into_iter()))
+        for ((path, _bytes), (size, partition_values)) in
+            adds.iter().zip(add_sizes.iter().zip(add_partition_values))
         {
             let add = deltalake::kernel::Add {
                 path: path.clone(),

@@ -9,7 +9,7 @@ Plan agreed; phased execution begun.
 | Plan | done | `c2b8cc68` (this doc) |
 | D1: relocate sandbox crates | done | `bd965792` |
 | D2: prep (sync-* deps wired) | done | `6c75e025` |
-| D2: substantive refactor | **pending** | — |
+| D2: substantive refactor | done | see `git log --grep "D2 substantive"` |
 | D3-D6 | pending | — |
 
 Active branch: `jmacd/sandbox_sync` (formerly `jmacd/50`).
@@ -388,6 +388,47 @@ data Delta table.
 - New per-pond_id behavior is reachable via `last_txn_seq(pond_id)`
   and similar — but no callers need it yet (cross-pond import
   arrives in D5).
+
+#### D2 substantive completion notes
+
+- New `crates/steward/src/control_table.rs` is a ~600 line wrapper
+  (vs the 1639-line pre-D2 file) over `sync_steward::ControlTable`.
+  `PondMetadata` (pond_id, birth_*) lives under `Uuid::nil()` config
+  rows; factory modes under `factory_mode:<name>`, settings under
+  `setting:<key>`, both keyed by the local pond_id.
+- `record_import_partition`, `update_import_watermark`,
+  `query_import_partitions` removed entirely.  Their callers in
+  `crates/steward/src/{guard,dispatch}.rs` and
+  `crates/cmd/src/commands/run.rs` are now no-ops; cross-pond
+  watermarking returns in D5 via row-level pond_id partitioning.
+- `record_post_commit_*` methods preserved at the wrapper API but
+  internally write `PostPush*` lean records; post-commit attributes
+  (`execution_seq`, `factory_name`, `config_path`, `error_message`)
+  packed into `metadata_json`.  D6 may rename the wrapper methods.
+- `record_failed` records' error text moved to `metadata_json.reason`;
+  `record_data_committed` records' `data_fs_version` moved to
+  `metadata_json.data_delta_version` (matches sync_steward's
+  `DataCommittedMetadata`).
+- CLI SQL queries in `cmd/control.rs`, `cmd/show.rs`,
+  `cmd/replicate_test_simple.rs`, `cmd/control_test.rs` rewritten
+  against the lean schema (`FROM control`, columns `record_kind`,
+  `ts_micros`, `has_parent_seq`, `metadata_json`, ...).  Post-commit
+  attribute columns extracted via `json_get_str(metadata_json, ...)`.
+- `pond control recent` and `pond control detail` no longer render
+  the `Command:` line; the original CLI args live in data Delta
+  commit metadata (`pond_txn`).
+- `pond control show-config` / `set-config` work unchanged against
+  the new cache-backed wrapper; settings round-trip across reopen.
+- Sync_steward gained three public accessors used by the wrapper:
+  `pub const TABLE_NAME`, `pub fn session_ctx()`, `pub fn
+  delta_table()`, `pub fn set_delta_table()`.
+- Pre-existing `useless-conversion` clippy lints in
+  `crates/sync-store/src/store.rs:438` and
+  `crates/sync-steward/src/steward.rs:488` cleaned up as part of
+  the same CI green-gate pass.
+- Final state: 1387 unit tests pass (identical to pre-D2 baseline),
+  9 ignored (S3/MinIO require runtime), `cargo fmt --check` clean,
+  `cargo clippy --workspace --all-features -- -D warnings` clean.
 
 ### D3: Add `verify` and `restart` operations
 

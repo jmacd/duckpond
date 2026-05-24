@@ -26,7 +26,8 @@ mod guard;
 mod steward;
 
 pub use control_table::{
-    ChecksumValue, CommitKind, ControlRecord, DataCommittedMetadata, PartitionChecksums, RecordKind,
+    ChecksumValue, CommitKind, ControlRecord, ControlTable, DataCommittedMetadata,
+    PartitionChecksums, RecordKind, TABLE_NAME, new_txn_id,
 };
 pub use error::{Result, StewardError};
 pub use guard::{ReadGuard, WriteGuard};

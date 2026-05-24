@@ -92,7 +92,12 @@ impl SimpleReplicationTest {
         Ok((last_seq_1, last_seq_2))
     }
 
-    /// Query transaction records from a pond
+    /// Query transaction records from a pond.  Post-D2 schema lives at
+    /// table "control" with `record_kind` (not `record_type`) and no
+    /// `transaction_type` column.  We filter to "write" lifecycle events
+    /// by selecting txn_seqs that have a `data_committed` record, then
+    /// returning every non-setting non-post-commit lifecycle row for
+    /// those seqs.
     async fn get_transaction_records(pond_path: &Path) -> Result<Vec<(i64, String)>> {
         let ship = ShipContext::pond_only(Some(&pond_path), vec!["pond".to_string()])
             .open_pond()
@@ -102,14 +107,21 @@ impl SimpleReplicationTest {
         let ctx = SessionContext::new();
 
         _ = ctx
-            .register_table("transactions", Arc::new(control_table.table().clone()))
+            .register_table("control", Arc::new(control_table.table().clone()))
             .map_err(|e| anyhow::anyhow!("Failed to register table: {}", e))?;
 
         let sql = r#"
-            SELECT DISTINCT txn_seq, record_type
-            FROM transactions
-            WHERE transaction_type = 'write'
-            ORDER BY txn_seq, record_type
+            WITH write_seqs AS (
+                SELECT DISTINCT txn_seq
+                FROM control
+                WHERE record_kind = 'data_committed'
+            )
+            SELECT DISTINCT txn_seq, record_kind
+            FROM control
+            WHERE record_kind <> 'setting'
+              AND NOT (has_parent_seq = true AND parent_seq <> txn_seq)
+              AND txn_seq IN (SELECT txn_seq FROM write_seqs)
+            ORDER BY txn_seq, record_kind
         "#;
 
         let df = ctx
@@ -136,15 +148,15 @@ impl SimpleReplicationTest {
                 .downcast_ref::<arrow::array::Int64Array>()
                 .unwrap();
 
-            let record_types = batch
-                .column_by_name("record_type")
+            let record_kinds = batch
+                .column_by_name("record_kind")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
 
             for i in 0..batch.num_rows() {
-                records.push((txn_seqs.value(i), record_types.value(i).to_string()));
+                records.push((txn_seqs.value(i), record_kinds.value(i).to_string()));
             }
         }
 
@@ -160,14 +172,16 @@ impl SimpleReplicationTest {
         let control_table = ship.control_table();
         let ctx = SessionContext::new();
 
-        // Register control table
+        // Register control table under the post-D2 lean schema's
+        // canonical name ("control").
         _ = ctx
-            .register_table("transactions", Arc::new(control_table.table().clone()))
-            .map_err(|e| anyhow::anyhow!("Failed to register transactions table: {}", e))?;
+            .register_table("control", Arc::new(control_table.table().clone()))
+            .map_err(|e| anyhow::anyhow!("Failed to register control table: {}", e))?;
 
-        // Get transaction count
+        // Get transaction count -- count `data_committed` records (one
+        // per successful write transaction).
         let txn_count = ctx
-            .sql("SELECT COUNT(*) as cnt FROM transactions WHERE transaction_type = 'write'")
+            .sql("SELECT COUNT(*) as cnt FROM control WHERE record_kind = 'data_committed'")
             .await?
             .collect()
             .await?;

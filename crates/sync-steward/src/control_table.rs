@@ -182,7 +182,11 @@ impl From<&ChecksumValue> for Checksum {
     }
 }
 
-const TABLE_NAME: &str = "control";
+/// SQL table name under which the control table is registered with the
+/// DataFusion `SessionContext` returned by [`ControlTable::session_ctx`].
+/// External callers building ad-hoc SQL against the control table should
+/// reference this constant rather than hard-coding `"control"`.
+pub const TABLE_NAME: &str = "control";
 
 const COL_POND_ID: &str = "pond_id";
 const COL_RECORD_KIND: &str = "record_kind";
@@ -327,6 +331,28 @@ impl ControlTable {
     /// On-disk path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Shared DataFusion session context with the control table registered
+    /// under [`TABLE_NAME`].  External wrappers performing ad-hoc SQL
+    /// reuse this so they see the same Delta version after every write.
+    pub fn session_ctx(&self) -> &Arc<SessionContext> {
+        &self.session_ctx
+    }
+
+    /// Borrow the underlying [`DeltaTable`] (e.g. to inspect commit info).
+    pub fn delta_table(&self) -> &DeltaTable {
+        &self.table
+    }
+
+    /// Replace the underlying [`DeltaTable`] handle and refresh the
+    /// session context registration.  Used by external maintenance flows
+    /// (compact/vacuum) that produced a new table handle through other
+    /// means.
+    pub fn set_delta_table(&mut self, table: DeltaTable) -> Result<()> {
+        self.table = table;
+        self.session_ctx = build_session_ctx(&self.table)?;
+        Ok(())
     }
 
     /// Run delta-rs `optimize(Compact)` on the control table to merge
