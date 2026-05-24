@@ -17,12 +17,14 @@ mod dispatch;
 mod guard;
 mod host;
 pub mod maintenance;
+mod remote_adapter;
 mod ship;
 
 pub use control_table::ControlTable;
 pub use dispatch::{Steward, Transaction};
 pub use guard::StewardTransactionGuard;
 pub use host::{HostSteward, HostTransaction};
+pub use remote_adapter::ShipRemoteSteward;
 pub use ship::Ship;
 pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
 

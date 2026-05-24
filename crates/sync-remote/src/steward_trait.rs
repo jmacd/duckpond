@@ -75,6 +75,36 @@ pub trait RemoteSteward: Send + Sync {
     /// [`Self::actions_at_version`]).
     fn read_data_file(&self, rel_path: &str) -> StewardResult<Vec<u8>>;
 
+    /// Defense-in-depth: validate that a Delta `Add`/`Remove` path
+    /// returned by [`Self::actions_at_version`] belongs to this
+    /// steward's local pond (`store_id`).  Called by `Remote::push`
+    /// once per file before bundling.
+    ///
+    /// The default implementation checks for the sync_store partition
+    /// layout `pond_id=<store_id>/`.  Stewards using a different data
+    /// layout (e.g., the D4 duckpond adapter, which uses
+    /// `part_id=<uuid>/<file>` because tlogfs does not yet have a
+    /// `pond_id` partition column) override this method with their
+    /// own scheme.
+    ///
+    /// In normal operation this is guaranteed by construction
+    /// (`data_committed_record` is per-pond_id, compact is
+    /// per-pond_id, apply_batch stamps the local pond_id), but the
+    /// check guards against any future bug that would leak foreign
+    /// rows into our own bundle.
+    fn validate_local_data_path(&self, path: &str) -> StewardResult<()> {
+        let prefix = format!("pond_id={}/", self.store_id());
+        if path.contains(&prefix) {
+            Ok(())
+        } else {
+            Err(sync_steward::StewardError::Invariant(format!(
+                "path `{}` is not in local pond {}",
+                path,
+                self.store_id()
+            )))
+        }
+    }
+
     /// Record a `PostPushPending` lifecycle record and return the
     /// `txn_id` assigned to it (so subsequent `Completed`/`Failed`
     /// records can reuse it).

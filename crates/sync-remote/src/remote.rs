@@ -887,29 +887,22 @@ impl Remote {
         let (adds, removes) = steward.actions_at_version(version).await?;
 
         // A3 push filter: every file in the bundle MUST belong to the
-        // local pond.  In normal operation this is guaranteed by
-        // construction (data_committed_record is per-pond_id, compact
-        // is per-pond_id, apply_batch stamps the local pond_id), but
-        // we assert it here as a defense-in-depth check against any
-        // future bug that would leak foreign rows into our own bundle.
-        let local_pond_str = format!("pond_id={}/", steward.store_id());
+        // local pond.  Delegated to the steward via
+        // `validate_local_data_path` so adapters with different data
+        // layouts (e.g., the D4 duckpond adapter, which uses
+        // `part_id=<uuid>/` instead of `pond_id=<uuid>/`) can plug in
+        // their own check.  See the trait method for rationale.
         for add in &adds {
-            if !add.path.contains(&local_pond_str) {
-                return Err(RemoteError::Schema(format!(
-                    "push filter: add path `{}` is not in local pond {}",
-                    add.path,
-                    steward.store_id()
-                )));
-            }
+            steward.validate_local_data_path(&add.path).map_err(|e| {
+                RemoteError::Schema(format!("push filter (add `{}`): {}", add.path, e))
+            })?;
         }
         for remove in &removes {
-            if !remove.path.contains(&local_pond_str) {
-                return Err(RemoteError::Schema(format!(
-                    "push filter: remove path `{}` is not in local pond {}",
-                    remove.path,
-                    steward.store_id()
-                )));
-            }
+            steward
+                .validate_local_data_path(&remove.path)
+                .map_err(|e| {
+                    RemoteError::Schema(format!("push filter (remove `{}`): {}", remove.path, e))
+                })?;
         }
 
         let now = Utc::now().timestamp_micros();

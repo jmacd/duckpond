@@ -340,6 +340,52 @@ impl Ship {
         &mut self.control_table
     }
 
+    /// On-disk pond directory (the parent of `data/` and `control/`).
+    /// Used by sync-remote integration for the steward adapter's `path()`.
+    #[must_use]
+    pub fn pond_path(&self) -> &Path {
+        &self.pond_path
+    }
+
+    /// Borrow the data persistence layer.  The sync-remote adapter uses
+    /// this to read the underlying Delta table for `actions_at_version`
+    /// and `read_data_file`.
+    #[must_use]
+    pub fn data_persistence(&self) -> &OpLogPersistence {
+        &self.data_persistence
+    }
+
+    /// Mutable view of the data persistence layer.  The sync-remote
+    /// adapter uses this to commit foreign Delta actions in
+    /// `apply_pulled_bundle` and to drop pond rows.
+    pub fn data_persistence_mut(&mut self) -> &mut OpLogPersistence {
+        &mut self.data_persistence
+    }
+
+    /// Highest write txn_seq this Ship has allocated locally (0 if
+    /// none).  The sync-remote `pond push` driver reads this to know
+    /// the upper bound for its push loop.
+    #[must_use]
+    pub fn last_write_seq(&self) -> i64 {
+        self.last_write_seq
+    }
+
+    /// Bump the in-memory `last_write_seq` allocator to at least `seq`.
+    ///
+    /// Used by `ShipRemoteSteward::apply_pulled_bundle` in MIRROR mode
+    /// to keep Ship's allocator ahead of any sequence numbers that a
+    /// pulled bundle injected into the data store.  Does nothing when
+    /// `seq <= self.last_write_seq`.
+    pub fn sync_last_write_seq(&mut self, seq: i64) {
+        if seq > self.last_write_seq {
+            debug!(
+                "Advancing last_write_seq {} -> {} after pulled bundle apply",
+                self.last_write_seq, seq
+            );
+            self.last_write_seq = seq;
+        }
+    }
+
     /// Begin a coordinated transaction with the given options
     pub async fn begin_read(
         &mut self,

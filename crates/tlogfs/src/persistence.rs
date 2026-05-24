@@ -182,6 +182,24 @@ impl OpLogPersistence {
         self.last_txn_seq
     }
 
+    /// Advance the in-memory `last_txn_seq` allocator to `seq` if it
+    /// is greater than the current value.  No-op otherwise.  Used by
+    /// the D4 sync-remote adapter after `apply_pulled_bundle` mirrors
+    /// a foreign Delta commit into the local data table: the on-disk
+    /// commit metadata carries the new `txn_seq` (and will be picked
+    /// up by the next `open_or_create`), but the in-memory value must
+    /// be advanced here too so that subsequent same-session writes
+    /// use the correct next sequence number.
+    pub fn sync_last_txn_seq(&mut self, seq: i64) {
+        if seq > self.last_txn_seq {
+            debug!(
+                "Advancing OpLogPersistence::last_txn_seq {} -> {} (apply_pulled_bundle)",
+                self.last_txn_seq, seq
+            );
+            self.last_txn_seq = seq;
+        }
+    }
+
     /// Get the pond identity UUID
     #[must_use]
     pub fn pond_id(&self) -> &str {

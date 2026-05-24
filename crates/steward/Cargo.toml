@@ -37,6 +37,7 @@ serde_arrow = { workspace = true }
 serde_json = { workspace = true }
 sync-steward = { workspace = true }
 sync-store = { workspace = true }
+sync-remote = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
@@ -51,6 +52,7 @@ tempfile = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+env_logger = { workspace = true }
 
 [lints]
 workspace = true
