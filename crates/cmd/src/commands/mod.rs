@@ -31,7 +31,6 @@ mod replicate_test_simple;
 pub use apply::apply_command;
 pub use cat::cat_command;
 pub use control::control_command;
-pub use control::sync_command;
 pub use copy::{CopyOptions, copy_command};
 pub use describe::describe_command;
 pub use export::export_command;

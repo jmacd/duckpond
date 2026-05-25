@@ -103,9 +103,6 @@ pub struct InnerState {
     /// Used by cross-pond import to register imported files in the same
     /// Delta commit as the normal OpLog records. Each entry is (path, size, part_id).
     external_add_actions: Vec<ExternalAddAction>,
-    /// Import metadata to include in the Delta commit for steward to process.
-    /// Records which foreign partitions were imported, keyed by factory node_id.
-    import_metadata: Vec<ImportPartitionRecord>,
 }
 
 /// An external parquet file to register as a Delta Add action at commit time.
@@ -117,19 +114,6 @@ pub struct ExternalAddAction {
     pub size: i64,
     /// Partition column value
     pub part_id: String,
-}
-
-/// Import partition metadata stored in Delta commit for steward processing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportPartitionRecord {
-    /// Factory node UUID (stable identifier)
-    pub factory_node_id: String,
-    /// Foreign partition ID
-    pub foreign_part_id: String,
-    /// Foreign pond UUID
-    pub foreign_pond_id: String,
-    /// Highest foreign transaction sequence imported (0 = initial registration)
-    pub watermark_txn_seq: i64,
 }
 
 #[derive(Clone)]
@@ -795,18 +779,6 @@ impl State {
         self.inner.lock().await.external_add_actions.push(action);
     }
 
-    /// Record import partition metadata for inclusion in the Delta commit.
-    /// Steward reads this from the commit metadata to populate the control table.
-    pub async fn add_import_metadata(&self, record: ImportPartitionRecord) {
-        self.inner.lock().await.import_metadata.push(record);
-    }
-
-    /// Get a copy of the pending import metadata (before commit consumes it).
-    /// Used by steward to extract import state for the control table.
-    pub async fn pending_import_metadata(&self) -> Vec<ImportPartitionRecord> {
-        self.inner.lock().await.import_metadata.clone()
-    }
-
     /// Get the large file storage options (compression settings, etc.)
     #[must_use]
     pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
@@ -1420,7 +1392,6 @@ impl InnerState {
             large_file_options,
             partition_records_cache: HashMap::new(),
             external_add_actions: Vec::new(),
-            import_metadata: Vec::new(),
         })
     }
 
@@ -2128,17 +2099,13 @@ impl InnerState {
 
         let mut records = std::mem::take(&mut self.records);
 
-        if records.is_empty()
-            && self.external_add_actions.is_empty()
-            && self.import_metadata.is_empty()
-        {
+        if records.is_empty() && self.external_add_actions.is_empty() {
             debug!("Committing read-only transaction");
             return Ok(None);
         }
 
-        // Collect external add actions and import metadata before any writing
+        // Collect external add actions before any writing
         let external_actions = std::mem::take(&mut self.external_add_actions);
-        let import_metadata = std::mem::take(&mut self.import_metadata);
         let _has_external = !external_actions.is_empty();
         let has_records = !records.is_empty();
 
@@ -2280,13 +2247,8 @@ impl InnerState {
             .ok()
             .map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
 
-        // Build commit metadata: pond_txn + optional import_state
-        let mut commit_metadata = metadata.to_delta_metadata();
-        if !import_metadata.is_empty() {
-            let import_json = serde_json::to_value(&import_metadata)
-                .expect("Failed to serialize import metadata");
-            let _ = commit_metadata.insert("import_state".to_string(), import_json);
-        }
+        // Build commit metadata (pond_txn)
+        let commit_metadata = metadata.to_delta_metadata();
 
         let _commit = CommitBuilder::default()
             .with_actions(all_actions)
@@ -2295,10 +2257,8 @@ impl InnerState {
             .await?;
 
         debug!(
-            "[OK] Single Delta commit: {} record(s) + {} external file(s) + {} import partition(s)",
-            record_count,
-            external_count,
-            import_metadata.len()
+            "[OK] Single Delta commit: {} record(s) + {} external file(s)",
+            record_count, external_count,
         );
 
         self.records.clear();

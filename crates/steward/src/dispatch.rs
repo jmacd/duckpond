@@ -327,20 +327,6 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// Cross-pond import watermark lookup -- removed in D2 of the
-    /// remote-redesign.  The pre-D2 implementation read per-import
-    /// state from the control table.  The lean control-table schema
-    /// does not carry that state, and D5 will reintroduce cross-pond
-    /// import via row-level `pond_id` partitioning of tlogfs.  For
-    /// now, return an empty list so callers fall through to the
-    /// foreign-pond discovery branch.
-    pub async fn query_import_partitions(
-        &self,
-        _factory_node_id: &str,
-    ) -> Result<Vec<(String, String, i64)>, StewardError> {
-        Ok(Vec::new())
-    }
-
     // -- Lifecycle --
 
     /// Commit the transaction.

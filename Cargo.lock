@@ -874,7 +874,6 @@ dependencies = [
  "peak_alloc",
  "provider",
  "regex",
- "remote",
  "serde",
  "serde_arrow",
  "serde_json",
@@ -5146,51 +5145,6 @@ name = "relative-path"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
-
-[[package]]
-name = "remote"
-version = "0.52.0"
-dependencies = [
- "anyhow",
- "arrow",
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
- "async-trait",
- "bao-tree",
- "base64",
- "blake3",
- "bytes",
- "chrono",
- "clap",
- "datafusion",
- "deltalake",
- "env_logger",
- "futures",
- "linkme",
- "log",
- "object_store",
- "parquet",
- "paste",
- "pin-project",
- "provider",
- "serde",
- "serde_json",
- "serde_yaml",
- "steward",
- "sync-remote",
- "sync-steward",
- "sync-store",
- "tempfile",
- "thiserror 2.0.18",
- "tinyfs",
- "tlogfs",
- "tokio",
- "tokio-util",
- "url",
- "utilities",
- "uuid7",
-]
 
 [[package]]
 name = "reqwest"

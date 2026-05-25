@@ -39,12 +39,6 @@ enum ControlCommand {
     },
     /// Show incomplete operations (for recovery)
     Incomplete,
-    /// Sync with remote: retry failed pushes OR pull new bundles
-    Sync {
-        /// Optional: Base64-encoded remote config for recovery (use same as pond init --config)
-        #[arg(long)]
-        config: Option<String>,
-    },
     /// Show pond configuration (ID, factory modes, metadata, settings)
     ShowConfig,
     /// Set a configuration value
@@ -136,14 +130,7 @@ enum RemoteCommand {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new pond
-    Init {
-        /// Initialize from remote backup (path to restore config YAML)
-        #[arg(long)]
-        from_backup: Option<PathBuf>,
-        /// Initialize from base64-encoded replication config (from 'pond run /system/run/10-remote replicate')
-        #[arg(long, conflicts_with = "from_backup")]
-        config: Option<String>,
-    },
+    Init,
     /// Recover from crash by checking and restoring transaction metadata
     Recover,
     /// Run Delta Lake maintenance (checkpoint, vacuum, optional compaction)
@@ -169,15 +156,6 @@ enum Commands {
         /// Show incomplete operations (for recovery)
         #[arg(long, conflicts_with = "txn_seq")]
         incomplete: bool,
-    },
-    /// Sync with remote storage (retry pushes, pull new bundles)
-    Sync {
-        /// Factory name or full path (e.g., "1-backup" or "/system/run/1-backup").
-        /// If omitted, syncs all remote factories in /system/run/.
-        name: Option<String>,
-        /// Base64-encoded remote config for recovery (use same as pond init --config)
-        #[arg(long)]
-        config: Option<String>,
     },
     /// Push pending local transactions to one or more remotes (D4).
     Push {
@@ -423,12 +401,9 @@ async fn main() -> Result<()> {
     let started = Instant::now();
 
     let result = match cli.command {
-        Commands::Init {
-            from_backup,
-            config,
-        } => {
-            // Init command creates new pond (optionally from backup or base64 config)
-            commands::init_command(&ship_context, from_backup.as_deref(), config.as_deref()).await
+        Commands::Init => {
+            // Init command creates a new empty pond.
+            commands::init_command(&ship_context).await
         }
         Commands::Recover => {
             // Recover command works with potentially damaged pond, handle specially
@@ -453,9 +428,6 @@ async fn main() -> Result<()> {
                 commands::control::ControlMode::Recent { limit }
             };
             commands::control_command(&ship_context, control_mode).await
-        }
-        Commands::Sync { name, config } => {
-            commands::sync_command(&ship_context, name, config).await
         }
         Commands::Push { name } => commands::push_command(&ship_context, name).await,
         Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
@@ -509,9 +481,6 @@ async fn main() -> Result<()> {
                     commands::control::ControlMode::Detail { txn_seq }
                 }
                 ControlCommand::Incomplete => commands::control::ControlMode::Incomplete,
-                ControlCommand::Sync { config } => commands::control::ControlMode::Sync {
-                    config: config.clone(),
-                },
                 ControlCommand::ShowConfig => commands::control::ControlMode::ShowConfig,
                 ControlCommand::SetConfig { key, value } => {
                     commands::control::ControlMode::SetConfig { key, value }

@@ -283,15 +283,10 @@ impl<'a> StewardTransactionGuard<'a> {
             .table()
             .version();
 
-        // Step 1: Transaction metadata was already provided at begin()
-        // The previous control-table-backed import watermark tracking
-        // (`pending_import_metadata` -> `record_import_partition` /
-        // `update_import_watermark`) was removed in D2 of the
-        // remote-redesign because the lean control-table schema does
-        // not carry per-import state.  Cross-pond import will be
-        // reintroduced in D5 via row-level `pond_id` partitioning of
-        // tlogfs; until then the old import-state callbacks are
-        // no-ops.
+        // Step 1: Transaction metadata was already provided at begin().
+        // (Legacy per-import watermark callbacks were removed alongside
+        // the chunked-parquet remote factory in D4.5; cross-pond import
+        // is planned for D5 via row-level `pond_id` partitioning.)
 
         // Step 2: Extract the underlying transaction guard and commit it
         let data_tx = self.take_transaction().ok_or_else(|| {

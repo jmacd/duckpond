@@ -100,7 +100,7 @@ async fn pond_remote_push_pull_roundtrip() {
 
     // 1) Source pond + one user write transaction.
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
-    init_command(&src_ctx, None, None).await.expect("init src");
+    init_command(&src_ctx).await.expect("init src");
     write_small_file(
         &src_ctx,
         "/hello.txt",
@@ -237,7 +237,7 @@ async fn pond_push_no_remotes_is_noop() {
     let scratch = TempDir::new().expect("tempdir");
     let pond_path = scratch.path().join("pond");
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx, None, None).await.expect("init");
+    init_command(&ctx).await.expect("init");
     push_command(&ctx, None).await.expect("push noop");
 }
 
@@ -248,7 +248,7 @@ async fn pond_pull_no_remotes_is_noop() {
     let scratch = TempDir::new().expect("tempdir");
     let pond_path = scratch.path().join("pond");
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx, None, None).await.expect("init");
+    init_command(&ctx).await.expect("init");
     pull_command(&ctx, None).await.expect("pull noop");
 }
 
@@ -259,7 +259,7 @@ async fn pond_remote_add_rejects_duplicate() {
     let scratch = TempDir::new().expect("tempdir");
     let pond_path = scratch.path().join("pond");
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
-    init_command(&ctx, None, None).await.expect("init");
+    init_command(&ctx).await.expect("init");
 
     add_remote_command(
         &ctx,
@@ -329,7 +329,7 @@ async fn post_commit_auto_push_publishes_to_file_remote() {
 
     // 1) Source pond.
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
-    init_command(&src_ctx, None, None).await.expect("init src");
+    init_command(&src_ctx).await.expect("init src");
 
     // 2) Create the remote bucket as a fresh Delta table.
     let store_id = {
@@ -440,7 +440,7 @@ async fn post_commit_auto_push_skips_pull_mode_remotes() {
     let remote_url = format!("file://{}", remote_path.display());
 
     let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
-    init_command(&src_ctx, None, None).await.expect("init src");
+    init_command(&src_ctx).await.expect("init src");
 
     // Create the bucket so any erroneous push would actually succeed
     // and update the watermark; the test would catch that.

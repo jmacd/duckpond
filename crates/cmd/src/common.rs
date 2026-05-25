@@ -88,6 +88,10 @@ impl ShipContext {
     ///
     /// REQUIRED: preserve_metadata must be provided with the source pond's identity.
     /// Restoration means cloning another pond, not creating a new one.
+    ///
+    /// Currently only used by tests; kept here so test code can construct
+    /// restoration ponds via the same `ShipContext` entry point as production code.
+    #[allow(dead_code)]
     pub async fn create_pond_for_restoration(
         &self,
         preserve_metadata: steward::PondMetadata,

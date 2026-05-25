@@ -134,7 +134,7 @@ mod tests {
             let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
 
             // Initialize the pond
-            init_command(&ship_context, None, None).await?;
+            init_command(&ship_context).await?;
 
             Ok(Self {
                 ship_context,

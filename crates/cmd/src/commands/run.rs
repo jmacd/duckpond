@@ -339,96 +339,6 @@ async fn run_pond_command_impl(
         factory_context = factory_context.with_effective_root(parent_wd.effective_root().clone());
     }
 
-    // If this is a remote import factory, load import partitions from control table
-    if factory_name == "remote" {
-        let remote_config: remote::RemoteConfig = serde_yaml::from_slice(&config_bytes)
-            .with_context(|| {
-                format!(
-                    "Failed to parse remote factory config at '{}' as YAML",
-                    config_path
-                )
-            })?;
-
-        if let Some(ref import_config) = remote_config.import {
-            // The factory key was set during mknod as the foreign part_id of
-            // the local mount-point directory.  We look it up by resolving
-            // local_path's parent directory entry.
-            //
-            // Note: parent_wd.get() on the mount-point itself can fail before
-            // the first pull because the foreign node it references hasn't
-            // been imported yet; in that case we skip the cache and let
-            // execute_import discover from the foreign backup.
-            let root = tx.root().await?;
-            let local_path = std::path::Path::new(&import_config.local_path);
-            let parent_path = local_path.parent().unwrap_or(std::path::Path::new("/"));
-            let dir_name = local_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "Import config local_path '{}' has no final component",
-                        import_config.local_path
-                    )
-                })?;
-
-            let parent_wd = if parent_path == std::path::Path::new("/") {
-                root.clone()
-            } else {
-                root.open_dir_path(parent_path).await.with_context(|| {
-                    format!(
-                        "Failed to open parent of import local_path '{}'",
-                        import_config.local_path
-                    )
-                })?
-            };
-
-            match parent_wd.get(dir_name).await {
-                Ok(Some(entry)) => {
-                    let factory_key = entry.id().part_id().to_string();
-                    let partitions = tx
-                        .query_import_partitions(&factory_key)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "Failed to query import partitions for factory_key={}",
-                                factory_key
-                            )
-                        })?;
-                    if partitions.is_empty() {
-                        log::info!(
-                            "No cached import partitions for factory_key={} (will discover from foreign backup)",
-                            factory_key
-                        );
-                    } else {
-                        log::info!(
-                            "Loaded {} cached import partition(s) from control table",
-                            partitions.len()
-                        );
-                        factory_context = factory_context.with_import_partitions(partitions);
-                    }
-                }
-                Ok(None) => {
-                    log::info!(
-                        "Import mount point '{}' not yet present locally; \
-                         skipping cache lookup (first pull will discover)",
-                        import_config.local_path
-                    );
-                }
-                Err(e) => {
-                    // The mount-point exists in the parent directory listing,
-                    // but loading its (foreign) node failed.  Expected on the
-                    // first pull, before any data has been imported.
-                    log::info!(
-                        "Cannot resolve import mount point '{}' yet ({}); \
-                         skipping cache lookup (first pull will discover)",
-                        import_config.local_path,
-                        e
-                    );
-                }
-            }
-        }
-    }
-
     // Execute the configuration using the factory registry in write mode
     FactoryRegistry::execute::<tlogfs::TLogFSError>(
         &factory_name,
@@ -504,10 +414,6 @@ mod tests {
         );
         assert_eq!(
             SchemeRegistry::classify("hydrovu"),
-            Some(SchemeKind::Factory)
-        );
-        assert_eq!(
-            SchemeRegistry::classify("remote"),
             Some(SchemeKind::Factory)
         );
     }

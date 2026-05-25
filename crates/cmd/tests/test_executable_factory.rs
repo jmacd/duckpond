@@ -29,7 +29,7 @@ async fn setup_test_ship() -> (ShipContext, TempDir) {
     };
 
     // Initialize the pond
-    cmd::commands::init::init_command(&ship_context, None, None)
+    cmd::commands::init::init_command(&ship_context)
         .await
         .expect("Failed to initialize pond");
 
