@@ -1,12 +1,19 @@
 # D5 Resumption Notes (Remote Redesign)
 
 > **Status as of 2026-05-25**: D4 is **complete and ready for PR**.
-> **D5.1 is complete** (commit pending on top of `jmacd/52`): tlogfs
+> **D5.1 is complete** (commit `1137d81d` on `jmacd/52`): tlogfs
 > data tables are now partitioned by `(pond_id, part_id)`; on-disk
 > layout is `data/pond_id=<uuid>/part_id=<uuid>/part-...parquet`;
 > legacy single-`part_id` ponds are refused at open time with an
 > error directing the operator to re-init from remote (fresh-start
 > migration policy, no in-place migration tool).
+> **D5.2 is complete** (commit pending on top of D5.1): pond identity
+> is canonically owned by the data Delta table's bootstrap row;
+> `OpLogPersistence::peek_pond_id` reads it from Delta partition
+> values without a DataFusion session; `Ship::create_infrastructure`
+> prefers the data-table value over the control-table cache and
+> auto-heals the cache on disagreement.  Restoration scaffolds (empty
+> data table) still fall back to the control cache.
 > This document is a working scratchpad for the next session; it is
 > intentionally checked in as a `docs/` file so it survives session
 > boundaries.  Delete (or move to `docs/archive/`) once D5 lands.
@@ -291,7 +298,9 @@ rather than in-place, given no compat constraint."  In practice:
   return either `(pond_id, part_id)` tuples or a flat list filtered
   by the local pond_id.
 
-### D5.2 — Bootstrap row as canonical pond identity
+### D5.2 — Bootstrap row as canonical pond identity — **DONE**
+
+**Status**: completed 2026-05-25 (commit pending on top of D5.1).
 
 Per the redesign plan:
 
@@ -300,17 +309,74 @@ Per the redesign plan:
 > source.  Adjust `Steward::open` to read `pond_id` from the root
 > directory's OplogEntry, not from the control-table Setting.
 
-Today: `ControlTable::pond_metadata().pond_id` (control-table
-Setting) is the source of truth.
+**What changed**:
 
-After D5.2: `Steward::open` reads the root directory's OplogEntry
-(`part_id` of root, the bootstrap row) and extracts `pond_id` from
-that row's `pond_id` column.  The control-table Setting becomes
-either redundant (still written for backwards compat) or removed.
+- `crates/tlogfs/src/persistence.rs`: new
+  `OpLogPersistence::peek_pond_id(path)` static method.  Opens the
+  Delta table read-only via `deltalake::open_table`, reads
+  `snapshot()?.add_actions_table(true)` (no DataFusion session
+  required), scans the flattened `partition.pond_id` String column,
+  collects unique non-null values via a `BTreeSet`.  Returns
+  `Ok(None)` if the path doesn't exist or the table has zero rows
+  (restoration scaffold), `Ok(Some(uuid_str))` for the unique
+  pond_id, or `Err(Internal)` if more than one is found (deferred
+  to D5.7 cross-pond import, which will refine this to identify
+  the *local* pond_id specifically).
+- `crates/steward/src/ship.rs` `create_infrastructure`: the
+  `create_new=false` branch now calls `peek_pond_id` first, then
+  opens the control table, and on disagreement (a) logs a
+  `log::warn!`, (b) keeps the data-table value, and (c) auto-heals
+  the control cache by rebuilding `PondMetadata` with the data-table
+  `pond_id` plus the existing `birth_*` fields and calling
+  `ct.set_pond_metadata(&healed)`.  If `peek_pond_id` returns `None`
+  (restoration scaffold awaiting bundles), the control cache is
+  used as a fallback.  `create_new=true` is unchanged - fresh ponds
+  write the same pond_id to both tables synchronously.
 
-This is a refactor that's logically separate from D5.1 but flows
-naturally from it: once `pond_id` is a partition column, the
-bootstrap row's `pond_id` is the obvious source of truth.
+**Why birth fields stay in control**: timestamp/hostname/username are
+informational only; if the control table is lost, those are
+acceptably lost.  Only `pond_id` is replicated property that must
+survive control-table loss.
+
+**Tests added**:
+
+- `crates/tlogfs/src/tests/mod.rs`: 3 `peek_pond_id_*` unit tests:
+  missing path returns `None`; freshly-created empty Delta table
+  returns `None`; a real pond returns the local pond_id matching the
+  control-table value.
+- `crates/steward/src/ship.rs`
+  `ship_open_prefers_data_pond_id_over_control_cache`: end-to-end
+  test that creates a pond, records the canonical pond_id, tampers
+  the control table with a different pond_id via
+  `set_pond_metadata`, reopens, and asserts the ship sees the
+  canonical data-table value.  A third open verifies the heal was
+  persisted.
+
+**Validation**:
+
+- `cargo fmt --all -- --check` clean
+- `cargo clippy --workspace --all-features -- -D warnings` clean
+- `cargo test --workspace`: all green
+
+**Sandbox divergence**: `crates/sync-steward/src/steward.rs:185-219`
+still uses the control-table Setting for store_id (matching
+duckpond's pre-D5.2 behavior).  Duckpond's D5.2 intentionally goes
+beyond the sandbox prototype because of remote replication: a
+duckpond replica is created by `pond init` + `pond remote add` +
+`pond pull`, during which the pond_id needs to come from the
+remote-shipped data (control table is locally minted).  Sandbox
+sync_steward has no remote/replication path so it never needs this.
+
+**Deferred** (out of D5.2 scope):
+
+- Full operator workflow for control-table loss recovery
+  ("rebuild control from data alone").  Today's `pond remote add` +
+  `pond pull` path indirectly covers this for replicas; a dedicated
+  recovery command can come later if needed.
+- The `peek_pond_id` "multiple pond_ids" error case lands fully
+  with D5.7 cross-pond import.
+
+### D5.2 — (original plan, kept for reference)
 
 ### D5.3 — Filter Remote::push by pond_id partition
 
@@ -480,8 +546,8 @@ here for easy reference:
 | `compute_live_checksums` stubbed | `crates/steward/src/remote_adapter.rs:501-511` | D5.5 above |
 | `data_delta_version=0` clamp | `crates/steward/src/remote_adapter.rs:573` | D5.6 above |
 | 13 disabled testsuite scripts | `testsuite/tests/{510,520-523,530-542}-*.sh` | D5.8 above |
-| `pond_id` not a partition column | `crates/tlogfs/src/persistence.rs:276,348` | D5.1 above |
-| Pond identity from control-table Setting, not bootstrap row | `crates/steward/src/control_table.rs:456` | D5.2 above |
+| `pond_id` not a partition column | `crates/tlogfs/src/persistence.rs:276,348` | D5.1 — **DONE** |
+| Pond identity from control-table Setting, not bootstrap row | `crates/steward/src/control_table.rs:456` | D5.2 — **DONE** |
 
 ---
 

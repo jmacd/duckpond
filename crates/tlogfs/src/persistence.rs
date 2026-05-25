@@ -8,7 +8,7 @@ use super::schema::{DirectoryEntry, ForArrow, OplogEntry};
 use super::symlink::OpLogSymlink;
 use super::transaction_guard::TransactionGuard;
 use crate::txn_metadata::{PondTxnMetadata, PondUserMetadata};
-use arrow::array::DictionaryArray;
+use arrow::array::{Array, DictionaryArray};
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::UInt16Type;
 use async_trait::async_trait;
@@ -192,6 +192,78 @@ impl OpLogPersistence {
     #[must_use]
     pub fn pond_id(&self) -> &str {
         &self.pond_id
+    }
+
+    /// Read the pond identity from a Delta data table without fully
+    /// instantiating an [`OpLogPersistence`].  Returns `Ok(Some(id))`
+    /// when the table holds at least one Add action and all Add
+    /// actions agree on a single `pond_id` partition value (the
+    /// normal case for a local pond).
+    ///
+    /// Returns `Ok(None)` when no Delta table exists at `path`, when
+    /// the table exists but has no Add actions yet (a restoration
+    /// scaffold awaiting its first bundle), or when the table is
+    /// present but lacks a `partition.pond_id` column (a pre-D5
+    /// layout already refused by [`open_or_create`]; we simply
+    /// decline to recover identity from such a table).
+    ///
+    /// Returns an error if multiple distinct `pond_id` values are
+    /// present in the same table.  Today (pre-D5.7) this is an
+    /// invariant violation; once cross-pond import lands, this
+    /// helper will be refined to specifically return the local
+    /// pond_id (read from the root directory's bootstrap row).
+    pub async fn peek_pond_id<P: AsRef<Path>>(path: P) -> Result<Option<String>, TLogFSError> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let url = Url::from_directory_path(path.as_ref())
+            .or_else(|_| Url::from_file_path(path.as_ref()))
+            .map_err(|_| {
+                TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str))
+            })?;
+
+        let table = match deltalake::open_table(url).await {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+
+        let snapshot = match table.snapshot() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+
+        let batch = snapshot.add_actions_table(true)?;
+        if batch.num_rows() == 0 {
+            return Ok(None);
+        }
+
+        let Some(col_idx) = batch.schema().index_of("partition.pond_id").ok() else {
+            return Ok(None);
+        };
+        let array = batch
+            .column(col_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                TLogFSError::Internal("partition.pond_id column is not a StringArray".to_string())
+            })?;
+
+        let mut unique: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for i in 0..array.len() {
+            if !array.is_null(i) {
+                let _inserted = unique.insert(array.value(i).to_string());
+            }
+        }
+
+        match unique.len() {
+            0 => Ok(None),
+            1 => Ok(unique.into_iter().next()),
+            _ => Err(TLogFSError::Internal(format!(
+                "Multiple pond_ids present in {}: {:?}; D5.7 cross-pond import \
+                 will refine peek_pond_id to read the local pond_id from the \
+                 root directory's bootstrap row",
+                path.as_ref().display(),
+                unique
+            ))),
+        }
     }
 
     /// Creates a new OpLogPersistence instance with a new table and initializes root

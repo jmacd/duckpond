@@ -2566,3 +2566,72 @@ async fn test_file_physical_series_csv_provider_sql() {
     log::debug!("- Streamed 6 total rows (concatenated from all versions)");
     log::debug!("- Queried with DataFusion SQL: COUNT, SUM, ORDER BY");
 }
+
+// ============================================================
+// D5.2: peek_pond_id - read pond identity from the data Delta
+// table's bootstrap row (canonical) instead of the control table
+// (cache).
+// ============================================================
+
+#[tokio::test]
+async fn peek_pond_id_returns_none_for_missing_path() {
+    let tmp = TempDir::new().unwrap();
+    let missing = tmp.path().join("does-not-exist");
+    let got = OpLogPersistence::peek_pond_id(&missing)
+        .await
+        .expect("peek_pond_id should not error on missing path");
+    assert!(
+        got.is_none(),
+        "peek_pond_id on missing path should be None, got {:?}",
+        got
+    );
+}
+
+#[tokio::test]
+async fn peek_pond_id_returns_none_for_empty_table() {
+    // create_empty() builds the Delta schema + _delta_log but writes no
+    // Add actions (used by restoration scaffolds awaiting bundles).
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("data");
+    std::fs::create_dir_all(&path).unwrap();
+    let _persistence =
+        OpLogPersistence::create_empty(path.to_str().unwrap(), uuid7::uuid7().to_string())
+            .await
+            .expect("create_empty failed");
+
+    let got = OpLogPersistence::peek_pond_id(&path)
+        .await
+        .expect("peek_pond_id should not error on empty table");
+    assert!(
+        got.is_none(),
+        "peek_pond_id on empty Delta table should be None, got {:?}",
+        got
+    );
+}
+
+#[tokio::test]
+async fn peek_pond_id_returns_local_id_for_fresh_pond() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("data").to_string_lossy().to_string();
+
+    let pond_id = uuid7::uuid7().to_string();
+    let _persistence = OpLogPersistence::open_or_create(
+        &path,
+        pond_id.clone(),
+        true,
+        Some(crate::txn_metadata::PondUserMetadata::new(vec![
+            "test".to_string(),
+        ])),
+    )
+    .await
+    .expect("open_or_create failed");
+
+    let got = OpLogPersistence::peek_pond_id(&path)
+        .await
+        .expect("peek_pond_id failed");
+    assert_eq!(
+        got.as_deref(),
+        Some(pond_id.as_str()),
+        "peek_pond_id should return the bootstrap row's pond_id"
+    );
+}

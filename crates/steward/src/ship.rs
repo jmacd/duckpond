@@ -201,9 +201,18 @@ impl Ship {
         let data_path_str = data_path.to_string_lossy().to_string();
         let control_path_str = control_path.to_string_lossy().to_string();
 
-        // Determine pond_id and initialize control table
+        // Determine pond_id and initialize control table.
+        //
+        // D5.2: pond identity is canonically owned by the data Delta table's
+        // bootstrap row (the root directory's OplogEntry, whose pond_id
+        // partition value is the local pond's id).  The control table still
+        // caches it (KEY_STORE_ID under BOOTSTRAP_POND_ID) for convenience,
+        // but on disagreement the data table wins and the control table
+        // cache is auto-healed to match.
         let (pond_id, control_table) = if create_new {
-            // Creating new pond - use preserved metadata if provided, otherwise create fresh metadata
+            // Creating new pond - mint fresh identity and persist it to both
+            // the control table (cache) and, implicitly via the upcoming root
+            // initialization, the data table (canonical).
             assert!(preserve_metadata.is_none());
             let metadata = PondMetadata::default();
             let pond_id = metadata.pond_id.to_string();
@@ -214,10 +223,55 @@ impl Ship {
             let ct = ControlTable::create(&control_path_str, &metadata).await?;
             (pond_id, ct)
         } else {
-            // Opening existing pond - metadata already exists in control table
-            debug!("Opening existing control table");
-            let ct = ControlTable::open(&control_path_str).await?;
-            let pond_id = ct.pond_metadata().pond_id.to_string();
+            // Opening existing pond - prefer the data table's bootstrap row,
+            // fall back to (or cross-check against) the control table cache.
+            let data_pond_id = OpLogPersistence::peek_pond_id(&data_path)
+                .await
+                .map_err(StewardError::DataInit)?;
+            let mut ct = ControlTable::open(&control_path_str).await?;
+            let ct_pond_id = ct.pond_metadata().pond_id.to_string();
+
+            let pond_id = match data_pond_id {
+                Some(from_data) => {
+                    if from_data != ct_pond_id {
+                        log::warn!(
+                            "Pond identity disagreement: data table holds pond_id={} \
+                             but control table caches pond_id={}; using data table \
+                             value (canonical per D5.2) and healing control cache",
+                            from_data,
+                            ct_pond_id
+                        );
+                        // Auto-heal: rewrite the control cache to match the
+                        // canonical data-table value.  Birth metadata (timestamp,
+                        // hostname, username) is preserved from the existing
+                        // control cache - those fields live only there.
+                        let healed = PondMetadata {
+                            pond_id: from_data.parse::<uuid7::Uuid>().map_err(|e| {
+                                StewardError::ControlTable(format!(
+                                    "data table pond_id {} is not a valid UUID: {}",
+                                    from_data, e
+                                ))
+                            })?,
+                            birth_timestamp: ct.pond_metadata().birth_timestamp,
+                            birth_hostname: ct.pond_metadata().birth_hostname.clone(),
+                            birth_username: ct.pond_metadata().birth_username.clone(),
+                        };
+                        ct.set_pond_metadata(&healed).await?;
+                    }
+                    from_data
+                }
+                None => {
+                    // Data table is empty (restoration scaffold awaiting bundles)
+                    // or pre-D5 layout (already refused by open_or_create below).
+                    // Either way, fall back to the control table cache.
+                    debug!(
+                        "Data table has no committed rows yet; using control \
+                         table pond_id={} (restoration scaffold)",
+                        ct_pond_id
+                    );
+                    ct_pond_id
+                }
+            };
             (pond_id, ct)
         };
 
@@ -776,6 +830,65 @@ mod tests {
         let _opened_ship = Ship::open_pond(&pond_path)
             .await
             .expect("Should be able to open existing pond");
+    }
+
+    /// D5.2: when the data table's bootstrap row holds pond_id A and the
+    /// control-table cache holds a different pond_id B, opening the pond
+    /// must use A (data is canonical) and auto-heal the cache to A.
+    #[tokio::test]
+    async fn ship_open_prefers_data_pond_id_over_control_cache() {
+        let temp_dir = tempdir().expect("temp dir");
+        let pond_path = temp_dir.path().join("pond");
+
+        // Create a fresh pond; both tables will agree on the same pond_id.
+        let ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("create_pond failed");
+        let canonical_id = ship.control_table.pond_metadata().pond_id.to_string();
+        drop(ship);
+
+        // Verify the data table's bootstrap row matches.
+        let data_path = get_data_path(&pond_path);
+        let from_data = OpLogPersistence::peek_pond_id(&data_path)
+            .await
+            .expect("peek_pond_id failed")
+            .expect("data table should hold the local pond_id");
+        assert_eq!(from_data, canonical_id);
+
+        // Tamper the control table: rewrite its cached pond_id to a
+        // different value while leaving the data table untouched.
+        let tampered_meta = PondMetadata::default();
+        let tampered_id = tampered_meta.pond_id.to_string();
+        assert_ne!(tampered_id, canonical_id);
+        {
+            let mut opened = Ship::open_pond(&pond_path).await.expect("open_pond failed");
+            opened
+                .control_table
+                .set_pond_metadata(&tampered_meta)
+                .await
+                .expect("set_pond_metadata failed");
+        }
+
+        // Reopen.  The opened ship should prefer the data-table pond_id
+        // and auto-heal the control cache back to it.
+        let reopened = Ship::open_pond(&pond_path).await.expect("reopen failed");
+        let after_id = reopened.control_table.pond_metadata().pond_id.to_string();
+        assert_eq!(
+            after_id, canonical_id,
+            "data-table pond_id must win on disagreement (got {} after tampering with {})",
+            after_id, tampered_id
+        );
+
+        // The healing is persisted: a third open should see the canonical
+        // pond_id in the control cache without any warning.
+        drop(reopened);
+        let again = Ship::open_pond(&pond_path)
+            .await
+            .expect("third open failed");
+        assert_eq!(
+            again.control_table.pond_metadata().pond_id.to_string(),
+            canonical_id
+        );
     }
 
     #[tokio::test]
