@@ -14,38 +14,34 @@
 //!   DataCommitted lookups, PostPush lifecycle).
 //! - Reads from the [`OpLogPersistence`] DeltaTable
 //!   (`actions_at_version`, `read_data_file`).
-//! - For `apply_pulled_bundle`: validates that the bundle's `pond_id`
-//!   matches `Ship`'s identity (mirror mode), validates each path is
-//!   of the duckpond layout `part_id=<uuid>/<file>.parquet`, writes
-//!   the parquet bytes under `<pond>/data/`, commits Add/Remove
-//!   actions to the data DeltaTable, writes a mirroring
-//!   `DataCommitted` record on the control table, and bumps
-//!   `last_write_seq`.
+//! - For `apply_pulled_bundle`: validates each path is of the duckpond
+//!   layout `pond_id=<uuid>/part_id=<uuid>/<file>.parquet`, writes the
+//!   parquet bytes under `<pond>/data/`, commits Add/Remove actions to
+//!   the data DeltaTable, writes a mirroring `DataCommitted` record on
+//!   the control table, and bumps `last_write_seq`.  For mirror mode
+//!   (bundle.pond_id == ship.pond_id) and -- since D5 -- for cross-pond
+//!   import (bundle.pond_id != ship.pond_id), the bundle's `pond_id` is
+//!   stamped into the partition path.
 //!
 //! ## What this adapter does NOT do (yet)
 //!
-//! - **Cross-pond import** (`bundle.pond_id != ship.pond_id`) is
-//!   rejected as `StewardError::Adapter`.  This is the D4 scope
-//!   restriction documented in `docs/d4-resumption.md` gotcha #7; D5
-//!   adds the tlogfs `(pond_id, part_id)` partitioning that makes
-//!   cross-pond import viable.
-//! - `compute_live_checksums` returns `unimplemented!("D3")` -- the
+//! - `compute_live_checksums` returns an "unimplemented" error -- the
 //!   duckpond row schema differs from `sync_store`'s k/v schema, so
 //!   the checksum strategy needs a tlogfs-aware re-implementation
-//!   (D3 scope, after D4).
+//!   (D5.5 scope).
 //!
 //! ## Path layout
 //!
 //! Duckpond tlogfs paths returned by `actions_at_version` look like:
 //!
 //! ```text
-//! part_id=<uuid>/part-00000-<uuid>-c000.snappy.parquet
+//! pond_id=<uuid>/part_id=<uuid>/part-00000-<uuid>-c000.snappy.parquet
 //! ```
 //!
-//! These differ from sync_store paths
-//! (`pond_id=<uuid>/partition_key=<value>/...`).  The adapter parses
-//! the leading `part_id=<uuid>/` segment via [`parse_part_id_path`]
-//! and rejects anything else.
+//! Matches the sync_store layout shape (pond_id outermost) and the
+//! sandbox prototype's cross-pond import contract.  The adapter parses
+//! the leading `pond_id=<uuid>/part_id=<uuid>/` segments via
+//! [`parse_pond_part_path`] and rejects anything else.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -88,54 +84,68 @@ fn adapt_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> SyncStewardE
 }
 
 /// Parse and validate a duckpond data path.  Expects the form
-/// `part_id=<uuid>/<filename>`.  Returns the `part_id` value on
-/// success.  Rejects:
+/// `pond_id=<uuid>/part_id=<uuid>/<filename>` (D5+).  Returns
+/// `(pond_id, part_id)` on success.  Rejects:
 ///
 /// - Absolute paths.
-/// - Paths containing `..` segments.
-/// - Paths that do not start with `part_id=<uuid>/`.
-/// - Multiple `part_id=` segments.
-fn parse_part_id_path(path: &str) -> Result<String, SyncStewardError> {
+/// - Paths containing `..` or `.` segments.
+/// - Paths that do not start with `pond_id=<uuid>/part_id=<uuid>/`.
+/// - Empty `pond_id` or `part_id` values.
+/// - Multiple `pond_id=` or `part_id=` segments.
+/// - Missing filename after the partition prefix.
+fn parse_pond_part_path(path: &str) -> Result<(String, String), SyncStewardError> {
     if path.starts_with('/') {
         return Err(SyncStewardError::Invariant(format!(
             "data path must be relative: {:?}",
             path
         )));
     }
-    let mut segments = path.split('/');
-    let first = segments.next().ok_or_else(|| {
-        SyncStewardError::Invariant(format!("data path has no segments: {:?}", path))
-    })?;
-    let rest: Vec<&str> = segments.collect();
-    for seg in std::iter::once(first).chain(rest.iter().copied()) {
-        if seg == ".." || seg == "." || seg.is_empty() {
+    let segments: Vec<&str> = path.split('/').collect();
+    for seg in &segments {
+        if *seg == ".." || *seg == "." || seg.is_empty() {
             return Err(SyncStewardError::Invariant(format!(
                 "data path contains invalid segment {:?}: {:?}",
                 seg, path
             )));
         }
     }
-    let part_id = if let Some(rest) = first.strip_prefix("part_id=") {
-        if rest.is_empty() {
-            return Err(SyncStewardError::Invariant(format!(
-                "data path has empty part_id value: {:?}",
-                path
-            )));
-        }
-        rest.to_string()
-    } else {
+    if segments.len() < 3 {
         return Err(SyncStewardError::Invariant(format!(
-            "data path must start with `part_id=<uuid>/`: {:?}",
-            path
-        )));
-    };
-    if rest.is_empty() {
-        return Err(SyncStewardError::Invariant(format!(
-            "data path must have a filename after part_id: {:?}",
+            "data path must have form `pond_id=<uuid>/part_id=<uuid>/<file>`: {:?}",
             path
         )));
     }
-    for seg in &rest {
+    let pond_id = segments[0].strip_prefix("pond_id=").ok_or_else(|| {
+        SyncStewardError::Invariant(format!(
+            "data path must start with `pond_id=<uuid>/`: {:?}",
+            path
+        ))
+    })?;
+    if pond_id.is_empty() {
+        return Err(SyncStewardError::Invariant(format!(
+            "data path has empty pond_id value: {:?}",
+            path
+        )));
+    }
+    let part_id = segments[1].strip_prefix("part_id=").ok_or_else(|| {
+        SyncStewardError::Invariant(format!(
+            "data path must have `part_id=<uuid>/` as second segment: {:?}",
+            path
+        ))
+    })?;
+    if part_id.is_empty() {
+        return Err(SyncStewardError::Invariant(format!(
+            "data path has empty part_id value: {:?}",
+            path
+        )));
+    }
+    for seg in &segments[2..] {
+        if seg.starts_with("pond_id=") {
+            return Err(SyncStewardError::Invariant(format!(
+                "data path contains multiple pond_id segments: {:?}",
+                path
+            )));
+        }
         if seg.starts_with("part_id=") {
             return Err(SyncStewardError::Invariant(format!(
                 "data path contains multiple part_id segments: {:?}",
@@ -143,7 +153,7 @@ fn parse_part_id_path(path: &str) -> Result<String, SyncStewardError> {
             )));
         }
     }
-    Ok(part_id)
+    Ok((pond_id.to_string(), part_id.to_string()))
 }
 
 #[async_trait]
@@ -226,16 +236,23 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
         })
     }
 
-    /// Override the default `pond_id=<uuid>/` check: duckpond's tlogfs
-    /// data table is partitioned by `part_id` only (not `pond_id`), so
-    /// outbound bundle paths must match the form
-    /// `part_id=<uuid>/<file>`.  Since a single duckpond data table
-    /// only ever contains rows belonging to one pond, the
-    /// `part_id` shape itself is sufficient to assert "local pond";
-    /// no per-pond_id check is possible until D5 adds a `pond_id`
-    /// partition column.
+    /// Override the default `pond_id=<uuid>/` check in the trait: duckpond's
+    /// tlogfs data table is partitioned by `(pond_id, part_id)` as of D5,
+    /// so outbound bundle paths must match the form
+    /// `pond_id=<uuid>/part_id=<uuid>/<file>`.  Until cross-pond import
+    /// is wired through (D5.7), we additionally require that the path's
+    /// `pond_id` matches the local Ship's `pond_id`: every outbound row
+    /// belongs to the local pond.
     fn validate_local_data_path(&self, path: &str) -> StewardResult<()> {
-        parse_part_id_path(path).map(|_| ())
+        let (pond_id, _part_id) = parse_pond_part_path(path)?;
+        let local = self.store_id().to_string();
+        if pond_id != local {
+            return Err(SyncStewardError::Invariant(format!(
+                "outbound data path has foreign pond_id {} (local pond_id {}): {:?}",
+                pond_id, local, path
+            )));
+        }
+        Ok(())
     }
 
     async fn record_post_push_pending(&mut self, txn_seq: i64) -> StewardResult<String> {
@@ -300,15 +317,17 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
             partition_checksums,
         } = bundle;
 
-        // D4 scope: only duckpond <-> duckpond mirror mode.  Cross-pond
-        // import requires D5's (pond_id, part_id) partition layout.
+        // D5.1 scope: only mirror mode (bundle.pond_id == local pond_id).
+        // Cross-pond import (a different bundle.pond_id) becomes valid
+        // once the cross-pond UX surface lands (D5.7); for now the
+        // partition layout supports it but no caller wires it up.
         let local_pond_id = self.store_id();
         if pond_id != local_pond_id {
             return Err(SyncStewardError::Adapter(Box::new(std::io::Error::other(
                 format!(
-                    "duckpond apply_pulled_bundle: cross-pond import is not supported \
-                     in D4 (bundle pond_id {} != local pond_id {}); see docs/d4-resumption.md \
-                     gotcha #7",
+                    "duckpond apply_pulled_bundle: cross-pond import is not yet wired \
+                     through (bundle pond_id {} != local pond_id {}); see docs/d5-resume.md \
+                     section D5.7",
                     pond_id, local_pond_id
                 ),
             ))));
@@ -328,16 +347,34 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
         }
 
         // 2. Validate every path; reject anything that does not match
-        //    the duckpond `part_id=<uuid>/<file>` layout.
+        //    the duckpond `pond_id=<uuid>/part_id=<uuid>/<file>` layout.
+        //    Also require the path's pond_id to match the bundle's
+        //    pond_id (paths cannot smuggle data into a different pond).
+        let bundle_pond_id_str = pond_id.to_string();
         let mut add_partition_values: Vec<HashMap<String, Option<String>>> =
             Vec::with_capacity(adds.len());
         for (path, _) in &adds {
-            let part_id = parse_part_id_path(path)?;
-            let pv = HashMap::from([("part_id".to_string(), Some(part_id))]);
+            let (path_pond_id, path_part_id) = parse_pond_part_path(path)?;
+            if path_pond_id != bundle_pond_id_str {
+                return Err(SyncStewardError::Invariant(format!(
+                    "bundle pond_id {} does not match path pond_id {}: {:?}",
+                    bundle_pond_id_str, path_pond_id, path
+                )));
+            }
+            let pv = HashMap::from([
+                ("pond_id".to_string(), Some(path_pond_id)),
+                ("part_id".to_string(), Some(path_part_id)),
+            ]);
             add_partition_values.push(pv);
         }
         for path in &removes {
-            let _ = parse_part_id_path(path)?;
+            let (path_pond_id, _) = parse_pond_part_path(path)?;
+            if path_pond_id != bundle_pond_id_str {
+                return Err(SyncStewardError::Invariant(format!(
+                    "bundle pond_id {} does not match path pond_id {}: {:?}",
+                    bundle_pond_id_str, path_pond_id, path
+                )));
+            }
         }
 
         // 3. Write each add's bytes under <pond>/data/.
@@ -599,37 +636,94 @@ pub async fn push_pending_to_remote(
 mod tests {
     use super::*;
 
+    const POND: &str = "01234567-89ab-cdef-0123-456789abcdef";
+    const PART: &str = "fedcba98-7654-3210-fedc-ba9876543210";
+
     #[test]
-    fn parse_part_id_path_happy() {
-        let p = parse_part_id_path(
-            "part_id=01234567-89ab-cdef-0123-456789abcdef/part-00000-xxx-c000.snappy.parquet",
-        )
+    fn parse_pond_part_path_happy() {
+        let (p, q) = parse_pond_part_path(&format!(
+            "pond_id={}/part_id={}/part-00000-xxx-c000.snappy.parquet",
+            POND, PART
+        ))
         .expect("ok");
-        assert_eq!(p, "01234567-89ab-cdef-0123-456789abcdef");
+        assert_eq!(p, POND);
+        assert_eq!(q, PART);
     }
 
     #[test]
-    fn parse_part_id_path_rejects_absolute() {
-        assert!(parse_part_id_path("/part_id=x/y.parquet").is_err());
+    fn parse_pond_part_path_rejects_absolute() {
+        assert!(
+            parse_pond_part_path(&format!("/pond_id={}/part_id={}/y.parquet", POND, PART)).is_err()
+        );
     }
 
     #[test]
-    fn parse_part_id_path_rejects_dotdot() {
-        assert!(parse_part_id_path("part_id=x/../y.parquet").is_err());
+    fn parse_pond_part_path_rejects_dotdot() {
+        assert!(
+            parse_pond_part_path(&format!("pond_id={}/part_id={}/../y.parquet", POND, PART))
+                .is_err()
+        );
     }
 
     #[test]
-    fn parse_part_id_path_rejects_missing_prefix() {
-        assert!(parse_part_id_path("pond_id=x/part_id=y/z.parquet").is_err());
+    fn parse_pond_part_path_rejects_dot() {
+        assert!(
+            parse_pond_part_path(&format!("pond_id={}/part_id={}/./y.parquet", POND, PART))
+                .is_err()
+        );
     }
 
     #[test]
-    fn parse_part_id_path_rejects_empty_part_id() {
-        assert!(parse_part_id_path("part_id=/y.parquet").is_err());
+    fn parse_pond_part_path_rejects_missing_pond_id_prefix() {
+        assert!(parse_pond_part_path(&format!("part_id={}/y.parquet", PART)).is_err());
+        assert!(
+            parse_pond_part_path(&format!("part_id={}/pond_id={}/y.parquet", PART, POND)).is_err()
+        );
     }
 
     #[test]
-    fn parse_part_id_path_rejects_multiple_part_ids() {
-        assert!(parse_part_id_path("part_id=a/part_id=b/y.parquet").is_err());
+    fn parse_pond_part_path_rejects_missing_part_id_prefix() {
+        assert!(parse_pond_part_path(&format!("pond_id={}/y.parquet", POND)).is_err());
+        assert!(
+            parse_pond_part_path(&format!("pond_id={}/something_else/y.parquet", POND)).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_pond_part_path_rejects_empty_pond_id() {
+        assert!(parse_pond_part_path(&format!("pond_id=/part_id={}/y.parquet", PART)).is_err());
+    }
+
+    #[test]
+    fn parse_pond_part_path_rejects_empty_part_id() {
+        assert!(parse_pond_part_path(&format!("pond_id={}/part_id=/y.parquet", POND)).is_err());
+    }
+
+    #[test]
+    fn parse_pond_part_path_rejects_missing_filename() {
+        assert!(parse_pond_part_path(&format!("pond_id={}/part_id={}", POND, PART)).is_err());
+        assert!(parse_pond_part_path(&format!("pond_id={}/part_id={}/", POND, PART)).is_err());
+    }
+
+    #[test]
+    fn parse_pond_part_path_rejects_multiple_pond_ids() {
+        assert!(
+            parse_pond_part_path(&format!(
+                "pond_id={}/part_id={}/pond_id={}/y.parquet",
+                POND, PART, POND
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_pond_part_path_rejects_multiple_part_ids() {
+        assert!(
+            parse_pond_part_path(&format!(
+                "pond_id={}/part_id={}/part_id={}/y.parquet",
+                POND, PART, PART
+            ))
+            .is_err()
+        );
     }
 }

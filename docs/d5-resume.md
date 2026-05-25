@@ -1,0 +1,599 @@
+# D5 Resumption Notes (Remote Redesign)
+
+> **Status as of 2026-05-25**: D4 is **complete and ready for PR**.
+> **D5.1 is complete** (commit pending on top of `jmacd/52`): tlogfs
+> data tables are now partitioned by `(pond_id, part_id)`; on-disk
+> layout is `data/pond_id=<uuid>/part_id=<uuid>/part-...parquet`;
+> legacy single-`part_id` ponds are refused at open time with an
+> error directing the operator to re-init from remote (fresh-start
+> migration policy, no in-place migration tool).
+> This document is a working scratchpad for the next session; it is
+> intentionally checked in as a `docs/` file so it survives session
+> boundaries.  Delete (or move to `docs/archive/`) once D5 lands.
+
+---
+
+## Where we are right now
+
+### Branch and recent commits
+
+Working branch: **`jmacd/52`** (formerly `jmacd/sandbox_sync`).
+
+The D4 series is **8 sub-commits**, `abf0d5c0..9f3944d6`:
+
+```
+9f3944d6 D4.8: auto-initialize remote Delta table in `pond remote add`
+a9bbf6eb D4.7: documentation update for D4 remote-redesign
+5cd1609b D4.6: testsuite cleanup for legacy remote-factory removal
+e62083d8 D4.5: hard-delete legacy crates/remote + import-partition scaffolding
+d6766353 D4.4: post-commit auto-push for /sys/remotes/*
+bfc77e32 D4.3: CLI verbs `pond remote add/remove/list`, `pond push`, `pond pull`
+cb41d8b2 D4.2: ShipRemoteSteward adapter + integration tests
+abf0d5c0 D4 foundation: RemoteSteward trait + duckpond ControlTable adapter
+```
+
+### Presubmits are clean
+
+As of `9f3944d6`:
+
+```bash
+cargo fmt --all -- --check                                # clean
+cargo clippy --workspace --all-features -- -D warnings    # clean
+cargo test --workspace                                    # all green
+```
+
+Test counts (last full workspace run):
+
+- `cmd` integration tests: `test_remote_cli.rs` has 9 tests, all pass.
+- `tlogfs` integration tests: 195, 133, 130, etc.
+- Total workspace: 1400+ unit tests + integration tests, 0 failures.
+
+### What D4 delivered
+
+D3 was folded into D4 (no point exposing transitional chunked-parquet
+bundles through the new CLI when the sync_remote Delta-bundle format
+was already ready in the sandbox).  D4 replaced the legacy `crates/remote`
+chunked-parquet factory with the `sync_remote::Remote` pipeline driven
+by `ShipRemoteSteward`.  Result:
+
+| Old surface                                       | New surface                            |
+|---------------------------------------------------|----------------------------------------|
+| `pond mknod remote /system/run/N-backup`          | `pond remote add <name> <url>`         |
+| `pond run N-backup push`                          | `pond push [<name>]`                   |
+| `pond run N-backup pull`                          | `pond pull [<name>]`                   |
+| `pond run N-backup show`                          | (no equivalent yet; D5)                |
+| `pond run N-backup verify`                        | (no equivalent yet; D5)                |
+| `pond init --from-backup` / `pond sync`           | gone — replaced by add+push or add+pull|
+| Post-commit auto-execution via `/system/run/*`    | post-commit auto-push for `/sys/remotes/*` |
+
+The `remote` factory is gone.  `crates/remote/` was hard-deleted in D4.5
+(5092 LOC).  Cross-pond import was scaffolded but never reachable from
+the CLI; the scaffolding (`ProviderContext::import_partitions`,
+`OpLogPersistence::pending_import_metadata`, etc.) was also deleted in
+D4.5.  Cross-pond import returns in D5 via row-level `pond_id`
+partitioning.
+
+The `pond remote add` verb auto-initializes the destination Delta table
+(D4.8), so `pond init` → `pond remote add` → `pond push` is a complete
+operator sequence with no manual `Remote::create_at_url` shim.
+
+### Documentation state
+
+- `docs/remote-redesign.md` — **current**, has the full D4
+  implementation-notes section at line ~480 documenting all six D4
+  sub-commits plus carry-forwards.
+- `docs/cli-reference.md` — **current** for D4 CLI surface.  Quick
+  Reference, mode-comparison table, `pond mknod`/`pond run`/`pond
+  remote`/`pond push`/`pond pull` sections, Filesystem Conventions
+  section, and the deprecated `### remote` factory section all
+  reflect the post-D4 reality.
+- `docs/operator-guide.md` — has a top-of-file D4 warning banner only;
+  body is otherwise pre-D4.  Full rewrite is D6 scope.
+- `docs/d4-resumption.md` — historical; was the original D4 plan.
+- **This file** (`docs/d5-resume.md`) — the new working doc.
+
+Docs that still reference legacy patterns and are explicitly **deferred
+to D6** per the redesign plan:
+- `docs/operator-interface-plan.md`
+- `docs/efficiency-priorities.md`
+- `docs/cli-command-structure.md`
+- `docs/design-cross-pond-import.md`
+- `docs/design-security-and-credentials.md`
+- `docs/delta-cleanup-synchronization.md`
+- `docs/d4-resumption.md` (will become archive)
+- `docs/remote-bandwidth-bug.md`
+- Several files under `docs/archive/`
+
+Do **not** rewrite these as part of D5 — they go away in D6 when the
+operator-guide is rewritten.
+
+---
+
+## What is D5?
+
+From `docs/remote-redesign.md` § D5:
+
+> **Goal**: make the data Delta table pond-pure at file granularity;
+> move pond identity to bootstrap row.
+
+D5 has two interleaved threads:
+
+1. **Schema/storage change**: promote `pond_id` from a regular
+   OplogEntry column to a Delta table **partition column**.  This
+   enables file-granularity push filters (`Remote::push` reads files
+   for own `pond_id` only via partition pruning) and `O(1)` drop of
+   foreign pond data on `restart_pond_from_compact`.
+
+2. **Cross-pond import end-to-end**: with row-level `pond_id`
+   partitioning in place, expose `pond remote attach <url> --mount
+   <path>` (or whatever the final UX is) so a consumer can mirror or
+   import a foreign pond's content into its own filesystem.
+
+In sandbox terms, D5 is the duckpond port of sandbox commit `c40737c2`
+(A1 — pond_id partitioning) and the cross-pond test coverage from
+`149af878` (A3 — push filter + cross-pond pull).
+
+### Why D5 matters operationally
+
+Right now (post-D4):
+
+- The data Delta table is partitioned by `part_id` only.
+- `pond_id` is a regular OplogEntry column (see
+  `crates/tlogfs/src/schema.rs:284`).
+- `ShipRemoteSteward::drop_pond_data` (in
+  `crates/steward/src/remote_adapter.rs:477-499`) issues a
+  `DELETE WHERE pond_id = '<uuid>'` which **rewrites partitions** —
+  expensive at scale, and requires reading every file in every
+  partition.
+- `Remote::push` currently filters at row level (post-read).  A
+  partition column would let DataFusion prune at scan time.
+- `compute_live_checksums` (same file, line 501-511) is **stubbed
+  out** with an `Err(...)` returning "deferred to D3 (pond verify)";
+  fixing it cleanly requires the `pond_id` partition to make per-pond
+  checksum streams cheap to compute.
+
+### What the cross-pond UX should look like (working theory)
+
+```bash
+# On the consumer (single pond), mount a foreign pond's content as a
+# subtree of the consumer's filesystem:
+pond remote add upstream s3://upstream-bucket --mode pull --mount /imports/upstream
+
+# Triggers a real first-pull bootstrap via `Remote::restart_from_compact`
+pond pull upstream
+
+# Result: the consumer can now read /imports/upstream/* as if those
+# files were native, but the OplogEntry rows under that subtree carry
+# the FOREIGN pond's pond_id.  Drop without disturbing local data:
+pond remote remove upstream    # implicitly calls restart_pond_from_compact
+                                # with --drop to release the foreign rows
+```
+
+This is intentionally vague; the actual UX is a D5 design discussion.
+The sandbox prototype's `cross_pond.rs` integration test is the model
+to mirror.
+
+---
+
+## D5 Phase Plan (proposed)
+
+This is a starting point, not a final plan.  Adjust during a planning
+discussion with the user before starting.
+
+### D5.1 — Partition migration in tlogfs (schema change) — **DONE**
+
+**Status**: completed 2026-05-25 (commit on top of `jmacd/52`).
+
+**What changed**:
+
+- `crates/tlogfs/src/persistence.rs`: both `create_empty` and
+  `open_or_create` paths now call
+  `with_partition_columns(["pond_id", "part_id"])` and drop
+  `pond_id` from `delta.dataSkippingStatsColumns` (partition columns
+  don't need stats).
+- The manual `CommitBuilder + Action::Add + ArrowWriter` parquet
+  writer now groups rows by `(pond_id, part_id)` tuples, strips both
+  columns before writing the parquet file, emits paths of the form
+  `pond_id=<uuid>/part_id=<uuid>/part-00000-<uuid>-c000.snappy.parquet`,
+  and populates `partition_values` for both columns.
+  `DeltaOperation::Write { partition_by, .. }` lists both.
+- `ExternalAddAction` (Phase 2 of bulk commit) gained a `pond_id`
+  field; not currently called from production but kept ready for
+  D5.7 cross-pond import.
+- `crates/tlogfs/src/error.rs`: new `LegacyPartitionLayout { path,
+  found }` variant.  After `deltalake::open_table()` succeeds we
+  fetch `snapshot()?.metadata().partition_columns()` and refuse to
+  open if it isn't exactly `["pond_id", "part_id"]`.  Error message
+  directs the operator to `pond init` a fresh directory and restore
+  via `pond remote add` + `pond pull`.
+- `crates/steward/src/remote_adapter.rs`: renamed
+  `parse_part_id_path` -> `parse_pond_part_path`, returns
+  `(pond_id, part_id)`, validates a 3+-segment path and rejects
+  duplicate `pond_id=` or `part_id=` segments.  `validate_local_data_path`
+  now also asserts the parsed `pond_id` equals `self.store_id()`
+  ("no foreign data leaks on push" guard, tightened until D5.7
+  enables cross-pond push).  `apply_pulled_bundle` asserts the
+  parsed `pond_id` matches the bundle's `pond_id` and populates both
+  columns in `partition_values`.  6 old parser tests replaced with
+  10 new ones exercising both prefixes and edge cases.
+
+**Migration policy chosen**: fresh-start.  No in-place migration
+tool; legacy ponds are refused at open time.  In practice the local
+pond is rebuilt by `pond init` + `pond remote add <existing-remote>`
++ `pond pull` once D5 wires that up; for pre-D5 testing operators
+simply re-init.
+
+**Validation**:
+
+- `cargo fmt --all -- --check` clean
+- `cargo clippy --workspace --all-features -- -D warnings` clean
+- `cargo test --workspace`: all green (9 remote-CLI integration
+  tests + full unit suite, zero failures across the workspace)
+- Manual smoke test confirms on-disk layout
+  (`./data/pond_id=<uuid>/part_id=<uuid>/part-...parquet`) and that
+  the legacy guard refuses to open a hand-mocked `partitionColumns =
+  ["part_id"]` table with the expected error.
+
+**SQL touch-up deferred**: queries in `persistence.rs` (lines 1178,
+2976, 3381) still filter only by `part_id` without scoping to
+`pond_id`.  Harmless today (one pond_id per local pond, so partition
+pruning over a single pond_id is transparent), but must be scoped
+by pond_id once D5.7 imports foreign rows.  Tracked as a D5.7
+checklist item below.
+
+### D5.1 — (original plan, kept for reference)
+
+**File**: `crates/tlogfs/src/persistence.rs`
+
+Two `create` paths (lines ~262-291 and ~339-371) both write the
+configuration property:
+
+```rust
+.with_configuration([(
+    "delta.checkpoint.writeStatsAsStruct".to_string(),
+    Some("true".to_string()),
+)])
+.with_partition_columns(["part_id"])
+```
+
+Change to:
+
+```rust
+.with_partition_columns(["pond_id", "part_id"])
+```
+
+Same in `open_or_create` paths.  The column ordering matters
+(outer-most first): `pond_id` first lets pond-scoped filters prune
+entire pond directories before descending into `part_id`.
+
+**Migration policy**: per `docs/remote-redesign.md` § D5, "schema
+migration on existing local ponds: probably 'create fresh from data'
+rather than in-place, given no compat constraint."  In practice:
+
+- For a single-pond local pond (the only case today, pre-cross-pond),
+  the new partition layout is `pond_id=<the-one-pond>/part_id=<uuid>/`.
+  Old ponds with no `pond_id` partition just need a one-time
+  rewrite.  Provide a one-shot CLI `pond migrate-partitions` or
+  similar; refuse to open un-migrated ponds with a clear error.
+- For testing, just `pond init` fresh ponds — the migration tool is
+  for production operators, not the test suite.
+
+**Touch points outside `persistence.rs`**:
+
+- Any code that constructs paths under `part_id=<uuid>/` directly
+  (search for `part_id=` in `crates/tlogfs/`, `crates/steward/`,
+  `crates/sync-remote/`).
+- The bootstrap that creates the root directory partition needs to
+  know the pond_id before the first write (it already does — see
+  `Ship::create_pond_with_metadata` calling
+  `OpLogPersistence::create_with_metadata`).
+- Anywhere that lists partitions (`list_part_ids()` etc.) needs to
+  return either `(pond_id, part_id)` tuples or a flat list filtered
+  by the local pond_id.
+
+### D5.2 — Bootstrap row as canonical pond identity
+
+Per the redesign plan:
+
+> Pond identity: move from control-table Setting to root directory's
+> OplogEntry's `pond_id` column.  Bootstrap row becomes the canonical
+> source.  Adjust `Steward::open` to read `pond_id` from the root
+> directory's OplogEntry, not from the control-table Setting.
+
+Today: `ControlTable::pond_metadata().pond_id` (control-table
+Setting) is the source of truth.
+
+After D5.2: `Steward::open` reads the root directory's OplogEntry
+(`part_id` of root, the bootstrap row) and extracts `pond_id` from
+that row's `pond_id` column.  The control-table Setting becomes
+either redundant (still written for backwards compat) or removed.
+
+This is a refactor that's logically separate from D5.1 but flows
+naturally from it: once `pond_id` is a partition column, the
+bootstrap row's `pond_id` is the obvious source of truth.
+
+### D5.3 — Filter Remote::push by pond_id partition
+
+**File**: `crates/sync-remote/src/remote.rs` around `Remote::push`
+(line ~285).
+
+Today `Remote::push` reads all OplogEntry rows for the requested
+`txn_seq` and pushes them all (the duckpond adapter
+`ShipRemoteSteward::commit_to_data_persistence` already filters by
+pond_id elsewhere, but the bundle itself doesn't have a
+partition-level filter).
+
+After D5.1, partition pruning in DataFusion can do this for free:
+the SQL query that builds bundles adds `WHERE pond_id = '<local>'`,
+and Delta scans only the relevant partitions.
+
+This is what unblocks **efficient** cross-pond push (and pull) in
+sandbox commit `149af878`.
+
+### D5.4 — restart_from_compact made generic over RemoteSteward
+
+**File**: `crates/sync-remote/src/remote.rs:576`.
+
+Today there are two restart-from-compact entry points:
+
+- `Remote::restart_from_compact(consumer_path: &Path) -> Result<Steward>`
+  — takes a `&Path` and creates a concrete `sync_steward::Steward`.
+  This is **what production needs for first-pull bootstrap** but is
+  hard-wired to sync_steward's Steward, not duckpond's.
+- `Remote::restart_pond_from_compact(consumer: &mut S: RemoteSteward)`
+  — operates on an existing open Steward and is generic over the
+  trait.  Used today by `restart_pond_from_compact` for cross-pond
+  drop-and-restart.
+
+The carry-forward: make `restart_from_compact` either generic over
+some `RemoteStewardFactory` trait, or split it into:
+
+- `bootstrap_consumer_dir(consumer_path: &Path) -> Result<()>` —
+  creates an empty consumer at `consumer_path` ready for first pull.
+  In duckpond this is essentially `pond init` + seeding the
+  `last_pulled_seq:<url>=1` setting.
+- Then `pull(&mut consumer)` does the rest.
+
+Integration test `crates/cmd/tests/test_remote_cli.rs:178-203` and
+`crates/cmd/tests/test_remote_cli.rs:406-420` already implement this
+manually (using `Steward::create_pond_for_restoration` +
+`raw_config_set("last_pulled_seq:<url>", "1")`).  That pattern needs
+to become a public API.
+
+This unblocks:
+- `pond restart-from-compact` CLI verb (currently missing).
+- `tests/500-s3-replication-minio.sh` pull half (currently
+  Pond1-push-only).
+- `tests/510-synth-logs-replication-cycle.sh` (currently skip-marked).
+- All cross-pond import tests (530-542 series).
+
+### D5.5 — compute_live_checksums for duckpond
+
+**File**: `crates/steward/src/remote_adapter.rs:501-511`.
+
+Currently:
+
+```rust
+async fn compute_live_checksums(&self, _pond_id: Uuid) -> StewardResult<PartitionChecksums> {
+    Err(SyncStewardError::Adapter(Box::new(std::io::Error::other(
+        "ShipRemoteSteward::compute_live_checksums is deferred to D3 \
+         (pond verify); duckpond's row schema requires a tlogfs-aware \
+         checksum strategy",
+    ))))
+}
+```
+
+This stub means `pond verify` doesn't work end-to-end for the
+duckpond row schema.  The sync_store implementation works against
+its own k/v schema; duckpond's OplogEntry schema needs a different
+checksum strategy (probably: blake3 over the canonical bytes of each
+OplogEntry row in a partition).  After D5.1, this is cheap because
+partition pruning gives us "all rows for a pond_id" in O(scanned
+partitions).
+
+### D5.6 — Lift the data_delta_version=0 clamp
+
+**File**: `crates/steward/src/remote_adapter.rs:573`.
+
+Today:
+
+```rust
+let start = std::cmp::max(previous_last_pushed + 1, 2);
+```
+
+Pushes start at txn_seq 2 because the bootstrap pond_init txn has
+`data_delta_version=0` and `Remote::push` rejects that with a
+`Schema` error.  The carry-forward: move the `version=0` handling
+into `Remote::push` itself (treat 0 as a clean skip, return Ok(())
+with no work done) and remove the driver-side clamp.
+
+This is a small, isolated change in `sync-remote` and removes a
+duckpond-specific workaround.
+
+### D5.7 — Cross-pond import UX surface
+
+This is the design discussion that produces the `pond remote attach
+... --mount <path>` flow (or whatever it ends up being called).
+Concrete decisions needed:
+
+- Is `--mount` an attribute of `pond remote add`, or a separate verb
+  (`pond mount <name> <path>`)?
+- What happens at `pond remote remove` if mounts exist?  Auto-unmount
+  with `restart_pond_from_compact(drop=true)`, or refuse and require
+  explicit `pond unmount`?
+- How does the filesystem read path know it's reading a foreign
+  pond's content?  Probably via OplogEntry's `pond_id` field plus a
+  mount-table lookup ("anything under `/imports/upstream/` is
+  expected to have `pond_id=<upstream's-uuid>`").
+- How do `pond cat` / `pond list` show foreign content?  Same as
+  native?  Marked specially?
+
+The sandbox prototype `duckpond/sandbox/DESIGN.md` and the cross_pond
+test in `crates/sync-tests/tests/cross_pond.rs` are the reference.
+
+### D5.8 — Testsuite revival
+
+Once D5.1–D5.7 land, work through the 13 currently-skipped scripts:
+
+**Cross-pond import (D5 core)**:
+- `tests/530-cross-pond-import-minio.sh`
+- `tests/531-recursive-cross-pond-import.sh`
+- `tests/532-cross-pond-path-boundaries.sh`
+- `tests/533-cross-pond-factory-resolution.sh`
+- `tests/540-import-watermark-incremental.sh`
+- `tests/540-recursive-sitegen.sh`
+- `tests/541-import-watermark-unrelated-txn.sh`
+- `tests/542-import-watermark-restore.sh`
+
+**First-pull bootstrap (unblocked by D5.4)**:
+- `tests/510-synth-logs-replication-cycle.sh`
+- `tests/523-emergency-erase-and-auto-bucket.sh`
+- Plus: extend `tests/500-s3-replication-minio.sh` with a Pond2
+  pull-back half.
+
+**`pond run remote show/verify` equivalents (need new CLI verbs)**:
+- `tests/520-remote-show-verification.sh` — needs `pond remote show`
+  / `pond remote verify` or similar.
+- `tests/521-external-tool-verification.sh` — same; also references a
+  Rust binary in `crates/remote-verify-tool/` that no longer exists.
+- `tests/522-emergency-recovery-tool.sh` — references
+  `duckpond-emergency` standalone binary; may stay as a separate
+  end-to-end test outside the D4/D5 CLI path.
+
+Each disabled script today has a `# DISABLED-D4: <reason>` comment
+header and a `SKIP: ...` early-exit block after `set -e`.  The CI
+filter (`.github/workflows/integration-tests.yml:68-76`) greps for
+`# REQUIRES: compose` in the first 25 lines, so only 500 and 501
+currently match.
+
+---
+
+## Carry-forwards inherited from D4 (a checklist)
+
+These are noted in `docs/remote-redesign.md` § D4 implementation notes
+and in the `crates/cmd/tests/test_remote_cli.rs` module doc.  Repeating
+here for easy reference:
+
+| Item | Where | What |
+|------|-------|------|
+| `restart_from_compact` not generic | `crates/sync-remote/src/remote.rs:576` | D5.4 above |
+| `compute_live_checksums` stubbed | `crates/steward/src/remote_adapter.rs:501-511` | D5.5 above |
+| `data_delta_version=0` clamp | `crates/steward/src/remote_adapter.rs:573` | D5.6 above |
+| 13 disabled testsuite scripts | `testsuite/tests/{510,520-523,530-542}-*.sh` | D5.8 above |
+| `pond_id` not a partition column | `crates/tlogfs/src/persistence.rs:276,348` | D5.1 above |
+| Pond identity from control-table Setting, not bootstrap row | `crates/steward/src/control_table.rs:456` | D5.2 above |
+
+---
+
+## Architectural reminders (so you don't re-derive these)
+
+### Layering (bottom → top)
+
+```
+cmd          CLI commands
+sync-remote  Remote (Delta-bundle pipeline) + RemoteSteward trait
+steward      Ship (transaction orchestration) + ControlTable +
+             ShipRemoteSteward (adapter implementing RemoteSteward)
+tlogfs       Delta Lake persistence, OpLog, DataFusion sessions
+tinyfs       Pure filesystem abstractions
+```
+
+`sync-remote` is **agnostic** of duckpond's specific schemas.  It
+operates against the `RemoteSteward` trait.  `ShipRemoteSteward` (in
+`crates/steward/src/remote_adapter.rs`) is the duckpond
+implementation; sandbox has its own.
+
+### Where pond_id lives today (pre-D5)
+
+- **Bootstrap source**: control-table Setting `pond_id` (set by
+  `Ship::create_pond_with_metadata`, read by `Steward::open`).
+- **Per-row**: regular column on every `OplogEntry`, stamped by
+  `OpLogPersistence` at commit time from `self.pond_id`.
+- **Partition layout**: NOT yet — `part_id` is the only partition
+  column.
+
+After D5: bootstrap row is canonical; partition layout adds `pond_id`
+as the outer-most partition; control-table Setting becomes redundant.
+
+### Where transactions live
+
+- `pond` CLI = one process = one transaction (enforced by panic if a
+  second `TransactionGuard` is created).
+- Inside that transaction: pass `&mut tx` to helpers.  **Never** call
+  `OpLogPersistence::open` or `persistence.begin()` again.
+- Auto-push (D4.4): post-commit hook fires inside the steward after
+  the transaction commits.  It scans `/sys/remotes/*` and pushes to
+  each `push|both`-mode remote.  Failures log but don't fail the
+  user's write.
+
+### Where remotes live
+
+- **Config**: `/sys/remotes/<name>` as YAML files (in the filesystem,
+  inside the steward transaction).
+- **Mode**: `remote_mode:<name>` in the control table's raw_config map.
+- **Per-remote watermarks**: `last_pushed_seq:<url>` and
+  `last_pulled_seq:<url>` in the control table's raw_config map (keyed
+  by URL, not name, so remote rename works).
+
+The path constants `SYS_DIR = "/sys"`, `SYS_REMOTES_DIR = "/sys/remotes"`,
+and the key prefix `REMOTE_MODE_PREFIX = "remote_mode:"` are exported
+from `crates/steward/src/lib.rs`.
+
+---
+
+## First-day workflow when you resume
+
+1. **Re-read this doc** + `docs/remote-redesign.md` § D5.
+2. **Verify baseline**: `cargo fmt --all -- --check && cargo clippy
+   --workspace --all-features -- -D warnings && cargo test
+   --workspace` should be clean on `jmacd/52`.
+3. **Decide whether to PR D4 first** or accumulate D5 commits on top.
+   Recommended: PR D4 first (it's a coherent, large change at a
+   natural boundary) so D5 lands on a known-good main.  The plan.md
+   in your session folder explicitly says "ready for PR".
+4. **Plan D5.1** carefully before starting — the partition column
+   change is a schema migration with operator impact.  Discuss with
+   the user:
+   - Migration policy: in-place rewrite, or "init fresh from data"?
+   - Refuse-to-open old ponds vs. silent upgrade on first write?
+   - Should there be a `pond migrate-partitions` CLI, or is this
+     internal-only?
+5. **Open the sandbox reference**: `duckpond/sandbox/` has working
+   prototypes of all D5 features.  Cherry-pick design, not code:
+   - `sandbox/A1-partition-by-pond-id.md` (if it exists; otherwise
+     read `sandbox/DESIGN.md`).
+   - `crates/sync-tests/tests/cross_pond.rs` — the cross-pond
+     integration test we need to mirror in duckpond.
+
+## Bookkeeping
+
+- **Untracked file `may-10-bugs.md`**: predates this session;
+  unrelated to D4/D5.  Leave alone unless the user asks.
+- **Session state on this machine**:
+  `~/.copilot/session-state/f5d4ca95-863b-4a92-bb51-56a07c994933/plan.md`
+  has the D4 progress log including all 8 commit SHAs.  That session
+  is ending; a new session should reference this file
+  (`docs/d5-resume.md`) rather than dig into the old plan.md.
+- **CI integration filter**:
+  `.github/workflows/integration-tests.yml:68-76` greps for
+  `# REQUIRES: compose` in the first 25 lines of each test script.
+  Today only 500 and 501 match.  When you re-enable a disabled
+  script, restore that line.
+
+## Memory cues (stored in repo memory)
+
+These were stored during D4 and should resurface in the next session:
+
+- "`pond remote add` auto-inits the remote: push/both creates Delta
+  table with local pond_id (or refuses foreign); pull requires
+  existing remote."
+- (See `subject: remote attach`, `subject: transactions`,
+  `subject: factory init`, etc. in stored memories.)
+
+---
+
+**Bottom line**: D4 is done and clean.  D5 is the partition-column
+migration plus cross-pond UX.  Start with D5.1 (partition migration);
+D5.2-D5.6 follow naturally; D5.7-D5.8 close out the cross-pond import
+flow and revive the disabled tests.  D6 is the operator-guide rewrite
+and goes after all of D5.

@@ -41,6 +41,14 @@ pub enum TLogFSError {
         hint: String,
     },
 
+    #[error(
+        "Legacy partition layout at {path}: data table is partitioned by [{found}] but D5 \
+         requires [pond_id, part_id]. Re-initialize the pond (e.g. `pond init` into a fresh \
+         directory and restore from your remote with `pond remote add` + `pond pull`); \
+         no in-place migration is provided."
+    )]
+    LegacyPartitionLayout { path: PathBuf, found: String },
+
     #[error("Commit error: {message}")]
     Commit { message: String },
 

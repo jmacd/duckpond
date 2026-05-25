@@ -108,11 +108,15 @@ pub struct InnerState {
 /// An external parquet file to register as a Delta Add action at commit time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalAddAction {
-    /// Relative path in the object store (e.g., "part_id=<uuid>/file.parquet")
+    /// Relative path in the object store, e.g.
+    /// `"pond_id=<uuid>/part_id=<uuid>/file.parquet"` (D5+).
     pub path: String,
     /// File size in bytes
     pub size: i64,
-    /// Partition column value
+    /// `pond_id` partition value (UUID of the owning pond; may differ
+    /// from the local pond for cross-pond import).
+    pub pond_id: String,
+    /// `part_id` partition value (UUID of the parent directory).
     pub part_id: String,
 }
 
@@ -259,7 +263,7 @@ impl OpLogPersistence {
         // Create the Delta table structure
         let config: HashMap<String, Option<String>> = vec![(
             "delta.dataSkippingStatsColumns".to_string(),
-            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,pond_id".to_string())
+            Some("node_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
         )]
         .into_iter()
         .collect();
@@ -273,7 +277,7 @@ impl OpLogPersistence {
             .await?
             .create()
             .with_columns(OplogEntry::for_delta())
-            .with_partition_columns(["part_id"])
+            .with_partition_columns(["pond_id", "part_id"])
             .with_configuration(config)
             .with_save_mode(SaveMode::ErrorIfExists)
             .await?;
@@ -324,6 +328,19 @@ impl OpLogPersistence {
         let table = match deltalake::open_table(url.clone()).await {
             Ok(existing_table) => {
                 debug!("Found existing table at {}", &path_str);
+                // D5: refuse to open tables with the pre-D5 partition layout.
+                // Pre-D5: partition_columns = ["part_id"]; D5+: ["pond_id", "part_id"].
+                let part_cols: Vec<String> = existing_table
+                    .snapshot()
+                    .ok()
+                    .map(|s| s.metadata().partition_columns().clone())
+                    .unwrap_or_default();
+                if part_cols.as_slice() != ["pond_id".to_string(), "part_id".to_string()] {
+                    return Err(TLogFSError::LegacyPartitionLayout {
+                        path: path.as_ref().to_path_buf(),
+                        found: part_cols.join(", "),
+                    });
+                }
                 existing_table
             }
             Err(open_err) => {
@@ -335,8 +352,9 @@ impl OpLogPersistence {
                 // Configure stats collection to skip the binary 'content' column to avoid warnings
                 let config: HashMap<String, Option<String>> = vec![(
                     "delta.dataSkippingStatsColumns".to_string(),
-		    // @@@ Awful
-                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,pond_id".to_string())
+                    // pond_id and part_id are partition columns (in the file path);
+                    // partition columns do not need data-skipping stats.
+                    Some("node_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
                 )]
                 .into_iter()
                 .collect();
@@ -345,7 +363,7 @@ impl OpLogPersistence {
                     .await?
                     .create()
                     .with_columns(OplogEntry::for_delta())
-                    .with_partition_columns(["part_id"])
+                    .with_partition_columns(["pond_id", "part_id"])
                     .with_configuration(config)
                     .with_save_mode(mode)
                     .await;
@@ -2141,34 +2159,46 @@ impl InnerState {
 
             let store = table.object_store();
 
-            // Group by part_id for partitioned writes
+            // Group by (pond_id, part_id) for partitioned writes.
             let part_id_col = batch.column_by_name("part_id").expect("part_id column");
             let part_id_arr = part_id_col
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .expect("part_id is StringArray");
+            let pond_id_col = batch.column_by_name("pond_id").expect("pond_id column");
+            let pond_id_arr = pond_id_col
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("pond_id is StringArray");
 
-            let mut part_ids: Vec<String> = Vec::new();
+            let mut groups: Vec<(String, String)> = Vec::new();
             for i in 0..batch.num_rows() {
-                let pid = part_id_arr.value(i).to_string();
-                if !part_ids.contains(&pid) {
-                    part_ids.push(pid);
+                let pond = pond_id_arr.value(i).to_string();
+                let part = part_id_arr.value(i).to_string();
+                let key = (pond, part);
+                if !groups.contains(&key) {
+                    groups.push(key);
                 }
             }
 
-            for pid in &part_ids {
+            for (pond, part) in &groups {
                 let mask: arrow::array::BooleanArray = (0..batch.num_rows())
-                    .map(|i| Some(part_id_arr.value(i) == pid.as_str()))
+                    .map(|i| {
+                        Some(
+                            pond_id_arr.value(i) == pond.as_str()
+                                && part_id_arr.value(i) == part.as_str(),
+                        )
+                    })
                     .collect();
                 let filtered = arrow::compute::filter_record_batch(&batch, &mask)?;
 
-                // Remove part_id column (it is the partition column, stored in path)
+                // Remove pond_id and part_id columns (partition columns, stored in path).
                 let indices: Vec<usize> = filtered
                     .schema()
                     .fields()
                     .iter()
                     .enumerate()
-                    .filter(|(_, f)| f.name() != "part_id")
+                    .filter(|(_, f)| f.name() != "part_id" && f.name() != "pond_id")
                     .map(|(i, _)| i)
                     .collect();
                 let filtered = filtered.project(&indices)?;
@@ -2183,8 +2213,9 @@ impl InnerState {
                 let _file_metadata = writer.close()?;
 
                 let file_name = format!(
-                    "part_id={}/part-00000-{}-c000.snappy.parquet",
-                    pid,
+                    "pond_id={}/part_id={}/part-00000-{}-c000.snappy.parquet",
+                    pond,
+                    part,
                     uuid7::uuid7()
                 );
                 let file_size = parquet_buf.len() as i64;
@@ -2199,7 +2230,10 @@ impl InnerState {
 
                 all_actions.push(Action::Add(Add {
                     path: file_name,
-                    partition_values: HashMap::from([("part_id".to_string(), Some(pid.clone()))]),
+                    partition_values: HashMap::from([
+                        ("pond_id".to_string(), Some(pond.clone())),
+                        ("part_id".to_string(), Some(part.clone())),
+                    ]),
                     size: file_size,
                     modification_time: now_ms,
                     data_change: true,
@@ -2219,10 +2253,10 @@ impl InnerState {
         for ea in &external_actions {
             all_actions.push(Action::Add(Add {
                 path: ea.path.clone(),
-                partition_values: HashMap::from([(
-                    "part_id".to_string(),
-                    Some(ea.part_id.clone()),
-                )]),
+                partition_values: HashMap::from([
+                    ("pond_id".to_string(), Some(ea.pond_id.clone())),
+                    ("part_id".to_string(), Some(ea.part_id.clone())),
+                ]),
                 size: ea.size,
                 modification_time: now_ms,
                 data_change: true,
@@ -2238,7 +2272,7 @@ impl InnerState {
         // Phase 3: Single Delta commit with all actions
         let operation = deltalake::protocol::DeltaOperation::Write {
             mode: SaveMode::Append,
-            partition_by: Some(vec!["part_id".to_string()]),
+            partition_by: Some(vec!["pond_id".to_string(), "part_id".to_string()]),
             predicate: None,
         };
 
