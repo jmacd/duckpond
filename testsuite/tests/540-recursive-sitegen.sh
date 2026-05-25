@@ -1,5 +1,5 @@
 #!/bin/bash
-# REQUIRES: compose
+# DISABLED-D4: cross-pond import was implemented by the legacy `remote` factory (deleted in D4.5); D5 will reintroduce it via row-level `pond_id` partitioning of tlogfs.
 # EXPERIMENT: Recursive sitegen via cross-pond import
 # DESCRIPTION:
 #   Tests that a top-level sitegen with subsites: can recursively generate
@@ -21,6 +21,11 @@
 #   - Shared assets (style.css, chart.js) at top level
 #   - Per-site theme.css in each directory
 set -e
+
+# DISABLED-D4 skip block (see header comment)
+echo "SKIP: this test is DISABLED-D4 (see header for details)" >&2
+exit 0
+
 
 source /usr/local/bin/check.sh 2>/dev/null || source check.sh 2>/dev/null || true
 

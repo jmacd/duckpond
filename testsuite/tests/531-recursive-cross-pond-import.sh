@@ -1,5 +1,5 @@
 #!/bin/bash
-# REQUIRES: compose
+# DISABLED-D4: cross-pond import was implemented by the legacy `remote` factory (deleted in D4.5); D5 will reintroduce it via row-level `pond_id` partitioning of tlogfs.
 # EXPERIMENT: Recursive cross-pond import via MinIO
 # DESCRIPTION:
 #   Tests the /** recursive import pattern. The producer pond has nested
@@ -15,6 +15,11 @@
 #   - Recursive import of /data/** imports all subdirectories
 #   - Data in nested dirs is queryable in the consumer pond
 set -e
+
+# DISABLED-D4 skip block (see header comment)
+echo "SKIP: this test is DISABLED-D4 (see header for details)" >&2
+exit 0
+
 
 source /usr/local/bin/check.sh 2>/dev/null || source check.sh 2>/dev/null || true
 

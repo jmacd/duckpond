@@ -1,4 +1,5 @@
 #!/bin/bash
+# DISABLED-D4: legacy `pond run <remote-factory> show` and `verify` subcommands removed in D4.5; no D4 CLI equivalent yet.
 # EXPERIMENT: Emergency Recovery Tool Verification
 # DESCRIPTION:
 #   - Create pond with test files of known content
@@ -17,6 +18,11 @@
 #   - duckpond-emergency script
 #
 set -e
+
+# DISABLED-D4 skip block (see header comment)
+echo "SKIP: this test is DISABLED-D4 (see header for details)" >&2
+exit 0
+
 
 echo "=== Experiment: Emergency Recovery Tool Verification ==="
 echo ""

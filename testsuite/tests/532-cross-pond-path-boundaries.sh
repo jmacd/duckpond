@@ -1,5 +1,5 @@
 #!/bin/bash
-# REQUIRES: compose
+# DISABLED-D4: cross-pond import was implemented by the legacy `remote` factory (deleted in D4.5); D5 will reintroduce it via row-level `pond_id` partitioning of tlogfs.
 # EXPERIMENT: Cross-pond path resolution boundaries
 # DESCRIPTION:
 #   Tests that absolute paths in an imported pond resolve within the
@@ -22,6 +22,11 @@
 #   - Absolute paths from the producer resolve within the import mount
 #   - Paths unique to the consumer pond are not visible in the import
 set -e
+
+# DISABLED-D4 skip block (see header comment)
+echo "SKIP: this test is DISABLED-D4 (see header for details)" >&2
+exit 0
+
 
 source /usr/local/bin/check.sh 2>/dev/null || source check.sh 2>/dev/null || true
 
