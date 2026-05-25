@@ -270,3 +270,89 @@ async fn ship_remote_pull_empty_remote_is_noop() {
         "empty remote should apply zero bundles"
     );
 }
+
+/// D5.3: `actions_at_version` filters Add/Remove file actions by the
+/// requested pond_id, so cross-pond Delta commits (D5.7) only
+/// contribute their local-pond rows to push bundles.  Today every
+/// commit is single-pond, so we test the filter contract by asking for
+/// a *different* (foreign) pond_id: the adapter must return empty
+/// adds/removes even though the commit contains real local-pond files.
+#[tokio::test]
+async fn ship_remote_actions_at_version_filters_by_pond_id() {
+    use sync_remote::RemoteSteward;
+    use uuid::Uuid;
+
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+
+    // Create a pond and commit one write so a Delta commit exists.
+    let mut ship = Ship::create_pond(&pond_path).await.expect("create");
+    let local_pond_id = ship.control_table().pond_id_uuid();
+    ship.write_transaction(&meta("seed_write"), async |fs| {
+        let root = fs.root().await?;
+        let _ =
+            tinyfs::async_helpers::convenience::create_file_path(&root, "/d53.txt", b"hi").await?;
+        Ok(())
+    })
+    .await
+    .expect("write txn");
+
+    let adapter = ShipRemoteSteward::new(&mut ship);
+
+    // Find the Delta commit version of the just-finished transaction
+    // (txn_seq == 1 is `pond init`; the write is txn_seq == 2).
+    let dc = adapter
+        .data_committed_record(local_pond_id, 2)
+        .await
+        .expect("data_committed_record")
+        .expect("expected DataCommitted at txn_seq 2");
+    let dc_meta: sync_steward::DataCommittedMetadata =
+        serde_json::from_str(&dc.metadata_json).expect("metadata_json");
+    let version = dc_meta.data_delta_version;
+    assert!(version > 0, "expected non-zero data_delta_version");
+
+    // Sanity: asking for the local pond_id returns the file(s) just
+    // added in this commit.
+    let (adds_local, _removes_local) = adapter
+        .actions_at_version(local_pond_id, version)
+        .await
+        .expect("local-pond actions");
+    assert!(
+        !adds_local.is_empty(),
+        "expected at least one Add for local pond at version {}",
+        version
+    );
+    for add in &adds_local {
+        let expected_prefix = format!("pond_id={}/", local_pond_id);
+        assert!(
+            add.path.starts_with(&expected_prefix),
+            "local-pond add `{}` should start with `{}`",
+            add.path,
+            expected_prefix
+        );
+    }
+
+    // Filter contract: asking for a foreign pond_id at the SAME
+    // commit returns empty -- this is the D5.3 invariant that lets
+    // push enumerate only the requested pond's files even when
+    // commits become multi-pond in D5.7.
+    let foreign_pond_id = Uuid::new_v4();
+    assert_ne!(foreign_pond_id, local_pond_id);
+    let (adds_foreign, removes_foreign) = adapter
+        .actions_at_version(foreign_pond_id, version)
+        .await
+        .expect("foreign-pond actions");
+    assert!(
+        adds_foreign.is_empty(),
+        "expected zero adds for foreign pond at version {} (got {:?})",
+        version,
+        adds_foreign
+    );
+    assert!(
+        removes_foreign.is_empty(),
+        "expected zero removes for foreign pond at version {} (got {:?})",
+        version,
+        removes_foreign
+    );
+}

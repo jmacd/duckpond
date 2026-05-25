@@ -195,6 +195,7 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
 
     async fn actions_at_version(
         &self,
+        pond_id: Uuid,
         version: i64,
     ) -> StewardResult<(Vec<AddPath>, Vec<RemovePath>)> {
         let table = self.ship.data_persistence().table();
@@ -210,15 +211,46 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
                 ))
             })?;
         let actions = deltalake::logstore::get_actions(version, &bytes).map_err(adapt_err)?;
+        // D5.3: filter Add/Remove file actions by the `pond_id`
+        // partition value, so cross-pond Delta commits (D5.7) only
+        // contribute their local-pond rows to push bundles.  Today
+        // every commit is single-pond and the filter is a no-op,
+        // but the contract is established here.
+        let pond_id_str = pond_id.to_string();
         let mut adds = Vec::new();
         let mut removes = Vec::new();
         for action in actions {
             match action {
-                deltalake::kernel::Action::Add(a) => adds.push(AddPath {
-                    path: a.path,
-                    size: a.size,
-                }),
-                deltalake::kernel::Action::Remove(r) => removes.push(RemovePath { path: r.path }),
+                deltalake::kernel::Action::Add(a) => {
+                    let matches = matches!(
+                        a.partition_values.get("pond_id"),
+                        Some(Some(v)) if v == &pond_id_str
+                    );
+                    if matches {
+                        adds.push(AddPath {
+                            path: a.path,
+                            size: a.size,
+                        });
+                    }
+                }
+                deltalake::kernel::Action::Remove(r) => {
+                    // Remove.partition_values is Option<HashMap>;
+                    // when present, prefer it.  When absent (older
+                    // Delta protocol versions or producers that
+                    // omit it), fall back to a path-prefix check.
+                    let by_partition = r
+                        .partition_values
+                        .as_ref()
+                        .and_then(|pv| pv.get("pond_id"))
+                        .and_then(|v| v.as_ref());
+                    let matches = match by_partition {
+                        Some(v) => v == &pond_id_str,
+                        None => r.path.starts_with(&format!("pond_id={}/", pond_id_str)),
+                    };
+                    if matches {
+                        removes.push(RemovePath { path: r.path });
+                    }
+                }
                 _ => {}
             }
         }

@@ -63,10 +63,27 @@ pub trait RemoteSteward: Send + Sync {
     async fn log(&self, limit: Option<usize>) -> StewardResult<Vec<ControlRecord>>;
 
     /// Read the Delta `Add`/`Remove` file actions recorded at
-    /// `version` on the underlying data store.  `Remote::push` uses
-    /// this to enumerate parquet files to chunk and upload.
+    /// `version` on the underlying data store, filtered to only
+    /// those belonging to `pond_id`.  `Remote::push` uses this to
+    /// enumerate parquet files to chunk and upload for a single
+    /// pond's bundle.
+    ///
+    /// **Why the pond_id filter** (D5.3): once cross-pond import
+    /// lands, a single Delta commit on the local data table can
+    /// hold files for multiple pond_ids (the local pond's own
+    /// writes plus foreign rows applied from a pull).  Push is a
+    /// per-pond operation -- the bundle for `txn_seq` belongs to
+    /// one pond -- so the steward must return only that pond's
+    /// files.  Until D5.7 lands, every commit is single-pond and
+    /// the filter is a no-op, but the parameter establishes the
+    /// contract.
+    ///
+    /// Implementations must filter by partition value (preferred:
+    /// `partition_values["pond_id"] == pond_id`) or, as a
+    /// fallback, by path prefix `pond_id=<uuid>/`.
     async fn actions_at_version(
         &self,
+        pond_id: Uuid,
         version: i64,
     ) -> StewardResult<(Vec<AddPath>, Vec<RemovePath>)>;
 
@@ -180,9 +197,26 @@ impl RemoteSteward for sync_steward::Steward {
 
     async fn actions_at_version(
         &self,
+        pond_id: Uuid,
         version: i64,
     ) -> StewardResult<(Vec<AddPath>, Vec<RemovePath>)> {
-        sync_steward::Steward::actions_at_version(self, version).await
+        // sync_store layout: every path is `pond_id=<uuid>/...`,
+        // so a prefix filter is sufficient.  We still iterate the
+        // full action list because the underlying API returns it
+        // unfiltered; D5.3's contract is bundle-level correctness,
+        // not partition-pruning at the Delta layer (which would
+        // require a DataFusion query rather than a commit-log read).
+        let (adds, removes) = sync_steward::Steward::actions_at_version(self, version).await?;
+        let prefix = format!("pond_id={}/", pond_id);
+        let adds = adds
+            .into_iter()
+            .filter(|a| a.path.starts_with(&prefix))
+            .collect();
+        let removes = removes
+            .into_iter()
+            .filter(|r| r.path.starts_with(&prefix))
+            .collect();
+        Ok((adds, removes))
     }
 
     fn read_data_file(&self, rel_path: &str) -> StewardResult<Vec<u8>> {

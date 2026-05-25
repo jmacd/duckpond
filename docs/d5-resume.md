@@ -7,13 +7,19 @@
 > legacy single-`part_id` ponds are refused at open time with an
 > error directing the operator to re-init from remote (fresh-start
 > migration policy, no in-place migration tool).
-> **D5.2 is complete** (commit pending on top of D5.1): pond identity
-> is canonically owned by the data Delta table's bootstrap row;
+> **D5.2 is complete** (commit `2d03c946`): pond identity is
+> canonically owned by the data Delta table's bootstrap row;
 > `OpLogPersistence::peek_pond_id` reads it from Delta partition
 > values without a DataFusion session; `Ship::create_infrastructure`
 > prefers the data-table value over the control-table cache and
 > auto-heals the cache on disagreement.  Restoration scaffolds (empty
 > data table) still fall back to the control cache.
+> **D5.3 is complete** (commit pending on top of D5.2):
+> `RemoteSteward::actions_at_version` now takes a `pond_id` parameter
+> and implementations filter Add/Remove file actions by partition
+> value (duckpond) or path prefix (sandbox sync_store).  Today a no-op
+> (single-pond commits), but establishes the per-pond bundle contract
+> required for D5.7 cross-pond import.
 > This document is a working scratchpad for the next session; it is
 > intentionally checked in as a `docs/` file so it survives session
 > boundaries.  Delete (or move to `docs/archive/`) once D5 lands.
@@ -378,7 +384,65 @@ sync_steward has no remote/replication path so it never needs this.
 
 ### D5.2 — (original plan, kept for reference)
 
-### D5.3 — Filter Remote::push by pond_id partition
+### D5.3 — Filter Remote::push by pond_id partition — **DONE**
+
+**Status**: completed 2026-05-25 (commit pending on top of D5.2).
+
+**What changed**:
+
+- `crates/sync-remote/src/steward_trait.rs`:
+  `RemoteSteward::actions_at_version` signature gained a
+  `pond_id: Uuid` parameter.  Doc-comment establishes the contract:
+  implementations MUST return only Add/Remove file actions that
+  belong to the requested pond.  Default impl (for
+  `sync_steward::Steward`) delegates to the public
+  `Steward::actions_at_version(version)` and filters by path prefix
+  `pond_id={uuid}/` (sync_store's native layout).
+- `crates/steward/src/remote_adapter.rs`:
+  `ShipRemoteSteward::actions_at_version` re-reads the Delta commit
+  log entry, then filters Add actions by
+  `partition_values["pond_id"] == pond_id` (semantic, partition-aware
+  source of truth).  Remove actions fall back to a path-prefix check
+  when `partition_values` is absent (older Delta protocol versions).
+- `crates/sync-remote/src/remote.rs` (`Remote::push`):
+  now calls `steward.actions_at_version(steward.store_id(), version)`.
+  The `validate_local_data_path` defense-in-depth loop is unchanged
+  (its comment was updated to reflect that filtering moved upstream).
+
+**Why this is forward-looking, not a behavior change today**: every
+`pond run` is one transaction = one Delta commit, and
+`apply_pulled_bundle` is a separate transaction.  So today no
+single commit can hold rows for multiple pond_ids -- the filter is
+a no-op.  But once D5.7 cross-pond import lands and commits can be
+multi-pond, push must enumerate only the local pond's files; this
+patch establishes that contract at the trait layer so D5.7 doesn't
+have to retroactively refactor `Remote::push`.
+
+**Tests added**:
+
+- `crates/steward/tests/remote_adapter_test.rs`:
+  `ship_remote_actions_at_version_filters_by_pond_id` creates a
+  pond, commits one write, looks up the corresponding Delta version
+  via `data_committed_record`, then asserts that
+  `actions_at_version(local_pond_id, v)` returns the file (with the
+  expected `pond_id=<uuid>/` prefix) while
+  `actions_at_version(foreign_pond_id, v)` returns empty
+  adds/removes -- the D5.3 invariant.
+
+**Validation**:
+
+- `cargo fmt --all -- --check` clean
+- `cargo clippy --workspace --all-features -- -D warnings` clean
+- `cargo test --workspace` all green
+
+**Sandbox divergence**: sandbox commit `149af878` references
+DataFusion partition-pruning via SQL.  Duckpond's push uses
+`read_commit_entry` (raw Delta commit log) rather than a SQL query,
+so we filter at the action-iteration step rather than at scan
+time.  Same outcome (bundle contains only local-pond files), but
+no DataFusion session is opened during push.
+
+### D5.3 — (original plan, kept for reference)
 
 **File**: `crates/sync-remote/src/remote.rs` around `Remote::push`
 (line ~285).

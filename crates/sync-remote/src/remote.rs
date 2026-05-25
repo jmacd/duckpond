@@ -883,15 +883,22 @@ impl Remote {
         }
         let version = dc_meta.data_delta_version;
 
-        // 6. Get Add/Remove file actions.
-        let (adds, removes) = steward.actions_at_version(version).await?;
+        // 6. Get Add/Remove file actions for THIS pond at this
+        // Delta commit version (D5.3: per-pond filter at the
+        // steward layer means we never see foreign rows here).
+        let (adds, removes) = steward
+            .actions_at_version(steward.store_id(), version)
+            .await?;
 
-        // A3 push filter: every file in the bundle MUST belong to the
-        // local pond.  Delegated to the steward via
-        // `validate_local_data_path` so adapters with different data
-        // layouts (e.g., the D4 duckpond adapter, which uses
-        // `part_id=<uuid>/` instead of `pond_id=<uuid>/`) can plug in
-        // their own check.  See the trait method for rationale.
+        // A3 push filter (defense-in-depth, D5.3): every file in
+        // the bundle MUST belong to the local pond.  D5.3 made
+        // `actions_at_version` per-pond at the steward layer, so
+        // this loop should always pass; it's kept as a safety net
+        // against future steward bugs that would leak foreign rows
+        // into our own bundle.  Delegated to the steward via
+        // `validate_local_data_path` so adapters with different
+        // data layouts can plug in their own check; see the trait
+        // method for the rationale and layout assumptions.
         for add in &adds {
             steward.validate_local_data_path(&add.path).map_err(|e| {
                 RemoteError::Schema(format!("push filter (add `{}`): {}", add.path, e))
