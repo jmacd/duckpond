@@ -11,124 +11,19 @@
 //! `remote_mode:<name>`) lives in the control table's raw_config map; the
 //! YAML on disk is intentionally portable (no per-pond watermarks).
 //!
-//! YAML schema -- see [`RemoteAttachment`]:
-//! ```yaml
-//! url: file:///path/to/remote   # required
-//! region: us-east-1             # optional (S3 only)
-//! access_key_id: ...            # optional (S3 only)
-//! secret_access_key: ...        # optional (S3 only)
-//! endpoint: http://minio:9000   # optional (S3 only, for non-AWS endpoints)
-//! allow_http: true              # optional (S3 only, for non-TLS endpoints)
-//! ```
+//! The data types ([`RemoteAttachment`] / [`RemoteMode`]) live in the
+//! [`steward`] crate so the post-commit auto-push dispatcher can use them
+//! too.  See [`steward::remote_config`] for the YAML schema.
 
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use steward::{REMOTE_MODE_PREFIX, SYS_DIR, SYS_REMOTES_DIR};
 use tinyfs::EntryType;
 use tokio::io::AsyncWriteExt;
 
-/// Portable, on-disk YAML config for one remote attachment.  Stored at
-/// `/sys/remotes/<name>` and serialized as YAML.  Pushing this config to a
-/// backup is safe -- it carries no per-pond watermarks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RemoteAttachment {
-    /// Canonical remote URL: `file:///path` or `s3://bucket/prefix`.
-    pub url: String,
-
-    /// AWS region (S3 only; ignored for `file://`).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub region: String,
-
-    /// S3 access key id (S3 only).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub access_key_id: String,
-
-    /// S3 secret access key (S3 only).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub secret_access_key: String,
-
-    /// Custom S3 endpoint (e.g., MinIO, R2).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub endpoint: String,
-
-    /// Allow plain HTTP (required for local MinIO).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub allow_http: bool,
-}
-
-impl RemoteAttachment {
-    /// Build the storage options map passed to `Remote::open_at_url`.
-    /// Returns an empty map for `file://` URLs.
-    #[must_use]
-    pub fn to_storage_options(&self) -> HashMap<String, String> {
-        let mut out = HashMap::new();
-        if self.url.starts_with("s3://") {
-            if !self.region.is_empty() {
-                let _ = out.insert("region".to_string(), self.region.clone());
-            }
-            if !self.access_key_id.is_empty() {
-                let _ = out.insert("access_key_id".to_string(), self.access_key_id.clone());
-            }
-            if !self.secret_access_key.is_empty() {
-                let _ = out.insert(
-                    "secret_access_key".to_string(),
-                    self.secret_access_key.clone(),
-                );
-            }
-            if !self.endpoint.is_empty() {
-                let _ = out.insert("endpoint".to_string(), self.endpoint.clone());
-                let _ = out.insert(
-                    "virtual_hosted_style_request".to_string(),
-                    "false".to_string(),
-                );
-            }
-            if self.allow_http {
-                let _ = out.insert("allow_http".to_string(), "true".to_string());
-            }
-        }
-        out
-    }
-}
-
-/// Operating mode for a remote attachment.  Stored in the control table's
-/// raw_config map under key `remote_mode:<name>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemoteMode {
-    /// Local writes are pushed to the remote (default for `add`).
-    Push,
-    /// Local pulls from the remote; no writes are pushed back.
-    Pull,
-    /// Both directions enabled.
-    Both,
-}
-
-impl RemoteMode {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RemoteMode::Push => "push",
-            RemoteMode::Pull => "pull",
-            RemoteMode::Both => "both",
-        }
-    }
-
-    /// Parse from the persisted string form.  Returns an error on
-    /// unrecognized values so the operator notices typos.
-    pub fn parse(s: &str) -> Result<Self> {
-        match s {
-            "push" => Ok(RemoteMode::Push),
-            "pull" => Ok(RemoteMode::Pull),
-            "both" => Ok(RemoteMode::Both),
-            other => Err(anyhow!(
-                "invalid remote mode `{}` (expected `push`, `pull`, or `both`)",
-                other
-            )),
-        }
-    }
-}
+// Re-export the types that moved to steward so existing callers using
+// `commands::remote::{RemoteAttachment, RemoteMode}` keep working.
+pub use steward::{RemoteAttachment, RemoteMode};
 
 /// Validate a remote name: single path segment, non-empty, no slashes,
 /// no leading dot, ASCII printable.
@@ -192,6 +87,18 @@ pub async fn add_remote_command(
 
     let mut ship = ship_context.open_pond().await?;
 
+    // Record the operating mode BEFORE the data write commits.  The
+    // write transaction's post-commit auto-push dispatcher reads
+    // `remote_mode:<name>` from the control table to decide whether to
+    // push to a freshly-added remote.  If we wrote the mode after the
+    // data commit, a `mode=pull` remote would be auto-pushed to once
+    // (because the dispatcher would see the default `push`).
+    let mode_key = format!("{REMOTE_MODE_PREFIX}{name}");
+    ship.control_table_mut()
+        .raw_config_set(&mode_key, mode_str)
+        .await
+        .map_err(|e| anyhow!("Failed to set remote mode `{}`: {}", mode_str, e))?;
+
     ship.write_transaction(
         &steward::PondUserMetadata::new(vec![
             "remote".to_string(),
@@ -239,15 +146,6 @@ pub async fn add_remote_command(
     )
     .await
     .map_err(|e| anyhow!("Failed to add remote: {}", e))?;
-
-    // Mode is per-pond runtime state; store in raw_config so it never ships
-    // with the YAML.  The write happens in its own short-lived transaction
-    // managed entirely by the control table (no data txn needed).
-    let mode_key = format!("{REMOTE_MODE_PREFIX}{name}");
-    ship.control_table_mut()
-        .raw_config_set(&mode_key, mode_str)
-        .await
-        .map_err(|e| anyhow!("Failed to set remote mode `{}`: {}", mode_str, e))?;
 
     log::info!(
         "[OK] added remote {} -> {} (mode={})",
@@ -415,7 +313,7 @@ pub async fn load_remote_attachment(
         .await
         .map_err(|e| anyhow!("failed to commit read tx: {}", e))?;
 
-    let attachment: RemoteAttachment = serde_yaml::from_slice(&yaml_bytes)
+    let attachment: RemoteAttachment = RemoteAttachment::from_yaml_bytes(&yaml_bytes)
         .map_err(|e| anyhow!("failed to parse {}: {}", config_path, e))?;
     Ok(attachment)
 }
@@ -476,7 +374,9 @@ pub async fn remote_mode_for(ship: &steward::Steward, name: &str) -> Result<Remo
         .await
         .map_err(|e| anyhow!("failed to read remote mode for `{}`: {}", name, e))?;
     match raw {
-        Some(s) if !s.is_empty() => RemoteMode::parse(&s),
+        Some(s) if !s.is_empty() => {
+            RemoteMode::parse(&s).map_err(|e| anyhow!("invalid remote mode for `{}`: {}", name, e))
+        }
         _ => Ok(RemoteMode::Push),
     }
 }
@@ -504,64 +404,5 @@ mod tests {
     #[test]
     fn test_remote_config_path_format() {
         assert_eq!(remote_config_path("origin"), "/sys/remotes/origin");
-    }
-
-    #[test]
-    fn test_mode_roundtrip() {
-        for m in [RemoteMode::Push, RemoteMode::Pull, RemoteMode::Both] {
-            assert_eq!(RemoteMode::parse(m.as_str()).unwrap(), m);
-        }
-        assert!(RemoteMode::parse("bogus").is_err());
-    }
-
-    #[test]
-    fn test_yaml_roundtrip_file_url() {
-        let a = RemoteAttachment {
-            url: "file:///tmp/x".to_string(),
-            region: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            endpoint: String::new(),
-            allow_http: false,
-        };
-        let y = serde_yaml::to_string(&a).unwrap();
-        let back: RemoteAttachment = serde_yaml::from_str(&y).unwrap();
-        assert_eq!(back.url, a.url);
-        assert_eq!(back.allow_http, false);
-        // skip_serializing_if should keep empty fields out of the YAML
-        assert!(!y.contains("region:"));
-        assert!(!y.contains("access_key_id:"));
-    }
-
-    #[test]
-    fn test_storage_options_empty_for_file() {
-        let a = RemoteAttachment {
-            url: "file:///tmp/x".to_string(),
-            region: "us-west-2".to_string(), // ignored for file://
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            endpoint: String::new(),
-            allow_http: false,
-        };
-        assert!(a.to_storage_options().is_empty());
-    }
-
-    #[test]
-    fn test_storage_options_populated_for_s3() {
-        let a = RemoteAttachment {
-            url: "s3://bucket/prefix".to_string(),
-            region: "us-east-1".to_string(),
-            access_key_id: "AKIA".to_string(),
-            secret_access_key: "SECRET".to_string(),
-            endpoint: "http://localhost:9000".to_string(),
-            allow_http: true,
-        };
-        let opts = a.to_storage_options();
-        assert_eq!(opts.get("region").unwrap(), "us-east-1");
-        assert_eq!(opts.get("access_key_id").unwrap(), "AKIA");
-        assert_eq!(opts.get("secret_access_key").unwrap(), "SECRET");
-        assert_eq!(opts.get("endpoint").unwrap(), "http://localhost:9000");
-        assert_eq!(opts.get("allow_http").unwrap(), "true");
-        assert_eq!(opts.get("virtual_hosted_style_request").unwrap(), "false");
     }
 }

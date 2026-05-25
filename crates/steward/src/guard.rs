@@ -347,6 +347,11 @@ impl<'a> StewardTransactionGuard<'a> {
                 // This happens AFTER commit but uses a NEW transaction
                 self.run_post_commit_factories().await;
 
+                // D4: Run post-commit auto-push for /sys/remotes/* entries.
+                // Same "after-commit, new transaction" model as factories
+                // above; failures are logged but do not undo the commit.
+                self.run_post_commit_remotes().await;
+
                 Ok(Some(()))
             }
             Ok(None) => {
@@ -842,6 +847,212 @@ impl<'a> StewardTransactionGuard<'a> {
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
         result.map_err(StewardError::DataInit)
+    }
+
+    /// D4 post-commit auto-push: scan `/sys/remotes/*` and push every
+    /// pending `txn_seq` to each attachment whose mode is `push` or
+    /// `both`.  This is the replacement for the legacy
+    /// `/system/run/<N>-remote` factory dispatch.
+    ///
+    /// Like [`Self::run_post_commit_factories`], failures from any
+    /// individual remote are logged but do not roll back the data
+    /// commit (the local write has already succeeded).  The legacy
+    /// factory-based dispatcher continues to run alongside this method
+    /// until D4.5 deletes `crates/remote`.
+    async fn run_post_commit_remotes(&mut self) {
+        debug!("Starting post-commit /sys/remotes/* discovery");
+
+        let remotes = match self.discover_sys_remotes().await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("Failed to discover /sys/remotes/*: {}", e);
+                return;
+            }
+        };
+
+        if remotes.is_empty() {
+            debug!("No /sys/remotes/* entries found");
+            return;
+        }
+
+        // Filter by mode (raw_config key `remote_mode:<name>`); default is push.
+        let mut to_push: Vec<(String, crate::RemoteAttachment)> = Vec::new();
+        for (name, attachment) in remotes {
+            let mode_key = format!("{}{}", crate::REMOTE_MODE_PREFIX, name);
+            let mode_str = match self.control_table.raw_config_get(&mode_key).await {
+                Ok(Some(v)) if !v.is_empty() => v,
+                _ => "push".to_string(),
+            };
+            let mode = match crate::RemoteMode::parse(&mode_str) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!(
+                        "post-commit auto-push: skipping `{}` (invalid mode `{}`: {})",
+                        name,
+                        mode_str,
+                        e
+                    );
+                    continue;
+                }
+            };
+            if !mode.pushes() {
+                debug!(
+                    "post-commit auto-push: skipping `{}` (mode={})",
+                    name,
+                    mode.as_str()
+                );
+                continue;
+            }
+            to_push.push((name, attachment));
+        }
+
+        if to_push.is_empty() {
+            debug!("No /sys/remotes/* entries are in push/both mode");
+            return;
+        }
+
+        // Open a fresh Ship for the push.  This is safe because the
+        // data transaction has already committed; the fresh Ship sees
+        // the committed view and has its own ControlTable handle on
+        // the same underlying Delta table.  `self.control_table` is
+        // about to become stale but the guard drops immediately after
+        // commit() returns.
+        let mut steward = match crate::Steward::open_pond(&self.pond_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!(
+                    "post-commit auto-push: failed to reopen pond at {:?}: {}",
+                    self.pond_path,
+                    e
+                );
+                return;
+            }
+        };
+        let ship = match steward.as_pond_mut() {
+            Some(s) => s,
+            None => {
+                log::error!("post-commit auto-push: reopened steward is not a pond (internal bug)");
+                return;
+            }
+        };
+
+        for (name, attachment) in to_push {
+            info!("post-commit auto-push: {} -> {}", name, attachment.url);
+            match crate::push_pending_to_remote(ship, &attachment).await {
+                Ok(outcome) => {
+                    info!(
+                        "post-commit auto-push: {} done (pushed={}, skipped={}, range={}..={})",
+                        name,
+                        outcome.pushed,
+                        outcome.skipped,
+                        outcome.previous_last_pushed + 1,
+                        outcome.upper_seq
+                    );
+                }
+                Err(e) => {
+                    log::error!("post-commit auto-push: {} failed: {}", name, e);
+                    // Continue with the next remote; one bad target
+                    // shouldn't poison the others.
+                }
+            }
+        }
+    }
+
+    /// Discover all `/sys/remotes/*` entries and parse their YAML.
+    /// Returns `(name, attachment)` pairs.  Quietly returns an empty
+    /// list if `/sys/remotes` does not exist yet.
+    async fn discover_sys_remotes(
+        &self,
+    ) -> Result<Vec<(String, crate::RemoteAttachment)>, StewardError> {
+        let data_path = crate::get_data_path(Path::new(&self.pond_path));
+        let pond_id = self.control_table.pond_metadata().pond_id.to_string();
+        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path, pond_id)
+            .await
+            .map_err(StewardError::DataInit)?;
+
+        let discovery_metadata = PondTxnMetadata::new(
+            self.txn_meta.txn_seq,
+            tlogfs::PondUserMetadata::new(vec![
+                "internal".to_string(),
+                "post-commit-remote-discovery".to_string(),
+            ]),
+        );
+        let discovery_tx = data_persistence
+            .begin_read(&discovery_metadata)
+            .await
+            .map_err(StewardError::DataInit)?;
+
+        let fs = FS::new(discovery_tx.state()?)
+            .await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        let root = fs
+            .root()
+            .await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        // If /sys/remotes doesn't exist yet (no `pond remote add` has
+        // been run), bail out cleanly.
+        if root.resolve_path(crate::SYS_REMOTES_DIR).await.is_err() {
+            _ = discovery_tx.commit().await;
+            return Ok(Vec::new());
+        }
+
+        let pattern = format!("{}/*", crate::SYS_REMOTES_DIR);
+        let matches = root
+            .collect_matches(&pattern)
+            .await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        let mut out: Vec<(String, crate::RemoteAttachment)> = Vec::new();
+        for (node_path, _captures) in matches {
+            let cfg_path = node_path.path().to_path_buf();
+            let name = match cfg_path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+
+            let mut reader = match root.async_reader_path(&cfg_path).await {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!(
+                        "post-commit auto-push: cannot read {}: {}",
+                        cfg_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            let mut buf = Vec::new();
+            if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buf).await {
+                log::warn!(
+                    "post-commit auto-push: read error on {}: {}",
+                    cfg_path.display(),
+                    e
+                );
+                continue;
+            }
+
+            match crate::RemoteAttachment::from_yaml_bytes(&buf) {
+                Ok(att) => out.push((name, att)),
+                Err(e) => {
+                    log::warn!(
+                        "post-commit auto-push: invalid YAML in {}: {}",
+                        cfg_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        _ = discovery_tx
+            .commit()
+            .await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        // Deterministic order so logs are easy to read.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
     }
 }
 

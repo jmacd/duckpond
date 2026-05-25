@@ -313,3 +313,180 @@ async fn pond_remote_add_rejects_duplicate() {
     .await
     .expect("overwrite add");
 }
+
+/// D4.4 post-commit auto-push: a normal write transaction (no explicit
+/// `pond push`) should publish to every `/sys/remotes/*` entry whose
+/// mode is `push` or `both`.  We verify this by pulling on a second
+/// pond and reading back the file written on src AFTER `remote add`.
+#[tokio::test]
+async fn post_commit_auto_push_publishes_to_file_remote() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let src_pond = scratch.path().join("src_pond");
+    let dst_pond = scratch.path().join("dst_pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    // 1) Source pond.
+    let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
+    init_command(&src_ctx, None, None).await.expect("init src");
+
+    // 2) Create the remote bucket as a fresh Delta table.
+    let store_id = {
+        let ship = src_ctx.open_pond().await.expect("open src");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+        .await
+        .expect("create remote");
+
+    // 3) `pond remote add origin --mode=push`.
+    add_remote_command(
+        &src_ctx,
+        "origin",
+        &remote_url,
+        RemoteMode::Push,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("remote add");
+
+    // 4) Write a file -- this is the ONLY write that crosses the auto-push
+    // threshold; we never call `push_command` directly.  The
+    // StewardTransactionGuard::commit() path should trigger
+    // `run_post_commit_remotes` and forward seq -> remote.
+    write_small_file(
+        &src_ctx,
+        "/auto.txt",
+        b"published by auto-push",
+        vec!["copy", "auto.txt"],
+    )
+    .await
+    .expect("write auto.txt");
+
+    // Watermark on src should reflect that the write was pushed.
+    let upper_seq = {
+        let mut ship = src_ctx.open_pond().await.expect("reopen src");
+        ship.as_pond_mut().expect("pond steward").last_write_seq()
+    };
+    let last_pushed = {
+        let ship = src_ctx.open_pond().await.expect("reopen src");
+        ship.control_table()
+            .raw_config_get(&format!("last_pushed_seq:{}", remote_url))
+            .await
+            .expect("get watermark")
+            .expect("watermark set by auto-push")
+    };
+    assert_eq!(
+        last_pushed,
+        upper_seq.to_string(),
+        "auto-push should advance last_pushed_seq to last_write_seq"
+    );
+
+    // 5) Bootstrap dst + pull (same workaround as the manual roundtrip).
+    let src_pond_meta = {
+        let ship = src_ctx.open_pond().await.expect("reopen src");
+        ship.control_table().pond_metadata().clone()
+    };
+    let _ = steward::Steward::create_pond_for_restoration(&dst_pond, src_pond_meta)
+        .await
+        .expect("create dst");
+    {
+        let mut dst = steward::Steward::open_pond(&dst_pond)
+            .await
+            .expect("open dst");
+        let setting_key = format!("last_pulled_seq:{}", remote_url);
+        let ship_ref = dst.as_pond_mut().expect("pond steward");
+        let mut adapter = ShipRemoteSteward::new(ship_ref);
+        RemoteSteward::config_set(&mut adapter, &setting_key, "1")
+            .await
+            .expect("seed last_pulled_seq");
+    }
+    {
+        let mut dst = steward::Steward::open_pond(&dst_pond)
+            .await
+            .expect("reopen dst");
+        let remote = sync_remote::Remote::open_at_url(&remote_url, Default::default())
+            .await
+            .expect("open remote on dst");
+        let ship_ref = dst.as_pond_mut().expect("pond steward");
+        let mut adapter = ShipRemoteSteward::new(ship_ref);
+        let _ = remote.pull(&mut adapter).await.expect("pull");
+    }
+
+    // 6) The auto-pushed file should be visible on dst.
+    let dst_ctx = ctx_for(&dst_pond, vec!["pond", "pull"]);
+    let bytes = read_small_file(&dst_ctx, "/auto.txt")
+        .await
+        .expect("read /auto.txt on dst");
+    assert_eq!(bytes, b"published by auto-push");
+}
+
+/// D4.4: a remote with mode=pull must NOT be auto-pushed to.  We
+/// verify the watermark `last_pushed_seq:<url>` stays unset after a
+/// write transaction.
+#[tokio::test]
+async fn post_commit_auto_push_skips_pull_mode_remotes() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let src_pond = scratch.path().join("src_pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
+    init_command(&src_ctx, None, None).await.expect("init src");
+
+    // Create the bucket so any erroneous push would actually succeed
+    // and update the watermark; the test would catch that.
+    let store_id = {
+        let ship = src_ctx.open_pond().await.expect("open src");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+        .await
+        .expect("create remote");
+
+    add_remote_command(
+        &src_ctx,
+        "origin",
+        &remote_url,
+        RemoteMode::Pull, // pull-only -- should be skipped
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("remote add (pull)");
+
+    write_small_file(
+        &src_ctx,
+        "/nopush.txt",
+        b"should not be auto-pushed",
+        vec!["copy", "nopush.txt"],
+    )
+    .await
+    .expect("write nopush.txt");
+
+    let watermark = {
+        let ship = src_ctx.open_pond().await.expect("reopen src");
+        ship.control_table()
+            .raw_config_get(&format!("last_pushed_seq:{}", remote_url))
+            .await
+            .expect("get watermark")
+    };
+    assert!(
+        watermark.is_none() || watermark.as_deref() == Some(""),
+        "pull-mode remote must not have last_pushed_seq set; got {:?}",
+        watermark
+    );
+}

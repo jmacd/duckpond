@@ -511,6 +511,90 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
     }
 }
 
+/// Outcome of [`push_pending_to_remote`].
+#[derive(Debug, Clone, Copy)]
+pub struct PushOutcome {
+    /// Lower bound (exclusive) that the push started from -- the
+    /// `last_pushed_seq` watermark before this call.
+    pub previous_last_pushed: i64,
+    /// Inclusive upper bound the push targeted (Ship's `last_write_seq`).
+    pub upper_seq: i64,
+    /// Number of `txn_seq` values for which `Remote::push` returned `Ok`.
+    pub pushed: usize,
+    /// Number of `txn_seq` values that were skipped because the remote
+    /// reported `NoSuchCommit` (e.g. read-only or hole-filling txns
+    /// claim a sequence but write no data).
+    pub skipped: usize,
+}
+
+/// Push every pending `txn_seq` from `last_pushed_seq + 1` (clamped to
+/// 2, so the bootstrap `pond_init` is never attempted) through
+/// `ship.last_write_seq()` into the remote described by `attachment`.
+///
+/// This is the shared driver used by both the `pond push` CLI verb
+/// ([`crate::ShipRemoteSteward`]) and the post-commit auto-push
+/// dispatcher in [`crate::guard`].  Errors from `Remote::push` other
+/// than `NoSuchCommit` abort the loop and propagate up.
+///
+/// # Why skip seq 1?
+///
+/// The very first transaction recorded by `pond init` writes a
+/// `DataCommitted` record with `data_delta_version == 0` (no parquet
+/// payload yet -- only the empty pond skeleton).  `Remote::push`
+/// rejects that with a `Schema` error.  Until `Remote::push` itself
+/// learns to treat `data_delta_version == 0` as a clean skip, the
+/// driver-side clamp avoids the error entirely.
+pub async fn push_pending_to_remote(
+    ship: &mut Ship,
+    attachment: &crate::RemoteAttachment,
+) -> Result<PushOutcome, sync_remote::RemoteError> {
+    use sync_remote::{Remote, RemoteSteward};
+
+    if attachment.url.starts_with("s3://") {
+        sync_remote::register_s3_handlers();
+    }
+    let storage_options = attachment.to_storage_options();
+    let mut remote = Remote::open_at_url(&attachment.url, storage_options).await?;
+
+    let upper = ship.last_write_seq();
+    let setting_key = format!("last_pushed_seq:{}", remote.url());
+
+    let previous_last_pushed = {
+        let adapter = ShipRemoteSteward::new(ship);
+        adapter
+            .config_get(&setting_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0)
+    };
+
+    let start = std::cmp::max(previous_last_pushed + 1, 2);
+
+    let mut outcome = PushOutcome {
+        previous_last_pushed,
+        upper_seq: upper,
+        pushed: 0,
+        skipped: 0,
+    };
+
+    if start > upper {
+        return Ok(outcome);
+    }
+
+    for seq in start..=upper {
+        let mut adapter = ShipRemoteSteward::new(ship);
+        match remote.push(&mut adapter, seq).await {
+            Ok(()) => outcome.pushed += 1,
+            Err(sync_remote::RemoteError::NoSuchCommit(_)) => outcome.skipped += 1,
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

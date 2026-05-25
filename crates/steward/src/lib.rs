@@ -18,13 +18,15 @@ mod guard;
 mod host;
 pub mod maintenance;
 mod remote_adapter;
+mod remote_config;
 mod ship;
 
 pub use control_table::ControlTable;
 pub use dispatch::{Steward, Transaction};
 pub use guard::StewardTransactionGuard;
 pub use host::{HostSteward, HostTransaction};
-pub use remote_adapter::ShipRemoteSteward;
+pub use remote_adapter::{PushOutcome, ShipRemoteSteward, push_pending_to_remote};
+pub use remote_config::{RemoteAttachment, RemoteConfigError, RemoteMode};
 pub use ship::Ship;
 pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
 
