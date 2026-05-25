@@ -164,6 +164,33 @@ impl Ship {
         })
     }
 
+    /// Create a fresh pond as a replica with the given `pond_id`.
+    ///
+    /// Convenience wrapper around [`Ship::create_pond_for_restoration`]
+    /// that synthesizes default birth metadata (timestamp = now,
+    /// hostname = `"unknown"`, username from `$USER`/`$USERNAME` or
+    /// `"unknown"`).  Birth metadata on a replica is informational
+    /// only -- the canonical replica identity is the `pond_id`, which
+    /// must match the source pond it replicates.
+    ///
+    /// The resulting pond has an empty data table awaiting
+    /// `apply_pulled_bundle` calls (e.g., via
+    /// [`sync_remote::Remote::bootstrap_consumer`] then
+    /// [`sync_remote::Remote::pull`]).
+    pub async fn create_replica<P: AsRef<Path>>(
+        pond_path: P,
+        pond_id: uuid::Uuid,
+    ) -> Result<Self, StewardError> {
+        // Convert uuid::Uuid -> uuid7::Uuid by reusing the 16-byte
+        // representation; both crates wrap the same wire format.
+        let pond_id_uuid7 = uuid7::Uuid::from(*pond_id.as_bytes());
+        let metadata = PondMetadata {
+            pond_id: pond_id_uuid7,
+            ..PondMetadata::default()
+        };
+        Self::create_pond_for_restoration(pond_path, metadata).await
+    }
+
     /// Open an existing, pre-initialized pond.
     pub async fn open_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
         Self::create_infrastructure(pond_path, false, None, None).await

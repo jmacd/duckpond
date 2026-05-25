@@ -6,10 +6,11 @@
 //! roundtrip using a `file://` remote, exercised entirely through the
 //! library entry points (no spawned subprocesses).
 //!
-//! Note: the second pond (`dst`) is bootstrapped manually because the
-//! production "first-time pull" path (`Remote::restart_from_compact`) is
-//! not yet generic over [`RemoteSteward`]; that work lands in a later D4
-//! phase.
+//! After D5.4, the destination pond is bootstrapped via the public
+//! [`steward::Ship::create_replica`] +
+//! [`sync_remote::Remote::bootstrap_consumer`] APIs (the
+//! sync_steward-only [`sync_remote::Remote::restart_from_compact`] is
+//! generic-equivalent via the shared [`sync_remote::Remote::restart_pond_from_compact`]).
 
 use cmd::commands::{
     add_remote_command, init_command, list_remotes_command, pull_command, push_command,
@@ -18,7 +19,6 @@ use cmd::commands::{
 use cmd::common::ShipContext;
 use std::sync::Once;
 use steward::{PondUserMetadata, REMOTE_MODE_PREFIX, ShipRemoteSteward};
-use sync_remote::RemoteSteward;
 use tempfile::TempDir;
 use tinyfs::EntryType;
 use tokio::io::AsyncWriteExt;
@@ -170,54 +170,47 @@ async fn pond_remote_push_pull_roundtrip() {
         .await
         .expect("push");
 
-    // 5) Bootstrap dst pond with src's pond identity.
-    let src_pond_meta = {
-        let ship = src_ctx.open_pond().await.expect("reopen src");
-        ship.control_table().pond_metadata().clone()
-    };
-    let _ = steward::Steward::create_pond_for_restoration(&dst_pond, src_pond_meta)
+    // 5) Bootstrap dst pond as a replica of src + first-pull via the
+    //    public APIs (D5.4).  No more manual `create_pond_for_restoration
+    //    + raw_config_set("last_pulled_seq:<url>", "1")` workaround.
+    let remote_for_pull = sync_remote::Remote::open_at_url(&remote_url, Default::default())
         .await
-        .expect("create dst");
-
-    // Seed dst's last_pulled_seq=1 to skip the unpushable pond_init txn.
-    // (This is the same workaround used by remote_adapter_test.rs until
-    // the production `restart_from_compact` flow is generic.)
+        .expect("open remote for bootstrap");
     {
-        let mut dst = steward::Steward::open_pond(&dst_pond)
+        let mut dst = steward::Ship::create_replica(&dst_pond, remote_for_pull.store_id())
             .await
-            .expect("open dst");
-        let setting_key = format!("last_pulled_seq:{}", remote_url);
-        let ship_ref = dst.as_pond_mut().expect("pond steward");
-        let mut adapter = ShipRemoteSteward::new(ship_ref);
-        RemoteSteward::config_set(&mut adapter, &setting_key, "1")
+            .expect("create dst replica");
+        let mut adapter = ShipRemoteSteward::new(&mut dst);
+        remote_for_pull
+            .bootstrap_consumer(&mut adapter)
             .await
-            .expect("seed last_pulled_seq");
+            .expect("bootstrap dst from remote");
     }
 
-    // Attach origin on dst pond too (with mode pull so default-pull works).
-    // NOTE: skipped pending `Remote::restart_from_compact` being made generic
-    // over `RemoteSteward`; today, `create_pond_for_restoration` + the seed
-    // workaround is enough to pull, but not to perform any *local* writes on
-    // the dst (`create_dir_all("/sys")` would error with "Partition not
-    // found" because the root partition has no data rows yet).  When
-    // `restart_from_compact` is wired through the adapter we can replace
-    // the bootstrap with a real first-pull and re-enable this step.
+    // Re-attach origin on dst (it was inherited from src as mode=push;
+    // override to mode=pull on dst so default-pull works).
     let dst_ctx = ctx_for(&dst_pond, vec!["pond", "pull"]);
+    add_remote_command(
+        &dst_ctx,
+        "origin",
+        &remote_url,
+        RemoteMode::Pull,
+        None,
+        None,
+        None,
+        None,
+        false,
+        true, // overwrite the inherited attachment
+    )
+    .await
+    .expect("re-attach origin on dst");
 
-    // 6) Pull -- via the adapter directly, since we cannot register the
-    // remote on dst (see note above).  This mirrors what `pull_command`
-    // does after loading the attachment YAML.
-    {
-        let mut dst = steward::Steward::open_pond(&dst_pond)
-            .await
-            .expect("reopen dst");
-        let remote = sync_remote::Remote::open_at_url(&remote_url, Default::default())
-            .await
-            .expect("open remote on dst");
-        let ship_ref = dst.as_pond_mut().expect("pond steward");
-        let mut adapter = ShipRemoteSteward::new(ship_ref);
-        let _ = remote.pull(&mut adapter).await.expect("pull");
-    }
+    // 6) Pull once more via the production command path -- after
+    //    bootstrap_consumer this is a no-op (already caught up), but
+    //    exercises the wired CLI plumbing.
+    pull_command(&dst_ctx, Some("origin".to_string()))
+        .await
+        .expect("pull origin on dst");
 
     // 7) The file pushed from src should be readable in dst.
     let bytes = read_small_file(&dst_ctx, "/hello.txt")
@@ -398,35 +391,21 @@ async fn post_commit_auto_push_publishes_to_file_remote() {
         "auto-push should advance last_pushed_seq to last_write_seq"
     );
 
-    // 5) Bootstrap dst + pull (same workaround as the manual roundtrip).
-    let src_pond_meta = {
-        let ship = src_ctx.open_pond().await.expect("reopen src");
-        ship.control_table().pond_metadata().clone()
-    };
-    let _ = steward::Steward::create_pond_for_restoration(&dst_pond, src_pond_meta)
-        .await
-        .expect("create dst");
+    // 5) Bootstrap dst as a replica of the remote via the D5.4 public
+    //    APIs (no more manual create_pond_for_restoration + raw_config_set
+    //    workaround).
     {
-        let mut dst = steward::Steward::open_pond(&dst_pond)
-            .await
-            .expect("open dst");
-        let setting_key = format!("last_pulled_seq:{}", remote_url);
-        let ship_ref = dst.as_pond_mut().expect("pond steward");
-        let mut adapter = ShipRemoteSteward::new(ship_ref);
-        RemoteSteward::config_set(&mut adapter, &setting_key, "1")
-            .await
-            .expect("seed last_pulled_seq");
-    }
-    {
-        let mut dst = steward::Steward::open_pond(&dst_pond)
-            .await
-            .expect("reopen dst");
         let remote = sync_remote::Remote::open_at_url(&remote_url, Default::default())
             .await
-            .expect("open remote on dst");
-        let ship_ref = dst.as_pond_mut().expect("pond steward");
-        let mut adapter = ShipRemoteSteward::new(ship_ref);
-        let _ = remote.pull(&mut adapter).await.expect("pull");
+            .expect("open remote for bootstrap");
+        let mut dst = steward::Ship::create_replica(&dst_pond, remote.store_id())
+            .await
+            .expect("create dst replica");
+        let mut adapter = ShipRemoteSteward::new(&mut dst);
+        remote
+            .bootstrap_consumer(&mut adapter)
+            .await
+            .expect("bootstrap dst from remote");
     }
 
     // 6) The auto-pushed file should be visible on dst.

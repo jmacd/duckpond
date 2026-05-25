@@ -560,28 +560,27 @@ impl Remote {
     ///    recursively remove the directory.
     /// 4. Create a fresh Steward at `consumer_path` with the remote's
     ///    `store_id`.
-    /// 5. Read the baseline compact bundle's adds + checksums from
-    ///    the remote.
-    /// 6. Apply via `Steward::apply_pulled_bundle` with EMPTY removes
-    ///    -- the consumer is fresh, has no prior parquets to remove,
-    ///    and the compact's Adds alone reconstruct the source's
-    ///    logical state at that txn_seq (compaction is checksum-
-    ///    invariant by design, so the compact's recorded
-    ///    partition_checksums match the consumer's resulting state).
-    /// 7. Set the consumer's `last_pulled_seq:<remote_path>` setting
-    ///    to the baseline compact's seq.
-    /// 8. Call `self.pull(&mut consumer)` to apply all bundles after
-    ///    the baseline (catch up to latest).
-    /// 9. Return the new Steward.
+    /// 5. Delegate to [`Remote::restart_pond_from_compact`] for the
+    ///    apply-baseline + set-seq + catch-up steps.  (The
+    ///    `drop_pond_data` on the fresh consumer is a no-op.)
+    /// 6. Return the new Steward.
+    ///
+    /// **Concrete vs generic**: This method bootstraps a concrete
+    /// `sync_steward::Steward` from a `&Path`.  For generic
+    /// `RemoteSteward` consumers (e.g., duckpond's `ShipRemoteSteward`),
+    /// use [`Remote::bootstrap_consumer`] together with a
+    /// caller-provided fresh consumer at matching `store_id`.
     pub async fn restart_from_compact(&self, consumer_path: &Path) -> Result<Steward> {
-        // 1. Validate: at least one compact bundle.
+        // 1. Validate: at least one compact bundle.  We check this
+        //    upfront so we don't wipe a perfectly-good existing pond
+        //    just to discover the remote has no restart point.
         let bundles = self.list_bundles().await?;
-        let baseline = bundles
+        if !bundles
             .iter()
-            .filter(|b| matches!(b.commit_kind, CommitKind::Compact))
-            .min_by_key(|b| b.txn_seq)
-            .ok_or(RemoteError::NoRestartPoint)?
-            .clone();
+            .any(|b| matches!(b.commit_kind, CommitKind::Compact))
+        {
+            return Err(RemoteError::NoRestartPoint);
+        }
 
         // 2./3. Safety wipe.
         if consumer_path.exists() {
@@ -616,35 +615,82 @@ impl Remote {
         )
         .await?;
 
-        // 5. Read baseline compact bundle from remote.
-        let (adds, _removes_ignored) = self.read_data_for_bundle(baseline.txn_seq).await?;
-        let partition_checksums = self.read_checksums_for_bundle(baseline.txn_seq).await?;
+        // 5. Apply baseline + set seq + catch up.  The shared in-place
+        //    generic path does the same steps -- a no-op drop on the
+        //    fresh consumer, then apply, set, pull.
+        self.restart_pond_from_compact(&mut consumer).await?;
 
-        // 6. Apply with empty removes.
-        consumer
-            .apply_pulled_bundle(sync_steward::PulledBundle {
-                pond_id: self.store_id,
-                txn_seq: baseline.txn_seq,
-                commit_kind: baseline.commit_kind,
-                parent_seq: baseline.parent_seq,
-                adds,
-                removes: Vec::new(),
-                partition_checksums,
-            })
-            .await?;
-
-        // 7. Set last_pulled_seq so subsequent pull doesn't re-apply
-        //    the baseline and doesn't trip the retention check.
-        let setting_key = last_pulled_seq_key(&self.url);
-        consumer
-            .config_set(&setting_key, &baseline.txn_seq.to_string())
-            .await?;
-
-        // 8. Catch up to latest.
-        let _report = self.pull(&mut consumer).await?;
-
-        // 9. Return the new Steward.
+        // 6. Return the new Steward.
         Ok(consumer)
+    }
+
+    /// Bootstrap a freshly-created consumer for first-pull from this
+    /// remote.
+    ///
+    /// The caller is responsible for constructing the empty consumer
+    /// with `consumer.store_id() == self.store_id()` (e.g., via
+    /// `Steward::create_with_options { store_id, .. }` for
+    /// sync_steward, or `Ship::create_replica` for duckpond).  This
+    /// method then handles the divergent first-pull paths in a single
+    /// generic API:
+    ///
+    /// - **If the remote has at least one compact bundle**: delegates
+    ///   to [`Remote::restart_pond_from_compact`].  The compact's
+    ///   adds reconstruct the source's logical state at the baseline
+    ///   txn_seq; `last_pulled_seq:<remote_url>` is set to the
+    ///   baseline; `pull` catches up to the latest bundle.
+    /// - **If the remote has only Write bundles** (no compact yet):
+    ///   seeds `last_pulled_seq:<remote_url> = 1` so the subsequent
+    ///   pull skips the producer's pond_init txn (txn_seq=1 is the
+    ///   identity-bearing bootstrap and is never replicated as a
+    ///   bundle), then calls `pull` to apply the Write bundles.
+    /// - **If the remote has no bundles at all**: seeds
+    ///   `last_pulled_seq=1` and returns; subsequent pulls will pick
+    ///   up bundles as they are pushed.
+    ///
+    /// After this returns Ok, the consumer is fully synced to the
+    /// remote's latest state and the caller can immediately call
+    /// `remote.pull(&mut consumer)` (which will be a no-op) or
+    /// continue with `attach`/local writes.
+    ///
+    /// Returns [`RemoteError::StoreIdMismatch`] if the consumer's
+    /// `store_id` does not match this remote's.
+    ///
+    /// This is the public replacement for the manual
+    /// `Steward::create_pond_for_restoration + raw_config_set(
+    /// "last_pulled_seq:<url>", "1")` workaround that callers used
+    /// before D5.4 wired `restart_from_compact` through the generic
+    /// `RemoteSteward` trait.
+    pub async fn bootstrap_consumer<S: RemoteSteward + ?Sized>(
+        &self,
+        consumer: &mut S,
+    ) -> Result<()> {
+        if consumer.store_id() != self.store_id {
+            return Err(RemoteError::StoreIdMismatch {
+                remote: self.store_id,
+                steward: consumer.store_id(),
+            });
+        }
+
+        let bundles = self.list_bundles().await?;
+        let has_compact = bundles
+            .iter()
+            .any(|b| matches!(b.commit_kind, CommitKind::Compact));
+
+        if has_compact {
+            // Compact baseline path: delegate to the shared in-place
+            // restart logic which already does drop-no-op + apply
+            // baseline + set seq + catch-up pull.
+            self.restart_pond_from_compact(consumer).await
+        } else {
+            // No-compact path: seed last_pulled_seq=1 so the pull
+            // skips the producer's pond_init txn (which is not
+            // replicated as a bundle), then catch up.
+            let setting_key = last_pulled_seq_key(&self.url);
+            consumer.config_set(&setting_key, "1").await?;
+            let _report = self.pull(consumer).await?;
+            Ok(())
+        }
     }
 
     async fn delete_below_horizon(&mut self, horizon: i64) -> Result<i64> {

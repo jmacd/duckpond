@@ -356,3 +356,154 @@ async fn ship_remote_actions_at_version_filters_by_pond_id() {
         removes_foreign
     );
 }
+
+/// D5.4: `Ship::create_replica` yields a pond whose `store_id` matches
+/// the requested `pond_id` (bit-for-bit identity preservation across
+/// the uuid::Uuid -> uuid7::Uuid conversion).
+#[tokio::test]
+async fn ship_create_replica_yields_matching_store_id() {
+    use uuid::Uuid;
+
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let replica_path = tmp.path().join("replica");
+
+    let target_pond_id = Uuid::new_v4();
+    let replica = Ship::create_replica(&replica_path, target_pond_id)
+        .await
+        .expect("create_replica");
+    let replica_pond_id = replica.control_table().pond_id_uuid();
+
+    assert_eq!(
+        replica_pond_id, target_pond_id,
+        "replica's pond_id ({}) must match the requested ({})",
+        replica_pond_id, target_pond_id,
+    );
+}
+
+/// D5.4: `Remote::bootstrap_consumer` against a remote with only
+/// Write bundles seeds `last_pulled_seq=1` (skipping the producer's
+/// pond_init) and then pulls all bundles -- the freshly-created
+/// duckpond replica ends up with the pushed file visible.
+///
+/// This is the public-API equivalent of the old manual workaround
+/// (`create_pond_for_restoration` + `raw_config_set(last_pulled_seq,
+/// "1")` + `remote.pull`) that callers used pre-D5.4.
+#[tokio::test]
+async fn ship_remote_bootstrap_consumer_no_compact() {
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let src_path = tmp.path().join("src");
+    let dst_path = tmp.path().join("dst");
+    let remote_path = tmp.path().join("remote");
+
+    // 1) Source pond + one write.
+    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let src_pond_id = src.control_table().pond_id_uuid();
+    src.write_transaction(&meta("seed"), async |fs| {
+        let root = fs.root().await?;
+        let _ = tinyfs::async_helpers::convenience::create_file_path(
+            &root,
+            "/d54.txt",
+            b"bootstrap consumer",
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .expect("write txn");
+    let src_seq = src.last_write_seq();
+
+    // 2) Push to file:// remote.
+    let mut remote = Remote::create(&remote_path, src_pond_id)
+        .await
+        .expect("create remote");
+    {
+        let mut adapter = ShipRemoteSteward::new(&mut src);
+        remote.push(&mut adapter, src_seq).await.expect("push");
+    }
+
+    // 3) Bootstrap a fresh dst replica via the new D5.4 APIs.
+    let remote_url = remote.url().to_string();
+    let remote_for_bootstrap = Remote::open_at_url(&remote_url, Default::default())
+        .await
+        .expect("open remote for bootstrap");
+    let mut dst = Ship::create_replica(&dst_path, src_pond_id)
+        .await
+        .expect("create_replica");
+    {
+        let mut adapter = ShipRemoteSteward::new(&mut dst);
+        remote_for_bootstrap
+            .bootstrap_consumer(&mut adapter)
+            .await
+            .expect("bootstrap_consumer");
+    }
+
+    // 4) The pushed file should be readable in dst (i.e., the
+    //    bootstrap actually pulled the writes, not just seeded the
+    //    setting).
+    let tx = dst.begin_read(&meta("verify")).await.expect("begin_read");
+    let root = tx.root().await.expect("dst root");
+    let bytes = root
+        .read_file_path_to_vec("/d54.txt")
+        .await
+        .expect("read /d54.txt");
+    assert_eq!(bytes, b"bootstrap consumer");
+    let _ = tx.commit().await.expect("commit read");
+
+    // 5) A second bootstrap_consumer call is a no-op (idempotent):
+    //    last_pulled_seq is already at the latest, so pull applies
+    //    zero bundles.  We can't directly observe this through
+    //    bootstrap_consumer's return (it returns ()), but a follow-up
+    //    pull should report zero bundles applied.
+    {
+        let mut adapter = ShipRemoteSteward::new(&mut dst);
+        let report = remote_for_bootstrap
+            .pull(&mut adapter)
+            .await
+            .expect("idempotent pull");
+        assert_eq!(
+            report.bundles_applied.len(),
+            0,
+            "second pull should be a no-op after bootstrap_consumer caught up"
+        );
+    }
+}
+
+/// D5.4: `Remote::bootstrap_consumer` refuses a consumer whose
+/// `store_id` does not match the remote's.  Replicas are always
+/// same-identity by construction; a mismatch is a programmer error
+/// (e.g., passing the wrong remote handle).
+#[tokio::test]
+async fn ship_remote_bootstrap_consumer_rejects_store_id_mismatch() {
+    use sync_remote::RemoteError;
+    use uuid::Uuid;
+
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let dst_path = tmp.path().join("dst");
+    let remote_path = tmp.path().join("remote");
+
+    // Remote has its OWN pond_id.
+    let remote_pond_id = Uuid::new_v4();
+    let remote = Remote::create(&remote_path, remote_pond_id)
+        .await
+        .expect("create remote");
+
+    // Consumer has a DIFFERENT pond_id.
+    let consumer_pond_id = Uuid::new_v4();
+    assert_ne!(consumer_pond_id, remote_pond_id);
+    let mut dst = Ship::create_replica(&dst_path, consumer_pond_id)
+        .await
+        .expect("create_replica");
+
+    let mut adapter = ShipRemoteSteward::new(&mut dst);
+    match remote.bootstrap_consumer(&mut adapter).await {
+        Err(RemoteError::StoreIdMismatch { remote: r, steward }) => {
+            assert_eq!(r, remote_pond_id);
+            assert_eq!(steward, consumer_pond_id);
+        }
+        Ok(()) => panic!("expected StoreIdMismatch, got Ok"),
+        Err(other) => panic!("expected StoreIdMismatch, got {:?}", other),
+    }
+}

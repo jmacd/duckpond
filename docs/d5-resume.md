@@ -20,6 +20,19 @@
 > value (duckpond) or path prefix (sandbox sync_store).  Today a no-op
 > (single-pond commits), but establishes the per-pond bundle contract
 > required for D5.7 cross-pond import.
+> **D5.4 is complete** (commit pending on top of D5.3):
+> `Remote::bootstrap_consumer<S: RemoteSteward>` is the new public,
+> generic first-pull API that handles both the compact-baseline path
+> (delegates to `restart_pond_from_compact`) and the writes-only path
+> (seeds `last_pulled_seq=1` then pulls).  `Ship::create_replica(path,
+> uuid::Uuid)` is the duckpond constructor for a fresh replica with a
+> caller-supplied `pond_id` (synthesizes default birth metadata).
+> The sync_steward `Remote::restart_from_compact(&Path)` is refactored
+> to share the apply-baseline/set-seq/pull code via
+> `restart_pond_from_compact`.  Manual workarounds in
+> `crates/cmd/tests/test_remote_cli.rs` removed in favor of the new
+> APIs; remote attachments are now actually replicated to dst on
+> first-pull.
 > This document is a working scratchpad for the next session; it is
 > intentionally checked in as a `docs/` file so it survives session
 > boundaries.  Delete (or move to `docs/archive/`) once D5 lands.
@@ -460,42 +473,46 @@ and Delta scans only the relevant partitions.
 This is what unblocks **efficient** cross-pond push (and pull) in
 sandbox commit `149af878`.
 
-### D5.4 — restart_from_compact made generic over RemoteSteward
+### D5.4 — restart_from_compact made generic over RemoteSteward [DONE]
 
-**File**: `crates/sync-remote/src/remote.rs:576`.
+**Files**: `crates/sync-remote/src/remote.rs` (added
+`Remote::bootstrap_consumer<S: RemoteSteward>`, refactored
+`restart_from_compact` to share apply/set/pull code via
+`restart_pond_from_compact`); `crates/steward/src/ship.rs` (added
+`Ship::create_replica(path, uuid::Uuid)` convenience constructor);
+`crates/cmd/tests/test_remote_cli.rs` (removed manual workarounds).
 
-Today there are two restart-from-compact entry points:
+The carry-forward landed as a hybrid of the spec's two options:
+- The generic API is `Remote::bootstrap_consumer<S>(consumer: &mut S)`:
+  caller supplies a fresh consumer at matching `store_id`; the
+  method handles both compact-baseline and writes-only first-pull.
+- The duckpond-side constructor for a fresh consumer is
+  `Ship::create_replica(path, pond_id)` (synthesizes default birth
+  metadata; bytes-preserved conversion from `uuid::Uuid` to
+  `uuid7::Uuid`).
+- The sync_steward concrete API `restart_from_compact(&Path)` stays
+  as a convenience wrapper that wipes/creates + delegates to
+  `restart_pond_from_compact` (the in-place generic path).  The two
+  paths now share apply-baseline/set-seq/catch-up code; the only
+  difference is path setup.
 
-- `Remote::restart_from_compact(consumer_path: &Path) -> Result<Steward>`
-  — takes a `&Path` and creates a concrete `sync_steward::Steward`.
-  This is **what production needs for first-pull bootstrap** but is
-  hard-wired to sync_steward's Steward, not duckpond's.
-- `Remote::restart_pond_from_compact(consumer: &mut S: RemoteSteward)`
-  — operates on an existing open Steward and is generic over the
-  trait.  Used today by `restart_pond_from_compact` for cross-pond
-  drop-and-restart.
+New tests:
+- `ship_create_replica_yields_matching_store_id`
+- `ship_remote_bootstrap_consumer_no_compact`
+- `ship_remote_bootstrap_consumer_rejects_store_id_mismatch`
+- `test_remote_cli::pond_remote_push_pull_roundtrip` and
+  `post_commit_auto_push_publishes_to_file_remote` rewritten to use
+  `Ship::create_replica` + `bootstrap_consumer`.
 
-The carry-forward: make `restart_from_compact` either generic over
-some `RemoteStewardFactory` trait, or split it into:
+After D5.4, dst pond inherits the source's `/sys/remotes/origin`
+attachment on first-pull; tests re-attach with `--overwrite` to
+change the mode to `pull`.
 
-- `bootstrap_consumer_dir(consumer_path: &Path) -> Result<()>` —
-  creates an empty consumer at `consumer_path` ready for first pull.
-  In duckpond this is essentially `pond init` + seeding the
-  `last_pulled_seq:<url>=1` setting.
-- Then `pull(&mut consumer)` does the rest.
-
-Integration test `crates/cmd/tests/test_remote_cli.rs:178-203` and
-`crates/cmd/tests/test_remote_cli.rs:406-420` already implement this
-manually (using `Steward::create_pond_for_restoration` +
-`raw_config_set("last_pulled_seq:<url>", "1")`).  That pattern needs
-to become a public API.
-
-This unblocks:
-- `pond restart-from-compact` CLI verb (currently missing).
-- `tests/500-s3-replication-minio.sh` pull half (currently
-  Pond1-push-only).
-- `tests/510-synth-logs-replication-cycle.sh` (currently skip-marked).
-- All cross-pond import tests (530-542 series).
+Still open (deferred):
+- `pond restart-from-compact` CLI verb (would call
+  `Ship::create_replica` + `Remote::bootstrap_consumer` from a
+  command handler).
+- Testsuite revival (`tests/500/510/530-542`) — depends on D5.8.
 
 ### D5.5 — compute_live_checksums for duckpond
 
@@ -606,12 +623,13 @@ here for easy reference:
 
 | Item | Where | What |
 |------|-------|------|
-| `restart_from_compact` not generic | `crates/sync-remote/src/remote.rs:576` | D5.4 above |
+| `restart_from_compact` generic + bootstrap_consumer | `crates/sync-remote/src/remote.rs`, `crates/steward/src/ship.rs` | D5.4 — **DONE** |
 | `compute_live_checksums` stubbed | `crates/steward/src/remote_adapter.rs:501-511` | D5.5 above |
 | `data_delta_version=0` clamp | `crates/steward/src/remote_adapter.rs:573` | D5.6 above |
 | 13 disabled testsuite scripts | `testsuite/tests/{510,520-523,530-542}-*.sh` | D5.8 above |
 | `pond_id` not a partition column | `crates/tlogfs/src/persistence.rs:276,348` | D5.1 — **DONE** |
 | Pond identity from control-table Setting, not bootstrap row | `crates/steward/src/control_table.rs:456` | D5.2 — **DONE** |
+| `actions_at_version` not pond-filtered | `crates/sync-remote/src/steward_trait.rs` | D5.3 — **DONE** |
 
 ---
 
