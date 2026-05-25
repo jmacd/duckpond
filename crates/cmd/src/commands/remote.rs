@@ -18,6 +18,7 @@
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
 use steward::{REMOTE_MODE_PREFIX, SYS_DIR, SYS_REMOTES_DIR};
+use sync_remote::{Remote, RemoteError};
 use tinyfs::EntryType;
 use tokio::io::AsyncWriteExt;
 
@@ -86,6 +87,96 @@ pub async fn add_remote_command(
     let mode_str = mode.as_str();
 
     let mut ship = ship_context.open_pond().await?;
+
+    // Initialize (or verify) the remote Delta table at `url` BEFORE any
+    // pond-side state changes.  This closes a gap that would otherwise
+    // surface as `delta error: Not a Delta table` on the first `pond
+    // push`: nothing else in the CLI ever calls `Remote::create_at_url`.
+    //
+    // Three cases:
+    //
+    // - URL already holds a Delta table:
+    //     - push/both: store_id MUST match our pond_id (refuse otherwise,
+    //       to avoid silently writing into a foreign pond's remote).
+    //     - pull:      any store_id is acceptable (consumer wants to
+    //       mirror upstream, which is by definition a foreign pond).
+    //
+    // - URL has no Delta table:
+    //     - push/both: create one with our pond_id as the store_id.
+    //     - pull:      refuse (consumer cannot bootstrap an empty
+    //       upstream; operator should set up the upstream pond first).
+    let local_pond_id = ship.control_table().pond_id_uuid();
+    if attachment.url.starts_with("s3://") {
+        sync_remote::register_s3_handlers();
+    }
+    let storage_options = attachment.to_storage_options();
+    match Remote::open_at_url(&attachment.url, storage_options.clone()).await {
+        Ok(remote) => match mode {
+            RemoteMode::Pull => {
+                log::info!(
+                    "remote {} ({}) already initialized (store_id={})",
+                    name,
+                    attachment.url,
+                    remote.store_id()
+                );
+            }
+            RemoteMode::Push | RemoteMode::Both => {
+                if remote.store_id() != local_pond_id {
+                    return Err(anyhow!(
+                        "remote `{}` at {} already exists but its store_id ({}) does not match \
+                         this pond's pond_id ({}); refusing to push into a foreign pond. Use a \
+                         different URL, or remove the existing remote contents first.",
+                        name,
+                        attachment.url,
+                        remote.store_id(),
+                        local_pond_id
+                    ));
+                }
+                log::info!(
+                    "remote {} ({}) already initialized for this pond (store_id={})",
+                    name,
+                    attachment.url,
+                    local_pond_id
+                );
+            }
+        },
+        Err(RemoteError::Delta(deltalake::DeltaTableError::NotATable(_))) => match mode {
+            RemoteMode::Pull => {
+                return Err(anyhow!(
+                    "remote `{}` at {} is not a Delta table; pull-mode remotes must point at an \
+                     existing pond. The consumer cannot initialize an empty upstream remote.",
+                    name,
+                    attachment.url
+                ));
+            }
+            RemoteMode::Push | RemoteMode::Both => {
+                let _ = Remote::create_at_url(&attachment.url, local_pond_id, storage_options)
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "failed to initialize remote `{}` at {}: {}",
+                            name,
+                            attachment.url,
+                            e
+                        )
+                    })?;
+                log::info!(
+                    "[OK] initialized remote {} at {} (store_id={})",
+                    name,
+                    attachment.url,
+                    local_pond_id
+                );
+            }
+        },
+        Err(e) => {
+            return Err(anyhow!(
+                "failed to open remote `{}` at {}: {}",
+                name,
+                attachment.url,
+                e
+            ));
+        }
+    }
 
     // Record the operating mode BEFORE the data write commits.  The
     // write transaction's post-commit auto-push dispatcher reads

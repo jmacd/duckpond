@@ -1,20 +1,26 @@
 #!/bin/bash
 # REQUIRES: compose
-# EXPERIMENT: Refuse push when bucket contains different pond
+# EXPERIMENT: Refuse attach when bucket contains a different pond
 # DESCRIPTION:
-#   - Create Pond1, push to S3 bucket via `pond remote add` + `pond push`
-#   - Create Pond2 (new pond_id) targeting the same bucket
-#   - Try to push Pond2 to the same bucket
-#   - Verify the second push is rejected with a pond_id mismatch error
+#   - Create Pond1, attach to S3 bucket via `pond remote add` (auto-inits
+#     the bucket as a Delta table with Pond1's pond_id), then push.
+#   - Create Pond2 (different pond_id) and try to attach the SAME bucket
+#     in push mode.
+#   - Verify the second `pond remote add` is rejected with a pond_id
+#     mismatch error (the operator finds out at attach time, not later
+#     on first push).
 #
 # EXPECTED:
-#   - First push succeeds
-#   - Second push (different pond_id) fails with clear error
+#   - First `pond remote add` + `pond push` succeed
+#   - Second `pond remote add` (different pond_id) fails with clear error
 #   - Error message mentions both pond IDs
 #
 # Migrated D4.6: rewritten on top of the D4 CLI verbs
 # (`pond remote add` + `pond push`) after the legacy
 # chunked-parquet `remote` factory was removed in D4.5.
+# Updated D4.8: `pond remote add` now auto-initializes the
+# remote Delta table, which means foreign-pond mismatch is
+# detected at attach time (was at first push).
 set -e
 
 echo "=== Experiment: Pond ID Mismatch Detection ==="
@@ -55,14 +61,17 @@ attach_remote() {
 #############################
 # STEP 1: Create Pond1 and push
 #############################
-echo "--- Step 1: Create first pond and push ---"
+echo "--- Step 1: Create first pond, attach, and push ---"
 
 POND1_DIR=$(mktemp -d)
 export POND="${POND1_DIR}"
 
 pond init
 
+# First attach auto-initializes the bucket as a fresh Delta table
+# with Pond1's pond_id as the store_id.
 attach_remote
+echo "[OK] First attach succeeded (bucket auto-initialized with Pond1's pond_id)"
 
 # Create some data
 pond mkdir -p /data
@@ -79,24 +88,15 @@ POND1_ID=$(pond config 2>/dev/null | grep "Pond ID" | awk '{print $NF}')
 echo "Pond1 ID: ${POND1_ID}"
 
 #############################
-# STEP 2: Create Pond2 and try to push to same bucket
+# STEP 2: Create Pond2 and try to attach to same bucket
 #############################
 echo ""
-echo "--- Step 2: Create second pond and push to same bucket ---"
+echo "--- Step 2: Create second pond, try to attach to same bucket ---"
 
 POND2_DIR=$(mktemp -d)
 export POND="${POND2_DIR}"
 
 pond init
-
-attach_remote
-
-# Create different data
-pond mkdir -p /data
-TMPFILE=$(mktemp)
-echo "hello from pond2" > "${TMPFILE}"
-pond copy "host:///${TMPFILE}" /data/file2.txt
-rm -f "${TMPFILE}"
 
 POND2_ID=$(pond config 2>/dev/null | grep "Pond ID" | awk '{print $NF}')
 echo "Pond2 ID: ${POND2_ID}"
@@ -108,16 +108,18 @@ if [ "${POND1_ID}" = "${POND2_ID}" ]; then
 fi
 echo "[OK] Pond IDs differ: ${POND1_ID} vs ${POND2_ID}"
 
-# Push should FAIL with mismatch error
+# Attach should FAIL with mismatch error: the bucket's Delta table
+# already has Pond1's store_id, and Pond2's pond_id does not match.
 echo ""
-echo "--- Attempting push (should fail) ---"
-OUTPUT=$(pond push origin 2>&1 || true)
+echo "--- Attempting attach (should fail) ---"
+OUTPUT=$(attach_remote 2>&1 || true)
 echo "${OUTPUT}"
 
-if echo "${OUTPUT}" | grep -qi "mismatch"; then
-    echo "[OK] Push correctly refused with mismatch error"
+if echo "${OUTPUT}" | grep -qi "does not match" \
+   && echo "${OUTPUT}" | grep -qi "foreign pond"; then
+    echo "[OK] Attach correctly refused with mismatch error"
 else
-    echo "[FAIL] Expected mismatch error"
+    echo "[FAIL] Expected store_id-mismatch / foreign-pond error"
     exit 1
 fi
 
@@ -126,8 +128,8 @@ fi
 #############################
 echo ""
 echo "=== VERIFICATION ==="
-echo "[OK] Pond ID mismatch correctly detected"
-echo "[OK] Push refused with clear error message"
+echo "[OK] Pond ID mismatch correctly detected at attach time"
+echo "[OK] Attach refused with clear error message"
 echo "[OK] Test passed"
 
 # Cleanup

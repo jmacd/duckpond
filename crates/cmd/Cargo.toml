@@ -113,6 +113,7 @@ uuid7 = { workspace = true }
 
 [dev-dependencies]
 regex = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

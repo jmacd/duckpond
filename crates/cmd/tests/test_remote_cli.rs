@@ -258,13 +258,22 @@ async fn pond_remote_add_rejects_duplicate() {
     init_log();
     let scratch = TempDir::new().expect("tempdir");
     let pond_path = scratch.path().join("pond");
+    // Two distinct empty directories that `add` will auto-init as
+    // fresh remote Delta tables (with our pond's pond_id as store_id).
+    let remote_a = scratch.path().join("remote_a");
+    let remote_b = scratch.path().join("remote_b");
+    let url_a = format!("file://{}", remote_a.display());
+    let url_b = format!("file://{}", remote_b.display());
+    std::fs::create_dir_all(&remote_a).expect("mkdir remote_a");
+    std::fs::create_dir_all(&remote_b).expect("mkdir remote_b");
+
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
     init_command(&ctx).await.expect("init");
 
     add_remote_command(
         &ctx,
         "origin",
-        "file:///tmp/whatever",
+        &url_a,
         RemoteMode::Push,
         None,
         None,
@@ -279,7 +288,7 @@ async fn pond_remote_add_rejects_duplicate() {
     let err = add_remote_command(
         &ctx,
         "origin",
-        "file:///tmp/other",
+        &url_b,
         RemoteMode::Push,
         None,
         None,
@@ -301,7 +310,7 @@ async fn pond_remote_add_rejects_duplicate() {
     add_remote_command(
         &ctx,
         "origin",
-        "file:///tmp/other",
+        &url_b,
         RemoteMode::Push,
         None,
         None,
@@ -488,5 +497,147 @@ async fn post_commit_auto_push_skips_pull_mode_remotes() {
         watermark.is_none() || watermark.as_deref() == Some(""),
         "pull-mode remote must not have last_pushed_seq set; got {:?}",
         watermark
+    );
+}
+
+/// `pond remote add --mode push` against an empty directory should
+/// initialize a fresh Delta table at the URL (no separate
+/// `Remote::create_at_url` call required).  The subsequent push then
+/// works without any manual bootstrap, which is the production CLI
+/// contract: `pond init` -> `pond remote add` -> `pond push` is a
+/// complete sequence.
+#[tokio::test]
+async fn pond_remote_add_auto_initializes_fresh_remote() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("src_pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    let src_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&src_ctx).await.expect("init src");
+
+    // No Remote::create_at_url call here -- add_remote_command must do it.
+    add_remote_command(
+        &src_ctx,
+        "origin",
+        &remote_url,
+        RemoteMode::Push,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("remote add (auto-init)");
+
+    // The remote should now exist as a Delta table with our pond_id
+    // as its store_id.
+    let expected_pond_id = {
+        let ship = src_ctx.open_pond().await.expect("open src");
+        ship.control_table().pond_id_uuid()
+    };
+    let remote = sync_remote::Remote::open_at_url(&remote_url, Default::default())
+        .await
+        .expect("open auto-initialized remote");
+    assert_eq!(
+        remote.store_id(),
+        expected_pond_id,
+        "auto-initialized remote must carry our pond_id as store_id"
+    );
+
+    // And a subsequent push (with no pre-init) must succeed.
+    write_small_file(&src_ctx, "/hello.txt", b"hello", vec!["copy", "hello.txt"])
+        .await
+        .expect("write hello.txt");
+    // The post-commit auto-push already published; an explicit push
+    // should be a no-op rather than an error.
+    push_command(&src_ctx, Some("origin".to_string()))
+        .await
+        .expect("explicit push after auto-init");
+}
+
+/// `pond remote add --mode push` against a URL that already holds a
+/// FOREIGN pond's Delta table (different store_id) must refuse.
+/// Otherwise we'd silently overwrite or corrupt the foreign pond's
+/// remote.
+#[tokio::test]
+async fn pond_remote_add_push_refuses_foreign_store_id() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("src_pond");
+    let remote_path = scratch.path().join("foreign_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    // Pre-create the remote with a DIFFERENT store_id (simulating a
+    // foreign pond's remote).
+    let foreign_store_id = uuid::Uuid::new_v4();
+    let _ = sync_remote::Remote::create_at_url(&remote_url, foreign_store_id, Default::default())
+        .await
+        .expect("create foreign remote");
+
+    let src_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&src_ctx).await.expect("init src");
+
+    let err = add_remote_command(
+        &src_ctx,
+        "origin",
+        &remote_url,
+        RemoteMode::Push,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect_err("push-mode add against foreign store_id should fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("does not match") && msg.contains("foreign pond"),
+        "expected store_id-mismatch error, got: {}",
+        msg
+    );
+}
+
+/// `pond remote add --mode pull` against an EMPTY URL must refuse:
+/// a consumer cannot initialize an upstream pond; the operator must
+/// set up the upstream first.
+#[tokio::test]
+async fn pond_remote_add_pull_refuses_empty_remote() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("dst_pond");
+    let remote_path = scratch.path().join("empty_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir empty remote");
+
+    let dst_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&dst_ctx).await.expect("init dst");
+
+    let err = add_remote_command(
+        &dst_ctx,
+        "upstream",
+        &remote_url,
+        RemoteMode::Pull,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect_err("pull-mode add against empty remote should fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not a Delta table") && msg.contains("pull-mode"),
+        "expected empty-remote-refusal error, got: {}",
+        msg
     );
 }
