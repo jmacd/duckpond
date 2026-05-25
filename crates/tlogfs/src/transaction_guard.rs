@@ -107,24 +107,62 @@ impl<'a> TransactionGuard<'a> {
     ///
     /// This is the clean production API that Steward uses.
     ///
+    /// Returns the commit outcome together with the underlying persistence
+    /// reference.  The steward layer needs post-commit access to the
+    /// persistence (to read the just-landed Delta state for the D5.7
+    /// partition-checksum snapshot recorded on `DataCommitted`), and the
+    /// reference is exactly what was owned by this guard.  Handing it back
+    /// after the embedded tinyfs guard has been dropped avoids a separate
+    /// `OpLogPersistence::open` round-trip.
+    ///
     /// The embedded tinyfs::TransactionGuard will be dropped after commit, clearing the transaction state.
-    pub async fn commit(self) -> TinyFSResult<Option<()>> {
-        if !self.is_write {
+    pub async fn commit(self) -> TinyFSResult<(Option<()>, &'a mut OpLogPersistence)> {
+        // We need to move the `&'a mut OpLogPersistence` field out of `self`
+        // with its full `'a` lifetime so it can be returned to the caller.
+        // A reborrow would shorten the lifetime; a `let Self { .. } = self`
+        // destructure fails because `TransactionGuard` implements `Drop`.
+        // `ManuallyDrop` + `ptr::read` is the idiomatic safe-Rust workaround
+        // for "destructure a Drop type": suppress the Drop impl and move
+        // fields out by raw read.  This is safe because (1) we read each
+        // field exactly once, (2) we never reference `this.*` after the
+        // reads, and (3) the suppressed Drop is a no-op once we clear
+        // `persistence.state` and `persistence.fs` below.
+        #[allow(unsafe_code)]
+        let (inner, persistence, metadata, is_write) = {
+            let this = std::mem::ManuallyDrop::new(self);
+            // SAFETY: each field is read exactly once and `this` is never
+            // accessed after the reads, so we cannot observe a moved-out
+            // field through `this`.
+            unsafe {
+                (
+                    std::ptr::read(&this.inner),
+                    std::ptr::read(&this.persistence),
+                    std::ptr::read(&this.metadata),
+                    this.is_write,
+                )
+            }
+        };
+
+        if !is_write {
             // Read transactions don't commit data - just clean up state
-            self.persistence.state = None;
-            self.persistence.fs = None;
-            return Ok(None);
+            persistence.state = None;
+            persistence.fs = None;
+            drop(inner);
+            return Ok((None, persistence));
         }
 
-        let result = self.persistence.commit(self.metadata.clone()).await;
+        let result = persistence.commit(metadata).await;
 
-        // Clear state so Drop handler knows we committed
-        self.persistence.state = None;
-        self.persistence.fs = None;
+        // Clear state so any subsequent guard knows we committed
+        persistence.state = None;
+        persistence.fs = None;
 
         // tinyfs guard drop happens here, clearing the transaction state
+        drop(inner);
 
-        result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
+        let value = result
+            .map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))?;
+        Ok((value, persistence))
     }
 
     /// Commit with test metadata - convenience for tests

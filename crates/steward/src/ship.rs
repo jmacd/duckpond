@@ -63,13 +63,17 @@ impl Ship {
             )
             .await?;
 
-        // Record data_committed (root initialization created DeltaLake version 0)
+        // Record data_committed (root initialization created DeltaLake version 0).
+        // D5.7a: the data_delta_version=0 bootstrap record is never included
+        // in pushed bundles (Remote::push clamps it), so its
+        // partition_checksums are unobservable via verify — pass empty.
         ship.control_table
             .record_data_committed(
                 &txn_metadata,
                 TransactionType::Write,
                 0, // Root initialization is DeltaLake version 0
                 0, // Duration unknown/not tracked
+                sync_steward::PartitionChecksums::new(),
             )
             .await?;
 
@@ -783,8 +787,15 @@ impl Ship {
         .await?;
 
         ship.control_table
-            // @@@ define duration
-            .record_data_committed(&txn_meta, TransactionType::Write, 0, 0)
+            // D5.7a: bootstrap data_delta_version=0 record is never pushed,
+            // so partition_checksums are unobservable — pass empty.
+            .record_data_committed(
+                &txn_meta,
+                TransactionType::Write,
+                0,
+                0,
+                sync_steward::PartitionChecksums::new(),
+            )
             .await?;
 
         ship.control_table
@@ -1045,6 +1056,7 @@ mod tests {
                 .commit()
                 .await
                 .expect("Failed to commit transaction")
+                .0
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH HERE - don't call commit_control_metadata()
@@ -1230,6 +1242,7 @@ mod tests {
                 .commit()
                 .await
                 .expect("Failed to commit transaction")
+                .0
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH: Don't record control metadata

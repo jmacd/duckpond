@@ -299,7 +299,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Step 3: Record transaction lifecycle in control table based on result
         match commit_result {
-            Ok(Some(())) => {
+            Ok((Some(()), persistence)) => {
                 // Write transaction committed successfully - version is pre_commit_version + 1
                 let new_version = pre_commit_version.unwrap_or(0) + 1;
 
@@ -319,12 +319,33 @@ impl<'a> StewardTransactionGuard<'a> {
                     return Err(StewardError::ReadTransactionAttemptedWrite);
                 }
 
+                // D5.7a: snapshot the post-commit partition checksums for
+                // the local pond_id so that DataCommitted records the
+                // exact value `verify_against_remote` will later expect
+                // as `live`.  Reading the post-commit Delta state goes
+                // through a fresh DataFusion SessionContext, so it does
+                // not require an active transaction on `persistence`.
+                let pond_id = self.control_table.pond_id_uuid();
+                let post_commit_table = persistence.table().clone();
+                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
+                    post_commit_table,
+                    pond_id,
+                )
+                .await
+                .map_err(|e| {
+                    StewardError::ControlTable(format!(
+                        "Failed to snapshot partition checksums after commit: {}",
+                        e
+                    ))
+                })?;
+
                 self.control_table
                     .record_data_committed(
                         &self.txn_meta,
                         self.transaction_type,
                         new_version,
                         duration_ms,
+                        partition_checksums,
                     )
                     .await
                     .map_err(|e| {
@@ -349,7 +370,7 @@ impl<'a> StewardTransactionGuard<'a> {
 
                 Ok(Some(()))
             }
-            Ok(None) => {
+            Ok((None, _persistence)) => {
                 // Read-only transaction completed successfully
                 // Note: Write transactions that make no changes are allowed (idempotent operations like mkdir -p)
                 // We record them as "completed" rather than "data_committed" since no version was created

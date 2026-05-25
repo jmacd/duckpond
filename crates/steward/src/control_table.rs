@@ -34,7 +34,7 @@ use deltalake::DeltaTable;
 use serde::{Deserialize, Serialize};
 use sync_steward::{
     CommitKind, ControlRecord, ControlTable as InnerControlTable, DataCommittedMetadata,
-    RecordKind, new_txn_id,
+    PartitionChecksums, RecordKind, new_txn_id,
 };
 use uuid::Uuid as StdUuid;
 
@@ -285,15 +285,29 @@ impl ControlTable {
     }
 
     /// Record successful data filesystem commit.
+    ///
+    /// `partition_checksums` must be a snapshot of every part_id under
+    /// the local pond_id taken AFTER the data Delta commit has landed
+    /// (see [`crate::remote_adapter::compute_live_checksums_for_table`]).
+    /// The values are folded into `DataCommittedMetadata` so that
+    /// `remote-push` serializes them into the bundle's Checksum rows
+    /// and a consumer's `verify_against_remote` can match `live`
+    /// against `recorded` for native writes.  Passing an empty map
+    /// would reproduce the pre-D5.7a bug where verify spuriously
+    /// reports drift on every native write.
     pub async fn record_data_committed(
         &mut self,
         txn_meta: &PondTxnMetadata,
         _transaction_type: TransactionType,
         data_fs_version: i64,
         duration_ms: i64,
+        partition_checksums: PartitionChecksums,
     ) -> Result<(), StewardError> {
         let metadata = DataCommittedMetadata {
-            partition_checksums: HashMap::new(),
+            partition_checksums: partition_checksums
+                .iter()
+                .map(|(k, v)| (k.clone(), sync_steward::ChecksumValue::from(v)))
+                .collect(),
             data_delta_version: data_fs_version,
         };
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
@@ -818,7 +832,13 @@ mod tests {
         assert_eq!(table.get_last_write_sequence().await.unwrap(), 0);
 
         table
-            .record_data_committed(&txn_meta, TransactionType::Write, 7, 12)
+            .record_data_committed(
+                &txn_meta,
+                TransactionType::Write,
+                7,
+                12,
+                PartitionChecksums::new(),
+            )
             .await
             .unwrap();
         assert_eq!(table.get_last_write_sequence().await.unwrap(), 1);

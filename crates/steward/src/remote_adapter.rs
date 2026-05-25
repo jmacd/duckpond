@@ -591,62 +591,76 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
     /// match the producer's `compute_live_checksums(pond_id)` for the
     /// same pond_id.
     ///
-    /// Implementation builds a fresh `SessionContext` over a clone of
-    /// the data table's current snapshot, so the call works regardless
-    /// of whether a transaction is active on the underlying `Ship`
-    /// (the verify path is read-only and runs outside a write txn).
+    /// Implementation delegates to the module-level
+    /// [`compute_live_checksums_for_table`] free function so the
+    /// post-commit hook in [`crate::guard::StewardTransactionGuard`]
+    /// can share the same hashing logic without instantiating a
+    /// [`ShipRemoteSteward`] adapter.
     async fn compute_live_checksums(&self, pond_id: Uuid) -> StewardResult<PartitionChecksums> {
         let table = self.ship.data_persistence().table().clone();
-        let ctx = datafusion::execution::context::SessionContext::new();
-        let _previous = ctx
-            .register_table("delta_table_live", Arc::new(table))
-            .map_err(adapt_err)?;
-
-        let pond_id_str = pond_id.to_string();
-        let sql = format!(
-            "SELECT * FROM delta_table_live WHERE pond_id = '{}' \
-             ORDER BY part_id, node_id, version",
-            pond_id_str
-        );
-        let batches = ctx
-            .sql(&sql)
-            .await
-            .map_err(adapt_err)?
-            .collect()
-            .await
-            .map_err(adapt_err)?;
-
-        // Group rows by part_id; per group, build owned (key,
-        // value_blake3) leaves.  We store owned strings/arrays so the
-        // borrow-bound `Leaf<'_>` can be constructed via `as_str`/`&`
-        // in the final Merkle pass.
-        let mut by_partition: HashMap<String, Vec<(String, [u8; 32])>> = HashMap::new();
-        for batch in batches {
-            let rows: Vec<OplogEntry> =
-                serde_arrow::from_record_batch(&batch).map_err(adapt_err)?;
-            for row in rows {
-                let key = format!("{}/{}", row.node_id, row.version);
-                let part = row.part_id.to_string();
-                let canonical = serde_json::to_vec(&row).map_err(adapt_err)?;
-                let digest = *blake3::hash(&canonical).as_bytes();
-                by_partition.entry(part).or_default().push((key, digest));
-            }
-        }
-
-        let strategy = Merkle::new();
-        let mut out = PartitionChecksums::new();
-        for (partition, kv) in by_partition {
-            let leaves: Vec<Leaf<'_>> = kv
-                .iter()
-                .map(|(k, v)| Leaf {
-                    key: k.as_str(),
-                    value_blake3: v,
-                })
-                .collect();
-            let _previous = out.insert(partition, strategy.compute(&leaves));
-        }
-        Ok(out)
+        compute_live_checksums_for_table(table, pond_id).await
     }
+}
+
+/// Compute the per-partition Merkle checksums for `pond_id` rows in
+/// `table`, using the same hash strategy as the trait implementation
+/// above.  Exposed at module scope so that the post-commit hook in
+/// [`crate::guard::StewardTransactionGuard`] can compute the snapshot
+/// recorded on `DataCommitted` without going through a `Ship`/`adapter`
+/// dance.  Takes ownership of the [`deltalake::DeltaTable`] handle so
+/// the caller's borrow on the persistence is released immediately.
+pub(crate) async fn compute_live_checksums_for_table(
+    table: deltalake::DeltaTable,
+    pond_id: Uuid,
+) -> StewardResult<PartitionChecksums> {
+    let ctx = datafusion::execution::context::SessionContext::new();
+    let _previous = ctx
+        .register_table("delta_table_live", Arc::new(table))
+        .map_err(adapt_err)?;
+
+    let pond_id_str = pond_id.to_string();
+    let sql = format!(
+        "SELECT * FROM delta_table_live WHERE pond_id = '{}' \
+         ORDER BY part_id, node_id, version",
+        pond_id_str
+    );
+    let batches = ctx
+        .sql(&sql)
+        .await
+        .map_err(adapt_err)?
+        .collect()
+        .await
+        .map_err(adapt_err)?;
+
+    // Group rows by part_id; per group, build owned (key,
+    // value_blake3) leaves.  We store owned strings/arrays so the
+    // borrow-bound `Leaf<'_>` can be constructed via `as_str`/`&`
+    // in the final Merkle pass.
+    let mut by_partition: HashMap<String, Vec<(String, [u8; 32])>> = HashMap::new();
+    for batch in batches {
+        let rows: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch).map_err(adapt_err)?;
+        for row in rows {
+            let key = format!("{}/{}", row.node_id, row.version);
+            let part = row.part_id.to_string();
+            let canonical = serde_json::to_vec(&row).map_err(adapt_err)?;
+            let digest = *blake3::hash(&canonical).as_bytes();
+            by_partition.entry(part).or_default().push((key, digest));
+        }
+    }
+
+    let strategy = Merkle::new();
+    let mut out = PartitionChecksums::new();
+    for (partition, kv) in by_partition {
+        let leaves: Vec<Leaf<'_>> = kv
+            .iter()
+            .map(|(k, v)| Leaf {
+                key: k.as_str(),
+                value_blake3: v,
+            })
+            .collect();
+        let _previous = out.insert(partition, strategy.compute(&leaves));
+    }
+    Ok(out)
 }
 
 /// Outcome of [`push_pending_to_remote`].

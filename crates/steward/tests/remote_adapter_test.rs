@@ -750,3 +750,74 @@ async fn ship_remote_push_bootstrap_txn_is_clean_skip() {
         "last_pushed_seq must be advanced to 1 by the v=0 skip"
     );
 }
+
+/// D5.7a regression: after a native write transaction commits, the
+/// `DataCommitted` record must carry partition checksums that match
+/// the live state of the data filesystem.  Before D5.7a,
+/// `record_data_committed` always stored `partition_checksums: {}`,
+/// causing `verify_against_remote(remote, src)` to report drift on
+/// every native write -- the bundle's recorded checksums were empty
+/// while the live checksums (computed by the steward) had real
+/// digests, so `compare(live, recorded)` always returned mismatches.
+///
+/// This test reproduces the failing path:
+/// 1. Source pond writes data and pushes to a `file://` remote.
+/// 2. `verify_against_remote(remote, src)` must report `ok = true`.
+///
+/// Cross-pond verify symmetry (dst pulls, dst verifies against
+/// remote) is a separate concern not addressed by D5.7a: the live
+/// checksum on dst is computed over only the bundles pulled, whereas
+/// src's recorded checksum is computed over its full local data
+/// table (including the unpushable `pond_init` rows at seq=1).
+/// Reconciling those two views is a follow-up.
+#[tokio::test]
+async fn ship_remote_native_write_then_verify_passes() {
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let src_path = tmp.path().join("src");
+    let remote_path = tmp.path().join("remote");
+
+    // 1. Source pond with a real write transaction.
+    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let src_pond_id = src.control_table().pond_id_uuid();
+
+    src.write_transaction(&meta("write_for_verify"), async |fs| {
+        let root = fs.root().await?;
+        let _ = tinyfs::async_helpers::convenience::create_file_path(
+            &root,
+            "/verify_me.txt",
+            b"payload for verify",
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .expect("write transaction");
+    let txn_seq = src.last_write_seq();
+    assert!(txn_seq >= 2, "expected seq >= 2 after one write");
+
+    // 2. Fresh file:// remote with src's store_id.
+    let mut remote = Remote::create(&remote_path, src_pond_id)
+        .await
+        .expect("create remote");
+
+    // 3. Push.
+    {
+        let mut adapter = ShipRemoteSteward::new(&mut src);
+        remote.push(&mut adapter, txn_seq).await.expect("push");
+    }
+
+    // 4. Verify src against remote.  Pre-D5.7a, this would fail
+    //    because recorded was empty but live had real checksums.
+    let adapter = ShipRemoteSteward::new(&mut src);
+    let report = sync_remote::verify_against_remote(&remote, &adapter)
+        .await
+        .expect("verify src");
+    assert!(
+        report.ok,
+        "src verify must pass after D5.7a: live and recorded should match.  \
+         mismatches={:?}, divergence_boundary={:?}",
+        report.mismatches, report.divergence_boundary
+    );
+    assert_eq!(report.remote_latest_seq, Some(txn_seq));
+}
