@@ -10,7 +10,10 @@ Plan agreed; phased execution begun.
 | D1: relocate sandbox crates | done | `bd965792` |
 | D2: prep (sync-* deps wired) | done | `6c75e025` |
 | D2: substantive refactor | done | see `git log --grep "D2 substantive"` |
-| D3-D6 | pending | — |
+| D3: deferred — folded into D4 | — | — |
+| D4: replace legacy remote with `sync_remote::Remote` | done | `abf0d5c0` .. `5cd1609b` (D4.1-D4.6) |
+| D5: tlogfs partition by `(pond_id, part_id)` | pending | — |
+| D6: cross-pond model migration + operator-guide rewrite | pending | — |
 
 Active branch: `jmacd/sandbox_sync` (formerly `jmacd/50`).
 
@@ -473,6 +476,82 @@ data Delta table.
 format are no longer readable.  Per "no compatibility issue"
 constraint, this is acceptable; existing user backups are
 treated as disposable for the migration.
+
+#### D4 implementation notes (as executed)
+
+D3 was folded into D4: rather than expose `verify_against_remote` /
+`restart_*_from_compact` against the TRANSITIONAL chunked-parquet
+bundle format, we went straight to the sync_remote Delta-bundle
+format under `sync_remote::Remote`.  Outcome split across six
+sub-commits, all on branch `jmacd/52`:
+
+| Phase | Commit | Summary |
+|---|---|---|
+| D4.1 | `abf0d5c0` | foundation: `crates/sync-remote` wired into workspace, factory shim removed |
+| D4.2 | `cb41d8b2` | `ShipRemoteSteward` adapter + tests |
+| D4.3 | `bfc77e32` | CLI verbs `pond remote add/remove/list`, `pond push`, `pond pull` |
+| D4.4 | `d6766353` | post-commit auto-push for `/sys/remotes/*` |
+| D4.5 | `e62083d8` | delete legacy `crates/remote/` entirely (5092 LOC), prune callers, drop orphan import scaffolding |
+| D4.6 | `5cd1609b` | testsuite cleanup — rewrite 500/501 on the new CLI; skip-mark 510/520-523/530-542 |
+
+**Final CLI surface delivered (vs original plan)**:
+
+- `pond remote add <name> <url> --mode {push,pull,both} [--region | --endpoint | --access-key-id | --secret-access-key | --allow-http]`
+- `pond remote remove <name>`
+- `pond remote list`
+- `pond push [<name>]` — pushes one or all `push|both`-mode remotes
+- `pond pull [<name>]` — pulls one or all `pull|both`-mode remotes
+- Post-commit hook: every write-tx auto-pushes all `/sys/remotes/*`
+  configured as `push` or `both`.
+
+Plan called for `pond remote attach <url> --name <name> [--mount]` and
+`pond restart-from-compact`.  We renamed the management verb to `add`
+(simpler than the path-mount machinery, which is gone in D4 — `--mount`
+is D5 cross-pond import territory).  `restart-from-compact` is not
+exposed as a CLI yet — the operator-facing version is deferred until
+`Remote::restart_from_compact` is generic over `RemoteSteward`.
+
+**Surface removed in D4.5**:
+
+- `pond init --from-backup <path>` and `pond init --config <b64>` —
+  bootstrap from a backup no longer exists at the CLI; the in-Rust
+  path lives in `ShipContext::create_pond_for_restoration` and is
+  only used by tests.
+- `pond sync [<name>]` (top-level) and `pond control sync` — replaced
+  by `pond push` + `pond pull`.
+- `pond run /system/run/N-remote push|pull|show|verify|replicate` —
+  the `remote` factory itself is gone; no `pond mknod remote ...` or
+  `pond apply` of legacy remote-factory YAML.
+
+**Orphan scaffolding removed in D4.5** (deleted to keep the workspace
+clean under `-D warnings`):
+
+- `tinyfs::ProviderContext::import_partitions` field + setter.
+- `tlogfs::OpLogPersistence::{pending_import_metadata, add_import_metadata,
+  import_metadata}`.
+- `tlogfs::ImportPartitionRecord` struct + re-export.
+- `steward::dispatch::query_import_partitions`.
+
+Cross-pond import returns in D5 via row-level `pond_id` partitioning;
+the scaffolding above was a transitional shim that the rest of D4
+made unreachable.
+
+**Carry-forwards into D5**:
+
+- `Remote::restart_from_compact` is not yet generic over `RemoteSteward`,
+  so destination ponds cannot bootstrap a first-pull from shell.  The
+  integration tests in `crates/cmd/tests/test_remote_cli.rs` seed the
+  replica's `last_pulled_seq:<url>=1` manually via
+  `ShipRemoteSteward::config_set` + `steward::Steward::create_pond_for_restoration`.
+  This blocks the pull halves of `tests/500-s3-replication-minio.sh`
+  and `tests/510-synth-logs-replication-cycle.sh`.
+- `Remote::push` currently rejects `data_delta_version=0`; the
+  driver-side `max(lower+1, 2)` clamp could move into push itself
+  (treating 0 as a clean no-op instead of a Schema error).
+- 13 testsuite scripts are `# DISABLED-D4:` skip-marked (510, 520-523,
+  530-533, 540-recursive-sitegen, 540-import-watermark-incremental,
+  541, 542); they need rewriting either as part of D5 (cross-pond
+  import) or once first-pull bootstrap is exposed.
 
 ### D5: Migrate tlogfs to partition by `(pond_id, part_id)`
 

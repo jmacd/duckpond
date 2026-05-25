@@ -1,5 +1,14 @@
 # DuckPond Operator Guide
 
+> ⚠️ **D4 update (post-`5cd1609b`)**: this guide predates the D4
+> remote-redesign work and contains command examples that no longer
+> work (`pond sync`, `pond init --from-backup`, `pond mknod remote
+> /system/run/<N>-backup`, etc.).  The current CLI surface for remote
+> sync is `pond remote add/remove/list`, `pond push`, `pond pull` --
+> see [docs/cli-reference.md](cli-reference.md) and
+> [docs/remote-redesign.md § D4](remote-redesign.md) for the up-to-date
+> reference.  A full rewrite of this guide is tracked under D6.
+
 This guide is for the person who keeps a DuckPond running: creating
 ponds, configuring remotes, managing replicas, running maintenance,
 monitoring health, and recovering from failures.
