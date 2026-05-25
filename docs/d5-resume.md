@@ -33,6 +33,19 @@
 > `crates/cmd/tests/test_remote_cli.rs` removed in favor of the new
 > APIs; remote attachments are now actually replicated to dst on
 > first-pull.
+> **D5.5 is complete** (commit pending on top of D5.4):
+> `ShipRemoteSteward::compute_live_checksums` now reads live OplogEntry
+> rows for the given `pond_id` through a fresh DataFusion
+> `SessionContext` over a clone of the data table's current snapshot
+> (works whether or not a transaction is active), groups by `part_id`,
+> hashes each row as `blake3(serde_json::to_vec(row))` keyed on
+> `"<node_id>/<version>"`, and folds the per-partition leaves through
+> the existing `Merkle` strategy.  This gives the verify path
+> end-to-end coverage of the LIVE side for duckpond's row schema.  The
+> RECORDED snapshot in `record_data_committed` for native writes is
+> still `HashMap::new()` (D5.6/D5.7 scope) so a verify pass after a
+> native write today would mis-fire on drift; D5.5 tests deliberately
+> exercise `compute_live_checksums` directly.
 > This document is a working scratchpad for the next session; it is
 > intentionally checked in as a `docs/` file so it survives session
 > boundaries.  Delete (or move to `docs/archive/`) once D5 lands.
@@ -514,29 +527,48 @@ Still open (deferred):
   command handler).
 - Testsuite revival (`tests/500/510/530-542`) — depends on D5.8.
 
-### D5.5 — compute_live_checksums for duckpond
+### D5.5 — compute_live_checksums for duckpond — **[DONE]**
 
-**File**: `crates/steward/src/remote_adapter.rs:501-511`.
+**File**: `crates/steward/src/remote_adapter.rs` (≈85 lines replacing the old stub).
+**Tests**: `crates/steward/tests/remote_adapter_test.rs::ship_compute_live_checksums_*` (3 tests).
 
-Currently:
+Strategy chosen: blake3-per-row over `serde_json::to_vec(&OplogEntry)`,
+leaf key `"<node_id>/<version>"`, group rows by `part_id`, fold each
+partition through the existing `Merkle` strategy from
+`sync_store::checksum`.
 
-```rust
-async fn compute_live_checksums(&self, _pond_id: Uuid) -> StewardResult<PartitionChecksums> {
-    Err(SyncStewardError::Adapter(Box::new(std::io::Error::other(
-        "ShipRemoteSteward::compute_live_checksums is deferred to D3 \
-         (pond verify); duckpond's row schema requires a tlogfs-aware \
-         checksum strategy",
-    ))))
-}
-```
+Why blake3-of-serde_json (not parquet bytes):
+- Canonicalization is stable (serde_json uses the struct's declared
+  field order; OplogEntry derives Serialize).
+- Survives Delta optimize / compaction (rewriting parquet files
+  without changing logical rows must not shift the checksum).
+- ALL OplogEntry fields contribute, including `pond_id`, `part_id`,
+  and `txn_seq`, so foreign-pond rows applied via `apply_pulled_bundle`
+  produce the SAME checksums on the consumer as the producer would for
+  the same `pond_id` (replication-invariant by construction).
 
-This stub means `pond verify` doesn't work end-to-end for the
-duckpond row schema.  The sync_store implementation works against
-its own k/v schema; duckpond's OplogEntry schema needs a different
-checksum strategy (probably: blake3 over the canonical bytes of each
-OplogEntry row in a partition).  After D5.1, this is cheap because
-partition pruning gives us "all rows for a pond_id" in O(scanned
-partitions).
+Why a fresh SessionContext (not the persistence layer's State):
+- `RemoteSteward::compute_live_checksums` takes `&self` and is invoked
+  by the verify path, which is read-only and not gated on an active
+  transaction.  `OpLogPersistence::state()` panics outside a
+  transaction, so the implementation cannot rely on it.
+- `build_session_ctx`-style pattern (mirrored from
+  `sync-remote/src/remote.rs`): create a one-shot `SessionContext`,
+  `register_table("delta_table_live", Arc::new(table.clone()))`, run
+  one SQL query, drop the context.  Cheap and correct in all states.
+
+tlogfs has no row-level tombstones — entries are append-only at the
+row level (versions are new rows), so the SQL is just
+`SELECT * FROM delta_table_live WHERE pond_id = '...' ORDER BY
+part_id, node_id, version` with no ROW_NUMBER dedup (unlike
+sync_store's k/v `partition_leaves`).
+
+After D5.5 the verify path now has the LIVE side working
+end-to-end for duckpond.  The RECORDED side in
+`crates/sync-steward/src/control_table.rs::record_data_committed`
+still writes `partition_checksums: HashMap::new()` for native writes
+— D5.6/D5.7 will close that, and only then is `pond verify` safe to
+run on a fresh native commit.
 
 ### D5.6 — Lift the data_delta_version=0 clamp
 
@@ -624,7 +656,7 @@ here for easy reference:
 | Item | Where | What |
 |------|-------|------|
 | `restart_from_compact` generic + bootstrap_consumer | `crates/sync-remote/src/remote.rs`, `crates/steward/src/ship.rs` | D5.4 — **DONE** |
-| `compute_live_checksums` stubbed | `crates/steward/src/remote_adapter.rs:501-511` | D5.5 above |
+| `compute_live_checksums` stubbed | `crates/steward/src/remote_adapter.rs` (was 501-511) | D5.5 — **DONE** (blake3-per-row Merkle) |
 | `data_delta_version=0` clamp | `crates/steward/src/remote_adapter.rs:573` | D5.6 above |
 | 13 disabled testsuite scripts | `testsuite/tests/{510,520-523,530-542}-*.sh` | D5.8 above |
 | `pond_id` not a partition column | `crates/tlogfs/src/persistence.rs:276,348` | D5.1 — **DONE** |

@@ -25,10 +25,9 @@
 //!
 //! ## What this adapter does NOT do (yet)
 //!
-//! - `compute_live_checksums` returns an "unimplemented" error -- the
-//!   duckpond row schema differs from `sync_store`'s k/v schema, so
-//!   the checksum strategy needs a tlogfs-aware re-implementation
-//!   (D5.5 scope).
+//! - For `apply_pulled_bundle`: cross-pond import (foreign `bundle.pond_id`)
+//!   is rejected for now; the partition layout supports it but no caller
+//!   wires it up.  See D5.7 in `docs/d5-resume.md`.
 //!
 //! ## Path layout
 //!
@@ -45,6 +44,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -56,9 +56,11 @@ use sync_steward::{
     CommitKind, ControlRecord, DataCommittedMetadata, PartitionChecksums, PulledBundle, RecordKind,
     Result as StewardResult, StewardError as SyncStewardError, new_txn_id,
 };
+use sync_store::checksum::{Leaf, Merkle, PartitionChecksum};
 use sync_store::{AddPath, RemovePath};
 
 use crate::Ship;
+use tlogfs::schema::OplogEntry;
 
 /// Adapter wrapping `&mut Ship` so that `sync_remote::Remote` can push
 /// to and pull from this duckpond instance.
@@ -567,16 +569,83 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
         Ok(())
     }
 
-    async fn compute_live_checksums(&self, _pond_id: Uuid) -> StewardResult<PartitionChecksums> {
-        // Deferred to D3 (pond verify).  The duckpond OplogEntry row
-        // schema differs from sync_store's k/v schema, so the checksum
-        // strategy needs a tlogfs-aware re-implementation; see
-        // docs/d4-resumption.md `compute_live_checksums` note.
-        Err(SyncStewardError::Adapter(Box::new(std::io::Error::other(
-            "ShipRemoteSteward::compute_live_checksums is deferred to D3 \
-             (pond verify); duckpond's row schema requires a tlogfs-aware \
-             checksum strategy",
-        ))))
+    /// Compute live partition checksums for every part_id that has
+    /// at least one OplogEntry row under `pond_id` in the current
+    /// data table.
+    ///
+    /// Each OplogEntry row is a leaf; its key is `"<node_id>/<version>"`
+    /// (unique within a partition because versions are strictly monotonic
+    /// per node), and its value-digest is the BLAKE3 of the row's
+    /// `serde_json` serialization.  The serde_json layout uses the
+    /// struct's declared field order, so the canonicalization is
+    /// stable across producers and across deserialize/reserialize cycles.
+    /// Note that this is a logical row hash; it is **not** the parquet
+    /// byte representation, so re-compaction (Delta optimize) that
+    /// rewrites parquet files without changing row content does not
+    /// shift the checksum.
+    ///
+    /// The Merkle strategy then folds the sorted leaves into the
+    /// partition checksum.  All replicated OplogEntry fields contribute
+    /// to the hash, including `pond_id`, `part_id`, and `txn_seq`, so
+    /// foreign-pond rows (cross-pond import) produce checksums that
+    /// match the producer's `compute_live_checksums(pond_id)` for the
+    /// same pond_id.
+    ///
+    /// Implementation builds a fresh `SessionContext` over a clone of
+    /// the data table's current snapshot, so the call works regardless
+    /// of whether a transaction is active on the underlying `Ship`
+    /// (the verify path is read-only and runs outside a write txn).
+    async fn compute_live_checksums(&self, pond_id: Uuid) -> StewardResult<PartitionChecksums> {
+        let table = self.ship.data_persistence().table().clone();
+        let ctx = datafusion::execution::context::SessionContext::new();
+        let _previous = ctx
+            .register_table("delta_table_live", Arc::new(table))
+            .map_err(adapt_err)?;
+
+        let pond_id_str = pond_id.to_string();
+        let sql = format!(
+            "SELECT * FROM delta_table_live WHERE pond_id = '{}' \
+             ORDER BY part_id, node_id, version",
+            pond_id_str
+        );
+        let batches = ctx
+            .sql(&sql)
+            .await
+            .map_err(adapt_err)?
+            .collect()
+            .await
+            .map_err(adapt_err)?;
+
+        // Group rows by part_id; per group, build owned (key,
+        // value_blake3) leaves.  We store owned strings/arrays so the
+        // borrow-bound `Leaf<'_>` can be constructed via `as_str`/`&`
+        // in the final Merkle pass.
+        let mut by_partition: HashMap<String, Vec<(String, [u8; 32])>> = HashMap::new();
+        for batch in batches {
+            let rows: Vec<OplogEntry> =
+                serde_arrow::from_record_batch(&batch).map_err(adapt_err)?;
+            for row in rows {
+                let key = format!("{}/{}", row.node_id, row.version);
+                let part = row.part_id.to_string();
+                let canonical = serde_json::to_vec(&row).map_err(adapt_err)?;
+                let digest = *blake3::hash(&canonical).as_bytes();
+                by_partition.entry(part).or_default().push((key, digest));
+            }
+        }
+
+        let strategy = Merkle::new();
+        let mut out = PartitionChecksums::new();
+        for (partition, kv) in by_partition {
+            let leaves: Vec<Leaf<'_>> = kv
+                .iter()
+                .map(|(k, v)| Leaf {
+                    key: k.as_str(),
+                    value_blake3: v,
+                })
+                .collect();
+            let _previous = out.insert(partition, strategy.compute(&leaves));
+        }
+        Ok(out)
     }
 }
 

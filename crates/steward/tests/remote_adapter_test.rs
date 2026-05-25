@@ -507,3 +507,162 @@ async fn ship_remote_bootstrap_consumer_rejects_store_id_mismatch() {
         Err(other) => panic!("expected StoreIdMismatch, got {:?}", other),
     }
 }
+
+// ---------------------------------------------------------------------
+// D5.5: compute_live_checksums for duckpond (tlogfs row schema).
+//
+// `RemoteSteward::compute_live_checksums(pond_id)` returns the live
+// per-partition BLAKE3-of-Merkle checksums for every part_id under
+// `pond_id`.  These tests exercise the freshly-implemented adapter
+// method directly (no full sync_remote::Remote roundtrip needed).
+// ---------------------------------------------------------------------
+
+/// Two back-to-back invocations of `compute_live_checksums` on the
+/// same pond -- with no writes in between -- must return identical
+/// maps.  Determinism is the verify path's foundational guarantee.
+#[tokio::test]
+async fn ship_compute_live_checksums_is_deterministic() {
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+
+    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let pond_id = ship.control_table().pond_id_uuid();
+
+    ship.write_transaction(&meta("seed"), async |fs| {
+        let root = fs.root().await?;
+        let _ =
+            tinyfs::async_helpers::convenience::create_file_path(&root, "/a.txt", b"alpha").await?;
+        let _ =
+            tinyfs::async_helpers::convenience::create_file_path(&root, "/b.txt", b"beta").await?;
+        Ok(())
+    })
+    .await
+    .expect("write txn");
+
+    let adapter = ShipRemoteSteward::new(&mut ship);
+    let first = sync_remote::RemoteSteward::compute_live_checksums(&adapter, pond_id)
+        .await
+        .expect("first compute");
+    let second = sync_remote::RemoteSteward::compute_live_checksums(&adapter, pond_id)
+        .await
+        .expect("second compute");
+    assert_eq!(
+        first, second,
+        "compute_live_checksums must be deterministic across calls"
+    );
+
+    assert!(
+        !first.is_empty(),
+        "a pond with writes should have at least one partition checksum"
+    );
+    for (partition, checksum) in &first {
+        assert_eq!(
+            checksum.kind,
+            sync_store::checksum::ChecksumKind::Merkle,
+            "partition {} should use the Merkle strategy",
+            partition
+        );
+        assert_eq!(
+            checksum.bytes.len(),
+            32,
+            "Merkle output is BLAKE3 (32 bytes), got {} for partition {}",
+            checksum.bytes.len(),
+            partition,
+        );
+    }
+}
+
+/// A write that actually changes content must cause the per-partition
+/// checksum to change -- otherwise verify is blind to drift.
+#[tokio::test]
+async fn ship_compute_live_checksums_changes_with_content() {
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+
+    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let pond_id = ship.control_table().pond_id_uuid();
+
+    // Initial write.
+    ship.write_transaction(&meta("v1"), async |fs| {
+        let root = fs.root().await?;
+        let _ =
+            tinyfs::async_helpers::convenience::create_file_path(&root, "/file.txt", b"v1").await?;
+        Ok(())
+    })
+    .await
+    .expect("write v1");
+    let before = {
+        let adapter = ShipRemoteSteward::new(&mut ship);
+        sync_remote::RemoteSteward::compute_live_checksums(&adapter, pond_id)
+            .await
+            .expect("checksums before")
+    };
+    assert!(!before.is_empty(), "expected at least one partition");
+
+    // Second write: append a NEW version of /file.txt.  This creates
+    // a new OplogEntry row with a different `content`/`blake3`, so the
+    // partition's checksum must shift.
+    ship.write_transaction(&meta("v2"), async |fs| {
+        let root = fs.root().await?;
+        root.write_file_path_from_slice("/file.txt", b"v2").await?;
+        Ok(())
+    })
+    .await
+    .expect("write v2");
+    let after = {
+        let adapter = ShipRemoteSteward::new(&mut ship);
+        sync_remote::RemoteSteward::compute_live_checksums(&adapter, pond_id)
+            .await
+            .expect("checksums after")
+    };
+
+    assert_ne!(
+        before, after,
+        "writing a new version of an existing file must shift the partition's checksum"
+    );
+    assert_eq!(
+        before.keys().collect::<std::collections::BTreeSet<_>>(),
+        after.keys().collect::<std::collections::BTreeSet<_>>(),
+        "partitions should not appear/disappear from a same-file overwrite"
+    );
+}
+
+/// A different pond_id (foreign or absent) returns an empty map.
+/// This is the contract verify relies on to skip foreign-pond data
+/// when the local pond has no cross-pond imports.
+#[tokio::test]
+async fn ship_compute_live_checksums_unknown_pond_id_is_empty() {
+    use uuid::Uuid;
+
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+
+    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+
+    ship.write_transaction(&meta("seed"), async |fs| {
+        let root = fs.root().await?;
+        let _ = tinyfs::async_helpers::convenience::create_file_path(
+            &root,
+            "/local.txt",
+            b"local content",
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .expect("write txn");
+
+    let foreign = Uuid::new_v4();
+    let adapter = ShipRemoteSteward::new(&mut ship);
+    let result = sync_remote::RemoteSteward::compute_live_checksums(&adapter, foreign)
+        .await
+        .expect("compute for unknown pond_id");
+    assert!(
+        result.is_empty(),
+        "compute_live_checksums for an unknown pond_id must be empty, got {} partitions",
+        result.len(),
+    );
+}

@@ -25,6 +25,7 @@ arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
 datafusion-functions-json = { workspace = true }

@@ -5743,6 +5743,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-schema",
  "async-trait",
+ "blake3",
  "chrono",
  "datafusion",
  "datafusion-functions-json",
