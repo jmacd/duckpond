@@ -665,8 +665,7 @@ pub struct PushOutcome {
     pub skipped: usize,
 }
 
-/// Push every pending `txn_seq` from `last_pushed_seq + 1` (clamped to
-/// 2, so the bootstrap `pond_init` is never attempted) through
+/// Push every pending `txn_seq` from `last_pushed_seq + 1` through
 /// `ship.last_write_seq()` into the remote described by `attachment`.
 ///
 /// This is the shared driver used by both the `pond push` CLI verb
@@ -674,14 +673,11 @@ pub struct PushOutcome {
 /// dispatcher in [`crate::guard`].  Errors from `Remote::push` other
 /// than `NoSuchCommit` abort the loop and propagate up.
 ///
-/// # Why skip seq 1?
-///
-/// The very first transaction recorded by `pond init` writes a
-/// `DataCommitted` record with `data_delta_version == 0` (no parquet
-/// payload yet -- only the empty pond skeleton).  `Remote::push`
-/// rejects that with a `Schema` error.  Until `Remote::push` itself
-/// learns to treat `data_delta_version == 0` as a clean skip, the
-/// driver-side clamp avoids the error entirely.
+/// The driver does NOT special-case the `pond_init` txn (`txn_seq=1`,
+/// `data_delta_version=0`).  Instead, `Remote::push` itself treats
+/// `data_delta_version == 0` as a clean no-op skip that still
+/// advances `last_pushed_seq`, so the driver iterates the full range
+/// and the bootstrap commit is invisible to operators.
 pub async fn push_pending_to_remote(
     ship: &mut Ship,
     attachment: &crate::RemoteAttachment,
@@ -708,7 +704,7 @@ pub async fn push_pending_to_remote(
             .unwrap_or(0)
     };
 
-    let start = std::cmp::max(previous_last_pushed + 1, 2);
+    let start = previous_last_pushed + 1;
 
     let mut outcome = PushOutcome {
         previous_last_pushed,

@@ -282,6 +282,13 @@ impl Remote {
     /// Idempotent: if the manifest row for `txn_seq` already exists on
     /// the remote, returns `Ok(())` immediately (and writes a
     /// `PostPushCompleted` if missing locally).
+    ///
+    /// Bootstrap-skip: if the source's `DataCommitted` for `txn_seq`
+    /// has `data_delta_version == 0` (the `pond_init` txn, which
+    /// claims a seq but writes no parquet payload), the push is a
+    /// clean no-op: no PostPush records are written, but the
+    /// `last_pushed_seq:<url>` watermark IS advanced to `txn_seq` so
+    /// the driver doesn't re-attempt the same seq forever.
     pub async fn push<S: RemoteSteward + ?Sized>(
         &mut self,
         steward: &mut S,
@@ -309,6 +316,23 @@ impl Remote {
             ))
         })?;
         let parent_seq = dc.parent_seq.unwrap_or(0);
+
+        // 2a. Bootstrap-skip: `pond_init` records `data_delta_version == 0`
+        // because it writes no parquet payload.  Treat that as a clean
+        // no-op: don't write PostPush records (nothing happened on the
+        // remote), but DO advance `last_pushed_seq` so the driver
+        // doesn't retry the same seq on every push pass.
+        if dc_meta.data_delta_version == 0 {
+            let key = last_pushed_seq_key(&self.url);
+            let current = match steward.config_get(&key).await? {
+                Some(s) => s.parse::<i64>().unwrap_or(0),
+                None => 0,
+            };
+            if txn_seq > current {
+                steward.config_set(&key, &txn_seq.to_string()).await?;
+            }
+            return Ok(());
+        }
 
         // 3. Idempotence: if a manifest row already exists on the
         // remote for this txn_seq, the push is a no-op success.  Bring
@@ -920,10 +944,13 @@ impl Remote {
         commit_kind: CommitKind,
         parent_seq: i64,
     ) -> Result<()> {
-        // 5. Read data_delta_version.
+        // 5. Read data_delta_version.  v == 0 is filtered upstream
+        // at the bootstrap-skip in `push`, so reaching this point
+        // with a non-positive value indicates a steward bug.
         if dc_meta.data_delta_version <= 0 {
             return Err(RemoteError::Schema(format!(
-                "DataCommitted at txn_seq {} has invalid data_delta_version {}",
+                "DataCommitted at txn_seq {} has invalid data_delta_version {} \
+                 (bootstrap-skip in push() should have filtered v=0 earlier)",
                 txn_seq, dc_meta.data_delta_version,
             )));
         }

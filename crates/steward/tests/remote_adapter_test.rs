@@ -666,3 +666,87 @@ async fn ship_compute_live_checksums_unknown_pond_id_is_empty() {
         result.len(),
     );
 }
+
+/// D5.6: `Remote::push` treats the `pond_init` txn (data_delta_version
+/// == 0) as a clean no-op skip that still advances `last_pushed_seq`.
+/// Before D5.6, the driver had a `start = max(prev+1, 2)` clamp to
+/// avoid calling push on seq 1; after D5.6, push handles it itself.
+///
+/// This test calls `Remote::push(seq=1)` directly on a freshly-created
+/// pond (only the pond_init txn exists) and asserts:
+/// - it returns Ok(()) (not a Schema error)
+/// - no PostPush records were written locally
+/// - the `last_pushed_seq:<url>` setting was advanced to 1
+#[tokio::test]
+async fn ship_remote_push_bootstrap_txn_is_clean_skip() {
+    use sync_remote::{Remote, RemoteSteward};
+    use sync_steward::RecordKind;
+
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+    let remote_path = tmp.path().join("remote");
+
+    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let pond_id = ship.control_table().pond_id_uuid();
+
+    // No data writes -- only the pond_init txn (txn_seq=1,
+    // data_delta_version=0) exists.
+    assert_eq!(
+        ship.last_write_seq(),
+        1,
+        "freshly-created pond has only the pond_init txn at seq 1",
+    );
+
+    let mut remote = Remote::create(&remote_path, pond_id)
+        .await
+        .expect("create remote");
+    let remote_url = remote.url().to_string();
+
+    {
+        let mut adapter = ShipRemoteSteward::new(&mut ship);
+        remote
+            .push(&mut adapter, 1)
+            .await
+            .expect("push of pond_init (v=0) must be a clean Ok");
+    }
+
+    // PostPush records should NOT have been written for a v=0 skip.
+    let records = ship
+        .control_table()
+        .inner()
+        .all_records_for(pond_id)
+        .await
+        .expect("read control records");
+    let post_push_seq_1: Vec<_> = records
+        .iter()
+        .filter(|r| {
+            r.txn_seq == 1
+                && matches!(
+                    r.record_kind,
+                    RecordKind::PostPushPending
+                        | RecordKind::PostPushCompleted
+                        | RecordKind::PostPushFailed
+                )
+        })
+        .collect();
+    assert!(
+        post_push_seq_1.is_empty(),
+        "v=0 skip must not write PostPush records, got {} records",
+        post_push_seq_1.len(),
+    );
+
+    // But last_pushed_seq:<url> SHOULD have advanced to 1, so a later
+    // push driver run won't retry seq 1.
+    let setting_key = format!("last_pushed_seq:{}", remote_url);
+    let adapter = ShipRemoteSteward::new(&mut ship);
+    let stored = adapter
+        .config_get(&setting_key)
+        .await
+        .expect("config_get")
+        .expect("setting should exist after v=0 skip");
+    assert_eq!(
+        stored, "1",
+        "last_pushed_seq must be advanced to 1 by the v=0 skip"
+    );
+}

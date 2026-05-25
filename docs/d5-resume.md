@@ -43,9 +43,21 @@
 > the existing `Merkle` strategy.  This gives the verify path
 > end-to-end coverage of the LIVE side for duckpond's row schema.  The
 > RECORDED snapshot in `record_data_committed` for native writes is
-> still `HashMap::new()` (D5.6/D5.7 scope) so a verify pass after a
-> native write today would mis-fire on drift; D5.5 tests deliberately
-> exercise `compute_live_checksums` directly.
+> still `HashMap::new()` (D5.7 scope) so a verify pass after a native
+> write today would mis-fire on drift; D5.5 tests deliberately exercise
+> `compute_live_checksums` directly.
+> **D5.6 is complete** (commit pending on top of D5.5):
+> `Remote::push` now treats the `pond_init` txn (`data_delta_version
+> == 0`) as a clean no-op skip that still advances
+> `last_pushed_seq:<url>` to the skipped seq, so the driver doesn't
+> retry it forever and operators see no spurious errors.  The
+> previously-required `start = max(prev+1, 2)` clamp in
+> `push_pending_to_remote` is now removed; the driver iterates the
+> full range `prev+1 ..= upper` and the bootstrap commit becomes
+> invisible to it.  The defense-in-depth `data_delta_version <= 0`
+> rejection inside `build_and_commit_bundle` stays as a safety net
+> (with an updated message noting that push's bootstrap-skip should
+> have filtered v=0 earlier).
 > This document is a working scratchpad for the next session; it is
 > intentionally checked in as a `docs/` file so it survives session
 > boundaries.  Delete (or move to `docs/archive/`) once D5 lands.
@@ -567,27 +579,46 @@ After D5.5 the verify path now has the LIVE side working
 end-to-end for duckpond.  The RECORDED side in
 `crates/sync-steward/src/control_table.rs::record_data_committed`
 still writes `partition_checksums: HashMap::new()` for native writes
-— D5.6/D5.7 will close that, and only then is `pond verify` safe to
+— D5.7 will close that, and only then is `pond verify` safe to
 run on a fresh native commit.
 
-### D5.6 — Lift the data_delta_version=0 clamp
+### D5.6 — Lift the data_delta_version=0 clamp — **[DONE]**
 
-**File**: `crates/steward/src/remote_adapter.rs:573`.
+**Files**: `crates/sync-remote/src/remote.rs::Remote::push`,
+`crates/steward/src/remote_adapter.rs::push_pending_to_remote`.
+**Test**: `crates/steward/tests/remote_adapter_test.rs::ship_remote_push_bootstrap_txn_is_clean_skip`.
 
-Today:
+Was:
 
 ```rust
 let start = std::cmp::max(previous_last_pushed + 1, 2);
 ```
 
-Pushes start at txn_seq 2 because the bootstrap pond_init txn has
-`data_delta_version=0` and `Remote::push` rejects that with a
-`Schema` error.  The carry-forward: move the `version=0` handling
-into `Remote::push` itself (treat 0 as a clean skip, return Ok(())
-with no work done) and remove the driver-side clamp.
+Now:
 
-This is a small, isolated change in `sync-remote` and removes a
-duckpond-specific workaround.
+```rust
+let start = previous_last_pushed + 1;
+```
+
+The driver no longer clamps; the bootstrap-skip logic moved into
+`Remote::push` itself.  Right after parsing `DataCommitted` metadata,
+push checks `dc_meta.data_delta_version == 0` and, if so, advances
+`last_pushed_seq:<url>` to `txn_seq` (via the same `max(current,
+txn_seq)` rule as the success path) and returns `Ok(())` without
+writing PostPush records (nothing happened on the remote).
+
+The defense-in-depth `data_delta_version <= 0` check inside
+`build_and_commit_bundle` stays as a safety net for future bugs and
+now has a message noting that push's bootstrap-skip should have
+filtered v=0 earlier.
+
+The regression test exercises a freshly-created pond (only the
+pond_init txn at seq=1 exists), calls `Remote::push(seq=1)` directly,
+and asserts:
+- the call returns `Ok(())` (not a Schema error);
+- no PostPush records were written for seq=1;
+- `last_pushed_seq:<url>` was advanced to `1`, so a later driver
+  iteration won't retry the same seq forever.
 
 ### D5.7 — Cross-pond import UX surface
 
@@ -657,7 +688,7 @@ here for easy reference:
 |------|-------|------|
 | `restart_from_compact` generic + bootstrap_consumer | `crates/sync-remote/src/remote.rs`, `crates/steward/src/ship.rs` | D5.4 — **DONE** |
 | `compute_live_checksums` stubbed | `crates/steward/src/remote_adapter.rs` (was 501-511) | D5.5 — **DONE** (blake3-per-row Merkle) |
-| `data_delta_version=0` clamp | `crates/steward/src/remote_adapter.rs:573` | D5.6 above |
+| `data_delta_version=0` clamp | `crates/sync-remote/src/remote.rs::push`, `crates/steward/src/remote_adapter.rs::push_pending_to_remote` | D5.6 — **DONE** (bootstrap-skip moved into Remote::push) |
 | 13 disabled testsuite scripts | `testsuite/tests/{510,520-523,530-542}-*.sh` | D5.8 above |
 | `pond_id` not a partition column | `crates/tlogfs/src/persistence.rs:276,348` | D5.1 — **DONE** |
 | Pond identity from control-table Setting, not bootstrap row | `crates/steward/src/control_table.rs:456` | D5.2 — **DONE** |
