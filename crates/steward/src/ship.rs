@@ -655,12 +655,14 @@ impl Ship {
     }
 
     /// Commit a steward transaction guard with proper sequencing
-    /// This method provides the control persistence access needed for proper sequencing
-    /// and handles post-commit factory execution for write transactions
+    ///
+    /// Returns the data-FS Delta version of a successful write commit
+    /// (`Ok(Some(v))`); returns `Ok(None)` for a read transaction or a
+    /// write that produced no changes.
     pub async fn commit_transaction(
         &mut self,
         guard: StewardTransactionGuard<'_>,
-    ) -> Result<Option<()>, StewardError> {
+    ) -> Result<Option<i64>, StewardError> {
         // Check if this is a write transaction before consuming the guard
         let is_write = guard.is_write_transaction();
 
@@ -1088,7 +1090,7 @@ mod tests {
                 .expect("Transaction guard should be available");
 
             // Commit the transaction (metadata was already provided at begin)
-            raw_tx
+            let _committed_version = raw_tx
                 .commit()
                 .await
                 .expect("Failed to commit transaction")
@@ -1274,7 +1276,7 @@ mod tests {
                 .expect("Transaction guard should be available");
 
             // Commit the transaction (metadata was already provided at begin)
-            raw_tx
+            let _committed_version = raw_tx
                 .commit()
                 .await
                 .expect("Failed to commit transaction")

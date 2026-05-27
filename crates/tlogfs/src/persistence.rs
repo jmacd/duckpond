@@ -679,7 +679,7 @@ impl OpLogPersistence {
     pub(crate) async fn commit(
         &mut self,
         mut metadata: PondTxnMetadata,
-    ) -> Result<Option<()>, TLogFSError> {
+    ) -> Result<Option<i64>, TLogFSError> {
         // Stamp pond_id into commit metadata
         let pond_id = self.pond_id.clone();
         metadata.pond_id = pond_id.clone();
@@ -693,26 +693,28 @@ impl OpLogPersistence {
             .commit_impl(metadata, self.table.clone(), pond_id)
             .await?;
 
-        // Reload the table from disk to pick up the committed changes
-        // This ensures subsequent transactions see the new data
-        let reload_url = Url::from_directory_path(&self.path)
-            .or_else(|_| Url::from_file_path(&self.path))
-            .map_err(|_| {
-                TLogFSError::Internal(format!(
-                    "Failed to create URL from path: {}",
-                    self.path.to_string_lossy()
-                ))
-            })?;
-        self.table = deltalake::open_table(reload_url).await?;
-        debug!(
-            "[SYNC] Reloaded table after commit, new version: {:?}",
-            self.table.version()
-        );
+        let version = match res {
+            Some(finalized) => {
+                // Install the post-commit snapshot directly into our table
+                // handle.  This avoids re-scanning the Delta log from disk
+                // and — combined with the steward write lock (D5.7a.1) —
+                // guarantees subsequent reads see exactly the state we
+                // just wrote, not some racing peer's view.
+                let version = finalized.version;
+                self.table.state = Some(finalized.snapshot);
+                debug!(
+                    "[SYNC] Installed post-commit snapshot, version: {}",
+                    version
+                );
+                Some(version)
+            }
+            None => None,
+        };
         self.last_txn_seq = new_seq;
 
         // Note: txn_state clearing is handled by tinyfs::TransactionGuard drop
 
-        Ok(res)
+        Ok(version)
     }
 
     /// Get the store path for this persistence layer
@@ -896,7 +898,7 @@ impl State {
         metadata: PondTxnMetadata,
         table: DeltaTable,
         pond_id: String,
-    ) -> Result<Option<()>, TLogFSError> {
+    ) -> Result<Option<deltalake::kernel::transaction::FinalizedCommit>, TLogFSError> {
         self.inner
             .lock()
             .await
@@ -2176,7 +2178,7 @@ impl InnerState {
         metadata: PondTxnMetadata,
         table: DeltaTable,
         pond_id: String,
-    ) -> Result<Option<()>, TLogFSError> {
+    ) -> Result<Option<deltalake::kernel::transaction::FinalizedCommit>, TLogFSError> {
         // Check if transaction is poisoned (failed write)
         if self.poisoned {
             return Err(TLogFSError::Transaction {
@@ -2356,21 +2358,21 @@ impl InnerState {
         // Build commit metadata (pond_txn)
         let commit_metadata = metadata.to_delta_metadata();
 
-        let _commit = CommitBuilder::default()
+        let finalized = CommitBuilder::default()
             .with_actions(all_actions)
             .with_app_metadata(commit_metadata)
             .build(snapshot_ref, table.log_store().clone(), operation)
             .await?;
 
         debug!(
-            "[OK] Single Delta commit: {} record(s) + {} external file(s)",
-            record_count, external_count,
+            "[OK] Single Delta commit at version {}: {} record(s) + {} external file(s)",
+            finalized.version, record_count, external_count,
         );
 
         self.records.clear();
         self.directories.clear();
 
-        Ok(Some(()))
+        Ok(Some(finalized))
     }
 
     /// Serialize DirectoryEntry records as Arrow IPC bytes

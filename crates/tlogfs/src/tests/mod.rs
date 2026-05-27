@@ -2635,3 +2635,88 @@ async fn peek_pond_id_returns_local_id_for_fresh_pond() {
         "peek_pond_id should return the bootstrap row's pond_id"
     );
 }
+
+/// D5.7a.2: a write commit returns the Delta version assigned by the
+/// FinalizedCommit, NOT a pre-commit version + 1 arithmetic guess.
+#[tokio::test]
+async fn commit_returns_assigned_version() {
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    let pre_version = persistence
+        .table()
+        .version()
+        .expect("post-create table must have a version");
+
+    let tx = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+    let wd = tx.root().await.expect("Failed to get root");
+    _ = tinyfs::async_helpers::convenience::create_file_path(&wd, "/version_probe.txt", b"hello")
+        .await
+        .expect("create_file_path failed");
+
+    let returned = tx
+        .commit_test_with_sequence(2)
+        .await
+        .expect("commit failed");
+    let returned_version = returned.expect("write commit should return a version");
+
+    let post_version = persistence
+        .table()
+        .version()
+        .expect("post-commit table must have a version");
+
+    assert_eq!(
+        returned_version, post_version,
+        "commit-returned version ({returned_version}) must match installed table version ({post_version})"
+    );
+    assert_eq!(
+        returned_version,
+        pre_version + 1,
+        "commit-returned version ({returned_version}) must equal pre_version+1 ({})",
+        pre_version + 1,
+    );
+}
+
+/// D5.7a.2: an empty (no-write) commit returns Ok(None) and does not
+/// advance the Delta table version.
+#[tokio::test]
+async fn commit_no_op_returns_none() {
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    let pre_version = persistence
+        .table()
+        .version()
+        .expect("post-create table must have a version");
+
+    let tx = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+    // No writes performed before commit.
+    let returned = tx
+        .commit_test_with_sequence(2)
+        .await
+        .expect("commit failed");
+
+    assert!(
+        returned.is_none(),
+        "empty commit should return Ok(None), got {returned:?}"
+    );
+
+    let post_version = persistence
+        .table()
+        .version()
+        .expect("table version should still exist");
+    assert_eq!(
+        pre_version, post_version,
+        "empty commit must not advance the Delta table version"
+    );
+}

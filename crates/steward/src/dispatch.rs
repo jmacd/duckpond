@@ -338,10 +338,15 @@ impl<'a> Transaction<'a> {
     // -- Lifecycle --
 
     /// Commit the transaction.
-    pub async fn commit(self) -> Result<Option<()>, StewardError> {
+    ///
+    /// On a `Pond` write commit, returns `Ok(Some(version))` with the
+    /// data-FS Delta version number. Returns `Ok(None)` for a read or a
+    /// write that produced no changes. `Host` transactions have no
+    /// versioning concept and always return `Ok(None)`.
+    pub async fn commit(self) -> Result<Option<i64>, StewardError> {
         match self {
             Transaction::Pond(guard) => guard.commit().await,
-            Transaction::Host(_) => Ok(Some(())), // No-op: host writes are immediate
+            Transaction::Host(_) => Ok(None), // No-op: host writes are immediate
         }
     }
 

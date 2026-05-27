@@ -270,8 +270,11 @@ impl<'a> StewardTransactionGuard<'a> {
     }
 
     /// Commit the transaction with proper steward sequencing
-    /// Returns whether a write transaction occurred
-    pub async fn commit(mut self) -> Result<Option<()>, StewardError> {
+    ///
+    /// Returns the data-FS Delta version number on a successful write
+    /// commit (`Ok(Some(v))`); returns `Ok(None)` for a read transaction
+    /// or a write that produced no changes.
+    pub async fn commit(mut self) -> Result<Option<i64>, StewardError> {
         let args_fmt = format!("{:?}", &self.txn_meta.user.args);
         debug!(
             "Committing steward transaction {} {}",
@@ -280,19 +283,6 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Calculate duration for recording
         let duration_ms = self.start_time.elapsed().as_millis() as i64;
-
-        // Get current table version before commit (the commit will increment it)
-        let pre_commit_version = self
-            .data_tx
-            .as_ref()
-            .ok_or_else(|| {
-                StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                    "Transaction already consumed".to_string(),
-                )))
-            })?
-            .persistence()
-            .table()
-            .version();
 
         // Step 1: Transaction metadata was already provided at begin().
         // (Legacy per-import watermark callbacks were removed alongside
@@ -310,9 +300,10 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Step 3: Record transaction lifecycle in control table based on result
         match commit_result {
-            Ok((Some(()), persistence)) => {
-                // Write transaction committed successfully - version is pre_commit_version + 1
-                let new_version = pre_commit_version.unwrap_or(0) + 1;
+            Ok((Some(new_version), persistence)) => {
+                // Write transaction committed successfully; the version is
+                // the one the FinalizedCommit returned (D5.7a.2) rather
+                // than pre_commit_version + 1 arithmetic.
 
                 // VALIDATION: If this was marked as a read transaction but wrote data, fail.
                 // Reads no longer leave a Begin record, so there's nothing to terminate in
@@ -370,7 +361,7 @@ impl<'a> StewardTransactionGuard<'a> {
                 // above; failures are logged but do not undo the commit.
                 self.run_post_commit_remotes().await;
 
-                Ok(Some(()))
+                Ok(Some(new_version))
             }
             Ok((None, _persistence)) => {
                 // Read-only transaction completed successfully (or write

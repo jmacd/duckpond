@@ -116,7 +116,7 @@ impl<'a> TransactionGuard<'a> {
     /// `OpLogPersistence::open` round-trip.
     ///
     /// The embedded tinyfs::TransactionGuard will be dropped after commit, clearing the transaction state.
-    pub async fn commit(self) -> TinyFSResult<(Option<()>, &'a mut OpLogPersistence)> {
+    pub async fn commit(self) -> TinyFSResult<(Option<i64>, &'a mut OpLogPersistence)> {
         // We need to move the `&'a mut OpLogPersistence` field out of `self`
         // with its full `'a` lifetime so it can be returned to the caller.
         // A reborrow would shorten the lifetime; a `let Self { .. } = self`
@@ -192,7 +192,7 @@ impl<'a> TransactionGuard<'a> {
     ///
     /// **Should only be used in test code.**
     #[cfg(test)]
-    pub async fn commit_test_with_sequence(self, txn_seq: i64) -> TinyFSResult<Option<()>> {
+    pub async fn commit_test_with_sequence(self, txn_seq: i64) -> TinyFSResult<Option<i64>> {
         let metadata = PondTxnMetadata::new(
             txn_seq,
             PondUserMetadata::new(vec!["test".to_string(), "transaction".to_string()]),
