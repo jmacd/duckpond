@@ -7,6 +7,7 @@
 use crate::{
     PondTxnMetadata, StewardError,
     control_table::{ControlTable, TransactionType},
+    write_lock::WriteLockGuard,
 };
 use log::{debug, error, info};
 use provider::FactoryRegistry;
@@ -41,6 +42,12 @@ pub struct StewardTransactionGuard<'a> {
     pond_path: PathBuf,
     /// Track if commit() was called to record failure on drop if not
     committed: bool,
+    /// Process-level write lock held for the lifetime of this transaction
+    /// when `transaction_type == Write`.  Releases automatically on Drop
+    /// (the underlying FD closes, which unlocks at the kernel level).
+    /// `None` for read transactions (no exclusion needed).
+    #[allow(dead_code)]
+    write_lock: Option<WriteLockGuard>,
 }
 
 impl<'a> StewardTransactionGuard<'a> {
@@ -51,6 +58,7 @@ impl<'a> StewardTransactionGuard<'a> {
         transaction_type: TransactionType,
         control_table: &'a mut ControlTable,
         path: P,
+        write_lock: Option<WriteLockGuard>,
     ) -> Self {
         Self {
             data_tx: Some(data_tx),
@@ -60,6 +68,7 @@ impl<'a> StewardTransactionGuard<'a> {
             start_time: std::time::Instant::now(),
             pond_path: path.as_ref().to_path_buf(),
             committed: false,
+            write_lock,
         }
     }
 
@@ -236,16 +245,18 @@ impl<'a> StewardTransactionGuard<'a> {
             &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, &error_msg
         );
 
-        // Record the failure in control table
-        if let Err(e) = self
-            .control_table
-            .record_failed(
-                &self.txn_meta,
-                self.transaction_type,
-                error_msg.clone(),
-                duration_ms,
-            )
-            .await
+        // Record the failure in control table — writes only (reads no
+        // longer have a matching Begin record).
+        if self.transaction_type == TransactionType::Write
+            && let Err(e) = self
+                .control_table
+                .record_failed(
+                    &self.txn_meta,
+                    self.transaction_type,
+                    error_msg.clone(),
+                    duration_ms,
+                )
+                .await
         {
             log::error!("Failed to record transaction failure: {}", e);
         }
@@ -303,19 +314,10 @@ impl<'a> StewardTransactionGuard<'a> {
                 // Write transaction committed successfully - version is pre_commit_version + 1
                 let new_version = pre_commit_version.unwrap_or(0) + 1;
 
-                // VALIDATION: If this was marked as a read transaction but wrote data, fail
+                // VALIDATION: If this was marked as a read transaction but wrote data, fail.
+                // Reads no longer leave a Begin record, so there's nothing to terminate in
+                // the control table — the in-memory error is sufficient.
                 if self.transaction_type == TransactionType::Read {
-                    self.control_table
-                        .record_failed(
-                            &self.txn_meta,
-                            self.transaction_type,
-                            "Read transaction attempted to write data".to_string(),
-                            duration_ms,
-                        )
-                        .await
-                        .map_err(|e| {
-                            StewardError::ControlTable(format!("Failed to record failure: {}", e))
-                        })?;
                     return Err(StewardError::ReadTransactionAttemptedWrite);
                 }
 
@@ -371,18 +373,19 @@ impl<'a> StewardTransactionGuard<'a> {
                 Ok(Some(()))
             }
             Ok((None, _persistence)) => {
-                // Read-only transaction completed successfully
-                // Note: Write transactions that make no changes are allowed (idempotent operations like mkdir -p)
-                // We record them as "completed" rather than "data_committed" since no version was created
-
-                self.control_table
-                    .record_completed(&self.txn_meta, self.transaction_type, duration_ms)
-                    .await
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!("Failed to record completion: {}", e))
-                    })?;
-
+                // Read-only transaction completed successfully (or write
+                // that produced no changes).  Reads no longer leave audit
+                // rows in the control table; only write-no-ops do.
                 if self.transaction_type == TransactionType::Write {
+                    self.control_table
+                        .record_completed(&self.txn_meta, self.transaction_type, duration_ms)
+                        .await
+                        .map_err(|e| {
+                            StewardError::ControlTable(format!(
+                                "Failed to record completion: {}",
+                                e
+                            ))
+                        })?;
                     debug!(
                         "Write-no-op steward transaction {} completed (seq={})",
                         &self.txn_meta.user.txn_id, self.txn_meta.txn_seq
@@ -397,19 +400,22 @@ impl<'a> StewardTransactionGuard<'a> {
                 Ok(None)
             }
             Err(e) => {
-                // Transaction failed - record error
+                // Transaction failed - record error (writes only; reads
+                // never recorded a Begin so there's nothing to terminate).
                 let error_msg = format!("{}", e);
-                self.control_table
-                    .record_failed(
-                        &self.txn_meta,
-                        self.transaction_type,
-                        error_msg.clone(),
-                        duration_ms,
-                    )
-                    .await
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!("Failed to record failure: {}", e))
-                    })?;
+                if self.transaction_type == TransactionType::Write {
+                    self.control_table
+                        .record_failed(
+                            &self.txn_meta,
+                            self.transaction_type,
+                            error_msg.clone(),
+                            duration_ms,
+                        )
+                        .await
+                        .map_err(|e| {
+                            StewardError::ControlTable(format!("Failed to record failure: {}", e))
+                        })?;
+                }
                 self.committed = true;
                 Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))
             }

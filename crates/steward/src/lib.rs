@@ -20,6 +20,7 @@ pub mod maintenance;
 mod remote_adapter;
 mod remote_config;
 mod ship;
+mod write_lock;
 
 pub use control_table::ControlTable;
 pub use dispatch::{Steward, Transaction};
@@ -64,6 +65,19 @@ pub enum StewardError {
     #[error("Transaction mode violation: read transaction attempted to write data")]
     ReadTransactionAttemptedWrite,
 
+    #[error(
+        "pond at {path} is locked by another process{}{}{}",
+        format_pid(*holder_pid),
+        format_since(holder_since.as_ref()),
+        format_txn_id(holder_txn_id.as_ref()),
+    )]
+    PondLocked {
+        path: PathBuf,
+        holder_pid: Option<u32>,
+        holder_since: Option<chrono::DateTime<chrono::Utc>>,
+        holder_txn_id: Option<String>,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -87,6 +101,36 @@ impl From<tinyfs::Error> for StewardError {
         StewardError::DataInit(tlogfs::TLogFSError::from(e))
     }
 }
+
+// ---------------------------------------------------------------------------
+// PondLocked display helpers
+// ---------------------------------------------------------------------------
+
+fn format_pid(pid: Option<u32>) -> String {
+    pid.map(|p| format!("\n  holder PID {p}"))
+        .unwrap_or_default()
+}
+
+fn format_since(since: Option<&chrono::DateTime<chrono::Utc>>) -> String {
+    since
+        .map(|t| {
+            format!(
+                " since {}",
+                t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn format_txn_id(txn_id: Option<&String>) -> String {
+    txn_id
+        .map(|t| format!("\n  transaction {t}"))
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem helpers
+// ---------------------------------------------------------------------------
 
 /// Get the data filesystem path under the pond
 #[must_use]

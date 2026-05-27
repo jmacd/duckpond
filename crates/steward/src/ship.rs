@@ -493,14 +493,13 @@ impl Ship {
     ) -> Result<StewardTransactionGuard<'_>, StewardError> {
         debug!("Beginning steward transaction {meta:?}");
 
-        // Allocate transaction sequence
+        // Compute the transaction sequence we *would* use, but do NOT
+        // commit the increment yet: if the write-lock acquisition below
+        // fails, we must leave `last_write_seq` untouched so the caller
+        // can retry without skipping a sequence number.
         let (txn_seq, based_on_seq) = if is_write {
-            // Write transaction: allocate next sequence
-            self.last_write_seq += 1;
-            let seq = self.last_write_seq;
-            (seq, None)
+            (self.last_write_seq + 1, None)
         } else {
-            // Read transaction: reuse last write sequence for read atomicity
             let seq = self.last_write_seq;
             (seq, Some(seq))
         };
@@ -517,13 +516,37 @@ impl Ship {
             &meta.txn_id, transaction_type, based_on_seq,
         );
 
-        // Record transaction begin in control table
-        self.control_table
-            .record_begin(&txn_meta, based_on_seq, transaction_type)
-            .await
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
-            })?;
+        // For writes, acquire the process-level exclusion lock BEFORE
+        // touching control or data tables.  A conflict here short-circuits
+        // cleanly without polluting the control log.  Read transactions
+        // do not take this lock (or any control-table record) — they're
+        // safe under Delta's read-time-travel semantics.
+        let write_lock = if is_write {
+            let control_dir = get_control_path(&self.pond_path);
+            Some(crate::write_lock::WriteLockGuard::try_acquire(
+                &control_dir,
+                &txn_meta,
+            )?)
+        } else {
+            None
+        };
+
+        // Lock acquired — now commit the sequence advance.
+        if is_write {
+            self.last_write_seq = txn_seq;
+        }
+
+        // Record transaction begin in control table — writes only.
+        // Reads no longer leave audit rows; the per-read Delta write
+        // was pure overhead now that exclusion is enforced by the lock.
+        if is_write {
+            self.control_table
+                .record_begin(&txn_meta, based_on_seq, transaction_type)
+                .await
+                .map_err(|e| {
+                    StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
+                })?;
+        }
 
         // Begin Data FS transaction guard with metadata
         let data_tx = if is_write {
@@ -546,6 +569,7 @@ impl Ship {
             transaction_type,
             &mut self.control_table,
             &self.pond_path,
+            write_lock,
         ))
     }
 
@@ -592,6 +616,12 @@ impl Ship {
 
         debug!("Transaction replay {txn_id:?} using sequence {txn_seq} (type=write, replay=true)",);
 
+        // Acquire process-level write lock (same exclusion contract as
+        // begin_write).  Replay is a write transaction and must not race
+        // with another writer in a sibling process.
+        let control_dir = get_control_path(&self.pond_path);
+        let write_lock = crate::write_lock::WriteLockGuard::try_acquire(&control_dir, txn_meta)?;
+
         // Record transaction begin in control table
         self.control_table
             .record_begin(
@@ -620,6 +650,7 @@ impl Ship {
             TransactionType::Write,
             &mut self.control_table,
             self.pond_path.clone(),
+            Some(write_lock),
         ))
     }
 
@@ -735,8 +766,13 @@ impl Ship {
                 "Marking transaction seq={}, id={} as recovered",
                 txn_meta.txn_seq, txn_meta.user.txn_id
             );
+            // Post-D5.7a.1: only write transactions leave Begin records,
+            // so any incomplete transaction we recover here must be a
+            // write that was interrupted (or a legacy Read-Begin from
+            // an upgrade-in-place pond; `record_completed` is shape-
+            // compatible with both).
             self.control_table
-                .record_completed(txn_meta, TransactionType::Read, 0) // Assume read for recovery
+                .record_completed(txn_meta, TransactionType::Write, 0)
                 .await?;
         }
 

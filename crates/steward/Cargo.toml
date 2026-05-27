@@ -30,6 +30,7 @@ chrono = { workspace = true }
 datafusion = { workspace = true }
 datafusion-functions-json = { workspace = true }
 deltalake = { workspace = true }
+fs2 = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true }
 provider = { workspace = true }

@@ -229,6 +229,14 @@ impl Steward {
 ///
 /// Wraps the concrete transaction guards and forwards all method calls.
 /// Implements `Deref<Target=FS>` for filesystem access.
+///
+/// The `Pond` variant is significantly larger than `Host` because
+/// `StewardTransactionGuard` carries the full delta-lake transaction
+/// state plus an optional process-exclusion lock guard.  Boxing isn't
+/// worth the extra allocation: `Pond` is the dominant variant in
+/// practice, and the size delta is amortized across a single
+/// transaction's lifetime.
+#[allow(clippy::large_enum_variant)]
 pub enum Transaction<'a> {
     /// Full tlogfs transaction with control table tracking
     Pond(StewardTransactionGuard<'a>),
