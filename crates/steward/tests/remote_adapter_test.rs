@@ -124,33 +124,12 @@ async fn ship_remote_push_pull_roundtrip() {
     assert_eq!(bytes, b"hello from source");
     let _ = tx.commit().await.expect("commit read");
 
-    // 8. Cross-pond import is rejected in D4.  Build a synthetic
-    //    PulledBundle with a foreign pond_id and confirm
-    //    apply_pulled_bundle errors.
-    {
-        let mut other = Ship::create_pond(tmp.path().join("other"))
-            .await
-            .expect("create other");
-        let bogus_bundle = sync_steward::PulledBundle {
-            pond_id: uuid::Uuid::new_v4(), // not other's pond_id
-            txn_seq: 1,
-            commit_kind: sync_steward::CommitKind::Write,
-            parent_seq: 0,
-            adds: vec![],
-            removes: vec![],
-            partition_checksums: Default::default(),
-        };
-        let mut adapter = ShipRemoteSteward::new(&mut other);
-        let err = sync_remote::RemoteSteward::apply_pulled_bundle(&mut adapter, bogus_bundle)
-            .await
-            .expect_err("cross-pond import should be rejected in D4");
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("cross-pond import"),
-            "expected cross-pond error, got: {}",
-            msg
-        );
-    }
+    // 8. Cross-pond import is now PERMITTED (D5.7b.2).  Mount
+    //    materialization is the responsibility of the CLI's
+    //    `pond pull` flow; the adapter itself simply applies the
+    //    foreign bundle into the local Delta table.  Positive
+    //    cross-pond coverage lives in `crates/cmd/tests/test_remote_cli.rs::
+    //    cross_pond_pull_materializes_mount_entry`.
 }
 
 /// Push two transactions, pull both, verify both files appear in the

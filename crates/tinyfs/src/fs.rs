@@ -61,6 +61,25 @@ impl FS {
         WD::new(np.clone(), self.clone(), effective_root).await
     }
 
+    /// Construct a directory node handle for the root of a foreign pond,
+    /// without writing to persistence.
+    ///
+    /// The foreign pond's data is expected to already exist in this
+    /// filesystem's persistence layer (typically after a cross-pond
+    /// `apply_pulled_bundle` deposited it). This method returns a `Node`
+    /// whose `FileID` has `pond_id = foreign_pond_id` and the well-known
+    /// root `node_id`/`part_id`; pass it to [`WD::insert_node`] to
+    /// materialize a mount point in a local directory.
+    ///
+    /// Safe to call even if the foreign root has not yet been pulled --
+    /// the returned handle just lazy-loads from persistence on access.
+    pub async fn foreign_root_node(&self, foreign_pond_id: uuid7::Uuid) -> Result<Node> {
+        let foreign_root_id = FileID::root_for(foreign_pond_id);
+        self.persistence
+            .create_directory_node(foreign_root_id)
+            .await
+    }
+
     /// Create a new node with persistence
     pub(crate) async fn create_node(&self, parent_id: FileID, node_type: NodeType) -> Result<Node> {
         let id = parent_id.new_child_id(node_type.entry_type().await?);

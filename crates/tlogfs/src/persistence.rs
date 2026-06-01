@@ -196,9 +196,8 @@ impl OpLogPersistence {
 
     /// Read the pond identity from a Delta data table without fully
     /// instantiating an [`OpLogPersistence`].  Returns `Ok(Some(id))`
-    /// when the table holds at least one Add action and all Add
-    /// actions agree on a single `pond_id` partition value (the
-    /// normal case for a local pond).
+    /// when the table holds at least one Add action and we can
+    /// identify the local pond's id.
     ///
     /// Returns `Ok(None)` when no Delta table exists at `path`, when
     /// the table exists but has no Add actions yet (a restoration
@@ -207,11 +206,15 @@ impl OpLogPersistence {
     /// layout already refused by [`open_or_create`]; we simply
     /// decline to recover identity from such a table).
     ///
-    /// Returns an error if multiple distinct `pond_id` values are
-    /// present in the same table.  Today (pre-D5.7) this is an
-    /// invariant violation; once cross-pond import lands, this
-    /// helper will be refined to specifically return the local
-    /// pond_id (read from the root directory's bootstrap row).
+    /// When multiple distinct `pond_id` values are present (the
+    /// cross-pond import case, D5.7b), we walk the Delta commit
+    /// history to find a commit that was NOT produced by
+    /// `apply_pulled_bundle` (i.e., a local-origin commit), and
+    /// return that commit's `pond_id`.  This identifies which of the
+    /// pond_ids in the data table is the local one.  If only foreign
+    /// commits are found (a brand-new restored pond that hasn't yet
+    /// done any local writes), we return `Ok(None)` so the caller
+    /// can fall back to the control table cache.
     pub async fn peek_pond_id<P: AsRef<Path>>(path: P) -> Result<Option<String>, TLogFSError> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let url = Url::from_directory_path(path.as_ref())
@@ -256,13 +259,37 @@ impl OpLogPersistence {
         match unique.len() {
             0 => Ok(None),
             1 => Ok(unique.into_iter().next()),
-            _ => Err(TLogFSError::Internal(format!(
-                "Multiple pond_ids present in {}: {:?}; D5.7 cross-pond import \
-                 will refine peek_pond_id to read the local pond_id from the \
-                 root directory's bootstrap row",
-                path.as_ref().display(),
-                unique
-            ))),
+            _ => {
+                // Cross-pond import: multiple pond_ids share this data
+                // table.  Walk the Delta commit history (newest first)
+                // looking for a commit whose user.args do NOT mark it
+                // as `apply_pulled_bundle` -- that's a local-origin
+                // commit and its stamped pond_id is the local one.
+                let history = table.history(None).await?;
+                // history is an iterator newest-first; collect so we
+                // can scan in reverse order (oldest-first) for the
+                // first local-origin commit.
+                let mut commits: Vec<CommitInfo> = history.collect();
+                commits.reverse();
+                for commit in &commits {
+                    let Some(meta) = PondTxnMetadata::from_delta_metadata(&commit.info) else {
+                        continue;
+                    };
+                    if meta.pond_id.is_empty() {
+                        continue;
+                    }
+                    let is_apply_pulled = meta.user.args.len() >= 2
+                        && meta.user.args[0] == "internal"
+                        && meta.user.args[1] == "apply_pulled_bundle";
+                    if !is_apply_pulled {
+                        return Ok(Some(meta.pond_id));
+                    }
+                }
+                // All commits are foreign-applied (no local writes yet
+                // beyond bundle replay).  Let the caller fall back to
+                // the control table cache.
+                Ok(None)
+            }
         }
     }
 

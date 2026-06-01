@@ -18,16 +18,20 @@
 //!   layout `pond_id=<uuid>/part_id=<uuid>/<file>.parquet`, writes the
 //!   parquet bytes under `<pond>/data/`, commits Add/Remove actions to
 //!   the data DeltaTable, writes a mirroring `DataCommitted` record on
-//!   the control table, and bumps `last_write_seq`.  For mirror mode
-//!   (bundle.pond_id == ship.pond_id) and -- since D5 -- for cross-pond
-//!   import (bundle.pond_id != ship.pond_id), the bundle's `pond_id` is
-//!   stamped into the partition path.
+//!   the control table, and bumps `last_write_seq` for mirror restarts
+//!   (bundle.pond_id == ship.pond_id).  Cross-pond import
+//!   (bundle.pond_id != ship.pond_id) lands the foreign data under the
+//!   foreign `pond_id` partition; the matching mount entry under
+//!   `mount_path` is materialized by `pull_command` after the pull
+//!   completes (see `crates/cmd/src/commands/pull.rs`).
 //!
 //! ## What this adapter does NOT do (yet)
 //!
-//! - For `apply_pulled_bundle`: cross-pond import (foreign `bundle.pond_id`)
-//!   is rejected for now; the partition layout supports it but no caller
-//!   wires it up.  See D5.7 in `docs/d5-resume.md`.
+//! - Cross-pond import advances `last_txn_seq` (the Delta-table
+//!   allocator) to the foreign bundle's seq for monotonicity, which
+//!   leaves visible gaps in the local pond's seq history.  A cleaner
+//!   fix would track per-`pond_id` seqs separately; see open items
+//!   in `docs/d7ab-resume.md`.
 //!
 //! ## Path layout
 //!
@@ -351,21 +355,12 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
             partition_checksums,
         } = bundle;
 
-        // D5.1 scope: only mirror mode (bundle.pond_id == local pond_id).
-        // Cross-pond import (a different bundle.pond_id) becomes valid
-        // once the cross-pond UX surface lands (D5.7); for now the
-        // partition layout supports it but no caller wires it up.
-        let local_pond_id = self.store_id();
-        if pond_id != local_pond_id {
-            return Err(SyncStewardError::Adapter(Box::new(std::io::Error::other(
-                format!(
-                    "duckpond apply_pulled_bundle: cross-pond import is not yet wired \
-                     through (bundle pond_id {} != local pond_id {}); see docs/d5-resume.md \
-                     section D5.7",
-                    pond_id, local_pond_id
-                ),
-            ))));
-        }
+        // D5.7b.2: cross-pond import is wired through. The bundle's
+        // `pond_id` may equal this pond's pond_id (mirror restart) or
+        // differ from it (cross-pond import); validation step 2 below
+        // checks that every path's pond_id matches `bundle.pond_id`,
+        // which is the only invariant required to keep partitions
+        // safely isolated.
 
         // 1. Idempotence: skip if already applied.
         if self
@@ -502,6 +497,13 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
             // writes in this same session use the right next-seq.
             // The on-disk commit metadata already carries `txn_seq`
             // so future opens of this pond will re-read it.
+            //
+            // NOTE (cross-pond import open item): for foreign bundles
+            // this advances the *local* Delta table's allocator to a
+            // *foreign* seq, leaving gaps in the local pond's seq
+            // history. Delta-table monotonicity requires SOME advance,
+            // but the cleanest fix is to track per-pond_id seqs
+            // separately. See `docs/d7ab-resume.md` follow-ups.
             data.sync_last_txn_seq(txn_seq);
             version
         };
@@ -538,8 +540,19 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
             })
             .await?;
 
-        // 6. Advance the Ship's in-memory allocator (mirror mode only;
-        //    D4 enforces mirror mode above).
+        // 6. Advance the Ship's in-memory allocator to keep it in
+        //    lock-step with the Delta table's last_txn_seq. This is
+        //    required for both mirror restart (pond_id == local) and
+        //    cross-pond import (pond_id != local), because the Delta
+        //    table itself is shared: the next local write must use a
+        //    seq strictly greater than any commit metadata on the
+        //    table, regardless of which pond produced it.
+        //
+        //    NOTE (cross-pond import open item): this leaves "gaps" in
+        //    the local pond's seq history (e.g., 1, 2, 4 after a
+        //    foreign-seq=3 apply). Delta-table monotonicity requires
+        //    this; the cleanest fix is to track per-pond_id seqs
+        //    separately, deferred. See `docs/d7ab-resume.md`.
         self.ship.sync_last_write_seq(txn_seq);
 
         Ok(())

@@ -190,8 +190,10 @@ async fn add_remote_attachment_internal(
     // - URL already holds a Delta table:
     //     - push/both: store_id MUST match our pond_id (refuse otherwise,
     //       to avoid silently writing into a foreign pond's remote).
-    //     - pull:      any store_id is acceptable (consumer wants to
-    //       mirror upstream, which is by definition a foreign pond).
+    //     - pull with mount_path == "/": store_id MUST match our pond_id
+    //       (mirror restart).
+    //     - pull with mount_path != "/": store_id MUST differ from our
+    //       pond_id (cross-pond import requires a foreign pond).
     //
     // - URL has no Delta table:
     //     - push/both: create one with our pond_id as the store_id.
@@ -205,11 +207,45 @@ async fn add_remote_attachment_internal(
     match Remote::open_at_url(&attachment.url, storage_options.clone()).await {
         Ok(remote) => match mode {
             RemoteMode::Pull => {
+                let remote_store_id = remote.store_id();
+                // PATH-aware validation:
+                //   mount_path == "/"   => mirror restart (remote must equal local)
+                //   mount_path != "/"   => cross-pond import (remote must differ)
+                // For non-pull modes the contract is enforced above (push/both
+                // refuse foreign remotes outright).
+                match mount_path {
+                    Some("/") if remote_store_id != local_pond_id => {
+                        return Err(anyhow!(
+                            "remote `{}` at {} has store_id {} which does not match this \
+                             pond's pond_id {}; mount path `/` is reserved for mirror \
+                             restarts (foreign store_id must match). Use a non-root mount \
+                             path like `/imports/{}` for a cross-pond import.",
+                            name,
+                            attachment.url,
+                            remote_store_id,
+                            local_pond_id,
+                            name
+                        ));
+                    }
+                    Some(path) if path != "/" && remote_store_id == local_pond_id => {
+                        return Err(anyhow!(
+                            "remote `{}` at {} has store_id {} which matches this pond's \
+                             pond_id; mount path `{}` is reserved for cross-pond imports \
+                             (foreign store_id must differ). Use `/` to attach this remote \
+                             as a mirror restart.",
+                            name,
+                            attachment.url,
+                            remote_store_id,
+                            path
+                        ));
+                    }
+                    _ => {}
+                }
                 log::info!(
                     "remote {} ({}) already initialized (store_id={})",
                     name,
                     attachment.url,
-                    remote.store_id()
+                    remote_store_id
                 );
             }
             RemoteMode::Push | RemoteMode::Both => {

@@ -825,3 +825,232 @@ async fn pond_remote_remove_clears_mount_path_key() {
         mount
     );
 }
+
+/// D5.7b.2: `pond remote add NAME URL /` against a remote whose
+/// store_id does NOT match this pond's pond_id is refused (mirror
+/// restart requires matching ids).
+#[tokio::test]
+async fn pond_remote_add_root_path_refuses_foreign_store_id() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("foreign_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    let foreign_id = uuid::Uuid::new_v4();
+    let _ = sync_remote::Remote::create_at_url(&remote_url, foreign_id, Default::default())
+        .await
+        .expect("create foreign remote");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    let err = add_remote_command(
+        &ctx,
+        "upstream",
+        &remote_url,
+        "/", // mirror mode -- must match local pond_id
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect_err("mirror attach against foreign store_id should fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mirror restart") && msg.contains("does not match"),
+        "expected mirror-restart-mismatch error, got: {}",
+        msg
+    );
+}
+
+/// D5.7b.2: `pond remote add NAME URL /imports/x` against a remote
+/// whose store_id MATCHES this pond's pond_id is refused (cross-pond
+/// import requires a foreign pond).
+#[tokio::test]
+async fn pond_remote_add_nonroot_path_refuses_matching_store_id() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("self_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    // Init the pond first so we know its pond_id, then create a remote
+    // with the same store_id (simulating a self-mirror -- which is
+    // valid for `/` but invalid for a non-root mount).
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+    let local_id = {
+        let ship = ctx.open_pond().await.expect("open");
+        ship.control_table().pond_id_uuid()
+    };
+    let _ = sync_remote::Remote::create_at_url(&remote_url, local_id, Default::default())
+        .await
+        .expect("create remote with our pond_id");
+
+    let err = add_remote_command(
+        &ctx,
+        "upstream",
+        &remote_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect_err("cross-pond import attach against matching store_id should fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cross-pond import") && msg.contains("matches"),
+        "expected cross-pond-mismatch error, got: {}",
+        msg
+    );
+}
+
+/// D5.7b.2: end-to-end cross-pond pull materializes a directory entry
+/// at the mount path that yields the foreign pond's root.
+///
+/// Scenario:
+///   1. pond A initialized + a file written.
+///   2. pond A pushes to a file:// remote.
+///   3. pond B initialized (its own fresh pond_id).
+///   4. pond B `pond remote add upstream file://... /imports/A`
+///      (foreign store_id).
+///   5. pond B `pond pull upstream`.
+///   6. pond B can read /imports/A/<file> as foreign data.
+#[tokio::test]
+async fn cross_pond_pull_materializes_mount_entry() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+    let remote_path = scratch.path().join("a_remote");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    // 1) Pond A: init + write a file.
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx).await.expect("init A");
+    write_small_file(
+        &a_ctx,
+        "/sensor.txt",
+        b"data from upstream pond A",
+        vec!["copy", "sensor.txt"],
+    )
+    .await
+    .expect("write sensor.txt on A");
+
+    // 2) Pond A pushes to its remote.
+    let a_pond_id = {
+        let ship = a_ctx.open_pond().await.expect("open A");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+        .await
+        .expect("create A's remote");
+    add_backup_command(
+        &a_ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup attach on A");
+    push_command(&a_ctx, Some("origin".to_string()))
+        .await
+        .expect("push from A");
+
+    // 3) Pond B: init (gets its own distinct pond_id).
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx).await.expect("init B");
+    let b_pond_id = {
+        let ship = b_ctx.open_pond().await.expect("open B");
+        ship.control_table().pond_id_uuid()
+    };
+    assert_ne!(
+        a_pond_id, b_pond_id,
+        "test invariant: A and B must have different pond_ids"
+    );
+
+    // 4) Pond B attaches A's remote at /imports/upstream (cross-pond
+    //    import; foreign store_id required).
+    add_remote_command(
+        &b_ctx,
+        "upstream",
+        &remote_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond attach on B");
+
+    // 5) Pond B pulls from upstream -- this triggers mount
+    //    materialization in pull_one.
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("pull upstream on B");
+
+    // 6) The mount entry should be readable on B.  Read the foreign
+    //    file via /imports/upstream/sensor.txt.
+    let bytes = read_small_file(&b_ctx, "/imports/upstream/sensor.txt")
+        .await
+        .expect("read foreign file through mount");
+    assert_eq!(bytes, b"data from upstream pond A");
+
+    // 7) The mount entry itself carries A's pond_id (not B's).  This
+    //    is what makes subsequent navigation through it resolve in
+    //    A's namespace.
+    {
+        use steward::PondUserMetadata;
+        let mut ship = b_ctx.open_pond().await.expect("reopen B");
+        let tx = ship
+            .begin_read(&PondUserMetadata::new(vec!["verify".to_string()]))
+            .await
+            .expect("begin read");
+        {
+            let fs = &*tx;
+            let root = fs.root().await.expect("root B");
+            let imports = root.open_dir_path("/imports").await.expect("open /imports");
+            let entry = imports
+                .get("upstream")
+                .await
+                .expect("get upstream")
+                .expect("upstream entry present");
+            let entry_pond = entry.node.id().pond_id();
+            let a_uuid7 = uuid7::Uuid::from(*a_pond_id.as_bytes());
+            assert_eq!(
+                entry_pond, a_uuid7,
+                "mount entry must carry foreign pond_id"
+            );
+        }
+        let _ = tx.commit().await.expect("commit read");
+    }
+
+    // 8) A second pull is idempotent (no error, no duplicate mount).
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("second pull is idempotent");
+    let bytes2 = read_small_file(&b_ctx, "/imports/upstream/sensor.txt")
+        .await
+        .expect("read foreign file after second pull");
+    assert_eq!(bytes2, b"data from upstream pond A");
+}
