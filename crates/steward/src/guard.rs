@@ -678,11 +678,34 @@ impl<'a> StewardTransactionGuard<'a> {
 
         debug!("Found {} matches for /system/run/*", matches.len());
 
+        // D5.7b.3: scope auto-exec to local pond_id. Configs whose
+        // node lives under a cross-pond mount (foreign pond_id) are
+        // skipped here -- they remain invokable via explicit
+        // `pond run /imports/foo/system/run/whatever`.
+        let local_pond_id_str = self.control_table.pond_metadata().pond_id.to_string();
+        let local_pond_uuid: uuid7::Uuid = local_pond_id_str.parse().map_err(|e| {
+            StewardError::ControlTable(format!(
+                "local pond_id `{}` is not a valid uuid7: {}",
+                local_pond_id_str, e
+            ))
+        })?;
+
         let mut factory_configs = Vec::new();
 
         for (node_path, _captures) in matches {
             let config_path_str = node_path.path().to_string_lossy().to_string();
             let config_file_id = node_path.id();
+
+            if config_file_id.pond_id() != local_pond_uuid {
+                debug!(
+                    "Skipping foreign post-commit config {} (pond_id={} != local {})",
+                    config_path_str,
+                    config_file_id.pond_id(),
+                    local_pond_uuid
+                );
+                continue;
+            }
+
             debug!(
                 "Found post-commit config: {} (id={})",
                 config_path_str, config_file_id

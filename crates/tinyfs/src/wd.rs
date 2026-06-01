@@ -156,7 +156,14 @@ impl WD {
 
     /// Insert a pre-created node into this directory.
     /// Used for cross-pond import where the node has a foreign FileID.
+    ///
+    /// The parent directory (this WD) must itself be writable -- you
+    /// cannot insert into a foreign-mount subdirectory.  The inserted
+    /// node, however, may carry any pond_id (this is exactly how
+    /// cross-pond mount entries are materialized: local parent,
+    /// foreign child).
     pub async fn insert_node(&self, name: &str, node: Node) -> Result<NodePath> {
+        self.check_writable()?;
         self.dref.insert(name.to_string(), node.clone()).await?;
         Ok(NodePath {
             node,

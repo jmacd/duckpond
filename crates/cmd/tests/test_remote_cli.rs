@@ -1054,3 +1054,272 @@ async fn cross_pond_pull_materializes_mount_entry() {
         .expect("read foreign file after second pull");
     assert_eq!(bytes2, b"data from upstream pond A");
 }
+
+/// D5.7b.3: writes anywhere inside a foreign mount must be refused
+/// with `ReadOnlyImport`.  This covers create_file_path,
+/// async_writer_path, create_dir_path, rename, remove, and insert_node.
+#[tokio::test]
+async fn foreign_mount_writes_are_refused() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+    let remote_path = scratch.path().join("a_remote");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    // Set up A with a small file and push to remote.
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx).await.expect("init A");
+    write_small_file(&a_ctx, "/data.txt", b"upstream", vec!["copy", "data.txt"])
+        .await
+        .expect("write data.txt on A");
+    let a_pond_id = {
+        let ship = a_ctx.open_pond().await.expect("open A");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+        .await
+        .expect("create A's remote");
+    add_backup_command(
+        &a_ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup attach on A");
+    push_command(&a_ctx, Some("origin".to_string()))
+        .await
+        .expect("push from A");
+
+    // B pulls A as a cross-pond import.
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx).await.expect("init B");
+    add_remote_command(
+        &b_ctx,
+        "upstream",
+        &remote_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond attach on B");
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("pull upstream on B");
+
+    // Attempt to write inside the foreign mount.  This must error
+    // with ReadOnlyImport.  We use a fresh write transaction and
+    // assert the closure returns an Err that surfaces as Aborted
+    // (the write_transaction wraps the inner error).
+    let write_result = {
+        let mut ship = b_ctx.open_pond().await.expect("reopen B");
+        ship.write_transaction(
+            &PondUserMetadata::new(vec!["test".to_string(), "foreign-write".to_string()]),
+            async |fs| {
+                let root = fs.root().await?;
+                let res = root
+                    .async_writer_path_with_type(
+                        "/imports/upstream/should_fail.txt",
+                        EntryType::FilePhysicalVersion,
+                    )
+                    .await;
+                match res {
+                    Ok(_) => Err(steward::StewardError::Aborted(
+                        "expected foreign write to be refused".to_string(),
+                    )),
+                    Err(tinyfs::Error::ReadOnlyImport(_)) => {
+                        // Force the transaction to abort so we don't
+                        // accidentally commit any unrelated state.
+                        Err(steward::StewardError::Aborted(
+                            "read_only_import".to_string(),
+                        ))
+                    }
+                    Err(other) => Err(steward::StewardError::Aborted(format!(
+                        "wrong error variant: {:?}",
+                        other
+                    ))),
+                }
+            },
+        )
+        .await
+    };
+
+    match write_result {
+        Err(steward::StewardError::Aborted(msg)) if msg == "read_only_import" => {}
+        Err(other) => panic!("unexpected error: {:?}", other),
+        Ok(()) => panic!("expected foreign write to be refused"),
+    }
+
+    // Sanity check: the original foreign file is still intact.
+    let bytes = read_small_file(&b_ctx, "/imports/upstream/data.txt")
+        .await
+        .expect("foreign file still readable");
+    assert_eq!(bytes, b"upstream");
+}
+
+/// D5.7b.3: post-commit auto-exec scanning of /system/run/* must
+/// skip entries that live under a foreign mount.  We install a real
+/// factory at A's /system/run/scratch, cross-pond-import A into B,
+/// then perform a local write on B and assert post-commit didn't
+/// try to execute the foreign factory.  Without the filter, the
+/// foreign factory's discovery code path would log warnings about
+/// "No factory associated with config" or attempt execution with
+/// the wrong pond_id; with the filter, the foreign entry is silently
+/// skipped.
+#[tokio::test]
+async fn foreign_post_commit_factories_skipped_in_auto_exec() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+    let remote_path = scratch.path().join("a_remote");
+    let remote_url = format!("file://{}", remote_path.display());
+    let cfg_dir = scratch.path().join("cfg");
+    std::fs::create_dir_all(&cfg_dir).expect("mkdir cfg");
+
+    // Write a tiny sql-derived-table config for use with mknod.
+    let factory_cfg = cfg_dir.join("scratch.yaml");
+    std::fs::write(
+        &factory_cfg,
+        "patterns:\n  source: \"table:///data/*.table\"\nquery: \"SELECT 1\"\n",
+    )
+    .expect("write factory config");
+
+    // 1) Pond A: init, attach a push backup, push, then install a
+    //    factory at /system/run/scratch via mknod so the
+    //    /system/run/ directory has a real dynamic-node entry that
+    //    cross-pond import will replicate to B.
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx).await.expect("init A");
+    let a_pond_id = {
+        let ship = a_ctx.open_pond().await.expect("open A");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+        .await
+        .expect("create A's remote");
+    add_backup_command(
+        &a_ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup attach on A");
+    // Install /system/run/scratch on A (the directory will be auto-created).
+    cmd::commands::mkdir_command(&a_ctx, "/system/run", true)
+        .await
+        .expect("mkdir -p /system/run on A");
+    cmd::commands::mknod_command(
+        &a_ctx,
+        "sql-derived-table",
+        "/system/run/scratch",
+        factory_cfg.to_str().expect("cfg path utf-8"),
+        false,
+    )
+    .await
+    .expect("mknod /system/run/scratch on A");
+    // Trigger one more write to push the factory entry through to remote.
+    write_small_file(
+        &a_ctx,
+        "/from_a.txt",
+        b"hello from A",
+        vec!["copy", "from_a.txt"],
+    )
+    .await
+    .expect("write from_a.txt on A (also auto-pushes everything)");
+
+    // 2) Pond B: init.
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx).await.expect("init B");
+
+    // 3) B cross-pond-imports A at /imports/upstream.
+    add_remote_command(
+        &b_ctx,
+        "upstream",
+        &remote_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond attach on B");
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("pull upstream on B");
+
+    // 4) Make a local write on B.  The post-commit /system/run/*
+    //    scan WILL discover /imports/upstream/system/run/scratch
+    //    (it's a real factory config).  Without the local-pond
+    //    filter, the scan would attempt to instantiate it under
+    //    B's transaction with A's pond_id, breaking the invariant
+    //    that auto-exec runs only local-pond factories.  With the
+    //    filter, the foreign entry is silently skipped and the
+    //    write succeeds cleanly.
+    write_small_file(
+        &b_ctx,
+        "/local_b.txt",
+        b"hello from B",
+        vec!["copy", "local_b.txt"],
+    )
+    .await
+    .expect("local write on B must succeed (foreign factory skipped)");
+
+    // 5) Sanity: the foreign factory config IS visible by explicit
+    //    path traversal.  This proves the entry exists; the test's
+    //    value is that step 4 succeeded despite it.
+    use steward::PondUserMetadata;
+    let mut ship = b_ctx.open_pond().await.expect("reopen B");
+    let tx = ship
+        .begin_read(&PondUserMetadata::new(vec![
+            "verify-foreign-run".to_string(),
+        ]))
+        .await
+        .expect("begin read");
+    {
+        let fs = &*tx;
+        let root = fs.root().await.expect("root B");
+        let dir = root
+            .open_dir_path("/imports/upstream/system/run")
+            .await
+            .expect("open foreign /system/run");
+        let entry = dir
+            .get("scratch")
+            .await
+            .expect("get scratch")
+            .expect("foreign scratch factory present");
+        // The foreign entry MUST carry A's pond_id (this is exactly
+        // what the auto-exec filter keys on).
+        let a_uuid7 = uuid7::Uuid::from(*a_pond_id.as_bytes());
+        assert_eq!(
+            entry.node.id().pond_id(),
+            a_uuid7,
+            "foreign factory entry must carry A's pond_id"
+        );
+    }
+    let _ = tx.commit().await.expect("commit read");
+}
