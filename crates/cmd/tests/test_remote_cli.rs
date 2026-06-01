@@ -1605,3 +1605,234 @@ async fn pond_backup_remove_purge_is_no_op_for_mount() {
     }
     let _ = tx.commit().await.expect("commit read");
 }
+
+/// D5.7b.5: two pull-mode remotes cannot share the same mount_path.
+#[tokio::test]
+async fn pond_remote_add_refuses_duplicate_mount_path() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_a = scratch.path().join("remote_a");
+    let remote_b = scratch.path().join("remote_b");
+    let url_a = format!("file://{}", remote_a.display());
+    let url_b = format!("file://{}", remote_b.display());
+    std::fs::create_dir_all(&remote_a).expect("mkdir a");
+    std::fs::create_dir_all(&remote_b).expect("mkdir b");
+
+    // Two distinct foreign upstreams.
+    let foreign_a = uuid::Uuid::new_v4();
+    let foreign_b = uuid::Uuid::new_v4();
+    let _ = sync_remote::Remote::create_at_url(&url_a, foreign_a, Default::default())
+        .await
+        .expect("create remote a");
+    let _ = sync_remote::Remote::create_at_url(&url_b, foreign_b, Default::default())
+        .await
+        .expect("create remote b");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    add_remote_command(
+        &ctx,
+        "first",
+        &url_a,
+        "/imports/shared",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("first attach");
+
+    let err = add_remote_command(
+        &ctx,
+        "second",
+        &url_b,
+        "/imports/shared",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect_err("second attach with same mount_path must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("mount path") && msg.contains("already used"),
+        "error must explain mount-path collision; got: {msg}"
+    );
+}
+
+/// D5.7b.5: trailing slashes don't sneak past the mount-path
+/// duplicate check.  Adding `/imports/shared/` after `/imports/shared`
+/// must also fail.
+#[tokio::test]
+async fn pond_remote_add_refuses_duplicate_mount_path_trailing_slash() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_a = scratch.path().join("remote_a");
+    let remote_b = scratch.path().join("remote_b");
+    let url_a = format!("file://{}", remote_a.display());
+    let url_b = format!("file://{}", remote_b.display());
+    std::fs::create_dir_all(&remote_a).expect("mkdir a");
+    std::fs::create_dir_all(&remote_b).expect("mkdir b");
+
+    let foreign_a = uuid::Uuid::new_v4();
+    let foreign_b = uuid::Uuid::new_v4();
+    let _ = sync_remote::Remote::create_at_url(&url_a, foreign_a, Default::default())
+        .await
+        .expect("create remote a");
+    let _ = sync_remote::Remote::create_at_url(&url_b, foreign_b, Default::default())
+        .await
+        .expect("create remote b");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    add_remote_command(
+        &ctx,
+        "first",
+        &url_a,
+        "/imports/shared",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("first attach");
+
+    let err = add_remote_command(
+        &ctx,
+        "second",
+        &url_b,
+        "/imports/shared/",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect_err("trailing-slash variant must also be detected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("mount path"),
+        "expected mount-path collision error; got: {msg}"
+    );
+}
+
+/// D5.7b.5: two different pull-mode names cannot point at the same
+/// foreign store_id.
+#[tokio::test]
+async fn pond_remote_add_refuses_duplicate_foreign_store_id() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    let foreign = uuid::Uuid::new_v4();
+    let _ = sync_remote::Remote::create_at_url(&url, foreign, Default::default())
+        .await
+        .expect("create remote");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    add_remote_command(
+        &ctx,
+        "first",
+        &url,
+        "/imports/first",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("first attach");
+
+    // Same URL (same store_id) under a different name + mount path.
+    let err = add_remote_command(
+        &ctx,
+        "duplicate",
+        &url,
+        "/imports/duplicate",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect_err("second attach with same store_id must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("already mounted") && msg.contains("store_id"),
+        "error must explain store_id collision; got: {msg}"
+    );
+}
+
+/// D5.7b.5: --overwrite of the same NAME still works (no false
+/// positive in the duplicate-path check).
+#[tokio::test]
+async fn pond_remote_add_overwrite_same_name_same_path_succeeds() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    let foreign = uuid::Uuid::new_v4();
+    let _ = sync_remote::Remote::create_at_url(&url, foreign, Default::default())
+        .await
+        .expect("create remote");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    add_remote_command(
+        &ctx,
+        "upstream",
+        &url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("first attach");
+
+    add_remote_command(
+        &ctx,
+        "upstream",
+        &url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        true,
+    )
+    .await
+    .expect("--overwrite of same name + same path must succeed");
+}

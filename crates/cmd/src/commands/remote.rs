@@ -180,6 +180,17 @@ async fn add_remote_attachment_internal(
 
     let mut ship = ship_context.open_pond().await?;
 
+    // D5.7b.5: mount-conflict pre-checks (local only) for pull-mode
+    // remotes.  Refuse if another pull-mode attachment already mounts
+    // the same `mount_path` (would create overlapping mount entries).
+    // The store_id-duplication check happens below, after we open the
+    // remote URL to learn its store_id.
+    if mode == RemoteMode::Pull
+        && let Some(mp) = mount_path
+    {
+        validate_no_mount_path_conflict(&mut ship, name, mp, overwrite).await?;
+    }
+
     // Initialize (or verify) the remote Delta table at `url` BEFORE any
     // pond-side state changes.  This closes a gap that would otherwise
     // surface as `delta error: Not a Delta table` on the first `pond
@@ -247,6 +258,23 @@ async fn add_remote_attachment_internal(
                     attachment.url,
                     remote_store_id
                 );
+
+                // D5.7b.5: refuse if another pull-mode attachment is
+                // already mounting this same foreign store_id (would
+                // create two mount entries pointing at the same
+                // foreign pond, with ambiguous resolution semantics).
+                // --overwrite of THIS attachment under the same name
+                // is OK; a *different* name pointing at the same
+                // store_id is not.
+                if remote_store_id != local_pond_id {
+                    validate_no_foreign_store_id_collision(
+                        &mut ship,
+                        name,
+                        remote_store_id,
+                        overwrite,
+                    )
+                    .await?;
+                }
             }
             RemoteMode::Push | RemoteMode::Both => {
                 if remote.store_id() != local_pond_id {
@@ -392,6 +420,134 @@ async fn add_remote_attachment_internal(
         ),
     }
     Ok(())
+}
+
+/// D5.7b.5: refuse if another pull-mode attachment already mounts
+/// the same `mount_path`.  Re-attaching the same NAME with --overwrite
+/// is permitted (the existing config will be replaced).
+async fn validate_no_mount_path_conflict(
+    ship: &mut steward::Steward,
+    new_name: &str,
+    new_mount_path: &str,
+    overwrite: bool,
+) -> Result<()> {
+    let existing_names = list_remote_names(ship).await?;
+    for existing_name in existing_names {
+        if existing_name == new_name {
+            // Same-name re-attach is allowed only with --overwrite;
+            // the existing-name check happens in the write
+            // transaction below (with a clear error message).  Skip
+            // here so the diagnostic for `--overwrite` collisions
+            // remains the one inside the transaction.
+            continue;
+        }
+        let mount_key = format!("{REMOTE_MOUNT_PATH_PREFIX}{existing_name}");
+        let existing_mount = ship
+            .control_table()
+            .raw_config_get(&mount_key)
+            .await
+            .map_err(|e| anyhow!("read mount key for `{}`: {}", existing_name, e))?;
+        match existing_mount {
+            Some(p) if !p.is_empty() && paths_equivalent(&p, new_mount_path) => {
+                if overwrite {
+                    return Err(anyhow!(
+                        "mount path `{}` is already used by remote `{}`; --overwrite \
+                         applies only to the same-named attachment (`{}`), not to a \
+                         different remote. Remove `{}` first or pick a different mount \
+                         path.",
+                        new_mount_path,
+                        existing_name,
+                        new_name,
+                        existing_name
+                    ));
+                }
+                return Err(anyhow!(
+                    "mount path `{}` is already used by remote `{}`; pick a different \
+                     mount path or remove `{}` first.",
+                    new_mount_path,
+                    existing_name,
+                    existing_name
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// D5.7b.5: refuse if another pull-mode attachment is already mounting
+/// the same foreign store_id at a different name.  This would create
+/// two mount entries for the same foreign pond with ambiguous resolution.
+async fn validate_no_foreign_store_id_collision(
+    ship: &mut steward::Steward,
+    new_name: &str,
+    new_store_id: uuid::Uuid,
+    overwrite: bool,
+) -> Result<()> {
+    let existing_names = list_remote_names(ship).await?;
+    for existing_name in existing_names {
+        if existing_name == new_name {
+            continue;
+        }
+        let attachment = match load_remote_attachment(ship, &existing_name).await {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let mode_str = ship
+            .control_table()
+            .raw_config_get(&format!("{REMOTE_MODE_PREFIX}{existing_name}"))
+            .await
+            .map_err(|e| anyhow!("read mode for `{}`: {}", existing_name, e))?
+            .unwrap_or_else(|| "push".to_string());
+        let parsed_mode = match RemoteMode::parse(&mode_str) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if parsed_mode != RemoteMode::Pull {
+            continue;
+        }
+        // Probe the existing remote to learn its store_id.
+        let storage_options = attachment.to_storage_options();
+        if attachment.url.starts_with("s3://") {
+            sync_remote::register_s3_handlers();
+        }
+        let existing_store_id = match Remote::open_at_url(&attachment.url, storage_options).await {
+            Ok(r) => r.store_id(),
+            Err(_) => continue,
+        };
+        if existing_store_id == new_store_id {
+            if overwrite {
+                return Err(anyhow!(
+                    "foreign store_id `{}` is already mounted by remote `{}` (mode=pull); \
+                     --overwrite cannot resolve a cross-remote collision. Remove `{}` first \
+                     or use a different upstream pond.",
+                    new_store_id,
+                    existing_name,
+                    existing_name
+                ));
+            }
+            return Err(anyhow!(
+                "foreign store_id `{}` is already mounted by remote `{}` (mode=pull); \
+                 attaching the same upstream twice creates ambiguous mount paths. Remove \
+                 `{}` first or use a different upstream pond.",
+                new_store_id,
+                existing_name,
+                existing_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// True if two pond paths are equivalent after normalizing trailing
+/// slashes (but treating `/foo` and `/foo/` as the same).
+fn paths_equivalent(a: &str, b: &str) -> bool {
+    let an = a.trim_end_matches('/');
+    let bn = b.trim_end_matches('/');
+    // Special-case root: "/" trims to "" -- treat both as "/".
+    let an = if an.is_empty() { "/" } else { an };
+    let bn = if bn.is_empty() { "/" } else { bn };
+    an == bn
 }
 
 /// `pond remote remove <name>` -- delete the attachment config and clear
