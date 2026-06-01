@@ -17,7 +17,7 @@
 
 use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
-use steward::{REMOTE_MODE_PREFIX, SYS_DIR, SYS_REMOTES_DIR};
+use steward::{REMOTE_MODE_PREFIX, REMOTE_MOUNT_PATH_PREFIX, SYS_DIR, SYS_REMOTES_DIR};
 use sync_remote::{Remote, RemoteError};
 use tinyfs::EntryType;
 use tokio::io::AsyncWriteExt;
@@ -25,6 +25,13 @@ use tokio::io::AsyncWriteExt;
 // Re-export the types that moved to steward so existing callers using
 // `commands::remote::{RemoteAttachment, RemoteMode}` keep working.
 pub use steward::{RemoteAttachment, RemoteMode};
+
+/// Filter passed to [`list_remotes_command`] for displaying a subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteListFilter {
+    /// Show only push or both-mode attachments (the backup side).
+    BackupsOnly,
+}
 
 /// Validate a remote name: single path segment, non-empty, no slashes,
 /// no leading dot, ASCII printable.
@@ -53,13 +60,98 @@ pub fn remote_config_path(name: &str) -> String {
     format!("{SYS_REMOTES_DIR}/{name}")
 }
 
-/// `pond remote add <name> <url> [--mode=push|pull|both] [--region=...] ...`
+/// `pond remote add <name> <url> <path> [--region=...] ...`
+///
+/// Always attaches a **pull-mode** remote and mounts it at `path`.
+/// `path = "/"` is a mirror restart (foreign store_id must equal this
+/// pond's pond_id); non-root `path` is a cross-pond import (foreign
+/// store_id must differ).  Both validations are checked at first pull
+/// (D5.7b.2); this verb only records the configuration.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_remote_command(
     ship_context: &ShipContext,
     name: &str,
     url: &str,
+    path: &str,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    endpoint: Option<String>,
+    allow_http: bool,
+    overwrite: bool,
+) -> Result<()> {
+    if !path.starts_with('/') {
+        return Err(anyhow!(
+            "remote mount path `{}` must be absolute (start with `/`); use `/` for a \
+             mirror restart or `/imports/<name>` for a cross-pond import",
+            path
+        ));
+    }
+    add_remote_attachment_internal(
+        ship_context,
+        name,
+        url,
+        RemoteMode::Pull,
+        Some(path),
+        region,
+        access_key_id,
+        secret_access_key,
+        endpoint,
+        allow_http,
+        overwrite,
+    )
+    .await
+}
+
+/// `pond backup add <name> <url> [--bidirectional] [--region=...] ...`
+///
+/// Attaches a backup remote.  Push-only by default; `bidirectional=true`
+/// also enables pulls (mode=both).  Backups always mirror the entire
+/// pond -- there is no PATH because the local pond IS the source.
+#[allow(clippy::too_many_arguments)]
+pub async fn add_backup_command(
+    ship_context: &ShipContext,
+    name: &str,
+    url: &str,
+    bidirectional: bool,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    endpoint: Option<String>,
+    allow_http: bool,
+    overwrite: bool,
+) -> Result<()> {
+    let mode = if bidirectional {
+        RemoteMode::Both
+    } else {
+        RemoteMode::Push
+    };
+    add_remote_attachment_internal(
+        ship_context,
+        name,
+        url,
+        mode,
+        None,
+        region,
+        access_key_id,
+        secret_access_key,
+        endpoint,
+        allow_http,
+        overwrite,
+    )
+    .await
+}
+
+/// Shared body for `add_remote_command` (pull) and `add_backup_command`
+/// (push/both).  Persists the attachment YAML, records mode and -- for
+/// pull -- the mount path, and auto-initializes the remote Delta table.
+#[allow(clippy::too_many_arguments)]
+async fn add_remote_attachment_internal(
+    ship_context: &ShipContext,
+    name: &str,
+    url: &str,
     mode: RemoteMode,
+    mount_path: Option<&str>,
     region: Option<String>,
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
@@ -190,6 +282,16 @@ pub async fn add_remote_command(
         .await
         .map_err(|e| anyhow!("Failed to set remote mode `{}`: {}", mode_str, e))?;
 
+    // Record (or clear) the mount path.  Pull-mode remotes always set
+    // this; push/both leave it empty so a future `pond remote add`
+    // -overwriting- a backup with a pull entry starts from a clean slate.
+    let mount_key = format!("{REMOTE_MOUNT_PATH_PREFIX}{name}");
+    let mount_value = mount_path.unwrap_or("");
+    ship.control_table_mut()
+        .raw_config_set(&mount_key, mount_value)
+        .await
+        .map_err(|e| anyhow!("Failed to set remote mount path: {}", e))?;
+
     ship.write_transaction(
         &steward::PondUserMetadata::new(vec![
             "remote".to_string(),
@@ -238,12 +340,21 @@ pub async fn add_remote_command(
     .await
     .map_err(|e| anyhow!("Failed to add remote: {}", e))?;
 
-    log::info!(
-        "[OK] added remote {} -> {} (mode={})",
-        name,
-        url,
-        mode.as_str()
-    );
+    match mount_path {
+        Some(p) => log::info!(
+            "[OK] added remote {} -> {} (mode={}, mount={})",
+            name,
+            url,
+            mode.as_str(),
+            p
+        ),
+        None => log::info!(
+            "[OK] added remote {} -> {} (mode={})",
+            name,
+            url,
+            mode.as_str()
+        ),
+    }
     Ok(())
 }
 
@@ -298,6 +409,14 @@ pub async fn remove_remote_command(ship_context: &ShipContext, name: &str) -> Re
     if let Err(e) = ship.control_table_mut().raw_config_set(&mode_key, "").await {
         log::warn!("[WARN] failed to clear {}: {}", mode_key, e);
     }
+    let mount_key = format!("{REMOTE_MOUNT_PATH_PREFIX}{name}");
+    if let Err(e) = ship
+        .control_table_mut()
+        .raw_config_set(&mount_key, "")
+        .await
+    {
+        log::warn!("[WARN] failed to clear {}: {}", mount_key, e);
+    }
     if let Some(url) = url_to_clear {
         for key in [
             format!("last_pushed_seq:{url}"),
@@ -313,20 +432,34 @@ pub async fn remove_remote_command(ship_context: &ShipContext, name: &str) -> Re
     Ok(())
 }
 
-/// `pond remote list` -- print each remote with URL, mode, and latest
-/// watermarks (`last_pushed_seq`, `last_pulled_seq`).
-pub async fn list_remotes_command(ship_context: &ShipContext) -> Result<()> {
+/// `pond remote list` / `pond backup list` -- print each remote with
+/// URL, mode, mount path, and the most recent push/pull watermarks.
+///
+/// `filter`:
+/// - `None`: show every remote.
+/// - `Some(BackupsOnly)`: show only push/both-mode attachments.
+/// - `Some(PullsOnly)`: show only pull-mode attachments.
+pub async fn list_remotes_command(
+    ship_context: &ShipContext,
+    filter: Option<RemoteListFilter>,
+) -> Result<()> {
     let mut ship = ship_context.open_pond().await?;
     let entries = list_remote_names(&mut ship).await?;
 
     if entries.is_empty() {
-        println!("(no remotes; use `pond remote add <name> <url>` to attach one)");
+        let suggestion = match filter {
+            Some(RemoteListFilter::BackupsOnly) => {
+                "(no remotes; use `pond backup add <name> <url>` to attach one)"
+            }
+            _ => "(no remotes; use `pond remote add <name> <url> <path>` to attach one)",
+        };
+        println!("{}", suggestion);
         return Ok(());
     }
 
     println!(
-        "{:<20} {:<60} {:<6} {:>16} {:>16}",
-        "NAME", "URL", "MODE", "LAST_PUSHED_SEQ", "LAST_PULLED_SEQ"
+        "{:<20} {:<60} {:<6} {:<24} {:>16} {:>16}",
+        "NAME", "URL", "MODE", "MOUNT", "LAST_PUSHED_SEQ", "LAST_PULLED_SEQ"
     );
     for name in entries {
         let attachment = match load_remote_attachment(&mut ship, &name).await {
@@ -342,6 +475,18 @@ pub async fn list_remotes_command(ship_context: &ShipContext) -> Result<()> {
             .await
             .unwrap_or_default()
             .unwrap_or_else(|| "push".to_string());
+        let parsed_mode = RemoteMode::parse(&mode).unwrap_or(RemoteMode::Push);
+        match filter {
+            Some(RemoteListFilter::BackupsOnly) if !parsed_mode.pushes() => continue,
+            _ => {}
+        }
+        let mount = ship
+            .control_table()
+            .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}{name}"))
+            .await
+            .unwrap_or_default()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "-".to_string());
         let last_pushed = ship
             .control_table()
             .raw_config_get(&format!("last_pushed_seq:{}", attachment.url))
@@ -355,8 +500,8 @@ pub async fn list_remotes_command(ship_context: &ShipContext) -> Result<()> {
             .unwrap_or_default()
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<20} {:<60} {:<6} {:>16} {:>16}",
-            name, attachment.url, mode, last_pushed, last_pulled
+            "{:<20} {:<60} {:<6} {:<24} {:>16} {:>16}",
+            name, attachment.url, mode, mount, last_pushed, last_pulled
         );
     }
     Ok(())

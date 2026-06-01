@@ -13,12 +13,12 @@
 //! generic-equivalent via the shared [`sync_remote::Remote::restart_pond_from_compact`]).
 
 use cmd::commands::{
-    add_remote_command, init_command, list_remotes_command, pull_command, push_command,
-    remote::{RemoteMode, remote_config_path},
+    add_backup_command, add_remote_command, init_command, list_remotes_command, pull_command,
+    push_command, remote::remote_config_path,
 };
 use cmd::common::ShipContext;
 use std::sync::Once;
-use steward::{PondUserMetadata, REMOTE_MODE_PREFIX, ShipRemoteSteward};
+use steward::{PondUserMetadata, REMOTE_MODE_PREFIX, REMOTE_MOUNT_PATH_PREFIX, ShipRemoteSteward};
 use tempfile::TempDir;
 use tinyfs::EntryType;
 use tokio::io::AsyncWriteExt;
@@ -124,12 +124,12 @@ async fn pond_remote_push_pull_roundtrip() {
             .expect("create remote");
     }
 
-    // 3) `pond remote add origin file://... --mode push`
-    add_remote_command(
+    // 3) `pond backup add origin file://...`
+    add_backup_command(
         &src_ctx,
         "origin",
         &remote_url,
-        RemoteMode::Push,
+        false, // push-only
         None,
         None,
         None,
@@ -187,14 +187,17 @@ async fn pond_remote_push_pull_roundtrip() {
             .expect("bootstrap dst from remote");
     }
 
-    // Re-attach origin on dst (it was inherited from src as mode=push;
-    // override to mode=pull on dst so default-pull works).
+    // Re-attach origin on dst as a pull-mode remote.  The bootstrap
+    // inherited it as mode=push from src (because remote attachment YAML
+    // is portable and pushed with every commit); override here so the
+    // default-pull dispatcher finds it.  PATH=`/` because dst is a
+    // mirror of src (same pond_id, populated via `create_replica`).
     let dst_ctx = ctx_for(&dst_pond, vec!["pond", "pull"]);
     add_remote_command(
         &dst_ctx,
         "origin",
         &remote_url,
-        RemoteMode::Pull,
+        "/",
         None,
         None,
         None,
@@ -220,7 +223,9 @@ async fn pond_remote_push_pull_roundtrip() {
 
     // 8) `pond remote list` on the SRC pond runs cleanly (prints to
     // stdout; smoke check that the YAML-backed listing works).
-    list_remotes_command(&src_ctx).await.expect("list src");
+    list_remotes_command(&src_ctx, None)
+        .await
+        .expect("list src");
 }
 
 /// `pond push` with no remotes is a no-op success.
@@ -263,32 +268,14 @@ async fn pond_remote_add_rejects_duplicate() {
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
     init_command(&ctx).await.expect("init");
 
-    add_remote_command(
-        &ctx,
-        "origin",
-        &url_a,
-        RemoteMode::Push,
-        None,
-        None,
-        None,
-        None,
-        false,
-        false,
+    add_backup_command(
+        &ctx, "origin", &url_a, false, None, None, None, None, false, false,
     )
     .await
     .expect("first add");
 
-    let err = add_remote_command(
-        &ctx,
-        "origin",
-        &url_b,
-        RemoteMode::Push,
-        None,
-        None,
-        None,
-        None,
-        false,
-        false,
+    let err = add_backup_command(
+        &ctx, "origin", &url_b, false, None, None, None, None, false, false,
     )
     .await
     .expect_err("duplicate add should fail");
@@ -300,17 +287,8 @@ async fn pond_remote_add_rejects_duplicate() {
     );
 
     // --overwrite succeeds.
-    add_remote_command(
-        &ctx,
-        "origin",
-        &url_b,
-        RemoteMode::Push,
-        None,
-        None,
-        None,
-        None,
-        false,
-        true, // overwrite
+    add_backup_command(
+        &ctx, "origin", &url_b, false, None, None, None, None, false, true, // overwrite
     )
     .await
     .expect("overwrite add");
@@ -343,12 +321,12 @@ async fn post_commit_auto_push_publishes_to_file_remote() {
         .await
         .expect("create remote");
 
-    // 3) `pond remote add origin --mode=push`.
-    add_remote_command(
+    // 3) `pond backup add origin` (push-only).
+    add_backup_command(
         &src_ctx,
         "origin",
         &remote_url,
-        RemoteMode::Push,
+        false,
         None,
         None,
         None,
@@ -445,7 +423,7 @@ async fn post_commit_auto_push_skips_pull_mode_remotes() {
         &src_ctx,
         "origin",
         &remote_url,
-        RemoteMode::Pull, // pull-only -- should be skipped
+        "/", // pull-mode mirror at root -- store_id will match local
         None,
         None,
         None,
@@ -497,12 +475,12 @@ async fn pond_remote_add_auto_initializes_fresh_remote() {
     let src_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
     init_command(&src_ctx).await.expect("init src");
 
-    // No Remote::create_at_url call here -- add_remote_command must do it.
-    add_remote_command(
+    // No Remote::create_at_url call here -- add_backup_command must do it.
+    add_backup_command(
         &src_ctx,
         "origin",
         &remote_url,
-        RemoteMode::Push,
+        false,
         None,
         None,
         None,
@@ -562,11 +540,11 @@ async fn pond_remote_add_push_refuses_foreign_store_id() {
     let src_ctx = ctx_for(&pond_path, vec!["pond", "init"]);
     init_command(&src_ctx).await.expect("init src");
 
-    let err = add_remote_command(
+    let err = add_backup_command(
         &src_ctx,
         "origin",
         &remote_url,
-        RemoteMode::Push,
+        false,
         None,
         None,
         None,
@@ -603,7 +581,7 @@ async fn pond_remote_add_pull_refuses_empty_remote() {
         &dst_ctx,
         "upstream",
         &remote_url,
-        RemoteMode::Pull,
+        "/imports/upstream",
         None,
         None,
         None,
@@ -618,5 +596,232 @@ async fn pond_remote_add_pull_refuses_empty_remote() {
         msg.contains("not a Delta table") && msg.contains("pull-mode"),
         "expected empty-remote-refusal error, got: {}",
         msg
+    );
+}
+
+/// D5.7b.1: `pond remote add` persists the mount path under
+/// `remote_mount_path:<name>` in raw_config; `pond backup add` leaves
+/// the key empty.
+#[tokio::test]
+async fn pond_remote_add_persists_mount_path() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+
+    // Two remotes: an upstream we'll mount as a pull, and a backup we
+    // attach for push.
+    let upstream_path = scratch.path().join("upstream_bucket");
+    let upstream_url = format!("file://{}", upstream_path.display());
+    let backup_path = scratch.path().join("backup_bucket");
+    let backup_url = format!("file://{}", backup_path.display());
+    std::fs::create_dir_all(&upstream_path).expect("mkdir upstream");
+    std::fs::create_dir_all(&backup_path).expect("mkdir backup");
+
+    // Initialize upstream remote with a foreign store_id so the pull
+    // attach is allowed (any store_id is OK for pull).
+    let foreign_id = uuid::Uuid::new_v4();
+    let _ = sync_remote::Remote::create_at_url(&upstream_url, foreign_id, Default::default())
+        .await
+        .expect("init upstream");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    // Pull attach with an explicit non-root mount path.
+    add_remote_command(
+        &ctx,
+        "upstream",
+        &upstream_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("pull attach");
+
+    // Backup attach (push-only, no mount path).
+    add_backup_command(
+        &ctx,
+        "origin",
+        &backup_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup attach");
+
+    // Verify control-table state.
+    let ship = ctx.open_pond().await.expect("reopen");
+    let upstream_mount = ship
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}upstream"))
+        .await
+        .expect("get mount key");
+    assert_eq!(
+        upstream_mount.as_deref(),
+        Some("/imports/upstream"),
+        "pull attach must record mount path"
+    );
+    let origin_mount = ship
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}origin"))
+        .await
+        .expect("get mount key for backup");
+    assert!(
+        origin_mount.as_deref().is_none_or(str::is_empty),
+        "backup attach must leave mount path empty, got {:?}",
+        origin_mount
+    );
+
+    let upstream_mode = ship
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MODE_PREFIX}upstream"))
+        .await
+        .expect("get mode")
+        .expect("mode set");
+    assert_eq!(upstream_mode, "pull");
+    let origin_mode = ship
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MODE_PREFIX}origin"))
+        .await
+        .expect("get mode")
+        .expect("mode set");
+    assert_eq!(origin_mode, "push");
+}
+
+/// D5.7b.1: `pond backup add --bidirectional` (i.e. mode=both) keeps the
+/// push initialization semantics AND records mode=both for the pull
+/// dispatcher.
+#[tokio::test]
+async fn pond_backup_add_bidirectional_records_both_mode() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    add_backup_command(
+        &ctx,
+        "origin",
+        &remote_url,
+        true, // bidirectional
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("bidirectional backup attach");
+
+    let ship = ctx.open_pond().await.expect("reopen");
+    let mode = ship
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MODE_PREFIX}origin"))
+        .await
+        .expect("get mode")
+        .expect("mode set");
+    assert_eq!(mode, "both", "bidirectional backup should record mode=both");
+}
+
+/// D5.7b.1: `pond remote add` rejects a non-absolute mount path.
+#[tokio::test]
+async fn pond_remote_add_rejects_relative_mount_path() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    let err = add_remote_command(
+        &ctx,
+        "upstream",
+        &remote_url,
+        "imports/upstream", // not absolute
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect_err("relative path should be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("must be absolute") && msg.contains("imports/upstream"),
+        "expected absolute-path-required error, got: {}",
+        msg
+    );
+}
+
+/// D5.7b.1: `pond remote remove` clears both mode AND mount-path keys
+/// from raw_config (no orphaned state in the control table).
+#[tokio::test]
+async fn pond_remote_remove_clears_mount_path_key() {
+    use cmd::commands::remove_remote_command;
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+
+    // Pre-init the remote with a foreign store_id (pull attach).
+    let foreign_id = uuid::Uuid::new_v4();
+    let _ = sync_remote::Remote::create_at_url(&remote_url, foreign_id, Default::default())
+        .await
+        .expect("create foreign remote");
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+
+    add_remote_command(
+        &ctx,
+        "upstream",
+        &remote_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("attach");
+
+    remove_remote_command(&ctx, "upstream")
+        .await
+        .expect("remove");
+
+    let ship = ctx.open_pond().await.expect("reopen");
+    let mount = ship
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}upstream"))
+        .await
+        .expect("get mount key");
+    assert!(
+        mount.as_deref().is_none_or(str::is_empty),
+        "mount path key must be cleared after remove, got {:?}",
+        mount
     );
 }

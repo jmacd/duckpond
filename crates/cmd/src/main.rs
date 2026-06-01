@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use common::ShipContext;
 use panic_alloc::PanicOnLargeAlloc;
 use std::path::PathBuf;
@@ -87,43 +87,84 @@ struct Cli {
 
 /// Remote management subcommands (D4: replaces `/system/run/<N>-remote`
 /// factory configs with `/sys/remotes/<name>` YAML attachments).
+///
+/// As of D5.7b the verb is split: `pond remote add` always attaches a
+/// **pull-only** remote (mirror restart or cross-pond import).  Use
+/// `pond backup add` to attach a push-mode (or bidirectional) remote.
 #[derive(Debug, Subcommand)]
 enum RemoteCommand {
-    /// Attach a new remote and persist its config under `/sys/remotes/<name>`.
+    /// Attach a pull-mode remote and mount it at PATH.
+    ///
+    /// `PATH = /` is a mirror restart (foreign store_id must match this
+    /// pond's pond_id).  Non-root PATH is a cross-pond import (foreign
+    /// store_id must differ).
     Add {
-        /// Logical name for the remote (e.g., "origin", "backup-s3").
+        /// Logical name for the remote (e.g., "upstream").
         name: String,
         /// Remote URL (`file:///path` or `s3://bucket/prefix`).
         url: String,
-        /// Operating mode for this remote (push, pull, or both).
-        #[arg(long, default_value = "push")]
-        mode: String,
-        /// AWS region (S3 only).
-        #[arg(long)]
-        region: Option<String>,
-        /// S3 access key id.
-        #[arg(long = "access-key-id", alias = "access-key")]
-        access_key_id: Option<String>,
-        /// S3 secret access key.
-        #[arg(long = "secret-access-key", alias = "secret-key")]
-        secret_access_key: Option<String>,
-        /// Custom S3 endpoint (e.g., for MinIO or R2).
-        #[arg(long)]
-        endpoint: Option<String>,
-        /// Allow plain HTTP (required for local MinIO).
-        #[arg(long)]
-        allow_http: bool,
-        /// Replace an existing remote attachment of the same name.
-        #[arg(long)]
-        overwrite: bool,
+        /// In-pond mount path.  Use `/` for a mirror restart of this
+        /// pond's own backup, or `/imports/<name>` for cross-pond import.
+        path: String,
+        #[command(flatten)]
+        options: RemoteAddOptions,
     },
     /// Remove a remote attachment and clear its watermarks.
     Remove {
         /// Logical name of the remote to remove.
         name: String,
     },
-    /// List all attached remotes.
+    /// List all attached remotes (both pull and backup).
     List,
+}
+
+/// Backup-side subcommands (D5.7b): the push half of the remote split.
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    /// Attach a backup remote (push-only by default; `--bidirectional`
+    /// makes it push+pull).  Backups always mirror the entire pond.
+    Add {
+        /// Logical name for the backup (e.g., "origin", "backup-s3").
+        name: String,
+        /// Remote URL (`file:///path` or `s3://bucket/prefix`).
+        url: String,
+        /// Also pull from this remote (push + pull, i.e. mode=both).
+        #[arg(long)]
+        bidirectional: bool,
+        #[command(flatten)]
+        options: RemoteAddOptions,
+    },
+    /// Remove a backup attachment (alias of `pond remote remove` for
+    /// symmetry; same semantics: deletes config and clears watermarks).
+    Remove {
+        /// Logical name of the backup to remove.
+        name: String,
+    },
+    /// List backup-mode attachments only.
+    List,
+}
+
+/// Shared options for `pond remote add` and `pond backup add`.
+#[derive(Debug, Args)]
+struct RemoteAddOptions {
+    /// AWS region (S3 only).
+    #[arg(long)]
+    region: Option<String>,
+    /// S3 access key id.
+    #[arg(long = "access-key-id", alias = "access-key")]
+    access_key_id: Option<String>,
+    /// S3 secret access key.
+    #[arg(long = "secret-access-key", alias = "secret-key")]
+    secret_access_key: Option<String>,
+    /// Custom S3 endpoint (e.g., for MinIO or R2).
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Allow plain HTTP (required for local MinIO).
+    #[arg(long)]
+    allow_http: bool,
+    /// Replace an existing attachment of the same name.
+    #[arg(long)]
+    overwrite: bool,
 }
 
 /// Pond user commands.
@@ -172,6 +213,11 @@ enum Commands {
     Remote {
         #[command(subcommand)]
         command: RemoteCommand,
+    },
+    /// Manage backup attachments (push-side of remote split, D5.7b).
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
     },
     /// Show or set pond configuration
     Config {
@@ -435,33 +481,59 @@ async fn main() -> Result<()> {
             RemoteCommand::Add {
                 name,
                 url,
-                mode,
-                region,
-                access_key_id,
-                secret_access_key,
-                endpoint,
-                allow_http,
-                overwrite,
+                path,
+                options,
             } => {
-                let parsed_mode = commands::RemoteMode::parse(&mode)?;
                 commands::add_remote_command(
                     &ship_context,
                     &name,
                     &url,
-                    parsed_mode,
-                    region,
-                    access_key_id,
-                    secret_access_key,
-                    endpoint,
-                    allow_http,
-                    overwrite,
+                    &path,
+                    options.region,
+                    options.access_key_id,
+                    options.secret_access_key,
+                    options.endpoint,
+                    options.allow_http,
+                    options.overwrite,
                 )
                 .await
             }
             RemoteCommand::Remove { name } => {
                 commands::remove_remote_command(&ship_context, &name).await
             }
-            RemoteCommand::List => commands::list_remotes_command(&ship_context).await,
+            RemoteCommand::List => commands::list_remotes_command(&ship_context, None).await,
+        },
+        Commands::Backup { command } => match command {
+            BackupCommand::Add {
+                name,
+                url,
+                bidirectional,
+                options,
+            } => {
+                commands::add_backup_command(
+                    &ship_context,
+                    &name,
+                    &url,
+                    bidirectional,
+                    options.region,
+                    options.access_key_id,
+                    options.secret_access_key,
+                    options.endpoint,
+                    options.allow_http,
+                    options.overwrite,
+                )
+                .await
+            }
+            BackupCommand::Remove { name } => {
+                commands::remove_remote_command(&ship_context, &name).await
+            }
+            BackupCommand::List => {
+                commands::list_remotes_command(
+                    &ship_context,
+                    Some(commands::RemoteListFilter::BackupsOnly),
+                )
+                .await
+            }
         },
         Commands::Config { command } => {
             let control_mode = match command {

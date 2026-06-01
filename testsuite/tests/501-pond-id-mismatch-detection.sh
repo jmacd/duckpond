@@ -47,10 +47,9 @@ fi
 mc alias set testminio "${MINIO_ENDPOINT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" 2>/dev/null || true
 mc mb --ignore-existing "testminio/${BUCKET_NAME}"
 
-# Helper: attach the remote to the current $POND using D4 CLI verbs.
+# Helper: attach the remote to the current $POND using D5.7b CLI verbs.
 attach_remote() {
-    pond remote add origin "s3://${BUCKET_NAME}" \
-        --mode push \
+    pond backup add origin "s3://${BUCKET_NAME}" \
         --region us-east-1 \
         --endpoint "${MINIO_ENDPOINT}" \
         --access-key-id "${MINIO_ROOT_USER}" \

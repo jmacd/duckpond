@@ -16,9 +16,11 @@
 | `pond run` | Execute factory nodes | `pond run 20-foo collect` |
 | `pond run` | Execute from host config | `pond run host+sitegen:///config.yaml build .` |
 | `pond log` | View transaction history | `pond log --limit 20` |
-| `pond remote add` | Attach a remote (S3 or file://) | `pond remote add origin s3://bucket --mode push` |
-| `pond remote list` | List attached remotes | `pond remote list` |
-| `pond remote remove` | Detach a remote | `pond remote remove origin` |
+| `pond remote add` | Attach a pull-mode remote (mirror or import) | `pond remote add upstream s3://bucket /imports/upstream` |
+| `pond backup add` | Attach a backup (push or push+pull) | `pond backup add origin s3://bucket` |
+| `pond remote list` | List attached remotes (all) | `pond remote list` |
+| `pond backup list` | List push-side attachments | `pond backup list` |
+| `pond remote remove` | Detach a remote (also works for backups) | `pond remote remove origin` |
 | `pond push` | Push to push/both-mode remotes | `pond push` |
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
 | `pond config` | Show/set pond configuration | `pond config` |
@@ -394,41 +396,62 @@ pond log --incomplete
 
 ---
 
-### pond remote
+### pond remote / pond backup
 
-Manage remote attachments under `/sys/remotes/` (D4).  Each attachment is
-a small YAML file recording the URL, mode, and (for S3) credentials.
+DuckPond splits remote attachment into two verbs that match operator
+intent (D5.7b):
+
+- **`pond remote add NAME URL PATH`** -- attach a **pull-mode** remote
+  and mount it at PATH.  `PATH = /` is a mirror restart of this pond's
+  own backup (foreign store_id must match this pond's pond_id).
+  Non-root PATH is a cross-pond import (foreign store_id must differ;
+  imported data appears under PATH).
+- **`pond backup add NAME URL [--bidirectional]`** -- attach a backup
+  remote.  Push-only by default; `--bidirectional` enables both push
+  and pull (the rare bidirectional case).  Backups always mirror the
+  entire pond -- there is no PATH because the local pond IS the source.
+
+Each attachment is a small YAML file under `/sys/remotes/<name>`
+(portable; no per-pond watermarks).  The local-only mode and mount
+path live in the control table's raw_config map.
 
 ```bash
-# Attach a local-filesystem remote (mode defaults to push)
-pond remote add origin file:///mnt/backups/origin
-
-# Attach an S3 remote with credentials and a custom endpoint (MinIO)
-pond remote add backup-s3 s3://my-bucket \
-    --mode push \
+# Attach an S3 backup with credentials (push-only)
+pond backup add origin s3://my-bucket \
     --region us-east-1 \
     --endpoint http://localhost:9000 \
     --access-key-id minioadmin \
     --secret-access-key minioadmin \
     --allow-http
 
-# `--mode pull` makes a consumer-only attachment (only `pond pull` will
-# touch it); `--mode both` makes it bidirectional.
-pond remote add upstream s3://prod-bucket --mode pull \
+# Attach a bidirectional remote (push + pull, e.g. a federated hub)
+pond backup add hub s3://hub-bucket --bidirectional \
     --region us-east-1 \
-    --access-key-id ... \
-    --secret-access-key ...
+    --access-key-id ... --secret-access-key ...
 
-# List configured remotes
+# Attach a pull-mode remote as a cross-pond import
+pond remote add upstream s3://prod-bucket /imports/upstream \
+    --region us-east-1 \
+    --access-key-id ... --secret-access-key ...
+
+# Attach a pull-mode remote as a mirror restart (after `pond init` on a
+# blank machine; the remote was created earlier with `pond backup add`
+# from the source pond).
+pond remote add origin file:///mnt/backups/origin /
+
+# List all remotes (both pull and backup)
 pond remote list
 
+# List backups only
+pond backup list
+
 # Remove a remote (also clears its watermarks from the control table)
-pond remote remove backup-s3
+pond remote remove origin
 ```
 
 `pond remote add` writes `/sys/remotes/<name>` as YAML and records
-`remote_mode:<name>` in the control table.  Re-adding the same name
-errors unless `--overwrite` is given.
+`remote_mode:<name>` and `remote_mount_path:<name>` in the control
+table.  Re-adding the same name errors unless `--overwrite` is given.
 
 ---
 
@@ -545,8 +568,8 @@ pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
 # Static content
 pond copy host:///path/to/templates /system/site --overwrite
 
-# Remote attachment (managed by `pond remote add`, not `pond mknod`)
-pond remote add origin s3://my-bucket --mode push \
+# Backup attachment (managed by `pond backup add`, not `pond mknod`)
+pond backup add origin s3://my-bucket \
     --region us-east-1 --access-key-id ... --secret-access-key ...
 ```
 
@@ -1335,8 +1358,9 @@ The legacy `remote` factory (`pond mknod remote /system/run/<N>-backup
 --config-path ...`) was removed in D4.  Its capabilities are now
 delivered by the top-level CLI:
 
-- Configure -> `pond remote add <name> <url> [--mode push|pull|both] [...]`
-  (see [pond remote](#pond-remote) above).
+- Configure -> `pond remote add <name> <url> <path>` (pull) or
+  `pond backup add <name> <url> [--bidirectional]` (push); see
+  [pond remote / pond backup](#pond-remote--pond-backup) above.
 - Push     -> `pond push [<name>]` (also auto-runs post-commit).
 - Pull     -> `pond pull [<name>]` (after first-pull bootstrap via Rust API).
 - Inspect  -> not yet exposed at the CLI (was `pond run .../show`); track
@@ -1541,7 +1565,7 @@ pond mknod dynamic-dir /singled  --config-path single.yaml
 pond mknod dynamic-dir /reduced  --config-path reduce.yaml
 pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
 pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
-pond remote add origin s3://my-bucket --mode push \
+pond backup add origin s3://my-bucket \
     --region us-east-1 --access-key-id ... --secret-access-key ...
 
 # Operational cycle:
@@ -1593,7 +1617,7 @@ pond mkdir -p /system/site
 pond mkdir -p /ingest
 pond copy host:///path/to/templates /system/site
 pond mknod logfile-ingest /system/etc/10-ingest --config-path ingest.yaml
-pond remote add origin s3://my-bucket --mode push \
+pond backup add origin s3://my-bucket \
     --region us-east-1 --access-key-id ... --secret-access-key ...
 pond mknod temporal-reduce /reduced --config-path reduce.yaml
 pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml

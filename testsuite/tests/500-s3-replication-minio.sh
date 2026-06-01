@@ -87,10 +87,9 @@ echo "[OK] Test data copied into pond"
 #############################
 
 echo ""
-echo "=== Attaching origin remote (mode=push) ==="
+echo "=== Attaching origin backup (push) ==="
 
-pond remote add origin "s3://${BUCKET_NAME}" \
-    --mode push \
+pond backup add origin "s3://${BUCKET_NAME}" \
     --region us-east-1 \
     --endpoint "${MINIO_ENDPOINT}" \
     --access-key-id "${MINIO_ROOT_USER}" \
@@ -98,7 +97,7 @@ pond remote add origin "s3://${BUCKET_NAME}" \
     --allow-http
 
 echo "[OK] origin attached"
-pond remote list
+pond backup list
 
 #############################
 # PUSH

@@ -174,3 +174,12 @@ pub const SYS_REMOTES_DIR: &str = "/sys/remotes";
 /// operate in" (`push`, `pull`, or `both`).  Format the full key as
 /// `format!("{REMOTE_MODE_PREFIX}{name}")`.
 pub const REMOTE_MODE_PREFIX: &str = "remote_mode:";
+
+/// Control-table raw_config key prefix for the in-pond mount path of a
+/// pull-mode remote (D5.7b).  Format the full key as
+/// `format!("{REMOTE_MOUNT_PATH_PREFIX}{name}")`.
+///
+/// Pull-mode remotes always set this key (default `/imports/<name>` or
+/// `/` for a mirror restart).  Push-mode and `both`-mode remotes leave it
+/// unset.
+pub const REMOTE_MOUNT_PATH_PREFIX: &str = "remote_mount_path:";

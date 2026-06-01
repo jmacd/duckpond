@@ -43,7 +43,10 @@ pub use mknod::mknod_command;
 pub use pull::pull_command;
 pub use push::push_command;
 pub use recover::recover_command;
-pub use remote::{RemoteMode, add_remote_command, list_remotes_command, remove_remote_command};
+pub use remote::{
+    RemoteListFilter, add_backup_command, add_remote_command, list_remotes_command,
+    remove_remote_command,
+};
 pub use run::run_command;
 pub use show::show_command;
 pub use temporal::{detect_overlaps_command, set_temporal_bounds_command};
