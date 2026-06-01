@@ -205,7 +205,7 @@ async fn materialize_mount(
 /// Split an absolute mount path into (parent_dir, leaf_name).
 /// Errors if the path is `/` (root mount is mirror mode, handled
 /// elsewhere) or has no leaf segment.
-fn split_mount_path(path: &str) -> Result<(&str, &str)> {
+pub(crate) fn split_mount_path(path: &str) -> Result<(&str, &str)> {
     if !path.starts_with('/') {
         return Err(anyhow!("mount path `{}` must be absolute", path));
     }

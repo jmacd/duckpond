@@ -809,7 +809,7 @@ async fn pond_remote_remove_clears_mount_path_key() {
     .await
     .expect("attach");
 
-    remove_remote_command(&ctx, "upstream")
+    remove_remote_command(&ctx, "upstream", false)
         .await
         .expect("remove");
 
@@ -1319,6 +1319,288 @@ async fn foreign_post_commit_factories_skipped_in_auto_exec() {
             entry.node.id().pond_id(),
             a_uuid7,
             "foreign factory entry must carry A's pond_id"
+        );
+    }
+    let _ = tx.commit().await.expect("commit read");
+}
+
+/// D5.7b.4: `pond remote remove NAME` defaults to **detach** for
+/// cross-pond imports: the YAML config and watermark keys go away,
+/// but the mount entry at `mount_path` is preserved so the imported
+/// data snapshot stays readable.
+#[tokio::test]
+async fn pond_remote_remove_detach_preserves_mount_entry() {
+    use cmd::commands::remove_remote_command;
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+    let remote_path = scratch.path().join("a_remote");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    // Set up A with a file, push to remote.
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx).await.expect("init A");
+    write_small_file(&a_ctx, "/blob.txt", b"keep me", vec!["copy", "blob.txt"])
+        .await
+        .expect("write blob.txt on A");
+    let a_pond_id = {
+        let ship = a_ctx.open_pond().await.expect("open A");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+        .await
+        .expect("create A's remote");
+    add_backup_command(
+        &a_ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup attach on A");
+    push_command(&a_ctx, Some("origin".to_string()))
+        .await
+        .expect("push from A");
+
+    // B cross-pond-imports A and pulls.
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx).await.expect("init B");
+    add_remote_command(
+        &b_ctx,
+        "upstream",
+        &remote_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond attach on B");
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("pull upstream on B");
+
+    // Sanity: imported file is readable.
+    let bytes = read_small_file(&b_ctx, "/imports/upstream/blob.txt")
+        .await
+        .expect("read imported blob.txt");
+    assert_eq!(bytes, b"keep me");
+
+    // Default remove = detach (purge=false).
+    remove_remote_command(&b_ctx, "upstream", false)
+        .await
+        .expect("remove detach");
+
+    // Config and watermarks are cleared.
+    let cfg_path = remote_config_path("upstream");
+    {
+        let mut ship = b_ctx.open_pond().await.expect("reopen B");
+        let tx = ship
+            .begin_read(&PondUserMetadata::new(vec!["verify-detach".to_string()]))
+            .await
+            .expect("begin read");
+        {
+            let fs = &*tx;
+            let root = fs.root().await.expect("root B");
+            assert!(
+                !root.exists(&cfg_path).await,
+                "/sys/remotes/upstream must be gone"
+            );
+        }
+        let _ = tx.commit().await.expect("commit read");
+    }
+    let ship = b_ctx.open_pond().await.expect("reopen B for watermark");
+    let mount_key = ship
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}upstream"))
+        .await
+        .expect("get mount key");
+    assert!(
+        mount_key.as_deref().is_none_or(str::is_empty),
+        "mount path key must be cleared after detach, got {:?}",
+        mount_key
+    );
+
+    // But the imported data snapshot is STILL readable through the
+    // preserved mount entry.  This is the defining property of detach.
+    let bytes = read_small_file(&b_ctx, "/imports/upstream/blob.txt")
+        .await
+        .expect("read imported blob.txt after detach");
+    assert_eq!(bytes, b"keep me");
+}
+
+/// D5.7b.4: `pond remote remove NAME --purge` removes both the
+/// attachment config AND the mount entry at `mount_path`.  After
+/// purge, the imported data is no longer reachable by path.
+#[tokio::test]
+async fn pond_remote_remove_purge_drops_mount_entry() {
+    use cmd::commands::remove_remote_command;
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+    let remote_path = scratch.path().join("a_remote");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx).await.expect("init A");
+    write_small_file(&a_ctx, "/blob.txt", b"keep me", vec!["copy", "blob.txt"])
+        .await
+        .expect("write blob.txt on A");
+    let a_pond_id = {
+        let ship = a_ctx.open_pond().await.expect("open A");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+        .await
+        .expect("create A's remote");
+    add_backup_command(
+        &a_ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup attach on A");
+    push_command(&a_ctx, Some("origin".to_string()))
+        .await
+        .expect("push from A");
+
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx).await.expect("init B");
+    add_remote_command(
+        &b_ctx,
+        "upstream",
+        &remote_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond attach on B");
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("pull upstream on B");
+
+    // Sanity.
+    let bytes = read_small_file(&b_ctx, "/imports/upstream/blob.txt")
+        .await
+        .expect("read imported blob.txt");
+    assert_eq!(bytes, b"keep me");
+
+    // Remove with --purge.
+    remove_remote_command(&b_ctx, "upstream", true)
+        .await
+        .expect("remove purge");
+
+    // Config gone, AND mount entry gone.
+    let cfg_path = remote_config_path("upstream");
+    let mut ship = b_ctx.open_pond().await.expect("reopen B");
+    let tx = ship
+        .begin_read(&PondUserMetadata::new(vec!["verify-purge".to_string()]))
+        .await
+        .expect("begin read");
+    {
+        let fs = &*tx;
+        let root = fs.root().await.expect("root B");
+        assert!(
+            !root.exists(&cfg_path).await,
+            "/sys/remotes/upstream must be gone after purge"
+        );
+        assert!(
+            !root.exists("/imports/upstream").await,
+            "/imports/upstream mount entry must be gone after purge"
+        );
+    }
+    let _ = tx.commit().await.expect("commit read");
+
+    // Reading through the purged path now errors.
+    let result = read_small_file(&b_ctx, "/imports/upstream/blob.txt").await;
+    assert!(
+        result.is_err(),
+        "reading purged mount must error; got Ok({:?})",
+        result.ok()
+    );
+}
+
+/// D5.7b.4: `--purge` on a backup-mode (push-only) attachment is a
+/// no-op for the mount (backups have no mount_path) but the config
+/// and watermarks still get cleared.  This documents the symmetry.
+#[tokio::test]
+async fn pond_backup_remove_purge_is_no_op_for_mount() {
+    use cmd::commands::remove_remote_command;
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+    let pond_id = {
+        let ship = ctx.open_pond().await.expect("open");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, pond_id, Default::default())
+        .await
+        .expect("create remote");
+    add_backup_command(
+        &ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup attach");
+
+    // Purge a backup: succeeds; no mount entry to remove.
+    remove_remote_command(&ctx, "origin", true)
+        .await
+        .expect("remove --purge on backup must succeed");
+
+    let cfg_path = remote_config_path("origin");
+    let mut ship = ctx.open_pond().await.expect("reopen");
+    let tx = ship
+        .begin_read(&PondUserMetadata::new(vec![
+            "verify-backup-purge".to_string(),
+        ]))
+        .await
+        .expect("begin read");
+    {
+        let fs = &*tx;
+        let root = fs.root().await.expect("root");
+        assert!(
+            !root.exists(&cfg_path).await,
+            "/sys/remotes/origin must be gone after purge"
         );
     }
     let _ = tx.commit().await.expect("commit read");

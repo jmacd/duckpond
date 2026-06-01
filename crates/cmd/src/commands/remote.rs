@@ -397,7 +397,22 @@ async fn add_remote_attachment_internal(
 /// `pond remote remove <name>` -- delete the attachment config and clear
 /// associated raw_config keys.  Does NOT yet refuse on pending PostPush*
 /// records (a future enhancement once D4.4 lands).
-pub async fn remove_remote_command(ship_context: &ShipContext, name: &str) -> Result<()> {
+/// `pond remote remove <name> [--purge]` -- delete the attachment
+/// config and clear associated raw_config keys.  By default this is
+/// a **detach**: any cross-pond mount entry materialized at the
+/// remote's `mount_path` is preserved (so the imported data stays
+/// visible).  With `--purge`, the mount entry is also removed.
+///
+/// Note: `--purge` does NOT physically delete the foreign pond_id's
+/// rows from the underlying Delta log (that would be a partitioned
+/// Delta `delete` predicate, deferred to a follow-up).  Once the
+/// mount entry is gone, the foreign rows are unreachable by path
+/// and will be eligible for vacuum at the next checkpoint cycle.
+pub async fn remove_remote_command(
+    ship_context: &ShipContext,
+    name: &str,
+    purge: bool,
+) -> Result<()> {
     validate_name(name)?;
     let config_path = remote_config_path(name);
     let name_owned = name.to_string();
@@ -412,12 +427,34 @@ pub async fn remove_remote_command(ship_context: &ShipContext, name: &str) -> Re
         }
     };
 
+    // Look up the mount path before deleting; if `purge` is set and
+    // the mount path is non-root, we must remove the mount entry in
+    // the same write transaction that removes the config.
+    let mount_path_to_purge: Option<String> = if purge {
+        let key = format!("{REMOTE_MOUNT_PATH_PREFIX}{name}");
+        match ship.control_table().raw_config_get(&key).await {
+            Ok(Some(v)) if !v.is_empty() && v != "/" => Some(v),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     ship.write_transaction(
-        &steward::PondUserMetadata::new(vec![
-            "remote".to_string(),
-            "remove".to_string(),
-            name_owned.clone(),
-        ]),
+        &steward::PondUserMetadata::new(if purge {
+            vec![
+                "remote".to_string(),
+                "remove".to_string(),
+                "--purge".to_string(),
+                name_owned.clone(),
+            ]
+        } else {
+            vec![
+                "remote".to_string(),
+                "remove".to_string(),
+                name_owned.clone(),
+            ]
+        }),
         async |fs| {
             let root = fs.root().await?;
             if !root.exists(&config_path).await {
@@ -433,6 +470,34 @@ pub async fn remove_remote_command(ship_context: &ShipContext, name: &str) -> Re
                     config_path, e
                 ))
             })?;
+
+            // D5.7b.4: purge mount entry if requested and present.
+            // The mount entry is a normal directory entry under its
+            // parent (e.g., /imports/upstream under /imports), so we
+            // resolve the parent and unlink the leaf name.
+            if let Some(mount_path) = &mount_path_to_purge {
+                let (parent, leaf) = super::pull::split_mount_path(mount_path).map_err(|e| {
+                    steward::StewardError::Aborted(format!(
+                        "invalid mount_path `{}`: {}",
+                        mount_path, e
+                    ))
+                })?;
+                if root.exists(mount_path).await {
+                    let parent_dir = root.open_dir_path(parent).await?;
+                    parent_dir.remove_entry(leaf).await.map_err(|e| {
+                        steward::StewardError::Aborted(format!(
+                            "failed to purge mount entry {}: {}",
+                            mount_path, e
+                        ))
+                    })?;
+                    log::info!("[OK] purged mount entry {}", mount_path);
+                } else {
+                    log::warn!(
+                        "[WARN] mount_path {} not found in pond; nothing to purge",
+                        mount_path
+                    );
+                }
+            }
             Ok(())
         },
     )
@@ -464,7 +529,11 @@ pub async fn remove_remote_command(ship_context: &ShipContext, name: &str) -> Re
         }
     }
 
-    log::info!("[OK] removed remote {}", name);
+    if purge {
+        log::info!("[OK] removed remote {} (with --purge)", name);
+    } else {
+        log::info!("[OK] removed remote {} (detached; data preserved)", name);
+    }
     Ok(())
 }
 

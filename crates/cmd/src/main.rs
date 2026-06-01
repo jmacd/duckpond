@@ -110,9 +110,21 @@ enum RemoteCommand {
         options: RemoteAddOptions,
     },
     /// Remove a remote attachment and clear its watermarks.
+    ///
+    /// By default this is a **detach**: the YAML config and watermark
+    /// keys are removed but any cross-pond mount entry materialized
+    /// at `mount_path` is kept (the imported data snapshot stays
+    /// readable).  Pass `--purge` to also remove the mount entry
+    /// itself (the foreign data becomes inaccessible by path even if
+    /// it remains in the Delta log).
     Remove {
         /// Logical name of the remote to remove.
         name: String,
+        /// Also remove the mount entry at the remote's `mount_path`
+        /// (cross-pond imports only).  Without this flag the imported
+        /// data remains visible via the existing mount path.
+        #[arg(long)]
+        purge: bool,
     },
     /// List all attached remotes (both pull and backup).
     List,
@@ -136,9 +148,15 @@ enum BackupCommand {
     },
     /// Remove a backup attachment (alias of `pond remote remove` for
     /// symmetry; same semantics: deletes config and clears watermarks).
+    /// Backups have no `mount_path`, so `--purge` is a no-op for them
+    /// but accepted for symmetry.
     Remove {
         /// Logical name of the backup to remove.
         name: String,
+        /// Accepted for symmetry with `pond remote remove --purge`;
+        /// has no effect on backups (no mount entry to purge).
+        #[arg(long)]
+        purge: bool,
     },
     /// List backup-mode attachments only.
     List,
@@ -498,8 +516,8 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            RemoteCommand::Remove { name } => {
-                commands::remove_remote_command(&ship_context, &name).await
+            RemoteCommand::Remove { name, purge } => {
+                commands::remove_remote_command(&ship_context, &name, purge).await
             }
             RemoteCommand::List => commands::list_remotes_command(&ship_context, None).await,
         },
@@ -524,8 +542,8 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            BackupCommand::Remove { name } => {
-                commands::remove_remote_command(&ship_context, &name).await
+            BackupCommand::Remove { name, purge } => {
+                commands::remove_remote_command(&ship_context, &name, purge).await
             }
             BackupCommand::List => {
                 commands::list_remotes_command(
