@@ -16,6 +16,24 @@
 
 ## 🟢 Done
 
+### ✅ D5.8.1: Revive `510-synth-logs-replication-cycle.sh` + fix post-commit factory replication
+- **Completed**: 2026-06-02
+- **Type**: BUG + REVIVAL
+- **Root Cause**: `StewardTransactionGuard::execute_post_commit_factory` opened a
+  fresh `OpLogPersistence::begin_write`, wrote a real parquet, and committed it,
+  but discarded the returned Delta version with `_ =` and never wrote any
+  `Begin`/`DataCommitted`/`Completed` rows on the control table for that
+  factory-allocated `txn_seq`. Replication's `Remote::push` then saw
+  `NoSuchCommit(seq)` for the factory's commit and silently skipped the bundle
+  — so logfile-ingest (and any other post-commit factory) data never replicated.
+- **Fix**: `crates/steward/src/guard.rs` — read `last_txn_seq + 1` from the
+  freshly-opened persistence (handles multi-factory case correctly), record
+  `Begin` before `begin_write`, and after `factory_tx.commit()` record
+  `DataCommitted` (with partition checksums snapshot) + `Completed`, or
+  `Completed` for write-no-op, or `Failed` on commit error.
+- **Test**: `510-synth-logs-replication-cycle.sh` (10/10 passes); 030-033
+  logfile-ingest tests and 500 baseline replication continue to pass.
+
 ### ✅ D-007: Improved `pond list /` behavior (P2-002)
 - **Completed**: 2026-02-03
 - **Resolution**: `/` now lists root entries, trailing slash lists directory contents, updated cli-reference.md

@@ -1,36 +1,39 @@
 #!/bin/bash
-# DISABLED-D4: blocked on first-pull bootstrap (Remote::restart_from_compact must be generic over RemoteSteward); rewrite once D4 bootstrap lands.
-# EXPERIMENT: Synth-Logs → Logfile-Ingest → S3 Replication Cycle
-# 
+# REQUIRES: compose
+# EXPERIMENT: Synth-Logs -> Logfile-Ingest -> S3 Cross-Pond Replication Cycle
+#
 # DESCRIPTION:
-#   End-to-end test of the data pipeline:
-#   1. Generate verifiable CSV content (row_number,checksum pattern)
-#   2. logfile-ingest ingests append-only CSV files
-#   3. backup factory pushes to MinIO S3-compatible storage
-#   4. 2nd pond initialized using replicate command from 1st pond
-#   5. 2nd pond pulls from S3
-#   6. Verify content integrity and row counts via --query
-#   7. Repeat cycle with additional data (append scenario)
+#   End-to-end test of the data pipeline using the D5.7b cross-pond import
+#   model (mirror-restart bootstrap CLI is still deferred per d5.8-resume.md
+#   section 6; cross-pond import covers this scenario today):
+#     1. Generate verifiable CSV content (row_number,row_squared)
+#     2. Pond1: logfile-ingest pulls the CSV into /data/metrics
+#     3. Pond1: `pond backup add origin` (push-mode) + `pond push origin`
+#     4. Pond2: fresh `pond init`, then `pond remote add origin URL /imports/origin`
+#        (cross-pond pull-mode mount); `pond pull origin` materializes the mount
+#     5. Verify row counts and md5 hash of Pond1 /data/metrics/metrics.log
+#        against Pond2 /imports/origin/data/metrics/metrics.log
+#     6. Append more rows on the host, re-ingest, push, pull, verify (rounds 2-3)
 #
 # VERIFIABLE DATA:
-#   Each line is: row_number,row_number_squared
-#   This allows simple verification that no data was lost or corrupted.
+#   Each line is `row_number,row_number_squared` so any drift surfaces both
+#   as a row-count mismatch and as a hash mismatch.
 #
 # EXPECTED:
-#   - All row counts match at each stage
-#   - Data verification passes (checksums match)
-#   - Incremental appends are correctly replicated
+#   - Row counts match at each stage on both ponds
+#   - md5 hashes of the replicated stream match exactly
+#   - Incremental appends propagate correctly via the cross-pond mount
 #
-# NOTE: Requires MinIO (either from docker-compose or standalone)
-#
+# History:
+#   Migrated D5.8: rewritten on top of the D5.7b CLI verbs (`pond backup add`,
+#   `pond remote add NAME URL /imports/<name>`, `pond push`, `pond pull`) after
+#   the legacy chunked-parquet `remote` factory + `replicate` config flow was
+#   removed.  The two-pond mirror-restart half of the old test (Pond2 takes on
+#   Pond1's pond_id) is deferred until the mirror-restart CLI surface lands;
+#   cross-pond import gives equivalent verification coverage today.
 set -e
 
-# DISABLED-D4 skip block (see header comment)
-echo "SKIP: this test is DISABLED-D4 (see header for details)" >&2
-exit 0
-
-
-echo "=== Experiment: Synth-Logs Replication Cycle ==="
+echo "=== Experiment: Synth-Logs Replication Cycle (cross-pond) ==="
 echo ""
 
 #############################
@@ -39,86 +42,31 @@ echo ""
 
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
-MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://localhost:9000}"
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://minio:9000}"
 BUCKET_NAME="duckpond-replication-test"
 
-# Test data parameters
-# NOTE: For large file threshold testing (>64KB), use INITIAL_ROWS=5000+
-# Each row is ~20 bytes, so 5000 rows ≈ 100KB (exceeds 64KB threshold)
-# See: docs/large-file-storage-implementation.md
+# Test data parameters.  500 rows of ~20 bytes ~= 10KB (under the 64KB
+# large-file threshold).  Bump INITIAL_ROWS past 5000 if you want to
+# exercise the external-blob path.
 INITIAL_ROWS=500
 APPEND_ROWS=250
 
-# Directory for generated log output
 SYNTH_LOGS_DIR="/var/log/synthapp"
 
-#############################
-# HELPER FUNCTIONS
-#############################
+# Track per-check pass/fail so run-test.sh's tail summary picks them up.
+CHECKS_TOTAL=0
+CHECKS_FAILED=0
 
-# Generate verifiable CSV data
-# Format: row_number,row_number_squared (simple checksum)
-generate_csv_data() {
-    local output_file="$1"
-    local start_row="$2"
-    local num_rows="$3"
-    
-    local end_row=$((start_row + num_rows - 1))
-    
-    for row in $(seq "$start_row" "$end_row"); do
-        local checksum=$((row * row))
-        echo "${row},${checksum}"
-    done >> "$output_file"
-}
-
-# Verify a single line matches expected format: row_number,row_squared
-verify_line() {
-    local line="$1"
-    local expected_row="$2"
-    
-    local row_number
-    local checksum
-    row_number=$(echo "$line" | cut -d',' -f1)
-    checksum=$(echo "$line" | cut -d',' -f2)
-    
-    if [[ "$row_number" != "$expected_row" ]]; then
-        echo "ERROR: Row mismatch - expected $expected_row, got $row_number"
-        return 1
-    fi
-    
-    local expected_checksum=$((expected_row * expected_row))
-    if [[ "$checksum" != "$expected_checksum" ]]; then
-        echo "ERROR: Checksum mismatch for row $row_number: expected $expected_checksum, got $checksum"
-        return 1
-    fi
-    
-    return 0
-}
-
-# Count rows in pond file using wc -l (simpler than SQL for basic counts)
-count_rows() {
-    local pond_path="$1"
-    local file_path="$2"
-    
-    POND="$pond_path" pond cat "$file_path" 2>/dev/null | wc -l | tr -d ' '
-}
-
-# Verify row count matches expected
-verify_row_count() {
-    local pond_path="$1"
-    local file_path="$2"
+check_eq() {
+    local description="$1"
+    local actual="$2"
     local expected="$3"
-    local description="$4"
-    
-    local actual
-    actual=$(count_rows "$pond_path" "$file_path")
-    
-    if [[ "$actual" == "$expected" ]]; then
-        echo "✓ ${description}: ${actual} rows (expected ${expected})"
-        return 0
+    CHECKS_TOTAL=$((CHECKS_TOTAL + 1))
+    if [[ "${actual}" == "${expected}" ]]; then
+        echo "  ✓ ${description} (${actual})"
     else
-        echo "✗ ${description}: ${actual} rows (expected ${expected})"
-        return 1
+        echo "  ✗ ${description}: got ${actual}, expected ${expected}"
+        CHECKS_FAILED=$((CHECKS_FAILED + 1))
     fi
 }
 
@@ -128,61 +76,46 @@ verify_row_count() {
 
 echo "=== Checking MinIO availability ==="
 
-MINIO_AVAILABLE=false
-
-if curl -s "${MINIO_ENDPOINT}/minio/health/live" &>/dev/null; then
-    echo "✓ MinIO available at ${MINIO_ENDPOINT}"
-    MINIO_AVAILABLE=true
-elif command -v minio &>/dev/null; then
-    echo "Starting MinIO server..."
-    mkdir -p /tmp/minio-data
-    MINIO_ROOT_USER=${MINIO_ROOT_USER} \
-    MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD} \
-    minio server /tmp/minio-data --console-address ":9001" &>/dev/null &
-    MINIO_PID=$!
-    
-    # Wait for MinIO to be ready
-    for i in $(seq 1 30); do
-        if curl -s "${MINIO_ENDPOINT}/minio/health/live" &>/dev/null; then
-            echo "✓ MinIO ready after ${i}s (PID ${MINIO_PID})"
-            MINIO_AVAILABLE=true
-            break
-        fi
-        sleep 1
-    done
-else
-    echo "⚠ MinIO not available - using file:// fallback"
-    MINIO_ENDPOINT=""
+if ! curl -s "${MINIO_ENDPOINT}/minio/health/live" >/dev/null; then
+    echo "[FAIL] MinIO not reachable at ${MINIO_ENDPOINT}"
+    echo "       This test must run via 'run-test.sh --compose 510'."
+    exit 1
 fi
+echo "[OK] MinIO reachable at ${MINIO_ENDPOINT}"
 
-# Configure MinIO client and create bucket
-if [[ "$MINIO_AVAILABLE" == "true" ]]; then
-    mc alias set local "${MINIO_ENDPOINT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" 2>/dev/null || true
-    mc rb "local/${BUCKET_NAME}" --force 2>/dev/null || true  # Clean start
-    mc mb "local/${BUCKET_NAME}" 2>/dev/null || true
-    echo "✓ Bucket ${BUCKET_NAME} ready"
-fi
+mc alias set local "${MINIO_ENDPOINT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" 2>/dev/null
+mc rb --force "local/${BUCKET_NAME}" 2>/dev/null || true   # ensure clean start
+mc mb --ignore-existing "local/${BUCKET_NAME}"
+echo "[OK] Bucket ${BUCKET_NAME} ready"
+
+#############################
+# HELPERS (need MinIO + pond)
+#############################
+
+# Generate verifiable CSV rows.  Format: row_number,row_number_squared.
+generate_csv_rows() {
+    local output_file="$1"
+    local start_row="$2"
+    local num_rows="$3"
+    local end_row=$((start_row + num_rows - 1))
+    for row in $(seq "$start_row" "$end_row"); do
+        echo "${row},$((row * row))"
+    done >> "$output_file"
+}
 
 #############################
 # PHASE 1: GENERATE INITIAL DATA
 #############################
 
 echo ""
-echo "=== Phase 1: Generate Initial Data ==="
+echo "=== Phase 1: Generate Initial Data (${INITIAL_ROWS} rows) ==="
 
 mkdir -p "${SYNTH_LOGS_DIR}"
+generate_csv_rows "${SYNTH_LOGS_DIR}/metrics.log" 1 "${INITIAL_ROWS}"
 
-# Generate initial batch - write to active log file
-echo "Generating ${INITIAL_ROWS} rows..."
-generate_csv_data "${SYNTH_LOGS_DIR}/metrics.log" 1 ${INITIAL_ROWS}
-
-echo ""
-echo "--- Generated files ---"
 ls -la "${SYNTH_LOGS_DIR}/"
-
-# Count total lines in all generated files
-TOTAL_HOST_LINES=$(cat "${SYNTH_LOGS_DIR}"/metrics.log* 2>/dev/null | wc -l | tr -d ' ')
-echo "Total lines on host: ${TOTAL_HOST_LINES}"
+HOST_LINES=$(wc -l < "${SYNTH_LOGS_DIR}/metrics.log" | tr -d ' ')
+echo "Total lines on host: ${HOST_LINES}"
 
 #############################
 # PHASE 2: SETUP POND1 (PRIMARY)
@@ -193,352 +126,186 @@ echo "=== Phase 2: Setup Pond1 (Primary) ==="
 
 export POND=/pond1
 pond init
-echo "✓ Pond1 initialized"
-
 pond mkdir -p /data/metrics
 pond mkdir -p /system/run
 
-# Create logfile-ingest configuration
 cat > /tmp/metrics-ingest.yaml << EOF
 archived_pattern: ${SYNTH_LOGS_DIR}/metrics.log.*
 active_pattern: ${SYNTH_LOGS_DIR}/metrics.log
 pond_path: /data/metrics
 EOF
 
-echo "--- Logfile-ingest config ---"
-cat /tmp/metrics-ingest.yaml
-
-# Create logfile-ingest factory node
 pond mknod logfile-ingest /system/run/20-metrics-ingest --config-path /tmp/metrics-ingest.yaml
-echo "✓ Created logfile-ingest node"
+echo "[OK] Pond1 initialized; logfile-ingest factory created"
 
 #############################
-# PHASE 3: INGEST DATA TO POND1
-#############################
-
-echo ""
-echo "=== Phase 3: Ingest Data to Pond1 ==="
-
-RUST_LOG=info pond run /system/run/20-metrics-ingest 2>&1 | tee /tmp/ingest1.log
-
-echo ""
-echo "--- Ingested files ---"
-pond list '/data/metrics/*'
-
-# Verify row count
-echo ""
-echo "--- Verify ingested row count ---"
-POND1_ROWS=$(pond cat /data/metrics/metrics.log 2>/dev/null | wc -l | tr -d ' ')
-echo "Pond1 metrics.log rows: ${POND1_ROWS}"
-
-if [[ "${POND1_ROWS}" != "${INITIAL_ROWS}" ]]; then
-    echo "⚠ Row count mismatch after ingest!"
-    echo "Expected: ${INITIAL_ROWS}, Got: ${POND1_ROWS}"
-fi
-
-#############################
-# PHASE 4: CONFIGURE S3 BACKUP
+# PHASE 3: ATTACH BACKUP + INGEST ROUND 1
 #############################
 
 echo ""
-echo "=== Phase 4: Configure S3 Backup ==="
+echo "=== Phase 3: Attach Backup + Ingest (Round 1) ==="
 
-if [[ "$MINIO_AVAILABLE" == "true" ]]; then
-    cat > /tmp/remote-config.yaml << EOF
-url: "s3://${BUCKET_NAME}"
-endpoint: "${MINIO_ENDPOINT}"
-region: "us-east-1"
-access_key_id: "${MINIO_ROOT_USER}"
-secret_access_key: "${MINIO_ROOT_PASSWORD}"
-allow_http: true
-EOF
-else
-    mkdir -p /tmp/s3-backup
-    cat > /tmp/remote-config.yaml << 'EOF'
-url: "file:///tmp/s3-backup"
-compression_level: 3
-EOF
-fi
+pond backup add origin "s3://${BUCKET_NAME}" \
+    --region us-east-1 \
+    --endpoint "${MINIO_ENDPOINT}" \
+    --access-key-id "${MINIO_ROOT_USER}" \
+    --secret-access-key "${MINIO_ROOT_PASSWORD}" \
+    --allow-http
 
-echo "--- Remote config ---"
-cat /tmp/remote-config.yaml
+echo "[OK] origin backup attached"
 
-pond mknod remote /system/run/10-remote --config-path /tmp/remote-config.yaml
-echo "✓ Remote backup configured"
+# Run ingest; this commits a write tx, which triggers post-commit auto-push.
+pond run /system/run/20-metrics-ingest
+
+# Explicit push as well -- belt-and-suspenders against any race where the
+# auto-push view of the world differed from what we just committed.
+pond push origin
+echo "[OK] Pond1 ingest + push complete"
+
+POND1_ROWS_R1=$(pond cat /data/metrics/metrics.log | wc -l | tr -d ' ')
+echo "Pond1 row count: ${POND1_ROWS_R1}"
 
 #############################
-# PHASE 5: PUSH TO S3
+# PHASE 4: SETUP POND2 (CROSS-POND REPLICA)
 #############################
 
 echo ""
-echo "=== Phase 5: Push to S3 ==="
-
-RUST_LOG=info pond run /system/run/10-remote push 2>&1 | tee /tmp/push1.log
-echo "✓ Push complete"
-
-# Verify backup exists
-if [[ "$MINIO_AVAILABLE" == "true" ]]; then
-    echo ""
-    echo "--- S3 bucket contents ---"
-    mc ls "local/${BUCKET_NAME}/" 2>/dev/null || echo "(listing failed)"
-fi
-
-#############################
-# PHASE 6: GET REPLICATE COMMAND
-#############################
-
-echo ""
-echo "=== Phase 6: Generate Replicate Command ==="
-
-REPLICATE_CMD=$(pond run /system/run/10-remote replicate 2>&1)
-echo "Replicate command:"
-echo "${REPLICATE_CMD}"
-
-# Extract the config parameter
-REPLICATE_CONFIG=$(echo "${REPLICATE_CMD}" | grep -o -- '--config=[^ ]*' | head -1)
-
-if [[ -z "${REPLICATE_CONFIG}" ]]; then
-    echo "ERROR: Failed to extract replicate config"
-    exit 1
-fi
-
-echo "✓ Extracted config for replication"
-
-#############################
-# PHASE 7: SETUP POND2 (REPLICA)
-#############################
-
-echo ""
-echo "=== Phase 7: Setup Pond2 (Replica) ==="
+echo "=== Phase 4: Setup Pond2 (Cross-Pond Replica) ==="
 
 export POND=/pond2
+pond init
 
-# Initialize using the replicate config
-# This automatically creates /system/run/10-remote and restores all transactions
-pond init ${REPLICATE_CONFIG}
-echo "✓ Pond2 initialized from replicate config"
+# Cross-pond import: store_id from the remote MUST differ from Pond2's
+# fresh pond_id; first pull materializes the /imports/origin mount entry.
+pond remote add origin "s3://${BUCKET_NAME}" /imports/origin \
+    --region us-east-1 \
+    --endpoint "${MINIO_ENDPOINT}" \
+    --access-key-id "${MINIO_ROOT_USER}" \
+    --secret-access-key "${MINIO_ROOT_PASSWORD}" \
+    --allow-http
 
-#############################
-# PHASE 8: PULL TO REPLICA
-#############################
+echo "[OK] Pond2 attached origin as cross-pond import"
 
-echo ""
-echo "=== Phase 8: Pull to Replica ==="
-
-RUST_LOG=info pond run /system/run/10-remote pull 2>&1 | tee /tmp/pull1.log
-echo "✓ Pull complete"
-
-#############################
-# PHASE 9: VERIFY REPLICATION
-#############################
-
-echo ""
-echo "=== Phase 9: Verify Replication ==="
-
-echo ""
-echo "--- Pond2 Structure ---"
-POND=/pond2 pond list '/data/metrics/*' 2>/dev/null || echo "(no files yet)"
-
-echo ""
-echo "--- Row Count Comparison (Round 1) ---"
-POND1_COUNT=$(POND=/pond1 pond cat /data/metrics/metrics.log 2>/dev/null | wc -l | tr -d ' ')
-POND2_COUNT=$(POND=/pond2 pond cat /data/metrics/metrics.log 2>/dev/null | wc -l | tr -d ' ')
-
-echo "Pond1 rows: ${POND1_COUNT}"
-echo "Pond2 rows: ${POND2_COUNT}"
-
-if [[ "${POND1_COUNT}" == "${POND2_COUNT}" ]]; then
-    echo "✓ Row counts match!"
-else
-    echo "✗ Row count mismatch!"
-fi
-
-# Verify data integrity by checking first and last rows
-echo ""
-echo "--- Data Integrity Check ---"
-POND1_FIRST=$(POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
-POND2_FIRST=$(POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 LIMIT 1" 2>/dev/null | tail -1)
-
-POND1_LAST=$(POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
-POND2_LAST=$(POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "SELECT * FROM source ORDER BY column0 DESC LIMIT 1" 2>/dev/null | tail -1)
-
-echo "First row - Pond1: ${POND1_FIRST}"
-echo "First row - Pond2: ${POND2_FIRST}"
-echo "Last row  - Pond1: ${POND1_LAST}"
-echo "Last row  - Pond2: ${POND2_LAST}"
+pond pull origin
+echo "[OK] Pond2 pull complete"
 
 #############################
-# PHASE 10: APPEND MORE DATA (ROUND 2)
+# PHASE 5: VERIFY ROUND 1
 #############################
 
 echo ""
-echo "=============================================="
-echo "=== Phase 10: Append More Data (Round 2) ==="
-echo "=============================================="
+echo "=== Phase 5: Verify Round 1 ==="
 
-# Generate additional rows starting from where we left off
-NEXT_START=$((INITIAL_ROWS + 1))
-echo "Appending ${APPEND_ROWS} rows starting at row ${NEXT_START}..."
-generate_csv_data "${SYNTH_LOGS_DIR}/metrics.log" ${NEXT_START} ${APPEND_ROWS}
+POND2_ROWS_R1=$(POND=/pond2 pond cat /imports/origin/data/metrics/metrics.log | wc -l | tr -d ' ')
+echo "Pond1 rows: ${POND1_ROWS_R1}, Pond2 (via /imports/origin) rows: ${POND2_ROWS_R1}"
+
+check_eq "Round 1 host vs Pond1 row count"    "${POND1_ROWS_R1}" "${HOST_LINES}"
+check_eq "Round 1 Pond1 vs Pond2 row count"   "${POND2_ROWS_R1}" "${POND1_ROWS_R1}"
+
+POND1_HASH_R1=$(POND=/pond1 pond cat /data/metrics/metrics.log | md5sum | cut -d' ' -f1)
+POND2_HASH_R1=$(POND=/pond2 pond cat /imports/origin/data/metrics/metrics.log | md5sum | cut -d' ' -f1)
+check_eq "Round 1 content hash" "${POND2_HASH_R1}" "${POND1_HASH_R1}"
+
+#############################
+# PHASE 6: APPEND ROUND 2
+#############################
 
 echo ""
-echo "--- Updated files ---"
-ls -la "${SYNTH_LOGS_DIR}/"
+echo "=== Phase 6: Append Round 2 (${APPEND_ROWS} rows) ==="
 
-TOTAL_HOST_LINES_R2=$(cat "${SYNTH_LOGS_DIR}"/metrics.log* 2>/dev/null | wc -l | tr -d ' ')
-echo "Total lines on host after append: ${TOTAL_HOST_LINES_R2}"
-
-# Re-ingest on Pond1
-echo ""
-echo "--- Re-running logfile-ingest ---"
-export POND=/pond1
-RUST_LOG=info pond run /system/run/20-metrics-ingest 2>&1 | tee /tmp/ingest2.log
-
-# Push to S3
-echo ""
-echo "--- Pushing round 2 ---"
-pond run /system/run/10-remote push 2>&1 | tee /tmp/push2.log
-
-# Pull to Pond2
-echo ""
-echo "--- Pulling to replica ---"
-export POND=/pond2
-pond run /system/run/10-remote pull 2>&1 | tee /tmp/pull2.log
-
-# Verify
-echo ""
-echo "--- Row Count Comparison (Round 2) ---"
+NEXT_START_R2=$((INITIAL_ROWS + 1))
+generate_csv_rows "${SYNTH_LOGS_DIR}/metrics.log" "${NEXT_START_R2}" "${APPEND_ROWS}"
 EXPECTED_R2=$((INITIAL_ROWS + APPEND_ROWS))
-POND1_COUNT_R2=$(POND=/pond1 pond cat /data/metrics/metrics.log 2>/dev/null | wc -l | tr -d ' ')
-POND2_COUNT_R2=$(POND=/pond2 pond cat /data/metrics/metrics.log 2>/dev/null | wc -l | tr -d ' ')
 
-echo "Expected rows: ${EXPECTED_R2}"
-echo "Pond1 rows:    ${POND1_COUNT_R2}"
-echo "Pond2 rows:    ${POND2_COUNT_R2}"
+export POND=/pond1
+pond run /system/run/20-metrics-ingest
+pond push origin
 
-if [[ "${POND1_COUNT_R2}" == "${EXPECTED_R2}" ]] && [[ "${POND1_COUNT_R2}" == "${POND2_COUNT_R2}" ]]; then
-    echo "✓ Round 2 verification passed!"
-else
-    echo "✗ Round 2 verification failed!"
-fi
+export POND=/pond2
+pond pull origin
+
+POND1_ROWS_R2=$(POND=/pond1 pond cat /data/metrics/metrics.log | wc -l | tr -d ' ')
+POND2_ROWS_R2=$(POND=/pond2 pond cat /imports/origin/data/metrics/metrics.log | wc -l | tr -d ' ')
+
+check_eq "Round 2 Pond1 row count"           "${POND1_ROWS_R2}" "${EXPECTED_R2}"
+check_eq "Round 2 Pond1 vs Pond2 row count"  "${POND2_ROWS_R2}" "${POND1_ROWS_R2}"
+
+POND1_HASH_R2=$(POND=/pond1 pond cat /data/metrics/metrics.log | md5sum | cut -d' ' -f1)
+POND2_HASH_R2=$(POND=/pond2 pond cat /imports/origin/data/metrics/metrics.log | md5sum | cut -d' ' -f1)
+check_eq "Round 2 content hash" "${POND2_HASH_R2}" "${POND1_HASH_R2}"
 
 #############################
-# PHASE 11: APPEND MORE DATA (ROUND 3)
+# PHASE 7: APPEND ROUND 3
 #############################
 
 echo ""
-echo "=============================================="
-echo "=== Phase 11: Append More Data (Round 3) ==="
-echo "=============================================="
+echo "=== Phase 7: Append Round 3 (${APPEND_ROWS} rows) ==="
 
 NEXT_START_R3=$((INITIAL_ROWS + APPEND_ROWS + 1))
-echo "Appending ${APPEND_ROWS} rows starting at row ${NEXT_START_R3}..."
-generate_csv_data "${SYNTH_LOGS_DIR}/metrics.log" ${NEXT_START_R3} ${APPEND_ROWS}
+generate_csv_rows "${SYNTH_LOGS_DIR}/metrics.log" "${NEXT_START_R3}" "${APPEND_ROWS}"
+EXPECTED_R3=$((INITIAL_ROWS + APPEND_ROWS + APPEND_ROWS))
 
-# Re-ingest, push, pull
 export POND=/pond1
-pond run /system/run/20-metrics-ingest 2>&1 | tee /tmp/ingest3.log
-pond run /system/run/10-remote push 2>&1 | tee /tmp/push3.log
+pond run /system/run/20-metrics-ingest
+pond push origin
 
 export POND=/pond2
-pond run /system/run/10-remote pull 2>&1 | tee /tmp/pull3.log
+pond pull origin
 
-# Final verification
+POND1_ROWS_R3=$(POND=/pond1 pond cat /data/metrics/metrics.log | wc -l | tr -d ' ')
+POND2_ROWS_R3=$(POND=/pond2 pond cat /imports/origin/data/metrics/metrics.log | wc -l | tr -d ' ')
+
+check_eq "Round 3 Pond1 row count"           "${POND1_ROWS_R3}" "${EXPECTED_R3}"
+check_eq "Round 3 Pond1 vs Pond2 row count"  "${POND2_ROWS_R3}" "${POND1_ROWS_R3}"
+
+POND1_HASH_R3=$(POND=/pond1 pond cat /data/metrics/metrics.log | md5sum | cut -d' ' -f1)
+POND2_HASH_R3=$(POND=/pond2 pond cat /imports/origin/data/metrics/metrics.log | md5sum | cut -d' ' -f1)
+check_eq "Round 3 content hash" "${POND2_HASH_R3}" "${POND1_HASH_R3}"
+
+#############################
+# PHASE 8: WRITE-PROTECTION INVARIANT (D5.7b.3)
+#############################
+
 echo ""
-echo "--- Row Count Comparison (Round 3 - Final) ---"
-EXPECTED_R3=$((INITIAL_ROWS + APPEND_ROWS + APPEND_ROWS))
-POND1_COUNT_R3=$(POND=/pond1 pond cat /data/metrics/metrics.log 2>/dev/null | wc -l | tr -d ' ')
-POND2_COUNT_R3=$(POND=/pond2 pond cat /data/metrics/metrics.log 2>/dev/null | wc -l | tr -d ' ')
+echo "=== Phase 8: Foreign mount is read-only ==="
 
-echo "Expected rows: ${EXPECTED_R3}"
-echo "Pond1 rows:    ${POND1_COUNT_R3}"
-echo "Pond2 rows:    ${POND2_COUNT_R3}"
-
-if [[ "${POND1_COUNT_R3}" == "${EXPECTED_R3}" ]] && [[ "${POND1_COUNT_R3}" == "${POND2_COUNT_R3}" ]]; then
-    echo "✓ Round 3 verification passed!"
+# Per d5.8-resume.md section 3 invariant 1, writes inside /imports/<name>
+# must be refused with ReadOnlyImport.  Use a known-bad write to confirm.
+export POND=/pond2
+if pond mkdir /imports/origin/should-not-exist 2>/tmp/mkdir-err; then
+    echo "  ✗ Expected mkdir under /imports/origin to fail (ReadOnlyImport)"
+    CHECKS_FAILED=$((CHECKS_FAILED + 1))
 else
-    echo "✗ Round 3 verification failed!"
+    if grep -qi 'ReadOnlyImport\|read-only\|read only' /tmp/mkdir-err; then
+        echo "  ✓ Write under /imports/origin refused (ReadOnlyImport)"
+    else
+        echo "  ✗ Write refused but for wrong reason:"
+        cat /tmp/mkdir-err | sed 's/^/      /'
+        CHECKS_FAILED=$((CHECKS_FAILED + 1))
+    fi
 fi
-
-#############################
-# FINAL VERIFICATION: HASH INTEGRITY
-#############################
-
-echo ""
-echo "=== Final Verification: Hash Integrity ==="
-
-# Check that data hashes match between ponds
-POND1_HASH=$(POND=/pond1 pond cat /data/metrics/metrics.log 2>/dev/null | md5sum | cut -d' ' -f1)
-POND2_HASH=$(POND=/pond2 pond cat /data/metrics/metrics.log 2>/dev/null | md5sum | cut -d' ' -f1)
-
-echo "Pond1 content hash: ${POND1_HASH}"
-echo "Pond2 content hash: ${POND2_HASH}"
-
-if [[ "${POND1_HASH}" == "${POND2_HASH}" ]]; then
-    echo "✓ Content hashes match - replication verified!"
-else
-    echo "✗ Content hashes DO NOT match!"
-fi
-
-# Summary SQL queries
-echo ""
-echo "=== Summary Queries ==="
-
-echo ""
-echo "--- Min/Max row numbers (Pond1) ---"
-POND=/pond1 pond cat /data/metrics/metrics.log --format=table --query "
-    SELECT 
-        MIN(CAST(column0 AS INTEGER)) as min_row,
-        MAX(CAST(column0 AS INTEGER)) as max_row,
-        COUNT(*) as total_rows
-    FROM source
-" 2>/dev/null || echo "(query failed)"
-
-echo ""
-echo "--- Min/Max row numbers (Pond2) ---"
-POND=/pond2 pond cat /data/metrics/metrics.log --format=table --query "
-    SELECT 
-        MIN(CAST(column0 AS INTEGER)) as min_row,
-        MAX(CAST(column0 AS INTEGER)) as max_row,
-        COUNT(*) as total_rows
-    FROM source
-" 2>/dev/null || echo "(query failed)"
-
-#############################
-# CLEANUP
-#############################
-
-if [[ -n "${MINIO_PID}" ]]; then
-    echo ""
-    echo "=== Cleanup ==="
-    kill ${MINIO_PID} 2>/dev/null || true
-    echo "✓ MinIO stopped"
-fi
+CHECKS_TOTAL=$((CHECKS_TOTAL + 1))
 
 #############################
 # SUMMARY
 #############################
 
 echo ""
-echo "========================================"
-echo "=== Experiment Complete ==="
-echo "========================================"
+echo "=== Results: ${CHECKS_FAILED} failed / ${CHECKS_TOTAL} total ==="
 echo ""
 echo "Pipeline tested:"
-echo "  1. synth-logs → Generated verifiable CSV with blake3 hashes"
-echo "  2. logfile-ingest → Ingested append-only CSV files"
-echo "  3. remote push → Backed up to S3-compatible storage"
-echo "  4. pond init --config → Initialized replica from replicate command"
-echo "  5. remote pull → Replicated to 2nd pond"
-echo "  6. SQL queries → Verified row counts"
+echo "  1. synth-logs        -> verifiable CSV (row,row^2) on host"
+echo "  2. logfile-ingest    -> /data/metrics on Pond1"
+echo "  3. pond backup add   -> origin attached on Pond1 (push mode)"
+echo "  4. pond push origin  -> Delta bundle into MinIO bucket"
+echo "  5. pond remote add   -> origin attached on Pond2 at /imports/origin"
+echo "  6. pond pull origin  -> Pond2 materializes the mount + pulls bundles"
+echo "  7. Cross-pond verify -> row count + md5 match across 3 incremental rounds"
 echo ""
-echo "Results:"
-echo "  Round 1: ${POND1_COUNT} rows replicated"
-echo "  Round 2: ${POND1_COUNT_R2} rows replicated"
-echo "  Round 3: ${POND1_COUNT_R3} rows replicated"
-if [[ "${POND1_HASH}" == "${POND2_HASH}" ]]; then
-    echo "  Hash match: ✓ Yes"
-else
-    echo "  Hash match: ✗ No (${POND1_HASH} vs ${POND2_HASH})"
+echo "Round 1: ${POND1_ROWS_R1} rows (hash ${POND1_HASH_R1:0:12}...)"
+echo "Round 2: ${POND1_ROWS_R2} rows (hash ${POND1_HASH_R2:0:12}...)"
+echo "Round 3: ${POND1_ROWS_R3} rows (hash ${POND1_HASH_R3:0:12}...)"
+
+if [[ "${CHECKS_FAILED}" -ne 0 ]]; then
+    exit 1
 fi
-echo ""

@@ -806,22 +806,49 @@ impl<'a> StewardTransactionGuard<'a> {
 
         debug!("Factory {} has mode: {}", factory_name, factory_mode);
 
-        // Reload OpLogPersistence for a fresh read transaction
+        // Reload OpLogPersistence for a fresh write transaction
         let data_path = crate::get_data_path(&self.pond_path);
         let pond_id = self.control_table.pond_metadata().pond_id.to_string();
         let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path, pond_id)
             .await
             .map_err(StewardError::DataInit)?;
 
-        // Open a new read transaction for factory execution
-        // Use self.txn_seq + 1 to read the data that was just committed
+        // Open a new write transaction for factory execution.
+        // Use `last_txn_seq + 1` from the freshly-opened persistence rather
+        // than `self.txn_meta.txn_seq + 1`: if multiple post-commit factories
+        // run in a single outer commit, each successive factory must allocate
+        // the next sequence after the previous factory's commit.
+        let factory_start = std::time::Instant::now();
+        let factory_txn_seq = data_persistence.last_txn_seq() + 1;
         let metadata = PondTxnMetadata::new(
-            self.txn_meta.txn_seq + 1,
+            factory_txn_seq,
             tlogfs::PondUserMetadata::new(vec![
                 "internal".to_string(),
                 "post-commit-factory".to_string(),
+                factory_name.to_string(),
+                config_path.to_string(),
             ]),
         );
+
+        // Record `Begin` on the control table BEFORE opening the data
+        // transaction so the factory's write has a complete audit trail.
+        // Without this row, replication's `Remote::push` sees `NoSuchCommit`
+        // for the factory's txn_seq and silently drops the bundle, breaking
+        // cross-pond replication of factory-produced data.
+        self.control_table
+            .record_begin(
+                &metadata,
+                Some(self.txn_meta.txn_seq),
+                TransactionType::Write,
+            )
+            .await
+            .map_err(|e| {
+                StewardError::ControlTable(format!(
+                    "Failed to record post-commit factory begin: {}",
+                    e
+                ))
+            })?;
+
         let factory_tx = data_persistence
             .begin_write(&metadata)
             .await
@@ -877,10 +904,101 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Commit the post-commit factory execution transaction
         // Metadata was already provided at begin()
-        _ = factory_tx
-            .commit()
-            .await
-            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        let commit_result = factory_tx.commit().await;
+        let duration_ms = factory_start.elapsed().as_millis() as i64;
+
+        match commit_result {
+            Ok((Some(new_version), persistence)) => {
+                // Snapshot partition checksums for the local pond_id so
+                // replication's bundle Checksum rows match what
+                // `verify_against_remote` will later expect.  Reading the
+                // post-commit Delta state goes through a fresh
+                // SessionContext, so no active transaction is required.
+                let pond_id_uuid = self.control_table.pond_id_uuid();
+                let post_commit_table = persistence.table().clone();
+                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
+                    post_commit_table,
+                    pond_id_uuid,
+                )
+                .await
+                .map_err(|e| {
+                    StewardError::ControlTable(format!(
+                        "Failed to snapshot partition checksums for post-commit factory: {}",
+                        e
+                    ))
+                })?;
+
+                self.control_table
+                    .record_data_committed(
+                        &metadata,
+                        TransactionType::Write,
+                        new_version,
+                        duration_ms,
+                        partition_checksums,
+                    )
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!(
+                            "Failed to record post-commit factory data_committed: {}",
+                            e
+                        ))
+                    })?;
+                self.control_table
+                    .record_completed(&metadata, TransactionType::Write, duration_ms)
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!(
+                            "Failed to record post-commit factory completion: {}",
+                            e
+                        ))
+                    })?;
+                debug!(
+                    "Post-commit factory transaction {} committed (seq={}, version={})",
+                    &metadata.user.txn_id, factory_txn_seq, new_version
+                );
+            }
+            Ok((None, _persistence)) => {
+                // Factory write was a no-op (no records produced).  Record
+                // `Completed` so the audit trail terminates the `Begin`.
+                self.control_table
+                    .record_completed(&metadata, TransactionType::Write, duration_ms)
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!(
+                            "Failed to record post-commit factory no-op completion: {}",
+                            e
+                        ))
+                    })?;
+                debug!(
+                    "Post-commit factory transaction {} was a write no-op (seq={})",
+                    &metadata.user.txn_id, factory_txn_seq
+                );
+            }
+            Err(commit_err) => {
+                // Commit failed - record Failed so the Begin row is
+                // terminated and the audit log isn't left dangling.
+                let err_msg = format!("{}", commit_err);
+                if let Err(record_err) = self
+                    .control_table
+                    .record_failed(
+                        &metadata,
+                        TransactionType::Write,
+                        err_msg.clone(),
+                        duration_ms,
+                    )
+                    .await
+                {
+                    log::error!(
+                        "Failed to record post-commit factory failure: {} (original error: {})",
+                        record_err,
+                        err_msg
+                    );
+                }
+                return Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                    commit_err,
+                )));
+            }
+        }
 
         result.map_err(StewardError::DataInit)
     }
