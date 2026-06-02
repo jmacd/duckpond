@@ -21,6 +21,7 @@
 | `pond remote list` | List attached remotes (all) | `pond remote list` |
 | `pond backup list` | List push-side attachments | `pond backup list` |
 | `pond remote remove` | Detach a remote (also works for backups) | `pond remote remove origin` |
+| `pond remote remove --purge` | Detach AND drop the materialized mount entry | `pond remote remove --purge upstream` |
 | `pond push` | Push to push/both-mode remotes | `pond push` |
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
 | `pond config` | Show/set pond configuration | `pond config` |
@@ -445,13 +446,50 @@ pond remote list
 # List backups only
 pond backup list
 
-# Remove a remote (also clears its watermarks from the control table)
+# Detach a remote (clears config + watermarks; preserves any materialized
+# mount entry so previously-imported data is still readable by path).
 pond remote remove origin
+
+# Detach AND remove the mount entry created by a cross-pond import
+# (only meaningful for pull-mode remotes with a non-root mount_path).
+pond remote remove --purge upstream
 ```
 
 `pond remote add` writes `/sys/remotes/<name>` as YAML and records
 `remote_mode:<name>` and `remote_mount_path:<name>` in the control
 table.  Re-adding the same name errors unless `--overwrite` is given.
+
+**Attach-time conflict checks** (pull-mode only):
+
+- The same `mount_path` cannot be used by two different pull-mode
+  remotes.  Trailing slashes are normalized, so `/imports/x` and
+  `/imports/x/` are treated as identical.  `--overwrite` is only
+  honored when the conflicting attachment has the *same* name as the
+  one being attached.
+- The same foreign `store_id` cannot be mounted under two different
+  pull-mode names.  Mirror-restart attachments (`PATH = /`, foreign
+  `store_id` == local `pond_id`) are exempt because they do not
+  materialize a mount entry.
+
+**Cross-pond mounts are read-only.**  Any write inside an
+`/imports/<name>/...` subtree -- whether by `pond copy`, by an
+explicit `pond run`, or by an auto-executing factory configured in
+the foreign pond -- is refused with `ReadOnlyImport`.  The steward
+also filters its `/system/run/*` scan by local `pond_id`, so a
+factory living in the foreign pond's filesystem is never
+auto-executed by the local steward.
+
+**`--purge` semantics.**  By default, `pond remote remove` is a
+**detach**: it clears `/sys/remotes/<name>`, the
+`remote_mode:<name>` key, the `remote_mount_path:<name>` key, and the
+per-URL watermarks, but leaves any materialized mount entry in place
+(so imported data stays readable through the original path).  With
+`--purge`, the mount entry is also unlinked from its parent
+directory.  `--purge` is a no-op on backup-mode attachments (they
+have no `mount_path`).  Note: physically vacuuming the foreign
+`pond_id`'s rows from the underlying Delta log is deferred -- the
+rows become unreachable by path after purge and are eligible for a
+future compaction.
 
 ---
 
@@ -486,13 +524,14 @@ pond pull
 pond pull upstream
 ```
 
-> **Note (D4):** pulling on a freshly initialised destination pond
-> requires the source pond's identity to be seeded first.  At present
-> this is done in Rust via `ShipContext::create_pond_for_restoration`
-> + `ShipRemoteSteward::config_set("last_pulled_seq:<url>", "1")`;
-> there is not yet a CLI surface for it.  A generic
-> `Remote::restart_from_compact` (D5) will unblock shell-level
-> first-pull bootstrap.
+> **Cross-pond pull bootstrap (D5.7b.2):** when a pull-mode remote
+> is attached with a non-root `mount_path` (e.g. `/imports/upstream`)
+> and its `store_id` differs from the local `pond_id`, the first
+> `pond pull` automatically materializes the mount entry under the
+> configured path.  No manual seeding is required.  Mirror restarts
+> (`PATH = /`, same `store_id`) still need the
+> `ShipContext::create_pond_for_restoration` path; a CLI surface for
+> mirror restart bootstrap is tracked separately.
 
 ---
 
@@ -1368,8 +1407,10 @@ delivered by the top-level CLI:
 - Verify   -> not yet exposed at the CLI (was `pond run .../verify`);
   bundle integrity is checked end-to-end inside `pond pull` today.
 
-Cross-pond import (the legacy `import:` block) is not available in D4 --
-it returns in D5 via row-level `pond_id` partitioning in tlogfs.
+Cross-pond import is available via `pond remote add NAME URL PATH`
+where `PATH != /` (D5.7b).  The legacy `import:` config block remains
+unused; cross-pond data is reached through the mount path rather than
+through factory-level imports.
 
 #### Emergency Recovery (duckpond-emergency)
 
