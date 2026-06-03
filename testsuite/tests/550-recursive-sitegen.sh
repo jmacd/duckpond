@@ -1,71 +1,102 @@
 #!/bin/bash
-# DISABLED-D4: cross-pond import was implemented by the legacy `remote` factory (deleted in D4.5); D5 will reintroduce it via row-level `pond_id` partitioning of tlogfs.
-# EXPERIMENT: Recursive sitegen via cross-pond import
+# REQUIRES: compose
+# EXPERIMENT: Recursive sitegen via cross-pond import (D5.4 + D5.7b)
+#
 # DESCRIPTION:
-#   Tests that a top-level sitegen with subsites: can recursively generate
-#   a sub-site from an imported pond's own sitegen config.
+#   A consumer pond cross-pond-imports a producer pond.  The producer
+#   carries its own sitegen factory config and templates.  The
+#   consumer's top-level sitegen references the producer's sitegen
+#   as a `subsites:` entry, so the combined `pond run /etc/site
+#   build` produces:
+#     - top-level pages from the consumer's config
+#     - sub-site pages from the producer's config, rendered under a
+#       sub-directory (e.g. /producer/)
+#     - shared build assets (style.css, chart.js, overlay.js) at the
+#       top level ONLY (not duplicated per subsite)
+#     - per-site `theme.css` overrides at top level AND in each subsite
 #
-#   Producer pond has:
-#     - synthetic timeseries data
-#     - temporal-reduce output
-#     - a sitegen config with exports and routes
-#     - page templates
+#   This is the build-time analog of cross-pond import: the producer
+#   author writes a self-contained sitegen YAML; an aggregator
+#   composes multiple producers' sites into one combined deploy.
 #
-#   Consumer imports the producer, installs a top-level sitegen with a
-#   subsites: directive, and builds the combined site.
+# TEST SHAPE:
+#   Pond A:  init, synthetic timeseries + temporal-reduce + sitegen
+#            config + page templates.  Standalone build succeeds.
+#            backup add + push.
+#   Pond B:  init, remote add upstream URL /sources/producer + pull.
+#            Verify imported tree under /sources/producer/* matches
+#            producer.  Install top-level sitegen with subsites:
+#            entry pointing at /sources/producer.  pond run build.
+#   Verify:  Top-level outputs, subsite outputs, shared assets, themes.
 #
 # EXPECTED:
-#   - Top-level index.html generated
-#   - Sub-site pages generated in subdirectory
-#   - Sub-site data files exported
-#   - Shared assets (style.css, chart.js) at top level
-#   - Per-site theme.css in each directory
+#   - Producer standalone sitegen build still works.
+#   - After cross-pond pull, /sources/producer/etc/site is readable as
+#     the sub-site's sitegen config.
+#   - Combined build emits both top-level pages and subsite pages, with
+#     shared assets at top level and per-site theme overrides.
+#
+# History:
+#   Renumbered from 540-recursive-sitegen.sh in D5.8.7 to resolve a
+#   numeric prefix collision with the new 540 watermark cluster.
+#   Revived D5.8.8 from a DISABLED-D4 stub that used the deleted
+#   `remote` factory; D5.7b cross-pond plumbing (`pond backup add` +
+#   `pond push` on the producer, `pond remote add NAME URL MOUNT_PATH`
+#   + `pond pull` on the consumer) replaces the legacy import path.
 set -e
 
-# DISABLED-D4 skip block (see header comment)
-echo "SKIP: this test is DISABLED-D4 (see header for details)" >&2
-exit 0
-
-
-source /usr/local/bin/check.sh 2>/dev/null || source check.sh 2>/dev/null || true
-
-echo "=== Experiment: Recursive Sitegen via Cross-Pond Import ==="
+echo "=== Experiment: Recursive sitegen via cross-pond import ==="
 echo ""
 
-# MinIO configuration
+#############################
+# CONFIGURATION
+#############################
+
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
-MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://localhost:9000}"
-BUCKET_NAME="recursive-sitegen-test"
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://minio:9000}"
+BUCKET_NAME="cross-pond-550"
 
-#############################
-# CONFIGURE MINIO
-#############################
+CHECKS_TOTAL=0
+CHECKS_FAILED=0
 
-echo "=== Configuring MinIO ==="
-for i in $(seq 1 30); do
-    if curl -s "${MINIO_ENDPOINT}/minio/health/live" &>/dev/null; then
-        echo "MinIO ready"
-        break
+check() {
+    local description="$1"
+    local cmd="$2"
+    CHECKS_TOTAL=$((CHECKS_TOTAL + 1))
+    if eval "${cmd}" >/dev/null 2>&1; then
+        echo "  ✓ ${description}"
+    else
+        echo "  ✗ ${description} (cmd: ${cmd})"
+        CHECKS_FAILED=$((CHECKS_FAILED + 1))
     fi
-    sleep 1
-done
-
-mc alias set local "${MINIO_ENDPOINT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" 2>/dev/null || true
-mc mb "local/${BUCKET_NAME}" 2>/dev/null || true
+}
 
 #############################
-# POND1 -- PRODUCER
-# Has data + sitegen config
+# MINIO READINESS
+#############################
+
+echo "=== Checking MinIO availability ==="
+if ! curl -s "${MINIO_ENDPOINT}/minio/health/live" >/dev/null; then
+    echo "[FAIL] MinIO not reachable at ${MINIO_ENDPOINT}"
+    exit 1
+fi
+
+mc alias set local "${MINIO_ENDPOINT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" >/dev/null 2>&1
+mc rb --force "local/${BUCKET_NAME}" >/dev/null 2>&1 || true
+mc mb "local/${BUCKET_NAME}" >/dev/null 2>&1
+
+#############################
+# POND A — PRODUCER
 #############################
 
 echo ""
-echo "=== Setting up Pond1 (Producer with data + sitegen) ==="
+echo "=== Phase 1: Pond A — data + sitegen factory + standalone build ==="
+export POND=/tmp/pond-a-550
+rm -rf "${POND}"
+pond init >/dev/null
 
-export POND=/pond1
-pond init
-
-# Create a dynamic-dir with synthetic timeseries
+# Synthetic sensors (parents of dynamic-dir)
 cat > /tmp/sensors.yaml << 'YAML'
 entries:
   - name: "temperature"
@@ -96,11 +127,9 @@ entries:
               period: "12h"
               offset: 1013.0
 YAML
+pond mknod dynamic-dir /sensors --config-path /tmp/sensors.yaml >/dev/null
 
-pond mknod dynamic-dir /sensors --config-path /tmp/sensors.yaml
-echo "Producer sensors created"
-
-# Create a temporal-reduce to make series files
+# Temporal-reduce wraps the raw series into queryable .series files
 cat > /tmp/reduce.yaml << 'YAML'
 entries:
   - name: "single_param"
@@ -115,20 +144,19 @@ entries:
         - type: "avg"
           columns: ["*"]
 YAML
+pond mknod dynamic-dir /reduced --config-path /tmp/reduce.yaml >/dev/null
 
-pond mknod dynamic-dir /reduced --config-path /tmp/reduce.yaml
-echo "Producer reduce created"
+# Sanity: the producer's own reduced output is queryable.
+pond cat /reduced/single_param/temperature/res=1h.series \
+    --format=table \
+    --sql "SELECT COUNT(*) AS rows FROM source" > /tmp/producer-temp.txt 2>&1
+check "producer: /reduced/.../temperature is queryable" \
+    "grep -q rows /tmp/producer-temp.txt"
 
-# Verify the series are accessible
-pond cat /reduced/single_param/temperature/res=1h.series --format=table --sql "SELECT COUNT(*) AS rows FROM source" > /tmp/producer-temp.txt 2>&1
-cat /tmp/producer-temp.txt
-check 'grep -q "rows" /tmp/producer-temp.txt' "producer temperature has rows"
+# Page templates + sitegen factory config
+pond mkdir -p /etc  >/dev/null
+pond mkdir -p /site >/dev/null
 
-# Create site templates in the pond
-pond mkdir -p /etc
-pond mkdir -p /site
-
-# Create producer index page template
 cat > /tmp/producer-index.md << 'EOF'
 ---
 title: Producer Site
@@ -139,9 +167,8 @@ layout: default
 
 This is the producer's index page.
 EOF
-pond copy host:///tmp/producer-index.md /site/index.md
+pond copy host:///tmp/producer-index.md /site/index.md >/dev/null
 
-# Create producer data page template
 cat > /tmp/producer-data.md << 'EOF'
 ---
 title: "{{ $0 }}"
@@ -152,17 +179,14 @@ layout: data
 
 {{ chart /}}
 EOF
-pond copy host:///tmp/producer-data.md /site/data.md
+pond copy host:///tmp/producer-data.md /site/data.md >/dev/null
 
-# Create producer sidebar
 cat > /tmp/producer-sidebar.md << 'EOF'
 {{ content_nav /}}
 EOF
-pond copy host:///tmp/producer-sidebar.md /site/sidebar.md
+pond copy host:///tmp/producer-sidebar.md /site/sidebar.md >/dev/null
 
-# Create producer sitegen config
 cat > /tmp/producer-site.yaml << 'YAML'
-
 site:
   title: "Producer Monitoring"
   base_url: "/"
@@ -200,89 +224,62 @@ theme:
   accent: "#2d5016"
   accent-light: "#4a7c2e"
 YAML
+pond mknod sitegen /etc/site --config-path /tmp/producer-site.yaml >/dev/null
 
-pond mknod sitegen /etc/site.yaml --config-path /tmp/producer-site.yaml
-echo "Producer sitegen created"
+# Producer standalone build (sanity, before cross-pond)
+rm -rf /tmp/producer-export
+pond run /etc/site build /tmp/producer-export 2>&1 | tail -3
+check "producer standalone: index.html exists" \
+    "[ -f /tmp/producer-export/index.html ]"
+check "producer standalone: temperature.html exists" \
+    "[ -f /tmp/producer-export/temperature.html ]"
+check "producer standalone: pressure.html exists" \
+    "[ -f /tmp/producer-export/pressure.html ]"
 
-# Verify producer can build its own site standalone
-POND=/pond1 pond run /etc/site.yaml build /tmp/producer-export
-echo "Producer standalone build complete"
-
-check '[ -f /tmp/producer-export/index.html ]' "producer standalone: index.html exists"
-check '[ -f /tmp/producer-export/temperature.html ]' "producer standalone: temperature.html exists"
-check '[ -f /tmp/producer-export/pressure.html ]' "producer standalone: pressure.html exists"
-check '[ -d /tmp/producer-export/data ]' "producer standalone: data/ directory exists"
-
-#############################
-# PUSH BACKUP
-#############################
-
-echo ""
-echo "=== Pushing producer backup to MinIO ==="
-
-pond mkdir -p /system/run
-
-cat > /tmp/producer-backup.yaml << EOF
-url: "s3://${BUCKET_NAME}"
-endpoint: "${MINIO_ENDPOINT}"
-region: "us-east-1"
-access_key_id: "${MINIO_ROOT_USER}"
-secret_access_key: "${MINIO_ROOT_PASSWORD}"
-allow_http: true
-EOF
-
-pond mknod remote /system/run/10-backup --config-path /tmp/producer-backup.yaml
-pond run /system/run/10-backup push
-echo "Push complete"
+# Backup the producer to MinIO
+pond backup add origin "s3://${BUCKET_NAME}" \
+    --region us-east-1 \
+    --endpoint "${MINIO_ENDPOINT}" \
+    --access-key-id "${MINIO_ROOT_USER}" \
+    --secret-access-key "${MINIO_ROOT_PASSWORD}" \
+    --allow-http \
+    --overwrite >/dev/null
+pond push origin >/dev/null
 
 #############################
-# POND2 -- CONSUMER
-# Imports the producer, adds top-level sitegen with subsites
+# POND B — CONSUMER (recursive sitegen)
 #############################
 
 echo ""
-echo "=== Setting up Pond2 (Consumer with subsites) ==="
+echo "=== Phase 2: Pond B — attach producer, install top-level sitegen ==="
+export POND=/tmp/pond-b-550
+rm -rf "${POND}"
+pond init >/dev/null
 
-export POND=/pond2
-pond init
+pond remote add upstream "s3://${BUCKET_NAME}" /sources/producer \
+    --region us-east-1 \
+    --endpoint "${MINIO_ENDPOINT}" \
+    --access-key-id "${MINIO_ROOT_USER}" \
+    --secret-access-key "${MINIO_ROOT_PASSWORD}" \
+    --allow-http \
+    --overwrite >/dev/null
+pond pull upstream 2>&1 | tail -3
 
-CONSUMER_POND_ID=$(pond config 2>/dev/null | grep "Pond ID" | awk '{print $NF}')
-echo "Consumer pond_id: ${CONSUMER_POND_ID}"
+# Verify imported tree.
+pond list /sources/producer/ > /tmp/import-listing.txt 2>&1 || true
+check "consumer: imported /sources/producer/sensors visible" \
+    "grep -qw sensors /tmp/import-listing.txt"
+check "consumer: imported /sources/producer/reduced visible" \
+    "grep -qw reduced /tmp/import-listing.txt"
+check "consumer: imported /sources/producer/site visible" \
+    "grep -qw site /tmp/import-listing.txt"
+check "consumer: imported /sources/producer/etc/site (sitegen factory) visible" \
+    "pond list /sources/producer/etc/ 2>/dev/null | grep -qw site"
 
-pond mkdir -p /system/etc
-pond mkdir -p /system/site
-pond mkdir -p /sources
+# Consumer's portal page + sidebar
+pond mkdir -p /system/etc  >/dev/null
+pond mkdir -p /system/site >/dev/null
 
-# Import the producer's entire tree
-cat > /tmp/import-config.yaml << EOF
-url: "s3://${BUCKET_NAME}"
-endpoint: "${MINIO_ENDPOINT}"
-region: "us-east-1"
-access_key_id: "${MINIO_ROOT_USER}"
-secret_access_key: "${MINIO_ROOT_PASSWORD}"
-allow_http: true
-import:
-  source_path: "/**"
-  local_path: "/sources/producer"
-EOF
-
-pond mknod remote /system/etc/10-producer --config-path /tmp/import-config.yaml
-echo "Import factory created"
-
-pond run /system/etc/10-producer pull
-echo "Import pull complete"
-
-# Verify imported tree
-echo ""
-echo "=== Verify imported structure ==="
-POND=/pond2 pond list '/sources/producer/*' > /tmp/import-listing.txt 2>&1 || true
-cat /tmp/import-listing.txt
-
-check 'grep -q "sensors" /tmp/import-listing.txt' "imported /sensors visible"
-check 'grep -q "reduced" /tmp/import-listing.txt' "imported /reduced visible"
-check 'grep -q "site" /tmp/import-listing.txt' "imported /site visible"
-
-# Create consumer's portal page
 cat > /tmp/portal-index.md << 'EOF'
 ---
 title: Combined Dashboard
@@ -295,16 +292,14 @@ Portal page with links to sub-sites.
 
 - [Producer](/producer/)
 EOF
-pond copy host:///tmp/portal-index.md /system/site/index.md
+pond copy host:///tmp/portal-index.md /system/site/index.md >/dev/null
 
 cat > /tmp/portal-sidebar.md << 'EOF'
-{{ content_nav }}
+{{ content_nav /}}
 EOF
-pond copy host:///tmp/portal-sidebar.md /system/site/sidebar.md
+pond copy host:///tmp/portal-sidebar.md /system/site/sidebar.md >/dev/null
 
-# Create consumer sitegen with subsites
 cat > /tmp/consumer-site.yaml << 'YAML'
-
 site:
   title: "Combined Dashboard"
   base_url: "/"
@@ -312,7 +307,7 @@ site:
 subsites:
   - name: "producer"
     path: "/sources/producer"
-    config: "/etc/site.yaml"
+    config: "/etc/site"
     base_url: "/producer/"
 
 routes:
@@ -333,75 +328,77 @@ sidebar:
 theme:
   accent: "#1a365d"
 YAML
-
-pond mknod sitegen /system/etc/90-sitegen --config-path /tmp/consumer-site.yaml
-echo "Consumer sitegen created"
+pond mknod sitegen /system/etc/90-sitegen --config-path /tmp/consumer-site.yaml >/dev/null
 
 #############################
 # BUILD COMBINED SITE
 #############################
 
 echo ""
-echo "=== Building combined site ==="
-
-COMBINED_OUT=/tmp/combined-export
+echo "=== Phase 3: Combined build ==="
+COMBINED_OUT=/tmp/combined-export-550
 rm -rf "${COMBINED_OUT}"
 mkdir -p "${COMBINED_OUT}"
-
-POND=/pond2 pond run /system/etc/90-sitegen build "${COMBINED_OUT}"
-echo "Combined build complete"
+pond run /system/etc/90-sitegen build "${COMBINED_OUT}" 2>&1 | tail -5
 
 #############################
 # VERIFY OUTPUT STRUCTURE
 #############################
 
 echo ""
-echo "=== Verify combined output ==="
+echo "=== Phase 4: Verify combined output ==="
 
-# Top-level assets
-check '[ -f "${COMBINED_OUT}/index.html" ]' "top-level index.html exists"
-check '[ -f "${COMBINED_OUT}/style.css" ]' "shared style.css at top level"
-check '[ -f "${COMBINED_OUT}/chart.js" ]' "shared chart.js at top level"
-check '[ -f "${COMBINED_OUT}/overlay.js" ]' "shared overlay.js at top level"
-check '[ -f "${COMBINED_OUT}/theme.css" ]' "top-level theme.css exists"
+# Top-level pages + assets
+check "top: index.html exists" \
+    "[ -f \"${COMBINED_OUT}/index.html\" ]"
+check "top: shared style.css at top level" \
+    "[ -f \"${COMBINED_OUT}/style.css\" ]"
+check "top: shared chart.js at top level" \
+    "[ -f \"${COMBINED_OUT}/chart.js\" ]"
+check "top: theme.css exists" \
+    "[ -f \"${COMBINED_OUT}/theme.css\" ]"
 
 # Sub-site pages
-check '[ -f "${COMBINED_OUT}/producer/index.html" ]' "subsite index.html exists"
-check '[ -f "${COMBINED_OUT}/producer/temperature.html" ]' "subsite temperature.html exists"
-check '[ -f "${COMBINED_OUT}/producer/pressure.html" ]' "subsite pressure.html exists"
-check '[ -f "${COMBINED_OUT}/producer/theme.css" ]' "subsite theme.css exists"
+check "subsite: producer/index.html exists" \
+    "[ -f \"${COMBINED_OUT}/producer/index.html\" ]"
+check "subsite: producer/temperature.html exists" \
+    "[ -f \"${COMBINED_OUT}/producer/temperature.html\" ]"
+check "subsite: producer/pressure.html exists" \
+    "[ -f \"${COMBINED_OUT}/producer/pressure.html\" ]"
+check "subsite: producer/theme.css exists" \
+    "[ -f \"${COMBINED_OUT}/producer/theme.css\" ]"
 
-# Sub-site data
-check '[ -d "${COMBINED_OUT}/producer/data" ]' "subsite data/ directory exists"
+# Content correctness
+check "top: index references the dashboard title" \
+    "grep -q 'Combined Dashboard' \"${COMBINED_OUT}/index.html\""
+check "subsite: index references the producer title" \
+    "grep -q 'Producer Monitoring' \"${COMBINED_OUT}/producer/index.html\""
 
-# Verify content
-echo ""
-echo "=== Verify HTML content ==="
+# Per-site theme accents
+check "top: theme has consumer accent (#1a365d)" \
+    "grep -q '1a365d' \"${COMBINED_OUT}/theme.css\""
+check "subsite: theme has producer accent (#2d5016)" \
+    "grep -q '2d5016' \"${COMBINED_OUT}/producer/theme.css\""
 
-# Top-level page should have the portal content
-check 'grep -q "Combined Dashboard" "${COMBINED_OUT}/index.html"' "top-level has dashboard title"
-check 'grep -q "style.css" "${COMBINED_OUT}/index.html"' "top-level references style.css"
-check 'grep -q "theme.css" "${COMBINED_OUT}/index.html"' "top-level references theme.css"
-
-# Sub-site page should have sub-site content
-check 'grep -q "Producer Monitoring" "${COMBINED_OUT}/producer/index.html"' "subsite has producer title"
-check 'grep -q "style.css" "${COMBINED_OUT}/producer/index.html"' "subsite references style.css"
-check 'grep -q "theme.css" "${COMBINED_OUT}/producer/index.html"' "subsite references theme.css"
-
-# Verify per-site theme CSS
-check 'grep -q "1a365d" "${COMBINED_OUT}/theme.css"' "top-level theme has steel blue accent"
-check 'grep -q "2d5016" "${COMBINED_OUT}/producer/theme.css"' "producer theme has green accent"
-
-# No shared assets duplicated in subsite
-check '[ ! -f "${COMBINED_OUT}/producer/style.css" ]' "style.css not duplicated in subsite"
-check '[ ! -f "${COMBINED_OUT}/producer/chart.js" ]' "chart.js not duplicated in subsite"
+# Shared assets NOT duplicated under subsite
+check "no dup: producer/style.css absent" \
+    "[ ! -f \"${COMBINED_OUT}/producer/style.css\" ]"
+check "no dup: producer/chart.js absent" \
+    "[ ! -f \"${COMBINED_OUT}/producer/chart.js\" ]"
 
 echo ""
-echo "=== Output tree ==="
+echo "=== Output tree (top 30) ==="
 find "${COMBINED_OUT}" -type f | sort | head -30
 
 #############################
 # RESULTS
 #############################
 
-check_finish
+echo ""
+echo "=== Results ==="
+echo "Checks: ${CHECKS_TOTAL}, Failed: ${CHECKS_FAILED}"
+if [[ "${CHECKS_FAILED}" -ne 0 ]]; then
+    echo "[FAIL] one or more checks failed"
+    exit 1
+fi
+echo "[OK] all checks passed"

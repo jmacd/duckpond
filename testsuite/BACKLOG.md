@@ -50,6 +50,48 @@
 
 ## 🟢 Done
 
+### ✅ D5.8.8: Revive `550-recursive-sitegen.sh` (the renamed sitegen-over-mount test)
+- **Completed**: 2026-06-03
+- **Type**: REVIVAL (one script)
+- **Description**: Replaced the `DISABLED-D4` stub (which drove the
+  deleted `remote` factory with `import:` YAML) with a D5.7b version
+  that exercises sitegen's `subsites:` directive over a cross-pond
+  import: 22 checks.
+- **Test shape**: Pond A creates synthetic timeseries (`dynamic-dir`
+  + `synthetic-timeseries`), a `temporal-reduce` wrapper, page
+  templates under `/site/`, and a `sitegen` factory at `/etc/site`.
+  Producer's standalone build succeeds (3 sanity checks).  Pond A
+  pushes via `pond backup add` + `pond push`.  Pond B attaches
+  with `pond remote add upstream URL /sources/producer` + `pond pull`,
+  then installs a top-level `sitegen` at `/system/etc/90-sitegen`
+  whose YAML declares the producer as a `subsites:` entry pointing at
+  `/sources/producer` with `config: /etc/site` and
+  `base_url: /producer/`.
+- **Verifies (in addition to the cross-pond plumbing)**:
+    - The subsite reads its config from
+      `/sources/producer/etc/site` via the mount (the consumer
+      doesn't have a local copy; sitegen reads through the
+      cross-pond mount at build time).
+    - The subsite's `exports:` declaration pulls factory output
+      (`/reduced/single_param/*/*.series`) from the producer's
+      dynamic-dir + temporal-reduce chain through the cross-pond
+      mount — confirms factories ARE executable when triggered
+      explicitly from the consumer side (even though they are
+      not auto-run, per invariant 2 in 533).
+    - Output structure: top-level shared assets (`style.css`,
+      `chart.js`, `overlay.js`) at root; per-site `theme.css` at
+      both root and `/producer/`; subsite HTML pages
+      (`producer/index.html`, `producer/temperature.html`,
+      `producer/pressure.html`) and data exports
+      (`producer/data/single_param/.../*.parquet`).
+    - Theme isolation: top has consumer's `#1a365d`, subsite has
+      producer's `#2d5016` -- subsite config really was read from
+      the producer side, not the consumer's defaults.
+- **No collisions, no new bugs**.  Test runs cleanly compose-mode in
+  ~70 s (sitegen build + duckdb-wasm vendor copy dominate runtime).
+- **Pre-existing tests still green**: 500, 501, 510, 520, 521, 522,
+  523, 530, 532, 533, 540, 541, 542 (full sweep after this batch).
+
 ### ✅ D5.8.7: Revive the cross-pond import watermark group (540 + 541 + 542) and renumber 540-recursive-sitegen → 550
 - **Completed**: 2026-06-03
 - **Type**: REVIVAL (three scripts + one rename)
