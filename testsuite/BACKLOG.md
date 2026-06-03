@@ -16,6 +16,21 @@
 
 ## 🟢 Done
 
+### ✅ D5.8.2: Revive `523-emergency-erase-and-auto-bucket.sh`
+- **Completed**: 2026-06-03
+- **Type**: REVIVAL
+- **Description**: Rewrote the disabled (`DISABLED-D4`) script on top of the
+  D5.7b backup CLI (`pond backup add`, `pond push`, `pond emergency
+  erase-bucket`) after the legacy `remote` factory + `pond apply`
+  configuration flow was removed.  Test now exercises four phases:
+  Pond1 attach + push (auto-inits bucket Delta table with Pond1 id) →
+  `pond emergency erase-bucket --dangerous` (with safety-flag refusal
+  check) → Pond2 reattach (empty bucket auto-inits with Pond2 id) +
+  push → Pond3 attach to occupied bucket must be refused with a
+  `does not match` / foreign-pond error.
+- **Test**: `523-emergency-erase-and-auto-bucket.sh` (11/11 passes);
+  500, 501, 510 regression-clean.
+
 ### ✅ D5.8.1: Revive `510-synth-logs-replication-cycle.sh` + fix post-commit factory replication
 - **Completed**: 2026-06-02
 - **Type**: BUG + REVIVAL
