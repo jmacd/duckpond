@@ -50,6 +50,62 @@
 
 ## 🟢 Done
 
+### ✅ D5.8.9: Revive `531-recursive-cross-pond-import.sh` + add 3-deep Rust integration test
+- **Completed**: 2026-06-03
+- **Type**: REVIVAL (one shell script) + new Rust integration test
+- **Description**: Pinned the **non-transitive cross-pond replication
+  invariant** in both the testsuite and the Rust unit suite.  The
+  legacy `DISABLED-D4` 531 stub tested the deleted `remote` factory's
+  flat-vs-`/data/**` `source_path` filter — that surface no longer
+  exists in D5.7b (cross-pond mounts the whole foreign pond root).
+  Rewrote as a 3-deep A→B→C chain instead, per
+  `docs/d5.8-resume.md` step 7 / § 291.
+- **Test shape (shell, 14 checks)**: Three ponds against two MinIO
+  buckets.  A writes `/data/a.txt`, pushes to bucket-A.  B mounts A
+  at `/imports/A`, pulls, writes own `/data/b.txt`, pushes to
+  bucket-B.  C mounts B at `/imports/B`, pulls.  Asserts:
+    - C reads B's local content via `/imports/B/data/b.txt` (the
+      replicated B-owned rows resolve correctly).
+    - C's `/imports/B/imports/` IS present as a B-owned directory
+      entry (B created it via `create_dir_all` when materializing
+      its own `/imports/A` mount).
+    - But **listing** `/imports/B/imports/` fails on C, and
+      `pond cat /imports/B/imports/A/data/a.txt` fails — A's content
+      is **not** transitively replicated.
+    - A's pond_id tail never surfaces anywhere in C's `pond list /`.
+    - A and B remain fully usable (B still reads A through its own
+      mount after C pulled).
+- **Test shape (Rust, `cross_pond_3deep_does_not_re_replicate_foreign_mount`)**:
+  Same A→B→C topology against two `file://` remotes (no MinIO).
+  Drives `init_command`, `add_remote_command`, `pull_command`,
+  `push_command` directly via the library entrypoints.  Asserts:
+    - 2-deep works (B reads A via `/imports/A/a.txt`).
+    - 3-deep is blocked (C cannot read `/imports/B/imports/A/a.txt`).
+    - `/imports/B` carries B's pond_id; `/imports/B/imports`
+      carries B's pond_id (not A's).
+    - The `A` child entry under `/imports/B/imports` is either
+      absent, unlookable, or — if somehow present — does NOT carry
+      A's pond_id (which would prove the push filter is broken).
+    - B still reads A through its mount after C's pull.
+- **Why this matters**: `steward::remote_adapter::actions_at_version`
+  filters outbound Add/Remove actions to rows where
+  `partition_values["pond_id"] == local pond's UUID`
+  (`remote_adapter.rs:230-241`).  This is a deliberate contract: a
+  pond pushes only its OWN rows, not foreign rows it has imported.
+  Both new tests pin this — if anyone weakens the filter without a
+  cross-pond-transitivity design change, both break loudly.
+- **Observed corner**: listing `/imports/B/imports/` on C returns
+  `"Partition not found: part_id=00000000-...-000000000000, node_id=00000000-...-000000000000"`.
+  The directory entry exists but its body partition is empty
+  (the only would-be child was the foreign-pond mount-entry row
+  that got filtered).  Cosmetic — the read correctly fails; the
+  error message could be friendlier in a future cleanup.
+- **Pre-existing tests still green** (full 15-test sweep): 500, 501,
+  510, 520, 521, 522, 523, 530, 531, 532, 533, 540, 541, 542, 550.
+- **Workspace check**: `cargo fmt --all --check`, `cargo clippy
+  --workspace --all-features -- -D warnings`, `cargo test
+  --workspace` all clean.
+
 ### ✅ D5.8.8: Revive `550-recursive-sitegen.sh` (the renamed sitegen-over-mount test)
 - **Completed**: 2026-06-03
 - **Type**: REVIVAL (one script)

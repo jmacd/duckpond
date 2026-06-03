@@ -1836,3 +1836,251 @@ async fn pond_remote_add_overwrite_same_name_same_path_succeeds() {
     .await
     .expect("--overwrite of same name + same path must succeed");
 }
+
+/// D5.8.9 / docs/d5.8-resume.md step 7: 3-deep cross-pond chain pins the
+/// non-transitive replication invariant.
+///
+/// Setup:
+///
+/// ```text
+///   Pond A  --push-->  file://A_remote
+///                          ^
+///                          | pull (mount at /imports/A)
+///   Pond B  --push-->  file://B_remote
+///                          ^
+///                          | pull (mount at /imports/B)
+///   Pond C
+/// ```
+///
+/// `steward::remote_adapter::actions_at_version` filters outbound
+/// bundles to rows where `partition_values["pond_id"]` equals the
+/// pushing pond's UUID.  When B pushes to `B_remote`, the foreign
+/// mount-entry row that materialized `/imports/A` (which carries A's
+/// pond_id) is intentionally excluded.  Therefore:
+///
+///   - C MUST be able to read B's local content via `/imports/B/...`.
+///   - C MUST NOT see A's content via `/imports/B/imports/A/...`.
+///   - `/imports/B/imports` may still appear as a child entry in C
+///     (B-owned `create_dir_all` parent), but the foreign child row
+///     under it is not pushed.
+///
+/// If anyone removes the pond_id filter in `actions_at_version` without
+/// a deliberate cross-pond-transitivity design change, this test breaks
+/// loudly.  Shell-level coverage lives in
+/// `testsuite/tests/531-recursive-cross-pond-import.sh`.
+#[tokio::test]
+async fn cross_pond_3deep_does_not_re_replicate_foreign_mount() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+    let c_pond = scratch.path().join("c_pond");
+    let a_remote_path = scratch.path().join("a_remote");
+    let b_remote_path = scratch.path().join("b_remote");
+    let a_url = format!("file://{}", a_remote_path.display());
+    let b_url = format!("file://{}", b_remote_path.display());
+
+    // --- Pond A: init + write + push to A's bucket. -----------------
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx).await.expect("init A");
+    write_small_file(&a_ctx, "/a.txt", b"from pond A", vec!["copy", "a.txt"])
+        .await
+        .expect("write a.txt on A");
+    let a_pond_id = {
+        let ship = a_ctx.open_pond().await.expect("open A");
+        ship.control_table().pond_id_uuid()
+    };
+    std::fs::create_dir_all(&a_remote_path).expect("mkdir a_remote");
+    let _ = sync_remote::Remote::create_at_url(&a_url, a_pond_id, Default::default())
+        .await
+        .expect("create A's remote");
+    add_backup_command(
+        &a_ctx, "originA", &a_url, false, None, None, None, None, false, false,
+    )
+    .await
+    .expect("backup attach on A");
+    push_command(&a_ctx, Some("originA".to_string()))
+        .await
+        .expect("push from A");
+
+    // --- Pond B: init + mount A + pull + own write + push to B. -----
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx).await.expect("init B");
+    add_remote_command(
+        &b_ctx,
+        "upstreamA",
+        &a_url,
+        "/imports/A",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond attach A on B");
+    pull_command(&b_ctx, Some("upstreamA".to_string()))
+        .await
+        .expect("pull A on B");
+    let b_pond_id = {
+        let ship = b_ctx.open_pond().await.expect("open B");
+        ship.control_table().pond_id_uuid()
+    };
+    assert_ne!(a_pond_id, b_pond_id, "A and B must have distinct pond_ids");
+
+    // Sanity: B reads A through its mount (2-deep works).
+    let b_view_of_a = read_small_file(&b_ctx, "/imports/A/a.txt")
+        .await
+        .expect("B reads A via mount");
+    assert_eq!(b_view_of_a, b"from pond A");
+
+    write_small_file(&b_ctx, "/b.txt", b"from pond B", vec!["copy", "b.txt"])
+        .await
+        .expect("write b.txt on B");
+    std::fs::create_dir_all(&b_remote_path).expect("mkdir b_remote");
+    let _ = sync_remote::Remote::create_at_url(&b_url, b_pond_id, Default::default())
+        .await
+        .expect("create B's remote");
+    add_backup_command(
+        &b_ctx, "originB", &b_url, false, None, None, None, None, false, false,
+    )
+    .await
+    .expect("backup attach on B");
+    push_command(&b_ctx, Some("originB".to_string()))
+        .await
+        .expect("push from B");
+
+    // --- Pond C: init + mount B + pull. ------------------------------
+    let c_ctx = ctx_for(&c_pond, vec!["pond", "init"]);
+    init_command(&c_ctx).await.expect("init C");
+    let c_pond_id = {
+        let ship = c_ctx.open_pond().await.expect("open C");
+        ship.control_table().pond_id_uuid()
+    };
+    assert_ne!(b_pond_id, c_pond_id, "B and C must have distinct pond_ids");
+    assert_ne!(a_pond_id, c_pond_id, "A and C must have distinct pond_ids");
+
+    add_remote_command(
+        &c_ctx,
+        "upstreamB",
+        &b_url,
+        "/imports/B",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond attach B on C");
+    pull_command(&c_ctx, Some("upstreamB".to_string()))
+        .await
+        .expect("pull B on C");
+
+    // --- INVARIANT 1: C reads B's local content. --------------------
+    let c_view_of_b = read_small_file(&c_ctx, "/imports/B/b.txt")
+        .await
+        .expect("C reads B's local /b.txt through /imports/B");
+    assert_eq!(c_view_of_b, b"from pond B");
+
+    // --- INVARIANT 2: 3-deep transitivity is BLOCKED. ---------------
+    // Reading A's content through B's mount must fail on C.  We try a
+    // few resolution paths (the foreign sub-mount is filtered out at
+    // various levels) and assert NONE of them succeed.
+    {
+        let err = read_small_file(&c_ctx, "/imports/B/imports/A/a.txt")
+            .await
+            .expect_err("C must NOT read A through /imports/B/imports/A (3-deep blocked)");
+        let msg = format!("{err:#}");
+        log::info!("expected 3-deep read failure: {msg}");
+    }
+
+    // --- INVARIANT 3: A's pond_id never surfaces in C's tree. -------
+    // The mount-entry row for /imports/B/imports/A carries A's pond_id;
+    // it should have been filtered out of B's push and so should NOT
+    // be locatable as a child entry of /imports/B/imports on C.
+    {
+        use steward::PondUserMetadata;
+        let mut ship = c_ctx.open_pond().await.expect("reopen C");
+        let tx = ship
+            .begin_read(&PondUserMetadata::new(vec![
+                "verify".to_string(),
+                "3deep-non-transitive".to_string(),
+            ]))
+            .await
+            .expect("begin read");
+        {
+            let fs = &*tx;
+            let root = fs.root().await.expect("root C");
+            // /imports/B is the foreign-root mount; pond_id == B's.
+            let imports_b = root
+                .open_dir_path("/imports/B")
+                .await
+                .expect("open /imports/B");
+            let imports_b_entry = root
+                .get_node_path("/imports/B")
+                .await
+                .expect("locate /imports/B");
+            let a_uuid7 = uuid7::Uuid::from(*a_pond_id.as_bytes());
+            let b_uuid7 = uuid7::Uuid::from(*b_pond_id.as_bytes());
+            assert_eq!(
+                imports_b_entry.node.id().pond_id(),
+                b_uuid7,
+                "/imports/B itself must carry B's pond_id"
+            );
+
+            // /imports/B/imports IS present as a B-owned dir entry
+            // (B materialized it via create_dir_all when attaching A).
+            let inner_imports_entry = imports_b
+                .get("imports")
+                .await
+                .expect("get /imports/B/imports");
+            assert!(
+                inner_imports_entry.is_some(),
+                "the B-owned /imports parent is replicated"
+            );
+            let inner_imports = inner_imports_entry.expect("present");
+            assert_eq!(
+                inner_imports.node.id().pond_id(),
+                b_uuid7,
+                "the inner /imports dir must carry B's pond_id, not A's"
+            );
+
+            // The /imports/B/imports/A foreign mount-entry row was
+            // filtered out of B's push (its pond_id was A's, not B's).
+            // Either the body of /imports/B/imports is unresolvable on
+            // C (no partition data) or the 'A' child lookup returns
+            // None.  Both outcomes are acceptable; both pin the
+            // non-transitivity invariant.
+            let inner_dir_result = imports_b.open_dir_path("imports").await;
+            let a_absent = match inner_dir_result {
+                Err(_) => true, // listing failed: partition not pushed
+                Ok(inner_dir) => match inner_dir.get("A").await {
+                    Ok(None) => true, // entry not present
+                    Err(_) => true,   // lookup failed
+                    Ok(Some(entry)) => {
+                        // If somehow the entry IS present, its pond_id
+                        // MUST NOT be A's -- that would mean A's data
+                        // had been re-replicated through B (i.e. the
+                        // filter was broken).
+                        entry.node.id().pond_id() != a_uuid7
+                    }
+                },
+            };
+            assert!(
+                a_absent,
+                "/imports/B/imports/A must NOT carry A's pond_id (would mean push filter is broken)"
+            );
+        }
+        let _ = tx.commit().await.expect("commit read");
+    }
+
+    // --- INVARIANT 4: A and B remain fully usable. ------------------
+    // Reading A through B's mount still works after C pulled.
+    let b_view_of_a_after = read_small_file(&b_ctx, "/imports/A/a.txt")
+        .await
+        .expect("B still reads A after C's pull");
+    assert_eq!(b_view_of_a_after, b"from pond A");
+}
