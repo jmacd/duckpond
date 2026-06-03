@@ -7,6 +7,40 @@
 
 ## 🔴 Open Items
 
+### P1-BUG-LF-REPLICATION: `_large_files/blake3=<hash>.parquet` blobs are not replicated by sync_remote push/pull
+- **Type**: BUG (discovered via D5.8.5 testsuite revival)
+- **Symptom**: After `pond push origin` + `pond pull` to a fresh pond, files
+  >64KiB (i.e., those that took the externalization path on the source) can
+  be `pond list`-ed (correct metadata, size, blake3) but `pond cat` returns
+  zero bytes.
+- **Root cause**: `Steward::actions_at_version` (in `crates/steward/src/remote_adapter.rs`)
+  enumerates Delta `Add` actions for the local pond. These are paths of the
+  form `pond_id=<u>/part_id=<v>/part-N-N.parquet` — the partition parquet that
+  contains the OpLog *row* describing the file.  For a large file, that row
+  carries a `blake3` reference into `_large_files/blake3=<hash>.parquet`,
+  which lives outside the partition tree and is therefore never enumerated,
+  read, chunked, or sent in the bundle.  The receiving side's
+  `apply_pulled_bundle` writes the partition parquet correctly but the
+  blob it points at never exists on the receiver.
+- **Test exposure**:
+    - `testsuite/tests/510-synth-logs-replication-cycle.sh` uses
+      `INITIAL_ROWS=500` (~10KB) — stays under the threshold, so does not
+      trip the bug.  Bump past 5000 to reproduce.
+    - `testsuite/tests/530-cross-pond-import-minio.sh` originally included
+      an 80KiB random `big.bin` to exercise this path; the case was removed
+      pending the fix so that 530 stays green while the bug is open.
+      Reinstate it (and add an analogous case to 510) once fixed.
+- **Fix sketch**: `actions_at_version` (or a parallel "side-content" pass)
+  must, for each Add path, open the parquet and emit any
+  `_large_files/blake3=<hash>` references it carries; those external blobs
+  then need to be (a) included in the push bundle and (b) materialized by
+  `apply_pulled_bundle`.  An alternative is for sync_remote to *inline*
+  the external bytes when chunking on push, then re-externalize on the
+  receiver — at the cost of duplicating the externalization decision
+  across writers.
+- **Priority**: P1 — silently corrupts data across the replication
+  boundary for files >64KiB.  Small ponds are unaffected.
+
 ### P3-001: Document factory configuration examples
 - **Type**: DOCS
 - **Description**: Factory YAML configs need more complete examples
@@ -15,6 +49,36 @@
 ---
 
 ## 🟢 Done
+
+### ✅ D5.8.5: Revive `530-cross-pond-import-minio.sh` against the D5.7b cross-pond CLI
+- **Completed**: 2026-06-03
+- **Type**: REVIVAL (+ exposed P1-BUG-LF-REPLICATION above)
+- **Description**: Replaced the `DISABLED-D4` stub — which mknod'd the
+  long-removed `remote` factory with a YAML carrying an `import:` block —
+  with a 13-check end-to-end test on top of the D5.7b CLI:
+    1. Pond A: `init`, write a small tree under `/data` (csv, second csv,
+       nested file), `pond backup add origin s3://BUCKET`, `pond push origin`.
+    2. Pond B: `init` (distinct `pond_id`), seed a local `/local/note.txt`,
+       `pond remote add upstream s3://BUCKET /imports/A`, `pond pull upstream`.
+    3. Verify: every imported file is byte-faithful via the mount;
+       Pond B's local data is unaffected; the `[<pond_id-tail>]` tag on
+       the `/imports/A` entry shows Pond A's pond_id (provenance);
+       a second pull is idempotent.
+- **Findings during revival**:
+    - `pond list PATH` returns the entry itself; `pond list PATH/` (trailing
+      slash) returns its children.  Tests must use the trailing slash form
+      to list directory contents.
+    - `pond list` decorates every entry with `[<last-12-hex-of-pond_id>]`,
+      which is the user-visible signal for cross-pond provenance.  No need
+      to query the control table for this -- it shows up on the mount root.
+    - `pond config` does not surface the foreign pond_id of an attached
+      cross-pond remote in its human output (only the local pond_id).
+      If a stable machine-readable view is wanted later, add it there.
+    - Large-file replication is broken (see P1-BUG-LF-REPLICATION).  The
+      80KiB `big.bin` case originally written into 530 was the smoking gun
+      and has been removed from the green path; restore once the bug is
+      fixed.
+- **Regression**: 500 / 501 / 510 / 520 / 521 / 522 / 523 all clean.
 
 ### ✅ D5.8.4: Rewrite `crates/cmd/scripts/duckpond-emergency` for current Delta schema + revive `522-emergency-recovery-tool.sh`
 - **Completed**: 2026-06-03
