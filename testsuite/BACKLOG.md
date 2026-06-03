@@ -50,6 +50,59 @@
 
 ## 🟢 Done
 
+### ✅ D5.8.7: Revive the cross-pond import watermark group (540 + 541 + 542) and renumber 540-recursive-sitegen → 550
+- **Completed**: 2026-06-03
+- **Type**: REVIVAL (three scripts + one rename)
+- **Description**: Replaced the three `DISABLED-D4` stubs that drove the
+  deleted `remote` factory (`pond mknod remote /system/run/...` +
+  `pond run ... pull` + `Watermark: N` log grep) with shell tests that
+  exercise the D5.7b watermark surface: the persisted
+  `last_pulled_seq:<url>` key in the steward control table, surfaced via
+  `pond remote list`'s `LAST_PULLED_SEQ` column, and the
+  `[OK] pull NAME: applied N bundle(s) from URL` log line emitted by
+  `crates/cmd/src/commands/pull.rs:114`.
+- **540 (incremental watermark — bandwidth-bug regression guard)**:
+  10 checks.  Three pulls: initial (applied > 0, watermark advances
+  above bootstrap), no-op (`applied 0 bundle(s)`, watermark unchanged
+  — the regression guard against the production "re-walk 679 txns
+  every tick" bug), and one-new-commit (applied >= 1, watermark
+  advances by the delta, new file visible).  Captures
+  `last_pulled_seq` between pulls and asserts monotonicity + zero
+  reset to the bootstrap floor.
+- **541 (watermark advances on ANY foreign txn shape)**:
+  12 checks.  After initial pull, producer issues two mkdir-only
+  commits (no file blobs) and a single file-content commit.  Asserts
+  each produces a bundle, each advances the watermark by exactly one,
+  the no-op pull between them still reports `applied 0 bundle(s)`,
+  and the foreign directories are visible under the mount even
+  though they carry no data payload.  Recast from the legacy
+  filter-induced-skip bug (filter no longer exists in D5.7b) into a
+  generic "bundle shape doesn't affect watermark persistence" guard.
+- **542 (fresh-replica bootstrap reconstruction)**:
+  11 checks.  Original consumer pulls and captures W_initial; pond
+  directory is `rm -rf`'d entirely (the D5.7b analog of "terraform
+  destroy + recreate" now that `pond init --from-backup` is removed,
+  see `crates/cmd/src/commands/init.rs:15`); fresh consumer with same
+  URL + mount path re-attaches and pulls.  Asserts: pre-pull
+  `LAST_PULLED_SEQ` is "-" (unset); first pull reaches the SAME
+  watermark and SAME applied count as the original; second pull is a
+  no-op (regression guard that the rebuilt control table genuinely
+  persisted the reconstructed watermark).
+- **Numbering collision fix**: `git mv 540-recursive-sitegen.sh →
+  550-recursive-sitegen.sh` (the sitegen-over-mount test was
+  numerically colliding with the new watermark cluster; `run-test.sh`
+  resolves numeric prefixes with `find -name 'N-*.sh' | head -1`,
+  which would otherwise have aliased to the first alphabetical
+  match).  550 still exits SKIP and is the next revival target.
+- **Watermark values observed (for documentation)**: in a 3-file
+  producer + 0-extra-history setup, pull #1 → watermark 4–7 (varies
+  by mkdir count), pull #2 (no-op) → unchanged, pull #3 (one new
+  commit) → watermark +1.  These numbers correspond directly to
+  producer-side Delta versions; the bootstrap seed of "1" (`pull.rs:
+  140-151`) skips the producer's pond_init txn at version 1.
+- **Pre-existing tests still green**: 500, 501, 510, 520, 521, 522,
+  523, 530, 532, 533 (full sweep run after this batch).
+
 ### ✅ D5.8.6: Revive `532-cross-pond-path-boundaries.sh` and `533-cross-pond-factory-resolution.sh`
 - **Completed**: 2026-06-03
 - **Type**: REVIVAL (both scripts)
