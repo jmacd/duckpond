@@ -16,6 +16,41 @@
 
 ## 🟢 Done
 
+### ✅ D5.8.4: Rewrite `crates/cmd/scripts/duckpond-emergency` for current Delta schema + revive `522-emergency-recovery-tool.sh`
+- **Completed**: 2026-06-03
+- **Type**: BUG (out-of-date disaster-recovery tool) + REVIVAL
+- **Root Cause**: `duckpond-emergency` (v1.0.0) was written for the long-removed
+  chunked-parquet remote schema (`bundle_id`, `path`, `root_hash`, `total_size`,
+  `pond_txn_id`, `chunk_*` packed into a single parquet per bundle).  After
+  D4.5 + D5.x replaced that with a Delta-Lake-native backup table
+  (`partition_kind` in {manifest, checksum, data}, with explicit
+  `file_path`/`file_action`/`file_blake3`/`chunk_data`/`chunk_blake3` columns
+  and source-pond storage paths), the legacy script's SQL referenced
+  non-existent columns and would have failed on every command.
+- **Fix**: Rewrote the script (now v2.0.0) for the current schema:
+  - `list` / `info` / `extract` / `verify` / `export-all` user-facing surface
+    preserved.
+  - All SQL targets `read_parquet('s3://BUCKET/partition_kind=*/*.parquet',
+    hive_partitioning=true)` (works with configured `s3_*` settings, unlike
+    `delta_scan()` which forces EC2 IMDS).
+  - "Current snapshot" semantics implemented via a
+    `ROW_NUMBER() OVER (PARTITION BY file_path ORDER BY txn_seq DESC)` CTE
+    that picks the latest `add` per `file_path` (so removed files are
+    excluded from list/extract/verify).
+  - BLOB extraction via `hex(chunk_data)` + `xxd -r -p` (portable across
+    DuckDB versions, same trick as 521).
+- **Tests**: `522-emergency-recovery-tool.sh` (21/21 passes) covers info /
+  list / extract / verify / export-all + a BLAKE3 round-trip and
+  parquet-readability spot check.  500 / 501 / 510 / 520 / 521 / 523
+  regression-clean.
+- **Notes for future work**: The remote backup only replicates the
+  source-pond's parquet files (`pond_id=<u>/part_id=<v>/part-*.parquet`)
+  and `_large_files/<hash>` blobs.  The source pond's own `_delta_log/`
+  is *not* replicated (it's regenerable from the parquet files); the
+  S3 bucket has its own separate `_delta_log/` describing the remote
+  table itself.  Document this somewhere user-facing if/when we write
+  a public disaster-recovery guide.
+
 ### ✅ D5.8.3: Revive `520-remote-show-verification.sh` + `521-external-tool-verification.sh`
 - **Completed**: 2026-06-04
 - **Type**: REVIVAL
