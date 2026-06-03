@@ -50,6 +50,56 @@
 
 ## 🟢 Done
 
+### ✅ D5.8.6: Revive `532-cross-pond-path-boundaries.sh` and `533-cross-pond-factory-resolution.sh`
+- **Completed**: 2026-06-03
+- **Type**: REVIVAL (both scripts)
+- **Description**: Replaced the `DISABLED-D4` stubs (which mknod'd the
+  long-removed `remote` factory with `import:` YAML blocks) with shell
+  CLI versions of the two cross-pond invariants from `docs/d5.8-resume.md`
+  § 3 that already had Rust integration coverage in
+  `crates/cmd/tests/test_remote_cli.rs`.
+- **532 (invariant 1: foreign mount is strictly read-only)**: 15 checks.
+  After a cross-pond pull, every writing CLI verb that targets a path
+  inside `/imports/A/*` must exit non-zero with a "read-only"-flavored
+  error.  Verbs exercised: `pond copy host://... /imports/A/x`,
+  `pond mkdir /imports/A/newdir`, `pond mkdir /imports/A/data/newsub`,
+  `pond mknod sql-derived-table /imports/A/factory ...`.  Coexistence:
+  writes to local (non-mount) paths still succeed.  Path-namespace
+  isolation: B's local `/data/foo.txt` and `/imports/A/data/foo.txt`
+  coexist with distinct content.
+- **533 (invariant 2: foreign factories are NOT auto-run on consumer)**:
+  12 checks.  Producer installs both kinds of factory entries
+  (`/system/run/scratch` via `pond mknod sql-derived-table` and
+  `/sys/remotes/origin` via `pond backup add`) and pushes.  Consumer
+  cross-pond-imports, then performs a local write — bucket-A object
+  count stays unchanged (both `discover_post_commit_factories` pond_id
+  filter at `crates/steward/src/guard.rs:699` and the root-anchored
+  `/sys/remotes/*` path pattern at `discover_sys_remotes` correctly
+  skip the foreign entries).  Consumer then installs its own
+  `/sys/remotes/origin-b` → bucket-B; next local write grows bucket-B,
+  confirming local factories DO still auto-run.  Foreign entries
+  remain visible by explicit traversal under the mount, decorated
+  with A's pond_id tail — proof that filtering is per-entry skip at
+  scan time, not entry deletion.
+- **Findings during revival**:
+    - There are TWO post-commit auto-exec mechanisms, with two distinct
+      filter strategies for invariant 2:
+        (a) `/sys/remotes/*` (D4+ `pond backup add` entries) is scanned
+            with a root-anchored glob, so foreign mount entries simply
+            do not match the pattern.
+        (b) `/system/run/*` (legacy/manual `pond mknod` entries) is
+            scanned with a glob that *can* cross mount boundaries, so
+            an explicit `node.id().pond_id() != local_pond_id` filter
+            skips foreign matches.
+      The shell test exercises both by installing one of each on the
+      producer side.
+    - `pond list` does NOT truncate path components.  `/imports/A/sys`
+      really is the directory name (the steward uses `/sys/` for
+      its metadata; only the legacy/dynamic factory entries live under
+      `/system/`).  These are two separate trees and both need to be
+      consulted for cross-pond invariant testing.
+    - `pond mkdir -p` is supported (long form `--parents`).
+
 ### ✅ D5.8.5: Revive `530-cross-pond-import-minio.sh` against the D5.7b cross-pond CLI
 - **Completed**: 2026-06-03
 - **Type**: REVIVAL (+ exposed P1-BUG-LF-REPLICATION above)
