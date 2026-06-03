@@ -1,275 +1,256 @@
 #!/bin/bash
-# DISABLED-D4: legacy `pond run <remote-factory> show` and `verify` subcommands removed in D4.5; no D4 CLI equivalent yet.
-# EXPERIMENT: Verify backup extraction with external tools
+# REQUIRES: compose
+# EXPERIMENT: External-tool extraction + BLAKE3 round-trip on backup
+#
 # DESCRIPTION:
-#   - Create pond with test files
-#   - Push to local backup
-#   - Use 'show --script' to generate verification commands
-#   - Actually run the generated DuckDB commands to extract files
-#   - Verify BLAKE3 checksums match
+#   Replaces the legacy `pond run /system/run/10-remote show --script`
+#   verification flow.  In the D5.7b CLI the backup is a native Delta
+#   Lake table with columns `partition_kind`, `txn_seq`, `file_path`,
+#   `file_action`, `file_size`, `file_blake3`, `chunk_id`, `chunk_count`,
+#   `chunk_data`, `chunk_blake3` (see crates/sync-remote/src/schema.rs).
+#
+#   This test exercises the full "extract using only standard tools"
+#   path that 520 stopped just short of:
+#
+#     1. Pond1: init + `pond backup add origin` + write a small text
+#        file (guaranteed single-chunk) into /data/hello.txt + push.
+#     2. Use DuckDB to read the remote and pick one data-add row whose
+#        chunk_count = 1 (single-chunk Add).
+#     3. Use DuckDB `hex(chunk_data)` + `xxd -r -p` to extract that
+#        single chunk byte-for-byte.
+#     4. b3sum the extracted bytes and verify it matches the stored
+#        chunk_blake3 (hex equality).
+#     5. For a single-chunk file, also verify file_blake3 ==
+#        chunk_blake3 == b3sum(extracted bytes).
+#
+#   This proves that even without the `pond` binary, an operator with
+#   only `duckdb` + `b3sum` can extract source-pond data files and
+#   verify their integrity end-to-end.
 #
 # EXPECTED:
-#   - Generated scripts are valid and executable
-#   - DuckDB can query the Delta Lake table
-#   - Extracted files have correct BLAKE3 hashes
+#   - DuckDB sees the remote and reports >= one data-add row.
+#   - Extracted bytes have the correct length (matches file_size when
+#     chunk_count = 1).
+#   - b3sum(extracted) == chunk_blake3 (hex).
+#   - b3sum(extracted) == file_blake3 (hex) for a single-chunk file.
 #
-# REQUIREMENTS:
-#   - DuckDB with delta extension
-#   - b3sum (BLAKE3 hasher)
-#
+# History:
+#   Migrated D5.8.3: rewrote on top of the D5.7b backup CLI; legacy
+#   `pond run …/show --script` generator was removed in D4.5.  Schema
+#   changed from chunked-parquet (path/root_hash/total_size/pond_txn_id)
+#   to native Delta (file_path/file_blake3/file_size/txn_seq).
 set -e
 
-# DISABLED-D4 skip block (see header comment)
-echo "SKIP: this test is DISABLED-D4 (see header for details)" >&2
-exit 0
-
-
-echo "=== Experiment: External Tool Backup Verification ==="
+echo "=== Experiment: DuckDB BLAKE3 Round-Trip on Remote Backup ==="
 echo ""
 
 #############################
-# CHECK PREREQUISITES
+# CONFIGURATION
 #############################
 
-echo "=== Checking prerequisites ==="
+MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
+MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://minio:9000}"
+BUCKET_NAME="duckpond-extract-test"
 
-# Check for duckdb (should be pre-installed in container via Dockerfile)
-if command -v duckdb &>/dev/null; then
-    echo "✓ DuckDB available: $(duckdb --version 2>&1 | head -1)"
-else
-    echo "✗ DuckDB not available - this should be installed in the Dockerfile"
-    exit 1
-fi
+CHECKS_TOTAL=0
+CHECKS_FAILED=0
 
-# Check for b3sum (should be pre-installed in container via Dockerfile)
-if command -v b3sum &>/dev/null; then
-    echo "✓ b3sum available"
-else
-    echo "✗ b3sum not available - this should be installed in the Dockerfile"
-    exit 1
-fi
-
-#############################
-# SETUP POND WITH TEST DATA
-#############################
-
-echo ""
-echo "=== Setting up test pond ==="
-
-export POND=/pond
-pond init
-echo "✓ Pond initialized"
-
-pond mkdir /data
-pond mkdir /system
-pond mkdir /system/run
-
-# Create a test file with known content
-TEST_CONTENT="Hello, this is test data for verification.
-Line 2 of the test file.
-Line 3 with some numbers: 12345
-Line 4 with special chars: @#$%^&*()
-End of test file."
-
-echo "$TEST_CONTENT" > /tmp/testfile.txt
-ORIGINAL_B3SUM=$(b3sum /tmp/testfile.txt | cut -d' ' -f1)
-echo "✓ Original file BLAKE3: $ORIGINAL_B3SUM"
-
-pond copy host:///tmp/testfile.txt /data/testfile.txt
-echo "✓ Test file copied to pond"
-
-# Create a JSON file
-cat > /tmp/config.json << 'EOF'
-{
-  "name": "verification-test",
-  "version": "1.0",
-  "enabled": true
+check() {
+    local condition="$1"
+    local description="$2"
+    CHECKS_TOTAL=$((CHECKS_TOTAL + 1))
+    if eval "${condition}"; then
+        echo "  ✓ ${description}"
+    else
+        echo "  ✗ ${description}"
+        CHECKS_FAILED=$((CHECKS_FAILED + 1))
+    fi
 }
-EOF
-pond copy host:///tmp/config.json /data/config.json
-echo "✓ Config file copied to pond"
+
+check_eq() {
+    local description="$1"
+    local actual="$2"
+    local expected="$3"
+    CHECKS_TOTAL=$((CHECKS_TOTAL + 1))
+    if [[ "${actual}" == "${expected}" ]]; then
+        echo "  ✓ ${description} (${actual})"
+    else
+        echo "  ✗ ${description}: got '${actual}', expected '${expected}'"
+        CHECKS_FAILED=$((CHECKS_FAILED + 1))
+    fi
+}
 
 #############################
-# CONFIGURE AND PUSH BACKUP
+# PHASE 0: Environment
 #############################
 
-echo ""
-echo "=== Configuring backup ==="
+echo "=== Phase 0: Environment ==="
+if ! curl -s "${MINIO_ENDPOINT}/minio/health/live" >/dev/null; then
+    echo "[FAIL] MinIO not reachable at ${MINIO_ENDPOINT}"
+    echo "       Run via 'run-test.sh --compose 521'."
+    exit 1
+fi
+echo "[OK] MinIO reachable"
 
-BACKUP_PATH="/backup-test"
-mkdir -p "$BACKUP_PATH"
+command -v duckdb >/dev/null || { echo "[FAIL] duckdb missing"; exit 1; }
+command -v b3sum  >/dev/null || { echo "[FAIL] b3sum missing"; exit 1; }
+echo "[OK] DuckDB + b3sum present"
 
-cat > /tmp/remote-config.yaml << EOF
-url: "file://${BACKUP_PATH}"
-EOF
-
-pond mknod remote /system/run/10-remote --config-path /tmp/remote-config.yaml
-echo "✓ Remote backup configured at $BACKUP_PATH"
-
-# Manual push (auto-push already happened, but let's be explicit)
-pond run /system/run/10-remote push 2>/dev/null || true
-echo "✓ Backup pushed"
-
-#############################
-# TEST SHOW COMMAND
-#############################
-
-echo ""
-echo "=== Testing show command ==="
-
-# Basic show
-echo "--- Basic show output ---"
-pond run /system/run/10-remote show
-
-# Show with script
-echo ""
-echo "--- Saving verification script ---"
-pond run /system/run/10-remote show -- --script > /tmp/verify-script.txt 2>/dev/null
-echo "✓ Verification script saved to /tmp/verify-script.txt"
-echo "  Script size: $(wc -c < /tmp/verify-script.txt) bytes"
+mc alias set local "${MINIO_ENDPOINT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" 2>/dev/null
+mc rb --force "local/${BUCKET_NAME}" 2>/dev/null || true
+mc mb --ignore-existing "local/${BUCKET_NAME}"
 
 #############################
-# VERIFY WITH DUCKDB
+# PHASE 1: Pond + push
 #############################
 
 echo ""
-echo "=== Verifying with DuckDB ==="
+echo "=== Phase 1: Pond setup + push ==="
 
-# Install delta extension
-echo "Installing DuckDB extensions..."
-duckdb -c "INSTALL delta; LOAD delta;" 2>&1 || echo "(extensions may already be installed)"
+export POND=/pond1
+rm -rf "${POND}"
+pond init
+pond mkdir -p /data
 
-# Query the backup table
+# A small text file -- guarantees one source parquet whose chunk_count = 1.
+echo "hello duckpond" > /tmp/hello.txt
+pond copy "host:///tmp/hello.txt" /data/hello.txt
+
+pond backup add origin "s3://${BUCKET_NAME}" \
+    --region us-east-1 \
+    --endpoint "${MINIO_ENDPOINT}" \
+    --access-key-id "${MINIO_ROOT_USER}" \
+    --secret-access-key "${MINIO_ROOT_PASSWORD}" \
+    --allow-http
+
+pond push origin
+echo "[OK] Pond1 pushed"
+
+rm -f /tmp/hello.txt
+
+#############################
+# PHASE 2: Pick a single-chunk Add row via DuckDB
+#############################
+
 echo ""
-echo "--- Querying backup table ---"
-duckdb -c "
-INSTALL delta;
-LOAD delta;
-SELECT COUNT(*) as total_rows FROM delta_scan('${BACKUP_PATH}');
+echo "=== Phase 2: Pick a single-chunk Add row ==="
+
+DUCKDB_PRELUDE="
+INSTALL httpfs;     LOAD httpfs;
+SET s3_region='us-east-1';
+SET s3_endpoint='${MINIO_ENDPOINT#http://}';
+SET s3_url_style='path';
+SET s3_use_ssl=false;
+SET s3_access_key_id='${MINIO_ROOT_USER}';
+SET s3_secret_access_key='${MINIO_ROOT_PASSWORD}';
 "
 
-echo ""
-echo "--- Listing files in backup ---"
-duckdb -c "
-INSTALL delta;
-LOAD delta;
-SELECT DISTINCT path, total_size, root_hash 
-FROM delta_scan('${BACKUP_PATH}')
-ORDER BY path;
-"
+PQ_GLOB="s3://${BUCKET_NAME}/partition_kind=*/*.parquet"
 
-# Extract a file
-echo ""
-echo "--- Extracting files from backup ---"
+# Count how many distinct files have chunk_count = 1.
+SINGLE_CHUNK_COUNT=$(duckdb -noheader -csv -c "
+${DUCKDB_PRELUDE}
+SELECT COUNT(DISTINCT file_path)
+FROM read_parquet('${PQ_GLOB}', hive_partitioning=true)
+WHERE partition_kind='data' AND file_action='add' AND chunk_count=1;
+" 2>/dev/null | tr -d ' \r')
+echo "Distinct single-chunk Add files: ${SINGLE_CHUNK_COUNT}"
+check '[[ "${SINGLE_CHUNK_COUNT}" =~ ^[0-9]+$ ]] && [ "${SINGLE_CHUNK_COUNT}" -ge 1 ]' \
+    "DuckDB sees at least one single-chunk Add row"
 
-# Get the first delta log file info
-FIRST_FILE=$(duckdb -noheader -csv -c "
-INSTALL delta;
-LOAD delta;
-SELECT bundle_id, path, pond_txn_id
-FROM delta_scan('${BACKUP_PATH}')
-WHERE path LIKE '_delta_log/%'
+# Pick one: smallest file_size, deterministic ordering on file_path.
+PICK=$(duckdb -noheader -csv -c "
+${DUCKDB_PRELUDE}
+SELECT file_path, txn_seq, file_size,
+       hex(file_blake3) AS file_blake3_hex,
+       hex(chunk_blake3) AS chunk_blake3_hex
+FROM read_parquet('${PQ_GLOB}', hive_partitioning=true)
+WHERE partition_kind='data' AND file_action='add' AND chunk_count=1
+ORDER BY file_size, file_path
 LIMIT 1;
 " 2>/dev/null)
+echo "Picked row: ${PICK}"
 
-if [ -n "$FIRST_FILE" ]; then
-    BUNDLE_ID=$(echo "$FIRST_FILE" | cut -d',' -f1)
-    FILE_PATH=$(echo "$FIRST_FILE" | cut -d',' -f2)
-    TXN_ID=$(echo "$FIRST_FILE" | cut -d',' -f3)
-    
-    echo "Extracting: $FILE_PATH"
-    echo "  Bundle: $BUNDLE_ID"
-    echo "  TXN: $TXN_ID"
-    
-    # Extract using DuckDB - export as raw binary (requires DuckDB v1.4+)
-    EXTRACT_PATH="/tmp/extracted_file.bin"
-    duckdb -c "
-INSTALL delta;
-LOAD delta;
-COPY (
-    SELECT list_reduce(list(chunk_data ORDER BY chunk_id), (a, b) -> a || b) AS data
-    FROM delta_scan('${BACKUP_PATH}')
-    WHERE bundle_id = '${BUNDLE_ID}' 
-      AND path = '${FILE_PATH}'
-      AND pond_txn_id = ${TXN_ID}
-) TO '${EXTRACT_PATH}' (FORMAT BLOB);
-" 2>&1
-    
-    if [ -f "$EXTRACT_PATH" ]; then
-        echo "✓ File extracted to $EXTRACT_PATH"
-        echo "  Extracted size: $(wc -c < "$EXTRACT_PATH") bytes"
-        
-        # Show first few bytes
-        echo "  First 100 bytes:"
-        head -c 100 "$EXTRACT_PATH" | cat -v
-        echo ""
-    else
-        echo "⚠ Extraction produced no output"
-    fi
-else
-    echo "⚠ No files found to extract"
-fi
+PICK_PATH=$(echo "${PICK}"   | cut -d',' -f1)
+PICK_TXN=$(echo  "${PICK}"   | cut -d',' -f2)
+PICK_SIZE=$(echo "${PICK}"   | cut -d',' -f3)
+PICK_FBLAKE=$(echo "${PICK}" | cut -d',' -f4 | tr 'A-Z' 'a-z')
+PICK_CBLAKE=$(echo "${PICK}" | cut -d',' -f5 | tr 'A-Z' 'a-z')
 
-# Get stored root_hash for comparison
-echo ""
-echo "--- Checking stored hashes ---"
-duckdb -c "
-INSTALL delta;
-LOAD delta;
-SELECT DISTINCT path, root_hash
-FROM delta_scan('${BACKUP_PATH}')
-WHERE path LIKE '_delta_log/%'
-ORDER BY path
-LIMIT 5;
-"
+echo "  file_path:    ${PICK_PATH}"
+echo "  txn_seq:      ${PICK_TXN}"
+echo "  file_size:    ${PICK_SIZE}"
+echo "  file_blake3:  ${PICK_FBLAKE}"
+echo "  chunk_blake3: ${PICK_CBLAKE}"
+
+# For a single-chunk Add, file_blake3 == chunk_blake3 by definition
+# (BLAKE3 of "the file" == BLAKE3 of "its only chunk").
+check_eq "single-chunk: file_blake3 == chunk_blake3" "${PICK_FBLAKE}" "${PICK_CBLAKE}"
 
 #############################
-# VERIFY BUILT-IN COMMAND
+# PHASE 3: Extract chunk_data via DuckDB COPY (FORMAT BLOB)
 #############################
 
 echo ""
-echo "=== Running built-in verify command ==="
-pond run /system/run/10-remote verify
-echo "✓ Built-in verify passed"
+echo "=== Phase 3: Extract chunk bytes via DuckDB ==="
+
+EXTRACT_PATH="/tmp/extracted.bin"
+rm -f "${EXTRACT_PATH}"
+
+# DuckDB doesn't have a portable raw-binary COPY across versions, so we
+# hex-encode the BLOB and pipe through xxd to reconstruct the bytes
+# exactly.  This is the same trick crates/cmd/scripts/duckpond-emergency
+# uses (base64 there; hex is even simpler and avoids newline issues).
+HEX_OUT=$(duckdb -noheader -csv -c "
+${DUCKDB_PRELUDE}
+SELECT hex(chunk_data)
+FROM read_parquet('${PQ_GLOB}', hive_partitioning=true)
+WHERE partition_kind='data' AND file_action='add'
+  AND file_path = '${PICK_PATH}'
+  AND txn_seq   = ${PICK_TXN}
+  AND chunk_id  = 0;
+" 2>/dev/null | tr -d ' \r\n')
+
+printf "%s" "${HEX_OUT}" | xxd -r -p > "${EXTRACT_PATH}"
+
+EXTRACT_SIZE=$(wc -c < "${EXTRACT_PATH}" | tr -d ' ')
+echo "Extracted bytes: ${EXTRACT_SIZE}"
+check_eq "extracted byte count matches file_size" "${EXTRACT_SIZE}" "${PICK_SIZE}"
 
 #############################
-# VERIFY SCRIPT STRUCTURE
+# PHASE 4: BLAKE3 round-trip
 #############################
 
 echo ""
-echo "=== Checking generated script structure ==="
+echo "=== Phase 4: BLAKE3 round-trip ==="
 
-# Check that script has all expected sections
-check_section() {
-    if grep -q "$1" /tmp/verify-script.txt; then
-        echo "✓ Section found: $1"
-    else
-        echo "✗ Section missing: $1"
-    fi
-}
+ACTUAL_B3=$(b3sum --no-names "${EXTRACT_PATH}" | tr -d ' \n' | tr 'A-Z' 'a-z')
+echo "b3sum(extracted): ${ACTUAL_B3}"
+echo "stored chunk_blake3:  ${PICK_CBLAKE}"
+echo "stored file_blake3:   ${PICK_FBLAKE}"
 
-check_section "ENVIRONMENT SETUP"
-check_section "LIST ALL BACKED UP FILES"
-check_section "EXTRACT FILES FROM BACKUP"
-check_section "VERIFY BLAKE3 CHECKSUMS"
-check_section "ALTERNATIVE: VERIFY WITH SHA256"
-check_section "EXTRACT ALL FILES"
-check_section "TOOL INSTALLATION"
+check_eq "b3sum(extracted) == chunk_blake3" "${ACTUAL_B3}" "${PICK_CBLAKE}"
+check_eq "b3sum(extracted) == file_blake3"  "${ACTUAL_B3}" "${PICK_FBLAKE}"
+
+#############################
+# CLEANUP
+#############################
+
+rm -rf /pond1 "${EXTRACT_PATH}"
+mc rb --force "local/${BUCKET_NAME}" 2>/dev/null || true
 
 #############################
 # SUMMARY
 #############################
 
 echo ""
-echo "=== Test Summary ==="
-echo ""
-echo "✓ Pond created with test files"
-echo "✓ Backup pushed to local storage"
-echo "✓ 'show' command displays file listing"
-echo "✓ 'show --script' generates verification script"
-echo "✓ DuckDB can query the Delta Lake backup"
-echo "✓ Files can be extracted using DuckDB"
-echo "✓ Built-in verify command confirms integrity"
-echo "✓ Generated script has all expected sections"
-echo ""
-echo "=== Experiment Complete ==="
+echo "=== VERIFICATION ==="
+echo "Total checks: ${CHECKS_TOTAL}, failed: ${CHECKS_FAILED}"
+if [ "${CHECKS_FAILED}" -eq 0 ]; then
+    echo "[OK] Test passed"
+    exit 0
+else
+    echo "[FAIL] ${CHECKS_FAILED} check(s) failed"
+    exit 1
+fi

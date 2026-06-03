@@ -16,6 +16,37 @@
 
 ## 🟢 Done
 
+### ✅ D5.8.3: Revive `520-remote-show-verification.sh` + `521-external-tool-verification.sh`
+- **Completed**: 2026-06-04
+- **Type**: REVIVAL
+- **Description**: Replaced the disabled (`DISABLED-D4`) scripts — both of which
+  drove the removed `pond run /system/run/10-remote show` flow against a long-gone
+  chunked-parquet schema (`bundle_id`, `path`, `root_hash`, `total_size`,
+  `pond_txn_id`) — with D5.7b-shaped tests built on top of `pond backup add`,
+  `pond push`, `pond log`, `pond config`, `mc ls`, and DuckDB over the current
+  Delta-Lake-native backup schema (`partition_kind`, `txn_seq`, `file_path`,
+  `file_blake3`, `chunk_data`, …).
+  - **520**: 14/14 — verifies pond setup, push, transaction log shape, pond id
+    config, `mc ls` of bucket layout (`_delta_log/`, `partition_kind=manifest/`,
+    `partition_kind=checksum/`, `partition_kind=data/`), and DuckDB queries over
+    `read_parquet('s3://.../partition_kind=*/*.parquet', hive_partitioning=true)`
+    against partition_kind/file_path/manifest. Confirms the storage-level layout
+    — distinct source `pond_id`, manifest `txn_seq` count, data partition with
+    `pond_id=<uuid>/part_id=<uuid>/part-*.parquet` references — i.e. the backup
+    replicates the *underlying storage*, not just the logical filesystem.
+  - **521**: 5/5 — end-to-end "extract using only standard tools": push a tiny
+    `hello.txt`, DuckDB picks the single-chunk Add row, `hex(chunk_data)` →
+    `xxd -r -p` extracts bytes verbatim, `b3sum` of the extracted bytes equals
+    both the stored `chunk_blake3` and `file_blake3` (single-chunk identity).
+- **Notes**:
+  - DuckDB's `delta_scan()` ignores configured `s3_*` settings and tries EC2
+    IMDS (`169.254.169.254`); switched to `read_parquet(..., hive_partitioning
+    =true)` over `s3://BUCKET/partition_kind=*/*.parquet`. For freshly-pushed
+    tables (no vacuum / no removes) the row set is equivalent to `delta_scan`.
+  - DuckDB binary BLOB extraction: `hex(...)` + `xxd -r -p` is the portable
+    cross-version path (avoids `COPY (...) TO ... (FORMAT BLOB)` quirks).
+- **Tests**: 520 (14/14), 521 (5/5); 500/501/510/523 regression-clean.
+
 ### ✅ D5.8.2: Revive `523-emergency-erase-and-auto-bucket.sh`
 - **Completed**: 2026-06-03
 - **Type**: REVIVAL
