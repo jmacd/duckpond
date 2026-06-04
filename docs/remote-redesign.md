@@ -2,9 +2,10 @@
 
 ## Status
 
-Architectural goals achieved; documentation reconciliation and one
-P1 correctness bug remain before cutover (see § "Open after D5.8"
-below).
+Architectural goals achieved; the P1 correctness blocker is now closed
+(D5.9, `d5bf4b68`).  Documentation reconciliation and D6 CLI verb gaps
+remain (see § "Open after D5.8" below), but the branch is functionally
+ready for production cutover.
 
 | Phase | Status | Commit |
 |---|---|---|
@@ -32,36 +33,40 @@ below).
 | D5.7b.5: attach-time mount/store_id conflict checks | done | `bfcfe76e` |
 | D5.7b docs (cli-reference.md update for D5.7b verbs) | done | `3914cdd1` |
 | D5.8: revive 13 disabled testsuite scripts | done | `01987ebb` .. `75eb4139` (D5.8.1-D5.8.9) |
+| D5.9: fix P1-BUG-LF-REPLICATION (large-file blob replication) | done | `d5bf4b68` |
 | D6: cross-pond model migration + operator-guide rewrite | partial | see § "Open after D5.8" |
 
-Active branch: `jmacd/52` (88 commits ahead of `main` as of `75eb4139`).
+Active branch: `jmacd/52` (89 commits ahead of `main` as of `d5bf4b68`).
 The D5 row in earlier revisions of this doc was a single "pending" line;
-it expanded into 14 sub-phases (D5.1 through D5.8.9) during execution.
+it expanded into 15 sub-phases (D5.1 through D5.9) during execution.
 The original D5 design (lines 556-578) accurately predicted the technical
 shape of the work; the sub-phasing is a record of how it actually landed.
 
 ## Open after D5.8
 
-D5.8 closed the testsuite revival arc on the D5.7b CLI surface, but
-three categories of work remain before this branch can replace the
-old duckpond in production:
+D5.9 closed the correctness blocker for cutover.  Two categories of
+work remain before this branch can fully replace the old duckpond in
+production:
 
-### Correctness blocker (P1)
+### Correctness blocker (P1) -- CLOSED
 
-- **P1-BUG-LF-REPLICATION** (`testsuite/BACKLOG.md`): files larger
+- **P1-BUG-LF-REPLICATION** (closed by D5.9, `d5bf4b68`): files larger
   than `LARGE_FILE_THRESHOLD` (64 KiB) are externalized to
-  `_large_files/blake3=<hash>.parquet` blobs that live outside the
-  `pond_id=<u>/part_id=<v>/` partition tree. `actions_at_version`
-  in `crates/steward/src/remote_adapter.rs` enumerates only the
-  partition parquet, so the receiver gets the OpLog row (with
-  correct metadata, size, blake3) but never the underlying blob.
-  `pond list` works; `pond cat` returns zero bytes.
-  Discovered via D5.8.5 testsuite revival; the 80 KiB `big.bin`
-  case in `tests/530-cross-pond-import-minio.sh` was removed to
-  keep the test green while the bug is open. Fix requires a
-  side-content pass over Add paths in `actions_at_version` (or
-  inlining at push time and re-externalizing on receive).
-  **This is the single correctness blocker for cutover.**
+  `_large_files/blake3_16=<pfx>/blake3=<hash>.parquet` blobs that live
+  outside the `pond_id=<u>/part_id=<v>/` partition tree.  Before the
+  fix, `actions_at_version` enumerated only the partition parquet, so
+  the receiver got the OpLog row (with correct metadata, size, blake3)
+  but never the underlying blob.  Fixed by adding an
+  `external_blobs_referenced_by` hook on the `RemoteSteward` trait;
+  the duckpond adapter overrides it to scan each partition parquet for
+  rows with `content IS NULL`, resolves their `blake3` to on-disk
+  paths, and `Remote::push` emits the blobs as additional dedup'd
+  `DataAdd` rows.  `apply_pulled_bundle` splits incoming adds by
+  `_large_files/` prefix and writes blobs without recording a Delta
+  `Add` action.  Regression coverage: new Rust integration test
+  `pond_remote_push_pull_large_file_roundtrip`, reinstated 80 KiB
+  `big.bin` case in `tests/530-cross-pond-import-minio.sh`, and bumped
+  `INITIAL_ROWS` to 6000 in `tests/510-synth-logs-replication-cycle.sh`.
 
 ### Deferred carry-forwards from D4/D5
 
