@@ -2,20 +2,114 @@
 
 ## Status
 
-Plan agreed; phased execution begun.
+Architectural goals achieved; documentation reconciliation and one
+P1 correctness bug remain before cutover (see § "Open after D5.8"
+below).
 
 | Phase | Status | Commit |
 |---|---|---|
 | Plan | done | `c2b8cc68` (this doc) |
 | D1: relocate sandbox crates | done | `bd965792` |
 | D2: prep (sync-* deps wired) | done | `6c75e025` |
-| D2: substantive refactor | done | see `git log --grep "D2 substantive"` |
+| D2: substantive refactor | done | `85eba5c4` |
 | D3: deferred — folded into D4 | — | — |
 | D4: replace legacy remote with `sync_remote::Remote` | done | `abf0d5c0` .. `5cd1609b` (D4.1-D4.6) |
-| D5: tlogfs partition by `(pond_id, part_id)` | pending | — |
-| D6: cross-pond model migration + operator-guide rewrite | pending | — |
+| D4.7: D4 documentation update | done | `a9bbf6eb` |
+| D4.8: auto-init remote Delta table in `pond remote add` | done | `9f3944d6` |
+| D5.1: partition tlogfs by `(pond_id, part_id)` | done | `1137d81d` |
+| D5.2: pond identity owned by data-table bootstrap row | done | `2d03c946` |
+| D5.3: `Remote::push` filters by local `pond_id` partition | done | `50956974` |
+| D5.4: `bootstrap_consumer` + `Ship::create_replica` (first-pull) | done | `2f1ee2ab` |
+| D5.5: `compute_live_checksums` for tlogfs row schema | done | `ccecc54a` |
+| D5.6: drop `data_delta_version=0` clamp from `Remote::push` | done | `1f2e2811` |
+| D5.7a: snapshot partition checksums in `record_data_committed` | done | `a1367d90` |
+| D5.7a.1: process write lock + drop read-tx control records | done | `c55d9bd3` |
+| D5.7a.2: thread `FinalizedCommit` version through commit chain | done | `fbc33b43` |
+| D5.7b.1: split `remote add` (pull) vs `backup add` (push) | done | `4cb992d4` |
+| D5.7b.2: first-pull cross-pond mount materialization | done | `7e763a42` |
+| D5.7b.3: read-only foreign mounts + scoped auto-exec | done | `6632f1ea` |
+| D5.7b.4: `remote remove` detach (default) and `--purge` | done | `2f95f99b` |
+| D5.7b.5: attach-time mount/store_id conflict checks | done | `bfcfe76e` |
+| D5.7b docs (cli-reference.md update for D5.7b verbs) | done | `3914cdd1` |
+| D5.8: revive 13 disabled testsuite scripts | done | `01987ebb` .. `75eb4139` (D5.8.1-D5.8.9) |
+| D6: cross-pond model migration + operator-guide rewrite | partial | see § "Open after D5.8" |
 
-Active branch: `jmacd/sandbox_sync` (formerly `jmacd/50`).
+Active branch: `jmacd/52` (88 commits ahead of `main` as of `75eb4139`).
+The D5 row in earlier revisions of this doc was a single "pending" line;
+it expanded into 14 sub-phases (D5.1 through D5.8.9) during execution.
+The original D5 design (lines 556-578) accurately predicted the technical
+shape of the work; the sub-phasing is a record of how it actually landed.
+
+## Open after D5.8
+
+D5.8 closed the testsuite revival arc on the D5.7b CLI surface, but
+three categories of work remain before this branch can replace the
+old duckpond in production:
+
+### Correctness blocker (P1)
+
+- **P1-BUG-LF-REPLICATION** (`testsuite/BACKLOG.md`): files larger
+  than `LARGE_FILE_THRESHOLD` (64 KiB) are externalized to
+  `_large_files/blake3=<hash>.parquet` blobs that live outside the
+  `pond_id=<u>/part_id=<v>/` partition tree. `actions_at_version`
+  in `crates/steward/src/remote_adapter.rs` enumerates only the
+  partition parquet, so the receiver gets the OpLog row (with
+  correct metadata, size, blake3) but never the underlying blob.
+  `pond list` works; `pond cat` returns zero bytes.
+  Discovered via D5.8.5 testsuite revival; the 80 KiB `big.bin`
+  case in `tests/530-cross-pond-import-minio.sh` was removed to
+  keep the test green while the bug is open. Fix requires a
+  side-content pass over Add paths in `actions_at_version` (or
+  inlining at push time and re-externalizing on receive).
+  **This is the single correctness blocker for cutover.**
+
+### Deferred carry-forwards from D4/D5
+
+- **`Remote::restart_from_compact` not generic over `RemoteSteward`**
+  (originally noted as a D4 carry-forward; still pending). Currently
+  mirror-only; cross-pond consumers cannot restart from a compacted
+  remote without manual Rust glue.
+- **Mirror-restart bootstrap is Rust-only** via
+  `ShipContext::create_pond_for_restoration`; cross-pond first-pull
+  works through the CLI, but mirror-restart from a fresh local
+  directory does not.
+- **Physical vacuum of purged foreign `pond_id` rows from the Delta
+  log** (D5.7b.4 deferral). Correctness-safe (rows are unreachable
+  by path after `--purge`); they remain in the log until a future
+  partitioned-delete compaction.
+
+### D6 surface gaps
+
+The D6 CLI plan at lines 593-602 of this doc enumerates verbs that
+have not all shipped:
+
+| Verb | Status | Notes |
+|------|--------|-------|
+| `pond init` | shipped | |
+| `pond init --from-remote` | not shipped | Replaced by automatic bootstrap on `pond remote add NAME URL /` (mirror-restart pull mode). |
+| `pond remote attach` | shipped as `pond remote add` | D5.7b.1 names. |
+| `pond remote detach` | shipped as `pond remote remove` | Default = detach; `--purge` = unlink mount entry. |
+| `pond push` / `pond pull` | shipped | |
+| `pond maintain` | shipped | |
+| `pond status` | **not shipped** | Operator-facing aggregate of pond + remotes + lifecycle states. |
+| `pond log` | shipped | |
+| `pond verify` | **not shipped** | Operator-facing wrapper around `verify_against_remote`. |
+| `pond recover` | shipped | Plus `pond emergency` for destructive recovery. |
+| `pond restart-from-compact` | **not shipped** | Blocked by the carry-forward above. |
+| `pond rebuild-control` | **not shipped** | Operator-driven control-table reset. |
+
+### Documentation reconciliation
+
+- **`docs/operator-guide.md`** still carries the "D4 update"
+  warning at lines 3-10 noting that examples no longer work and
+  that "a full rewrite of this guide is tracked under D6." Either
+  rewrite it on the D5.7b/D5.8 surface, or move it to
+  `docs/archive/` and point operators at `docs/cli-reference.md`.
+- **`docs/operator-interface-plan.md`** likewise predates D4 and
+  needs the same disposition.
+- **This document's** phase table was updated in this round to
+  reflect actual D5 sub-phasing; the design narrative at lines
+  556-602 is still accurate as a record of intent.
 
 ## Background
 
