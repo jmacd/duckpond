@@ -90,6 +90,11 @@ echo "--- Step 4: Verify transaction log ---"
 LOG_OUT=$(pond log --limit 5)
 echo "$LOG_OUT"
 
-check 'echo "$LOG_OUT" | grep -q "apply"' "transaction log contains apply"
+# Post-D2 the control table no longer stores `cli_args`, so `pond log` cannot
+# print the originating command name.  Assert instead that the first apply
+# produced a committed write transaction (the second apply is idempotent and
+# rolls back without committing).
+check 'echo "$LOG_OUT" | grep -q "(write)"' "transaction log contains a write transaction"
+check 'echo "$LOG_OUT" | grep -q "COMMITTED"' "transaction log contains a COMMITTED transaction"
 
 check_finish
