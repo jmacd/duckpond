@@ -10,7 +10,7 @@
 //! property identifies the pond family; all push and pull operations
 //! validate this against the steward's `store_id` first.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -1024,6 +1024,13 @@ impl Remote {
         }
 
         // 7. DataAdd rows (one per chunk per added file).
+        // For each Delta-managed Add, also enumerate any external
+        // content-addressed blobs the steward says it references
+        // (the duckpond `_large_files/blake3=…parquet` layer).
+        // Blobs are deduplicated across all adds so a blob shared
+        // by two partition parquets is sent once.
+        let mut sent_blobs: HashSet<String> = HashSet::new();
+        let mut extra_blob_paths: Vec<String> = Vec::new();
         for add in &adds {
             let bytes = steward.read_data_file(&add.path)?;
             let chunked = chunk_bytes(&bytes);
@@ -1034,6 +1041,48 @@ impl Remote {
                     ts_micros: now,
                     body: RowBody::DataAdd {
                         file_path: add.path.clone(),
+                        file_size: chunked.file_size,
+                        file_blake3: chunked.file_blake3,
+                        chunk_count,
+                        chunk_id: chunk.chunk_id,
+                        chunk_data: chunk.chunk_data,
+                        chunk_blake3: chunk.chunk_blake3,
+                    },
+                });
+            }
+            // Enumerate external blobs referenced by this partition
+            // parquet.  Generic stewards (without an external-blob
+            // layer) return an empty Vec via the trait default.
+            let blob_paths = steward.external_blobs_referenced_by(&add.path, &bytes)?;
+            for blob_path in blob_paths {
+                if sent_blobs.insert(blob_path.clone()) {
+                    extra_blob_paths.push(blob_path);
+                }
+            }
+        }
+
+        // Validate every extra blob path, then chunk and emit its
+        // bytes as additional DataAdd rows.  Receiver disambiguates
+        // by path-shape (e.g., `_large_files/` prefix) and skips the
+        // Delta `Add` action for these.
+        for blob_path in &extra_blob_paths {
+            steward.validate_local_data_path(blob_path).map_err(|e| {
+                RemoteError::Schema(format!(
+                    "push filter (external blob `{}`): {}",
+                    blob_path, e
+                ))
+            })?;
+        }
+        for blob_path in extra_blob_paths {
+            let bytes = steward.read_data_file(&blob_path)?;
+            let chunked = chunk_bytes(&bytes);
+            let chunk_count = chunked.chunk_count();
+            for chunk in chunked.chunks {
+                rows.push(RemoteRow {
+                    txn_seq,
+                    ts_micros: now,
+                    body: RowBody::DataAdd {
+                        file_path: blob_path.clone(),
                         file_size: chunked.file_size,
                         file_blake3: chunked.file_blake3,
                         chunk_count,

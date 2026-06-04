@@ -26,6 +26,7 @@ arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
 datafusion-functions-json = { workspace = true }
@@ -33,6 +34,7 @@ deltalake = { workspace = true }
 fs2 = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true }
+parquet = { workspace = true }
 provider = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }

@@ -228,6 +228,137 @@ async fn pond_remote_push_pull_roundtrip() {
         .expect("list src");
 }
 
+/// Regression test for P1-BUG-LF-REPLICATION (D5.9): a file larger than
+/// `tlogfs::large_files::LARGE_FILE_THRESHOLD` (64 KiB) is externalized
+/// into `<pond>/data/_large_files/blake3_16=…/blake3=….parquet`, and
+/// the partition parquet committed to Delta carries only a `blake3`
+/// reference, not the bytes.  Before D5.9, `Steward::actions_at_version`
+/// listed only Delta `Add` paths, so the body blob never made it into
+/// the push bundle.  This test pushes such a file and verifies the
+/// replica sees the full byte content via `read_file_path_to_vec`.
+#[tokio::test]
+async fn pond_remote_push_pull_large_file_roundtrip() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let src_pond = scratch.path().join("src_pond");
+    let dst_pond = scratch.path().join("dst_pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    // 80 KiB > LARGE_FILE_THRESHOLD (64 KiB).  Use a non-trivial
+    // byte pattern so any silent truncation/replacement is detected.
+    let big: Vec<u8> = (0..80 * 1024).map(|i| (i as u8).wrapping_mul(31)).collect();
+    assert!(
+        big.len() > tlogfs::large_files::LARGE_FILE_THRESHOLD,
+        "test payload must exceed LARGE_FILE_THRESHOLD"
+    );
+
+    // 1) Source pond + one user write transaction.
+    let src_ctx = ctx_for(&src_pond, vec!["pond", "init"]);
+    init_command(&src_ctx).await.expect("init src");
+    write_small_file(&src_ctx, "/big.bin", &big, vec!["copy", "big.bin"])
+        .await
+        .expect("write big.bin");
+
+    // Sanity: confirm the source actually wrote the bytes through the
+    // large-file path (a `_large_files/` directory must now exist).
+    {
+        let large_dir = src_pond.join("data").join("_large_files");
+        assert!(
+            large_dir.exists(),
+            "_large_files/ should exist after writing a >64KiB file: {:?}",
+            large_dir
+        );
+    }
+
+    // 2) Create the remote bucket as a fresh Delta table.
+    {
+        let store_id = {
+            let ship = src_ctx.open_pond().await.expect("open src");
+            ship.control_table().pond_id_uuid()
+        };
+        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+            .await
+            .expect("create remote");
+    }
+
+    // 3) Attach + push.
+    add_backup_command(
+        &src_ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup add");
+    push_command(&src_ctx, Some("origin".to_string()))
+        .await
+        .expect("push");
+
+    // 4) Bootstrap dst pond as a replica + pull.
+    let remote_for_pull = sync_remote::Remote::open_at_url(&remote_url, Default::default())
+        .await
+        .expect("open remote for bootstrap");
+    {
+        let mut dst = steward::Ship::create_replica(&dst_pond, remote_for_pull.store_id())
+            .await
+            .expect("create dst replica");
+        let mut adapter = ShipRemoteSteward::new(&mut dst);
+        remote_for_pull
+            .bootstrap_consumer(&mut adapter)
+            .await
+            .expect("bootstrap dst from remote");
+    }
+    let dst_ctx = ctx_for(&dst_pond, vec!["pond", "pull"]);
+    add_remote_command(
+        &dst_ctx,
+        "origin",
+        &remote_url,
+        "/",
+        None,
+        None,
+        None,
+        None,
+        false,
+        true,
+    )
+    .await
+    .expect("re-attach origin on dst");
+    pull_command(&dst_ctx, Some("origin".to_string()))
+        .await
+        .expect("pull origin on dst");
+
+    // 5) The replica's `_large_files/` directory must now exist with
+    //    the body blob; otherwise we have a regression of the bug.
+    {
+        let dst_large = dst_pond.join("data").join("_large_files");
+        assert!(
+            dst_large.exists(),
+            "replica is missing _large_files/ (P1-BUG-LF-REPLICATION regression): {:?}",
+            dst_large
+        );
+    }
+
+    // 6) Byte-for-byte verification through the regular read path
+    //    (which goes through OplogEntry -> find_large_file_path -> blob).
+    let bytes = read_small_file(&dst_ctx, "/big.bin")
+        .await
+        .expect("read /big.bin on dst");
+    assert_eq!(
+        bytes.len(),
+        big.len(),
+        "replica byte length differs from source"
+    );
+    assert_eq!(bytes, big, "replica content differs from source");
+}
+
 /// `pond push` with no remotes is a no-op success.
 #[tokio::test]
 async fn pond_push_no_remotes_is_noop() {

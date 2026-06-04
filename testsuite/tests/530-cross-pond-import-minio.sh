@@ -10,8 +10,9 @@
 #       1. init (gets pond_id_A).
 #       2. write a mixed tree under /data:
 #            /data/sensors.csv         (data, ~200 bytes)
-#            /data/big.bin             (data, ~80 KiB -> large-file path)
+#            /data/sites.csv           (data, multi-add bundling)
 #            /data/nested/readme.txt   (data, in subdirectory)
+#            /data/big.bin             (data, 80 KiB -> large-file path)
 #       3. pond backup add origin URL
 #       4. pond push origin
 #
@@ -131,14 +132,14 @@ pond copy host:///tmp/sites.csv /data/sites.csv >/dev/null
 echo "Hello from upstream pond A." > /tmp/readme.txt
 pond copy host:///tmp/readme.txt /data/nested/readme.txt >/dev/null
 
-# NOTE: We deliberately keep every file under the 64KiB large-file
-# threshold here.  Large files travel as external blobs in
-# `<pond>/data/_large_files/blake3=<hash>.parquet`, and as of D5.7b
-# `sync_remote::push` does NOT include those blobs in the bundle --
-# only the Delta partition parquet files (OpLog rows) are pushed.
-# Cross-pond pull therefore reconstructs the OpLog row but cannot
-# satisfy reads through the mount.  Tracked as a separate bug; see
-# `testsuite/BACKLOG.md` D5.8.5 notes.
+# 80 KiB > LARGE_FILE_THRESHOLD (64 KiB).  Exercises the large-file
+# replication path through cross-pond import: the body is externalized
+# to `<pond>/data/_large_files/blake3_16=…/blake3=….parquet` on A, and
+# `sync_remote::push` must include those external blobs in the bundle
+# alongside the Delta partition parquet so B can satisfy reads through
+# the mount (P1-BUG-LF-REPLICATION, fixed in D5.9).
+python3 -c "import sys; sys.stdout.buffer.write(bytes((i * 31) & 0xff for i in range(80 * 1024)))" > /tmp/big.bin
+pond copy host:///tmp/big.bin /data/big.bin >/dev/null
 
 # Capture A's pond_id (uuid hex with dashes) for later provenance check.
 POND_ID_A=$(pond config 2>/dev/null | awk '/^Pond ID:/ {print $NF; exit}')
@@ -166,10 +167,12 @@ echo "Push complete."
 SENSORS_HASH_A=$(pond cat /data/sensors.csv 2>/dev/null | md5sum | cut -d' ' -f1)
 SITES_HASH_A=$(pond cat /data/sites.csv 2>/dev/null | md5sum | cut -d' ' -f1)
 README_HASH_A=$(pond cat /data/nested/readme.txt 2>/dev/null | md5sum | cut -d' ' -f1)
+BIG_HASH_A=$(pond cat /data/big.bin 2>/dev/null | md5sum | cut -d' ' -f1)
 echo "Pond A hashes:"
 echo "  sensors.csv:        ${SENSORS_HASH_A}"
 echo "  sites.csv:          ${SITES_HASH_A}"
 echo "  nested/readme.txt:  ${README_HASH_A}"
+echo "  big.bin (80 KiB):   ${BIG_HASH_A}"
 
 #############################
 # POND B — CONSUMER
@@ -229,15 +232,19 @@ check "imports/A/data listing mentions sites.csv" \
     "grep -q 'sites.csv' /tmp/b-list-data.txt"
 check "imports/A/data listing mentions nested" \
     "grep -q 'nested' /tmp/b-list-data.txt"
+check "imports/A/data listing mentions big.bin" \
+    "grep -q 'big.bin' /tmp/b-list-data.txt"
 
 echo ""
 echo "=== Phase 6: Byte-faithful import (md5 round-trip) ==="
 SENSORS_HASH_B=$(pond cat /imports/A/data/sensors.csv 2>/dev/null | md5sum | cut -d' ' -f1)
 SITES_HASH_B=$(pond cat /imports/A/data/sites.csv 2>/dev/null | md5sum | cut -d' ' -f1)
 README_HASH_B=$(pond cat /imports/A/data/nested/readme.txt 2>/dev/null | md5sum | cut -d' ' -f1)
+BIG_HASH_B=$(pond cat /imports/A/data/big.bin 2>/dev/null | md5sum | cut -d' ' -f1)
 check_eq "sensors.csv survives cross-pond import" "${SENSORS_HASH_B}" "${SENSORS_HASH_A}"
 check_eq "sites.csv (multi-add bundle) survives cross-pond import" "${SITES_HASH_B}" "${SITES_HASH_A}"
 check_eq "nested/readme.txt survives cross-pond import" "${README_HASH_B}" "${README_HASH_A}"
+check_eq "big.bin (>64KiB large-file) survives cross-pond import" "${BIG_HASH_B}" "${BIG_HASH_A}"
 
 echo ""
 echo "=== Phase 7: Local data on B is unaffected by the import ==="

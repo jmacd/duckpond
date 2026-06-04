@@ -7,40 +7,6 @@
 
 ## 🔴 Open Items
 
-### P1-BUG-LF-REPLICATION: `_large_files/blake3=<hash>.parquet` blobs are not replicated by sync_remote push/pull
-- **Type**: BUG (discovered via D5.8.5 testsuite revival)
-- **Symptom**: After `pond push origin` + `pond pull` to a fresh pond, files
-  >64KiB (i.e., those that took the externalization path on the source) can
-  be `pond list`-ed (correct metadata, size, blake3) but `pond cat` returns
-  zero bytes.
-- **Root cause**: `Steward::actions_at_version` (in `crates/steward/src/remote_adapter.rs`)
-  enumerates Delta `Add` actions for the local pond. These are paths of the
-  form `pond_id=<u>/part_id=<v>/part-N-N.parquet` — the partition parquet that
-  contains the OpLog *row* describing the file.  For a large file, that row
-  carries a `blake3` reference into `_large_files/blake3=<hash>.parquet`,
-  which lives outside the partition tree and is therefore never enumerated,
-  read, chunked, or sent in the bundle.  The receiving side's
-  `apply_pulled_bundle` writes the partition parquet correctly but the
-  blob it points at never exists on the receiver.
-- **Test exposure**:
-    - `testsuite/tests/510-synth-logs-replication-cycle.sh` uses
-      `INITIAL_ROWS=500` (~10KB) — stays under the threshold, so does not
-      trip the bug.  Bump past 5000 to reproduce.
-    - `testsuite/tests/530-cross-pond-import-minio.sh` originally included
-      an 80KiB random `big.bin` to exercise this path; the case was removed
-      pending the fix so that 530 stays green while the bug is open.
-      Reinstate it (and add an analogous case to 510) once fixed.
-- **Fix sketch**: `actions_at_version` (or a parallel "side-content" pass)
-  must, for each Add path, open the parquet and emit any
-  `_large_files/blake3=<hash>` references it carries; those external blobs
-  then need to be (a) included in the push bundle and (b) materialized by
-  `apply_pulled_bundle`.  An alternative is for sync_remote to *inline*
-  the external bytes when chunking on push, then re-externalize on the
-  receiver — at the cost of duplicating the externalization decision
-  across writers.
-- **Priority**: P1 — silently corrupts data across the replication
-  boundary for files >64KiB.  Small ponds are unaffected.
-
 ### P3-001: Document factory configuration examples
 - **Type**: DOCS
 - **Description**: Factory YAML configs need more complete examples
@@ -49,6 +15,55 @@
 ---
 
 ## 🟢 Done
+
+### ✅ D5.9: Fix P1-BUG-LF-REPLICATION (large-file blobs replicate over push/pull)
+- **Completed**: 2026-06-03
+- **Type**: BUG FIX (discovered via D5.8.5 testsuite revival)
+- **Symptom (pre-fix)**: After `pond push origin` + `pond pull` to a fresh
+  pond, files >64KiB (i.e., those that took the externalization path on
+  the source) could be `pond list`-ed (correct metadata, size, blake3) but
+  `pond cat` returned zero bytes.
+- **Root cause**: `Steward::actions_at_version` enumerated only Delta `Add`
+  paths of the form `pond_id=<u>/part_id=<v>/part-N-N.parquet` -- the
+  partition parquet that contains the OpLog *row* describing the file.
+  For a large file, that row carries a `blake3` reference into
+  `_large_files/blake3=<hash>.parquet`, which lives outside the partition
+  tree and was therefore never enumerated, read, chunked, or sent in the
+  bundle.
+- **Fix**: Added an `external_blobs_referenced_by(add_path, add_bytes)`
+  hook to the `RemoteSteward` trait with an empty default; duckpond's
+  adapter overrides it to scan each partition parquet for rows where
+  `content IS NULL` AND the entry is a file, then resolves each `blake3`
+  to the on-disk hierarchical/flat path under `_large_files/`.  In
+  `Remote::push`, blob paths are deduplicated across adds (a blob shared
+  by two partition parquets is sent once) and emitted as additional
+  `DataAdd` rows that reuse the existing schema.  In `apply_pulled_bundle`,
+  incoming `adds` are split by `_large_files/` path prefix: partition
+  parquets follow the existing Delta-write path, blobs are written to
+  disk only (no Delta `Add` action, no `parse_pond_part_path` check,
+  since they have no `pond_id` segment).  The trait's default
+  `validate_local_data_path` was also broadened to allow the
+  `_large_files/` prefix (content-addressed, cross-pond-safe by design).
+- **Files changed**:
+    - `crates/sync-remote/src/steward_trait.rs` -- new trait method,
+      broadened path validator default.
+    - `crates/sync-remote/src/remote.rs` -- push-side dedup loop emits
+      DataAdd rows for partition parquets and external blobs.
+    - `crates/steward/src/remote_adapter.rs` -- duckpond override scans
+      parquet for blake3 refs; `apply_pulled_bundle` splits adds by
+      `_large_files/` prefix.
+    - `crates/steward/Cargo.toml` -- added `bytes` and `parquet` deps.
+- **Test coverage added**:
+    - `crates/cmd/tests/test_remote_cli.rs::pond_remote_push_pull_large_file_roundtrip`
+      -- focused Rust integration test that pushes an 80 KiB file with a
+      non-trivial byte pattern, pulls into a fresh pond, and verifies
+      `read_file_path_to_vec` returns matching bytes.
+    - `testsuite/tests/530-cross-pond-import-minio.sh` -- reinstated the
+      80 KiB `big.bin` case in cross-pond import; verifies md5 round-trip
+      via the foreign mount.
+    - `testsuite/tests/510-synth-logs-replication-cycle.sh` -- bumped
+      `INITIAL_ROWS` from 500 to 6000 (~120 KB) so the synth-logs
+      replication cycle also exercises large-file replication.
 
 ### ✅ D5.8.9: Revive `531-recursive-cross-pond-import.sh` + add 3-deep Rust integration test
 - **Completed**: 2026-06-03

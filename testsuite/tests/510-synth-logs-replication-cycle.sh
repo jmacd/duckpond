@@ -45,10 +45,14 @@ MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://minio:9000}"
 BUCKET_NAME="duckpond-replication-test"
 
-# Test data parameters.  500 rows of ~20 bytes ~= 10KB (under the 64KB
-# large-file threshold).  Bump INITIAL_ROWS past 5000 if you want to
-# exercise the external-blob path.
-INITIAL_ROWS=500
+# Test data parameters.  6000 rows of ~20 bytes each ~= 120KB, which
+# crosses the 64KB large-file threshold so the replication cycle
+# exercises the externalized `_large_files/blake3=…parquet` path on
+# both the push and the pull sides (regression coverage for
+# P1-BUG-LF-REPLICATION, fixed in D5.9).  APPEND_ROWS keeps subsequent
+# rounds modest so we exercise multi-version appends without rerunning
+# the heavy generator each phase.
+INITIAL_ROWS=6000
 APPEND_ROWS=250
 
 SYNTH_LOGS_DIR="/var/log/synthapp"

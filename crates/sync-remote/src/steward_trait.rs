@@ -92,24 +92,68 @@ pub trait RemoteSteward: Send + Sync {
     /// [`Self::actions_at_version`]).
     fn read_data_file(&self, rel_path: &str) -> StewardResult<Vec<u8>>;
 
+    /// Return any **external content-addressed blob paths** that the
+    /// given Add path references and that live OUTSIDE the
+    /// Delta-managed partition tree.  The duckpond adapter uses this
+    /// to enumerate `_large_files/blake3=<hash>.parquet` blobs that
+    /// hold the bodies of files larger than `LARGE_FILE_THRESHOLD`;
+    /// those blobs are reachable only through `blake3` references in
+    /// the partition parquet's OplogEntry rows and do not appear in
+    /// Delta's `Add` actions, so without this hook they would never
+    /// be sent in a push bundle (silent data loss for replicas).
+    ///
+    /// `Remote::push` calls this once per Add, after reading the
+    /// Add's bytes (which makes them available to the implementation
+    /// for in-memory scanning), and includes the returned paths as
+    /// additional `DataAdd` rows in the bundle (deduplicated across
+    /// the bundle so a blob referenced by two Adds is sent once).
+    /// The receiving `apply_pulled_bundle` is responsible for
+    /// recognizing external-blob paths and writing them to disk
+    /// without recording a Delta `Add` action for them.
+    ///
+    /// Returned paths must satisfy [`Self::validate_local_data_path`]
+    /// when the default implementation is used (the default accepts
+    /// any path whose first segment is `_large_files`).
+    ///
+    /// The default implementation returns an empty `Vec`: stewards
+    /// without an external-blob layer (e.g., the sandbox prototype's
+    /// `sync_store::Store`, where row content is inline) need not
+    /// override this method.
+    fn external_blobs_referenced_by(
+        &self,
+        _add_path: &str,
+        _add_bytes: &[u8],
+    ) -> StewardResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// Defense-in-depth: validate that a Delta `Add`/`Remove` path
-    /// returned by [`Self::actions_at_version`] belongs to this
-    /// steward's local pond (`store_id`).  Called by `Remote::push`
-    /// once per file before bundling.
+    /// returned by [`Self::actions_at_version`] (or an external blob
+    /// path returned by [`Self::external_blobs_referenced_by`])
+    /// belongs to this steward's local pond (`store_id`).  Called by
+    /// `Remote::push` once per file before bundling.
     ///
-    /// The default implementation checks for the sync_store partition
-    /// layout `pond_id=<store_id>/`.  Stewards using a different data
-    /// layout (e.g., the D4 duckpond adapter, which uses
-    /// `part_id=<uuid>/<file>` because tlogfs does not yet have a
-    /// `pond_id` partition column) override this method with their
-    /// own scheme.
+    /// The default implementation accepts two shapes:
+    /// 1. Partition paths containing `pond_id=<store_id>/` (the
+    ///    sync_store / D5 duckpond layout).
+    /// 2. External content-addressed blob paths whose first segment
+    ///    is `_large_files` (the duckpond externalized-large-file
+    ///    layout; the blob is keyed by `blake3` hash and is shared
+    ///    across pond_ids by construction, so no pond_id check
+    ///    applies).
     ///
-    /// In normal operation this is guaranteed by construction
-    /// (`data_committed_record` is per-pond_id, compact is
-    /// per-pond_id, apply_batch stamps the local pond_id), but the
-    /// check guards against any future bug that would leak foreign
-    /// rows into our own bundle.
+    /// Stewards using a different data layout override this method
+    /// with their own scheme.
+    ///
+    /// In normal operation the pond_id check is guaranteed by
+    /// construction (`data_committed_record` is per-pond_id, compact
+    /// is per-pond_id, apply_batch stamps the local pond_id), but
+    /// the check guards against any future bug that would leak
+    /// foreign rows into our own bundle.
     fn validate_local_data_path(&self, path: &str) -> StewardResult<()> {
+        if path.starts_with("_large_files/") {
+            return Ok(());
+        }
         let prefix = format!("pond_id={}/", self.store_id());
         if path.contains(&prefix) {
             Ok(())

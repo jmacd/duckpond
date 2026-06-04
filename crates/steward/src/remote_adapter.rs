@@ -274,6 +274,177 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
         })
     }
 
+    /// Scan a Delta-managed partition parquet for references to
+    /// externalized large-file blobs (`_large_files/blake3=…parquet`)
+    /// and return their data-root-relative paths.  This fixes
+    /// P1-BUG-LF-REPLICATION: without it, `Remote::push` would emit
+    /// only the partition parquet (which carries the OplogEntry row's
+    /// `blake3` reference) while the body blob it points at would
+    /// never leave the source pond, leaving the replica with
+    /// `pond list`-able metadata but zero-byte `pond cat` output for
+    /// files larger than `LARGE_FILE_THRESHOLD`.
+    ///
+    /// Large-file rows are identified by the canonical discriminator
+    /// `content IS NULL && file_type IS A FILE` (see
+    /// `OplogEntry::is_large_file`).  Each such row's `blake3` is
+    /// resolved to an on-disk path by checking the hierarchical
+    /// layout (`_large_files/blake3_16=PFX/blake3=H.parquet`) first
+    /// and the flat layout (`_large_files/blake3=H.parquet`) as a
+    /// fallback -- mirroring `tlogfs::large_files::find_large_file_path`.
+    /// The returned paths are data-root-relative so the bundle row's
+    /// `file_path` can be written verbatim by the receiver.
+    fn external_blobs_referenced_by(
+        &self,
+        _add_path: &str,
+        add_bytes: &[u8],
+    ) -> StewardResult<Vec<String>> {
+        use arrow_array::{Array, BinaryArray, StringArray};
+        use bytes::Bytes;
+        use parquet::arrow::ProjectionMask;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let bytes = Bytes::copy_from_slice(add_bytes);
+        // Project only the three columns we need.  Partition columns
+        // (`pond_id`, `part_id`) are stripped from Delta-managed
+        // parquet files (they live only in the partition values), so
+        // we cannot decode the full `OplogEntry` here -- we must read
+        // the underlying parquet directly.
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).map_err(|e| {
+            SyncStewardError::Adapter(Box::new(std::io::Error::other(format!(
+                "external_blobs_referenced_by: parquet reader build: {}",
+                e
+            ))))
+        })?;
+        let parquet_schema = builder.parquet_schema().clone();
+        let mut col_indices: Vec<usize> = Vec::with_capacity(3);
+        for name in ["content", "blake3", "file_type"] {
+            let idx = (0..parquet_schema.num_columns())
+                .find(|i| parquet_schema.column(*i).name() == name)
+                .ok_or_else(|| {
+                    SyncStewardError::Invariant(format!(
+                        "partition parquet is missing required column `{}` (OplogEntry schema mismatch?)",
+                        name
+                    ))
+                })?;
+            col_indices.push(idx);
+        }
+        let mask = ProjectionMask::leaves(&parquet_schema, col_indices);
+        let reader = builder.with_projection(mask).build().map_err(|e| {
+            SyncStewardError::Adapter(Box::new(std::io::Error::other(format!(
+                "external_blobs_referenced_by: parquet reader open: {}",
+                e
+            ))))
+        })?;
+
+        let data_path = crate::get_data_path(self.ship.pond_path());
+        let large_files_dir = data_path.join("_large_files");
+        let mut blob_paths: Vec<String> = Vec::new();
+        for batch_result in reader {
+            let batch = batch_result.map_err(|e| {
+                SyncStewardError::Adapter(Box::new(std::io::Error::other(format!(
+                    "external_blobs_referenced_by: parquet batch read: {}",
+                    e
+                ))))
+            })?;
+            let content_col = batch
+                .column_by_name("content")
+                .ok_or_else(|| {
+                    SyncStewardError::Invariant(
+                        "projected batch missing `content` column".to_string(),
+                    )
+                })?
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| {
+                    SyncStewardError::Invariant("`content` column is not Binary".to_string())
+                })?;
+            let blake3_col = batch
+                .column_by_name("blake3")
+                .ok_or_else(|| {
+                    SyncStewardError::Invariant(
+                        "projected batch missing `blake3` column".to_string(),
+                    )
+                })?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    SyncStewardError::Invariant("`blake3` column is not Utf8".to_string())
+                })?;
+            let file_type_col = batch
+                .column_by_name("file_type")
+                .ok_or_else(|| {
+                    SyncStewardError::Invariant(
+                        "projected batch missing `file_type` column".to_string(),
+                    )
+                })?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    SyncStewardError::Invariant("`file_type` column is not Utf8".to_string())
+                })?;
+            for row in 0..batch.num_rows() {
+                // Large-file discriminator mirrors `OplogEntry::is_large_file`:
+                // `content` is null AND the entry is a file (not a directory
+                // or symlink).
+                if !content_col.is_null(row) {
+                    continue;
+                }
+                if file_type_col.is_null(row) {
+                    continue;
+                }
+                let file_type = file_type_col.value(row);
+                let entry_ty: tinyfs::EntryType = match file_type.parse() {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if !entry_ty.is_file() {
+                    continue;
+                }
+                if blake3_col.is_null(row) {
+                    return Err(SyncStewardError::Invariant(format!(
+                        "OplogEntry row {} for large file (file_type={}) is missing blake3",
+                        row, file_type
+                    )));
+                }
+                let blake3 = blake3_col.value(row);
+                if blake3.len() < tlogfs::large_files::PREFIX_BITS / 4 {
+                    return Err(SyncStewardError::Invariant(format!(
+                        "blake3 string `{}` shorter than {} hex chars",
+                        blake3,
+                        tlogfs::large_files::PREFIX_BITS / 4
+                    )));
+                }
+                let prefix = &blake3[0..tlogfs::large_files::PREFIX_BITS / 4];
+                let hierarchical = large_files_dir
+                    .join(format!(
+                        "blake3_{}={}",
+                        tlogfs::large_files::PREFIX_BITS,
+                        prefix
+                    ))
+                    .join(format!("blake3={}.parquet", blake3));
+                let flat = large_files_dir.join(format!("blake3={}.parquet", blake3));
+                let abs = if hierarchical.exists() {
+                    hierarchical
+                } else if flat.exists() {
+                    flat
+                } else {
+                    return Err(SyncStewardError::Invariant(format!(
+                        "large-file blob not found for blake3={} (referenced by OplogEntry but absent from _large_files/)",
+                        blake3
+                    )));
+                };
+                let rel = abs.strip_prefix(&data_path).map_err(|_| {
+                    SyncStewardError::Invariant(format!(
+                        "large-file path {:?} is not under data root {:?}",
+                        abs, data_path
+                    ))
+                })?;
+                blob_paths.push(rel.to_string_lossy().into_owned());
+            }
+        }
+        Ok(blob_paths)
+    }
+
     /// Override the default `pond_id=<uuid>/` check in the trait: duckpond's
     /// tlogfs data table is partitioned by `(pond_id, part_id)` as of D5,
     /// so outbound bundle paths must match the form
@@ -281,7 +452,16 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
     /// is wired through (D5.7), we additionally require that the path's
     /// `pond_id` matches the local Ship's `pond_id`: every outbound row
     /// belongs to the local pond.
+    ///
+    /// Content-addressed large-file blobs under `_large_files/` are exempt
+    /// from the `pond_id` check: their paths have no `pond_id` segment
+    /// (they live in a single shared content store at the data root) and
+    /// every blob is a candidate for cross-pond sharing once foreign
+    /// imports land.
     fn validate_local_data_path(&self, path: &str) -> StewardResult<()> {
+        if path.starts_with("_large_files/") {
+            return Ok(());
+        }
         let (pond_id, _part_id) = parse_pond_part_path(path)?;
         let local = self.store_id().to_string();
         if pond_id != local {
@@ -379,10 +559,21 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
         //    the duckpond `pond_id=<uuid>/part_id=<uuid>/<file>` layout.
         //    Also require the path's pond_id to match the bundle's
         //    pond_id (paths cannot smuggle data into a different pond).
+        //
+        //    Content-addressed `_large_files/blake3=…parquet` blobs are
+        //    handled separately (step 3b below): they have no pond_id
+        //    segment, are not Delta-managed, and only need bytes
+        //    written under `<pond>/data/`.
         let bundle_pond_id_str = pond_id.to_string();
-        let mut add_partition_values: Vec<HashMap<String, Option<String>>> =
-            Vec::with_capacity(adds.len());
-        for (path, _) in &adds {
+        let mut add_partition_values: Vec<HashMap<String, Option<String>>> = Vec::new();
+        let mut partition_adds: Vec<&(String, Vec<u8>)> = Vec::new();
+        let mut blob_adds: Vec<&(String, Vec<u8>)> = Vec::new();
+        for add in &adds {
+            let (path, _) = add;
+            if path.starts_with("_large_files/") {
+                blob_adds.push(add);
+                continue;
+            }
             let (path_pond_id, path_part_id) = parse_pond_part_path(path)?;
             if path_pond_id != bundle_pond_id_str {
                 return Err(SyncStewardError::Invariant(format!(
@@ -395,6 +586,7 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
                 ("part_id".to_string(), Some(path_part_id)),
             ]);
             add_partition_values.push(pv);
+            partition_adds.push(add);
         }
         for path in &removes {
             let (path_pond_id, _) = parse_pond_part_path(path)?;
@@ -406,16 +598,31 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
             }
         }
 
-        // 3. Write each add's bytes under <pond>/data/.
+        // 3a. Write each partition parquet's bytes under <pond>/data/.
         let data_path = crate::get_data_path(self.ship.pond_path());
-        let mut add_sizes: Vec<i64> = Vec::with_capacity(adds.len());
-        for (rel_path, bytes) in &adds {
+        let mut add_sizes: Vec<i64> = Vec::with_capacity(partition_adds.len());
+        for (rel_path, bytes) in &partition_adds {
             let abs = data_path.join(rel_path);
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent).map_err(adapt_err)?;
             }
             std::fs::write(&abs, bytes).map_err(adapt_err)?;
             add_sizes.push(bytes.len() as i64);
+        }
+
+        // 3b. Write each large-file blob's bytes under <pond>/data/.
+        //    Blobs are content-addressed (`_large_files/blake3=...`),
+        //    so the path itself has no pond_id segment and they are
+        //    safe to share across ponds.  They are NOT added to the
+        //    Delta transaction log because they live outside the Delta
+        //    table; the on-disk presence at the canonical blake3 path
+        //    is what `OpLogPersistence` later resolves on read.
+        for (rel_path, bytes) in &blob_adds {
+            let abs = data_path.join(rel_path);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).map_err(adapt_err)?;
+            }
+            std::fs::write(&abs, bytes).map_err(adapt_err)?;
         }
 
         // 4. Build Delta actions and commit one version on the data
@@ -425,9 +632,10 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
         let now_ms = Utc::now().timestamp_millis();
         let data_change_on_add = matches!(commit_kind, CommitKind::Write);
         let mut actions: Vec<deltalake::kernel::Action> =
-            Vec::with_capacity(adds.len() + removes.len());
-        for ((path, _bytes), (size, partition_values)) in
-            adds.iter().zip(add_sizes.iter().zip(add_partition_values))
+            Vec::with_capacity(partition_adds.len() + removes.len());
+        for ((path, _bytes), (size, partition_values)) in partition_adds
+            .iter()
+            .zip(add_sizes.iter().zip(add_partition_values))
         {
             actions.push(deltalake::kernel::Action::Add(deltalake::kernel::Add {
                 path: path.clone(),
