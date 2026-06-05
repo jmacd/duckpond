@@ -21,8 +21,20 @@
 - **Type**: BUG FIX (discovered via D5.8.5 testsuite revival)
 - **Symptom (pre-fix)**: After `pond push origin` + `pond pull` to a fresh
   pond, files >64KiB (i.e., those that took the externalization path on
-  the source) could be `pond list`-ed (correct metadata, size, blake3) but
-  `pond cat` returned zero bytes.
+  the source) could be `pond list`-ed (correct metadata, size, blake3)
+  but `pond cat` failed hard on read with exit code 1 and the error:
+  `Error: Transaction aborted: Failed to open file for reading: Other:
+  Large file not found: <blake3> at path _large_files/blake3=<hash>`.
+  The receive-side `pond pull` was silent about the missing blob (Delta
+  apply succeeded; only the read-time lookup at
+  `crates/tlogfs/src/persistence.rs:2089` fell through to
+  `TLogFSError::LargeFileNotFound`).  Initial notes in commit
+  `fcbbdbef` (D5.8.5) and earlier checkpoints described the symptom as
+  "returns zero bytes" because the smoking-gun shell test piped
+  `pond cat ... 2>/dev/null | md5sum`, which hid both the stderr
+  message and the non-zero exit code -- only the empty-string md5
+  (`d41d8cd9...`) on stdout was visible to the test.  Re-verified
+  2026-06-04 with a direct repro against the parent of `d5bf4b68`.
 - **Root cause**: `Steward::actions_at_version` enumerated only Delta `Add`
   paths of the form `pond_id=<u>/part_id=<v>/part-N-N.parquet` -- the
   partition parquet that contains the OpLog *row* describing the file.

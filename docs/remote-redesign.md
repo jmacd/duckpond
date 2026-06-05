@@ -56,7 +56,11 @@ production:
   outside the `pond_id=<u>/part_id=<v>/` partition tree.  Before the
   fix, `actions_at_version` enumerated only the partition parquet, so
   the receiver got the OpLog row (with correct metadata, size, blake3)
-  but never the underlying blob.  Fixed by adding an
+  but never the underlying blob.  Receive-side `pond pull` succeeded
+  silently; subsequent `pond cat` of the file on the replica failed
+  hard at read time with exit code 1 and
+  `TLogFSError::LargeFileNotFound` (no silent data loss -- the bug was
+  observable on first read).  Fixed by adding an
   `external_blobs_referenced_by` hook on the `RemoteSteward` trait;
   the duckpond adapter overrides it to scan each partition parquet for
   rows with `content IS NULL`, resolves their `blake3` to on-disk
