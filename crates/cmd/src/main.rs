@@ -227,6 +227,11 @@ enum Commands {
         /// Remote name.  Omit to pull every remote in `pull` or `both` mode.
         name: Option<String>,
     },
+    /// Verify local data matches one or more remotes' recorded checksums (D6).
+    Verify {
+        /// Remote or backup name.  Omit to verify against every attachment.
+        name: Option<String>,
+    },
     /// Manage remote attachments under `/sys/remotes/` (D4).
     Remote {
         #[command(subcommand)]
@@ -495,6 +500,7 @@ async fn main() -> Result<()> {
         }
         Commands::Push { name } => commands::push_command(&ship_context, name).await,
         Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
+        Commands::Verify { name } => commands::verify_command(&ship_context, name).await,
         Commands::Remote { command } => match command {
             RemoteCommand::Add {
                 name,

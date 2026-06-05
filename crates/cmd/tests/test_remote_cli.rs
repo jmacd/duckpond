@@ -14,7 +14,7 @@
 
 use cmd::commands::{
     add_backup_command, add_remote_command, init_command, list_remotes_command, pull_command,
-    push_command, remote::remote_config_path,
+    push_command, remote::remote_config_path, verify_command,
 };
 use cmd::common::ShipContext;
 use std::sync::Once;
@@ -379,6 +379,74 @@ async fn pond_pull_no_remotes_is_noop() {
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
     init_command(&ctx).await.expect("init");
     pull_command(&ctx, None).await.expect("pull noop");
+}
+
+/// D6.1: `pond verify` reports the happy path after a clean push.
+///
+/// Push a single small file, then call `verify`.  Because the live
+/// data matches the bundle we just published, the report must come
+/// back `ok=true` with `remote_latest_seq=Some(_)`.
+#[tokio::test]
+async fn pond_verify_ok_after_push() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+    write_small_file(&ctx, "/v.txt", b"verify me", vec!["copy", "v.txt"])
+        .await
+        .expect("write v.txt");
+
+    // Pre-create the remote bucket so `backup add` is a pure attach.
+    {
+        let store_id = {
+            let ship = ctx.open_pond().await.expect("open");
+            ship.control_table().pond_id_uuid()
+        };
+        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+            .await
+            .expect("create remote");
+    }
+    add_backup_command(
+        &ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup add");
+    push_command(&ctx, Some("origin".to_string()))
+        .await
+        .expect("push");
+
+    // Named-target form: must succeed.
+    verify_command(&ctx, Some("origin".to_string()))
+        .await
+        .expect("verify origin");
+
+    // All-targets form: must succeed too (single attachment, also OK).
+    verify_command(&ctx, None).await.expect("verify all");
+}
+
+/// `pond verify` with no remotes attached is a no-op success.
+#[tokio::test]
+async fn pond_verify_no_remotes_is_noop() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+    verify_command(&ctx, None).await.expect("verify noop");
 }
 
 /// `pond remote add` rejects duplicate names without --overwrite.

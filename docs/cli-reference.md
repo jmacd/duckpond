@@ -24,6 +24,7 @@
 | `pond remote remove --purge` | Detach AND drop the materialized mount entry | `pond remote remove --purge upstream` |
 | `pond push` | Push to push/both-mode remotes | `pond push` |
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
+| `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
 | `pond config` | Show/set pond configuration | `pond config` |
 
 ### Two Operating Modes
@@ -532,6 +533,43 @@ pond pull upstream
 > (`PATH = /`, same `store_id`) still need the
 > `ShipContext::create_pond_for_restoration` path; a CLI surface for
 > mirror restart bootstrap is tracked separately.
+
+---
+
+### pond verify (D6.1)
+
+Compare this pond's CURRENT live data against one or more remotes'
+recorded partition checksums.
+
+```bash
+# Verify against every attached remote
+pond verify
+
+# Verify against only the named remote
+pond verify origin
+```
+
+Output (per remote):
+- `[OK] verify <name>: live data matches remote at seq=<N>` -- consumer
+  agrees with the remote's latest bundle.
+- `[OK] verify <name>: remote has no bundles (vacuous match)` -- remote
+  is empty and so is the consumer.
+- `[MISMATCH] verify <name>: <K> partition(s) diverge from remote at seq=<N>`
+  followed by one line per mismatching partition.  If the consumer
+  agrees with a prior bundle in the remote's history, the
+  `divergence boundary: ... seq=<B>` line identifies when drift began.
+
+Exit code is non-zero if any remote reports a mismatch or fails to load.
+
+> **Known limitation (P2-VERIFY-BOOTSTRAP-DRIFT):** verify on a
+> replica that was bootstrapped from a remote currently reports a
+> mismatch at the root partition even with no operator-driven writes
+> in between.  The producer's `pond_init` transaction is not
+> replicated and `Ship::create_replica` synthesizes its own
+> non-deterministic root rows.  Treat verify as authoritative on the
+> producer side; consumer-side reports are still useful for detecting
+> divergence trends but the absolute "OK" baseline is not reachable
+> from bootstrap today.
 
 ---
 
