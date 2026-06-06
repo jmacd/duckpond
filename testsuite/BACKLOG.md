@@ -7,6 +7,38 @@
 
 ## 🔴 Open Items
 
+### P2-PRODUCER-COMPACT-BUNDLES: duckpond producers never create remote Compact bundles
+- **Type**: DESIGN GAP (discovered 2026-06-05 while wiring D6.4 `pond restart-from-compact`)
+- **Symptom**: `pond restart-from-compact <mirror>` always reports
+  "no compact bundle to restart from" for a pure duckpond mirror, even
+  after many writes + `pond maintain`.
+- **Root cause**: duckpond's `ControlTable::record_data_committed`
+  hardcodes `commit_kind = Some(CommitKind::Write)`
+  (crates/steward/src/control_table.rs:315).  `Remote::push` reads that
+  commit_kind from the source's DataCommitted record
+  (crates/sync-remote/src/remote.rs:312), so every bundle a duckpond
+  producer pushes is a `Write` bundle -- it never emits a `Compact`
+  bundle.  `Remote::maintain` only *retains/prunes* existing compact
+  bundles; it does not synthesize one by merging Write bundles.  So a
+  compact baseline on the remote only ever appears when the upstream is
+  a compacting producer (sync_steward-style, as exercised by
+  `crates/sync-tests/tests/cross_pond.rs` and `restart.rs`).
+- **Impact**: `pond restart-from-compact` is fully wired and
+  forward-compatible (it delegates to the library-tested
+  `Remote::restart_pond_from_compact`), and works for cross-pond imports
+  from a compacting upstream, but the **mirror** retention-recovery flow
+  is not reachable end-to-end from duckpond alone until producer-side
+  compaction lands.
+- **Possible fix**: add a duckpond producer compaction path (a logical
+  "compact" txn whose DataCommitted carries `CommitKind::Compact`,
+  pushed as a Compact bundle), analogous to sync_steward's
+  `Steward::compact`.  Wire it under `pond maintain --compact` or a new
+  verb.  Then `Remote::maintain` retention + `restart-from-compact`
+  close the loop for mirrors.
+- **Files**: crates/steward/src/control_table.rs:315 (hardcoded Write);
+  crates/sync-remote/src/remote.rs:312 (push reads commit_kind);
+  crates/sync-remote/src/remote.rs:515 (Remote::maintain prunes only).
+
 ### P2-VERIFY-BOOTSTRAP-DRIFT: `pond verify` mismatches against freshly-bootstrapped replicas
 - **Type**: BUG / DESIGN GAP (discovered 2026-06-05 while wiring D6.1 `pond verify`)
 - **Symptom**: Bootstrap a dst replica from a remote, then run

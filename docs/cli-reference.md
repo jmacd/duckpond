@@ -27,6 +27,7 @@
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
 | `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
 | `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
+| `pond restart-from-compact` | Recover a consumer past the retention horizon (D6.4) | `pond restart-from-compact origin` |
 | `pond config` | Show/set pond configuration | `pond config` |
 
 ### Two Operating Modes
@@ -651,6 +652,46 @@ pond rebuild-control --force
 > **Note:** `pond rebuild-control` is designed for primary ponds.  A
 > freshly restored replica that has not yet done local writes should be
 > re-bootstrapped via `pond remote add` + `pond pull`, not rebuilt.
+
+---
+
+### pond restart-from-compact (D6.4)
+
+Recover a consumer that has fallen below a remote's retention horizon.
+
+When `pond pull` fails with `consumer is below retention horizon`
+([`BehindRetention`]), the bundles the consumer still needs have been
+pruned by retention.  The only recovery is to drop the affected pond's
+local footprint and re-apply the remote's oldest surviving **compact
+baseline**, then catch up to the latest bundle.
+
+```bash
+pond restart-from-compact <name>
+```
+
+Behavior depends on whether the remote is a mirror or a cross-pond
+import:
+
+- **Mirror** (`remote.store_id == local pond_id`): drops ALL local data
+  for the pond and rebuilds from the compact baseline.  Because the
+  `/sys/remotes/<name>` attachment and its mode/mount settings live
+  under the local pond_id, they are dropped too -- the command
+  re-persists them automatically afterwards so the remote stays usable.
+- **Cross-pond import** (`remote.store_id != local pond_id`): drops only
+  the foreign pond's footprint on the consumer; the consumer's own data
+  and any sibling imports are untouched.
+
+If the remote has no compact bundle, the command refuses with a clear
+error (nothing is dropped -- the safety check runs before any delete).
+
+> **Current limitation:** duckpond *producers* do not yet create compact
+> bundles (every native commit is recorded as a `Write` bundle), so a
+> compact baseline on the remote only appears when the upstream is a
+> compacting producer (e.g. a cross-pond source) or once producer-side
+> compaction lands.  Until then, `restart-from-compact` against a pure
+> duckpond mirror will report "no compact bundle".  The command itself
+> is fully wired and forward-compatible.  See BACKLOG
+> P2-PRODUCER-COMPACT-BUNDLES.
 
 ---
 

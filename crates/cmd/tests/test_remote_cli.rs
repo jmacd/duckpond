@@ -14,7 +14,8 @@
 
 use cmd::commands::{
     add_backup_command, add_remote_command, init_command, list_remotes_command, pull_command,
-    push_command, remote::remote_config_path, status_command, verify_command,
+    push_command, remote::remote_config_path, restart_from_compact_command, status_command,
+    verify_command,
 };
 use cmd::common::ShipContext;
 use std::sync::Once;
@@ -505,6 +506,71 @@ async fn pond_status_with_backup() {
         .expect("push");
 
     status_command(&ctx).await.expect("status with backup");
+}
+
+/// D6.4: `pond restart-from-compact` reports a friendly error when the
+/// remote has no compact bundle to restart from.  This exercises the
+/// full command wiring (open pond, load attachment, open remote,
+/// mirror detection, capture attachment, delegate to
+/// `restart_pond_from_compact`) up to the `NoRestartPoint` mapping.
+#[tokio::test]
+async fn pond_restart_from_compact_no_restart_point() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+    write_small_file(&ctx, "/r.txt", b"restart", vec!["copy", "r.txt"])
+        .await
+        .expect("write r.txt");
+    {
+        let store_id = {
+            let ship = ctx.open_pond().await.expect("open");
+            ship.control_table().pond_id_uuid()
+        };
+        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+            .await
+            .expect("create remote");
+    }
+    // Attach + push a Write bundle, but never create a Compact bundle.
+    add_backup_command(
+        &ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup add");
+    push_command(&ctx, Some("origin".to_string()))
+        .await
+        .expect("push");
+
+    let err = restart_from_compact_command(&ctx, "origin".to_string())
+        .await
+        .expect_err("restart must fail with no compact bundle");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no compact bundle"),
+        "expected a no-compact-bundle error, got: {}",
+        msg
+    );
+
+    // The attachment must still be intact after the failed restart
+    // (a mirror restart captures it up-front but never drops it because
+    // the restart aborted before drop_pond_data).
+    list_remotes_command(&ctx, None)
+        .await
+        .expect("remote list still works after failed restart");
 }
 
 /// `pond remote add` rejects duplicate names without --overwrite.

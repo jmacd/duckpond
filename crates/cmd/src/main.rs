@@ -245,6 +245,12 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Recover a consumer that fell below a remote's retention horizon
+    /// by re-bootstrapping from the remote's oldest compact bundle (D6).
+    RestartFromCompact {
+        /// Remote name (from `pond remote add`) to restart from.
+        name: String,
+    },
     /// Manage remote attachments under `/sys/remotes/` (D4).
     Remote {
         #[command(subcommand)]
@@ -517,6 +523,9 @@ async fn main() -> Result<()> {
         Commands::Status => commands::status_command(&ship_context).await,
         Commands::RebuildControl { force } => {
             commands::rebuild_control_command(&ship_context, force).await
+        }
+        Commands::RestartFromCompact { name } => {
+            commands::restart_from_compact_command(&ship_context, name).await
         }
         Commands::Remote { command } => match command {
             RemoteCommand::Add {
