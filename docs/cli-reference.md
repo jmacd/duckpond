@@ -24,6 +24,7 @@
 | `pond remote remove --purge` | Detach AND drop the materialized mount entry | `pond remote remove --purge upstream` |
 | `pond push` | Push to push/both-mode remotes | `pond push` |
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
+| `pond maintain` | Delta maintenance; `--compact` records a pushable Compact bundle | `pond maintain --compact` |
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
 | `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
 | `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
@@ -655,6 +656,39 @@ pond rebuild-control --force
 
 ---
 
+### pond maintain
+
+Run Delta Lake maintenance on the pond's data and control tables:
+checkpoint creation, commit-log cleanup, and vacuum of stale parquet
+files.  Safe to run routinely (e.g. from cron) to keep table-open cost
+bounded.
+
+```bash
+# Checkpoint + vacuum (no file merging)
+pond maintain
+
+# Also compact: merge many small parquet files into fewer large ones
+pond maintain --compact
+```
+
+`--compact` compacts the pond's own-`pond_id` partitions as a **recorded,
+pushable transaction**: the merge is written to the control table as a
+`Compact` commit, so a subsequent `pond push` emits a **Compact bundle**.
+That bundle is the restart baseline used by
+[`pond restart-from-compact`](#pond-restart-from-compact-d64), and it lets
+`pond maintain --remote=<name>` retention prune the superseded `Write`
+bundles.
+
+Compaction never changes logical content -- duckpond snapshots each
+partition's checksum before and after the merge and aborts if they
+differ.  A run with nothing to merge is a clean no-op.
+
+> **Tip:** push before compacting (or push the compact baseline) -- the
+> Compact bundle is a full snapshot of the pond at the compacted version,
+> so consumers can restart from it alone.
+
+---
+
 ### pond restart-from-compact (D6.4)
 
 Recover a consumer that has fallen below a remote's retention horizon.
@@ -684,14 +718,12 @@ import:
 If the remote has no compact bundle, the command refuses with a clear
 error (nothing is dropped -- the safety check runs before any delete).
 
-> **Current limitation:** duckpond *producers* do not yet create compact
-> bundles (every native commit is recorded as a `Write` bundle), so a
-> compact baseline on the remote only appears when the upstream is a
-> compacting producer (e.g. a cross-pond source) or once producer-side
-> compaction lands.  Until then, `restart-from-compact` against a pure
-> duckpond mirror will report "no compact bundle".  The command itself
-> is fully wired and forward-compatible.  See BACKLOG
-> P2-PRODUCER-COMPACT-BUNDLES.
+> **Producing a compact baseline:** run `pond maintain --compact` on the
+> producer and then `pond push`.  Compaction is recorded as a Compact
+> transaction, so the next push emits a Compact bundle that becomes the
+> remote's restart baseline (and lets `pond maintain --remote` retention
+> prune the superseded Write bundles).  Cross-pond sources can also
+> supply a compact baseline.
 
 ---
 

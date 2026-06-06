@@ -303,6 +303,52 @@ impl ControlTable {
         duration_ms: i64,
         partition_checksums: PartitionChecksums,
     ) -> Result<(), StewardError> {
+        self.record_committed_inner(
+            txn_meta,
+            CommitKind::Write,
+            data_fs_version,
+            duration_ms,
+            partition_checksums,
+        )
+        .await
+    }
+
+    /// Record a successful producer-side compaction commit (see
+    /// [`crate::Ship::compact`]).  Identical to [`Self::record_data_committed`]
+    /// except the `commit_kind` is [`CommitKind::Compact`], so
+    /// `Remote::push` serializes the bundle's manifest as a Compact
+    /// bundle (a restart baseline) rather than an incremental Write.
+    ///
+    /// `partition_checksums` must be the post-compaction snapshot of every
+    /// part_id under the local pond_id.  Because compaction does not change
+    /// logical content, these MUST equal the pre-compaction checksums (the
+    /// caller asserts this invariant); they are folded into the bundle so a
+    /// consumer's `verify_against_remote` matches `live` against `recorded`.
+    pub async fn record_compact_committed(
+        &mut self,
+        txn_meta: &PondTxnMetadata,
+        data_fs_version: i64,
+        duration_ms: i64,
+        partition_checksums: PartitionChecksums,
+    ) -> Result<(), StewardError> {
+        self.record_committed_inner(
+            txn_meta,
+            CommitKind::Compact,
+            data_fs_version,
+            duration_ms,
+            partition_checksums,
+        )
+        .await
+    }
+
+    async fn record_committed_inner(
+        &mut self,
+        txn_meta: &PondTxnMetadata,
+        commit_kind: CommitKind,
+        data_fs_version: i64,
+        duration_ms: i64,
+        partition_checksums: PartitionChecksums,
+    ) -> Result<(), StewardError> {
         let metadata = DataCommittedMetadata {
             partition_checksums: partition_checksums
                 .iter()
@@ -312,7 +358,7 @@ impl ControlTable {
         };
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
         let mut record = self.base_record(RecordKind::DataCommitted, txn_meta);
-        record.commit_kind = Some(CommitKind::Write);
+        record.commit_kind = Some(commit_kind);
         record.duration_ms = Some(duration_ms);
         record.metadata_json = metadata_json;
         self.inner.write_record(record).await.map_err(map_err)

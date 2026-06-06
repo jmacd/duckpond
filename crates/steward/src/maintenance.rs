@@ -24,8 +24,12 @@
 use chrono::Duration;
 use deltalake::DeltaTable;
 use deltalake::checkpoints;
+use deltalake::kernel::schema::partitions::{PartitionFilter, PartitionValue};
+use deltalake::kernel::transaction::CommitProperties;
 use deltalake::operations::optimize::OptimizeType;
 use log::{debug, info, warn};
+use std::collections::HashMap;
+use uuid::Uuid;
 
 /// How often to create checkpoints (every N versions).
 /// Delta Lake standard is 10.
@@ -227,4 +231,74 @@ pub async fn maintain_table(
 
     result.version = table.version().unwrap_or(-1);
     (table, result)
+}
+
+/// Number of parquet files added/removed by a [`compact_pond_partitions`]
+/// run.  Both zero means Delta optimize found nothing to merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompactStats {
+    /// Number of new (merged) parquet files Delta wrote.
+    pub files_added: u64,
+    /// Number of small parquet files Delta marked Removed.
+    pub files_removed: u64,
+}
+
+impl CompactStats {
+    /// `true` iff Delta did not actually change the file set.
+    #[must_use]
+    pub fn is_noop(&self) -> bool {
+        self.files_added == 0 && self.files_removed == 0
+    }
+}
+
+/// Run Delta `optimize(Compact)` over a single `pond_id`'s partitions of
+/// the data table, merging small parquet files into larger ones.
+///
+/// `pond_id` is a Delta partition column (`["pond_id", "part_id"]`), so
+/// restricting the optimize to one pond_id is a hard guarantee that no
+/// foreign-pond data files are touched -- important once cross-pond
+/// imports live alongside the producer's own rows.
+///
+/// `app_metadata` is stamped into the optimize commit's `commitInfo`
+/// (the caller passes `PondTxnMetadata::to_delta_metadata()` carrying the
+/// compaction's `txn_seq`).  This is REQUIRED: `OpLogPersistence::open`
+/// derives `last_txn_seq` from the most recent commit's `pond_txn` blob,
+/// so an optimize commit with no `pond_txn` would reset the sequence on
+/// the next pond open.
+///
+/// Compaction must NOT change logical content; callers
+/// ([`crate::Ship::compact`]) assert this by snapshotting per-partition
+/// checksums before and after.  Returns the new [`DeltaTable`] handle
+/// (optimize produces a fresh table state) and the file-delta metrics.
+/// A no-op optimize (nothing to merge) creates no Delta commit.
+pub async fn compact_pond_partitions(
+    table: DeltaTable,
+    pond_id: Uuid,
+    app_metadata: HashMap<String, serde_json::Value>,
+) -> Result<(DeltaTable, CompactStats), deltalake::DeltaTableError> {
+    let filters = [PartitionFilter {
+        key: "pond_id".to_string(),
+        value: PartitionValue::Equal(pond_id.to_string()),
+    }];
+    let (new_table, metrics) = table
+        .optimize()
+        .with_type(OptimizeType::Compact)
+        .with_target_size(COMPACT_TARGET_SIZE)
+        .with_filters(&filters)
+        .with_commit_properties(CommitProperties::default().with_metadata(app_metadata))
+        .await?;
+    debug!(
+        "[MAINTAIN] compact pond {} version {:?}: +{} files / -{} files",
+        pond_id,
+        new_table.version(),
+        metrics.num_files_added,
+        metrics.num_files_removed,
+    );
+    Ok((
+        new_table,
+        CompactStats {
+            files_added: metrics.num_files_added,
+            files_removed: metrics.num_files_removed,
+        },
+    ))
 }

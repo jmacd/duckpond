@@ -34,7 +34,8 @@ ready for production cutover.
 | D5.7b docs (cli-reference.md update for D5.7b verbs) | done | `3914cdd1` |
 | D5.8: revive 13 disabled testsuite scripts | done | `01987ebb` .. `75eb4139` (D5.8.1-D5.8.9) |
 | D5.9: fix P1-BUG-LF-REPLICATION (large-file blob replication) | done | `d5bf4b68` |
-| D6: diagnostic/recovery CLI verbs + operator-guide rewrite | mostly done | verify/status/rebuild-control/restart-from-compact shipped (D6.1-D6.4); operator-guide rewritten; producer compaction remains (P2-PRODUCER-COMPACT-BUNDLES) |
+| D6: diagnostic/recovery CLI verbs + operator-guide rewrite | done | verify/status/rebuild-control/restart-from-compact shipped (D6.1-D6.4); operator-guide rewritten |
+| D7: producer-side compaction (close P2-PRODUCER-COMPACT-BUNDLES) | done | `Ship::compact` records a pushable `CommitKind::Compact` txn; `pond maintain --compact` routes through it; mirror restart loop now reachable end-to-end |
 
 Active branch: `jmacd/52` (89 commits ahead of `main` as of `d5bf4b68`).
 The D5 row in earlier revisions of this doc was a single "pending" line;
@@ -104,7 +105,8 @@ have not all shipped:
 | `pond log` | shipped | |
 | `pond verify` | **shipped (D6.1, 2026-06-05)** | Operator-facing wrapper around `verify_against_remote`.  Producer-side verify is correct; bootstrap-then-verify on replicas has a known root-partition mismatch (see BACKLOG P2-VERIFY-BOOTSTRAP-DRIFT). |
 | `pond recover` | shipped | Plus `pond emergency` for destructive recovery. |
-| `pond restart-from-compact` | **shipped (D6.4, 2026-06-05)** | Delegates to the generic `Remote::restart_pond_from_compact` (works on duckpond's `ShipRemoteSteward`; the carry-forward "blocker" was already resolved by that generic path).  Mirror restart re-persists the dropped attachment.  Trigger requires a compact baseline on the remote, which needs a compacting producer -- duckpond producers do not yet create Compact bundles (see BACKLOG P2-PRODUCER-COMPACT-BUNDLES). |
+| `pond restart-from-compact` | **shipped (D6.4, 2026-06-05)** | Delegates to the generic `Remote::restart_pond_from_compact` (works on duckpond's `ShipRemoteSteward`; the carry-forward "blocker" was already resolved by that generic path).  Mirror restart re-persists the dropped attachment.  Requires a compact baseline on the remote -- duckpond producers now create one via `pond maintain --compact` + `pond push` (D7, P2-PRODUCER-COMPACT-BUNDLES closed). |
+| `pond maintain --compact` | **shipped (D7, 2026-06-06)** | Records the data-table Delta optimize as a `CommitKind::Compact` transaction (`Ship::compact`), so `Remote::push` emits a Compact bundle (restart baseline).  Asserts per-partition checksum invariance; stamps `pond_txn` on the optimize commit so reopen recovers `last_txn_seq`. |
 | `pond rebuild-control` | **shipped (D6.3, 2026-06-05)** | Reconstructs the control table from the data Delta table's `pond_txn` commit history.  Recovers pond identity + transaction-log skeleton; settings/watermarks and per-txn checksums are not recoverable (re-attach remotes, re-baseline verify). |
 
 ### Documentation reconciliation

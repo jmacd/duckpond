@@ -187,15 +187,21 @@ Pulls are always manual (or scripted via cron -- see [§7](#7-cron--systemd)).
 
 `pond maintain` runs Delta Lake housekeeping (checkpoint + vacuum) on the
 **local** data and control tables.  `--compact` additionally merges
-small parquet files.
+small parquet files into fewer large ones.
 
 ```
 $ pond maintain
 $ pond maintain --compact
 ```
 
+`--compact` records the data-table merge as a **Compact transaction**, so
+the next `pond push` emits a Compact bundle that backups can use as a
+restart baseline (see [§6](#6-recovery)) and that
+`pond maintain --remote` retention can prune behind.  Push before (or
+right after) compacting so the baseline reaches your backup.
+
 > `pond maintain` operates on the local pond only; it does not push to or
-> compact remotes.
+> prune remotes.  (Remote retention is `pond maintain --remote=<name>`.)
 
 ---
 
@@ -309,10 +315,11 @@ A mirror restart drops all local data and rebuilds (the attachment is
 re-persisted automatically); a cross-pond restart drops only the foreign
 pond's footprint.
 
-> Current limitation: duckpond producers do not yet create compact
-> bundles, so a compact baseline only exists on remotes fed by a
-> compacting upstream (see BACKLOG P2-PRODUCER-COMPACT-BUNDLES).  Against
-> a pure duckpond mirror this command reports "no compact bundle".
+> Producing a baseline: run `pond maintain --compact` on the producer and
+> `pond push`.  The compaction is pushed as a Compact bundle that becomes
+> the remote's restart baseline.  A pure duckpond mirror with no compacted
+> push (and no compacting upstream) has no baseline yet, and the command
+> reports "no compact bundle".
 
 ### Destructive recovery
 

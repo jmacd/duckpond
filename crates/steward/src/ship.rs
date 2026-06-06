@@ -11,7 +11,7 @@ use crate::{
     maintenance::{self, MaintenanceReport},
 };
 use anyhow::Result;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::ops::AsyncFnOnce;
 use std::path::{Path, PathBuf};
 use tlogfs::{OpLogPersistence, PondMetadata, PondTxnMetadata, PondUserMetadata};
@@ -23,6 +23,23 @@ pub struct Ship {
     control_table: ControlTable,
     last_write_seq: i64,
     pond_path: PathBuf,
+}
+
+/// Outcome of a producer-side compaction transaction ([`Ship::compact`]).
+#[derive(Debug, Clone, Copy)]
+pub struct CompactOutcome {
+    /// The transaction sequence allocated for this compaction.
+    pub txn_seq: i64,
+    /// Whether any files were actually merged.  `false` is a clean no-op:
+    /// only a `Completed` record was written, the committed sequence is
+    /// unchanged, and there is nothing to push.
+    pub had_data: bool,
+    /// Number of new merged parquet files Delta wrote (real compaction only).
+    pub files_added: u64,
+    /// Number of small parquet files Delta marked Removed (real compaction only).
+    pub files_removed: u64,
+    /// Data Delta version after the optimize commit (real compaction only).
+    pub data_delta_version: i64,
 }
 
 impl Ship {
@@ -683,20 +700,43 @@ impl Ship {
     /// Run maintenance (checkpoint + vacuum) on both data and control tables.
     ///
     /// When `force` is true, checkpoint is always created (for explicit commands).
-    /// When `compact` is true, also merges small parquet files into larger ones.
-    /// This is best-effort: individual failures are logged as warnings and do
-    /// not prevent maintenance of the other table.
+    /// When `compact` is true, the data table's own-pond partitions are
+    /// compacted as a RECORDED, pushable transaction via [`Self::compact`]
+    /// (so the merge replicates to remotes), and the control table is
+    /// optimized best-effort (it is never pushed).  This is best-effort:
+    /// individual failures are logged as warnings and do not prevent
+    /// maintenance of the other table.
     pub async fn maintain(&mut self, force: bool, compact: bool) -> MaintenanceReport {
         let mut report = MaintenanceReport::default();
 
-        // Maintain data table
+        // Data table compaction goes through the recorded transaction path
+        // so it is replicated (Begin/DataCommitted(Compact)).  The
+        // checkpoint/vacuum that follow are best-effort and unrecorded.
+        let compact_outcome = if compact {
+            match self.compact().await {
+                Ok(outcome) => Some(outcome),
+                Err(e) => {
+                    warn!("[MAINTAIN] Data compaction failed: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Maintain data table (checkpoint + vacuum only; compaction handled above)
         let data_table = self.data_persistence.table().clone();
-        let (new_data_table, data_result) =
-            maintenance::maintain_table(data_table, "data", force, compact).await;
+        let (new_data_table, mut data_result) =
+            maintenance::maintain_table(data_table, "data", force, false).await;
         self.data_persistence.set_table(new_data_table);
+        if let Some(oc) = compact_outcome {
+            data_result.compacted = oc.had_data;
+            data_result.compact_files_added = oc.files_added;
+            data_result.compact_files_removed = oc.files_removed;
+        }
         report.data = Some(data_result);
 
-        // Maintain control table
+        // Maintain control table (best-effort optimize allowed; never pushed)
         let control_table = self.control_table.table().clone();
         let (new_control_table, control_result) =
             maintenance::maintain_table(control_table, "control", force, compact).await;
@@ -704,6 +744,167 @@ impl Ship {
         report.control = Some(control_result);
 
         report
+    }
+
+    /// Compact this pond's own data partitions as a RECORDED, pushable
+    /// transaction.
+    ///
+    /// Unlike `maintain(force, /*compact=*/true)`'s historical behavior --
+    /// a best-effort Delta optimize that was NOT recorded in the control
+    /// table and therefore never replicated -- this writes a
+    /// `Begin` / `DataCommitted(commit_kind=Compact)` transaction so that
+    /// `Remote::push` emits a Compact bundle.  Downstream consumers can
+    /// then use that bundle as a restart baseline (`pond restart-from-compact`),
+    /// and `Remote::maintain` retention can prune the superseded Write
+    /// bundles.  This closes the mirror retention-recovery loop end to end.
+    ///
+    /// Compaction must not change logical content: the per-partition Merkle
+    /// checksums are snapshotted before and after the Delta optimize and
+    /// asserted identical (a mismatch is a bug and aborts the txn with a
+    /// `Failed` record).  A no-op compaction (nothing to merge) writes a
+    /// `Completed` record only, leaves the committed sequence unchanged, and
+    /// returns `had_data == false`.
+    ///
+    /// Like `Remote::restart_pond_from_compact`, the bundle built from this
+    /// transaction is treated as a full snapshot of the pond at the compacted
+    /// version; the optimize target size (128 MB) merges each partition's
+    /// small files into one, so a producer that accumulates many small writes
+    /// per partition yields a complete baseline.
+    pub async fn compact(&mut self) -> Result<CompactOutcome, StewardError> {
+        use chrono::Utc;
+
+        let pond_id = self.control_table.pond_id_uuid();
+
+        // 1. Allocate seq, acquire the write lock, advance, write Begin.
+        let txn_seq = self.last_write_seq + 1;
+        let meta = PondUserMetadata::new(vec![
+            "pond".to_string(),
+            "maintain".to_string(),
+            "--compact".to_string(),
+        ]);
+        let txn_meta = PondTxnMetadata::new(txn_seq, meta);
+        let started = Utc::now().timestamp_micros();
+
+        let control_dir = get_control_path(&self.pond_path);
+        let _write_lock = crate::write_lock::WriteLockGuard::try_acquire(&control_dir, &txn_meta)?;
+        self.last_write_seq = txn_seq;
+
+        self.control_table
+            .record_begin(&txn_meta, None, TransactionType::Write)
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("compact: record begin: {}", e)))?;
+
+        // 2. Pre-compaction checksum snapshot.
+        let pre = crate::remote_adapter::compute_live_checksums_for_table(
+            self.data_persistence.table().clone(),
+            pond_id,
+        )
+        .await
+        .map_err(|e| StewardError::ControlTable(format!("compact: pre snapshot: {}", e)))?;
+
+        // 3. Run the Delta optimize, scoped to our own pond_id partitions.
+        //    Stamp the compaction's txn_seq into the commit's `pond_txn`
+        //    metadata so `OpLogPersistence::open` recovers the right
+        //    `last_txn_seq` on the next pond open (the optimize commit
+        //    becomes the most recent Delta commit).
+        let mut commit_meta = txn_meta.clone();
+        commit_meta.pond_id = pond_id.to_string();
+        let app_metadata = commit_meta.to_delta_metadata();
+        let stats = match maintenance::compact_pond_partitions(
+            self.data_persistence.table().clone(),
+            pond_id,
+            app_metadata,
+        )
+        .await
+        {
+            Ok((new_table, stats)) => {
+                self.data_persistence.set_table(new_table);
+                stats
+            }
+            Err(e) => {
+                let reason = format!("optimize failed: {}", e);
+                self.record_compact_failed(&txn_meta, started, reason).await;
+                return Err(StewardError::ControlTable(format!("compact: {}", e)));
+            }
+        };
+
+        // 4. No-op: nothing merged.  Write Completed (terminal for a
+        //    write-no-op) and do not advance the committed sequence.
+        if stats.is_noop() {
+            let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
+            self.control_table
+                .record_completed(&txn_meta, TransactionType::Write, duration_ms)
+                .await
+                .map_err(|e| {
+                    StewardError::ControlTable(format!("compact: record completed: {}", e))
+                })?;
+            debug!("Compaction no-op at seq={} (nothing to merge)", txn_seq);
+            return Ok(CompactOutcome {
+                txn_seq,
+                had_data: false,
+                files_added: 0,
+                files_removed: 0,
+                data_delta_version: 0,
+            });
+        }
+
+        // 5. Post-compaction snapshot + invariant: content must be unchanged.
+        let post = crate::remote_adapter::compute_live_checksums_for_table(
+            self.data_persistence.table().clone(),
+            pond_id,
+        )
+        .await
+        .map_err(|e| StewardError::ControlTable(format!("compact: post snapshot: {}", e)))?;
+        if let Err(e) = assert_compaction_invariant(&pre, &post) {
+            let reason = format!("{}", e);
+            self.record_compact_failed(&txn_meta, started, reason).await;
+            return Err(e);
+        }
+
+        // 6. Record DataCommitted(Compact) at the new data Delta version.
+        //    DataCommitted is the terminal record for a data write in the
+        //    duckpond control schema (no trailing Completed).
+        let new_version = self.data_persistence.table().version().unwrap_or(-1);
+        // Keep the in-memory persistence allocator in step with the
+        // committed compaction seq (the optimize commit already carries it
+        // on disk via `pond_txn`), so a subsequent read/write in this same
+        // process validates against the right sequence.
+        self.data_persistence.sync_last_txn_seq(txn_seq);
+        let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
+        self.control_table
+            .record_compact_committed(&txn_meta, new_version, duration_ms, post)
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("compact: record committed: {}", e)))?;
+
+        info!(
+            "Compaction committed (seq={}, version={}, +{}/-{} files)",
+            txn_seq, new_version, stats.files_added, stats.files_removed
+        );
+        Ok(CompactOutcome {
+            txn_seq,
+            had_data: true,
+            files_added: stats.files_added,
+            files_removed: stats.files_removed,
+            data_delta_version: new_version,
+        })
+    }
+
+    /// Best-effort `Failed` record for an aborted compaction transaction,
+    /// so the `Begin` does not linger as an incomplete transaction.
+    async fn record_compact_failed(
+        &mut self,
+        txn_meta: &PondTxnMetadata,
+        started_micros: i64,
+        reason: String,
+    ) {
+        let duration_ms = ((chrono::Utc::now().timestamp_micros() - started_micros) / 1000).max(0);
+        if let Err(e) = self
+            .control_table
+            .record_failed(txn_meta, TransactionType::Write, reason, duration_ms)
+            .await
+        {
+            warn!("compact: failed to record Failed terminal: {}", e);
+        }
     }
 
     /// Check if recovery is needed by querying the control table
@@ -875,6 +1076,45 @@ impl std::fmt::Debug for Ship {
             .field("has_data_persistence", &true)
             .finish()
     }
+}
+
+/// Verify that `pre` and `post` describe the same logical content: the
+/// same set of partition keys AND identical checksum bytes per key.
+/// Producer-side compaction ([`Ship::compact`]) merges parquet files
+/// without changing any row, so this MUST hold; a violation indicates a
+/// bug (e.g. optimize touched foreign rows or dropped data) and aborts
+/// the compaction transaction.
+fn assert_compaction_invariant(
+    pre: &sync_steward::PartitionChecksums,
+    post: &sync_steward::PartitionChecksums,
+) -> Result<(), StewardError> {
+    if pre.len() != post.len() {
+        return Err(StewardError::ControlTable(format!(
+            "compaction changed partition count: pre={} post={}",
+            pre.len(),
+            post.len(),
+        )));
+    }
+    for (partition, pre_cs) in pre {
+        match post.get(partition) {
+            Some(post_cs) if post_cs == pre_cs => {}
+            Some(post_cs) => {
+                return Err(StewardError::ControlTable(format!(
+                    "compaction altered partition {} checksum: pre={} post={}",
+                    partition,
+                    pre_cs.hex(),
+                    post_cs.hex(),
+                )));
+            }
+            None => {
+                return Err(StewardError::ControlTable(format!(
+                    "compaction dropped partition {}",
+                    partition,
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

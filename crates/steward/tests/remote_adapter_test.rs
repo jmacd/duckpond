@@ -800,3 +800,295 @@ async fn ship_remote_native_write_then_verify_passes() {
     );
     assert_eq!(report.remote_latest_seq, Some(txn_seq));
 }
+
+/// Write `content` to `path` in its own write transaction and return the
+/// allocated txn_seq.
+async fn write_one(src: &mut Ship, path: &str, content: &[u8]) -> i64 {
+    let owned = content.to_vec();
+    src.write_transaction(&meta("compact_write"), async move |fs| {
+        let root = fs.root().await?;
+        let _ = tinyfs::async_helpers::convenience::create_file_path(&root, path, &owned).await?;
+        Ok(())
+    })
+    .await
+    .expect("write transaction");
+    src.last_write_seq()
+}
+
+/// P2-PRODUCER-COMPACT-BUNDLES: `Ship::compact` records a pushable
+/// Compact transaction.  Several writes accumulate small parquet files in
+/// the root partition; compaction merges them and records a
+/// `DataCommitted(commit_kind=Compact)` at the post-optimize Delta
+/// version.  A second compaction is a no-op.
+#[tokio::test]
+async fn ship_compact_records_pushable_compact_transaction() {
+    use sync_steward::{CommitKind, RecordKind};
+
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+
+    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let pond_id = ship.control_table().pond_id_uuid();
+
+    // Several writes -> several small parquet files in the root partition.
+    for i in 0..4 {
+        let _ = write_one(
+            &mut ship,
+            &format!("/f{}.txt", i),
+            format!("v{}", i).as_bytes(),
+        )
+        .await;
+    }
+    let last_write_seq = ship.last_write_seq();
+
+    // Compaction merges them as a recorded transaction.
+    let outcome = ship.compact().await.expect("compact");
+    assert!(outcome.had_data, "expected real compaction, got no-op");
+    assert!(
+        outcome.files_removed > 0 && outcome.files_added > 0,
+        "expected files merged, got +{}/-{}",
+        outcome.files_added,
+        outcome.files_removed
+    );
+    assert_eq!(
+        outcome.txn_seq,
+        last_write_seq + 1,
+        "compaction takes the next seq"
+    );
+    assert_eq!(
+        ship.last_write_seq(),
+        outcome.txn_seq,
+        "in-memory last_write_seq advances to the compaction seq"
+    );
+
+    // The control table has a DataCommitted(Compact) at the compaction seq
+    // whose data_delta_version matches the outcome.
+    let records = ship
+        .control_table()
+        .inner()
+        .all_records_for(pond_id)
+        .await
+        .expect("read control records");
+    let dc = records
+        .iter()
+        .find(|r| r.record_kind == RecordKind::DataCommitted && r.txn_seq == outcome.txn_seq)
+        .expect("DataCommitted record for the compaction seq");
+    assert_eq!(
+        dc.commit_kind,
+        Some(CommitKind::Compact),
+        "the compaction commit must be marked Compact (so push emits a Compact bundle)"
+    );
+    let dc_meta: sync_steward::DataCommittedMetadata =
+        serde_json::from_str(&dc.metadata_json).expect("parse DataCommitted metadata");
+    assert_eq!(
+        dc_meta.data_delta_version, outcome.data_delta_version,
+        "recorded data_delta_version must point at the optimize commit"
+    );
+    assert!(
+        !dc_meta.partition_checksums.is_empty(),
+        "compaction records the post-compaction partition checksums"
+    );
+
+    // get_last_write_sequence (reads DataCommitted from disk) reflects it.
+    assert_eq!(
+        ship.control_table()
+            .get_last_write_sequence()
+            .await
+            .expect("last committed seq"),
+        outcome.txn_seq
+    );
+
+    // Data is intact (the invariant check would have aborted otherwise).
+    let tx = ship.begin_read(&meta("verify")).await.expect("begin_read");
+    let root = tx.root().await.expect("root");
+    for i in 0..4 {
+        let bytes = root
+            .read_file_path_to_vec(&format!("/f{}.txt", i))
+            .await
+            .expect("read file after compaction");
+        assert_eq!(bytes, format!("v{}", i).as_bytes());
+    }
+    let _ = tx.commit().await.expect("commit read");
+
+    // A second compaction has nothing to merge -> clean no-op.
+    let noop = ship.compact().await.expect("second compact");
+    assert!(!noop.had_data, "second compaction should be a no-op");
+}
+
+/// P2-PRODUCER-COMPACT-BUNDLES end-to-end: a producer compaction pushed
+/// to a remote becomes a Compact bundle that a fresh consumer can restart
+/// from.  This exercises the full mirror retention-recovery loop that was
+/// previously unreachable from duckpond alone.
+#[tokio::test]
+async fn ship_compact_bundle_drives_restart_from_compact() {
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let src_path = tmp.path().join("src");
+    let dst_path = tmp.path().join("dst");
+    let remote_path = tmp.path().join("remote");
+
+    // 1. Source pond with several writes, all under the root partition.
+    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let src_pond_id = src.control_table().pond_id_uuid();
+    let src_pond_meta = src.control_table().pond_metadata().clone();
+
+    let mut write_seqs = Vec::new();
+    for i in 0..4 {
+        write_seqs.push(
+            write_one(
+                &mut src,
+                &format!("/f{}.txt", i),
+                format!("v{}", i).as_bytes(),
+            )
+            .await,
+        );
+    }
+
+    // 2. Remote with the source's identity (mirror).
+    let mut remote = Remote::create(&remote_path, src_pond_id)
+        .await
+        .expect("create remote");
+
+    // 3. Push every write bundle.
+    for seq in &write_seqs {
+        let mut adapter = ShipRemoteSteward::new(&mut src);
+        remote.push(&mut adapter, *seq).await.expect("push write");
+    }
+
+    // 4. Compact and push the resulting Compact bundle.
+    let outcome = src.compact().await.expect("compact");
+    assert!(outcome.had_data, "expected a real compaction for the test");
+    {
+        let mut adapter = ShipRemoteSteward::new(&mut src);
+        remote
+            .push(&mut adapter, outcome.txn_seq)
+            .await
+            .expect("push compact bundle");
+    }
+
+    // The remote now carries a Compact bundle.
+    let has_compact = remote
+        .list_bundles()
+        .await
+        .expect("list bundles")
+        .iter()
+        .any(|b| matches!(b.commit_kind, sync_steward::CommitKind::Compact));
+    assert!(has_compact, "remote must carry a Compact bundle after push");
+
+    // 5. Fresh consumer (same identity) restarts from the compact baseline.
+    let mut dst = Ship::create_pond_for_restoration(&dst_path, src_pond_meta)
+        .await
+        .expect("create dst");
+    {
+        let mut adapter = ShipRemoteSteward::new(&mut dst);
+        remote
+            .restart_pond_from_compact(&mut adapter)
+            .await
+            .expect("restart_pond_from_compact");
+    }
+
+    // 6. The consumer has the full dataset reconstructed from the baseline.
+    let tx = dst
+        .begin_read(&meta("verify_dst"))
+        .await
+        .expect("begin_read");
+    let root = tx.root().await.expect("dst root");
+    for i in 0..4 {
+        let bytes = root
+            .read_file_path_to_vec(&format!("/f{}.txt", i))
+            .await
+            .expect("read file from restarted consumer");
+        assert_eq!(bytes, format!("v{}", i).as_bytes());
+    }
+    let _ = tx.commit().await.expect("commit read");
+}
+
+/// P2-PRODUCER-COMPACT-BUNDLES regression: after a compaction, reopening
+/// the pond recovers the right `last_txn_seq`.  The optimize commit
+/// becomes the most recent Delta commit, so it MUST carry `pond_txn`
+/// metadata or `OpLogPersistence::open` would reset the sequence to 0.
+#[tokio::test]
+async fn ship_compact_survives_reopen() {
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+
+    let compact_seq = {
+        let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+        for i in 0..4 {
+            let _ = write_one(
+                &mut ship,
+                &format!("/f{}.txt", i),
+                format!("v{}", i).as_bytes(),
+            )
+            .await;
+        }
+        let outcome = ship.compact().await.expect("compact");
+        assert!(outcome.had_data);
+        outcome.txn_seq
+    };
+
+    // Reopen: last_write_seq must reflect the compaction, data intact, and
+    // a subsequent write must take the next sequence.
+    let mut ship = Ship::open_pond(&pond_path).await.expect("reopen pond");
+    assert_eq!(
+        ship.last_write_seq(),
+        compact_seq,
+        "reopened pond must recover the compaction seq, not reset to 0"
+    );
+
+    let tx = ship.begin_read(&meta("verify")).await.expect("begin_read");
+    let root = tx.root().await.expect("root");
+    for i in 0..4 {
+        let bytes = root
+            .read_file_path_to_vec(&format!("/f{}.txt", i))
+            .await
+            .expect("read file after reopen");
+        assert_eq!(bytes, format!("v{}", i).as_bytes());
+    }
+    let _ = tx.commit().await.expect("commit read");
+
+    let next_seq = write_one(&mut ship, "/after.txt", b"after").await;
+    assert_eq!(
+        next_seq,
+        compact_seq + 1,
+        "a write after compaction takes the next sequence"
+    );
+}
+
+/// P2-PRODUCER-COMPACT-BUNDLES regression: the full `maintain(true, true)`
+/// flow (compact THEN checkpoint/vacuum) must leave the data table's
+/// `last_txn_seq` recoverable on reopen, so `pond push` sees the
+/// compaction.  Reproduces the CLI `pond maintain --compact` path.
+#[tokio::test]
+async fn ship_maintain_compact_survives_reopen() {
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+
+    let expected_seq = {
+        let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+        for i in 0..4 {
+            let _ = write_one(
+                &mut ship,
+                &format!("/f{}.txt", i),
+                format!("v{}", i).as_bytes(),
+            )
+            .await;
+        }
+        let report = ship.maintain(true, true).await;
+        assert!(
+            report.data.as_ref().map(|d| d.compacted).unwrap_or(false),
+            "maintain --compact should have compacted the data table"
+        );
+        ship.last_write_seq()
+    };
+
+    let ship = Ship::open_pond(&pond_path).await.expect("reopen pond");
+    assert_eq!(
+        ship.last_write_seq(),
+        expected_seq,
+        "reopen after maintain --compact must recover the compaction seq from the data table"
+    );
+}

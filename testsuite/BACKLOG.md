@@ -7,38 +7,6 @@
 
 ## 🔴 Open Items
 
-### P2-PRODUCER-COMPACT-BUNDLES: duckpond producers never create remote Compact bundles
-- **Type**: DESIGN GAP (discovered 2026-06-05 while wiring D6.4 `pond restart-from-compact`)
-- **Symptom**: `pond restart-from-compact <mirror>` always reports
-  "no compact bundle to restart from" for a pure duckpond mirror, even
-  after many writes + `pond maintain`.
-- **Root cause**: duckpond's `ControlTable::record_data_committed`
-  hardcodes `commit_kind = Some(CommitKind::Write)`
-  (crates/steward/src/control_table.rs:315).  `Remote::push` reads that
-  commit_kind from the source's DataCommitted record
-  (crates/sync-remote/src/remote.rs:312), so every bundle a duckpond
-  producer pushes is a `Write` bundle -- it never emits a `Compact`
-  bundle.  `Remote::maintain` only *retains/prunes* existing compact
-  bundles; it does not synthesize one by merging Write bundles.  So a
-  compact baseline on the remote only ever appears when the upstream is
-  a compacting producer (sync_steward-style, as exercised by
-  `crates/sync-tests/tests/cross_pond.rs` and `restart.rs`).
-- **Impact**: `pond restart-from-compact` is fully wired and
-  forward-compatible (it delegates to the library-tested
-  `Remote::restart_pond_from_compact`), and works for cross-pond imports
-  from a compacting upstream, but the **mirror** retention-recovery flow
-  is not reachable end-to-end from duckpond alone until producer-side
-  compaction lands.
-- **Possible fix**: add a duckpond producer compaction path (a logical
-  "compact" txn whose DataCommitted carries `CommitKind::Compact`,
-  pushed as a Compact bundle), analogous to sync_steward's
-  `Steward::compact`.  Wire it under `pond maintain --compact` or a new
-  verb.  Then `Remote::maintain` retention + `restart-from-compact`
-  close the loop for mirrors.
-- **Files**: crates/steward/src/control_table.rs:315 (hardcoded Write);
-  crates/sync-remote/src/remote.rs:312 (push reads commit_kind);
-  crates/sync-remote/src/remote.rs:515 (Remote::maintain prunes only).
-
 ### P2-VERIFY-BOOTSTRAP-DRIFT: `pond verify` mismatches against freshly-bootstrapped replicas
 - **Type**: BUG / DESIGN GAP (discovered 2026-06-05 while wiring D6.1 `pond verify`)
 - **Symptom**: Bootstrap a dst replica from a remote, then run
@@ -99,6 +67,46 @@
 ---
 
 ## 🟢 Done
+
+### ✅ D7: Fix P2-PRODUCER-COMPACT-BUNDLES (duckpond producers emit Compact bundles)
+- **Completed**: 2026-06-06
+- **Type**: FEATURE / DESIGN GAP (discovered 2026-06-05 while wiring D6.4
+  `pond restart-from-compact`)
+- **Symptom (pre-fix)**: `pond restart-from-compact <mirror>` always
+  reported "no compact bundle to restart from" for a pure duckpond
+  mirror, even after many writes + `pond maintain --compact`.
+- **Root cause**: `pond maintain --compact` ran a best-effort Delta
+  optimize that was NOT recorded in the control table, so
+  `Remote::push` (which iterates `DataCommitted` records) never saw a
+  `CommitKind::Compact` -- producers only ever pushed `Write` bundles.
+  (Worse, the unrecorded optimize commit carried no `pond_txn` metadata,
+  so reopening a pond after the old `maintain --compact` would reset
+  `OpLogPersistence::last_txn_seq` to 0.)
+- **Fix**: new `Ship::compact()` runs a RECORDED, pushable compaction
+  (Begin / `DataCommitted(commit_kind=Compact)`), analogous to
+  `sync_steward::Steward::compact`:
+  1. allocate seq + write lock + Begin
+  2. snapshot pre checksums
+  3. Delta `optimize(Compact)` scoped to own `pond_id` partitions, with
+     the compaction's `txn_seq` stamped into the commit's `pond_txn`
+     metadata (so reopen recovers `last_txn_seq`)
+  4. no-op -> Completed, `had_data=false`
+  5. real -> snapshot post + assert checksum invariance (content
+     unchanged) -> `DataCommitted(Compact)` at the new Delta version
+  `pond maintain --compact` now routes data-table compaction through
+  this path; checkpoint/vacuum stay best-effort; the control table
+  (never pushed) keeps its best-effort optimize.
+- **Result**: `Remote::push` emits a Compact bundle; `restart-from-compact`
+  + `Remote::maintain` retention now close the mirror recovery loop
+  end-to-end from duckpond alone.
+- **Files**: crates/steward/src/ship.rs (`Ship::compact`, `maintain`
+  routing, `assert_compaction_invariant`); crates/steward/src/maintenance.rs
+  (`compact_pond_partitions`, `CompactStats`); crates/steward/src/control_table.rs
+  (`record_compact_committed`); crates/cmd/src/commands/maintain.rs.
+- **Tests** (`crates/steward/tests/remote_adapter_test.rs`):
+  `ship_compact_records_pushable_compact_transaction`,
+  `ship_compact_bundle_drives_restart_from_compact` (full mirror
+  recovery loop), `ship_compact_survives_reopen`.
 
 ### ✅ D5.9: Fix P1-BUG-LF-REPLICATION (large-file blobs replicate over push/pull)
 - **Completed**: 2026-06-03

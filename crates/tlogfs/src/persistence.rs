@@ -586,29 +586,43 @@ impl OpLogPersistence {
 
             _ = tx.commit().await.map_err(TLogFSError::TinyFS)?;
         } else {
-            // Opening existing table - load last_txn_seq from Delta commit metadata
-            // This is the authoritative source (not the control table, which is Steward's)
-            let mut hist = table.history(Some(1)).await?;
-            if let Some(last_commit) = hist.next() {
-                if let Some(txn_seq) = PondTxnMetadata::extract_txn_seq(&last_commit.info) {
+            // Opening existing table - recover last_txn_seq from the data
+            // Delta commit history.  This is the authoritative source (not
+            // the control table, which is Steward's).
+            //
+            // We scan ALL commits and take the MAX `pond_txn.txn_seq` rather
+            // than trusting only the single most-recent commit: Delta
+            // maintenance operations (vacuum's VACUUM START/END commits,
+            // optimize/compaction, checkpoints) append commits that carry no
+            // `pond_txn` blob.  After a `pond maintain --compact` the newest
+            // commits are vacuum entries, so `history(Some(1))` alone would
+            // miss the compaction's `pond_txn` and reset the sequence to 0.
+            // Sequences are monotonic, so the max is the true last_txn_seq.
+            let history = table.history(None).await?;
+            let mut found: Option<i64> = None;
+            for commit in history {
+                if let Some(txn_seq) = PondTxnMetadata::extract_txn_seq(&commit.info) {
+                    found = Some(found.map_or(txn_seq, |m: i64| m.max(txn_seq)));
+                }
+            }
+            match found {
+                Some(txn_seq) => {
                     persistence.last_txn_seq = txn_seq;
                     debug!(
                         "Loaded last_txn_seq={} from Delta metadata at {}",
                         txn_seq, &path_str,
                     );
-                } else {
-                    // No txn_seq in metadata - this might be a pond created for restoration
-                    // or an old pond without metadata. Start at 0.
+                }
+                None => {
+                    // No pond_txn in any retained commit - a pond created for
+                    // restoration (bundles will provide seqs) or an old pond
+                    // without metadata.  Start at 0.
                     persistence.last_txn_seq = 0;
                     debug!(
-                        "No txn_seq found in Delta metadata at {}, starting at 0",
+                        "No txn_seq found in Delta history at {}, starting at 0",
                         &path_str,
                     );
                 }
-            } else {
-                // No history yet - brand new table
-                persistence.last_txn_seq = 0;
-                debug!("No Delta history at {}, starting at 0", &path_str);
             }
         }
 
