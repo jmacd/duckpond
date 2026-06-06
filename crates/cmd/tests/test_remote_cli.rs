@@ -14,7 +14,7 @@
 
 use cmd::commands::{
     add_backup_command, add_remote_command, init_command, list_remotes_command, pull_command,
-    push_command, remote::remote_config_path, verify_command,
+    push_command, remote::remote_config_path, status_command, verify_command,
 };
 use cmd::common::ShipContext;
 use std::sync::Once;
@@ -447,6 +447,64 @@ async fn pond_verify_no_remotes_is_noop() {
     let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
     init_command(&ctx).await.expect("init");
     verify_command(&ctx, None).await.expect("verify noop");
+}
+
+/// D6.2: `pond status` renders cleanly on a fresh pond with no remotes.
+#[tokio::test]
+async fn pond_status_fresh_pond() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+    status_command(&ctx).await.expect("status fresh");
+}
+
+/// D6.2: `pond status` renders cleanly after attaching a backup and
+/// pushing (exercises identity, last_write_seq, remote enumeration,
+/// and the push-watermark lag formatting).
+#[tokio::test]
+async fn pond_status_with_backup() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let pond_path = scratch.path().join("pond");
+    let remote_path = scratch.path().join("remote_bucket");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    let ctx = ctx_for(&pond_path, vec!["pond", "init"]);
+    init_command(&ctx).await.expect("init");
+    write_small_file(&ctx, "/s.txt", b"status", vec!["copy", "s.txt"])
+        .await
+        .expect("write s.txt");
+    {
+        let store_id = {
+            let ship = ctx.open_pond().await.expect("open");
+            ship.control_table().pond_id_uuid()
+        };
+        std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+        let _ = sync_remote::Remote::create_at_url(&remote_url, store_id, Default::default())
+            .await
+            .expect("create remote");
+    }
+    add_backup_command(
+        &ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup add");
+    push_command(&ctx, Some("origin".to_string()))
+        .await
+        .expect("push");
+
+    status_command(&ctx).await.expect("status with backup");
 }
 
 /// `pond remote add` rejects duplicate names without --overwrite.

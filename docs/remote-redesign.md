@@ -100,7 +100,7 @@ have not all shipped:
 | `pond remote detach` | shipped as `pond remote remove` | Default = detach; `--purge` = unlink mount entry. |
 | `pond push` / `pond pull` | shipped | |
 | `pond maintain` | shipped | |
-| `pond status` | **not shipped** | Operator-facing aggregate of pond + remotes + lifecycle states. |
+| `pond status` | **shipped (D6.2, 2026-06-05)** | Operator-facing aggregate of pond identity + local commit state + recovery health + per-remote sync watermarks.  Offline (no network); push lag from local watermarks. |
 | `pond log` | shipped | |
 | `pond verify` | **shipped (D6.1, 2026-06-05)** | Operator-facing wrapper around `verify_against_remote`.  Producer-side verify is correct; bootstrap-then-verify on replicas has a known root-partition mismatch (see BACKLOG P2-VERIFY-BOOTSTRAP-DRIFT). |
 | `pond recover` | shipped | Plus `pond emergency` for destructive recovery. |

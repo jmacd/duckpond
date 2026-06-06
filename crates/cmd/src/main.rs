@@ -232,6 +232,9 @@ enum Commands {
         /// Remote or backup name.  Omit to verify against every attachment.
         name: Option<String>,
     },
+    /// Show an operator-facing status aggregate: identity, local commit
+    /// state, recovery health, and per-remote sync watermarks (D6).
+    Status,
     /// Manage remote attachments under `/sys/remotes/` (D4).
     Remote {
         #[command(subcommand)]
@@ -501,6 +504,7 @@ async fn main() -> Result<()> {
         Commands::Push { name } => commands::push_command(&ship_context, name).await,
         Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
         Commands::Verify { name } => commands::verify_command(&ship_context, name).await,
+        Commands::Status => commands::status_command(&ship_context).await,
         Commands::Remote { command } => match command {
             RemoteCommand::Add {
                 name,

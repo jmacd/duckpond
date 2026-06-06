@@ -25,6 +25,7 @@
 | `pond push` | Push to push/both-mode remotes | `pond push` |
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
+| `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
 | `pond config` | Show/set pond configuration | `pond config` |
 
 ### Two Operating Modes
@@ -570,6 +571,36 @@ Exit code is non-zero if any remote reports a mismatch or fails to load.
 > producer side; consumer-side reports are still useful for detecting
 > divergence trends but the absolute "OK" baseline is not reachable
 > from bootstrap today.
+
+---
+
+### pond status (D6.2)
+
+Show an operator-facing status aggregate for the current pond.  This is
+a fast, **offline** command -- it reads only the local control table and
+`/sys/remotes/*` attachments and never opens a remote or touches the
+network, so it is safe on a pond whose remotes are unreachable.
+
+```bash
+pond status
+```
+
+Output sections:
+- **Identity** -- pond ID, creation time / creator, on-disk location.
+- **Local state** -- last committed write sequence and recovery health
+  (lists incomplete transactions with a `pond recover` hint if any are
+  found).
+- **Remotes** -- one block per attached remote/backup: url, mount path
+  (`/ (mirror)` for mirror attachments), and sync watermarks.  For
+  push/both remotes the `last pushed` line shows lag relative to the
+  local `last write seq` (`up to date`, `behind local by N txn`, or
+  `never pushed`).  For pull/both remotes the `last pulled` watermark is
+  shown.
+
+> **Note:** push "lag" is computed purely from local watermarks
+> (`last_write_seq` vs `last_pushed_seq:<url>`).  To cross-check the
+> consumer's data against what a remote actually recorded, use
+> `pond verify`.
 
 ---
 

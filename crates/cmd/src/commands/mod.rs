@@ -23,6 +23,7 @@ pub mod remote;
 pub mod run;
 pub mod run_summary;
 pub mod show;
+pub mod status;
 pub mod temporal;
 pub mod verify;
 
@@ -50,5 +51,6 @@ pub use remote::{
 };
 pub use run::run_command;
 pub use show::show_command;
+pub use status::status_command;
 pub use temporal::{detect_overlaps_command, set_temporal_bounds_command};
 pub use verify::verify_command;
