@@ -34,7 +34,7 @@ ready for production cutover.
 | D5.7b docs (cli-reference.md update for D5.7b verbs) | done | `3914cdd1` |
 | D5.8: revive 13 disabled testsuite scripts | done | `01987ebb` .. `75eb4139` (D5.8.1-D5.8.9) |
 | D5.9: fix P1-BUG-LF-REPLICATION (large-file blob replication) | done | `d5bf4b68` |
-| D6: cross-pond model migration + operator-guide rewrite | partial | see § "Open after D5.8" |
+| D6: diagnostic/recovery CLI verbs + operator-guide rewrite | mostly done | verify/status/rebuild-control/restart-from-compact shipped (D6.1-D6.4); operator-guide rewritten; producer compaction remains (P2-PRODUCER-COMPACT-BUNDLES) |
 
 Active branch: `jmacd/52` (89 commits ahead of `main` as of `d5bf4b68`).
 The D5 row in earlier revisions of this doc was a single "pending" line;
@@ -109,13 +109,15 @@ have not all shipped:
 
 ### Documentation reconciliation
 
-- **`docs/operator-guide.md`** still carries the "D4 update"
-  warning at lines 3-10 noting that examples no longer work and
-  that "a full rewrite of this guide is tracked under D6." Either
-  rewrite it on the D5.7b/D5.8 surface, or move it to
-  `docs/archive/` and point operators at `docs/cli-reference.md`.
-- **`docs/operator-interface-plan.md`** likewise predates D4 and
-  needs the same disposition.
+- **`docs/operator-guide.md`** was rewritten for the post-D6 CLI
+  (2026-06-05): backup/remote attach, push/pull, maintain, status,
+  verify, log, recover, rebuild-control, restart-from-compact, plus
+  transaction lifecycle-state vocabulary and a runbook.  The pre-D6
+  factory-based version was archived to
+  `docs/archive/operator-guide-pre-d6.md`.
+- **`docs/operator-interface-plan.md`** (the superseded aspirational
+  interface plan) was archived to
+  `docs/archive/operator-interface-plan.md`.
 - **This document's** phase table was updated in this round to
   reflect actual D5 sub-phasing; the design narrative at lines
   556-602 is still accurate as a record of intent.
