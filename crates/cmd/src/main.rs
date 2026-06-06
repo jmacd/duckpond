@@ -235,6 +235,16 @@ enum Commands {
     /// Show an operator-facing status aggregate: identity, local commit
     /// state, recovery health, and per-remote sync watermarks (D6).
     Status,
+    /// Rebuild the control table from the data Delta table when the
+    /// control table is lost or corrupt (D6).  Recovers pond identity
+    /// and the transaction-log skeleton; settings/watermarks must be
+    /// re-established by re-attaching remotes.
+    RebuildControl {
+        /// Move an existing control table aside (to control.bak.<ts>)
+        /// and rebuild.  Required when a control table already exists.
+        #[arg(long)]
+        force: bool,
+    },
     /// Manage remote attachments under `/sys/remotes/` (D4).
     Remote {
         #[command(subcommand)]
@@ -505,6 +515,9 @@ async fn main() -> Result<()> {
         Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
         Commands::Verify { name } => commands::verify_command(&ship_context, name).await,
         Commands::Status => commands::status_command(&ship_context).await,
+        Commands::RebuildControl { force } => {
+            commands::rebuild_control_command(&ship_context, force).await
+        }
         Commands::Remote { command } => match command {
             RemoteCommand::Add {
                 name,

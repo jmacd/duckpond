@@ -105,7 +105,7 @@ have not all shipped:
 | `pond verify` | **shipped (D6.1, 2026-06-05)** | Operator-facing wrapper around `verify_against_remote`.  Producer-side verify is correct; bootstrap-then-verify on replicas has a known root-partition mismatch (see BACKLOG P2-VERIFY-BOOTSTRAP-DRIFT). |
 | `pond recover` | shipped | Plus `pond emergency` for destructive recovery. |
 | `pond restart-from-compact` | **not shipped** | Blocked by the carry-forward above. |
-| `pond rebuild-control` | **not shipped** | Operator-driven control-table reset. |
+| `pond rebuild-control` | **shipped (D6.3, 2026-06-05)** | Reconstructs the control table from the data Delta table's `pond_txn` commit history.  Recovers pond identity + transaction-log skeleton; settings/watermarks and per-txn checksums are not recoverable (re-attach remotes, re-baseline verify). |
 
 ### Documentation reconciliation
 

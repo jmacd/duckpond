@@ -26,6 +26,7 @@
 | `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
 | `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
 | `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
+| `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
 | `pond config` | Show/set pond configuration | `pond config` |
 
 ### Two Operating Modes
@@ -601,6 +602,55 @@ Output sections:
 > (`last_write_seq` vs `last_pushed_seq:<url>`).  To cross-check the
 > consumer's data against what a remote actually recorded, use
 > `pond verify`.
+
+---
+
+### pond rebuild-control (D6.3)
+
+Reconstruct the control table from the data Delta table.  This is a
+**disaster-recovery** command for the case where the data Delta table
+survives but the control table is lost or corrupt (so `pond` can no
+longer open the pond).
+
+```bash
+# Rebuild when the control table is missing
+pond rebuild-control
+
+# Move an existing (corrupt) control table aside and rebuild
+pond rebuild-control --force
+```
+
+**Recovers:**
+- **Pond identity** -- the canonical `pond_id` from the data table's
+  bootstrap row, plus a birth timestamp from the bootstrap commit.  The
+  birth hostname/username are not stored in the data table and are
+  recorded as `unknown`.
+- **Transaction-log skeleton** -- one `Begin` + `DataCommitted` (plus a
+  trailing `Completed` for the bootstrap) per write transaction found in
+  the data Delta commit history, so `pond log` and `pond status` work
+  again.  The original `txn_seq`, `txn_id`, CLI args, Delta version, and
+  commit timestamp are all recovered from the `pond_txn` commit
+  metadata.
+
+**Does NOT recover (operator follow-up required):**
+- **Remote attachments' settings** -- remote modes and
+  `last_pushed_seq` / `last_pulled_seq` watermarks live only in the
+  control table.  Re-attach remotes with `pond remote add` /
+  `pond backup add` after a rebuild.
+- **Per-transaction partition checksums** -- not recoverable from data
+  alone, so reconstructed `DataCommitted` records carry empty checksums
+  and `pond verify` must be re-baselined.
+
+> **Safety:** if a real control table already exists, the rebuild is
+> refused unless `--force` is given.  With `--force`, the existing
+> control directory is moved aside to a `control.bak.<unix_ts>` sibling
+> before the new one is written.  A stale empty `control/` directory
+> left behind by a failed open is removed automatically (no `--force`
+> needed).
+
+> **Note:** `pond rebuild-control` is designed for primary ponds.  A
+> freshly restored replica that has not yet done local writes should be
+> re-bootstrapped via `pond remote add` + `pond pull`, not rebuilt.
 
 ---
 

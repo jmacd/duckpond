@@ -18,6 +18,7 @@ pub mod mkdir;
 pub mod mknod;
 pub mod pull;
 pub mod push;
+pub mod rebuild_control;
 pub mod recover;
 pub mod remote;
 pub mod run;
@@ -44,6 +45,7 @@ pub use mkdir::mkdir_command;
 pub use mknod::mknod_command;
 pub use pull::pull_command;
 pub use push::push_command;
+pub use rebuild_control::rebuild_control_command;
 pub use recover::recover_command;
 pub use remote::{
     RemoteListFilter, add_backup_command, add_remote_command, list_remotes_command,

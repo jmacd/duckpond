@@ -148,6 +148,23 @@ pub struct State {
 // Re-export TableProviderKey from provider for backward compatibility
 pub use provider::TableProviderKey;
 
+/// One reconstructed write transaction recovered from the data Delta
+/// table's commit history by [`OpLogPersistence::reconstruct_txn_history`].
+///
+/// Carries enough to rebuild the control table's lifecycle records:
+/// the original `pond_txn` metadata (txn_seq, txn_id, CLI args,
+/// pond_id), the Delta version the commit landed at, and the commit
+/// timestamp in microseconds.
+#[derive(Debug, Clone)]
+pub struct ReconstructedTxn {
+    /// The `pond_txn` metadata stamped on the Delta commit.
+    pub meta: PondTxnMetadata,
+    /// The Delta Lake version at which this commit landed.
+    pub delta_version: i64,
+    /// Commit timestamp in microseconds since the Unix epoch.
+    pub timestamp_micros: i64,
+}
+
 impl OpLogPersistence {
     /// Get the Delta table for query operations
     #[must_use]
@@ -291,6 +308,68 @@ impl OpLogPersistence {
                 Ok(None)
             }
         }
+    }
+
+    /// Reconstruct the write-transaction history of the data Delta table
+    /// at `path` from its commit log, for `pond rebuild-control`.
+    ///
+    /// Walks the Delta commit history (which carries a `pond_txn`
+    /// metadata blob on every steward write commit) and returns one
+    /// [`ReconstructedTxn`] per commit that carries such metadata,
+    /// sorted ascending by `txn_seq`.  Commits without `pond_txn`
+    /// (the initial table `CREATE`, compaction/optimize commits, etc.)
+    /// are skipped but still consume a version slot, so the derived
+    /// `delta_version` stays correct across them.
+    ///
+    /// `delta_version` is the actual Delta Lake version at which the
+    /// commit landed (derived from the table's latest version and the
+    /// newest-first ordering of history).  Note that `create_pond`
+    /// records the bootstrap txn's `data_delta_version` as `0` even
+    /// though its physical commit is version 1; callers that need to
+    /// reproduce that convention should special-case the bootstrap.
+    ///
+    /// Returns an empty vec if the table is missing, unreadable, or
+    /// carries no `pond_txn` commits.
+    pub async fn reconstruct_txn_history<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<Vec<ReconstructedTxn>, TLogFSError> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let url = Url::from_directory_path(path.as_ref())
+            .or_else(|_| Url::from_file_path(path.as_ref()))
+            .map_err(|_| {
+                TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str))
+            })?;
+
+        let table = match deltalake::open_table(url).await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let Some(latest) = table.version() else {
+            return Ok(Vec::new());
+        };
+
+        // `history` is newest-first; the i-th entry is at version
+        // `latest - i` (every Delta version has exactly one commit).
+        let history: Vec<CommitInfo> = table.history(None).await?.collect();
+        let mut out = Vec::new();
+        for (i, commit) in history.iter().enumerate() {
+            let version = latest - i as i64;
+            let Some(meta) = PondTxnMetadata::from_delta_metadata(&commit.info) else {
+                continue;
+            };
+            // Delta commit timestamps are milliseconds since epoch;
+            // OplogEntry / control records use microseconds.
+            let timestamp_micros = commit.timestamp.unwrap_or(0).saturating_mul(1000);
+            out.push(ReconstructedTxn {
+                meta,
+                delta_version: version,
+                timestamp_micros,
+            });
+        }
+
+        out.sort_by_key(|t| t.meta.txn_seq);
+        Ok(out)
     }
 
     /// Creates a new OpLogPersistence instance with a new table and initializes root

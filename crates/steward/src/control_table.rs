@@ -348,6 +348,55 @@ impl ControlTable {
         self.inner.write_record(record).await.map_err(map_err)
     }
 
+    /// Reconstruct the lifecycle records for one historical write
+    /// transaction at a known commit timestamp.  Used by
+    /// `pond rebuild-control` to rebuild the control table from the data
+    /// Delta table's commit history when the control table is lost or
+    /// corrupt.
+    ///
+    /// Writes a `Begin` + `DataCommitted` pair (plus a trailing
+    /// `Completed` when `include_completed` is set, matching the
+    /// bootstrap shape produced by [`crate::Ship::create_pond`]).  All
+    /// records carry the supplied `ts_micros` so `pond log` shows the
+    /// original commit time rather than the rebuild time.
+    ///
+    /// The `DataCommitted` record carries EMPTY partition checksums:
+    /// historical per-transaction checksums are not recoverable from the
+    /// data table alone, so `pond verify` must be re-baselined (and
+    /// remotes re-attached) after a rebuild.
+    pub async fn reconstruct_write_txn(
+        &mut self,
+        txn_meta: &PondTxnMetadata,
+        ts_micros: i64,
+        data_delta_version: i64,
+        include_completed: bool,
+    ) -> Result<(), StewardError> {
+        let mut begin = self.base_record(RecordKind::Begin, txn_meta);
+        begin.ts_micros = ts_micros;
+        self.inner.write_record(begin).await.map_err(map_err)?;
+
+        let metadata = DataCommittedMetadata {
+            partition_checksums: HashMap::new(),
+            data_delta_version,
+        };
+        let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into());
+        let mut committed = self.base_record(RecordKind::DataCommitted, txn_meta);
+        committed.commit_kind = Some(CommitKind::Write);
+        committed.duration_ms = Some(0);
+        committed.ts_micros = ts_micros;
+        committed.metadata_json = metadata_json;
+        self.inner.write_record(committed).await.map_err(map_err)?;
+
+        if include_completed {
+            let mut completed = self.base_record(RecordKind::Completed, txn_meta);
+            completed.duration_ms = Some(0);
+            completed.ts_micros = ts_micros;
+            self.inner.write_record(completed).await.map_err(map_err)?;
+        }
+
+        Ok(())
+    }
+
     // -------- Post-commit records --------
 
     /// Record that a post-commit factory task has been queued.
