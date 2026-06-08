@@ -7,7 +7,27 @@
 
 ## 🔴 Open Items
 
-(none -- see Test Queue below for tests pending a Docker/MinIO environment)
+### FLAKY-SITEGEN-OUTPUT: 209/210 sitegen-sidebar tests flake under heavy churn
+- **Type**: TEST FLAKINESS (pre-existing; surfaced during the full
+  testsuite run 2026-06-08)
+- **Symptom**: Under rapid back-to-back container runs (`./run-all.sh`, or
+  a tight `run-test.sh` loop), one of `209-sitegen-sidebar-theme.sh` /
+  `210-sitegen-nested-sidebar.sh` intermittently fails with
+  `write "/output/index.html": No such file or directory (os error 2)`.
+  Non-deterministic: which test fails (if any) varies run to run; both
+  PASS in isolation and in light back-to-back runs (21/21, 18/18).
+- **Assessment**: transient ENOENT on the container `/output` path under
+  heavy Docker-Desktop-on-macOS container churn (each test runs in its OWN
+  fresh container, so it is not a cross-test collision).  NOT a duckpond
+  code regression -- sitegen is untouched by D7/D7b/D8.
+- **Mitigation applied**: `sitegen build <dir>` now `create_dir_all`s its
+  output root before writing (crates/sitegen/src/factory.rs), so the build
+  is self-contained and the output dir is (re)created immediately before
+  the first write.  This does not fully cure the Docker/macOS churn flake
+  but removes any dependency on the dir pre-existing.
+- **Next step (if it recurs in CI)**: add a retry around the sitegen
+  `build` step in the two tests, or investigate Docker Desktop overlayfs
+  sync under load.
 
 ---
 
