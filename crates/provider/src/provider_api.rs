@@ -115,14 +115,23 @@ impl Provider {
 
         let scheme = url.scheme();
 
-        // Host files explicitly typed as table/series (e.g.
-        // `host+table:///snapshot.parquet`, `host+series:///readings.parquet`)
-        // are raw bytes on the host filesystem, but the URL asserts they are
+        // Host files explicitly typed as table/series with the default
+        // (Parquet) format -- `host+table:///snapshot.parquet`,
+        // `host+series:///readings.parquet` (both have scheme `file`) -- are
+        // raw bytes on the host filesystem, but the URL asserts they are
         // queryable Parquet.  Read them directly as Parquet rather than
         // routing through the tinyfs builtin path, which classifies host
         // files as raw `FilePhysicalVersion` and rejects them as
         // "not queryable".
-        if url.is_host() && matches!(url.entry_type(), Some("table") | Some("series")) {
+        //
+        // The `scheme == "file"` guard is essential: a non-default format
+        // such as `host+csv+series:///data.csv` also carries entry_type
+        // `series` but must be parsed by its format provider (CSV here), NOT
+        // read as Parquet.
+        if url.is_host()
+            && scheme == "file"
+            && matches!(url.entry_type(), Some("table") | Some("series"))
+        {
             return self.create_host_parquet_table_provider(&url).await;
         }
 
@@ -949,6 +958,35 @@ mod tests {
         assert!(
             err.to_string().contains("not a valid Parquet file"),
             "error should be a clear Parquet error, got: {}",
+            err
+        );
+    }
+
+    /// Regression: `host+csv+series://` carries entry_type `series` but a
+    /// non-default format scheme (`csv`); it must route to the CSV format
+    /// provider, NOT the Parquet host path.  (Caught by testsuite 301.)
+    #[tokio::test]
+    async fn test_host_csv_series_does_not_use_parquet_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // Even pointing at a real Parquet file, csv+series must NOT take the
+        // Parquet path -- the `csv` format scheme wins over the entry type.
+        let path = dir.path().join("data.parquet");
+        std::fs::write(&path, b"PAR1 not really").unwrap();
+
+        let fs = create_test_fs().await;
+        let provider = Provider::new(fs);
+        let ctx = SessionContext::new();
+
+        let url = format!("host+csv+series://{}", path.display());
+        let err = provider
+            .create_table_provider(&url, &ctx)
+            .await
+            .expect_err("csv+series over a plain test FS cannot read the host path");
+        // The error must NOT be the Parquet-path error: that would mean the
+        // routing incorrectly treated this CSV URL as Parquet.
+        assert!(
+            !err.to_string().contains("not a valid Parquet file"),
+            "host+csv+series must not take the Parquet path, got: {}",
             err
         );
     }
