@@ -16,6 +16,30 @@
 
 ## 🟢 Done
 
+### ✅ D8: Fix `host+table:///x.parquet` "not queryable"
+- **Completed**: 2026-06-07
+- **Type**: BUG FIX
+- **Symptom (pre-fix)**: `pond cat host+table:///file.parquet` (and
+  `host+series://`) errored `File '...' is not queryable (type:
+  FilePhysicalVersion)`.
+- **Root cause**: `host+table://` parses as builtin entry-type `table`, so
+  `create_table_provider` routed to the tinyfs builtin path.  That resolves
+  the host file through the filesystem, where a raw host file has entry
+  type `FilePhysicalVersion` (not a table/series), so `as_queryable()`
+  rejected it -- even though the bytes are valid Parquet.
+- **Fix**: in `Provider::create_table_provider`, when `url.is_host()` and
+  `entry_type` is `table`/`series`, read the host file directly as Parquet
+  (`open_host_url` + `ParquetRecordBatchReaderBuilder` -> `MemTable`)
+  instead of routing through tinyfs.  A non-Parquet file now yields a clear
+  "not a valid Parquet file" error.
+- **Files**: crates/provider/src/provider_api.rs
+  (`create_host_parquet_table_provider` + routing).
+- **Tests** (crates/provider/src/provider_api.rs):
+  `test_host_table_reads_parquet_directly`,
+  `test_host_table_rejects_non_parquet`.  Verified end-to-end via the
+  `pond` binary (`host+table://` and `host+series://` query cleanly;
+  `--format=table` and `--sql` both work).
+
 ### ✅ D7b: Fix P2-VERIFY-BOOTSTRAP-DRIFT (replicate the pond_init bundle)
 - **Completed**: 2026-06-06
 - **Type**: BUG / DESIGN GAP (discovered 2026-06-05 while wiring D6.1 `pond verify`)
@@ -546,19 +570,3 @@ cd /Volumes/sourcecode/src/duckpond/tests
 docker-compose up -d minio
 docker-compose run --rm duckpond
 ```
-
-## BUG: `host+table:///path.parquet` fails with "not queryable"
-
-`pond cat host+table:///path/to/file.parquet` errors:
-```
-Invalid URL: File '...' is not queryable (type: FilePhysicalVersion)
-```
-
-**Root cause:** `host+table://` parses as builtin scheme `table`, which routes
-to `create_builtin_table_provider()`. That resolves the path through `HostmountPersistence`,
-which maps all regular files as `FilePhysicalVersion` (raw data). The queryable check
-fails because the entry type metadata isn't set — it's just a file on disk.
-
-**Fix:** When `url.is_host()` and scheme is `table`/`series`, bypass the tinyfs
-metadata path and read the file directly as Parquet (validate PAR1 magic, create
-a DataFusion `ParquetExec` or `MemTable` from the bytes).

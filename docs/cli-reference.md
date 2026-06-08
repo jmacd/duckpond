@@ -223,6 +223,10 @@ pond cat host+csv:///tmp/data.csv --format=table --sql "SELECT * FROM source WHE
 # Query a host zstd-compressed CSV
 pond cat host+csv+zstd:///tmp/data.csv.zst --format=table
 
+# Query a host Parquet file directly as a table (no pond needed)
+pond cat host+table:///tmp/snapshot.parquet --format=table
+pond cat host+table:///tmp/snapshot.parquet --sql "SELECT count(*) FROM source"
+
 # Query pond CSV files with SQL (use csv:// prefix)
 pond cat csv:///data/readings.csv --sql "SELECT * FROM source WHERE temp > 20"
 
