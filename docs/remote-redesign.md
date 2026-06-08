@@ -103,7 +103,7 @@ have not all shipped:
 | `pond maintain` | shipped | |
 | `pond status` | **shipped (D6.2, 2026-06-05)** | Operator-facing aggregate of pond identity + local commit state + recovery health + per-remote sync watermarks.  Offline (no network); push lag from local watermarks. |
 | `pond log` | shipped | |
-| `pond verify` | **shipped (D6.1, 2026-06-05)** | Operator-facing wrapper around `verify_against_remote`.  Producer-side verify is correct; bootstrap-then-verify on replicas has a known root-partition mismatch (see BACKLOG P2-VERIFY-BOOTSTRAP-DRIFT). |
+| `pond verify` | **shipped (D6.1, 2026-06-05)** | Operator-facing wrapper around `verify_against_remote`.  Symmetric: producer-side and replica-side verify both pass (the `pond_init` bundle is replicated, P2-VERIFY-BOOTSTRAP-DRIFT fixed in D7). |
 | `pond recover` | shipped | Plus `pond emergency` for destructive recovery. |
 | `pond restart-from-compact` | **shipped (D6.4, 2026-06-05)** | Delegates to the generic `Remote::restart_pond_from_compact` (works on duckpond's `ShipRemoteSteward`; the carry-forward "blocker" was already resolved by that generic path).  Mirror restart re-persists the dropped attachment.  Requires a compact baseline on the remote -- duckpond producers now create one via `pond maintain --compact` + `pond push` (D7, P2-PRODUCER-COMPACT-BUNDLES closed). |
 | `pond maintain --compact` | **shipped (D7, 2026-06-06)** | Records the data-table Delta optimize as a `CommitKind::Compact` transaction (`Ship::compact`), so `Remote::push` emits a Compact bundle (restart baseline).  Asserts per-partition checksum invariance; stamps `pond_txn` on the optimize commit so reopen recovers `last_txn_seq`. |

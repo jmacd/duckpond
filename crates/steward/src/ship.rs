@@ -80,17 +80,30 @@ impl Ship {
             )
             .await?;
 
-        // Record data_committed (root initialization created DeltaLake version 0).
-        // D5.7a: the data_delta_version=0 bootstrap record is never included
-        // in pushed bundles (Remote::push clamps it), so its
-        // partition_checksums are unobservable via verify — pass empty.
+        // Record data_committed for the root-init transaction.  The root
+        // directory's OplogEntry is written at the data Delta version that
+        // `create_infrastructure` just produced (version 0 is `CREATE TABLE`
+        // with no data; the root row lands at the next version).  Recording
+        // the REAL version + checksums (rather than the historical
+        // `data_delta_version=0` / empty-checksums placeholder) is what makes
+        // `Remote::push` replicate the pond_init bundle, so a bootstrapped
+        // replica holds the root-dir v1 row and `pond verify` matches
+        // (P2-VERIFY-BOOTSTRAP-DRIFT).
+        let root_version = ship.data_persistence.table().version().unwrap_or(0);
+        let root_pond_id = ship.control_table.pond_id_uuid();
+        let root_checksums = crate::remote_adapter::compute_live_checksums_for_table(
+            ship.data_persistence.table().clone(),
+            root_pond_id,
+        )
+        .await
+        .map_err(|e| StewardError::ControlTable(format!("compute root-init checksums: {}", e)))?;
         ship.control_table
             .record_data_committed(
                 &txn_metadata,
                 TransactionType::Write,
-                0, // Root initialization is DeltaLake version 0
+                root_version,
                 0, // Duration unknown/not tracked
-                sync_steward::PartitionChecksums::new(),
+                root_checksums,
             )
             .await?;
 

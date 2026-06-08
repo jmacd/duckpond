@@ -283,12 +283,15 @@ impl Remote {
     /// the remote, returns `Ok(())` immediately (and writes a
     /// `PostPushCompleted` if missing locally).
     ///
-    /// Bootstrap-skip: if the source's `DataCommitted` for `txn_seq`
-    /// has `data_delta_version == 0` (the `pond_init` txn, which
-    /// claims a seq but writes no parquet payload), the push is a
+    /// Bootstrap-skip (legacy/defensive): if the source's `DataCommitted`
+    /// for `txn_seq` records `data_delta_version == 0`, the push is a
     /// clean no-op: no PostPush records are written, but the
-    /// `last_pushed_seq:<url>` watermark IS advanced to `txn_seq` so
-    /// the driver doesn't re-attempt the same seq forever.
+    /// `last_pushed_seq:<url>` watermark IS advanced to `txn_seq` so the
+    /// driver doesn't re-attempt the same seq forever.  Current producers
+    /// record the pond_init txn's real Delta version (>= 1) so it
+    /// replicates as a normal bundle; this guard only fires for ponds
+    /// created before that fix (P2-VERIFY-BOOTSTRAP-DRIFT) or any other
+    /// commit that genuinely wrote no parquet at a real version.
     pub async fn push<S: RemoteSteward + ?Sized>(
         &mut self,
         steward: &mut S,
@@ -317,11 +320,14 @@ impl Remote {
         })?;
         let parent_seq = dc.parent_seq.unwrap_or(0);
 
-        // 2a. Bootstrap-skip: `pond_init` records `data_delta_version == 0`
-        // because it writes no parquet payload.  Treat that as a clean
-        // no-op: don't write PostPush records (nothing happened on the
-        // remote), but DO advance `last_pushed_seq` so the driver
-        // doesn't retry the same seq on every push pass.
+        // 2a. Bootstrap-skip (legacy/defensive): a `data_delta_version == 0`
+        // DataCommitted has no parquet to push (version 0 is the Delta
+        // `CREATE TABLE`).  Treat it as a clean no-op: don't write PostPush
+        // records (nothing happened on the remote), but DO advance
+        // `last_pushed_seq` so the driver doesn't retry the same seq on
+        // every push pass.  Current producers record pond_init's real
+        // version (>= 1) so it does NOT hit this path and replicates
+        // normally (P2-VERIFY-BOOTSTRAP-DRIFT).
         if dc_meta.data_delta_version == 0 {
             let key = last_pushed_seq_key(&self.url);
             let current = match steward.config_get(&key).await? {
@@ -664,12 +670,13 @@ impl Remote {
     ///   txn_seq; `last_pulled_seq:<remote_url>` is set to the
     ///   baseline; `pull` catches up to the latest bundle.
     /// - **If the remote has only Write bundles** (no compact yet):
-    ///   seeds `last_pulled_seq:<remote_url> = 1` so the subsequent
-    ///   pull skips the producer's pond_init txn (txn_seq=1 is the
-    ///   identity-bearing bootstrap and is never replicated as a
-    ///   bundle), then calls `pull` to apply the Write bundles.
+    ///   seeds `last_pulled_seq:<remote_url>` to one below the oldest
+    ///   available bundle, then calls `pull` to apply every bundle.  A
+    ///   current producer replicates its pond_init txn (txn_seq=1) as a
+    ///   normal bundle, so the replica receives the identity-bearing
+    ///   root-dir rows and matches the producer on `verify`.
     /// - **If the remote has no bundles at all**: seeds
-    ///   `last_pulled_seq=1` and returns; subsequent pulls will pick
+    ///   `last_pulled_seq=0` and returns; subsequent pulls will pick
     ///   up bundles as they are pushed.
     ///
     /// After this returns Ok, the consumer is fully synced to the
@@ -707,11 +714,19 @@ impl Remote {
             // baseline + set seq + catch-up pull.
             self.restart_pond_from_compact(consumer).await
         } else {
-            // No-compact path: seed last_pulled_seq=1 so the pull
-            // skips the producer's pond_init txn (which is not
-            // replicated as a bundle), then catch up.
+            // No-compact path: seed `last_pulled_seq` to one below the
+            // oldest available bundle so the subsequent pull applies every
+            // bundle the remote has, starting at the oldest.  A current
+            // producer pushes its pond_init txn (txn_seq=1) as a normal
+            // bundle, so oldest=1 -> seed=0 and the replica receives the
+            // identity-bearing root-dir rows (P2-VERIFY-BOOTSTRAP-DRIFT).
+            // A legacy producer that never replicated seq=1 has oldest=2 ->
+            // seed=1, preserving the old skip-the-bootstrap behavior.  An
+            // empty remote seeds 0 and the pull is a no-op.
+            let oldest = self.oldest_available_seq().await?.unwrap_or(1);
+            let seed = (oldest - 1).max(0);
             let setting_key = last_pulled_seq_key(&self.url);
-            consumer.config_set(&setting_key, "1").await?;
+            consumer.config_set(&setting_key, &seed.to_string()).await?;
             let _report = self.pull(consumer).await?;
             Ok(())
         }

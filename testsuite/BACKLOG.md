@@ -7,58 +7,6 @@
 
 ## 🔴 Open Items
 
-### P2-VERIFY-BOOTSTRAP-DRIFT: `pond verify` mismatches against freshly-bootstrapped replicas
-- **Type**: BUG / DESIGN GAP (discovered 2026-06-05 while wiring D6.1 `pond verify`)
-- **Symptom**: Bootstrap a dst replica from a remote, then run
-  `pond verify origin` on dst.  Live data and recorded data mismatch at
-  the root partition `00000000-0000-7100-8000-000000000000`, even
-  though no further writes have happened.  `pond verify` returns
-  `[MISMATCH] verify origin: 1 partition(s) diverge from remote at seq=N`.
-- **Likely root cause**: `compute_live_checksums_for_table` selects all
-  OplogEntry rows for the requested `pond_id` from the local Delta table.
-  - The producer's `pond_init` txn (`txn_seq=1`, `data_delta_version=0`)
-    writes rows for the root partition (root dir entry, etc.) and is
-    explicitly NOT pushed to remote (`Remote::push` skips
-    `data_delta_version=0`).
-  - `Ship::create_replica` on dst synthesizes its OWN init transaction
-    using fresh uuid7 node IDs and `Utc::now()` timestamps to populate
-    the root-partition rows for the foreign pond_id.
-  - After `bootstrap_consumer` applies the producer's incremental
-    bundles, dst's root partition has dst-local-init rows + producer's
-    txn>=2 rows, whereas the producer recorded
-    `compute_live_checksums(pond_id)` over producer-init + txn>=2 rows.
-  - The init rows differ field-by-field (different node IDs,
-    timestamps, etc.) → root-partition Merkle root differs → verify
-    reports a mismatch even though both sides have the "same" logical
-    pond state.
-- **Workaround**: `pond verify` works correctly when the source pond and
-  the remote agree (the producer can verify against its own backups -
-  `pond_verify_ok_after_push` regression test covers this).  Replicas
-  bootstrapped from a remote will always show a root-partition mismatch
-  until the underlying design is fixed.  Operators should treat verify's
-  output as authoritative only on the producer side for now.
-- **Possible fixes** (need design discussion):
-  1. Push the producer's `pond_init` bundle so consumers can apply it
-     verbatim instead of synthesizing their own (changes the
-     "bootstrap is from snapshot" invariant).
-  2. Have `Ship::create_replica` derive deterministic root node IDs
-     and timestamps from the foreign pond_id (still leaves the
-     factory's `last_pulled_seq` / mount entries differing).
-  3. Filter `compute_live_checksums` to ignore the root partition
-     entirely (compromises the integrity story for cross-pond mounts).
-  4. Stamp the producer's init rows into the bundle stream as a
-     special "manifest snapshot" the consumer copies verbatim.
-- **Files involved**:
-    - `crates/steward/src/remote_adapter.rs:833-885`
-      (compute_live_checksums_for_table)
-    - `crates/steward/src/ship.rs` (create_replica)
-    - `crates/sync-remote/src/remote.rs` (push - skips data_delta_version=0)
-- **Repro** (in-repo test, currently `#[ignore]`-able):
-  see `cmd/tests/test_remote_cli.rs::pond_verify_ok_after_push` for the
-  positive case.  Symmetric drift test was attempted and removed; the
-  diagnostic logs printed `live` != `recorded` at the root partition
-  with no operator-driven mutation in between.
-
 ### P3-001: Document factory configuration examples
 - **Type**: DOCS
 - **Description**: Factory YAML configs need more complete examples
@@ -67,6 +15,40 @@
 ---
 
 ## 🟢 Done
+
+### ✅ D7b: Fix P2-VERIFY-BOOTSTRAP-DRIFT (replicate the pond_init bundle)
+- **Completed**: 2026-06-06
+- **Type**: BUG / DESIGN GAP (discovered 2026-06-05 while wiring D6.1 `pond verify`)
+- **Symptom (pre-fix)**: a replica bootstrapped from a remote reported a
+  root-partition mismatch on `pond verify` even with no local writes.
+- **True root cause** (confirmed at the Delta-log level): the producer's
+  `pond_init` root-directory row lands at Delta **version 1** (version 0
+  is the `CREATE TABLE`), but `Ship::create_pond` hard-coded
+  `data_delta_version=0` (+ empty checksums) for seq=1.  `Remote::push`'s
+  `data_delta_version==0` bootstrap-skip then never replicated the root
+  row, so the replica was missing the producer's `root-dir` v1 leaf that
+  the producer's recorded checksum includes -> root-partition Merkle
+  differs -> mismatch.  (The earlier "create_replica synthesizes its own
+  init rows" theory was wrong: `create_pond_for_restoration` makes an
+  EMPTY table; the replica is simply missing the unreplicated row.)
+- **Fix** (Option 1 - replicate the pond_init bundle):
+  - `Ship::create_pond` records seq=1's REAL `data_delta_version`
+    (`table.version()` after root init) and REAL partition checksums.
+  - `Remote::push`'s `data_delta_version==0` skip stays only as a
+    legacy/defensive guard; current ponds push seq=1 as a normal bundle.
+  - `Remote::bootstrap_consumer` and `pond pull` seed `last_pulled_seq`
+    to `oldest_available_seq - 1` (so new producers -> seed 0, pull seq=1+;
+    legacy producers -> seed 1, unchanged) instead of hard-coding "1".
+- **Result**: replicas are byte-identical to producers; `pond verify`
+  passes symmetrically (producer AND replica).  Verified: remote carries
+  txn_seq 1..N (pond_init replicated); producer verify `[OK]`.
+- **Files**: crates/steward/src/ship.rs (create_pond);
+  crates/sync-remote/src/remote.rs (push skip comment + bootstrap_consumer
+  seed); crates/cmd/src/commands/pull.rs (first-pull seed).
+- **Tests**: crates/steward/tests/remote_adapter_test.rs::
+  `ship_replica_verify_matches_after_bootstrap` (the regression) and
+  `ship_remote_push_replicates_pond_init` (rewritten from the old
+  clean-skip test).
 
 ### ✅ D7: Fix P2-PRODUCER-COMPACT-BUNDLES (duckpond producers emit Compact bundles)
 - **Completed**: 2026-06-06

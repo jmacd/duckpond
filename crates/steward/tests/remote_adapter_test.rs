@@ -646,18 +646,20 @@ async fn ship_compute_live_checksums_unknown_pond_id_is_empty() {
     );
 }
 
-/// D5.6: `Remote::push` treats the `pond_init` txn (data_delta_version
-/// == 0) as a clean no-op skip that still advances `last_pushed_seq`.
-/// Before D5.6, the driver had a `start = max(prev+1, 2)` clamp to
-/// avoid calling push on seq 1; after D5.6, push handles it itself.
+/// P2-VERIFY-BOOTSTRAP-DRIFT: `Remote::push` replicates the `pond_init`
+/// txn (txn_seq=1) as a normal bundle.  The root directory's OplogEntry
+/// lands at a real Delta version (>= 1), so the producer records that
+/// version and push builds a real bundle -- the bundle a replica needs to
+/// hold the identity-bearing root rows.
 ///
 /// This test calls `Remote::push(seq=1)` directly on a freshly-created
 /// pond (only the pond_init txn exists) and asserts:
-/// - it returns Ok(()) (not a Schema error)
-/// - no PostPush records were written locally
+/// - it returns Ok(())
+/// - PostPush records WERE written locally (a real push happened)
 /// - the `last_pushed_seq:<url>` setting was advanced to 1
+/// - a bundle for seq=1 now exists on the remote
 #[tokio::test]
-async fn ship_remote_push_bootstrap_txn_is_clean_skip() {
+async fn ship_remote_push_replicates_pond_init() {
     use sync_remote::{Remote, RemoteSteward};
     use sync_steward::RecordKind;
 
@@ -669,8 +671,8 @@ async fn ship_remote_push_bootstrap_txn_is_clean_skip() {
     let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
     let pond_id = ship.control_table().pond_id_uuid();
 
-    // No data writes -- only the pond_init txn (txn_seq=1,
-    // data_delta_version=0) exists.
+    // No data writes -- only the pond_init txn (txn_seq=1) exists, whose
+    // root row sits at a real Delta version.
     assert_eq!(
         ship.last_write_seq(),
         1,
@@ -687,46 +689,39 @@ async fn ship_remote_push_bootstrap_txn_is_clean_skip() {
         remote
             .push(&mut adapter, 1)
             .await
-            .expect("push of pond_init (v=0) must be a clean Ok");
+            .expect("push of pond_init must succeed");
     }
 
-    // PostPush records should NOT have been written for a v=0 skip.
+    // PostPush records ARE written now that pond_init is a real bundle.
     let records = ship
         .control_table()
         .inner()
         .all_records_for(pond_id)
         .await
         .expect("read control records");
-    let post_push_seq_1: Vec<_> = records
+    let post_push_completed_seq_1 = records
         .iter()
-        .filter(|r| {
-            r.txn_seq == 1
-                && matches!(
-                    r.record_kind,
-                    RecordKind::PostPushPending
-                        | RecordKind::PostPushCompleted
-                        | RecordKind::PostPushFailed
-                )
-        })
-        .collect();
+        .any(|r| r.txn_seq == 1 && matches!(r.record_kind, RecordKind::PostPushCompleted));
     assert!(
-        post_push_seq_1.is_empty(),
-        "v=0 skip must not write PostPush records, got {} records",
-        post_push_seq_1.len(),
+        post_push_completed_seq_1,
+        "pushing pond_init must write a PostPushCompleted record for seq 1",
     );
 
-    // But last_pushed_seq:<url> SHOULD have advanced to 1, so a later
-    // push driver run won't retry seq 1.
+    // last_pushed_seq:<url> advanced to 1.
     let setting_key = format!("last_pushed_seq:{}", remote_url);
     let adapter = ShipRemoteSteward::new(&mut ship);
     let stored = adapter
         .config_get(&setting_key)
         .await
         .expect("config_get")
-        .expect("setting should exist after v=0 skip");
+        .expect("setting should exist after push");
+    assert_eq!(stored, "1", "last_pushed_seq must be advanced to 1");
+
+    // A bundle for seq=1 now exists on the remote.
     assert_eq!(
-        stored, "1",
-        "last_pushed_seq must be advanced to 1 by the v=0 skip"
+        remote.oldest_available_seq().await.expect("oldest"),
+        Some(1),
+        "pond_init must be replicated as the oldest bundle",
     );
 }
 
@@ -1091,4 +1086,103 @@ async fn ship_maintain_compact_survives_reopen() {
         expected_seq,
         "reopen after maintain --compact must recover the compaction seq from the data table"
     );
+}
+
+/// P2-VERIFY-BOOTSTRAP-DRIFT regression: a replica bootstrapped from a
+/// remote must verify cleanly against that remote.  Before the fix the
+/// producer's pond_init root rows (Delta version 1, mis-recorded as
+/// data_delta_version=0 and skipped by push) were never replicated, so
+/// the replica's root partition diverged.  Now seq=1 is a normal bundle.
+#[tokio::test]
+async fn ship_replica_verify_matches_after_bootstrap() {
+    use sync_remote::Remote;
+
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let src_path = tmp.path().join("src");
+    let dst_path = tmp.path().join("dst");
+    let remote_path = tmp.path().join("remote");
+
+    // Producer with a few writes.
+    let mut src = Ship::create_pond(&src_path).await.expect("create src");
+    let pond_id = src.control_table().pond_id_uuid();
+    for i in 0..3 {
+        let _ = write_one(
+            &mut src,
+            &format!("/f{}.txt", i),
+            format!("v{}", i).as_bytes(),
+        )
+        .await;
+    }
+
+    // Push every seq (1..=upper); seq=1 (pond_init) is now a real bundle.
+    let mut remote = Remote::create(&remote_path, pond_id).await.expect("remote");
+    let upper = src.last_write_seq();
+    for seq in 1..=upper {
+        let mut a = ShipRemoteSteward::new(&mut src);
+        match remote.push(&mut a, seq).await {
+            Ok(()) => {}
+            Err(sync_remote::RemoteError::NoSuchCommit(_)) => {}
+            Err(e) => panic!("push {}: {}", seq, e),
+        }
+    }
+
+    // The pond_init bundle (seq=1) must now exist on the remote.
+    let oldest = remote.oldest_available_seq().await.expect("oldest");
+    assert_eq!(
+        oldest,
+        Some(1),
+        "pond_init (seq=1) must be replicated as a bundle"
+    );
+
+    // Producer verifies against its own backup.
+    {
+        let a = ShipRemoteSteward::new(&mut src);
+        let r = sync_remote::verify_against_remote(&remote, &a)
+            .await
+            .expect("verify src");
+        assert!(
+            r.ok,
+            "producer verify must pass: mismatches={:?}",
+            r.mismatches
+        );
+    }
+
+    // Bootstrap a fresh mirror replica and verify it against the remote.
+    let mut dst = Ship::create_replica(&dst_path, uuid::Uuid::from_bytes(*pond_id.as_bytes()))
+        .await
+        .expect("replica");
+    {
+        let mut a = ShipRemoteSteward::new(&mut dst);
+        remote
+            .bootstrap_consumer(&mut a)
+            .await
+            .expect("bootstrap_consumer");
+    }
+    {
+        let a = ShipRemoteSteward::new(&mut dst);
+        let r = sync_remote::verify_against_remote(&remote, &a)
+            .await
+            .expect("verify dst");
+        assert!(
+            r.ok,
+            "replica verify must pass after bootstrap: mismatches={:?}",
+            r.mismatches
+        );
+    }
+
+    // And the replica holds the data.
+    let tx = dst
+        .begin_read(&meta("verify_dst"))
+        .await
+        .expect("begin_read");
+    let root = tx.root().await.expect("root");
+    for i in 0..3 {
+        let bytes = root
+            .read_file_path_to_vec(&format!("/f{}.txt", i))
+            .await
+            .expect("read replica file");
+        assert_eq!(bytes, format!("v{}", i).as_bytes());
+    }
+    let _ = tx.commit().await.expect("commit read");
 }

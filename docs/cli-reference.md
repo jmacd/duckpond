@@ -565,15 +565,11 @@ Output (per remote):
 
 Exit code is non-zero if any remote reports a mismatch or fails to load.
 
-> **Known limitation (P2-VERIFY-BOOTSTRAP-DRIFT):** verify on a
-> replica that was bootstrapped from a remote currently reports a
-> mismatch at the root partition even with no operator-driven writes
-> in between.  The producer's `pond_init` transaction is not
-> replicated and `Ship::create_replica` synthesizes its own
-> non-deterministic root rows.  Treat verify as authoritative on the
-> producer side; consumer-side reports are still useful for detecting
-> divergence trends but the absolute "OK" baseline is not reachable
-> from bootstrap today.
+> Verify is symmetric: a replica bootstrapped from a remote (via
+> `pond pull` or `restart-from-compact`) verifies cleanly against that
+> remote, because the producer's `pond_init` transaction is replicated as
+> a normal bundle so the replica is byte-identical (P2-VERIFY-BOOTSTRAP-DRIFT,
+> fixed).
 
 ---
 

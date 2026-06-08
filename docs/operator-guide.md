@@ -249,10 +249,9 @@ $ pond verify origin
 
 A mismatch prints per-partition detail and the divergence boundary.
 
-> Known limitation: verify on a replica that was *bootstrapped* from a
-> remote currently reports a root-partition mismatch even with no local
-> writes (see BACKLOG P2-VERIFY-BOOTSTRAP-DRIFT).  Treat verify as
-> authoritative on the producer side.
+> Verify is symmetric: a replica bootstrapped from a remote verifies
+> cleanly against it (the producer's `pond_init` transaction is replicated
+> as a normal bundle, so the replica is byte-identical).
 
 ### Transaction log
 

@@ -84,16 +84,17 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         .map_err(|e| anyhow!("read mount_path for `{}`: {}", name, e))?
         .filter(|s| !s.is_empty() && s != "/");
 
-    // First-pull bootstrap: if `last_pulled_seq:<url>` is unset, seed it
-    // to "1" so the pull skips the producer's pond_init txn (which is
-    // not replicated as a bundle on the remote).  This mirrors
-    // `Remote::bootstrap_consumer`'s no-compact path but works for both
-    // mirror restart (foreign==local) and cross-pond import (foreign!=
-    // local).  For producers that have already compacted, this seed
-    // may still be below the retention horizon; in that case the pull
-    // returns `BehindRetention` and the operator should use
-    // `Ship::create_replica` (mirror) or a future compact-aware
-    // cross-pond bootstrap.
+    // First-pull bootstrap: if `last_pulled_seq:<url>` is unset, seed it to
+    // one below the remote's oldest available bundle so the pull applies
+    // every bundle the remote has.  A current producer replicates its
+    // pond_init txn (txn_seq=1) as a normal bundle, so the consumer
+    // receives the identity-bearing root-dir rows and matches on `verify`
+    // (P2-VERIFY-BOOTSTRAP-DRIFT); a legacy producer's oldest bundle is 2,
+    // so the seed is 1 (the old skip-the-bootstrap behavior).  Works for
+    // both mirror restart (foreign==local) and cross-pond import.  If the
+    // producer has already compacted+pruned past the oldest the consumer
+    // needs, the pull returns `BehindRetention` and the operator should use
+    // `pond restart-from-compact`.
     let last_pulled_key = format!("last_pulled_seq:{}", attachment.url);
     let already_pulled = ship_ref
         .control_table()
@@ -102,7 +103,13 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         .map_err(|e| anyhow!("read last_pulled_seq for `{}`: {}", name, e))?
         .is_some();
     if !already_pulled {
-        seed_initial_last_pulled(ship_ref, &attachment.url, name).await?;
+        let oldest = remote
+            .oldest_available_seq()
+            .await
+            .map_err(|e| anyhow!("read oldest bundle seq for `{}`: {}", name, e))?
+            .unwrap_or(1);
+        let seed = (oldest - 1).max(0);
+        seed_initial_last_pulled(ship_ref, &attachment.url, name, seed).await?;
     }
 
     let mut adapter = ShipRemoteSteward::new(ship_ref);
@@ -137,14 +144,19 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Seed `last_pulled_seq:<url>` to "1" on first pull, matching
-/// `bootstrap_consumer`'s no-compact path: the producer's pond_init
-/// txn (txn_seq=1) is never replicated as a bundle, so a fresh
-/// consumer that hasn't yet pulled would otherwise fail the retention
-/// horizon check (oldest_available=2 vs last_pulled=0).
-async fn seed_initial_last_pulled(ship: &mut steward::Ship, url: &str, name: &str) -> Result<()> {
+/// Seed `last_pulled_seq:<url>` to `seed` on first pull so the subsequent
+/// pull applies every bundle from `seed + 1` onward.  `seed` is normally
+/// `oldest_available_seq - 1` so the consumer starts at the remote's
+/// oldest bundle (the producer's replicated pond_init for current
+/// producers, or the first Write bundle for legacy ones).
+async fn seed_initial_last_pulled(
+    ship: &mut steward::Ship,
+    url: &str,
+    name: &str,
+    seed: i64,
+) -> Result<()> {
     ship.control_table_mut()
-        .raw_config_set(&format!("last_pulled_seq:{}", url), "1")
+        .raw_config_set(&format!("last_pulled_seq:{}", url), &seed.to_string())
         .await
         .map_err(|e| anyhow!("seed last_pulled_seq for `{}` ({}): {}", name, url, e))?;
     Ok(())
