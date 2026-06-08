@@ -7,14 +7,27 @@
 
 ## 🔴 Open Items
 
-### P3-001: Document factory configuration examples
-- **Type**: DOCS
-- **Description**: Factory YAML configs need more complete examples
-- **Next Step**: Run factory tests to discover actual syntax
+(none -- see Test Queue below for tests pending a Docker/MinIO environment)
 
 ---
 
 ## 🟢 Done
+
+### ✅ D8b: P3-001 Document factory configuration examples
+- **Completed**: 2026-06-07
+- **Type**: DOCS
+- **What**: Audited the registered factories against the `cli-reference.md`
+  Factory Types sections.  Every production factory now has a documented
+  config example.  The one gap -- `journal-ingest` (registered via
+  `register_executable_factory!`, no docs) -- is now documented with its
+  YAML config (pond_path, journalctl_command, collect_kernel,
+  timestamp_field, extra_args), the `pond mknod` / `pond run [status]`
+  flow, per-unit `.jsonl` output, and the `.journal-cursor` incremental
+  model.  Added it to the `/system/etc/` examples and the Factory Type
+  Quick Reference table.  Config fields verified against
+  `JournalIngestConfig` (`#[serde(deny_unknown_fields)]`); `pond mknod
+  journal-ingest` verified to create the node.
+- **Files**: docs/cli-reference.md.
 
 ### ✅ D8: Fix `host+table:///x.parquet` "not queryable"
 - **Completed**: 2026-06-07

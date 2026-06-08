@@ -764,7 +764,7 @@ auto-execution behavior:
 | Directory | Purpose | Post-commit | Examples |
 |-----------|---------|------------|----------|
 | `/system/run/` | Auto-executing factories | Yes (default: `push`) | (currently rare; see note) |
-| `/system/etc/` | Manually triggered or passive | No | `hydrovu`, `sitegen`, `column-rename` |
+| `/system/etc/` | Manually triggered or passive | No | `hydrovu`, `sitegen`, `column-rename`, `logfile-ingest`, `journal-ingest` |
 | `/system/site/` | Static content (templates) | No | Markdown page templates |
 
 > **Note (D4+)**: the legacy `remote` factory used to live in
@@ -1735,6 +1735,52 @@ logger -t myapp "Test message"
 
 ---
 
+### journal-ingest
+
+Ingest the systemd journal (and optionally the kernel ring buffer) into the
+pond as per-unit JSON Lines series. Runs `journalctl -o json` incrementally,
+tracking progress with a stored cursor so each run only collects new entries.
+
+```yaml
+# Destination path within the pond (required)
+pond_path: logs/watershop
+# journalctl binary (default: "journalctl")
+journalctl_command: journalctl
+# Collect the kernel ring buffer as a separate stream (default: true)
+collect_kernel: true
+# JSON field holding the timestamp, in microseconds since epoch
+# (default: "__REALTIME_TIMESTAMP")
+timestamp_field: __REALTIME_TIMESTAMP
+# Extra args appended to every journalctl invocation (default: []).
+# Use ["--merge"] to also pull the invoking user's journal so user-scope
+# units (e.g. pond@water-prod.service) are captured.
+extra_args: ["--merge"]
+```
+
+**Usage:**
+```bash
+# Create the factory node (manually triggered -> /system/etc/)
+pond mknod journal-ingest /system/etc/15-journal --config-path journal.yaml
+
+# Collect new journal entries (default subcommand)
+pond run /system/etc/15-journal
+pond run 15-journal             # short name works too
+
+# Show the cursor position and per-unit entry counts
+pond run 15-journal status
+```
+
+**Behavior:**
+- Entries are grouped into one `.jsonl` series file per systemd unit under
+  `pond_path`: `<unit>.jsonl`, `kernel.jsonl` (kernel transport),
+  `user-<unit>.jsonl` (user-scope units), and `other.jsonl` (no unit).
+- Output files are `data:series` (FilePhysicalSeries) -- versioned raw JSON
+  Lines; each run appends a new version with the collected entries.
+- A `.journal-cursor` file in `pond_path` records the last journal cursor, so
+  collection is incremental and idempotent across runs (ideal for cron).
+
+---
+
 ## Glob Patterns
 
 DuckPond uses glob patterns for file matching:
@@ -1896,6 +1942,7 @@ pond run 90-sitegen build ./dist            # build site (reduce is dynamic)
 | `column-rename` | transform | `pond mknod` | Wraps `TableProvider` |
 | `sitegen` | executable | `pond mknod` + `pond run ... build` | Static files on host |
 | `logfile-ingest` | executable | `pond mknod` + `pond run` | `data` entries in pond |
+| `journal-ingest` | executable | `pond mknod` + `pond run [status]` | `data:series` JSON Lines in pond |
 | `hydrovu` | executable | `pond mknod` + `pond run ... collect` | `table:series` in pond |
 | `remote` | executable | `pond mknod` + `pond run ... push/pull` | Backup bundles on S3 |
 
