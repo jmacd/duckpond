@@ -685,10 +685,19 @@ impl<'a> RemoteSteward for ShipRemoteSteward<'a> {
             use deltalake::kernel::transaction::CommitBuilder;
             let data = self.ship.data_persistence_mut();
             let table = data.table();
-            let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> = table
-                .snapshot()
-                .ok()
-                .map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
+            let snapshot_ref: Option<&dyn deltalake::kernel::transaction::TableReference> =
+                match table.snapshot() {
+                    Ok(s) => Some(s as &dyn deltalake::kernel::transaction::TableReference),
+                    // `NotInitialized` (state is None) is the only error
+                    // `snapshot()` returns, and means the data table has no
+                    // loaded state yet: the legitimate empty-table base for a
+                    // first commit.  Any other error is a real fault -- do NOT
+                    // silently fall back to a `None` base, which would commit
+                    // Add/Remove actions (including removes of files present in
+                    // the real snapshot) against no current version.
+                    Err(deltalake::DeltaTableError::NotInitialized) => None,
+                    Err(e) => return Err(adapt_err(e)),
+                };
             let log_store = table.log_store().clone();
             let _commit = CommitBuilder::default()
                 .with_actions(actions)

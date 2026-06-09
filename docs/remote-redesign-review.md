@@ -143,9 +143,24 @@ Ordered highest-value first.
 - **Fix:** Distinguish "no snapshot because the table is empty/new"
   (legitimate `None`) from a `snapshot()` `Err`, and propagate the
   latter rather than silently committing against no base.
+- **Status:** Resolved. The `.ok()` is replaced by an explicit `match`:
+  `Ok` -> `Some(base)`; `DeltaTableError::NotInitialized` (state is
+  `None`, i.e., a genuinely empty/new table) -> the legitimate `None`
+  base; any other error is propagated via `adapt_err`. Note: in
+  deltalake 0.30.2 `snapshot()` returns *only* `NotInitialized`, and the
+  data table is created with a `CREATE TABLE` commit (version 0, state
+  loaded) before any bundle is applied -- so `snapshot()` is `Ok` in
+  normal operation and the original review scenario (a transient `Err`
+  on a populated replica) cannot occur today. The fix removes the latent
+  silent-fallback and future-proofs against new error variants;
+  behavior is unchanged today. Happy-path apply (snapshot present ->
+  `Some` base) stays covered by `remote_adapter_test.rs`
+  (`ship_remote_bootstrap_consumer_no_compact`, fresh replica at v0; the
+  multi-bundle apply asserting `last_write_seq` advances, existing
+  replica at vN).
 
 ## Assessment
 
 None of these block the architecture, which is solid and well-tested.
-Finding #1 (credential exposure across replicas) is the one to fix
-before any production cutover.
+All four findings are resolved; finding #1 (credential exposure across
+replicas) was the one to fix before any production cutover.
