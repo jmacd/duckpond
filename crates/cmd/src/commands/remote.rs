@@ -171,6 +171,26 @@ async fn add_remote_attachment_internal(
         endpoint: endpoint.unwrap_or_default(),
         allow_http,
     };
+
+    // The attachment YAML at /sys/remotes/<name> is an oplog row that
+    // `pond push` replicates to every backup.  A literal secret would
+    // therefore be exposed on all replicas, so require the secret to be a
+    // `${env:VAR}` reference: the reference text replicates harmlessly and
+    // each replica resolves the value from its own environment at use time.
+    if !attachment.secret_access_key.is_empty()
+        && !utilities::env_substitution::has_env_refs(&attachment.secret_access_key)
+    {
+        return Err(anyhow!(
+            "secret_access_key must be an environment reference such as \
+             ${{env:AWS_SECRET_ACCESS_KEY}}, not a literal secret: the remote config \
+             at {}/{} is replicated to every backup, so a literal secret would be \
+             exposed on all replicas. Set the secret in the environment and pass \
+             `--secret-access-key '${{env:AWS_SECRET_ACCESS_KEY}}'`.",
+            SYS_REMOTES_DIR,
+            name
+        ));
+    }
+
     let yaml = serde_yaml::to_string(&attachment)
         .map_err(|e| anyhow!("failed to serialize remote attachment YAML: {}", e))?;
 
@@ -214,7 +234,7 @@ async fn add_remote_attachment_internal(
     if attachment.url.starts_with("s3://") {
         sync_remote::register_s3_handlers();
     }
-    let storage_options = attachment.to_storage_options();
+    let storage_options = attachment.to_storage_options()?;
     match Remote::open_at_url(&attachment.url, storage_options.clone()).await {
         Ok(remote) => match mode {
             RemoteMode::Pull => {
@@ -507,7 +527,7 @@ async fn validate_no_foreign_store_id_collision(
             continue;
         }
         // Probe the existing remote to learn its store_id.
-        let storage_options = attachment.to_storage_options();
+        let storage_options = attachment.to_storage_options()?;
         if attachment.url.starts_with("s3://") {
             sync_remote::register_s3_handlers();
         }

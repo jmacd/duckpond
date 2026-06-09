@@ -156,7 +156,7 @@ pond backup add origin "${BUCKET_URL}" \
     --region us-east-1 \
     --endpoint "${MINIO_ENDPOINT}" \
     --access-key-id "${MINIO_ROOT_USER}" \
-    --secret-access-key "${MINIO_ROOT_PASSWORD}" \
+    --secret-access-key '${env:MINIO_ROOT_PASSWORD}' \
     --allow-http
 echo "[OK] origin attached"
 

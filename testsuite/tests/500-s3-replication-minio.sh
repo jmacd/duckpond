@@ -93,7 +93,7 @@ pond backup add origin "s3://${BUCKET_NAME}" \
     --region us-east-1 \
     --endpoint "${MINIO_ENDPOINT}" \
     --access-key-id "${MINIO_ROOT_USER}" \
-    --secret-access-key "${MINIO_ROOT_PASSWORD}" \
+    --secret-access-key '${env:MINIO_ROOT_PASSWORD}' \
     --allow-http
 
 echo "[OK] origin attached"

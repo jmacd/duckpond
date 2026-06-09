@@ -22,11 +22,21 @@ pub enum RemoteConfigError {
 
     #[error("remote attachment YAML parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+
+    #[error("environment variable substitution failed in remote config: {0}")]
+    EnvSubst(String),
 }
 
 /// Portable, on-disk YAML config for one remote attachment.  Stored at
-/// `/sys/remotes/<name>` and serialized as YAML.  Pushing this config to a
-/// backup is safe -- it carries no per-pond watermarks.
+/// `/sys/remotes/<name>` and serialized as YAML.
+///
+/// Credential fields (`access_key_id`, `secret_access_key`) hold
+/// `${env:VAR}` references rather than literal secrets (enforced for
+/// `secret_access_key` at `pond remote add` time).  The reference text is
+/// what gets replicated to a backup -- the secret itself is resolved from
+/// the local process environment per replica at use time (see
+/// [`RemoteAttachment::to_storage_options`]).  This config carries no
+/// per-pond watermarks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteAttachment {
@@ -55,26 +65,52 @@ pub struct RemoteAttachment {
 }
 
 impl RemoteAttachment {
+    /// Resolve a single config field, expanding any `${env:VAR}` references
+    /// against the local process environment.  Plain literal values (no
+    /// `${env:` marker) pass through untouched, so legacy configs that
+    /// predate the env-reference model are unaffected.
+    fn resolve_field(value: &str) -> Result<String, RemoteConfigError> {
+        if utilities::env_substitution::has_env_refs(value) {
+            utilities::env_substitution::substitute_env_vars(value)
+                .map_err(|e| RemoteConfigError::EnvSubst(e.to_string()))
+        } else {
+            Ok(value.to_string())
+        }
+    }
+
     /// Build the storage options map passed to `Remote::open_at_url`.
     /// Returns an empty map for `file://` URLs.
-    #[must_use]
-    pub fn to_storage_options(&self) -> HashMap<String, String> {
+    ///
+    /// `${env:VAR}` references in the credential/endpoint fields are
+    /// expanded here, at use time, against the local environment.  This is
+    /// why secrets need never be persisted: the YAML stores `${env:VAR}`,
+    /// the live process supplies the value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RemoteConfigError::EnvSubst`] when a `${env:VAR}` reference
+    /// names a variable that is unset (and provides no `:-default`), rather
+    /// than silently forwarding the unresolved placeholder to S3.
+    pub fn to_storage_options(&self) -> Result<HashMap<String, String>, RemoteConfigError> {
         let mut out = HashMap::new();
         if self.url.starts_with("s3://") {
             if !self.region.is_empty() {
-                let _ = out.insert("region".to_string(), self.region.clone());
+                let _ = out.insert("region".to_string(), Self::resolve_field(&self.region)?);
             }
             if !self.access_key_id.is_empty() {
-                let _ = out.insert("access_key_id".to_string(), self.access_key_id.clone());
+                let _ = out.insert(
+                    "access_key_id".to_string(),
+                    Self::resolve_field(&self.access_key_id)?,
+                );
             }
             if !self.secret_access_key.is_empty() {
                 let _ = out.insert(
                     "secret_access_key".to_string(),
-                    self.secret_access_key.clone(),
+                    Self::resolve_field(&self.secret_access_key)?,
                 );
             }
             if !self.endpoint.is_empty() {
-                let _ = out.insert("endpoint".to_string(), self.endpoint.clone());
+                let _ = out.insert("endpoint".to_string(), Self::resolve_field(&self.endpoint)?);
                 let _ = out.insert(
                     "virtual_hosted_style_request".to_string(),
                     "false".to_string(),
@@ -84,7 +120,7 @@ impl RemoteAttachment {
                 let _ = out.insert("allow_http".to_string(), "true".to_string());
             }
         }
-        out
+        Ok(out)
     }
 
     /// Parse from raw YAML bytes (as stored under `/sys/remotes/<name>`).
@@ -192,7 +228,7 @@ mod tests {
             allow_http: true,
         };
         // File URLs ignore all S3 options.
-        assert!(a.to_storage_options().is_empty());
+        assert!(a.to_storage_options().unwrap().is_empty());
     }
 
     #[test]
@@ -205,7 +241,7 @@ mod tests {
             endpoint: "http://minio:9000".to_string(),
             allow_http: true,
         };
-        let opts = a.to_storage_options();
+        let opts = a.to_storage_options().unwrap();
         assert_eq!(opts.get("region").map(String::as_str), Some("us-east-2"));
         assert_eq!(opts.get("access_key_id").map(String::as_str), Some("k"));
         assert_eq!(opts.get("secret_access_key").map(String::as_str), Some("s"));
@@ -218,5 +254,47 @@ mod tests {
             Some("false")
         );
         assert_eq!(opts.get("allow_http").map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn storage_options_expand_env_refs() {
+        let a = RemoteAttachment {
+            url: "s3://bucket/prefix".to_string(),
+            region: "us-east-2".to_string(),
+            access_key_id: "literal-key".to_string(),
+            // `:-default` resolves without mutating the process environment.
+            secret_access_key: "${env:POND_RC_TEST_UNSET:-resolved-secret}".to_string(),
+            endpoint: String::new(),
+            allow_http: false,
+        };
+        let opts = a.to_storage_options().unwrap();
+        // Literal values pass through; ${env:VAR} is resolved locally.
+        assert_eq!(
+            opts.get("access_key_id").map(String::as_str),
+            Some("literal-key")
+        );
+        assert_eq!(
+            opts.get("secret_access_key").map(String::as_str),
+            Some("resolved-secret")
+        );
+    }
+
+    #[test]
+    fn storage_options_unset_env_ref_errors() {
+        let a = RemoteAttachment {
+            url: "s3://bucket/prefix".to_string(),
+            region: String::new(),
+            access_key_id: String::new(),
+            // Uniquely-named var with no default: guaranteed unset.
+            secret_access_key: "${env:POND_RC_TEST_DEFINITELY_UNSET_XYZ}".to_string(),
+            endpoint: String::new(),
+            allow_http: false,
+        };
+        // An unset env reference must surface as an error, never silently
+        // forward the unresolved placeholder to S3.
+        assert!(matches!(
+            a.to_storage_options(),
+            Err(RemoteConfigError::EnvSubst(_))
+        ));
     }
 }

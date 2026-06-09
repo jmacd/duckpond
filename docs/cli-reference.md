@@ -425,24 +425,35 @@ Each attachment is a small YAML file under `/sys/remotes/<name>`
 (portable; no per-pond watermarks).  The local-only mode and mount
 path live in the control table's raw_config map.
 
+> **Credentials must be `${env:VAR}` references, not literal secrets.**
+> The attachment YAML is replicated to every backup, so a literal
+> `--secret-access-key` would expose the secret on all replicas.
+> `pond remote add` / `pond backup add` therefore rejects a literal
+> `secret_access_key`: pass an env reference (single-quoted so your
+> shell does not expand it) and set the value in the environment.  The
+> reference text replicates; each replica resolves it locally at use
+> time.
+
 ```bash
-# Attach an S3 backup with credentials (push-only)
+# Attach an S3 backup with credentials (push-only).
+# Export the secret in the environment; pass it as an env reference.
+export AWS_SECRET_ACCESS_KEY=...   # the actual secret, never persisted
 pond backup add origin s3://my-bucket \
     --region us-east-1 \
     --endpoint http://localhost:9000 \
     --access-key-id minioadmin \
-    --secret-access-key minioadmin \
+    --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}' \
     --allow-http
 
 # Attach a bidirectional remote (push + pull, e.g. a federated hub)
 pond backup add hub s3://hub-bucket --bidirectional \
     --region us-east-1 \
-    --access-key-id ... --secret-access-key ...
+    --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
 # Attach a pull-mode remote as a cross-pond import
 pond remote add upstream s3://prod-bucket /imports/upstream \
     --region us-east-1 \
-    --access-key-id ... --secret-access-key ...
+    --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
 # Attach a pull-mode remote as a mirror restart (after `pond init` on a
 # blank machine; the remote was created earlier with `pond backup add`
@@ -801,7 +812,7 @@ pond copy host:///path/to/templates /system/site --overwrite
 
 # Backup attachment (managed by `pond backup add`, not `pond mknod`)
 pond backup add origin s3://my-bucket \
-    --region us-east-1 --access-key-id ... --secret-access-key ...
+    --region us-east-1 --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 ```
 
 ---
@@ -1845,7 +1856,7 @@ pond mknod dynamic-dir /reduced  --config-path reduce.yaml
 pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
 pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
 pond backup add origin s3://my-bucket \
-    --region us-east-1 --access-key-id ... --secret-access-key ...
+    --region us-east-1 --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
 # Operational cycle:
 pond run 20-hydrovu collect              # Collect data
@@ -1897,7 +1908,7 @@ pond mkdir -p /ingest
 pond copy host:///path/to/templates /system/site
 pond mknod logfile-ingest /system/etc/10-ingest --config-path ingest.yaml
 pond backup add origin s3://my-bucket \
-    --region us-east-1 --access-key-id ... --secret-access-key ...
+    --region us-east-1 --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 pond mknod temporal-reduce /reduced --config-path reduce.yaml
 pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
 

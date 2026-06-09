@@ -922,7 +922,9 @@ pub async fn push_pending_to_remote(
     if attachment.url.starts_with("s3://") {
         sync_remote::register_s3_handlers();
     }
-    let storage_options = attachment.to_storage_options();
+    let storage_options = attachment
+        .to_storage_options()
+        .map_err(|e| sync_remote::RemoteError::InvalidRemote(format!("storage options: {e}")))?;
     let mut remote = Remote::open_at_url(&attachment.url, storage_options).await?;
 
     let upper = ship.last_write_seq();

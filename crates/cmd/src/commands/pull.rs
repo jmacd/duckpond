@@ -62,7 +62,7 @@ async fn pull_one(ship: &mut steward::Steward, name: &str) -> Result<()> {
         sync_remote::register_s3_handlers();
     }
 
-    let storage_options = attachment.to_storage_options();
+    let storage_options = attachment.to_storage_options()?;
     let remote = Remote::open_at_url(&attachment.url, storage_options)
         .await
         .map_err(|e| anyhow!("open remote `{}` ({}): {}", name, attachment.url, e))?;
