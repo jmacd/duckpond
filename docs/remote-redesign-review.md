@@ -118,6 +118,15 @@ Ordered highest-value first.
   rule.
 - **Fix:** Use the same `.map_err(...) -> RemoteError::Schema` /
   `adapt_err` treatment as `pull`; only `Ok(None)` should mean `0`.
+- **Status:** Resolved. The push-side watermark read in
+  `remote.rs` (now consolidated into `Remote::advance_last_pushed_seq`
+  by the item-2 fix) and `push_pending_to_remote` in
+  `remote_adapter.rs` both mirror `pull`: a read error propagates
+  (`?` -> `RemoteError::Steward`) and an unparseable value becomes
+  `RemoteError::Schema`; only `Ok(None)` yields `0`. Regression tests:
+  `crates/sync-remote/tests/push.rs::push_errors_on_unparseable_last_pushed_seq_watermark`
+  and
+  `crates/steward/tests/remote_adapter_test.rs::push_pending_to_remote_errors_on_corrupt_watermark`.
 
 ### 4. [Robustness, low-probability] `apply_pulled_bundle` discards a snapshot error
 

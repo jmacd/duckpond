@@ -450,3 +450,36 @@ async fn idempotent_re_push_after_simulated_post_commit_crash_writes_completed()
         "latest PostPush record after crash-recovery is Completed, not Pending",
     );
 }
+
+/// Regression for remote-redesign-review #3 (no-silent-fallback): a
+/// present-but-unparseable `last_pushed_seq:<url>` watermark must surface
+/// as a `Schema` error from the push path, not be silently coerced to 0
+/// (which would re-enumerate the entire transaction history from seq 1).
+#[tokio::test]
+async fn push_errors_on_unparseable_last_pushed_seq_watermark() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut steward = Steward::create(dir.path().join("pond")).await.unwrap();
+    {
+        let mut g = steward.begin_write().await.unwrap();
+        g.put("p", "k", b"v".to_vec()).unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+    let mut remote = Remote::create(dir.path().join("remote"), steward.store_id())
+        .await
+        .unwrap();
+
+    // Plant a corrupt watermark, then push: the watermark-advance step
+    // must reject the unparseable value rather than treat it as 0.
+    let watermark_key = format!("last_pushed_seq:{}", remote.url());
+    steward
+        .config_set(&watermark_key, "not-an-i64")
+        .await
+        .unwrap();
+
+    let err = remote.push(&mut steward, 1).await.unwrap_err();
+    assert!(
+        matches!(err, sync_remote::RemoteError::Schema(_)),
+        "unparseable watermark must surface as Schema, got {err:?}",
+    );
+}

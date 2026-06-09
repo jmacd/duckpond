@@ -283,8 +283,13 @@ impl Remote {
     ) -> Result<()> {
         let key = last_pushed_seq_key(&self.url);
         let current = match steward.config_get(&key).await? {
-            Some(s) => s.parse::<i64>().unwrap_or(0),
             None => 0,
+            Some(s) => s.parse::<i64>().map_err(|e| {
+                RemoteError::Schema(format!(
+                    "source setting `{}` is not a valid i64: `{}` ({})",
+                    key, s, e
+                ))
+            })?,
         };
         if txn_seq > current {
             steward.config_set(&key, &txn_seq.to_string()).await?;

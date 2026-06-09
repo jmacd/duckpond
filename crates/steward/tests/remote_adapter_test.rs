@@ -725,6 +725,55 @@ async fn ship_remote_push_replicates_pond_init() {
     );
 }
 
+/// Regression for remote-redesign-review #3 (no-silent-fallback): when
+/// the source's `last_pushed_seq:<url>` watermark holds a corrupt,
+/// unparseable value, `push_pending_to_remote` must surface it as an
+/// error instead of silently coercing it to 0 (which would re-enumerate
+/// the entire transaction history from seq 1).  Before the fix the read
+/// was `config_get(...).ok().flatten().and_then(parse).unwrap_or(0)`,
+/// swallowing both a control-table read error and a parse error.
+#[tokio::test]
+async fn push_pending_to_remote_errors_on_corrupt_watermark() {
+    use steward::{RemoteAttachment, push_pending_to_remote};
+
+    init_log();
+    let tmp = tempdir().expect("tempdir");
+    let pond_path = tmp.path().join("pond");
+    let remote_path = tmp.path().join("remote");
+
+    let mut ship = Ship::create_pond(&pond_path).await.expect("create pond");
+    let pond_id = ship.control_table().pond_id_uuid();
+
+    let remote = Remote::create(&remote_path, pond_id)
+        .await
+        .expect("create remote");
+    let remote_url = remote.url().to_string();
+
+    // Plant a corrupt watermark for this remote URL.
+    let setting_key = format!("last_pushed_seq:{}", remote_url);
+    ship.control_table_mut()
+        .raw_config_set(&setting_key, "not-an-i64")
+        .await
+        .expect("raw_config_set");
+
+    let attachment = RemoteAttachment {
+        url: remote_url,
+        region: String::new(),
+        access_key_id: String::new(),
+        secret_access_key: String::new(),
+        endpoint: String::new(),
+        allow_http: false,
+    };
+
+    let err = push_pending_to_remote(&mut ship, &attachment)
+        .await
+        .expect_err("corrupt watermark must surface as an error");
+    assert!(
+        matches!(err, sync_remote::RemoteError::Schema(_)),
+        "corrupt watermark must surface as Schema, got {err:?}",
+    );
+}
+
 /// D5.7a regression: after a native write transaction commits, the
 /// `DataCommitted` record must carry partition checksums that match
 /// the live state of the data filesystem.  Before D5.7a,

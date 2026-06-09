@@ -932,13 +932,15 @@ pub async fn push_pending_to_remote(
 
     let previous_last_pushed = {
         let adapter = ShipRemoteSteward::new(ship);
-        adapter
-            .config_get(&setting_key)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0)
+        match adapter.config_get(&setting_key).await? {
+            None => 0,
+            Some(v) => v.parse::<i64>().map_err(|e| {
+                sync_remote::RemoteError::Schema(format!(
+                    "source setting `{}` is not a valid i64: `{}` ({})",
+                    setting_key, v, e
+                ))
+            })?,
+        }
     };
 
     let start = previous_last_pushed + 1;
