@@ -33,6 +33,34 @@
 
 ## 🟢 Done
 
+### ✅ D9: file:// testsuite coverage for the D6/D7 remote CLI verbs
+- **Completed**: 2026-06-08
+- **Type**: TEST COVERAGE
+- **What**: The new remote replica push/pull CLI (D4..D7) had several verbs
+  with zero (or MinIO-only) testsuite coverage.  Added five self-contained
+  tests that drive a local `file:///` remote (no docker-compose), so they
+  run in the base container.  69 checks total, all green in-container.
+  - `710-remote-backup-lifecycle.sh` -- `pond backup add/list/remove` (push
+    side), auto-push on attach, `pond push` no-op, `pond verify`, `pond
+    status`, `backup add --bidirectional`, and unknown-remote negative paths.
+  - `711-cross-pond-file-import.sh` -- `pond remote add NAME URL /imports/X`,
+    `pond pull`, md5 content match across the import boundary, watermark
+    advance/idempotence (LAST_PULLED_SEQ), `remote remove` detach vs
+    `--purge`, and self-mount-under-non-root refusal.
+  - `712-maintain-compact-push.sh` -- `pond maintain --compact` (D7) records
+    a Compact transaction; `pond push` emits the Compact bundle; `pond
+    verify` clean post-compact; a fresh consumer reproduces content exactly.
+  - `713-rebuild-control.sh` -- `pond rebuild-control` (D6.3): `--force`
+    gating, reconstructs N txns, preserves pond_id, leaves control.bak.*,
+    pond stays usable; warns that settings/watermarks need re-attach.
+  - `714-restart-from-compact.sh` -- `pond restart-from-compact` (D6.4)
+    cross-pond path: rebuild foreign footprint from the compact baseline,
+    catch up, imported content intact, consumer's own data untouched.
+- **Notes**: file:// remote dir must pre-exist; `pond copy` does not create
+  parent dirs (tests `pond mkdir -p` first); backup remotes auto-push
+  post-commit, so `pond verify` stays clean without an explicit push.
+- **Files**: testsuite/tests/710..714.
+
 ### ✅ D8b: P3-001 Document factory configuration examples
 - **Completed**: 2026-06-07
 - **Type**: DOCS
