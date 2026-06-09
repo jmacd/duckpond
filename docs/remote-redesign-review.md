@@ -93,6 +93,13 @@ Ordered highest-value first.
 - **Fix:** In the idempotent-skip branch, advance `last_pushed_seq` to
   `max(current, txn_seq)`, mirroring the success and bootstrap-skip
   branches.
+- **Status:** Resolved. The watermark-advance logic is now a shared
+  `Remote::advance_last_pushed_seq` helper called by all three exit
+  paths (success, bootstrap-skip, idempotent-skip), so a confirmed-on-
+  remote bundle always advances the watermark. Regression test:
+  `crates/sync-remote/tests/push.rs::idempotent_re_push_advances_last_pushed_seq_watermark`
+  (rewinds the watermark to simulate the crash window, re-pushes, and
+  asserts the watermark is repaired).
 
 ### 3. [Convention] Silent `unwrap_or(0)` on corrupt or erroring watermarks
 

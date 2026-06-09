@@ -301,6 +301,72 @@ async fn open_errors_when_property_is_corrupted_uuid() {
     }
 }
 
+/// Regression for the "idempotent re-push never advances
+/// `last_pushed_seq`" correctness bug (remote-redesign-review #2).
+///
+/// The idempotent-skip branch -- taken when the bundle for `txn_seq`
+/// already exists on the remote (the documented post-crash reconcile
+/// window) -- previously returned `Ok(())` without advancing the
+/// `last_pushed_seq:<url>` watermark, unlike the success and
+/// bootstrap-skip branches.  If a crash left the watermark behind while
+/// the bundle was already committed remotely, every subsequent push
+/// re-probed and idempotent-skipped the same seq, pinning the watermark
+/// and producing false push-lag in `pond status`.
+///
+/// This test drives the idempotent-skip path with a deliberately
+/// rewound watermark and asserts the watermark is advanced to the seq.
+#[tokio::test]
+async fn idempotent_re_push_advances_last_pushed_seq_watermark() {
+    init_logger();
+    let dir = TempDir::new().unwrap();
+    let mut steward = Steward::create(dir.path().join("pond")).await.unwrap();
+    {
+        let mut g = steward.begin_write().await.unwrap();
+        g.put("p", "k", b"v".to_vec()).unwrap();
+        let _ = g.commit().await.unwrap();
+    }
+    let mut remote = Remote::create(dir.path().join("remote"), steward.store_id())
+        .await
+        .unwrap();
+
+    let watermark_key = format!("last_pushed_seq:{}", remote.url());
+
+    // First push: bundle lands on the remote and the watermark advances.
+    remote.push(&mut steward, 1).await.unwrap();
+    assert_eq!(remote.list_bundles().await.unwrap().len(), 1);
+    assert_eq!(
+        steward.config_get(&watermark_key).await.unwrap().as_deref(),
+        Some("1"),
+        "successful push advances the watermark to seq 1",
+    );
+
+    // Simulate the crash window: the bundle is committed on the remote,
+    // but the local watermark was left behind (rewound to 0) before it
+    // could be persisted.  The next push must take the idempotent-skip
+    // branch (manifest already present) AND repair the watermark.
+    steward.config_set(&watermark_key, "0").await.unwrap();
+    assert_eq!(
+        steward.config_get(&watermark_key).await.unwrap().as_deref(),
+        Some("0"),
+        "precondition: watermark rewound to simulate crash window",
+    );
+
+    // Re-push the same seq: idempotent skip (no duplicate bundle), but
+    // the watermark must be advanced back to seq 1 so the driver does
+    // not re-probe this seq on every subsequent push.
+    remote.push(&mut steward, 1).await.unwrap();
+    assert_eq!(
+        remote.list_bundles().await.unwrap().len(),
+        1,
+        "idempotent re-push does not duplicate the bundle",
+    );
+    assert_eq!(
+        steward.config_get(&watermark_key).await.unwrap().as_deref(),
+        Some("1"),
+        "idempotent-skip branch advances last_pushed_seq to the confirmed seq",
+    );
+}
+
 /// The highest-value crash window: remote commit succeeded, but local
 /// PostPushCompleted was never written (process crashed between the
 /// two).  On retry, push must:

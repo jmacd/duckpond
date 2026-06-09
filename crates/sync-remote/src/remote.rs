@@ -269,6 +269,29 @@ impl Remote {
         Ok(bundles.iter().map(|b| b.txn_seq).min())
     }
 
+    /// Advance the `last_pushed_seq:<url>` watermark to
+    /// `max(current, txn_seq)`.  Called by every push exit path that has
+    /// confirmed a bundle is present on the remote -- the success path,
+    /// the bootstrap-skip path, and the idempotent-skip path -- so the
+    /// driver does not re-attempt already-landed seqs.  Pushes are
+    /// typically monotonic; the `max` guard tolerates an out-of-order
+    /// push without rewinding the watermark.
+    async fn advance_last_pushed_seq<S: RemoteSteward + ?Sized>(
+        &self,
+        steward: &mut S,
+        txn_seq: i64,
+    ) -> Result<()> {
+        let key = last_pushed_seq_key(&self.url);
+        let current = match steward.config_get(&key).await? {
+            Some(s) => s.parse::<i64>().unwrap_or(0),
+            None => 0,
+        };
+        if txn_seq > current {
+            steward.config_set(&key, &txn_seq.to_string()).await?;
+        }
+        Ok(())
+    }
+
     /// Push the bundle for `txn_seq` from `steward` to this remote.
     ///
     /// See `../../DESIGN.md` §2.5.3 for the lifecycle.  In one
@@ -329,14 +352,7 @@ impl Remote {
         // version (>= 1) so it does NOT hit this path and replicates
         // normally (P2-VERIFY-BOOTSTRAP-DRIFT).
         if dc_meta.data_delta_version == 0 {
-            let key = last_pushed_seq_key(&self.url);
-            let current = match steward.config_get(&key).await? {
-                Some(s) => s.parse::<i64>().unwrap_or(0),
-                None => 0,
-            };
-            if txn_seq > current {
-                steward.config_set(&key, &txn_seq.to_string()).await?;
-            }
+            self.advance_last_pushed_seq(steward, txn_seq).await?;
             return Ok(());
         }
 
@@ -344,10 +360,15 @@ impl Remote {
         // remote for this txn_seq, the push is a no-op success.  Bring
         // local control table into agreement by writing
         // PostPushCompleted if the most recent PostPush for this
-        // txn_seq is still Pending.
+        // txn_seq is still Pending.  Advance `last_pushed_seq` too: the
+        // bundle is confirmed present on the remote, so leaving the
+        // watermark behind would re-probe and idempotent-skip this seq
+        // on every subsequent push pass (false push-lag in `pond
+        // status`).
         if self.has_manifest_for(txn_seq).await? {
             self.reconcile_post_push_after_idempotent_skip(steward, txn_seq)
                 .await?;
+            self.advance_last_pushed_seq(steward, txn_seq).await?;
             return Ok(());
         }
 
@@ -366,18 +387,7 @@ impl Remote {
                 steward
                     .record_post_push_completed(txn_seq, txn_id, pending_started)
                     .await?;
-                // Update source's last_pushed_seq:<remote_path> to the
-                // MAX of (current setting, this txn_seq).  Operators
-                // typically push monotonically; the max protects
-                // against out-of-order pushes recording an older seq.
-                let key = last_pushed_seq_key(&self.url);
-                let current = match steward.config_get(&key).await? {
-                    Some(s) => s.parse::<i64>().unwrap_or(0),
-                    None => 0,
-                };
-                if txn_seq > current {
-                    steward.config_set(&key, &txn_seq.to_string()).await?;
-                }
+                self.advance_last_pushed_seq(steward, txn_seq).await?;
                 Ok(())
             }
             Err(e) => {
