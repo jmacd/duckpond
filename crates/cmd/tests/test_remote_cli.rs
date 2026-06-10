@@ -1378,6 +1378,140 @@ async fn cross_pond_pull_materializes_mount_entry() {
     assert_eq!(bytes2, b"data from upstream pond A");
 }
 
+/// Per-pond_id seq allocator: importing a foreign pond's high-seq
+/// bundles must NOT inflate the LOCAL pond's own seq space.  Before the
+/// per-pond_id allocator, `apply_pulled_bundle` bumped a single global
+/// `last_txn_seq` to the foreign frontier, inflating the local pond's
+/// seq numbering and leaving gaps in its history.  This pins the
+/// decoupled behavior: a cross-pond import leaves the local allocator
+/// untouched, and a subsequent local write takes the next CONTIGUOUS
+/// local seq -- not `foreign_frontier + 1`.
+#[tokio::test]
+async fn cross_pond_pull_does_not_inflate_local_seq() {
+    init_log();
+    let scratch = TempDir::new().expect("tempdir");
+    let a_pond = scratch.path().join("a_pond");
+    let b_pond = scratch.path().join("b_pond");
+    let remote_path = scratch.path().join("a_remote");
+    let remote_url = format!("file://{}", remote_path.display());
+
+    // 1) Pond A: init (seq 1) + four writes (seq 2..5) so A's frontier is high.
+    let a_ctx = ctx_for(&a_pond, vec!["pond", "init"]);
+    init_command(&a_ctx).await.expect("init A");
+    for i in 0..4 {
+        write_small_file(
+            &a_ctx,
+            &format!("/f{i}.txt"),
+            format!("payload {i}").as_bytes(),
+            vec!["copy", "f.txt"],
+        )
+        .await
+        .expect("write on A");
+    }
+    let a_pond_id = {
+        let ship = a_ctx.open_pond().await.expect("open A");
+        ship.control_table().pond_id_uuid()
+    };
+    let a_seq = {
+        let mut ship = a_ctx.open_pond().await.expect("open A");
+        ship.as_pond_mut().expect("pond steward").last_write_seq()
+    };
+    assert!(a_seq >= 5, "A's frontier should be high, got {a_seq}");
+
+    // 2) Pond A pushes to its remote.
+    std::fs::create_dir_all(&remote_path).expect("mkdir remote");
+    let _ = sync_remote::Remote::create_at_url(&remote_url, a_pond_id, Default::default())
+        .await
+        .expect("create A's remote");
+    add_backup_command(
+        &a_ctx,
+        "origin",
+        &remote_url,
+        false,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("backup attach on A");
+    push_command(&a_ctx, Some("origin".to_string()))
+        .await
+        .expect("push from A");
+
+    // 3) Pond B: init -> local seq 1.
+    let b_ctx = ctx_for(&b_pond, vec!["pond", "init"]);
+    init_command(&b_ctx).await.expect("init B");
+    let b_seq_before = {
+        let mut ship = b_ctx.open_pond().await.expect("open B");
+        ship.as_pond_mut().expect("pond steward").last_write_seq()
+    };
+    assert_eq!(b_seq_before, 1, "B starts at local seq 1");
+
+    // 4) B attaches A's remote and pulls A's high-seq bundles.
+    add_remote_command(
+        &b_ctx,
+        "upstream",
+        &remote_url,
+        "/imports/upstream",
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("cross-pond attach on B");
+    pull_command(&b_ctx, Some("upstream".to_string()))
+        .await
+        .expect("pull upstream on B");
+
+    // 5) The import must NOT inflate B's local allocator to A's frontier.
+    //    B's local seq only advances for B's OWN local writes (the remote
+    //    config write + the pull's mount materialization), staying well
+    //    below A's foreign frontier.  Before the per-pond_id allocator,
+    //    `apply_pulled_bundle` bumped the global seq to A's frontier, so
+    //    this value would have been >= a_seq.
+    let b_seq_after_pull = {
+        let mut ship = b_ctx.open_pond().await.expect("reopen B");
+        ship.as_pond_mut().expect("pond steward").last_write_seq()
+    };
+    assert!(
+        b_seq_after_pull < a_seq,
+        "cross-pond import must not inflate B's local seq to A's frontier \
+         (got {b_seq_after_pull}, A frontier {a_seq})"
+    );
+
+    // Sanity: imported content is readable through the mount.
+    let bytes = read_small_file(&b_ctx, "/imports/upstream/f0.txt")
+        .await
+        .expect("read foreign file");
+    assert_eq!(bytes, b"payload 0");
+
+    // 6) A subsequent LOCAL write on B takes the next CONTIGUOUS local seq
+    //    (b_seq_after_pull + 1), not the foreign frontier + 1.
+    write_small_file(
+        &b_ctx,
+        "/local.txt",
+        b"B local data",
+        vec!["copy", "local.txt"],
+    )
+    .await
+    .expect("local write on B");
+    let b_seq_after_write = {
+        let mut ship = b_ctx.open_pond().await.expect("reopen B");
+        ship.as_pond_mut().expect("pond steward").last_write_seq()
+    };
+    assert_eq!(
+        b_seq_after_write,
+        b_seq_after_pull + 1,
+        "B's local write must take the next contiguous local seq, not foreign frontier+1"
+    );
+}
+
 /// D5.7b.3: writes anywhere inside a foreign mount must be refused
 /// with `ReadOnlyImport`.  This covers create_file_path,
 /// async_writer_path, create_dir_path, rename, remove, and insert_node.

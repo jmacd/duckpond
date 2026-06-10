@@ -123,15 +123,21 @@ default; `--bidirectional` makes it push+pull.
 # Local directory backup
 $ pond backup add origin file:///backups/mysite
 
-# S3 backup
+# S3 backup.  Credentials must be `${env:VAR}` references (single-quoted so
+# the shell does NOT expand them): the attachment config is replicated to
+# every backup, so a literal secret would be exposed on all replicas.  Each
+# replica resolves the value from its own environment at use time.  A literal
+# `secret_access_key` is rejected at attach time.
 $ pond backup add origin s3://my-bucket/mysite \
-    --region us-west-2 --access-key-id "$AWS_ACCESS_KEY_ID" \
-    --secret-access-key "$AWS_SECRET_ACCESS_KEY"
+    --region us-west-2 \
+    --access-key-id '${env:AWS_ACCESS_KEY_ID}' \
+    --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
 # MinIO / R2 / other S3-compatible endpoint
 $ pond backup add origin s3://my-bucket/mysite \
     --endpoint http://minio.local:9000 --allow-http \
-    --access-key-id "$KEY" --secret-access-key "$SECRET"
+    --access-key-id '${env:AWS_ACCESS_KEY_ID}' \
+    --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 ```
 
 Attaching auto-initializes the remote (creates the Delta table stamped
@@ -196,12 +202,12 @@ $ pond maintain --compact
 
 `--compact` records the data-table merge as a **Compact transaction**, so
 the next `pond push` emits a Compact bundle that backups can use as a
-restart baseline (see [§6](#6-recovery)) and that
-`pond maintain --remote` retention can prune behind.  Push before (or
-right after) compacting so the baseline reaches your backup.
+restart baseline (see [§6](#6-recovery)).  Push before (or right after)
+compacting so the baseline reaches your backup.
 
 > `pond maintain` operates on the local pond only; it does not push to or
-> prune remotes.  (Remote retention is `pond maintain --remote=<name>`.)
+> prune remotes.  Remote-side bundle retention is not currently exposed as
+> a `pond` CLI command.
 
 ---
 
@@ -457,4 +463,6 @@ RECOVERY
 
 S3 options for `pond backup add` / `pond remote add`: `--region`,
 `--access-key-id`, `--secret-access-key`, `--endpoint`, `--allow-http`.
-See [cli-reference.md](cli-reference.md) for the complete list.
+`--secret-access-key` must be a `${env:VAR}` reference (single-quoted),
+not a literal secret.  See [cli-reference.md](cli-reference.md) for the
+complete list.

@@ -37,7 +37,15 @@ pub struct OpLogPersistence {
     pub(crate) table: DeltaTable,
     pub(crate) fs: Option<FS>,
     pub(crate) state: Option<State>,
-    pub(crate) last_txn_seq: i64, // Track last committed transaction sequence for validation
+    /// Per-pond_id transaction-sequence allocator: `pond_id` -> last
+    /// committed `txn_seq` for that pond.  Each pond_id has its own seq
+    /// space.  Only the LOCAL pond (`self.pond_id`) is advanced by
+    /// `begin_write`/`commit`; foreign pond_ids appear here only via
+    /// cross-pond import (`sync_last_txn_seq`).  This realizes the
+    /// design's per-pond_id namespaced seq spaces at the data-table
+    /// layer: importing a fast foreign producer no longer inflates the
+    /// local pond's own seq numbering or leaves gaps in its history.
+    pub(crate) seqs: HashMap<String, i64>,
     /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
     pub(crate) txn_state: Arc<TinyFsTransactionState>,
     /// Options for large file storage (compression, etc.)
@@ -178,30 +186,54 @@ impl OpLogPersistence {
         self.table = table;
     }
 
-    /// Get the last committed transaction sequence number
+    /// Local pond's last committed transaction sequence (0 if none).
+    fn local_seq(&self) -> i64 {
+        self.seqs.get(&self.pond_id).copied().unwrap_or(0)
+    }
+
+    /// Set the local pond's last committed transaction sequence.
+    fn set_local_seq(&mut self, seq: i64) {
+        let _ = self.seqs.insert(self.pond_id.clone(), seq);
+    }
+
+    /// Get the last committed transaction sequence number for the LOCAL
+    /// pond.
     ///
     /// This is the authoritative source for the current transaction sequence.
     /// Use this to determine the next sequence number: `last_txn_seq() + 1`
     #[must_use]
     pub fn last_txn_seq(&self) -> i64 {
-        self.last_txn_seq
+        self.local_seq()
     }
 
-    /// Advance the in-memory `last_txn_seq` allocator to `seq` if it
-    /// is greater than the current value.  No-op otherwise.  Used by
-    /// the D4 sync-remote adapter after `apply_pulled_bundle` mirrors
-    /// a foreign Delta commit into the local data table: the on-disk
-    /// commit metadata carries the new `txn_seq` (and will be picked
-    /// up by the next `open_or_create`), but the in-memory value must
-    /// be advanced here too so that subsequent same-session writes
-    /// use the correct next sequence number.
-    pub fn sync_last_txn_seq(&mut self, seq: i64) {
-        if seq > self.last_txn_seq {
+    /// Get the last committed transaction sequence number for an arbitrary
+    /// `pond_id` (0 if that pond has no committed rows here).  Foreign
+    /// pond_ids are populated by cross-pond import.
+    #[must_use]
+    pub fn last_txn_seq_for(&self, pond_id: &str) -> i64 {
+        self.seqs.get(pond_id).copied().unwrap_or(0)
+    }
+
+    /// Advance the in-memory per-pond seq allocator for `pond_id` to `seq`
+    /// if it is greater than the current value.  No-op otherwise.  Used by
+    /// the sync-remote adapter after `apply_pulled_bundle` mirrors a Delta
+    /// commit into the local data table: the on-disk commit metadata
+    /// carries the new `txn_seq` (and is picked up by the next
+    /// `open_or_create`), but the in-memory value must be advanced too.
+    ///
+    /// Because the allocator is per-pond_id, advancing a FOREIGN pond's
+    /// seq (cross-pond import) does not disturb the LOCAL pond's seq
+    /// space: local writes continue from `last_txn_seq()` with no gaps.
+    /// For a mirror restart (`pond_id == self.pond_id`) this advances the
+    /// local allocator as required.
+    pub fn sync_last_txn_seq(&mut self, pond_id: &str, seq: i64) {
+        let entry = self.seqs.entry(pond_id.to_string()).or_insert(0);
+        if seq > *entry {
             debug!(
-                "Advancing OpLogPersistence::last_txn_seq {} -> {} (apply_pulled_bundle)",
-                self.last_txn_seq, seq
+                "Advancing OpLogPersistence seq[{}] {} -> {} (apply_pulled_bundle)",
+                pond_id, *entry, seq
             );
-            self.last_txn_seq = seq;
+            *entry = seq;
         }
     }
 
@@ -411,7 +443,7 @@ impl OpLogPersistence {
     /// Test-only helper: Begin a transaction with automatic sequence numbering.
     #[cfg(test)]
     pub async fn begin_test(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
-        let next_seq = self.last_txn_seq + 1;
+        let next_seq = self.local_seq() + 1;
         let metadata =
             PondTxnMetadata::new(next_seq, PondUserMetadata::new(vec!["test".to_string()]));
         self.begin_write(&metadata).await // Tests are write transactions
@@ -467,7 +499,7 @@ impl OpLogPersistence {
             path: path.as_ref().to_path_buf(),
             fs: None,
             state: None,
-            last_txn_seq: 0, // No transactions yet - bundles will provide them
+            seqs: HashMap::new(), // No transactions yet - bundles will provide them
             txn_state: Arc::new(TinyFsTransactionState::new()),
             large_file_options: Default::default(),
             pond_id,
@@ -561,7 +593,7 @@ impl OpLogPersistence {
             path: path.as_ref().to_path_buf(),
             fs: None,
             state: None,
-            last_txn_seq: 0, // Will be updated below
+            seqs: HashMap::new(), // Will be updated below
             txn_state: Arc::new(TinyFsTransactionState::new()),
             large_file_options: Default::default(),
             pond_id,
@@ -586,44 +618,45 @@ impl OpLogPersistence {
 
             _ = tx.commit().await.map_err(TLogFSError::TinyFS)?;
         } else {
-            // Opening existing table - recover last_txn_seq from the data
-            // Delta commit history.  This is the authoritative source (not
-            // the control table, which is Steward's).
+            // Opening existing table - recover the per-pond_id seq
+            // allocator from the data Delta commit history.  This is the
+            // authoritative source (not the control table, which is
+            // Steward's).
             //
-            // We scan ALL commits and take the MAX `pond_txn.txn_seq` rather
-            // than trusting only the single most-recent commit: Delta
+            // We scan ALL commits and bucket each `pond_txn` by its
+            // `pond_id`, taking the per-pond MAX `txn_seq` rather than
+            // trusting only the single most-recent commit: Delta
             // maintenance operations (vacuum's VACUUM START/END commits,
-            // optimize/compaction, checkpoints) append commits that carry no
-            // `pond_txn` blob.  After a `pond maintain --compact` the newest
-            // commits are vacuum entries, so `history(Some(1))` alone would
-            // miss the compaction's `pond_txn` and reset the sequence to 0.
-            // Sequences are monotonic, so the max is the true last_txn_seq.
+            // optimize/compaction, checkpoints) append commits that carry
+            // no `pond_txn` blob.  After a `pond maintain --compact` the
+            // newest commits are vacuum entries, so `history(Some(1))`
+            // alone would miss the compaction's `pond_txn`.  Sequences are
+            // monotonic per pond, so the per-pond max is the true value.
+            //
+            // Bucketing per pond_id keeps the LOCAL allocator decoupled
+            // from foreign frontiers: a fast cross-pond producer no longer
+            // drags `last_txn_seq()` (= local) upward.  A `pond_txn` with
+            // an empty pond_id (defensive; current ponds always stamp one)
+            // is attributed to the local pond so the local allocator is
+            // never under-recovered (which could collide on the next write).
             let history = table.history(None).await?;
-            let mut found: Option<i64> = None;
+            let mut seqs: HashMap<String, i64> = HashMap::new();
             for commit in history {
-                if let Some(txn_seq) = PondTxnMetadata::extract_txn_seq(&commit.info) {
-                    found = Some(found.map_or(txn_seq, |m: i64| m.max(txn_seq)));
+                if let Some(meta) = PondTxnMetadata::from_delta_metadata(&commit.info) {
+                    let key = if meta.pond_id.is_empty() {
+                        persistence.pond_id.clone()
+                    } else {
+                        meta.pond_id.clone()
+                    };
+                    let entry = seqs.entry(key).or_insert(0);
+                    *entry = (*entry).max(meta.txn_seq);
                 }
             }
-            match found {
-                Some(txn_seq) => {
-                    persistence.last_txn_seq = txn_seq;
-                    debug!(
-                        "Loaded last_txn_seq={} from Delta metadata at {}",
-                        txn_seq, &path_str,
-                    );
-                }
-                None => {
-                    // No pond_txn in any retained commit - a pond created for
-                    // restoration (bundles will provide seqs) or an old pond
-                    // without metadata.  Start at 0.
-                    persistence.last_txn_seq = 0;
-                    debug!(
-                        "No txn_seq found in Delta history at {}, starting at 0",
-                        &path_str,
-                    );
-                }
-            }
+            debug!(
+                "Loaded per-pond seq allocator {:?} from Delta metadata at {} (local pond_id={})",
+                seqs, &path_str, persistence.pond_id,
+            );
+            persistence.seqs = seqs;
         }
 
         Ok(persistence)
@@ -688,13 +721,13 @@ impl OpLogPersistence {
         metadata: &PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Write transactions must be strictly increasing
-        if metadata.txn_seq != self.last_txn_seq + 1 {
+        if metadata.txn_seq != self.local_seq() + 1 {
             return Err(TLogFSError::Transaction {
                 message: format!(
                     "Write transaction sequence must be exactly +1: attempted txn_seq={} but last_txn_seq={} (expected {})",
                     metadata.txn_seq,
-                    self.last_txn_seq,
-                    self.last_txn_seq + 1
+                    self.local_seq(),
+                    self.local_seq() + 1
                 ),
             });
         }
@@ -718,11 +751,12 @@ impl OpLogPersistence {
         txn_meta: &PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Read transactions reuse the last write sequence
-        if txn_meta.txn_seq != self.last_txn_seq {
+        if txn_meta.txn_seq != self.local_seq() {
             return Err(TLogFSError::Transaction {
                 message: format!(
                     "Read transaction must use last write sequence: attempted txn_seq={} but last_txn_seq={}",
-                    txn_meta.txn_seq, self.last_txn_seq
+                    txn_meta.txn_seq,
+                    self.local_seq()
                 ),
             });
         }
@@ -830,7 +864,7 @@ impl OpLogPersistence {
             }
             None => None,
         };
-        self.last_txn_seq = new_seq;
+        self.set_local_seq(new_seq);
 
         // Note: txn_state clearing is handled by tinyfs::TransactionGuard drop
 

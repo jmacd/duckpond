@@ -179,7 +179,12 @@ pub async fn rebuild_control_table(
                 include_completed,
             )
             .await?;
-        last_txn_seq = last_txn_seq.max(txn.meta.txn_seq);
+        // Only the LOCAL pond's txns advance the reported `last_txn_seq`
+        // (which must match the rebuilt Ship's local `last_write_seq`).
+        // Foreign cross-pond txns live in their own per-pond_id seq space.
+        if txn.meta.pond_id == pond_id_str {
+            last_txn_seq = last_txn_seq.max(txn.meta.txn_seq);
+        }
     }
 
     Ok(RebuildReport {

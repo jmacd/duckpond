@@ -897,7 +897,8 @@ impl Ship {
         // committed compaction seq (the optimize commit already carries it
         // on disk via `pond_txn`), so a subsequent read/write in this same
         // process validates against the right sequence.
-        self.data_persistence.sync_last_txn_seq(txn_seq);
+        self.data_persistence
+            .sync_last_txn_seq(&pond_id.to_string(), txn_seq);
         let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
         self.control_table
             .record_compact_committed(&txn_meta, new_version, duration_ms, post)

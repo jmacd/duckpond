@@ -148,6 +148,31 @@ that the bugs are fixed and the resolution is recorded here.
   by path after `--purge`); they remain in the log until a future
   partitioned-delete compaction.
 
+### Per-pond_id seq allocator -- CLOSED (D10)
+
+- **Shared global data-table seq allocator** (closed by D10): previously
+  `OpLogPersistence` held a single global `last_txn_seq`, recovered on
+  `open` as the global MAX `pond_txn.txn_seq` across ALL commits, and
+  `apply_pulled_bundle` bumped it to the foreign bundle's seq.  Importing
+  a fast foreign producer therefore inflated the LOCAL pond's own next
+  seq and left gaps in its history (e.g. local `1,2,3` then import
+  foreign `50` -> local's next own write was `51`).  This realized the
+  control table's per-pond_id seq spaces but NOT the data table's, so the
+  design promise (§A2) was only half met.  It was never a correctness bug
+  (the allocator was monotonic; push/pull iterate actual records), only
+  an operability + design-promise gap.  **Fixed** by replacing the scalar
+  with a per-pond_id map `seqs: HashMap<String, i64>`
+  (`crates/tlogfs/src/persistence.rs`): `last_txn_seq()` returns the LOCAL
+  pond's seq; `open` recovery buckets each `pond_txn` commit by its
+  `pond_id` and takes the per-pond max; `sync_last_txn_seq(pond_id, seq)`
+  is now pond_id-scoped; and `apply_pulled_bundle`
+  (`crates/steward/src/remote_adapter.rs`) advances only the foreign
+  pond's entry, bumping the local Ship allocator (`sync_last_write_seq`)
+  only for a mirror restart (`bundle.pond_id == local`).  Cross-pond
+  import now leaves the local seq space contiguous and decoupled from
+  foreign frontiers.  Regression: `crates/cmd/tests/test_remote_cli.rs::
+  cross_pond_pull_does_not_inflate_local_seq`.
+
 ### D6 surface gaps
 
 The D6 CLI plan in § D6 below enumerates verbs that
