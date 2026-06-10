@@ -16,11 +16,18 @@ pub mod list_factories;
 pub mod maintain;
 pub mod mkdir;
 pub mod mknod;
+pub mod pull;
+pub mod push;
+pub mod rebuild_control;
 pub mod recover;
+pub mod remote;
+pub mod restart_from_compact;
 pub mod run;
 pub mod run_summary;
 pub mod show;
+pub mod status;
 pub mod temporal;
+pub mod verify;
 
 #[cfg(test)]
 mod replicate_test_simple;
@@ -28,7 +35,6 @@ mod replicate_test_simple;
 pub use apply::apply_command;
 pub use cat::cat_command;
 pub use control::control_command;
-pub use control::sync_command;
 pub use copy::{CopyOptions, copy_command};
 pub use describe::describe_command;
 pub use export::export_command;
@@ -38,7 +44,17 @@ pub use list_factories::list_factories_command;
 pub use maintain::maintain_command;
 pub use mkdir::mkdir_command;
 pub use mknod::mknod_command;
+pub use pull::pull_command;
+pub use push::push_command;
+pub use rebuild_control::rebuild_control_command;
 pub use recover::recover_command;
+pub use remote::{
+    RemoteListFilter, add_backup_command, add_remote_command, list_remotes_command,
+    remove_remote_command,
+};
+pub use restart_from_compact::restart_from_compact_command;
 pub use run::run_command;
 pub use show::show_command;
+pub use status::status_command;
 pub use temporal::{detect_overlaps_command, set_temporal_bounds_command};
+pub use verify::verify_command;

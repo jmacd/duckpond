@@ -17,13 +17,20 @@ mod dispatch;
 mod guard;
 mod host;
 pub mod maintenance;
+mod rebuild;
+mod remote_adapter;
+mod remote_config;
 mod ship;
+mod write_lock;
 
 pub use control_table::ControlTable;
 pub use dispatch::{Steward, Transaction};
 pub use guard::StewardTransactionGuard;
 pub use host::{HostSteward, HostTransaction};
-pub use ship::Ship;
+pub use rebuild::{RebuildReport, rebuild_control_table};
+pub use remote_adapter::{PushOutcome, ShipRemoteSteward, push_pending_to_remote};
+pub use remote_config::{RemoteAttachment, RemoteConfigError, RemoteMode};
+pub use ship::{CompactOutcome, Ship};
 pub use tlogfs::{PondMetadata, PondTxnMetadata, PondUserMetadata};
 
 /// Recovery command result
@@ -60,6 +67,19 @@ pub enum StewardError {
     #[error("Transaction mode violation: read transaction attempted to write data")]
     ReadTransactionAttemptedWrite,
 
+    #[error(
+        "pond at {path} is locked by another process{}{}{}",
+        format_pid(*holder_pid),
+        format_since(holder_since.as_ref()),
+        format_txn_id(holder_txn_id.as_ref()),
+    )]
+    PondLocked {
+        path: PathBuf,
+        holder_pid: Option<u32>,
+        holder_since: Option<chrono::DateTime<chrono::Utc>>,
+        holder_txn_id: Option<String>,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -84,6 +104,36 @@ impl From<tinyfs::Error> for StewardError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PondLocked display helpers
+// ---------------------------------------------------------------------------
+
+fn format_pid(pid: Option<u32>) -> String {
+    pid.map(|p| format!("\n  holder PID {p}"))
+        .unwrap_or_default()
+}
+
+fn format_since(since: Option<&chrono::DateTime<chrono::Utc>>) -> String {
+    since
+        .map(|t| {
+            format!(
+                " since {}",
+                t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn format_txn_id(txn_id: Option<&String>) -> String {
+    txn_id
+        .map(|t| format!("\n  transaction {t}"))
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem helpers
+// ---------------------------------------------------------------------------
+
 /// Get the data filesystem path under the pond
 #[must_use]
 pub fn get_data_path(pond_path: &Path) -> PathBuf {
@@ -101,3 +151,37 @@ pub fn get_control_path(pond_path: &Path) -> PathBuf {
 pub fn get_git_path(pond_path: &Path) -> PathBuf {
     pond_path.join("git")
 }
+
+// ---------------------------------------------------------------------------
+// In-pond filesystem conventions used by D4 (`pond remote add/push/pull`).
+//
+// Remote attachments live as small YAML files under `/sys/remotes/<name>`.
+// The directory `/sys/` is reserved for system metadata; D4 only writes
+// `/sys/remotes/*` but future D-phases may add more siblings (e.g. `/sys/keys/`).
+//
+// Per-remote runtime state — `last_pushed_seq:<url>`, `last_pulled_seq:<url>`,
+// `remote_mode:<name>` — is stored in the control table's settings map via
+// `ControlTable::raw_config_{get,set}`, NOT in the YAML config (so that
+// pushing the config to a backup never accidentally ships local watermarks).
+
+/// Filesystem directory holding `/sys/` metadata files (D4+).
+pub const SYS_DIR: &str = "/sys";
+
+/// Filesystem directory holding remote attachment configs.  Each child is a
+/// YAML file named `<remote-name>` containing a [`RemoteAttachment`] (see
+/// `crates/cmd/src/commands/remote.rs`).
+pub const SYS_REMOTES_DIR: &str = "/sys/remotes";
+
+/// Control-table raw_config key prefix for "what mode does remote `<name>`
+/// operate in" (`push`, `pull`, or `both`).  Format the full key as
+/// `format!("{REMOTE_MODE_PREFIX}{name}")`.
+pub const REMOTE_MODE_PREFIX: &str = "remote_mode:";
+
+/// Control-table raw_config key prefix for the in-pond mount path of a
+/// pull-mode remote (D5.7b).  Format the full key as
+/// `format!("{REMOTE_MOUNT_PATH_PREFIX}{name}")`.
+///
+/// Pull-mode remotes always set this key (default `/imports/<name>` or
+/// `/` for a mirror restart).  Push-mode and `both`-mode remotes leave it
+/// unset.
+pub const REMOTE_MOUNT_PATH_PREFIX: &str = "remote_mount_path:";

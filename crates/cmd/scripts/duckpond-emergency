@@ -3,119 +3,105 @@
 # SPDX-FileCopyrightText: Caspar Water Company
 #
 # duckpond-emergency - Emergency file extraction from DuckPond backups
+#                      (D5.7b Delta-Lake-native backup format)
 #
-# This script extracts files from DuckPond Delta Lake backups using only
-# DuckDB - no pond binary required. Use this for disaster recovery when
-# the pond software is unavailable.
+# This script extracts files from DuckPond remote backups using only
+# DuckDB - no pond binary required.  Use it for disaster recovery
+# when the pond software is unavailable.
 #
 # REQUIREMENTS:
 #   - DuckDB CLI (https://duckdb.org/)
-#   - b3sum for BLAKE3 verification (optional)
+#   - b3sum for BLAKE3 verification (optional but recommended)
+#   - xxd (for binary extraction; ships with vim/most distros)
 #
 # USAGE:
 #   duckpond-emergency <backup-path> list
-#   duckpond-emergency <backup-path> extract <file-pattern> [output-dir]
-#   duckpond-emergency <backup-path> verify <file-pattern>
-#   duckpond-emergency <backup-path> export-all <output-dir>
+#   duckpond-emergency <backup-path> info
+#   duckpond-emergency <backup-path> extract <pattern> [out-dir]
+#   duckpond-emergency <backup-path> verify [pattern]
+#   duckpond-emergency <backup-path> export-all <out-dir>
 #
-# EXAMPLES:
-#   # List all files in backup
-#   duckpond-emergency /path/to/backup list
+# BACKUP PATH:
+#   Local:  /path/to/backup     (or file:///path/to/backup)
+#   S3:     s3://bucket/path    (set AWS_* env vars first)
 #
-#   # Extract a specific file
-#   duckpond-emergency /path/to/backup extract "_delta_log/00000000000000000001.json"
+# S3/MinIO SETUP (export before invoking):
+#   export AWS_ENDPOINT_URL="http://localhost:9000"
+#   export AWS_REGION="us-east-1"
+#   export AWS_ACCESS_KEY_ID="..."
+#   export AWS_SECRET_ACCESS_KEY="..."
 #
-#   # Extract all delta logs to a directory
-#   duckpond-emergency /path/to/backup extract "_delta_log%" ./extracted/
+# IMPLEMENTATION NOTES
+# --------------------
 #
-#   # Verify all files have valid checksums
-#   duckpond-emergency /path/to/backup verify
+#   1. STORAGE FORMAT (D5.x):
+#      The backup is a Delta Lake table partitioned by partition_kind,
+#      laid out on disk / in S3 as:
 #
-# S3/MinIO USAGE:
-#   Export these environment variables first:
-#     export AWS_ENDPOINT_URL="http://localhost:9000"
-#     export AWS_REGION="us-east-1"
-#     export AWS_ACCESS_KEY_ID="minioadmin"
-#     export AWS_SECRET_ACCESS_KEY="minioadmin"
+#        <backup>/_delta_log/*.json
+#        <backup>/partition_kind=manifest/*.parquet  -- one row per source-pond txn_seq
+#        <backup>/partition_kind=checksum/*.parquet  -- per-partition content checksums
+#        <backup>/partition_kind=data/*.parquet      -- file add/remove rows w/ chunk bytes
 #
-#   Then use s3:// URLs:
-#   duckpond-emergency s3://bucket/backup list
+#      Each `data` Add row carries one chunk of one source-pond storage file:
 #
-# IMPLEMENTATION NOTES:
-#   This script reads DuckPond backups directly from parquet files WITHOUT
-#   using the Delta Lake protocol. This is intentional for disaster recovery:
+#        file_path      -- source-pond storage path (e.g.
+#                          "_delta_log/00000000000000000001.json",
+#                          "pond_id=<u>/part_id=<v>/part-*.parquet",
+#                          "_large_files/<hash>")
+#        file_action    -- "add" or "remove"
+#        file_size      -- total file size in bytes
+#        file_blake3    -- BLAKE3 of the complete file
+#        chunk_count    -- number of chunks for this file
+#        chunk_id       -- 0-based chunk index
+#        chunk_data     -- raw chunk bytes (BLOB)
+#        chunk_blake3   -- BLAKE3 of chunk_data
+#        txn_seq        -- source-pond transaction sequence this row belongs to
 #
-#   1. STORAGE FORMAT:
-#      DuckPond's remote backup stores data in a Delta Lake table with this schema:
-#        - bundle_id: Partition column (e.g., "FILE-META-2026-02-04-1")
-#        - path: Original file path in the pond
-#        - pond_txn_id: Transaction sequence number
-#        - chunk_id: Chunk sequence (0, 1, 2...) for multi-chunk files
-#        - chunk_data: Binary blob containing the actual file data
-#        - root_hash: BLAKE3 hash of the complete file
-#        - total_size: File size in bytes
+#      For multi-chunk files (file_size > CHUNK_SIZE_BYTES, 16 MiB), there is
+#      one Add row per chunk; concatenating chunk_data in chunk_id order
+#      reconstructs the original file byte-for-byte.
 #
-#   2. DIRECTORY STRUCTURE:
-#      backup_path/
-#        bundle_id=FILE-META-2026-02-04-1/
-#          *.parquet  <- Contains rows for all files in txn 1
-#        bundle_id=FILE-META-2026-02-04-2/
-#          *.parquet  <- Contains rows for all files in txn 2
-#        _delta_log/
-#          00000000000000000001.json  <- Delta commit logs (we ignore these)
+#      The "current snapshot" of the backup is: for every file_path, the
+#      latest action by txn_seq; if it is "add", the file exists; if it is
+#      "remove", the file has been deleted.
 #
-#   3. WHY read_parquet() INSTEAD OF delta_scan():
-#      - delta_scan() requires the Delta Lake extension which has DeltaKernel FFI
-#      - DeltaKernel has bugs with predicate pushdown on certain queries
-#      - read_parquet() with hive_partitioning=true reads the files directly
-#      - This is more robust for emergency recovery scenarios
+#   2. WHY read_parquet() INSTEAD OF delta_scan():
+#      DuckDB's `delta_scan()` goes through DeltaKernel which ignores DuckDB's
+#      configured `s3_*` settings and tries the EC2 IMDS endpoint -- that's a
+#      no-go for MinIO / non-AWS S3.  Reading the parquet partitions directly
+#      via `read_parquet('s3://.../partition_kind=*/*.parquet',
+#      hive_partitioning=true)` honours `s3_*` settings and is what we want.
 #
-#   4. BLOB EXTRACTION:
-#      DuckDB can't directly export BLOB columns to binary files. We work around
-#      this by:
-#        a) Using to_base64(chunk_data) to convert blobs to base64 strings
-#        b) Piping each base64 line through `base64 -d` to decode
-#        c) Appending decoded chunks in chunk_id order to reconstruct the file
+#      For freshly-pushed backups (no Vacuum, no removed files) the row set
+#      is equivalent to `delta_scan()`.  We also filter by latest txn_seq per
+#      file_path so removed files are excluded from list/extract.
 #
-#   5. STDIN HANDLING:
-#      Nested while loops in bash share stdin. To prevent inner duckdb commands
-#      from consuming the outer loop's input, we:
-#        a) Write file lists to temp files
-#        b) Read from file descriptor 3 for the outer loop
-#        c) Capture duckdb output to variables before processing
-#
-# Note: set -e is disabled to allow proper loop error handling
-# set -e
+#   3. BLOB EXTRACTION:
+#      DuckDB's portable cross-version way to extract raw bytes from a BLOB
+#      column is `SELECT hex(blob_col)` plus `xxd -r -p` on the way out.
+#      `COPY (...) TO 'file' (FORMAT BLOB)` is unreliable across versions.
 
-VERSION="1.0.0"
+set -u  # error on undefined vars; do NOT use -e here so loops handle errors
+
+VERSION="2.0.0"
 SCRIPT_NAME="duckpond-emergency"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Colors for output (disabled if stdout isn't a tty)
+if [ -t 1 ]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[1;33m'
+    BLUE=$'\033[0;34m'
+    NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; NC=""
+fi
 
-#############################
-# HELPER FUNCTIONS
-#############################
-
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-log_success() {
-    echo -e "${GREEN}[OK]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
-}
+log_info()    { echo "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo "${GREEN}[OK]${NC} $1"; }
+log_warn()    { echo "${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo "${RED}[ERROR]${NC} $1" >&2; }
 
 usage() {
     cat << EOF
@@ -125,14 +111,16 @@ USAGE:
     $SCRIPT_NAME <backup-path> <command> [args...]
 
 COMMANDS:
-    list                    List all files in the backup
-    extract <pattern> [dir] Extract files matching pattern to directory
-    verify [pattern]        Verify BLAKE3 checksums of files
-    export-all <dir>        Export all files to directory
-    info                    Show backup metadata
+    list                    List current-snapshot files in the backup
+    info                    Show backup metadata summary
+    extract <pat> [dir]     Extract files matching SQL LIKE pattern to dir
+    verify [pat]            Verify BLAKE3 of files matching pattern
+    export-all <dir>        Export every current-snapshot file to dir
+
+PATTERN (SQL LIKE):  % = any chars, _ = single char.  Anchored to file_path.
 
 OPTIONS:
-    -h, --help             Show this help message
+    -h, --help             Show this help
     -v, --version          Show version
 
 BACKUP PATH:
@@ -140,87 +128,118 @@ BACKUP PATH:
     S3:     s3://bucket/path (set AWS_* env vars first)
 
 EXAMPLES:
-    # List files
+    # List files in current snapshot
     $SCRIPT_NAME /backup list
 
-    # Extract specific file
-    $SCRIPT_NAME /backup extract "part_id=abc/file.parquet" ./out/
+    # Show summary
+    $SCRIPT_NAME /backup info
 
-    # Extract all files matching pattern (SQL LIKE syntax: % = wildcard)
-    $SCRIPT_NAME /backup extract "_delta_log%" ./delta_logs/
+    # Extract only Delta log files
+    $SCRIPT_NAME /backup extract '_delta_log/%' ./out/
 
-    # Verify all checksums
+    # Extract one specific storage parquet
+    $SCRIPT_NAME /backup extract 'pond_id=abc%' ./out/
+
+    # Verify all checksums in the current snapshot
     $SCRIPT_NAME /backup verify
 
-    # Export everything
-    $SCRIPT_NAME /backup export-all ./full_restore/
+    # Reconstruct the source-pond storage tree
+    $SCRIPT_NAME /backup export-all ./recovered/
 
 S3/MINIO SETUP:
-    export AWS_ENDPOINT_URL="http://localhost:9000"  # For MinIO
+    export AWS_ENDPOINT_URL="http://localhost:9000"
     export AWS_REGION="us-east-1"
     export AWS_ACCESS_KEY_ID="your-key"
     export AWS_SECRET_ACCESS_KEY="your-secret"
     $SCRIPT_NAME s3://bucket/backup list
-
 EOF
     exit 0
 }
 
 check_duckdb() {
     if ! command -v duckdb &>/dev/null; then
-        log_error "DuckDB is not installed."
-        echo ""
-        echo "Install DuckDB:"
-        echo "  macOS:  brew install duckdb"
-        echo "  Linux:  curl -LO https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip"
-        echo "          unzip duckdb_cli-linux-amd64.zip && sudo mv duckdb /usr/local/bin/"
-        echo ""
+        log_error "DuckDB is not installed.  Install from https://duckdb.org/"
         exit 1
     fi
 }
 
-# Build DuckDB preamble for S3 or local access
+check_xxd() {
+    if ! command -v xxd &>/dev/null; then
+        log_error "xxd is required (provides hex<->binary conversion)."
+        exit 1
+    fi
+}
+
+# Build a DuckDB SQL preamble that configures S3 access if needed.
+# Echoes the SQL on stdout; safe to inline in a -c argument.
 build_duckdb_preamble() {
     local backup_path="$1"
-    
-    # No delta extension needed - we read raw parquet files directly
-    
+
     if [[ "$backup_path" == s3://* ]]; then
-        echo "INSTALL httpfs; LOAD httpfs;"
-        
-        if [ -n "$AWS_REGION" ]; then
-            echo "SET s3_region='$AWS_REGION';"
+        printf "INSTALL httpfs; LOAD httpfs;\n"
+
+        if [ -n "${AWS_REGION:-}" ]; then
+            printf "SET s3_region='%s';\n" "$AWS_REGION"
         else
-            echo "SET s3_region='us-east-1';"
+            printf "SET s3_region='us-east-1';\n"
         fi
-        
-        if [ -n "$AWS_ENDPOINT_URL" ]; then
+
+        if [ -n "${AWS_ENDPOINT_URL:-}" ]; then
             local endpoint="${AWS_ENDPOINT_URL#http://}"
             endpoint="${endpoint#https://}"
-            echo "SET s3_endpoint='$endpoint';"
-            echo "SET s3_url_style='path';"
+            printf "SET s3_endpoint='%s';\n" "$endpoint"
+            printf "SET s3_url_style='path';\n"
             if [[ "$AWS_ENDPOINT_URL" == http://* ]]; then
-                echo "SET s3_use_ssl=false;"
+                printf "SET s3_use_ssl=false;\n"
             fi
         fi
-        
-        if [ -n "$AWS_ACCESS_KEY_ID" ]; then
-            echo "SET s3_access_key_id='$AWS_ACCESS_KEY_ID';"
+
+        if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
+            printf "SET s3_access_key_id='%s';\n" "$AWS_ACCESS_KEY_ID"
         fi
-        
-        if [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
-            echo "SET s3_secret_access_key='$AWS_SECRET_ACCESS_KEY';"
+        if [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            printf "SET s3_secret_access_key='%s';\n" "$AWS_SECRET_ACCESS_KEY"
         fi
     fi
 }
 
-# Build the glob pattern for reading all parquet files in a backup
-# Structure: backup_path/bundle_id=*/**.parquet
-parquet_glob() {
-    local backup_path="$1"
-    # Remove trailing slash if present
-    backup_path="${backup_path%/}"
-    echo "${backup_path}/bundle_id=*/*.parquet"
+# Build the parquet glob for the data partition.
+data_glob() {
+    local backup_path="${1%/}"  # strip trailing slash
+    echo "${backup_path}/partition_kind=data/*.parquet"
+}
+
+# Build the parquet glob across all three partitions.
+all_glob() {
+    local backup_path="${1%/}"
+    echo "${backup_path}/partition_kind=*/*.parquet"
+}
+
+# Common CTE that resolves the current snapshot from the raw data
+# partition.  Defines a view 'snapshot' over file_path/file_size/
+# file_blake3/chunk_count for every file whose latest action is 'add'.
+# (Used inline in WITH ... AS (...) constructions.)
+snapshot_cte() {
+    local glob="$1"
+    cat <<EOF
+WITH per_file AS (
+    SELECT
+        file_path,
+        file_action,
+        file_size,
+        file_blake3,
+        chunk_count,
+        txn_seq,
+        ROW_NUMBER() OVER (PARTITION BY file_path ORDER BY txn_seq DESC) AS rn
+    FROM read_parquet('${glob}', hive_partitioning=true)
+    WHERE chunk_id = 0  -- one synthesis row per (file_path, txn_seq)
+),
+snapshot AS (
+    SELECT file_path, file_size, file_blake3, chunk_count, txn_seq
+    FROM per_file
+    WHERE rn = 1 AND file_action = 'add'
+)
+EOF
 }
 
 #############################
@@ -229,298 +248,338 @@ parquet_glob() {
 
 cmd_list() {
     local backup_path="$1"
-    
-    log_info "Listing files in backup: $backup_path"
-    echo ""
-    
     local preamble
-    local parquet_path
     preamble=$(build_duckdb_preamble "$backup_path")
-    parquet_path=$(parquet_glob "$backup_path")
-    
+    local glob
+    glob=$(data_glob "$backup_path")
+
+    log_info "Current-snapshot files in backup: $backup_path"
+    echo ""
+
     duckdb -c "
-$preamble
-SELECT 
-    path,
-    total_size as size_bytes,
-    pond_txn_id as txn,
-    root_hash
-FROM read_parquet('$parquet_path', hive_partitioning=true)
-GROUP BY path, total_size, pond_txn_id, root_hash
-ORDER BY path;
+${preamble}
+$(snapshot_cte "$glob")
+SELECT
+    file_path,
+    file_size AS size_bytes,
+    chunk_count AS chunks,
+    txn_seq AS added_in_txn,
+    hex(file_blake3) AS blake3_hex
+FROM snapshot
+ORDER BY file_path;
 "
 }
 
 cmd_info() {
     local backup_path="$1"
-    
-    log_info "Backup information: $backup_path"
-    echo ""
-    
     local preamble
-    local parquet_path
     preamble=$(build_duckdb_preamble "$backup_path")
-    parquet_path=$(parquet_glob "$backup_path")
-    
-    echo "=== Summary ==="
-    duckdb -c "
-$preamble
-SELECT 
-    COUNT(DISTINCT path) as total_files,
-    COUNT(*) as total_chunks,
-    AVG(total_size) as avg_file_size,
-    MIN(pond_txn_id) as min_txn,
-    MAX(pond_txn_id) as max_txn
-FROM read_parquet('$parquet_path', hive_partitioning=true);
-"
-    
+    local data
+    data=$(data_glob "$backup_path")
+    local all
+    all=$(all_glob "$backup_path")
+
+    log_info "Backup info: $backup_path"
     echo ""
-    echo "=== Files by Transaction ==="
+
+    echo "=== Current-snapshot summary ==="
     duckdb -c "
-$preamble
-SELECT 
-    pond_txn_id as txn,
-    COUNT(DISTINCT path) as files,
-    SUM(total_size) as total_bytes
-FROM read_parquet('$parquet_path', hive_partitioning=true)
-GROUP BY pond_txn_id
-ORDER BY pond_txn_id;
+${preamble}
+$(snapshot_cte "$data")
+SELECT
+    COUNT(*)              AS live_files,
+    COALESCE(SUM(file_size), 0) AS total_bytes,
+    COALESCE(SUM(chunk_count), 0) AS total_chunks,
+    MIN(txn_seq)          AS earliest_add_txn,
+    MAX(txn_seq)          AS latest_add_txn
+FROM snapshot;
 "
+
+    echo ""
+    echo "=== Per-partition row counts ==="
+    duckdb -c "
+${preamble}
+SELECT partition_kind, COUNT(*) AS rows
+FROM read_parquet('${all}', hive_partitioning=true)
+GROUP BY partition_kind
+ORDER BY partition_kind;
+"
+
+    echo ""
+    echo "=== Source-pond commits (manifest partition) ==="
+    duckdb -c "
+${preamble}
+SELECT
+    txn_seq,
+    commit_kind,
+    parent_seq,
+    make_timestamp(ts_micros) AS ts
+FROM read_parquet('${all}', hive_partitioning=true)
+WHERE partition_kind = 'manifest'
+ORDER BY txn_seq;
+"
+}
+
+# Extract one file from the backup.
+#   $1 = SQL preamble
+#   $2 = data partition glob
+#   $3 = file_path (exact)
+#   $4 = output filename
+#   $5 = expected file_size (for sanity check)
+#   $6 = expected chunk_count
+# Echoes "OK" / "FAIL: <reason>" on stdout.
+extract_one_file() {
+    local preamble="$1"
+    local glob="$2"
+    local file_path="$3"
+    local out_file="$4"
+    local expect_size="$5"
+    local expect_chunks="$6"
+
+    mkdir -p "$(dirname "$out_file")"
+    rm -f "$out_file"
+    touch "$out_file"
+
+    # Determine the latest add for this file (we want the snapshot version).
+    local add_txn
+    add_txn=$(duckdb -noheader -csv -c "
+${preamble}
+$(snapshot_cte "$glob")
+SELECT txn_seq FROM snapshot WHERE file_path = '${file_path}';
+" 2>/dev/null | tr -d ' \r\n')
+
+    if [ -z "$add_txn" ]; then
+        echo "FAIL: file not in current snapshot"
+        return 1
+    fi
+
+    local i
+    for (( i = 0; i < expect_chunks; i++ )); do
+        local hex_out
+        hex_out=$(duckdb -noheader -csv -c "
+${preamble}
+SELECT hex(chunk_data)
+FROM read_parquet('${glob}', hive_partitioning=true)
+WHERE partition_kind = 'data'
+  AND file_action    = 'add'
+  AND file_path      = '${file_path}'
+  AND txn_seq        = ${add_txn}
+  AND chunk_id       = ${i};
+" 2>/dev/null | tr -d ' \r\n')
+
+        if [ -z "$hex_out" ]; then
+            echo "FAIL: missing chunk ${i}"
+            return 1
+        fi
+
+        printf "%s" "$hex_out" | xxd -r -p >> "$out_file"
+    done
+
+    local actual_size
+    actual_size=$(wc -c < "$out_file" | tr -d ' ')
+    if [ "$actual_size" != "$expect_size" ]; then
+        echo "FAIL: size mismatch (expected $expect_size, got $actual_size)"
+        return 1
+    fi
+
+    echo "OK"
+    return 0
 }
 
 cmd_extract() {
     local backup_path="$1"
     local pattern="$2"
-    local output_dir="${3:-.}"
-    
-    mkdir -p "$output_dir"
-    
-    log_info "Extracting files matching: $pattern"
-    log_info "Output directory: $output_dir"
-    echo ""
-    
-    local preamble
-    local parquet_path
-    preamble=$(build_duckdb_preamble "$backup_path")
-    parquet_path=$(parquet_glob "$backup_path")
-    
-    # Get list of files matching pattern - write to temp file to avoid stdin issues
-    local files_tmp
-    files_tmp=$(mktemp)
-    trap "rm -f '$files_tmp'" RETURN
-    
-    duckdb -noheader -csv -c "
-$preamble
-SELECT DISTINCT bundle_id, path, pond_txn_id, root_hash
-FROM read_parquet('$parquet_path', hive_partitioning=true)
-WHERE path LIKE '$pattern'
-ORDER BY path;
-" </dev/null 2>/dev/null > "$files_tmp"
-    
-    if [ ! -s "$files_tmp" ]; then
-        log_warn "No files match pattern: $pattern"
+    local out_dir="${3:-./}"
+
+    if [ -z "$pattern" ]; then
+        log_error "extract requires a pattern (use '%' to match everything)"
         return 1
     fi
-    
-    local file_count
-    file_count=$(wc -l < "$files_tmp" | tr -d ' ')
-    log_info "Found $file_count files to extract"
-    
-    local count=0
-    local failed=0
-    
-    # Open file descriptor 3 for reading the file list
-    exec 3< "$files_tmp"
-    
-    # Read from file descriptor 3 to avoid stdin interference from inner commands
-    while IFS=',' read -r bundle_id path pond_txn_id root_hash <&3; do
-        # Skip empty lines
-        [ -z "$bundle_id" ] && continue
-        
-        # Create safe filename
-        local safe_name
-        safe_name=$(echo "$path" | tr '/' '_' | tr '=' '_')
-        local output_file="$output_dir/$safe_name"
-        
-        log_info "Extracting: $path"
-        
-        # Extract using DuckDB - get each chunk as base64, decode and concatenate
-        # This handles multi-chunk files correctly by processing each chunk in order
-        rm -f "$output_file" 2>/dev/null
-        
-        local chunk_count=0
-        local chunk_failed=0
-        
-        # Get chunks as base64, one per line, in chunk_id order
-        # Using read_parquet directly instead of delta_scan to avoid DeltaKernel issues
-        # Note: duckdb errors are handled - don't let set -e kill the loop
-        local duckdb_output
-        duckdb_output=$(duckdb -noheader -list -c "
-$preamble
-SELECT to_base64(chunk_data)
-FROM read_parquet('$parquet_path', hive_partitioning=true)
-WHERE path = '$path'
-  AND pond_txn_id = $pond_txn_id
-ORDER BY chunk_id;
-" </dev/null 2>&1) || true
-        
-        while IFS= read -r b64_chunk; do
-            [ -z "$b64_chunk" ] && continue
-            # Decode and append to output file
-            if echo "$b64_chunk" | base64 -d >> "$output_file" 2>/dev/null; then
-                ((chunk_count++))
-            else
-                ((chunk_failed++))
-            fi
-        done <<< "$duckdb_output"
-        
-        if [ "$chunk_count" -gt 0 ] && [ "$chunk_failed" -eq 0 ] && [ -f "$output_file" ] && [ -s "$output_file" ]; then
-            local size
-            size=$(wc -c < "$output_file" 2>/dev/null | tr -d ' ')
-            log_success "  -> $output_file ($size bytes, $chunk_count chunks)"
-            
-            # Verify BLAKE3 if available
-            if command -v b3sum &>/dev/null && [ -n "$root_hash" ]; then
+
+    check_xxd
+    mkdir -p "$out_dir"
+
+    local preamble
+    preamble=$(build_duckdb_preamble "$backup_path")
+    local glob
+    glob=$(data_glob "$backup_path")
+
+    log_info "Extracting files matching: $pattern"
+    log_info "Output directory: $out_dir"
+    echo ""
+
+    local list_tmp
+    list_tmp=$(mktemp)
+    trap "rm -f '$list_tmp'" RETURN
+
+    duckdb -noheader -csv -c "
+${preamble}
+$(snapshot_cte "$glob")
+SELECT file_path, file_size, chunk_count, hex(file_blake3)
+FROM snapshot
+WHERE file_path LIKE '${pattern}'
+ORDER BY file_path;
+" 2>/dev/null > "$list_tmp"
+
+    if [ ! -s "$list_tmp" ]; then
+        log_warn "No files match pattern: $pattern"
+        return 0
+    fi
+
+    local match_count
+    match_count=$(wc -l < "$list_tmp" | tr -d ' ')
+    log_info "Found $match_count matching files"
+    echo ""
+
+    local ok=0 fail=0 verify_ok=0 verify_fail=0
+    local have_b3sum=0
+    if command -v b3sum &>/dev/null; then
+        have_b3sum=1
+    fi
+
+    while IFS=',' read -r file_path file_size chunk_count blake3_hex; do
+        [ -z "$file_path" ] && continue
+
+        local safe_name="${file_path//\//_}"
+        safe_name="${safe_name//=/_}"
+        local out_file="${out_dir%/}/${safe_name}"
+
+        local result
+        result=$(extract_one_file "$preamble" "$glob" "$file_path" "$out_file" "$file_size" "$chunk_count")
+
+        if [ "$result" = "OK" ]; then
+            log_success "$file_path  ($file_size bytes, $chunk_count chunks) -> $out_file"
+            ok=$((ok + 1))
+
+            if [ "$have_b3sum" = 1 ] && [ -n "$blake3_hex" ]; then
                 local actual_hash
-                actual_hash=$(b3sum "$output_file" 2>/dev/null | cut -d' ' -f1)
-                if [ "$actual_hash" = "$root_hash" ]; then
-                    log_success "  BLAKE3 verified: $root_hash"
+                actual_hash=$(b3sum "$out_file" | cut -d' ' -f1)
+                local expected_hash
+                expected_hash=$(echo "$blake3_hex" | tr '[:upper:]' '[:lower:]')
+                if [ "$actual_hash" = "$expected_hash" ]; then
+                    verify_ok=$((verify_ok + 1))
                 else
-                    log_warn "  BLAKE3 mismatch! Expected: $root_hash, Got: $actual_hash"
-                    ((failed++))
+                    log_warn "BLAKE3 mismatch for $file_path"
+                    log_warn "  expected: $expected_hash"
+                    log_warn "  actual:   $actual_hash"
+                    verify_fail=$((verify_fail + 1))
                 fi
             fi
-            ((count++))
         else
-            log_error "  Failed to extract: $path (chunks: $chunk_count, failed: $chunk_failed)"
-            ((failed++))
+            log_error "$file_path -- $result"
+            fail=$((fail + 1))
         fi
-        
-    done
-    
-    # Close file descriptor
-    exec 3<&-
-    
+    done < "$list_tmp"
+
     echo ""
-    log_info "Extracted $count files to $output_dir"
-    if [ $failed -gt 0 ]; then
-        log_warn "$failed files had errors or verification failures"
+    log_info "Extracted $ok files to $out_dir"
+    if [ "$fail" -gt 0 ]; then
+        log_error "$fail file(s) failed to extract"
+    fi
+    if [ "$have_b3sum" = 1 ]; then
+        log_info "BLAKE3 verified: $verify_ok ok, $verify_fail mismatched"
+    fi
+    if [ "$fail" -gt 0 ] || [ "$verify_fail" -gt 0 ]; then
         return 1
     fi
+    return 0
 }
 
 cmd_verify() {
     local backup_path="$1"
     local pattern="${2:-%}"
-    
-    log_info "Verifying files matching: $pattern"
-    echo ""
-    
+
     if ! command -v b3sum &>/dev/null; then
-        log_error "b3sum is required for verification but not installed."
-        echo "Install with: cargo install b3sum"
+        log_error "b3sum is required for verify"
         return 1
     fi
-    
+    check_xxd
+
     local preamble
-    local parquet_path
     preamble=$(build_duckdb_preamble "$backup_path")
-    parquet_path=$(parquet_glob "$backup_path")
-    
-    # Get list of files - write to temp file to avoid stdin issues
-    local files_tmp
-    files_tmp=$(mktemp)
-    
-    duckdb -noheader -csv -c "
-$preamble
-SELECT DISTINCT bundle_id, path, pond_txn_id, root_hash
-FROM read_parquet('$parquet_path', hive_partitioning=true)
-WHERE path LIKE '$pattern'
-ORDER BY path;
-" </dev/null 2>/dev/null > "$files_tmp"
-    
-    local count=0
-    local verified=0
-    local failed=0
-    
-    local tmpfile
-    tmpfile=$(mktemp)
-    
-    # Open file descriptor 3 for reading the file list
-    exec 3< "$files_tmp"
-    
-    while IFS=',' read -r bundle_id path pond_txn_id root_hash <&3; do
-        [ -z "$bundle_id" ] && continue
-        ((count++))
-        
-        echo -n "Verifying: $path ... "
-        
-        # Extract to temp file using base64 approach
-        rm -f "$tmpfile" 2>/dev/null
-        local chunk_count=0
-        
-        local duckdb_output
-        duckdb_output=$(duckdb -noheader -list -c "
-$preamble
-SELECT to_base64(chunk_data)
-FROM read_parquet('$parquet_path', hive_partitioning=true)
-WHERE path = '$path'
-  AND pond_txn_id = $pond_txn_id
-ORDER BY chunk_id;
-" </dev/null 2>&1) || true
-        
-        while IFS= read -r b64_chunk; do
-            [ -z "$b64_chunk" ] && continue
-            echo "$b64_chunk" | base64 -d >> "$tmpfile" 2>/dev/null
-            ((chunk_count++)) || true
-        done <<< "$duckdb_output"
-        
-        if [ "$chunk_count" -gt 0 ] && [ -f "$tmpfile" ] && [ -s "$tmpfile" ]; then
-            local actual_hash
-            actual_hash=$(b3sum "$tmpfile" 2>/dev/null | cut -d' ' -f1)
-            
-            if [ "$actual_hash" = "$root_hash" ]; then
-                echo -e "${GREEN}OK${NC}"
-                ((verified++)) || true
-            else
-                echo -e "${RED}MISMATCH${NC}"
-                echo "  Expected: $root_hash"
-                echo "  Actual:   $actual_hash"
-                ((failed++)) || true
-            fi
-        else
-            echo -e "${RED}EXTRACT FAILED${NC}"
-            ((failed++)) || true
-        fi
-        
-    done
-    
-    # Close file descriptor and cleanup
-    exec 3<&-
-    rm -f "$files_tmp" "$tmpfile" 2>/dev/null
-    
+    local glob
+    glob=$(data_glob "$backup_path")
+
+    log_info "Verifying current snapshot files matching: $pattern"
     echo ""
-    echo "=== Verification Summary ==="
-    echo "Total files:    $count"
-    echo "Verified OK:    $verified"
-    echo "Failed:         $failed"
-    
-    if [ $failed -gt 0 ]; then
+
+    local list_tmp tmpfile
+    list_tmp=$(mktemp)
+    tmpfile=$(mktemp)
+    trap "rm -f '$list_tmp' '$tmpfile'" RETURN
+
+    duckdb -noheader -csv -c "
+${preamble}
+$(snapshot_cte "$glob")
+SELECT file_path, file_size, chunk_count, hex(file_blake3)
+FROM snapshot
+WHERE file_path LIKE '${pattern}'
+ORDER BY file_path;
+" 2>/dev/null > "$list_tmp"
+
+    if [ ! -s "$list_tmp" ]; then
+        log_warn "No files match pattern: $pattern"
+        return 0
+    fi
+
+    local total=0 ok=0 bad=0 extract_fail=0
+
+    while IFS=',' read -r file_path file_size chunk_count blake3_hex; do
+        [ -z "$file_path" ] && continue
+        total=$((total + 1))
+
+        echo -n "  $file_path ... "
+
+        rm -f "$tmpfile"
+        local result
+        result=$(extract_one_file "$preamble" "$glob" "$file_path" "$tmpfile" "$file_size" "$chunk_count")
+
+        if [ "$result" != "OK" ]; then
+            echo "${RED}EXTRACT FAILED${NC} ($result)"
+            extract_fail=$((extract_fail + 1))
+            continue
+        fi
+
+        local actual_hash
+        actual_hash=$(b3sum "$tmpfile" | cut -d' ' -f1)
+        local expected_hash
+        expected_hash=$(echo "$blake3_hex" | tr '[:upper:]' '[:lower:]')
+
+        if [ "$actual_hash" = "$expected_hash" ]; then
+            echo "${GREEN}OK${NC}"
+            ok=$((ok + 1))
+        else
+            echo "${RED}MISMATCH${NC}"
+            echo "    expected: $expected_hash"
+            echo "    actual:   $actual_hash"
+            bad=$((bad + 1))
+        fi
+    done < "$list_tmp"
+
+    echo ""
+    echo "=== Verification summary ==="
+    echo "Total checked:     $total"
+    echo "Verified:          $ok"
+    echo "Mismatched:        $bad"
+    echo "Extract failed:    $extract_fail"
+
+    if [ "$bad" -gt 0 ] || [ "$extract_fail" -gt 0 ]; then
         return 1
     fi
+    return 0
 }
 
 cmd_export_all() {
     local backup_path="$1"
-    local output_dir="$2"
-    
-    if [ -z "$output_dir" ]; then
-        log_error "Output directory required"
-        echo "Usage: $SCRIPT_NAME $backup_path export-all <output-dir>"
+    local out_dir="${2:-}"
+
+    if [ -z "$out_dir" ]; then
+        log_error "export-all requires an output directory"
+        echo "Usage: $SCRIPT_NAME $backup_path export-all <out-dir>"
         return 1
     fi
-    
-    cmd_extract "$backup_path" "%" "$output_dir"
+
+    cmd_extract "$backup_path" "%" "$out_dir"
 }
 
 #############################
@@ -528,66 +587,41 @@ cmd_export_all() {
 #############################
 
 main() {
-    # Parse global options
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -h|--help)
-                usage
-                ;;
-            -v|--version)
-                echo "$SCRIPT_NAME v$VERSION"
-                exit 0
-                ;;
-            -*)
-                log_error "Unknown option: $1"
-                echo "Use --help for usage information"
-                exit 1
-                ;;
-            *)
-                break
-                ;;
+            -h|--help)    usage ;;
+            -v|--version) echo "$SCRIPT_NAME v$VERSION"; exit 0 ;;
+            -*) log_error "Unknown option: $1"; exit 1 ;;
+            *)  break ;;
         esac
     done
-    
-    # Check arguments
+
     if [ $# -lt 2 ]; then
         log_error "Missing arguments"
         echo "Usage: $SCRIPT_NAME <backup-path> <command> [args...]"
         echo "Use --help for more information"
         exit 1
     fi
-    
+
     local backup_path="$1"
     local command="$2"
     shift 2
-    
-    # Normalize backup path
+
     if [[ "$backup_path" != s3://* ]] && [[ "$backup_path" != file://* ]]; then
-        # Local path - ensure it exists
         if [ ! -d "$backup_path" ]; then
             log_error "Backup directory not found: $backup_path"
             exit 1
         fi
     fi
-    
+
     check_duckdb
-    
+
     case "$command" in
-        list)
-            cmd_list "$backup_path"
-            ;;
-        info)
-            cmd_info "$backup_path"
-            ;;
-        extract)
-            cmd_extract "$backup_path" "$@"
-            ;;
-        verify)
-            cmd_verify "$backup_path" "$@"
-            ;;
-        export-all)
-            cmd_export_all "$backup_path" "$@"
-            ;;
+        list)       cmd_list "$backup_path" ;;
+        info)       cmd_info "$backup_path" ;;
+        extract)    cmd_extract "$backup_path" "$@" ;;
+        verify)     cmd_verify  "$backup_path" "$@" ;;
+        export-all) cmd_export_all "$backup_path" "$@" ;;
         *)
             log_error "Unknown command: $command"
             echo "Use --help for usage information"

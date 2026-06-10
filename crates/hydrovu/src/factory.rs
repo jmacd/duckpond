@@ -25,7 +25,7 @@ enum HydroVuCommand {
     /// Fetches sensor data from configured devices and stores it in the pond.
     /// Devices with `active: false` in the config are skipped.
     ///
-    /// Example: pond run /system/run/20-hydrovu collect
+    /// Example: pond run /system/etc/20-hydrovu collect
     Collect,
 
     /// Archive active series data
@@ -34,8 +34,8 @@ enum HydroVuCommand {
     /// to `{Name}_archive_YYYYMMDD.series`. Prints a `pond copy` script to
     /// export the archived files to the host filesystem.
     ///
-    /// Example: pond run /etc/hydrovu archive
-    /// Example: pond run /etc/hydrovu archive --device NoyoCenterVulink_1
+    /// Example: pond run /system/etc/20-hydrovu archive
+    /// Example: pond run /system/etc/20-hydrovu archive --device NoyoCenterVulink_1
     Archive {
         /// Only archive this device (by name). If omitted, archives all devices.
         #[arg(long)]

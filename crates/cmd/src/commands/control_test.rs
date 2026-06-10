@@ -33,7 +33,7 @@ impl TestSetup {
         let ship_context = ShipContext::pond_only(Some(&pond_path), init_args);
 
         // Initialize pond
-        init_command(&ship_context, None, None).await?;
+        init_command(&ship_context).await?;
 
         Ok(TestSetup {
             _temp_dir: temp_dir,
@@ -110,38 +110,46 @@ impl TestSetup {
             .map_err(|e| anyhow::anyhow!("Failed to get last txn seq: {}", e))
     }
 
-    /// Query transaction records from control table
+    /// Query transaction records from control table.  Post-D2 the
+    /// control table schema is lean: post-commit attributes live in
+    /// `metadata_json` and the lifecycle kinds were renamed
+    /// `post_commit_*` -> `post_push_*`.  This helper hides both
+    /// changes from callers by:
+    ///
+    /// - Reading the lean columns + `metadata_json` from table `control`.
+    /// - Decoding `factory_name`, `config_path`, `execution_seq`,
+    ///   `error_message` from `metadata_json`.
+    /// - Translating `post_push_*` record kinds back to the legacy
+    ///   `post_commit_*` strings so existing test assertions still
+    ///   read naturally.
     async fn query_transaction_records(
         &self,
         txn_seq: i64,
     ) -> Result<Vec<TransactionRecordSummary>> {
-        use arrow::array::{Array, Int32Array, Int64Array, StringArray};
+        use arrow::array::{Array, BooleanArray, Int64Array, StringArray};
 
-        // Open ship to access cached control table
         let ship = self.ship_context.open_pond().await?;
         let control_table = ship.control_table();
-
-        // Use control table's SessionContext (following tlogfs pattern)
         let ctx = control_table.session_context();
 
-        // Query all records for this transaction
         let sql = format!(
             r#"
-            SELECT 
-                record_type,
-                factory_name,
-                config_path,
-                execution_seq,
-                error_message,
-                duration_ms
-            FROM transactions
-            WHERE txn_seq = {} OR parent_txn_seq = {}
-            ORDER BY 
-                CASE WHEN parent_txn_seq IS NULL THEN 0 ELSE 1 END,
-                execution_seq NULLS FIRST,
-                timestamp
+            SELECT
+                record_kind,
+                has_duration_ms,
+                duration_ms,
+                metadata_json
+            FROM control
+            WHERE record_kind <> 'setting'
+              AND (
+                  (txn_seq = {seq} AND has_parent_seq = false)
+                  OR (has_parent_seq = true AND parent_seq = {seq})
+              )
+            ORDER BY
+                CASE WHEN has_parent_seq = false THEN 0 ELSE 1 END,
+                ts_micros
             "#,
-            txn_seq, txn_seq
+            seq = txn_seq
         );
 
         let df = ctx
@@ -161,35 +169,17 @@ impl TestSetup {
                 continue;
             }
 
-            let record_types = batch
-                .column_by_name("record_type")
+            let record_kinds = batch
+                .column_by_name("record_kind")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .unwrap();
-            let factory_names = batch
-                .column_by_name("factory_name")
+            let has_durations = batch
+                .column_by_name("has_duration_ms")
                 .unwrap()
                 .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let config_paths = batch
-                .column_by_name("config_path")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let execution_seqs = batch
-                .column_by_name("execution_seq")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .unwrap();
-            let error_messages = batch
-                .column_by_name("error_message")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
+                .downcast_ref::<BooleanArray>()
                 .unwrap();
             let durations = batch
                 .column_by_name("duration_ms")
@@ -197,35 +187,65 @@ impl TestSetup {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .unwrap();
+            let metadatas = batch
+                .column_by_name("metadata_json")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
 
             for i in 0..batch.num_rows() {
+                // Translate post_push_* (lean schema) -> post_commit_*
+                // (legacy label) so test assertions remain stable.
+                let kind = match record_kinds.value(i) {
+                    "post_push_pending" => "post_commit_pending".to_string(),
+                    "post_push_started" => "post_commit_started".to_string(),
+                    "post_push_completed" => "post_commit_completed".to_string(),
+                    "post_push_failed" => "post_commit_failed".to_string(),
+                    other => other.to_string(),
+                };
+
+                let meta_json = metadatas.value(i);
+                let meta: serde_json::Value =
+                    serde_json::from_str(meta_json).unwrap_or(serde_json::json!({}));
+
+                let factory_name = meta
+                    .get("factory_name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let config_path = meta
+                    .get("config_path")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let execution_seq = meta
+                    .get("execution_seq")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as i32);
+                // The error message lives directly in `metadata_json`
+                // for post_push_failed records, and under `reason` for
+                // lifecycle `failed` records.
+                let error_message = meta
+                    .get("error_message")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(|| {
+                        meta.get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    });
+                let duration_ms = if has_durations.value(i) {
+                    Some(durations.value(i))
+                } else {
+                    None
+                };
+
                 records.push(TransactionRecordSummary {
-                    record_type: record_types.value(i).to_string(),
-                    factory_name: if !factory_names.is_null(i) {
-                        Some(factory_names.value(i).to_string())
-                    } else {
-                        None
-                    },
-                    config_path: if !config_paths.is_null(i) {
-                        Some(config_paths.value(i).to_string())
-                    } else {
-                        None
-                    },
-                    execution_seq: if !execution_seqs.is_null(i) {
-                        Some(execution_seqs.value(i))
-                    } else {
-                        None
-                    },
-                    error_message: if !error_messages.is_null(i) {
-                        Some(error_messages.value(i).to_string())
-                    } else {
-                        None
-                    },
-                    duration_ms: if !durations.is_null(i) {
-                        Some(durations.value(i))
-                    } else {
-                        None
-                    },
+                    record_type: kind,
+                    factory_name,
+                    config_path,
+                    execution_seq,
+                    error_message,
+                    duration_ms,
                 });
             }
         }
@@ -845,20 +865,24 @@ async fn test_query_pending_never_started() {
     // Use control table's SessionContext (following tlogfs pattern)
     let ctx = control_table.session_context();
 
-    // Query for pending tasks that were never started
+    // Query for pending tasks that were never started.  Post-D2 lean
+    // schema: post-commit attributes live in `metadata_json`; the
+    // parent transaction's seq is in `parent_seq` (with
+    // `has_parent_seq=true`); execution_seq is JSON-extracted.
     let sql = r#"
-        SELECT 
-            parent_txn_seq,
-            execution_seq,
-            factory_name,
-            config_path
-        FROM transactions
-        WHERE record_type = 'post_commit_pending'
+        SELECT
+            parent_seq AS parent_txn_seq,
+            json_get_str(metadata_json, 'execution_seq') AS execution_seq,
+            json_get_str(metadata_json, 'factory_name')  AS factory_name,
+            json_get_str(metadata_json, 'config_path')   AS config_path
+        FROM control p
+        WHERE p.record_kind = 'post_push_pending'
           AND NOT EXISTS (
-              SELECT 1 FROM transactions started
-              WHERE started.parent_txn_seq = transactions.parent_txn_seq
-                AND started.execution_seq = transactions.execution_seq
-                AND started.record_type = 'post_commit_started'
+              SELECT 1 FROM control s
+              WHERE s.record_kind = 'post_push_started'
+                AND s.parent_seq = p.parent_seq
+                AND json_get_str(s.metadata_json, 'execution_seq')
+                  = json_get_str(p.metadata_json, 'execution_seq')
           )
     "#;
 
@@ -885,26 +909,29 @@ async fn test_query_started_never_completed() {
     // Use control table's SessionContext (following tlogfs pattern)
     let ctx = control_table.session_context();
 
-    // Query for tasks that started but never completed/failed
+    // Query for tasks that started but never completed/failed.
+    // Same lean-schema considerations as above.
     let sql = r#"
-        SELECT 
-            parent_txn_seq,
-            execution_seq,
-            factory_name,
-            config_path
-        FROM transactions pending
-        WHERE pending.record_type = 'post_commit_pending'
+        SELECT
+            p.parent_seq AS parent_txn_seq,
+            json_get_str(p.metadata_json, 'execution_seq') AS execution_seq,
+            json_get_str(p.metadata_json, 'factory_name')  AS factory_name,
+            json_get_str(p.metadata_json, 'config_path')   AS config_path
+        FROM control p
+        WHERE p.record_kind = 'post_push_pending'
           AND EXISTS (
-              SELECT 1 FROM transactions started
-              WHERE started.parent_txn_seq = pending.parent_txn_seq
-                AND started.execution_seq = pending.execution_seq
-                AND started.record_type = 'post_commit_started'
+              SELECT 1 FROM control s
+              WHERE s.record_kind = 'post_push_started'
+                AND s.parent_seq = p.parent_seq
+                AND json_get_str(s.metadata_json, 'execution_seq')
+                  = json_get_str(p.metadata_json, 'execution_seq')
           )
           AND NOT EXISTS (
-              SELECT 1 FROM transactions completed
-              WHERE completed.parent_txn_seq = pending.parent_txn_seq
-                AND completed.execution_seq = pending.execution_seq
-                AND completed.record_type IN ('post_commit_completed', 'post_commit_failed')
+              SELECT 1 FROM control c
+              WHERE c.record_kind IN ('post_push_completed', 'post_push_failed')
+                AND c.parent_seq = p.parent_seq
+                AND json_get_str(c.metadata_json, 'execution_seq')
+                  = json_get_str(p.metadata_json, 'execution_seq')
           )
     "#;
 
@@ -1342,10 +1369,14 @@ async fn test_replica_preserves_transaction_sequences() {
         "Normal pond should have 1 transaction"
     );
     assert_eq!(normal_txns[0].0, 1, "First txn should be seq=1");
-    assert_eq!(
-        normal_txns[0].1,
-        vec!["pond", "init"],
-        "First txn should be pond init"
+    // Post-D2: cli_args are no longer persisted in the control table;
+    // the helper returns an empty Vec for each transaction.  The
+    // original command lives in data Delta commit metadata
+    // (`pond_txn`) for callers that need it.
+    assert!(
+        normal_txns[0].1.is_empty(),
+        "Post-D2 control table does not persist cli_args; got {:?}",
+        normal_txns[0].1
     );
 
     drop(normal_ship);
@@ -1451,10 +1482,11 @@ async fn test_replica_preserves_transaction_sequences() {
         after_restore_txns[0].0, 1,
         "Restored transaction should be seq=1 (THE BUG FIX: not seq=2)"
     );
-    assert_eq!(
-        after_restore_txns[0].1,
-        vec!["pond", "init"],
-        "Restored transaction should be pond init"
+    // Post-D2 cli_args are not persisted; see comment above.
+    assert!(
+        after_restore_txns[0].1.is_empty(),
+        "Post-D2 control table does not persist cli_args; got {:?}",
+        after_restore_txns[0].1
     );
 
     drop(replica_ship);
@@ -1466,36 +1498,31 @@ async fn test_replica_preserves_transaction_sequences() {
 }
 
 /// Helper to get transaction cli_args from a pond
+/// Return (txn_seq, cli_args) for each user transaction in the
+/// control table.  Post-D2 the lean schema does not persist cli_args
+/// at all; callers receive an empty `Vec<String>` for each tx (the
+/// original command lives in data Delta commit metadata).  Kept as a
+/// helper so the test reads as a single source of truth for "list
+/// transactions visible in the control table".
 async fn get_transaction_cli_args(
     ship_context: &ShipContext,
     limit: usize,
 ) -> Result<Vec<(i64, Vec<String>)>> {
     let mut ship = ship_context.open_pond().await?;
     let control_table = ship.control_table_mut();
-    // Control table automatically sees latest Delta commits via DataFusion
 
     let ctx = control_table.session_context();
     let sql = format!(
         r#"
-        WITH recent_seqs AS (
-            SELECT DISTINCT txn_seq
-            FROM transactions
-            WHERE record_category = 'transaction'
-              AND transaction_type IN ('read', 'write')
-            ORDER BY txn_seq ASC
-            LIMIT {}
-        )
-        SELECT 
-            t.txn_seq,
-            t.cli_args
-        FROM transactions t
-        WHERE t.record_category = 'transaction'
-          AND t.transaction_type IN ('read', 'write')
-          AND t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
-          AND t.record_type = 'begin'
-        ORDER BY t.txn_seq ASC
+        SELECT DISTINCT txn_seq
+        FROM control
+        WHERE record_kind = 'begin'
+          AND has_parent_seq = false
+          AND txn_seq > 0
+        ORDER BY txn_seq ASC
+        LIMIT {limit}
         "#,
-        limit
+        limit = limit
     );
 
     let df = ctx.sql(&sql).await?;
@@ -1503,7 +1530,7 @@ async fn get_transaction_cli_args(
 
     let mut records = Vec::new();
     for batch in batches {
-        use arrow::array::{Array, Int64Array, StringArray};
+        use arrow::array::{Array, Int64Array};
 
         let txn_seqs = batch
             .column_by_name("txn_seq")
@@ -1511,22 +1538,9 @@ async fn get_transaction_cli_args(
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        let cli_args_col = batch
-            .column_by_name("cli_args")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
 
         for i in 0..batch.num_rows() {
-            let cli_args = if !cli_args_col.is_null(i) {
-                let json_str = cli_args_col.value(i);
-                serde_json::from_str::<Vec<String>>(json_str).unwrap_or_else(|_| vec![])
-            } else {
-                vec![]
-            };
-
-            records.push((txn_seqs.value(i), cli_args));
+            records.push((txn_seqs.value(i), Vec::new()));
         }
     }
 

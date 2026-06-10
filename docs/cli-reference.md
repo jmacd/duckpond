@@ -14,9 +14,21 @@
 | `pond describe` | Show file schema | `pond describe /data/*.csv` |
 | `pond mknod` | Create factory nodes | `pond mknod --config f.yaml /path` |
 | `pond run` | Execute factory nodes | `pond run 20-foo collect` |
-| `pond run` | Execute from host config | `pond run host+remote:///config.yaml show` |
+| `pond run` | Execute from host config | `pond run host+sitegen:///config.yaml build .` |
 | `pond log` | View transaction history | `pond log --limit 20` |
-| `pond sync` | Sync with remote storage | `pond sync` |
+| `pond remote add` | Attach a pull-mode remote (mirror or import) | `pond remote add upstream s3://bucket /imports/upstream` |
+| `pond backup add` | Attach a backup (push or push+pull) | `pond backup add origin s3://bucket` |
+| `pond remote list` | List attached remotes (all) | `pond remote list` |
+| `pond backup list` | List push-side attachments | `pond backup list` |
+| `pond remote remove` | Detach a remote (also works for backups) | `pond remote remove origin` |
+| `pond remote remove --purge` | Detach AND drop the materialized mount entry | `pond remote remove --purge upstream` |
+| `pond push` | Push to push/both-mode remotes | `pond push` |
+| `pond pull` | Pull from pull/both-mode remotes | `pond pull` |
+| `pond maintain` | Delta maintenance; `--compact` records a pushable Compact bundle | `pond maintain --compact` |
+| `pond verify` | Compare local data against remote checksums (D6.1) | `pond verify origin` |
+| `pond status` | Operator status aggregate: identity, watermarks, recovery (D6.2) | `pond status` |
+| `pond rebuild-control` | Reconstruct a lost control table from data (D6.3) | `pond rebuild-control` |
+| `pond restart-from-compact` | Recover a consumer past the retention horizon (D6.4) | `pond restart-from-compact origin` |
 | `pond config` | Show/set pond configuration | `pond config` |
 
 ### Two Operating Modes
@@ -31,8 +43,8 @@ DuckPond commands work in two modes:
 
 | Mode | `pond cat` | `pond run` | `pond copy` |
 |------|-----------|-----------|-------------|
-| Pond | `pond cat /data/file` | `pond run 20-backup push` | `pond copy host:///f /data/f` |
-| Host | `pond cat host+csv:///f` | `pond run host+remote:///c.yaml show` | N/A (read-only) |
+| Pond | `pond cat /data/file` | `pond run 20-hydrovu collect` | `pond copy host:///f /data/f` |
+| Host | `pond cat host+csv:///f` | `pond run host+sitegen:///c.yaml build .` | N/A (read-only) |
 
 ## Environment
 
@@ -211,6 +223,10 @@ pond cat host+csv:///tmp/data.csv --format=table --sql "SELECT * FROM source WHE
 # Query a host zstd-compressed CSV
 pond cat host+csv+zstd:///tmp/data.csv.zst --format=table
 
+# Query a host Parquet file directly as a table (no pond needed)
+pond cat host+table:///tmp/snapshot.parquet --format=table
+pond cat host+table:///tmp/snapshot.parquet --sql "SELECT count(*) FROM source"
+
 # Query pond CSV files with SQL (use csv:// prefix)
 pond cat csv:///data/readings.csv --sql "SELECT * FROM source WHERE temp > 20"
 
@@ -318,8 +334,8 @@ pond mknod --config /path/to/config.yaml /destination/path
 
 # Specific factory types
 pond mknod sql-derived-table /derived/view --config-path filter.yaml
-pond mknod remote /system/run/1-backup --config-path backup.yaml
 pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
+pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
 ```
 
 See [Factory Types](#factory-types) for configuration options.
@@ -338,12 +354,6 @@ pond run /system/etc/20-hydrovu collect
 # Short name resolution (tries /system/run/ then /system/etc/)
 pond run 20-hydrovu collect
 
-# Push to remote backup
-pond run /system/run/1-backup push
-
-# Pull from remote
-pond run /system/run/1-backup pull
-
 # Build site
 pond run /system/etc/90-sitegen build ./dist
 ```
@@ -352,39 +362,29 @@ Short names (without a leading `/`) are resolved by checking `/system/run/{name}
 then `/system/etc/{name}`. The first path that exists wins. If neither exists,
 falls back to `/system/run/{name}` (which will produce a clear error downstream).
 
+> **Note (D4+)**: remote-backup `push`/`pull`/`verify`/`show` are no longer
+> invoked through `pond run` on a factory node.  Use the top-level
+> `pond push`, `pond pull`, and `pond remote ...` verbs instead (see below).
+> Configurations live under `/sys/remotes/<name>`, not under
+> `/system/run/<N>-remote`.
+
 #### Host Mode (`host+factory://`)
 
 When the path uses a `host+` URL, `pond run` reads the config from the
 host filesystem and executes the factory named by the URL scheme.  **No
-`$POND` is required.**  This is useful for inspecting remote backups,
-generating sites, or running any factory against a local config file
-without first setting up a pond.
+`$POND` is required.**  This is useful for running any factory against
+a local config file without first setting up a pond.
 
 ```bash
-# Browse what's in a remote backup
-pond run host+remote:///path/to/backup-config.yaml show
-
 # Build a site from a local config
 pond run host+sitegen:///path/to/site.yaml build ./dist
 ```
 
-The URL scheme (`remote`, `sitegen`, etc.) must be a registered factory
-name.  Format providers like `csv` are not valid here -- use `pond cat`
-for those.
+The URL scheme (`sitegen`, etc.) must be a registered factory name.
+Format providers like `csv` are not valid here -- use `pond cat` for those.
 
 **Config file format**: the YAML file at the host path is passed directly
-to the factory, exactly as if it were stored inside a pond node.  For
-remote factories, this is the same YAML used with `pond mknod`:
-
-```yaml
-# backup-config.yaml -- point at a remote S3 bucket
-url: "s3://my-bucket"
-endpoint: "http://my-server:9000"
-region: "us-east-1"
-access_key: "..."
-secret_key: "..."
-allow_http: true
-```
+to the factory, exactly as if it were stored inside a pond node.
 
 ---
 
@@ -406,24 +406,335 @@ pond log --incomplete
 
 ---
 
-### pond sync
+### pond remote / pond backup
 
-Sync with remote storage (retry pushes, pull new bundles).
-`pond sync` only operates on remote factories in `/system/run/`.
+DuckPond splits remote attachment into two verbs that match operator
+intent (D5.7b):
+
+- **`pond remote add NAME URL PATH`** -- attach a **pull-mode** remote
+  and mount it at PATH.  `PATH = /` is a mirror restart of this pond's
+  own backup (foreign store_id must match this pond's pond_id).
+  Non-root PATH is a cross-pond import (foreign store_id must differ;
+  imported data appears under PATH).
+- **`pond backup add NAME URL [--bidirectional]`** -- attach a backup
+  remote.  Push-only by default; `--bidirectional` enables both push
+  and pull (the rare bidirectional case).  Backups always mirror the
+  entire pond -- there is no PATH because the local pond IS the source.
+
+Each attachment is a small YAML file under `/sys/remotes/<name>`
+(portable; no per-pond watermarks).  The local-only mode and mount
+path live in the control table's raw_config map.
+
+> **Credentials must be `${env:VAR}` references, not literal secrets.**
+> The attachment YAML is replicated to every backup, so a literal
+> `--secret-access-key` would expose the secret on all replicas.
+> `pond remote add` / `pond backup add` therefore rejects a literal
+> `secret_access_key`: pass an env reference (single-quoted so your
+> shell does not expand it) and set the value in the environment.  The
+> reference text replicates; each replica resolves it locally at use
+> time.
 
 ```bash
-# Sync all remote factories in /system/run/
-pond sync
+# Attach an S3 backup with credentials (push-only).
+# Export the secret in the environment; pass it as an env reference.
+export AWS_SECRET_ACCESS_KEY=...   # the actual secret, never persisted
+pond backup add origin s3://my-bucket \
+    --region us-east-1 \
+    --endpoint http://localhost:9000 \
+    --access-key-id minioadmin \
+    --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}' \
+    --allow-http
 
-# Sync a specific factory by short name
-pond sync 1-backup
+# Attach a bidirectional remote (push + pull, e.g. a federated hub)
+pond backup add hub s3://hub-bucket --bidirectional \
+    --region us-east-1 \
+    --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
-# Sync by full path
-pond sync /system/run/1-backup
+# Attach a pull-mode remote as a cross-pond import
+pond remote add upstream s3://prod-bucket /imports/upstream \
+    --region us-east-1 \
+    --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
-# Recovery mode with base64 config
-pond sync --config <base64-encoded-config>
+# Attach a pull-mode remote as a mirror restart (after `pond init` on a
+# blank machine; the remote was created earlier with `pond backup add`
+# from the source pond).
+pond remote add origin file:///mnt/backups/origin /
+
+# List all remotes (both pull and backup)
+pond remote list
+
+# List backups only
+pond backup list
+
+# Detach a remote (clears config + watermarks; preserves any materialized
+# mount entry so previously-imported data is still readable by path).
+pond remote remove origin
+
+# Detach AND remove the mount entry created by a cross-pond import
+# (only meaningful for pull-mode remotes with a non-root mount_path).
+pond remote remove --purge upstream
 ```
+
+`pond remote add` writes `/sys/remotes/<name>` as YAML and records
+`remote_mode:<name>` and `remote_mount_path:<name>` in the control
+table.  Re-adding the same name errors unless `--overwrite` is given.
+
+**Attach-time conflict checks** (pull-mode only):
+
+- The same `mount_path` cannot be used by two different pull-mode
+  remotes.  Trailing slashes are normalized, so `/imports/x` and
+  `/imports/x/` are treated as identical.  `--overwrite` is only
+  honored when the conflicting attachment has the *same* name as the
+  one being attached.
+- The same foreign `store_id` cannot be mounted under two different
+  pull-mode names.  Mirror-restart attachments (`PATH = /`, foreign
+  `store_id` == local `pond_id`) are exempt because they do not
+  materialize a mount entry.
+
+**Cross-pond mounts are read-only.**  Any write inside an
+`/imports/<name>/...` subtree -- whether by `pond copy`, by an
+explicit `pond run`, or by an auto-executing factory configured in
+the foreign pond -- is refused with `ReadOnlyImport`.  The steward
+also filters its `/system/run/*` scan by local `pond_id`, so a
+factory living in the foreign pond's filesystem is never
+auto-executed by the local steward.
+
+**`--purge` semantics.**  By default, `pond remote remove` is a
+**detach**: it clears `/sys/remotes/<name>`, the
+`remote_mode:<name>` key, the `remote_mount_path:<name>` key, and the
+per-URL watermarks, but leaves any materialized mount entry in place
+(so imported data stays readable through the original path).  With
+`--purge`, the mount entry is also unlinked from its parent
+directory.  `--purge` is a no-op on backup-mode attachments (they
+have no `mount_path`).  Note: physically vacuuming the foreign
+`pond_id`'s rows from the underlying Delta log is deferred -- the
+rows become unreachable by path after purge and are eligible for a
+future compaction.
+
+---
+
+### pond push
+
+Push pending local transactions to one or more remotes.
+
+```bash
+# Push every remote with mode=push or mode=both
+pond push
+
+# Push only the named remote
+pond push origin
+```
+
+After every write transaction, the steward also auto-pushes all
+`push`/`both`-mode remotes -- so this command is mostly used when an
+earlier auto-push failed (transient network), or right after attaching
+a brand-new remote.
+
+---
+
+### pond pull
+
+Pull new bundles from one or more remotes.
+
+```bash
+# Pull every remote with mode=pull or mode=both
+pond pull
+
+# Pull only the named remote
+pond pull upstream
+```
+
+> **Cross-pond pull bootstrap (D5.7b.2):** when a pull-mode remote
+> is attached with a non-root `mount_path` (e.g. `/imports/upstream`)
+> and its `store_id` differs from the local `pond_id`, the first
+> `pond pull` automatically materializes the mount entry under the
+> configured path.  No manual seeding is required.  Mirror restarts
+> (`PATH = /`, same `store_id`) still need the
+> `ShipContext::create_pond_for_restoration` path; a CLI surface for
+> mirror restart bootstrap is tracked separately.
+
+---
+
+### pond verify (D6.1)
+
+Compare this pond's CURRENT live data against one or more remotes'
+recorded partition checksums.
+
+```bash
+# Verify against every attached remote
+pond verify
+
+# Verify against only the named remote
+pond verify origin
+```
+
+Output (per remote):
+- `[OK] verify <name>: live data matches remote at seq=<N>` -- consumer
+  agrees with the remote's latest bundle.
+- `[OK] verify <name>: remote has no bundles (vacuous match)` -- remote
+  is empty and so is the consumer.
+- `[MISMATCH] verify <name>: <K> partition(s) diverge from remote at seq=<N>`
+  followed by one line per mismatching partition.  If the consumer
+  agrees with a prior bundle in the remote's history, the
+  `divergence boundary: ... seq=<B>` line identifies when drift began.
+
+Exit code is non-zero if any remote reports a mismatch or fails to load.
+
+> Verify is symmetric: a replica bootstrapped from a remote (via
+> `pond pull` or `restart-from-compact`) verifies cleanly against that
+> remote, because the producer's `pond_init` transaction is replicated as
+> a normal bundle so the replica is byte-identical (P2-VERIFY-BOOTSTRAP-DRIFT,
+> fixed).
+
+---
+
+### pond status (D6.2)
+
+Show an operator-facing status aggregate for the current pond.  This is
+a fast, **offline** command -- it reads only the local control table and
+`/sys/remotes/*` attachments and never opens a remote or touches the
+network, so it is safe on a pond whose remotes are unreachable.
+
+```bash
+pond status
+```
+
+Output sections:
+- **Identity** -- pond ID, creation time / creator, on-disk location.
+- **Local state** -- last committed write sequence and recovery health
+  (lists incomplete transactions with a `pond recover` hint if any are
+  found).
+- **Remotes** -- one block per attached remote/backup: url, mount path
+  (`/ (mirror)` for mirror attachments), and sync watermarks.  For
+  push/both remotes the `last pushed` line shows lag relative to the
+  local `last write seq` (`up to date`, `behind local by N txn`, or
+  `never pushed`).  For pull/both remotes the `last pulled` watermark is
+  shown.
+
+> **Note:** push "lag" is computed purely from local watermarks
+> (`last_write_seq` vs `last_pushed_seq:<url>`).  To cross-check the
+> consumer's data against what a remote actually recorded, use
+> `pond verify`.
+
+---
+
+### pond rebuild-control (D6.3)
+
+Reconstruct the control table from the data Delta table.  This is a
+**disaster-recovery** command for the case where the data Delta table
+survives but the control table is lost or corrupt (so `pond` can no
+longer open the pond).
+
+```bash
+# Rebuild when the control table is missing
+pond rebuild-control
+
+# Move an existing (corrupt) control table aside and rebuild
+pond rebuild-control --force
+```
+
+**Recovers:**
+- **Pond identity** -- the canonical `pond_id` from the data table's
+  bootstrap row, plus a birth timestamp from the bootstrap commit.  The
+  birth hostname/username are not stored in the data table and are
+  recorded as `unknown`.
+- **Transaction-log skeleton** -- one `Begin` + `DataCommitted` (plus a
+  trailing `Completed` for the bootstrap) per write transaction found in
+  the data Delta commit history, so `pond log` and `pond status` work
+  again.  The original `txn_seq`, `txn_id`, CLI args, Delta version, and
+  commit timestamp are all recovered from the `pond_txn` commit
+  metadata.
+
+**Does NOT recover (operator follow-up required):**
+- **Remote attachments' settings** -- remote modes and
+  `last_pushed_seq` / `last_pulled_seq` watermarks live only in the
+  control table.  Re-attach remotes with `pond remote add` /
+  `pond backup add` after a rebuild.
+- **Per-transaction partition checksums** -- not recoverable from data
+  alone, so reconstructed `DataCommitted` records carry empty checksums
+  and `pond verify` must be re-baselined.
+
+> **Safety:** if a real control table already exists, the rebuild is
+> refused unless `--force` is given.  With `--force`, the existing
+> control directory is moved aside to a `control.bak.<unix_ts>` sibling
+> before the new one is written.  A stale empty `control/` directory
+> left behind by a failed open is removed automatically (no `--force`
+> needed).
+
+> **Note:** `pond rebuild-control` is designed for primary ponds.  A
+> freshly restored replica that has not yet done local writes should be
+> re-bootstrapped via `pond remote add` + `pond pull`, not rebuilt.
+
+---
+
+### pond maintain
+
+Run Delta Lake maintenance on the pond's data and control tables:
+checkpoint creation, commit-log cleanup, and vacuum of stale parquet
+files.  Safe to run routinely (e.g. from cron) to keep table-open cost
+bounded.
+
+```bash
+# Checkpoint + vacuum (no file merging)
+pond maintain
+
+# Also compact: merge many small parquet files into fewer large ones
+pond maintain --compact
+```
+
+`--compact` compacts the pond's own-`pond_id` partitions as a **recorded,
+pushable transaction**: the merge is written to the control table as a
+`Compact` commit, so a subsequent `pond push` emits a **Compact bundle**.
+That bundle is the restart baseline used by
+[`pond restart-from-compact`](#pond-restart-from-compact-d64), and it lets
+`pond maintain --remote=<name>` retention prune the superseded `Write`
+bundles.
+
+Compaction never changes logical content -- duckpond snapshots each
+partition's checksum before and after the merge and aborts if they
+differ.  A run with nothing to merge is a clean no-op.
+
+> **Tip:** push before compacting (or push the compact baseline) -- the
+> Compact bundle is a full snapshot of the pond at the compacted version,
+> so consumers can restart from it alone.
+
+---
+
+### pond restart-from-compact (D6.4)
+
+Recover a consumer that has fallen below a remote's retention horizon.
+
+When `pond pull` fails with `consumer is below retention horizon`
+([`BehindRetention`]), the bundles the consumer still needs have been
+pruned by retention.  The only recovery is to drop the affected pond's
+local footprint and re-apply the remote's oldest surviving **compact
+baseline**, then catch up to the latest bundle.
+
+```bash
+pond restart-from-compact <name>
+```
+
+Behavior depends on whether the remote is a mirror or a cross-pond
+import:
+
+- **Mirror** (`remote.store_id == local pond_id`): drops ALL local data
+  for the pond and rebuilds from the compact baseline.  Because the
+  `/sys/remotes/<name>` attachment and its mode/mount settings live
+  under the local pond_id, they are dropped too -- the command
+  re-persists them automatically afterwards so the remote stays usable.
+- **Cross-pond import** (`remote.store_id != local pond_id`): drops only
+  the foreign pond's footprint on the consumer; the consumer's own data
+  and any sibling imports are untouched.
+
+If the remote has no compact bundle, the command refuses with a clear
+error (nothing is dropped -- the safety check runs before any delete).
+
+> **Producing a compact baseline:** run `pond maintain --compact` on the
+> producer and then `pond push`.  Compaction is recorded as a Compact
+> transaction, so the next push emits a Compact bundle that becomes the
+> remote's restart baseline (and lets `pond maintain --remote` retention
+> prune the superseded Write bundles).  Cross-pond sources can also
+> supply a compact baseline.
 
 ---
 
@@ -443,45 +754,65 @@ pond config set <key> <value>
 
 ---
 
-## Factory Filesystem Conventions
+## Filesystem Conventions
 
-Factory nodes live under `/system/` in two directories that determine their
+Several well-known paths under the pond have special meaning to the
+steward and CLI.
+
+### `/sys/remotes/<name>` -- remote attachments (D4)
+
+Each file under `/sys/remotes/<name>` is a small YAML document recording
+one remote's URL + mode + (S3) credentials.  Managed via `pond remote
+add`, `pond remote remove`, `pond remote list`.  After every write
+transaction the steward iterates these and auto-pushes any whose mode is
+`push` or `both`.
+
+### `/system/{run,etc,site}/` -- factory nodes
+
+Factory nodes live under `/system/` in directories that determine their
 auto-execution behavior:
 
 | Directory | Purpose | Post-commit | Examples |
 |-----------|---------|------------|----------|
-| `/system/run/` | Auto-executing factories | Yes (default: `push`) | `remote` (backup) |
-| `/system/etc/` | Manually triggered or passive | No | `hydrovu`, `sitegen`, `column-rename` |
+| `/system/run/` | Auto-executing factories | Yes (default: `push`) | (currently rare; see note) |
+| `/system/etc/` | Manually triggered or passive | No | `hydrovu`, `sitegen`, `column-rename`, `logfile-ingest`, `journal-ingest` |
 | `/system/site/` | Static content (templates) | No | Markdown page templates |
 
-**Post-commit auto-execution:** After every write transaction, the steward
-scans `/system/run/*` and executes each factory with its configured mode
-(default: `push`). Only factories that support the mode will succeed --
-this is why `hydrovu` and `sitegen` must NOT be placed in `/system/run/`.
+> **Note (D4+)**: the legacy `remote` factory used to live in
+> `/system/run/<N>-remote`; that pathway is gone.  Remote sync is now
+> handled by `/sys/remotes/<name>` + `pond push|pull` (see above).
+> `/system/run/` is still scanned post-commit for any future factories
+> that opt into auto-execution, but no in-tree factory currently uses it.
 
-**Short name resolution:** `pond run` resolves bare names (no leading `/`)
-by checking `/system/run/{name}` then `/system/etc/{name}`. `pond sync`
-only looks in `/system/run/` since it only operates on remote factories.
+**Post-commit auto-execution:** After every write transaction, the
+steward scans `/system/run/*` and executes each factory with its
+configured mode (default: `push`).  Only factories that support the
+mode will succeed -- this is why `hydrovu` and `sitegen` must NOT be
+placed in `/system/run/`.  Separately, the steward iterates
+`/sys/remotes/*` and auto-pushes any `push`/`both`-mode remotes.
+
+**Short name resolution:** `pond run` resolves bare names (no leading
+`/`) by checking `/system/run/{name}` then `/system/etc/{name}`.
 
 **Naming convention:** Use numeric prefixes for ordering:
-`1-backup`, `10-hrename`, `20-hydrovu`, `90-sitegen`.
+`10-hrename`, `20-hydrovu`, `90-sitegen`.
 
 **Setup pattern:**
 ```bash
-pond mkdir -p /system/run
 pond mkdir -p /system/etc
 pond mkdir -p /system/site
 
-# Auto-executing (remote backup)
-pond mknod remote /system/run/1-backup --config-path backup.yaml
-
-# Manually triggered
+# Manually triggered factories
 pond mknod column-rename /system/etc/10-hrename --config-path hrename.yaml
 pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
 pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
 
 # Static content
 pond copy host:///path/to/templates /system/site --overwrite
+
+# Backup attachment (managed by `pond backup add`, not `pond mknod`)
+pond backup add origin s3://my-bucket \
+    --region us-east-1 --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 ```
 
 ---
@@ -1263,107 +1594,26 @@ inputs:
 
 ---
 
-### remote
+### remote (REMOVED in D4)
 
-Backup, replication, and cross-pond import via S3-compatible storage.
+The legacy `remote` factory (`pond mknod remote /system/run/<N>-backup
+--config-path ...`) was removed in D4.  Its capabilities are now
+delivered by the top-level CLI:
 
-```yaml
-# Local file backup
-url: "file:///backup/location"
-compression_level: 3
+- Configure -> `pond remote add <name> <url> <path>` (pull) or
+  `pond backup add <name> <url> [--bidirectional]` (push); see
+  [pond remote / pond backup](#pond-remote--pond-backup) above.
+- Push     -> `pond push [<name>]` (also auto-runs post-commit).
+- Pull     -> `pond pull [<name>]` (after first-pull bootstrap via Rust API).
+- Inspect  -> not yet exposed at the CLI (was `pond run .../show`); track
+  via `pond log` plus `mc ls`/`aws s3 ls` against the bucket directly.
+- Verify   -> not yet exposed at the CLI (was `pond run .../verify`);
+  bundle integrity is checked end-to-end inside `pond pull` today.
 
-# S3 backup
-url: "s3://bucket-name"
-endpoint: "http://localhost:9000"  # For MinIO
-region: "us-east-1"
-access_key_id: "..."
-secret_access_key: "..."
-allow_http: true  # Required for non-HTTPS endpoints
-```
-
-**Commands:**
-```bash
-# Push local pond to remote backup
-pond run /system/run/1-backup push
-
-# Pull from remote (restore)
-pond run /system/run/1-backup pull
-
-# Verify backup integrity
-pond run /system/run/1-backup verify
-
-# List files in remote storage
-pond run /system/run/1-backup list-files
-
-# Show backup contents
-pond run /system/run/1-backup show           # All files
-pond run /system/run/1-backup show "/data/*" # Pattern match
-pond run /system/run/1-backup show --script  # Generate copy-pastable scripts
-```
-
-#### Host Mode (no pond required)
-
-Any remote factory command works from a host config file via `host+remote://`.
-This is the fastest way to inspect a remote backup from another machine:
-
-```bash
-# Create a config file pointing at the pond's bucket
-cat > remote.yaml << 'EOF'
-url: "s3://my-pond-bucket"
-endpoint: "http://remote-host:9000"
-region: "us-east-1"
-access_key: "mykey"
-secret_key: "mysecret"
-allow_http: true
-EOF
-
-# Browse the filesystem tree in the backup
-pond run host+remote:///path/to/remote.yaml show
-```
-
-#### Cross-Pond Import
-
-Import lets one pond pull a subtree from another pond's remote backup.
-The import config specifies which path in the foreign pond to import
-and where it appears locally:
-
-```yaml
-# import-config.yaml
-url: "s3://producer-pond-bucket"
-endpoint: "http://remote-host:9000"
-region: "us-east-1"
-access_key: "..."
-secret_key: "..."
-allow_http: true
-import:
-  source_path: "/logs/data"       # Path in the foreign pond
-  local_path: "/sources/remote"   # Where it appears in this pond
-```
-
-Use `/**` suffix on `source_path` for recursive import of nested
-directories:
-
-```yaml
-import:
-  source_path: "/logs/**"          # Import all subdirectories
-  local_path: "/sources/remote"
-```
-
-**Workflow:**
-```bash
-# 1. Create the import config pointing at the producer's bucket
-#    Each pond has its own bucket -- no UUID discovery needed.
-
-# 2. Install the import factory in the consumer pond
-pond mknod remote /system/etc/10-import --config-path import-config.yaml
-
-# 3. Pull the foreign data
-pond run 10-import pull
-
-# 4. Query the imported data
-pond list '/sources/remote/**'
-pond cat /sources/remote/data.csv
-```
+Cross-pond import is available via `pond remote add NAME URL PATH`
+where `PATH != /` (D5.7b).  The legacy `import:` config block remains
+unused; cross-pond data is reached through the mount path rather than
+through factory-level imports.
 
 #### Emergency Recovery (duckpond-emergency)
 
@@ -1402,6 +1652,11 @@ export AWS_ACCESS_KEY_ID="minioadmin"
 export AWS_SECRET_ACCESS_KEY="minioadmin"
 duckpond-emergency s3://bucket/backup list
 ```
+
+> **Note:** `duckpond-emergency` predates the D4 bundle-format change.
+> It currently assumes the legacy chunked-parquet bundle layout; it will
+> need a rewrite (or replacement) for ponds whose bundles were produced
+> by `sync_remote::Remote`.
 
 ### hydrovu
 
@@ -1491,6 +1746,52 @@ logger -t myapp "Test message"
 
 ---
 
+### journal-ingest
+
+Ingest the systemd journal (and optionally the kernel ring buffer) into the
+pond as per-unit JSON Lines series. Runs `journalctl -o json` incrementally,
+tracking progress with a stored cursor so each run only collects new entries.
+
+```yaml
+# Destination path within the pond (required)
+pond_path: logs/watershop
+# journalctl binary (default: "journalctl")
+journalctl_command: journalctl
+# Collect the kernel ring buffer as a separate stream (default: true)
+collect_kernel: true
+# JSON field holding the timestamp, in microseconds since epoch
+# (default: "__REALTIME_TIMESTAMP")
+timestamp_field: __REALTIME_TIMESTAMP
+# Extra args appended to every journalctl invocation (default: []).
+# Use ["--merge"] to also pull the invoking user's journal so user-scope
+# units (e.g. pond@water-prod.service) are captured.
+extra_args: ["--merge"]
+```
+
+**Usage:**
+```bash
+# Create the factory node (manually triggered -> /system/etc/)
+pond mknod journal-ingest /system/etc/15-journal --config-path journal.yaml
+
+# Collect new journal entries (default subcommand)
+pond run /system/etc/15-journal
+pond run 15-journal             # short name works too
+
+# Show the cursor position and per-unit entry counts
+pond run 15-journal status
+```
+
+**Behavior:**
+- Entries are grouped into one `.jsonl` series file per systemd unit under
+  `pond_path`: `<unit>.jsonl`, `kernel.jsonl` (kernel transport),
+  `user-<unit>.jsonl` (user-scope units), and `other.jsonl` (no unit).
+- Output files are `data:series` (FilePhysicalSeries) -- versioned raw JSON
+  Lines; each run appends a new version with the collected entries.
+- A `.journal-cursor` file in `pond_path` records the last journal cursor, so
+  collection is incremental and idempotent across runs (ideal for cron).
+
+---
+
 ## Glob Patterns
 
 DuckPond uses glob patterns for file matching:
@@ -1545,7 +1846,6 @@ sitegen (/system/etc/90-sitegen)
 **Setup pattern:**
 ```bash
 pond init
-pond mkdir -p /system/run
 pond mkdir -p /system/etc
 pond mkdir -p /system/site
 pond copy host:///path/to/templates /system/site    # Markdown templates
@@ -1555,12 +1855,13 @@ pond mknod dynamic-dir /singled  --config-path single.yaml
 pond mknod dynamic-dir /reduced  --config-path reduce.yaml
 pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
 pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
-pond mknod remote /system/run/1-backup --config-path backup.yaml
+pond backup add origin s3://my-bucket \
+    --region us-east-1 --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 
 # Operational cycle:
 pond run 20-hydrovu collect              # Collect data
 pond run 90-sitegen build ./dist         # Build site
-# Backup runs automatically on post-commit (remote in /system/run/)
+# `pond push origin` runs automatically post-commit (mode=push)
 ```
 
 ### Single-Source (Septic)
@@ -1601,20 +1902,20 @@ config:
 **Setup pattern:**
 ```bash
 pond init
-pond mkdir -p /system/run
 pond mkdir -p /system/etc
 pond mkdir -p /system/site
 pond mkdir -p /ingest
 pond copy host:///path/to/templates /system/site
 pond mknod logfile-ingest /system/etc/10-ingest --config-path ingest.yaml
-pond mknod remote /system/run/1-backup --config-path backup.yaml
+pond backup add origin s3://my-bucket \
+    --region us-east-1 --access-key-id ... --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 pond mknod temporal-reduce /reduced --config-path reduce.yaml
 pond mknod sitegen /system/etc/90-sitegen --config-path site.yaml
 
 # Operational cycle:
 pond run 10-ingest                          # ingest new log data
 pond run 90-sitegen build ./dist            # build site (reduce is dynamic)
-# Backup runs automatically on post-commit (remote in /system/run/)
+# `pond push origin` runs automatically post-commit (mode=push)
 ```
 
 **Notes on single-source pipelines:**
@@ -1652,6 +1953,7 @@ pond run 90-sitegen build ./dist            # build site (reduce is dynamic)
 | `column-rename` | transform | `pond mknod` | Wraps `TableProvider` |
 | `sitegen` | executable | `pond mknod` + `pond run ... build` | Static files on host |
 | `logfile-ingest` | executable | `pond mknod` + `pond run` | `data` entries in pond |
+| `journal-ingest` | executable | `pond mknod` + `pond run [status]` | `data:series` JSON Lines in pond |
 | `hydrovu` | executable | `pond mknod` + `pond run ... collect` | `table:series` in pond |
 | `remote` | executable | `pond mknod` + `pond run ... push/pull` | Backup bundles on S3 |
 

@@ -1,636 +1,352 @@
 # DuckPond Operator Guide
 
 This guide is for the person who keeps a DuckPond running: creating
-ponds, configuring remotes, managing replicas, running maintenance,
-monitoring health, and recovering from failures.
+ponds, attaching remotes, replicating, running maintenance, monitoring
+health, and recovering from failures.
 
 It assumes familiarity with the data commands (`pond copy`, `pond cat`,
-`pond list`, `pond mknod`, `pond run`).
+`pond list`, `pond mknod`, `pond run`).  For the full command/flag
+reference see [docs/cli-reference.md](cli-reference.md); for the design
+rationale behind the remote model see
+[docs/remote-redesign.md](remote-redesign.md).
+
+> This guide reflects the post-D6 CLI.  The pre-D6 factory-based remote
+> model (`pond sync`, `pond remote add <yaml>`, `/sys/run/<N>-backup`,
+> `import:` config sections, `pond context`) is gone; the historical
+> version is archived at
+> [docs/archive/operator-guide-pre-d6.md](archive/operator-guide-pre-d6.md).
 
 ---
 
-## Concepts
+## 1. Concepts
 
-A **pond** is a transactional filesystem backed by Delta Lake.  It
-stores data files, time-series, and computed views.  Every write is
-an atomic transaction recorded in the Delta commit log.
+A **pond** is a transactional, query-native filesystem backed by Delta
+Lake.  Every write is one atomic transaction recorded in the Delta
+commit log.
 
-A **remote** is an S3-compatible bucket that stores backup copies of
-the pond's data.  The primary pond pushes to the remote after each
-write transaction.
+A **remote** is an S3-compatible bucket or a local directory that holds
+replicated copies of a pond's transactions as **bundles**.  Two kinds of
+attachment exist, distinguished only by direction:
 
-A **replica** is a read-only copy of a pond, created by pulling from
-a shared remote.  Multiple replicas can exist, each with independent
-local state.  Replicas see the same data as the primary (after pull).
+| Attachment | Command | Direction | Use |
+|-----------|---------|-----------|-----|
+| **Backup** | `pond backup add` | push (or push+pull) | Send this pond's writes to an offsite copy |
+| **Remote** | `pond remote add` | pull | Receive another pond's data (mirror or import) |
 
-**Maintenance** is Delta Lake housekeeping: checkpointing the
-transaction log, vacuuming deleted files, and optionally compacting
-small files into larger ones.
+A pull remote attaches at a **mount path**:
 
-A **context** is a named reference to a pond, stored in
-`~/.pond/config`.  Contexts let you manage multiple ponds without
-juggling environment variables.
+- **Mirror** (`PATH = /`): the remote's `store_id` equals this pond's
+  `pond_id`.  This pond is a replica of the producer; pulled data lands
+  as this pond's own data.
+- **Cross-pond import** (`PATH = /imports/<name>`): the remote's
+  `store_id` differs from this pond's `pond_id`.  The foreign pond's
+  data is mounted read-through at the configured path, alongside this
+  pond's own data.
 
-### Pond Layout
+### Universal vs. per-replica state
 
-```
-/data/mysite/                     Pond root
-  data/                           Delta Lake table (the actual filesystem)
-    _delta_log/                   Transaction log + commit metadata
-    _large_files/                 Content-addressed store (files >64KB)
-    part_id=<uuid>/               Partitions (one per directory)
-  control/                        Control table (per-replica, NOT replicated)
-    _delta_log/                   Control transaction log
-    record_category=metadata/     Pond identity, factory modes, settings
-    record_category=transaction/  Audit log of all transactions
-```
+| Kind | Examples | Where it lives | Replicated? |
+|------|----------|----------------|-------------|
+| **Universal** | User data, factory configs, `/sys/remotes/<name>` attachment YAML | Data Delta table | Yes (push/pull) |
+| **Per-replica** | Pond identity cache, remote modes, push/pull watermarks | Control table | No |
 
-### Filesystem Conventions
+The **data table** is canonical and replicable.  The **control table**
+is a per-instance cache and audit log; it is disposable and can be
+rebuilt from the data table (see [§6 Recovery](#6-recovery)).
 
-```
-/                                 Pond root
-  sys/                            System configuration (replicated)
-    run/                          Auto-exec factories (run after each commit)
-      1-backup                    Primary remote
-    etc/                          Manual factories (run on demand)
-      20-hydrovu                  Data collector
-      90-sitegen                  Static site generator
-  ...                             User data
-```
+### Transaction lifecycle states
 
-Factories in `/sys/run/` are automatically executed after each write
-transaction.  Their behavior is determined by their per-replica mode
-(e.g., `push` for primaries, `pull` for replicas; `pull`-mode
-factories are skipped during post-commit auto-execution).
+Each transaction is recorded in the control table as a sequence of
+lifecycle records.  `pond log` and `pond log --txn-seq N` surface them:
 
-Factories in `/sys/etc/` are only executed manually via `pond run`.
+| State | Meaning |
+|-------|---------|
+| `Begin` | Transaction started. |
+| `DataCommitted` | The data Delta commit landed; this is the terminal record for a successful **write**. Carries the Delta version + partition checksums. |
+| `Completed` | A read (or no-op write) finished cleanly. |
+| `Failed` | The transaction aborted; the reason is in the record metadata. |
+| `PostPushPending` / `PostPushStarted` / `PostPushCompleted` / `PostPushFailed` | Lifecycle of the post-commit auto-push of one write to one push/both-mode remote. |
 
-### Universal vs. Per-Replica State
-
-Because multiple replicas share the same data table, the system
-distinguishes between:
-
-| Kind | Examples | Where it lives |
-|------|----------|----------------|
-| **Universal** | Factory configs, user data | Data table (replicated via push/pull) |
-| **Per-replica** | Pond identity, factory modes, import watermarks, settings | Control table (never replicated) |
-
-Per-replica state is disposable.  You can delete the control table
-and rebuild it.  Modes re-default (primary=push, replica=pull),
-watermarks are recomputed from the data.  Pond identity is set
-during `pond init` or replica creation.
+A transaction with a `Begin` but no terminal record is **incomplete**
+(the process crashed mid-write); `pond recover` resolves it.
 
 ---
 
-## 1. Contexts
-
-### Why contexts?
-
-Without contexts, every command requires `$POND` to be set or
-`--pond` to be passed.  Contexts provide named shortcuts for
-interactive use.
-
-### Setting up contexts
+## 2. On-disk and filesystem layout
 
 ```
-$ pond context add mysite --path /data/mysite
-Context "mysite" added.
-Set as current context.
-
-$ pond context add septic --path /data/septic
-Context "septic" added.
-
-$ pond context list
-  CURRENT  NAME     PATH              ROLE
-  *        mysite   /data/mysite      primary
-           septic   /data/septic      primary
+{POND}/
+  data/                     Data Delta table (the filesystem itself; replicable)
+    _delta_log/             Transaction log + pond_txn commit metadata
+    _large_files/           Content-addressed store for files >64KB
+    pond_id=<uuid>/part_id=<uuid>/   Partitions (one per directory)
+  control/                  Control table (per-replica; NOT replicated)
+    _delta_log/
 ```
 
-### Switching contexts
+In-pond system paths:
 
 ```
-$ pond context use septic
-Switched to context "septic".
-
-$ pond context current
-septic (/data/septic)
+/sys/                       Steward-owned (replicated)
+  remotes/<name>            Remote/backup attachment YAML (one per attachment)
+/system/                    cmd-owned factory nodes (replicated)
+  run/                      Auto-executing factories (run after each commit)
+  etc/                      Manually triggered factories (pond run)
+  site/                     Static content (templates)
+/...                        User data
 ```
 
-### Pond path resolution
-
-Commands resolve the pond path in this order:
-
-1. `--pond /path` flag (explicit override)
-2. `$POND` environment variable (scripts, cron jobs)
-3. `~/.pond/config` current context (interactive use)
-
-Scripts and cron jobs should continue using `$POND`.  Contexts are
-for interactive use.
-
-### Context configuration file
-
-```yaml
-# ~/.pond/config
-current-context: mysite
-contexts:
-  mysite:
-    path: /data/mysite
-  septic:
-    path: /data/septic
-```
+> Note the two separate trees: **`/sys/remotes/`** holds remote
+> attachments (managed by `pond remote`/`pond backup`); **`/system/run`**
+> and **`/system/etc`** hold factory nodes (managed by `pond mknod`/`pond
+> run`).  Do not confuse them.
 
 ---
 
-## 2. Remotes
+## 3. Setup
 
-### Adding a remote
-
-Create a YAML config file with your S3 credentials:
-
-```yaml
-# backup.yaml
-url: s3://my-bucket/backups/
-region: us-west-2
-access_key: "{{ env(AWS_ACCESS_KEY_ID) }}"
-secret_key: "{{ env(AWS_SECRET_ACCESS_KEY) }}"
-```
-
-Then add it to the pond:
+### Create a pond
 
 ```
-$ pond remote add backup.yaml
-Remote "1-backup" configured at /sys/run/1-backup
-  URL:  s3://my-bucket/backups/
-  Mode: push (auto after each commit)
-  Test connection... OK
+$ export POND=/data/mysite
+$ pond init
 ```
 
-This creates the factory node in the pond and sets the mode to
-`push` in the per-replica local state.
+`$POND` (or `--pond <path>`) selects the pond for every command.
 
-For S3-compatible endpoints (MinIO, R2, etc.), add `endpoint` and
-`allow_http`:
+### Attach a backup (push side)
 
-```yaml
-# minio-backup.yaml
-url: s3://my-bucket/backups/
-region: us-east-1
-endpoint: http://minio.local:9000
-allow_http: true
-access_key: "{{ env(MINIO_ACCESS_KEY) }}"
-secret_key: "{{ env(MINIO_SECRET_KEY) }}"
-```
-
-#### Remote config reference
-
-```yaml
-# Required
-url: <string>                   # S3 URL (s3://bucket/prefix/)
-
-# Authentication
-access_key: <string>            # AWS access key (or {{ env(...) }} template)
-secret_key: <string>            # AWS secret key (or {{ env(...) }} template)
-
-# Optional
-region: <string>                # AWS region (default: "")
-endpoint: <string>              # Custom S3 endpoint (MinIO, R2, etc.)
-allow_http: <bool>              # Allow non-TLS connections (default: false)
-
-# Import mode (for replicas pulling from a foreign pond)
-import:
-  source_path: <string>         # Path in the foreign pond (e.g., "/ingest")
-  local_path: <string>          # Path in this pond (e.g., "/sources/septic")
-```
-
-### Listing remotes
+A backup mirrors the whole pond to an offsite copy.  Push-only by
+default; `--bidirectional` makes it push+pull.
 
 ```
-$ pond remote list
-  NAME        URL                         MODE   LAST SYNC
-  1-backup    s3://my-bucket/backups/     push   2 min ago (v1658)
+# Local directory backup
+$ pond backup add origin file:///backups/mysite
+
+# S3 backup.  Credentials must be `${env:VAR}` references (single-quoted so
+# the shell does NOT expand them): the attachment config is replicated to
+# every backup, so a literal secret would be exposed on all replicas.  Each
+# replica resolves the value from its own environment at use time.  A literal
+# `secret_access_key` is rejected at attach time.
+$ pond backup add origin s3://my-bucket/mysite \
+    --region us-west-2 \
+    --access-key-id '${env:AWS_ACCESS_KEY_ID}' \
+    --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
+
+# MinIO / R2 / other S3-compatible endpoint
+$ pond backup add origin s3://my-bucket/mysite \
+    --endpoint http://minio.local:9000 --allow-http \
+    --access-key-id '${env:AWS_ACCESS_KEY_ID}' \
+    --secret-access-key '${env:AWS_SECRET_ACCESS_KEY}'
 ```
 
-### Checking replication status
+Attaching auto-initializes the remote (creates the Delta table stamped
+with this pond's `pond_id`).  From then on, **every write transaction is
+automatically pushed** to push/both-mode backups after it commits (the
+steward scans `/sys/remotes/*` post-commit).  You only run `pond push`
+manually to retry after a failure.
+
+### Attach a pull remote (replica or import)
 
 ```
-$ pond remote status
-Remote: s3://my-bucket/backups/ (via /sys/run/1-backup)
-  Mode:          push (this replica)
-  Local version: 1658
-  Remote version:1658
-  Status:        IN SYNC
-  Last push:     2026-04-05 21:30:12 UTC (seq 1658, 0.3s)
-  Last failure:  none
+# Mirror restart: this pond is a replica of the producer (same pond_id)
+$ pond remote add upstream s3://my-bucket/mysite /
+
+# Cross-pond import: mount a foreign pond's data read-through
+$ pond remote add septic s3://other-bucket/septic /imports/septic
 ```
 
-When behind:
+The first `pond pull` from a cross-pond remote materializes the mount
+entry at the configured path automatically.
+
+### List and detach
 
 ```
-$ pond remote status
-Remote: s3://my-bucket/backups/ (via /sys/run/1-backup)
-  Mode:          push (this replica)
-  Local version: 1661
-  Remote version:1658
-  Status:        BEHIND (3 versions)
-  Last failure:  2026-04-05 21:31:00 UTC -- connection timeout
-  Suggestion:    Run 'pond remote push' to retry
-```
+$ pond remote list                 # all attachments (push + pull)
+$ pond backup list                 # push-side attachments only
 
-### Manual push and pull
-
-```
-# Retry a failed push
-$ pond remote push
-Pushing versions 1659-1661 to s3://my-bucket/backups/...
-  1659: 3 files, 47 KB ... OK
-  1660: 1 file, 12 KB ... OK
-  1661: 5 files, 128 KB ... OK
-Push complete: remote now at version 1661.
-
-# Pull from remote (replica ponds)
-$ pond remote pull
-Pulling from s3://my-bucket/backups/...
-  New versions: 1659-1661 (3 versions, 187 KB)
-  Applied: 8 files
-Pull complete: local now at version 1661.
-```
-
-### Exploring the remote
-
-```
-# Show what's in the remote backup
-$ pond remote show
-Remote backup: s3://my-pond-bucket/ (pond a1b2c3d4-...)
-  /hydrovu/
-    /devices/
-      /device-123/
-        readings.series  (table:series, 847 versions)
-      /device-456/
-        readings.series  (table:series, 612 versions)
-  /sys/
-    /remotes/
-      1-backup  (factory)
-    /etc/
-      20-hydrovu  (factory)
-
-# Verify backup integrity
-$ pond remote verify
-Verifying remote backup...
-  Checking 2,255 backed-up files...
-  All files valid: checksums match, no missing chunks.
-  Backup is complete through version 1658.
-```
-
-### `pond remote` is a thin wrapper
-
-Every `pond remote` subcommand delegates to `pond run`:
-
-```
-pond remote push         =  pond run /sys/run/<name> push
-pond remote pull         =  pond run /sys/run/<name> pull
-pond remote show         =  pond run /sys/run/<name> show
-pond remote verify       =  pond run /sys/run/<name> verify
-pond remote replicate    =  pond run /sys/run/<name> replicate
-```
-
-When there is one remote, the name is implicit.  With multiple
-remotes, specify the name:
-
-```
-$ pond remote push --name=archive
-```
-
-`pond run` continues to work for all factory types.  `pond remote`
-is a convenience for the most common case.
-
-`pond sync` is a hidden alias: `pond sync` behaves like
-`pond remote push` (or `pond remote pull` on replicas).
-
----
-
-## 3. Replicas
-
-### Creating a replica
-
-On the primary pond, generate a replication command:
-
-```
-$ pond remote replicate
-To create a replica of this pond, run on the target machine:
-
-  export POND=/path/to/replica
-  pond init --config eyJidWNrZXQiOi...
-
-The config string contains S3 credentials and pond identity
-(base64-encoded).
-```
-
-On the target machine:
-
-```
-$ export POND=/data/replica
-$ pond init --config eyJidWNrZXQiOi...
-Restoring from s3://my-bucket/backups/...
-  Downloading pond a1b2c3d4-...
-  Applying 1,658 versions...
-Restore complete: 847 MB, 1,643 files.
-```
-
-The replica is initialized with mode=pull (per-replica state).
-
-### Setting up periodic pull
-
-```bash
-# /etc/cron.d/duckpond-pull
-*/5 * * * *  duckpond  POND=/data/replica pond remote pull 2>&1 | logger -t duckpond-pull
-```
-
-### Cross-pond import
-
-A replica can import specific directories from a foreign pond's
-backup.  This is configured via the `import` section of the remote
-config:
-
-```yaml
-# import-config.yaml
-url: s3://my-bucket/backups/
-region: us-west-2
-access_key: "{{ env(AWS_ACCESS_KEY_ID) }}"
-secret_key: "{{ env(AWS_SECRET_ACCESS_KEY) }}"
-import:
-  source_path: /ingest
-  local_path: /sources/foreign-pond
-```
-
-```
-$ pond remote add import-config.yaml --mode=pull
-Remote "1-import" configured at /sys/run/1-import
-  URL:  s3://my-bucket/backups/
-  Mode: pull (import from foreign pond)
-  Import: /ingest -> /sources/foreign-pond
+$ pond remote remove upstream      # detach: drop YAML + watermarks
+$ pond remote remove --purge septic  # also drop the cross-pond mount entry
 ```
 
 ---
 
-## 4. Maintenance
+## 4. Routine operation
 
-### What maintenance does
+### Push and pull
 
-| Operation | What | When |
-|-----------|------|------|
-| Checkpoint | Consolidates delta log into a snapshot | Auto after each commit |
-| Vacuum | Removes unreferenced files | Auto after each commit |
-| Log cleanup | Removes old delta log JSON entries | After checkpoint |
-| Compact | Merges small parquet files into larger ones | Manual only |
+```
+# Manually push pending writes to push/both remotes (retry after failure)
+$ pond push                # all push/both remotes
+$ pond push origin         # one named remote
 
-Checkpoint and vacuum run automatically.  You only need `pond maintain`
-for forced operations or compaction.
+# Pull new bundles from pull/both remotes
+$ pond pull                # all pull/both remotes
+$ pond pull upstream       # one named remote
+```
 
-### Running maintenance
+Push/both backups are pushed automatically after each commit, so
+`pond push` is normally only needed to recover from a transient failure.
+Pulls are always manual (or scripted via cron -- see [§7](#7-cron--systemd)).
+
+### Maintenance
+
+`pond maintain` runs Delta Lake housekeeping (checkpoint + vacuum) on the
+**local** data and control tables.  `--compact` additionally merges
+small parquet files into fewer large ones.
 
 ```
 $ pond maintain
-Maintenance: /data/mysite
-
-  Data table:
-    Checkpoint: created (version 1661)
-    Log cleanup: removed 19 old entries
-    Vacuum: 0 files removed (clean)
-
-  Remote (s3://my-bucket/backups/):
-    Push: OK (0 versions pending)
-    Checkpoint: created (version 1661)
-    Vacuum: 3 files removed
-```
-
-### Compaction
-
-```
 $ pond maintain --compact
-Maintenance: /data/mysite
-
-  Data table:
-    Checkpoint: created (version 1661)
-    Compact: merged 1,643 files -> 14 files (97% reduction)
-    Vacuum: 1,629 old files removed
-    Size: 847 MB -> 842 MB
-
-  Remote:
-    Push: OK (pushed compacted data)
-    Compact: merged 1,643 files -> 14 files
-    Vacuum: 1,629 files removed
 ```
 
-### Push before cleanup
+`--compact` records the data-table merge as a **Compact transaction**, so
+the next `pond push` emits a Compact bundle that backups can use as a
+restart baseline (see [§6](#6-recovery)).  Push before (or right after)
+compacting so the baseline reaches your backup.
 
-During maintenance, the pond pushes to the remote *before* cleaning
-up delta log entries.  The remote needs those log entries to
-determine which versions are new.  If the push fails, log cleanup
-is deferred:
-
-```
-$ pond maintain
-  Remote push: FAILED (connection timeout)
-  Data table log cleanup: DEFERRED (needed for next push)
-```
-
-### Coordination
-
-Maintenance uses Delta Lake's transaction conflict mechanism to
-prevent concurrent maintenance processes from colliding.  If another
-maintenance is running:
-
-```
-$ pond maintain
-Error: Concurrent maintenance detected. Another process is
-running maintenance on this table. Retry later.
-```
+> `pond maintain` operates on the local pond only; it does not push to or
+> prune remotes.  Remote-side bundle retention is not currently exposed as
+> a `pond` CLI command.
 
 ---
 
-## 5. Status
+## 5. Monitoring
+
+### Status
+
+`pond status` is a fast, offline health aggregate (it reads only the
+local control table and `/sys/remotes/*` -- no network).
 
 ```
 $ pond status
+Pond Status
+===========
 
-Context:     mysite
-Pond:        /data/mysite
-ID:          a1b2c3d4-e5f6-7890-abcd-ef1234567890
-Role:        primary (push)
+Identity
+  Pond ID:   019e9b27-d392-7506-b875-b096dc5a41af
+  Created:   2026-06-06 04:18:59 UTC by jmacd@host
+  Location:  /data/mysite
 
-Remote:      s3://my-bucket/backups/ (/sys/run/1-backup)
-  Status:    IN SYNC -- last push 2 min ago
-  Behind:    0 versions
+Local state
+  Last write seq:  4
+  Recovery:        OK (no incomplete transactions)
 
-Maintenance: last auto 2 min ago
-  Compact:   never run (1,643 small files)
-
-Recent:      5 txns/hour, 0 failures
+Remotes (1)
+  origin  [push]
+    url:          s3://my-bucket/mysite
+    mount:        / (mirror)
+    last pushed:  4 (up to date)
 ```
 
-### Exit codes
+Push "lag" (`up to date` / `behind local by N txn` / `never pushed`) is
+computed from local watermarks.  To cross-check against what the remote
+actually recorded, use `pond verify`.
 
-| Code | Meaning |
-|------|---------|
-| 0 | Healthy |
-| 1 | Degraded (replication behind, needs maintenance) |
-| 2 | Error (replication failed, incomplete transactions) |
+### Verify
 
-Use in monitoring:
-
-```bash
-pond status --quiet || alert "DuckPond needs attention"
-```
-
----
-
-## 6. Transaction Log
-
-### Recent transactions
+`pond verify` compares this pond's current live data against a remote's
+recorded partition checksums.
 
 ```
-$ pond log
-
-Pond: a1b2c3d4-... (/data/mysite)
-
-SEQ   TYPE   COMMAND                         STATUS     DURATION  POST-COMMIT
-1661  write  pond run 20-hydrovu collect     completed  2.3s      push: ok
-1660  write  pond copy host:///tmp/f /data/   completed  0.1s      push: ok
-1659  write  pond run 20-hydrovu collect     completed  1.8s      push: ok
-1658  read   pond cat /data/readings.series  completed  0.4s      --
-1657  write  pond run 20-hydrovu collect     completed  2.1s      push: failed
-...
+$ pond verify origin
+[OK] verify origin: live data matches remote at seq=4
 ```
 
-### Transaction detail
+A mismatch prints per-partition detail and the divergence boundary.
+
+> Verify is symmetric: a replica bootstrapped from a remote verifies
+> cleanly against it (the producer's `pond_init` transaction is replicated
+> as a normal bundle, so the replica is byte-identical).
+
+### Transaction log
 
 ```
-$ pond log --txn-seq 1657
-
-Transaction 1657
-  Type:    write
-  Command: pond run 20-hydrovu collect
-  Started: 2026-04-05 21:28:00.000 UTC
-  Status:  completed (2.1s)
-
-  Post-commit:
-    /sys/run/1-backup:
-      push started  21:28:02.150 UTC
-      push FAILED   21:28:05.300 UTC -- connection timeout
+$ pond log                 # recent transactions (default 10)
+$ pond log --limit 50
+$ pond log --txn-seq 42    # full lifecycle detail for one transaction
+$ pond log --incomplete    # transactions that need `pond recover`
 ```
 
-### Incomplete operations
+### Configuration
 
 ```
-$ pond log --incomplete
-
-Incomplete operations:
-  SEQ 1662: write -- began 21:35:00 UTC, no commit recorded
-    Likely cause: process crashed during write
-    Recovery: run 'pond recover'
+$ pond config              # pond ID, creation, factory modes, settings
+$ pond config set <key> <value>
 ```
 
 ---
 
-## 7. Configuration
+## 6. Recovery
 
-### Viewing
+### Crash recovery (incomplete transaction)
 
-```
-$ pond config
-
-Pond ID:    a1b2c3d4-e5f6-7890-abcd-ef1234567890
-Created:    2025-06-15 08:30:00 UTC
-
-Per-replica settings:
-  mode:     push (primary)
-
-Factory modes:
-  /sys/run/1-backup: push
-```
-
-### Setting
+If a write crashes mid-flight, the next command reports an incomplete
+transaction.  `pond recover` marks it resolved and restores consistency.
 
 ```
-$ pond config set maintenance_lock off
-Maintenance lock cleared.
-```
-
-### Editing factory configs
-
-To modify a factory configuration, use `pond cat` to read the current
-config, edit it locally, then `pond copy` the updated file back:
-
-```
-$ pond cat /sys/etc/20-hydrovu --format=raw > /tmp/20-hydrovu.yaml
-$ vi /tmp/20-hydrovu.yaml
-  (make changes)
-$ pond copy host:///tmp/20-hydrovu.yaml /sys/etc/20-hydrovu --overwrite
-```
-
-Template secrets (`{{ env(AWS_SECRET_ACCESS_KEY) }}`) are stored as
-raw template strings.  They are expanded at `pond run` time, never
-persisted in expanded form.
-
----
-
-## 8. Recovery
-
-### From a crash
-
-```
-$ pond list
-Error: Incomplete transaction detected (seq 1662).
-Run 'pond recover' to restore consistency.
-
 $ pond recover
-Checking transaction log...
-  Transaction 1662: begin recorded, no commit -- marking as failed.
-  Data table: consistent (rolled back to version 1661).
-Recovery complete.
 ```
 
-### From a remote backup
+### Rebuild a lost control table
+
+If the control table is lost or corrupt (but the data table survives),
+the pond can no longer be opened.  `pond rebuild-control` reconstructs
+the control table from the data Delta table's commit history.
 
 ```
-# With the config file:
-$ export POND=/data/restored
-$ pond init --from-backup backup.yaml
-
-# With the base64 config string:
-$ export POND=/data/restored
-$ pond init --config eyJidWNrZXQiOi...
-
-Restoring from s3://my-bucket/backups/...
-  Downloading pond a1b2c3d4-...
-  Applying 1,658 versions...
-Restore complete: 847 MB, 1,643 files.
+$ pond rebuild-control          # control table is missing
+$ pond rebuild-control --force  # move an existing (corrupt) one aside first
 ```
 
-### Resetting per-replica state
+It recovers pond identity and the transaction-log skeleton.  It does
+**not** recover operator settings (remote modes, watermarks) or per-txn
+checksums, so afterwards you must **re-attach remotes** and treat
+`pond verify` as re-baselined.  See
+[cli-reference.md](cli-reference.md#pond-rebuild-control-d63) for the
+full recovery semantics.
 
-Per-replica state lives in the control table and is disposable.
-If it becomes corrupt:
+### Consumer fell below the retention horizon
+
+If `pond pull` fails with "consumer is below retention horizon", the
+bundles you still need were pruned by retention.  Recover by
+re-bootstrapping from the remote's oldest compact baseline:
 
 ```
-$ rm -rf /data/mysite/control/
-$ pond recover
-Rebuilding per-replica state...
-  Factory modes: defaulted (push)
-  Push watermarks: recomputed from remote
-  Import watermarks: recomputed from data
-Recovery complete.
+$ pond restart-from-compact upstream
 ```
+
+A mirror restart drops all local data and rebuilds (the attachment is
+re-persisted automatically); a cross-pond restart drops only the foreign
+pond's footprint.
+
+> Producing a baseline: run `pond maintain --compact` on the producer and
+> `pond push`.  The compaction is pushed as a Compact bundle that becomes
+> the remote's restart baseline.  A pure duckpond mirror with no compacted
+> push (and no compacting upstream) has no baseline yet, and the command
+> reports "no compact bundle".
+
+### Destructive recovery
+
+`pond emergency` provides destructive recovery operations (e.g. erasing
+a remote bucket).  Use with care; see `pond emergency --help`.
 
 ---
 
-## 9. Cron / Systemd Integration
+## 7. Cron / systemd
 
-### Data collection (every minute)
+### Data collection (factory) every minute
 
 ```bash
 # /etc/cron.d/duckpond-collect
 * * * * *  duckpond  POND=/data/mysite pond run 20-hydrovu collect 2>&1 | logger -t duckpond
+```
+
+### Replica pull every 5 minutes
+
+```bash
+# /etc/cron.d/duckpond-pull
+*/5 * * * *  duckpond  POND=/data/replica pond pull 2>&1 | logger -t duckpond-pull
 ```
 
 ### Weekly compaction
@@ -640,33 +356,10 @@ Recovery complete.
 0 3 * * 0  duckpond  POND=/data/mysite pond maintain --compact 2>&1 | logger -t duckpond-maintain
 ```
 
-### Health monitoring
-
-```bash
-# /etc/cron.d/duckpond-monitor
-*/5 * * * *  duckpond  POND=/data/mysite pond status --quiet || echo "DuckPond unhealthy" | mail -s "Alert" ops@example.com
-```
-
-### Systemd timer
-
-```ini
-# /etc/systemd/system/duckpond-collect.timer
-[Unit]
-Description=DuckPond data collection
-
-[Timer]
-OnCalendar=minutely
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
+### systemd oneshot + timer
 
 ```ini
 # /etc/systemd/system/duckpond-collect.service
-[Unit]
-Description=DuckPond data collection
-
 [Service]
 Type=oneshot
 User=duckpond
@@ -674,160 +367,102 @@ Environment=POND=/data/mysite
 ExecStart=/usr/local/bin/pond run 20-hydrovu collect
 ```
 
+```ini
+# /etc/systemd/system/duckpond-collect.timer
+[Timer]
+OnCalendar=minutely
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+> Scripts and cron jobs should set `$POND` explicitly rather than relying
+> on any interactive default.
+
 ---
 
-## 10. Operational Runbook
+## 8. Runbook
 
-### "Replication is behind"
+### "A backup push failed"
 
 ```
-$ pond status
-  Remote: BEHIND (3 versions)
+$ pond status          # shows the backup `behind local by N txn`
+$ pond push origin     # retry
+$ pond status          # back to `up to date`
+```
 
-$ pond remote push
-  Pushing 3 versions... OK
+### "Replica is behind"
 
+```
+$ pond pull upstream
 $ pond status
-  Remote: IN SYNC
+```
+
+### "Replica pull says 'below retention horizon'"
+
+```
+$ pond restart-from-compact upstream
+```
+
+### "Control table is corrupt / pond won't open"
+
+```
+$ pond rebuild-control --force
+# then re-attach remotes:
+$ pond backup add origin s3://my-bucket/mysite ...
 ```
 
 ### "Disk is filling up"
 
 ```
-$ pond status
-  Data size: 4.2 GB (12,847 files)
-  Compact: never run
-
 $ pond maintain --compact
-  Compact: 12,847 files -> 42 files
-  Vacuum: removed 12,805 old files
-  Size: 4.2 GB -> 3.8 GB
 ```
 
-### "Maintenance lock is stuck"
-
-```
-$ pond maintain
-  Error: Concurrent maintenance detected.
-
-# If you are sure no other maintenance is running:
-$ pond config set maintenance_lock off
-  Lock cleared.
-
-$ pond maintain
-  OK
-```
-
-### "Transaction failed, data inconsistent"
+### "Transaction failed, data looks inconsistent"
 
 ```
 $ pond log --incomplete
-  SEQ 1662: incomplete write
-
 $ pond recover
-  Transaction 1662 rolled back.
-  Pond is consistent.
 ```
 
-### "Need to set up a replica"
+### "Is my backup actually consistent?"
 
 ```
-# On primary:
-$ pond remote replicate
-  pond init --config eyJidWNrZXQiOi...
-
-# On target machine:
-$ export POND=/data/replica
-$ pond init --config eyJidWNrZXQiOi...
-  Restored from remote.
-
-# Set up periodic pull:
-$ cat > crontab-entry
-*/5 * * * *  duckpond  POND=/data/replica pond remote pull 2>&1 | logger -t duckpond-pull
-```
-
-### "Need multiple remotes"
-
-```
-$ pond remote add primary.yaml --name=primary
-$ pond remote add archive.yaml --name=archive
-
-$ pond remote status
-  primary:  IN SYNC (s3://bucket-1/)
-  archive:  BEHIND 12 versions (s3://bucket-2/)
-
-$ pond remote push --name=archive
+$ pond verify origin     # run on the producer side
 ```
 
 ---
 
-## Quick Reference
+## 9. Quick reference
 
 ```
-CONTEXTS
-  pond context add <name> --path <path>     Add a context
-  pond context use <name>                   Switch current context
-  pond context list                         List all contexts
-  pond context current                      Show current context
+SETUP
+  pond init                                   Create a pond
+  pond backup add <name> <url> [s3 opts]      Attach a push backup
+  pond remote add <name> <url> <path>         Attach a pull remote (/ = mirror)
+  pond remote list / pond backup list         List attachments
+  pond remote remove [--purge] <name>         Detach
 
-REMOTES
-  pond remote add <config.yaml>             Configure a remote
-  pond remote list                          List configured remotes
-  pond remote status                        Show replication status
-  pond remote push                          Push to remote
-  pond remote pull                          Pull from remote
-  pond remote show                          Show remote backup contents
-  pond remote verify                        Verify backup integrity
-  pond remote replicate                     Generate replica command
-
-MAINTENANCE
-  pond maintain                             Checkpoint + vacuum
-  pond maintain --compact                   Also compact small files
+ROUTINE
+  pond push [name]                            Push pending writes (retry)
+  pond pull [name]                            Pull new bundles
+  pond maintain [--compact]                   Local checkpoint/vacuum/compact
 
 MONITORING
-  pond status                               Health dashboard
-  pond status --quiet                       Exit code only (for scripts)
-  pond log                                  Recent transactions
-  pond log --txn-seq <N>                    Transaction detail
-  pond log --incomplete                     Incomplete operations
-
-CONFIGURATION
-  pond config                               Show configuration
-  pond config set <key> <value>             Set a setting
+  pond status                                 Identity + watermarks + recovery
+  pond verify [name]                          Compare local data vs remote
+  pond log [--limit N|--txn-seq N|--incomplete]
+  pond config [set <key> <value>]
 
 RECOVERY
-  pond recover                              Fix incomplete transactions
-  pond init --from-backup <config.yaml>     Restore from backup
-  pond init --config <base64>               Restore from encoded config
+  pond recover                                Resolve incomplete transactions
+  pond rebuild-control [--force]              Rebuild control table from data
+  pond restart-from-compact <name>            Recover past the retention horizon
+  pond emergency ...                          Destructive recovery
 ```
 
----
-
-## YAML Reference
-
-### Remote config (`/sys/run/<name>`)
-
-```yaml
-url: s3://bucket/prefix/             # Required: S3-compatible URL
-region: us-west-2                     # AWS region
-access_key: "{{ env(AWS_ACCESS_KEY_ID) }}"    # Access key (template)
-secret_key: "{{ env(AWS_SECRET_ACCESS_KEY) }}" # Secret key (template)
-endpoint: http://minio:9000           # Custom S3 endpoint
-allow_http: true                      # Allow non-TLS (MinIO, local dev)
-
-# For import/replica mode:
-import:
-  source_path: /ingest                # Path in the foreign pond
-  local_path: /sources/foreign        # Path in this pond
-```
-
-### Context config (`~/.pond/config`)
-
-```yaml
-current-context: mysite
-contexts:
-  mysite:
-    path: /data/mysite
-  septic:
-    path: /data/septic
-```
+S3 options for `pond backup add` / `pond remote add`: `--region`,
+`--access-key-id`, `--secret-access-key`, `--endpoint`, `--allow-http`.
+`--secret-access-key` must be a `${env:VAR}` reference (single-quoted),
+not a literal secret.  See [cli-reference.md](cli-reference.md) for the
+complete list.

@@ -7,6 +7,7 @@
 use crate::{
     PondTxnMetadata, StewardError,
     control_table::{ControlTable, TransactionType},
+    write_lock::WriteLockGuard,
 };
 use log::{debug, error, info};
 use provider::FactoryRegistry;
@@ -41,6 +42,12 @@ pub struct StewardTransactionGuard<'a> {
     pond_path: PathBuf,
     /// Track if commit() was called to record failure on drop if not
     committed: bool,
+    /// Process-level write lock held for the lifetime of this transaction
+    /// when `transaction_type == Write`.  Releases automatically on Drop
+    /// (the underlying FD closes, which unlocks at the kernel level).
+    /// `None` for read transactions (no exclusion needed).
+    #[allow(dead_code)]
+    write_lock: Option<WriteLockGuard>,
 }
 
 impl<'a> StewardTransactionGuard<'a> {
@@ -51,6 +58,7 @@ impl<'a> StewardTransactionGuard<'a> {
         transaction_type: TransactionType,
         control_table: &'a mut ControlTable,
         path: P,
+        write_lock: Option<WriteLockGuard>,
     ) -> Self {
         Self {
             data_tx: Some(data_tx),
@@ -60,6 +68,7 @@ impl<'a> StewardTransactionGuard<'a> {
             start_time: std::time::Instant::now(),
             pond_path: path.as_ref().to_path_buf(),
             committed: false,
+            write_lock,
         }
     }
 
@@ -236,16 +245,18 @@ impl<'a> StewardTransactionGuard<'a> {
             &self.txn_meta.user.txn_id, self.txn_meta.txn_seq, &error_msg
         );
 
-        // Record the failure in control table
-        if let Err(e) = self
-            .control_table
-            .record_failed(
-                &self.txn_meta,
-                self.transaction_type,
-                error_msg.clone(),
-                duration_ms,
-            )
-            .await
+        // Record the failure in control table — writes only (reads no
+        // longer have a matching Begin record).
+        if self.transaction_type == TransactionType::Write
+            && let Err(e) = self
+                .control_table
+                .record_failed(
+                    &self.txn_meta,
+                    self.transaction_type,
+                    error_msg.clone(),
+                    duration_ms,
+                )
+                .await
         {
             log::error!("Failed to record transaction failure: {}", e);
         }
@@ -259,8 +270,11 @@ impl<'a> StewardTransactionGuard<'a> {
     }
 
     /// Commit the transaction with proper steward sequencing
-    /// Returns whether a write transaction occurred
-    pub async fn commit(mut self) -> Result<Option<()>, StewardError> {
+    ///
+    /// Returns the data-FS Delta version number on a successful write
+    /// commit (`Ok(Some(v))`); returns `Ok(None)` for a read transaction
+    /// or a write that produced no changes.
+    pub async fn commit(mut self) -> Result<Option<i64>, StewardError> {
         let args_fmt = format!("{:?}", &self.txn_meta.user.args);
         debug!(
             "Committing steward transaction {} {}",
@@ -270,30 +284,10 @@ impl<'a> StewardTransactionGuard<'a> {
         // Calculate duration for recording
         let duration_ms = self.start_time.elapsed().as_millis() as i64;
 
-        // Get current table version before commit (the commit will increment it)
-        let pre_commit_version = self
-            .data_tx
-            .as_ref()
-            .ok_or_else(|| {
-                StewardError::DataInit(tlogfs::TLogFSError::TinyFS(tinyfs::Error::Other(
-                    "Transaction already consumed".to_string(),
-                )))
-            })?
-            .persistence()
-            .table()
-            .version();
-
-        // Step 1: Transaction metadata was already provided at begin()
-        // Extract import metadata before commit consumes the transaction state
-        let import_metadata = if let Some(ref tx) = self.data_tx {
-            if let Ok(state) = tx.state() {
-                state.pending_import_metadata().await
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
+        // Step 1: Transaction metadata was already provided at begin().
+        // (Legacy per-import watermark callbacks were removed alongside
+        // the chunked-parquet remote factory in D4.5; cross-pond import
+        // is planned for D5 via row-level `pond_id` partitioning.)
 
         // Step 2: Extract the underlying transaction guard and commit it
         let data_tx = self.take_transaction().ok_or_else(|| {
@@ -306,25 +300,37 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Step 3: Record transaction lifecycle in control table based on result
         match commit_result {
-            Ok(Some(())) => {
-                // Write transaction committed successfully - version is pre_commit_version + 1
-                let new_version = pre_commit_version.unwrap_or(0) + 1;
+            Ok((Some(new_version), persistence)) => {
+                // Write transaction committed successfully; the version is
+                // the one the FinalizedCommit returned (D5.7a.2) rather
+                // than pre_commit_version + 1 arithmetic.
 
-                // VALIDATION: If this was marked as a read transaction but wrote data, fail
+                // VALIDATION: If this was marked as a read transaction but wrote data, fail.
+                // Reads no longer leave a Begin record, so there's nothing to terminate in
+                // the control table — the in-memory error is sufficient.
                 if self.transaction_type == TransactionType::Read {
-                    self.control_table
-                        .record_failed(
-                            &self.txn_meta,
-                            self.transaction_type,
-                            "Read transaction attempted to write data".to_string(),
-                            duration_ms,
-                        )
-                        .await
-                        .map_err(|e| {
-                            StewardError::ControlTable(format!("Failed to record failure: {}", e))
-                        })?;
                     return Err(StewardError::ReadTransactionAttemptedWrite);
                 }
+
+                // D5.7a: snapshot the post-commit partition checksums for
+                // the local pond_id so that DataCommitted records the
+                // exact value `verify_against_remote` will later expect
+                // as `live`.  Reading the post-commit Delta state goes
+                // through a fresh DataFusion SessionContext, so it does
+                // not require an active transaction on `persistence`.
+                let pond_id = self.control_table.pond_id_uuid();
+                let post_commit_table = persistence.table().clone();
+                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
+                    post_commit_table,
+                    pond_id,
+                )
+                .await
+                .map_err(|e| {
+                    StewardError::ControlTable(format!(
+                        "Failed to snapshot partition checksums after commit: {}",
+                        e
+                    ))
+                })?;
 
                 self.control_table
                     .record_data_committed(
@@ -332,6 +338,7 @@ impl<'a> StewardTransactionGuard<'a> {
                         self.transaction_type,
                         new_version,
                         duration_ms,
+                        partition_checksums,
                     )
                     .await
                     .map_err(|e| {
@@ -345,70 +352,31 @@ impl<'a> StewardTransactionGuard<'a> {
                 // Mark as committed
                 self.committed = true;
 
-                // Write import state to control table if any
-                if !import_metadata.is_empty() {
-                    debug!(
-                        "Recording {} import partition(s) in control table",
-                        import_metadata.len()
-                    );
-                    for record in &import_metadata {
-                        if record.watermark_txn_seq > 0 {
-                            // Update existing partition watermark
-                            if let Err(e) = self
-                                .control_table
-                                .update_import_watermark(
-                                    &record.factory_node_id,
-                                    &record.foreign_part_id,
-                                    record.watermark_txn_seq,
-                                )
-                                .await
-                            {
-                                log::warn!(
-                                    "Failed to update import watermark for {}: {}",
-                                    record.foreign_part_id,
-                                    e
-                                );
-                            }
-                        } else {
-                            // Initial partition registration
-                            if let Err(e) = self
-                                .control_table
-                                .record_import_partition(
-                                    &record.factory_node_id,
-                                    &record.foreign_part_id,
-                                    &record.foreign_pond_id,
-                                )
-                                .await
-                            {
-                                log::warn!(
-                                    "Failed to record import partition {}: {}",
-                                    record.foreign_part_id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-
                 // Run post-commit factories for write transactions
                 // This happens AFTER commit but uses a NEW transaction
                 self.run_post_commit_factories().await;
 
-                Ok(Some(()))
+                // D4: Run post-commit auto-push for /sys/remotes/* entries.
+                // Same "after-commit, new transaction" model as factories
+                // above; failures are logged but do not undo the commit.
+                self.run_post_commit_remotes().await;
+
+                Ok(Some(new_version))
             }
-            Ok(None) => {
-                // Read-only transaction completed successfully
-                // Note: Write transactions that make no changes are allowed (idempotent operations like mkdir -p)
-                // We record them as "completed" rather than "data_committed" since no version was created
-
-                self.control_table
-                    .record_completed(&self.txn_meta, self.transaction_type, duration_ms)
-                    .await
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!("Failed to record completion: {}", e))
-                    })?;
-
+            Ok((None, _persistence)) => {
+                // Read-only transaction completed successfully (or write
+                // that produced no changes).  Reads no longer leave audit
+                // rows in the control table; only write-no-ops do.
                 if self.transaction_type == TransactionType::Write {
+                    self.control_table
+                        .record_completed(&self.txn_meta, self.transaction_type, duration_ms)
+                        .await
+                        .map_err(|e| {
+                            StewardError::ControlTable(format!(
+                                "Failed to record completion: {}",
+                                e
+                            ))
+                        })?;
                     debug!(
                         "Write-no-op steward transaction {} completed (seq={})",
                         &self.txn_meta.user.txn_id, self.txn_meta.txn_seq
@@ -423,19 +391,22 @@ impl<'a> StewardTransactionGuard<'a> {
                 Ok(None)
             }
             Err(e) => {
-                // Transaction failed - record error
+                // Transaction failed - record error (writes only; reads
+                // never recorded a Begin so there's nothing to terminate).
                 let error_msg = format!("{}", e);
-                self.control_table
-                    .record_failed(
-                        &self.txn_meta,
-                        self.transaction_type,
-                        error_msg.clone(),
-                        duration_ms,
-                    )
-                    .await
-                    .map_err(|e| {
-                        StewardError::ControlTable(format!("Failed to record failure: {}", e))
-                    })?;
+                if self.transaction_type == TransactionType::Write {
+                    self.control_table
+                        .record_failed(
+                            &self.txn_meta,
+                            self.transaction_type,
+                            error_msg.clone(),
+                            duration_ms,
+                        )
+                        .await
+                        .map_err(|e| {
+                            StewardError::ControlTable(format!("Failed to record failure: {}", e))
+                        })?;
+                }
                 self.committed = true;
                 Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))
             }
@@ -707,11 +678,34 @@ impl<'a> StewardTransactionGuard<'a> {
 
         debug!("Found {} matches for /system/run/*", matches.len());
 
+        // D5.7b.3: scope auto-exec to local pond_id. Configs whose
+        // node lives under a cross-pond mount (foreign pond_id) are
+        // skipped here -- they remain invokable via explicit
+        // `pond run /imports/foo/system/run/whatever`.
+        let local_pond_id_str = self.control_table.pond_metadata().pond_id.to_string();
+        let local_pond_uuid: uuid7::Uuid = local_pond_id_str.parse().map_err(|e| {
+            StewardError::ControlTable(format!(
+                "local pond_id `{}` is not a valid uuid7: {}",
+                local_pond_id_str, e
+            ))
+        })?;
+
         let mut factory_configs = Vec::new();
 
         for (node_path, _captures) in matches {
             let config_path_str = node_path.path().to_string_lossy().to_string();
             let config_file_id = node_path.id();
+
+            if config_file_id.pond_id() != local_pond_uuid {
+                debug!(
+                    "Skipping foreign post-commit config {} (pond_id={} != local {})",
+                    config_path_str,
+                    config_file_id.pond_id(),
+                    local_pond_uuid
+                );
+                continue;
+            }
+
             debug!(
                 "Found post-commit config: {} (id={})",
                 config_path_str, config_file_id
@@ -812,22 +806,49 @@ impl<'a> StewardTransactionGuard<'a> {
 
         debug!("Factory {} has mode: {}", factory_name, factory_mode);
 
-        // Reload OpLogPersistence for a fresh read transaction
+        // Reload OpLogPersistence for a fresh write transaction
         let data_path = crate::get_data_path(&self.pond_path);
         let pond_id = self.control_table.pond_metadata().pond_id.to_string();
         let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path, pond_id)
             .await
             .map_err(StewardError::DataInit)?;
 
-        // Open a new read transaction for factory execution
-        // Use self.txn_seq + 1 to read the data that was just committed
+        // Open a new write transaction for factory execution.
+        // Use `last_txn_seq + 1` from the freshly-opened persistence rather
+        // than `self.txn_meta.txn_seq + 1`: if multiple post-commit factories
+        // run in a single outer commit, each successive factory must allocate
+        // the next sequence after the previous factory's commit.
+        let factory_start = std::time::Instant::now();
+        let factory_txn_seq = data_persistence.last_txn_seq() + 1;
         let metadata = PondTxnMetadata::new(
-            self.txn_meta.txn_seq + 1,
+            factory_txn_seq,
             tlogfs::PondUserMetadata::new(vec![
                 "internal".to_string(),
                 "post-commit-factory".to_string(),
+                factory_name.to_string(),
+                config_path.to_string(),
             ]),
         );
+
+        // Record `Begin` on the control table BEFORE opening the data
+        // transaction so the factory's write has a complete audit trail.
+        // Without this row, replication's `Remote::push` sees `NoSuchCommit`
+        // for the factory's txn_seq and silently drops the bundle, breaking
+        // cross-pond replication of factory-produced data.
+        self.control_table
+            .record_begin(
+                &metadata,
+                Some(self.txn_meta.txn_seq),
+                TransactionType::Write,
+            )
+            .await
+            .map_err(|e| {
+                StewardError::ControlTable(format!(
+                    "Failed to record post-commit factory begin: {}",
+                    e
+                ))
+            })?;
+
         let factory_tx = data_persistence
             .begin_write(&metadata)
             .await
@@ -883,12 +904,309 @@ impl<'a> StewardTransactionGuard<'a> {
 
         // Commit the post-commit factory execution transaction
         // Metadata was already provided at begin()
-        _ = factory_tx
+        let commit_result = factory_tx.commit().await;
+        let duration_ms = factory_start.elapsed().as_millis() as i64;
+
+        match commit_result {
+            Ok((Some(new_version), persistence)) => {
+                // Snapshot partition checksums for the local pond_id so
+                // replication's bundle Checksum rows match what
+                // `verify_against_remote` will later expect.  Reading the
+                // post-commit Delta state goes through a fresh
+                // SessionContext, so no active transaction is required.
+                let pond_id_uuid = self.control_table.pond_id_uuid();
+                let post_commit_table = persistence.table().clone();
+                let partition_checksums = crate::remote_adapter::compute_live_checksums_for_table(
+                    post_commit_table,
+                    pond_id_uuid,
+                )
+                .await
+                .map_err(|e| {
+                    StewardError::ControlTable(format!(
+                        "Failed to snapshot partition checksums for post-commit factory: {}",
+                        e
+                    ))
+                })?;
+
+                self.control_table
+                    .record_data_committed(
+                        &metadata,
+                        TransactionType::Write,
+                        new_version,
+                        duration_ms,
+                        partition_checksums,
+                    )
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!(
+                            "Failed to record post-commit factory data_committed: {}",
+                            e
+                        ))
+                    })?;
+                self.control_table
+                    .record_completed(&metadata, TransactionType::Write, duration_ms)
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!(
+                            "Failed to record post-commit factory completion: {}",
+                            e
+                        ))
+                    })?;
+                debug!(
+                    "Post-commit factory transaction {} committed (seq={}, version={})",
+                    &metadata.user.txn_id, factory_txn_seq, new_version
+                );
+            }
+            Ok((None, _persistence)) => {
+                // Factory write was a no-op (no records produced).  Record
+                // `Completed` so the audit trail terminates the `Begin`.
+                self.control_table
+                    .record_completed(&metadata, TransactionType::Write, duration_ms)
+                    .await
+                    .map_err(|e| {
+                        StewardError::ControlTable(format!(
+                            "Failed to record post-commit factory no-op completion: {}",
+                            e
+                        ))
+                    })?;
+                debug!(
+                    "Post-commit factory transaction {} was a write no-op (seq={})",
+                    &metadata.user.txn_id, factory_txn_seq
+                );
+            }
+            Err(commit_err) => {
+                // Commit failed - record Failed so the Begin row is
+                // terminated and the audit log isn't left dangling.
+                let err_msg = format!("{}", commit_err);
+                if let Err(record_err) = self
+                    .control_table
+                    .record_failed(
+                        &metadata,
+                        TransactionType::Write,
+                        err_msg.clone(),
+                        duration_ms,
+                    )
+                    .await
+                {
+                    log::error!(
+                        "Failed to record post-commit factory failure: {} (original error: {})",
+                        record_err,
+                        err_msg
+                    );
+                }
+                return Err(StewardError::DataInit(tlogfs::TLogFSError::TinyFS(
+                    commit_err,
+                )));
+            }
+        }
+
+        result.map_err(StewardError::DataInit)
+    }
+
+    /// D4 post-commit auto-push: scan `/sys/remotes/*` and push every
+    /// pending `txn_seq` to each attachment whose mode is `push` or
+    /// `both`.  This is the replacement for the legacy
+    /// `/system/run/<N>-remote` factory dispatch.
+    ///
+    /// Like [`Self::run_post_commit_factories`], failures from any
+    /// individual remote are logged but do not roll back the data
+    /// commit (the local write has already succeeded).  The legacy
+    /// factory-based dispatcher continues to run alongside this method
+    /// until D4.5 deletes `crates/remote`.
+    async fn run_post_commit_remotes(&mut self) {
+        debug!("Starting post-commit /sys/remotes/* discovery");
+
+        let remotes = match self.discover_sys_remotes().await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("Failed to discover /sys/remotes/*: {}", e);
+                return;
+            }
+        };
+
+        if remotes.is_empty() {
+            debug!("No /sys/remotes/* entries found");
+            return;
+        }
+
+        // Filter by mode (raw_config key `remote_mode:<name>`); default is push.
+        let mut to_push: Vec<(String, crate::RemoteAttachment)> = Vec::new();
+        for (name, attachment) in remotes {
+            let mode_key = format!("{}{}", crate::REMOTE_MODE_PREFIX, name);
+            let mode_str = match self.control_table.raw_config_get(&mode_key).await {
+                Ok(Some(v)) if !v.is_empty() => v,
+                _ => "push".to_string(),
+            };
+            let mode = match crate::RemoteMode::parse(&mode_str) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!(
+                        "post-commit auto-push: skipping `{}` (invalid mode `{}`: {})",
+                        name,
+                        mode_str,
+                        e
+                    );
+                    continue;
+                }
+            };
+            if !mode.pushes() {
+                debug!(
+                    "post-commit auto-push: skipping `{}` (mode={})",
+                    name,
+                    mode.as_str()
+                );
+                continue;
+            }
+            to_push.push((name, attachment));
+        }
+
+        if to_push.is_empty() {
+            debug!("No /sys/remotes/* entries are in push/both mode");
+            return;
+        }
+
+        // Open a fresh Ship for the push.  This is safe because the
+        // data transaction has already committed; the fresh Ship sees
+        // the committed view and has its own ControlTable handle on
+        // the same underlying Delta table.  `self.control_table` is
+        // about to become stale but the guard drops immediately after
+        // commit() returns.
+        let mut steward = match crate::Steward::open_pond(&self.pond_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!(
+                    "post-commit auto-push: failed to reopen pond at {:?}: {}",
+                    self.pond_path,
+                    e
+                );
+                return;
+            }
+        };
+        let ship = match steward.as_pond_mut() {
+            Some(s) => s,
+            None => {
+                log::error!("post-commit auto-push: reopened steward is not a pond (internal bug)");
+                return;
+            }
+        };
+
+        for (name, attachment) in to_push {
+            info!("post-commit auto-push: {} -> {}", name, attachment.url);
+            match crate::push_pending_to_remote(ship, &attachment).await {
+                Ok(outcome) => {
+                    info!(
+                        "post-commit auto-push: {} done (pushed={}, skipped={}, range={}..={})",
+                        name,
+                        outcome.pushed,
+                        outcome.skipped,
+                        outcome.previous_last_pushed + 1,
+                        outcome.upper_seq
+                    );
+                }
+                Err(e) => {
+                    log::error!("post-commit auto-push: {} failed: {}", name, e);
+                    // Continue with the next remote; one bad target
+                    // shouldn't poison the others.
+                }
+            }
+        }
+    }
+
+    /// Discover all `/sys/remotes/*` entries and parse their YAML.
+    /// Returns `(name, attachment)` pairs.  Quietly returns an empty
+    /// list if `/sys/remotes` does not exist yet.
+    async fn discover_sys_remotes(
+        &self,
+    ) -> Result<Vec<(String, crate::RemoteAttachment)>, StewardError> {
+        let data_path = crate::get_data_path(Path::new(&self.pond_path));
+        let pond_id = self.control_table.pond_metadata().pond_id.to_string();
+        let mut data_persistence = tlogfs::OpLogPersistence::open(&data_path, pond_id)
+            .await
+            .map_err(StewardError::DataInit)?;
+
+        let discovery_metadata = PondTxnMetadata::new(
+            self.txn_meta.txn_seq,
+            tlogfs::PondUserMetadata::new(vec![
+                "internal".to_string(),
+                "post-commit-remote-discovery".to_string(),
+            ]),
+        );
+        let discovery_tx = data_persistence
+            .begin_read(&discovery_metadata)
+            .await
+            .map_err(StewardError::DataInit)?;
+
+        let fs = FS::new(discovery_tx.state()?)
+            .await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+        let root = fs
+            .root()
+            .await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        // If /sys/remotes doesn't exist yet (no `pond remote add` has
+        // been run), bail out cleanly.
+        if root.resolve_path(crate::SYS_REMOTES_DIR).await.is_err() {
+            _ = discovery_tx.commit().await;
+            return Ok(Vec::new());
+        }
+
+        let pattern = format!("{}/*", crate::SYS_REMOTES_DIR);
+        let matches = root
+            .collect_matches(&pattern)
+            .await
+            .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+
+        let mut out: Vec<(String, crate::RemoteAttachment)> = Vec::new();
+        for (node_path, _captures) in matches {
+            let cfg_path = node_path.path().to_path_buf();
+            let name = match cfg_path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+
+            let mut reader = match root.async_reader_path(&cfg_path).await {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!(
+                        "post-commit auto-push: cannot read {}: {}",
+                        cfg_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            let mut buf = Vec::new();
+            if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buf).await {
+                log::warn!(
+                    "post-commit auto-push: read error on {}: {}",
+                    cfg_path.display(),
+                    e
+                );
+                continue;
+            }
+
+            match crate::RemoteAttachment::from_yaml_bytes(&buf) {
+                Ok(att) => out.push((name, att)),
+                Err(e) => {
+                    log::warn!(
+                        "post-commit auto-push: invalid YAML in {}: {}",
+                        cfg_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        _ = discovery_tx
             .commit()
             .await
             .map_err(|e| StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        result.map_err(StewardError::DataInit)
+        // Deterministic order so logs are easy to read.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
     }
 }
 

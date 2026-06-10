@@ -2566,3 +2566,157 @@ async fn test_file_physical_series_csv_provider_sql() {
     log::debug!("- Streamed 6 total rows (concatenated from all versions)");
     log::debug!("- Queried with DataFusion SQL: COUNT, SUM, ORDER BY");
 }
+
+// ============================================================
+// D5.2: peek_pond_id - read pond identity from the data Delta
+// table's bootstrap row (canonical) instead of the control table
+// (cache).
+// ============================================================
+
+#[tokio::test]
+async fn peek_pond_id_returns_none_for_missing_path() {
+    let tmp = TempDir::new().unwrap();
+    let missing = tmp.path().join("does-not-exist");
+    let got = OpLogPersistence::peek_pond_id(&missing)
+        .await
+        .expect("peek_pond_id should not error on missing path");
+    assert!(
+        got.is_none(),
+        "peek_pond_id on missing path should be None, got {:?}",
+        got
+    );
+}
+
+#[tokio::test]
+async fn peek_pond_id_returns_none_for_empty_table() {
+    // create_empty() builds the Delta schema + _delta_log but writes no
+    // Add actions (used by restoration scaffolds awaiting bundles).
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("data");
+    std::fs::create_dir_all(&path).unwrap();
+    let _persistence =
+        OpLogPersistence::create_empty(path.to_str().unwrap(), uuid7::uuid7().to_string())
+            .await
+            .expect("create_empty failed");
+
+    let got = OpLogPersistence::peek_pond_id(&path)
+        .await
+        .expect("peek_pond_id should not error on empty table");
+    assert!(
+        got.is_none(),
+        "peek_pond_id on empty Delta table should be None, got {:?}",
+        got
+    );
+}
+
+#[tokio::test]
+async fn peek_pond_id_returns_local_id_for_fresh_pond() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("data").to_string_lossy().to_string();
+
+    let pond_id = uuid7::uuid7().to_string();
+    let _persistence = OpLogPersistence::open_or_create(
+        &path,
+        pond_id.clone(),
+        true,
+        Some(crate::txn_metadata::PondUserMetadata::new(vec![
+            "test".to_string(),
+        ])),
+    )
+    .await
+    .expect("open_or_create failed");
+
+    let got = OpLogPersistence::peek_pond_id(&path)
+        .await
+        .expect("peek_pond_id failed");
+    assert_eq!(
+        got.as_deref(),
+        Some(pond_id.as_str()),
+        "peek_pond_id should return the bootstrap row's pond_id"
+    );
+}
+
+/// D5.7a.2: a write commit returns the Delta version assigned by the
+/// FinalizedCommit, NOT a pre-commit version + 1 arithmetic guess.
+#[tokio::test]
+async fn commit_returns_assigned_version() {
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    let pre_version = persistence
+        .table()
+        .version()
+        .expect("post-create table must have a version");
+
+    let tx = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+    let wd = tx.root().await.expect("Failed to get root");
+    _ = tinyfs::async_helpers::convenience::create_file_path(&wd, "/version_probe.txt", b"hello")
+        .await
+        .expect("create_file_path failed");
+
+    let returned = tx
+        .commit_test_with_sequence(2)
+        .await
+        .expect("commit failed");
+    let returned_version = returned.expect("write commit should return a version");
+
+    let post_version = persistence
+        .table()
+        .version()
+        .expect("post-commit table must have a version");
+
+    assert_eq!(
+        returned_version, post_version,
+        "commit-returned version ({returned_version}) must match installed table version ({post_version})"
+    );
+    assert_eq!(
+        returned_version,
+        pre_version + 1,
+        "commit-returned version ({returned_version}) must equal pre_version+1 ({})",
+        pre_version + 1,
+    );
+}
+
+/// D5.7a.2: an empty (no-write) commit returns Ok(None) and does not
+/// advance the Delta table version.
+#[tokio::test]
+async fn commit_no_op_returns_none() {
+    let store_path = test_dir();
+    let mut persistence = OpLogPersistence::create_test(&store_path)
+        .await
+        .expect("Failed to create persistence layer");
+
+    let pre_version = persistence
+        .table()
+        .version()
+        .expect("post-create table must have a version");
+
+    let tx = persistence
+        .begin_test()
+        .await
+        .expect("Failed to begin transaction");
+    // No writes performed before commit.
+    let returned = tx
+        .commit_test_with_sequence(2)
+        .await
+        .expect("commit failed");
+
+    assert!(
+        returned.is_none(),
+        "empty commit should return Ok(None), got {returned:?}"
+    );
+
+    let post_version = persistence
+        .table()
+        .version()
+        .expect("table version should still exist");
+    assert_eq!(
+        pre_version, post_version,
+        "empty commit must not advance the Delta table version"
+    );
+}

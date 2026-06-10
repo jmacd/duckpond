@@ -115,6 +115,26 @@ impl Provider {
 
         let scheme = url.scheme();
 
+        // Host files explicitly typed as table/series with the default
+        // (Parquet) format -- `host+table:///snapshot.parquet`,
+        // `host+series:///readings.parquet` (both have scheme `file`) -- are
+        // raw bytes on the host filesystem, but the URL asserts they are
+        // queryable Parquet.  Read them directly as Parquet rather than
+        // routing through the tinyfs builtin path, which classifies host
+        // files as raw `FilePhysicalVersion` and rejects them as
+        // "not queryable".
+        //
+        // The `scheme == "file"` guard is essential: a non-default format
+        // such as `host+csv+series:///data.csv` also carries entry_type
+        // `series` but must be parsed by its format provider (CSV here), NOT
+        // read as Parquet.
+        if url.is_host()
+            && scheme == "file"
+            && matches!(url.entry_type(), Some("table") | Some("series"))
+        {
+            return self.create_host_parquet_table_provider(&url).await;
+        }
+
         // Check if this is a builtin TinyFS type (file, series, table, data)
         if matches!(scheme, "file" | "series" | "table" | "data") {
             let provider_context = self.provider_context.as_ref().ok_or_else(|| {
@@ -149,6 +169,64 @@ impl Provider {
         // No cache available -- fall back to MemTable
         self.create_memtable_from_url(&url, format_provider.as_ref())
             .await
+    }
+
+    /// Create a `MemTable` from a host filesystem file read as Parquet.
+    ///
+    /// Used for `host+table:///x.parquet` / `host+series:///x.parquet`: the
+    /// file lives on the host filesystem (raw bytes, no tinyfs entry-type
+    /// metadata), but the URL asserts it is Parquet.  We read the bytes
+    /// through the host file provider and decode them with the Parquet
+    /// reader, which validates the format (a non-Parquet file yields a
+    /// clear "not a valid Parquet file" error rather than the opaque
+    /// "not queryable" error from the tinyfs builtin path).
+    async fn create_host_parquet_table_provider(
+        &self,
+        url: &Url,
+    ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use tokio::io::AsyncReadExt;
+
+        // Read the whole host file into memory (host files are local and
+        // `pond cat`-sized).  `open_host_url` reads the local filesystem
+        // directly (with optional `+gzip`/`+zstd` decompression), so this
+        // does not depend on `self.fs` being a host-mount.
+        let mut reader = crate::open_host_url(url).await?;
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf).await.map_err(|e| {
+            Error::InvalidUrl(format!("Failed to read host file '{}': {}", url.path(), e))
+        })?;
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(buf)).map_err(|e| {
+                Error::InvalidUrl(format!(
+                    "Host file '{}' is not a valid Parquet file: {}",
+                    url.path(),
+                    e
+                ))
+            })?;
+        let schema = builder.schema().clone();
+        let batch_reader = builder.build().map_err(|e| {
+            Error::InvalidUrl(format!(
+                "Failed to read Parquet from host file '{}': {}",
+                url.path(),
+                e
+            ))
+        })?;
+
+        let mut batches = Vec::new();
+        for batch in batch_reader {
+            batches.push(batch.map_err(|e| {
+                Error::InvalidUrl(format!(
+                    "Failed to decode Parquet batch from host file '{}': {}",
+                    url.path(),
+                    e
+                ))
+            })?);
+        }
+
+        let table = MemTable::try_new(schema, vec![batches])?;
+        Ok(Arc::new(table))
     }
 
     /// Create TableProvider from builtin TinyFS file using QueryableFile trait
@@ -795,5 +873,121 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_host_table_reads_parquet_directly() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+
+        // Write a real Parquet file to the host filesystem.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap();
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            let _ = writer.close().unwrap();
+        }
+
+        // A plain pond FS is enough: host+table reads the host file directly.
+        let fs = create_test_fs().await;
+        let provider = Provider::new(fs);
+        let ctx = SessionContext::new();
+
+        let url = format!("host+table://{}", path.display());
+        let table = provider
+            .create_table_provider(&url, &ctx)
+            .await
+            .expect("host+table parquet must be queryable");
+        let _ = ctx.register_table("source", table).unwrap();
+
+        let results = ctx
+            .sql("SELECT count(*) AS n, sum(id) AS s FROM source")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let batch = &results[0];
+        let n = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        let s = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(n, 3);
+        assert_eq!(s, 6);
+    }
+
+    #[tokio::test]
+    async fn test_host_table_rejects_non_parquet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.txt");
+        std::fs::write(&path, b"this is not parquet").unwrap();
+
+        let fs = create_test_fs().await;
+        let provider = Provider::new(fs);
+        let ctx = SessionContext::new();
+
+        let url = format!("host+table://{}", path.display());
+        let err = provider
+            .create_table_provider(&url, &ctx)
+            .await
+            .expect_err("non-Parquet host+table must error");
+        assert!(
+            err.to_string().contains("not a valid Parquet file"),
+            "error should be a clear Parquet error, got: {}",
+            err
+        );
+    }
+
+    /// Regression: `host+csv+series://` carries entry_type `series` but a
+    /// non-default format scheme (`csv`); it must route to the CSV format
+    /// provider, NOT the Parquet host path.  (Caught by testsuite 301.)
+    #[tokio::test]
+    async fn test_host_csv_series_does_not_use_parquet_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // Even pointing at a real Parquet file, csv+series must NOT take the
+        // Parquet path -- the `csv` format scheme wins over the entry type.
+        let path = dir.path().join("data.parquet");
+        std::fs::write(&path, b"PAR1 not really").unwrap();
+
+        let fs = create_test_fs().await;
+        let provider = Provider::new(fs);
+        let ctx = SessionContext::new();
+
+        let url = format!("host+csv+series://{}", path.display());
+        let err = provider
+            .create_table_provider(&url, &ctx)
+            .await
+            .expect_err("csv+series over a plain test FS cannot read the host path");
+        // The error must NOT be the Parquet-path error: that would mean the
+        // routing incorrectly treated this CSV URL as Parquet.
+        assert!(
+            !err.to_string().contains("not a valid Parquet file"),
+            "host+csv+series must not take the Parquet path, got: {}",
+            err
+        );
     }
 }

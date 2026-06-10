@@ -229,6 +229,14 @@ impl Steward {
 ///
 /// Wraps the concrete transaction guards and forwards all method calls.
 /// Implements `Deref<Target=FS>` for filesystem access.
+///
+/// The `Pond` variant is significantly larger than `Host` because
+/// `StewardTransactionGuard` carries the full delta-lake transaction
+/// state plus an optional process-exclusion lock guard.  Boxing isn't
+/// worth the extra allocation: `Pond` is the dominant variant in
+/// practice, and the size delta is amortized across a single
+/// transaction's lifetime.
+#[allow(clippy::large_enum_variant)]
 pub enum Transaction<'a> {
     /// Full tlogfs transaction with control table tracking
     Pond(StewardTransactionGuard<'a>),
@@ -327,31 +335,18 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// Query import partitions from the control table for a given factory node.
-    /// Returns (foreign_part_id, foreign_pond_id, watermark_txn_seq) for each partition.
-    /// Returns empty vec for host transactions.
-    pub async fn query_import_partitions(
-        &self,
-        factory_node_id: &str,
-    ) -> Result<Vec<(String, String, i64)>, StewardError> {
-        match self {
-            Transaction::Pond(guard) => {
-                guard
-                    .control_table()
-                    .query_import_partitions(factory_node_id)
-                    .await
-            }
-            Transaction::Host(_) => Ok(Vec::new()),
-        }
-    }
-
     // -- Lifecycle --
 
     /// Commit the transaction.
-    pub async fn commit(self) -> Result<Option<()>, StewardError> {
+    ///
+    /// On a `Pond` write commit, returns `Ok(Some(version))` with the
+    /// data-FS Delta version number. Returns `Ok(None)` for a read or a
+    /// write that produced no changes. `Host` transactions have no
+    /// versioning concept and always return `Ok(None)`.
+    pub async fn commit(self) -> Result<Option<i64>, StewardError> {
         match self {
             Transaction::Pond(guard) => guard.commit().await,
-            Transaction::Host(_) => Ok(Some(())), // No-op: host writes are immediate
+            Transaction::Host(_) => Ok(None), // No-op: host writes are immediate
         }
     }
 

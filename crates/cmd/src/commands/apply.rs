@@ -930,7 +930,7 @@ mod tests {
 
             let init_args = vec!["pond".to_string(), "init".to_string()];
             let ship_context = ShipContext::pond_only(Some(&pond_path), init_args.clone());
-            init_command(&ship_context, None, None).await?;
+            init_command(&ship_context).await?;
 
             Ok(Self {
                 temp_dir,

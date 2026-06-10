@@ -11,7 +11,7 @@ use crate::{
     maintenance::{self, MaintenanceReport},
 };
 use anyhow::Result;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::ops::AsyncFnOnce;
 use std::path::{Path, PathBuf};
 use tlogfs::{OpLogPersistence, PondMetadata, PondTxnMetadata, PondUserMetadata};
@@ -23,6 +23,23 @@ pub struct Ship {
     control_table: ControlTable,
     last_write_seq: i64,
     pond_path: PathBuf,
+}
+
+/// Outcome of a producer-side compaction transaction ([`Ship::compact`]).
+#[derive(Debug, Clone, Copy)]
+pub struct CompactOutcome {
+    /// The transaction sequence allocated for this compaction.
+    pub txn_seq: i64,
+    /// Whether any files were actually merged.  `false` is a clean no-op:
+    /// only a `Completed` record was written, the committed sequence is
+    /// unchanged, and there is nothing to push.
+    pub had_data: bool,
+    /// Number of new merged parquet files Delta wrote (real compaction only).
+    pub files_added: u64,
+    /// Number of small parquet files Delta marked Removed (real compaction only).
+    pub files_removed: u64,
+    /// Data Delta version after the optimize commit (real compaction only).
+    pub data_delta_version: i64,
 }
 
 impl Ship {
@@ -63,13 +80,30 @@ impl Ship {
             )
             .await?;
 
-        // Record data_committed (root initialization created DeltaLake version 0)
+        // Record data_committed for the root-init transaction.  The root
+        // directory's OplogEntry is written at the data Delta version that
+        // `create_infrastructure` just produced (version 0 is `CREATE TABLE`
+        // with no data; the root row lands at the next version).  Recording
+        // the REAL version + checksums (rather than the historical
+        // `data_delta_version=0` / empty-checksums placeholder) is what makes
+        // `Remote::push` replicate the pond_init bundle, so a bootstrapped
+        // replica holds the root-dir v1 row and `pond verify` matches
+        // (P2-VERIFY-BOOTSTRAP-DRIFT).
+        let root_version = ship.data_persistence.table().version().unwrap_or(0);
+        let root_pond_id = ship.control_table.pond_id_uuid();
+        let root_checksums = crate::remote_adapter::compute_live_checksums_for_table(
+            ship.data_persistence.table().clone(),
+            root_pond_id,
+        )
+        .await
+        .map_err(|e| StewardError::ControlTable(format!("compute root-init checksums: {}", e)))?;
         ship.control_table
             .record_data_committed(
                 &txn_metadata,
                 TransactionType::Write,
-                0, // Root initialization is DeltaLake version 0
+                root_version,
                 0, // Duration unknown/not tracked
+                root_checksums,
             )
             .await?;
 
@@ -164,6 +198,33 @@ impl Ship {
         })
     }
 
+    /// Create a fresh pond as a replica with the given `pond_id`.
+    ///
+    /// Convenience wrapper around [`Ship::create_pond_for_restoration`]
+    /// that synthesizes default birth metadata (timestamp = now,
+    /// hostname = `"unknown"`, username from `$USER`/`$USERNAME` or
+    /// `"unknown"`).  Birth metadata on a replica is informational
+    /// only -- the canonical replica identity is the `pond_id`, which
+    /// must match the source pond it replicates.
+    ///
+    /// The resulting pond has an empty data table awaiting
+    /// `apply_pulled_bundle` calls (e.g., via
+    /// [`sync_remote::Remote::bootstrap_consumer`] then
+    /// [`sync_remote::Remote::pull`]).
+    pub async fn create_replica<P: AsRef<Path>>(
+        pond_path: P,
+        pond_id: uuid::Uuid,
+    ) -> Result<Self, StewardError> {
+        // Convert uuid::Uuid -> uuid7::Uuid by reusing the 16-byte
+        // representation; both crates wrap the same wire format.
+        let pond_id_uuid7 = uuid7::Uuid::from(*pond_id.as_bytes());
+        let metadata = PondMetadata {
+            pond_id: pond_id_uuid7,
+            ..PondMetadata::default()
+        };
+        Self::create_pond_for_restoration(pond_path, metadata).await
+    }
+
     /// Open an existing, pre-initialized pond.
     pub async fn open_pond<P: AsRef<Path>>(pond_path: P) -> Result<Self, StewardError> {
         Self::create_infrastructure(pond_path, false, None, None).await
@@ -201,9 +262,18 @@ impl Ship {
         let data_path_str = data_path.to_string_lossy().to_string();
         let control_path_str = control_path.to_string_lossy().to_string();
 
-        // Determine pond_id and initialize control table
+        // Determine pond_id and initialize control table.
+        //
+        // D5.2: pond identity is canonically owned by the data Delta table's
+        // bootstrap row (the root directory's OplogEntry, whose pond_id
+        // partition value is the local pond's id).  The control table still
+        // caches it (KEY_STORE_ID under BOOTSTRAP_POND_ID) for convenience,
+        // but on disagreement the data table wins and the control table
+        // cache is auto-healed to match.
         let (pond_id, control_table) = if create_new {
-            // Creating new pond - use preserved metadata if provided, otherwise create fresh metadata
+            // Creating new pond - mint fresh identity and persist it to both
+            // the control table (cache) and, implicitly via the upcoming root
+            // initialization, the data table (canonical).
             assert!(preserve_metadata.is_none());
             let metadata = PondMetadata::default();
             let pond_id = metadata.pond_id.to_string();
@@ -214,10 +284,55 @@ impl Ship {
             let ct = ControlTable::create(&control_path_str, &metadata).await?;
             (pond_id, ct)
         } else {
-            // Opening existing pond - metadata already exists in control table
-            debug!("Opening existing control table");
-            let ct = ControlTable::open(&control_path_str).await?;
-            let pond_id = ct.pond_metadata().pond_id.to_string();
+            // Opening existing pond - prefer the data table's bootstrap row,
+            // fall back to (or cross-check against) the control table cache.
+            let data_pond_id = OpLogPersistence::peek_pond_id(&data_path)
+                .await
+                .map_err(StewardError::DataInit)?;
+            let mut ct = ControlTable::open(&control_path_str).await?;
+            let ct_pond_id = ct.pond_metadata().pond_id.to_string();
+
+            let pond_id = match data_pond_id {
+                Some(from_data) => {
+                    if from_data != ct_pond_id {
+                        log::warn!(
+                            "Pond identity disagreement: data table holds pond_id={} \
+                             but control table caches pond_id={}; using data table \
+                             value (canonical per D5.2) and healing control cache",
+                            from_data,
+                            ct_pond_id
+                        );
+                        // Auto-heal: rewrite the control cache to match the
+                        // canonical data-table value.  Birth metadata (timestamp,
+                        // hostname, username) is preserved from the existing
+                        // control cache - those fields live only there.
+                        let healed = PondMetadata {
+                            pond_id: from_data.parse::<uuid7::Uuid>().map_err(|e| {
+                                StewardError::ControlTable(format!(
+                                    "data table pond_id {} is not a valid UUID: {}",
+                                    from_data, e
+                                ))
+                            })?,
+                            birth_timestamp: ct.pond_metadata().birth_timestamp,
+                            birth_hostname: ct.pond_metadata().birth_hostname.clone(),
+                            birth_username: ct.pond_metadata().birth_username.clone(),
+                        };
+                        ct.set_pond_metadata(&healed).await?;
+                    }
+                    from_data
+                }
+                None => {
+                    // Data table is empty (restoration scaffold awaiting bundles)
+                    // or pre-D5 layout (already refused by open_or_create below).
+                    // Either way, fall back to the control table cache.
+                    debug!(
+                        "Data table has no committed rows yet; using control \
+                         table pond_id={} (restoration scaffold)",
+                        ct_pond_id
+                    );
+                    ct_pond_id
+                }
+            };
             (pond_id, ct)
         };
 
@@ -340,6 +455,52 @@ impl Ship {
         &mut self.control_table
     }
 
+    /// On-disk pond directory (the parent of `data/` and `control/`).
+    /// Used by sync-remote integration for the steward adapter's `path()`.
+    #[must_use]
+    pub fn pond_path(&self) -> &Path {
+        &self.pond_path
+    }
+
+    /// Borrow the data persistence layer.  The sync-remote adapter uses
+    /// this to read the underlying Delta table for `actions_at_version`
+    /// and `read_data_file`.
+    #[must_use]
+    pub fn data_persistence(&self) -> &OpLogPersistence {
+        &self.data_persistence
+    }
+
+    /// Mutable view of the data persistence layer.  The sync-remote
+    /// adapter uses this to commit foreign Delta actions in
+    /// `apply_pulled_bundle` and to drop pond rows.
+    pub fn data_persistence_mut(&mut self) -> &mut OpLogPersistence {
+        &mut self.data_persistence
+    }
+
+    /// Highest write txn_seq this Ship has allocated locally (0 if
+    /// none).  The sync-remote `pond push` driver reads this to know
+    /// the upper bound for its push loop.
+    #[must_use]
+    pub fn last_write_seq(&self) -> i64 {
+        self.last_write_seq
+    }
+
+    /// Bump the in-memory `last_write_seq` allocator to at least `seq`.
+    ///
+    /// Used by `ShipRemoteSteward::apply_pulled_bundle` in MIRROR mode
+    /// to keep Ship's allocator ahead of any sequence numbers that a
+    /// pulled bundle injected into the data store.  Does nothing when
+    /// `seq <= self.last_write_seq`.
+    pub fn sync_last_write_seq(&mut self, seq: i64) {
+        if seq > self.last_write_seq {
+            debug!(
+                "Advancing last_write_seq {} -> {} after pulled bundle apply",
+                self.last_write_seq, seq
+            );
+            self.last_write_seq = seq;
+        }
+    }
+
     /// Begin a coordinated transaction with the given options
     pub async fn begin_read(
         &mut self,
@@ -362,14 +523,13 @@ impl Ship {
     ) -> Result<StewardTransactionGuard<'_>, StewardError> {
         debug!("Beginning steward transaction {meta:?}");
 
-        // Allocate transaction sequence
+        // Compute the transaction sequence we *would* use, but do NOT
+        // commit the increment yet: if the write-lock acquisition below
+        // fails, we must leave `last_write_seq` untouched so the caller
+        // can retry without skipping a sequence number.
         let (txn_seq, based_on_seq) = if is_write {
-            // Write transaction: allocate next sequence
-            self.last_write_seq += 1;
-            let seq = self.last_write_seq;
-            (seq, None)
+            (self.last_write_seq + 1, None)
         } else {
-            // Read transaction: reuse last write sequence for read atomicity
             let seq = self.last_write_seq;
             (seq, Some(seq))
         };
@@ -386,13 +546,37 @@ impl Ship {
             &meta.txn_id, transaction_type, based_on_seq,
         );
 
-        // Record transaction begin in control table
-        self.control_table
-            .record_begin(&txn_meta, based_on_seq, transaction_type)
-            .await
-            .map_err(|e| {
-                StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
-            })?;
+        // For writes, acquire the process-level exclusion lock BEFORE
+        // touching control or data tables.  A conflict here short-circuits
+        // cleanly without polluting the control log.  Read transactions
+        // do not take this lock (or any control-table record) — they're
+        // safe under Delta's read-time-travel semantics.
+        let write_lock = if is_write {
+            let control_dir = get_control_path(&self.pond_path);
+            Some(crate::write_lock::WriteLockGuard::try_acquire(
+                &control_dir,
+                &txn_meta,
+            )?)
+        } else {
+            None
+        };
+
+        // Lock acquired — now commit the sequence advance.
+        if is_write {
+            self.last_write_seq = txn_seq;
+        }
+
+        // Record transaction begin in control table — writes only.
+        // Reads no longer leave audit rows; the per-read Delta write
+        // was pure overhead now that exclusion is enforced by the lock.
+        if is_write {
+            self.control_table
+                .record_begin(&txn_meta, based_on_seq, transaction_type)
+                .await
+                .map_err(|e| {
+                    StewardError::ControlTable(format!("Failed to record transaction begin: {}", e))
+                })?;
+        }
 
         // Begin Data FS transaction guard with metadata
         let data_tx = if is_write {
@@ -415,6 +599,7 @@ impl Ship {
             transaction_type,
             &mut self.control_table,
             &self.pond_path,
+            write_lock,
         ))
     }
 
@@ -461,6 +646,12 @@ impl Ship {
 
         debug!("Transaction replay {txn_id:?} using sequence {txn_seq} (type=write, replay=true)",);
 
+        // Acquire process-level write lock (same exclusion contract as
+        // begin_write).  Replay is a write transaction and must not race
+        // with another writer in a sibling process.
+        let control_dir = get_control_path(&self.pond_path);
+        let write_lock = crate::write_lock::WriteLockGuard::try_acquire(&control_dir, txn_meta)?;
+
         // Record transaction begin in control table
         self.control_table
             .record_begin(
@@ -489,16 +680,19 @@ impl Ship {
             TransactionType::Write,
             &mut self.control_table,
             self.pond_path.clone(),
+            Some(write_lock),
         ))
     }
 
     /// Commit a steward transaction guard with proper sequencing
-    /// This method provides the control persistence access needed for proper sequencing
-    /// and handles post-commit factory execution for write transactions
+    ///
+    /// Returns the data-FS Delta version of a successful write commit
+    /// (`Ok(Some(v))`); returns `Ok(None)` for a read transaction or a
+    /// write that produced no changes.
     pub async fn commit_transaction(
         &mut self,
         guard: StewardTransactionGuard<'_>,
-    ) -> Result<Option<()>, StewardError> {
+    ) -> Result<Option<i64>, StewardError> {
         // Check if this is a write transaction before consuming the guard
         let is_write = guard.is_write_transaction();
 
@@ -519,20 +713,43 @@ impl Ship {
     /// Run maintenance (checkpoint + vacuum) on both data and control tables.
     ///
     /// When `force` is true, checkpoint is always created (for explicit commands).
-    /// When `compact` is true, also merges small parquet files into larger ones.
-    /// This is best-effort: individual failures are logged as warnings and do
-    /// not prevent maintenance of the other table.
+    /// When `compact` is true, the data table's own-pond partitions are
+    /// compacted as a RECORDED, pushable transaction via [`Self::compact`]
+    /// (so the merge replicates to remotes), and the control table is
+    /// optimized best-effort (it is never pushed).  This is best-effort:
+    /// individual failures are logged as warnings and do not prevent
+    /// maintenance of the other table.
     pub async fn maintain(&mut self, force: bool, compact: bool) -> MaintenanceReport {
         let mut report = MaintenanceReport::default();
 
-        // Maintain data table
+        // Data table compaction goes through the recorded transaction path
+        // so it is replicated (Begin/DataCommitted(Compact)).  The
+        // checkpoint/vacuum that follow are best-effort and unrecorded.
+        let compact_outcome = if compact {
+            match self.compact().await {
+                Ok(outcome) => Some(outcome),
+                Err(e) => {
+                    warn!("[MAINTAIN] Data compaction failed: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Maintain data table (checkpoint + vacuum only; compaction handled above)
         let data_table = self.data_persistence.table().clone();
-        let (new_data_table, data_result) =
-            maintenance::maintain_table(data_table, "data", force, compact).await;
+        let (new_data_table, mut data_result) =
+            maintenance::maintain_table(data_table, "data", force, false).await;
         self.data_persistence.set_table(new_data_table);
+        if let Some(oc) = compact_outcome {
+            data_result.compacted = oc.had_data;
+            data_result.compact_files_added = oc.files_added;
+            data_result.compact_files_removed = oc.files_removed;
+        }
         report.data = Some(data_result);
 
-        // Maintain control table
+        // Maintain control table (best-effort optimize allowed; never pushed)
         let control_table = self.control_table.table().clone();
         let (new_control_table, control_result) =
             maintenance::maintain_table(control_table, "control", force, compact).await;
@@ -540,6 +757,183 @@ impl Ship {
         report.control = Some(control_result);
 
         report
+    }
+
+    /// Compact this pond's own data partitions as a RECORDED, pushable
+    /// transaction.
+    ///
+    /// Unlike `maintain(force, /*compact=*/true)`'s historical behavior --
+    /// a best-effort Delta optimize that was NOT recorded in the control
+    /// table and therefore never replicated -- this writes a
+    /// `Begin` / `DataCommitted(commit_kind=Compact)` transaction so that
+    /// `Remote::push` emits a Compact bundle.  Downstream consumers can
+    /// then use that bundle as a restart baseline (`pond restart-from-compact`),
+    /// and `Remote::maintain` retention can prune the superseded Write
+    /// bundles.  This closes the mirror retention-recovery loop end to end.
+    ///
+    /// Compaction must not change logical content: the per-partition Merkle
+    /// checksums are snapshotted before and after the Delta optimize and
+    /// asserted identical (a mismatch is a bug and aborts the txn with a
+    /// `Failed` record).  A no-op compaction (nothing to merge) writes a
+    /// `Completed` record only, leaves the committed sequence unchanged, and
+    /// returns `had_data == false`.
+    ///
+    /// Like `Remote::restart_pond_from_compact`, the bundle built from this
+    /// transaction is treated as a full snapshot of the pond at the compacted
+    /// version; the optimize target size (128 MB) merges each partition's
+    /// small files into one, so a producer that accumulates many small writes
+    /// per partition yields a complete baseline.
+    pub async fn compact(&mut self) -> Result<CompactOutcome, StewardError> {
+        use chrono::Utc;
+
+        let pond_id = self.control_table.pond_id_uuid();
+
+        // 1. Allocate seq, acquire the write lock, advance, write Begin.
+        let txn_seq = self.last_write_seq + 1;
+        let meta = PondUserMetadata::new(vec![
+            "pond".to_string(),
+            "maintain".to_string(),
+            "--compact".to_string(),
+        ]);
+        let txn_meta = PondTxnMetadata::new(txn_seq, meta);
+        let started = Utc::now().timestamp_micros();
+
+        let control_dir = get_control_path(&self.pond_path);
+        let _write_lock = crate::write_lock::WriteLockGuard::try_acquire(&control_dir, &txn_meta)?;
+        self.last_write_seq = txn_seq;
+
+        self.control_table
+            .record_begin(&txn_meta, None, TransactionType::Write)
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("compact: record begin: {}", e)))?;
+
+        // 2. Pre-compaction checksum snapshot.
+        let pre = crate::remote_adapter::compute_live_checksums_for_table(
+            self.data_persistence.table().clone(),
+            pond_id,
+        )
+        .await
+        .map_err(|e| StewardError::ControlTable(format!("compact: pre snapshot: {}", e)))?;
+
+        // 3. Run the Delta optimize, scoped to our own pond_id partitions.
+        //    Stamp the compaction's txn_seq into the commit's `pond_txn`
+        //    metadata so `OpLogPersistence::open` recovers the right
+        //    `last_txn_seq` on the next pond open (the optimize commit
+        //    becomes the most recent Delta commit).
+        let mut commit_meta = txn_meta.clone();
+        commit_meta.pond_id = pond_id.to_string();
+        let app_metadata = commit_meta.to_delta_metadata();
+        let stats = match maintenance::compact_pond_partitions(
+            self.data_persistence.table().clone(),
+            pond_id,
+            app_metadata,
+        )
+        .await
+        {
+            Ok((new_table, stats)) => {
+                self.data_persistence.set_table(new_table);
+                stats
+            }
+            Err(e) => {
+                // The optimize produced no data Delta commit, so this seq is
+                // not consumed on disk (`OpLogPersistence::last_txn_seq` is
+                // still `txn_seq - 1`, and a reopen would recover `txn_seq - 1`
+                // from the data history).  Roll the in-memory allocator back to
+                // match so it stays in lockstep with `data_persistence`; the
+                // next write will reuse this seq.  The terminal `Failed` record
+                // closes the dangling `Begin`.
+                self.last_write_seq = txn_seq - 1;
+                let reason = format!("optimize failed: {}", e);
+                self.record_compact_failed(&txn_meta, started, reason).await;
+                return Err(StewardError::ControlTable(format!("compact: {}", e)));
+            }
+        };
+
+        // 4. No-op: nothing merged.  Write Completed (terminal for a
+        //    write-no-op) and do not advance the committed sequence.
+        if stats.is_noop() {
+            let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
+            self.control_table
+                .record_completed(&txn_meta, TransactionType::Write, duration_ms)
+                .await
+                .map_err(|e| {
+                    StewardError::ControlTable(format!("compact: record completed: {}", e))
+                })?;
+            // A no-op optimize commits no data, so `data_persistence`'s
+            // `last_txn_seq` was never advanced to `txn_seq` and a reopen would
+            // recover `txn_seq - 1` from the data history.  Roll the in-memory
+            // allocator back to match, keeping `last_write_seq` in lockstep with
+            // `data_persistence.last_txn_seq` (otherwise the next read/write
+            // transaction on this Ship would fail the strict +1 sequence check).
+            self.last_write_seq = txn_seq - 1;
+            debug!("Compaction no-op at seq={} (nothing to merge)", txn_seq);
+            return Ok(CompactOutcome {
+                txn_seq,
+                had_data: false,
+                files_added: 0,
+                files_removed: 0,
+                data_delta_version: 0,
+            });
+        }
+
+        // 5. Post-compaction snapshot + invariant: content must be unchanged.
+        let post = crate::remote_adapter::compute_live_checksums_for_table(
+            self.data_persistence.table().clone(),
+            pond_id,
+        )
+        .await
+        .map_err(|e| StewardError::ControlTable(format!("compact: post snapshot: {}", e)))?;
+        if let Err(e) = assert_compaction_invariant(&pre, &post) {
+            let reason = format!("{}", e);
+            self.record_compact_failed(&txn_meta, started, reason).await;
+            return Err(e);
+        }
+
+        // 6. Record DataCommitted(Compact) at the new data Delta version.
+        //    DataCommitted is the terminal record for a data write in the
+        //    duckpond control schema (no trailing Completed).
+        let new_version = self.data_persistence.table().version().unwrap_or(-1);
+        // Keep the in-memory persistence allocator in step with the
+        // committed compaction seq (the optimize commit already carries it
+        // on disk via `pond_txn`), so a subsequent read/write in this same
+        // process validates against the right sequence.
+        self.data_persistence
+            .sync_last_txn_seq(&pond_id.to_string(), txn_seq);
+        let duration_ms = ((Utc::now().timestamp_micros() - started) / 1000).max(0);
+        self.control_table
+            .record_compact_committed(&txn_meta, new_version, duration_ms, post)
+            .await
+            .map_err(|e| StewardError::ControlTable(format!("compact: record committed: {}", e)))?;
+
+        info!(
+            "Compaction committed (seq={}, version={}, +{}/-{} files)",
+            txn_seq, new_version, stats.files_added, stats.files_removed
+        );
+        Ok(CompactOutcome {
+            txn_seq,
+            had_data: true,
+            files_added: stats.files_added,
+            files_removed: stats.files_removed,
+            data_delta_version: new_version,
+        })
+    }
+
+    /// Best-effort `Failed` record for an aborted compaction transaction,
+    /// so the `Begin` does not linger as an incomplete transaction.
+    async fn record_compact_failed(
+        &mut self,
+        txn_meta: &PondTxnMetadata,
+        started_micros: i64,
+        reason: String,
+    ) {
+        let duration_ms = ((chrono::Utc::now().timestamp_micros() - started_micros) / 1000).max(0);
+        if let Err(e) = self
+            .control_table
+            .record_failed(txn_meta, TransactionType::Write, reason, duration_ms)
+            .await
+        {
+            warn!("compact: failed to record Failed terminal: {}", e);
+        }
     }
 
     /// Check if recovery is needed by querying the control table
@@ -604,8 +998,13 @@ impl Ship {
                 "Marking transaction seq={}, id={} as recovered",
                 txn_meta.txn_seq, txn_meta.user.txn_id
             );
+            // Post-D5.7a.1: only write transactions leave Begin records,
+            // so any incomplete transaction we recover here must be a
+            // write that was interrupted (or a legacy Read-Begin from
+            // an upgrade-in-place pond; `record_completed` is shape-
+            // compatible with both).
             self.control_table
-                .record_completed(txn_meta, TransactionType::Read, 0) // Assume read for recovery
+                .record_completed(txn_meta, TransactionType::Write, 0)
                 .await?;
         }
 
@@ -656,8 +1055,15 @@ impl Ship {
         .await?;
 
         ship.control_table
-            // @@@ define duration
-            .record_data_committed(&txn_meta, TransactionType::Write, 0, 0)
+            // D5.7a: bootstrap data_delta_version=0 record is never pushed,
+            // so partition_checksums are unobservable — pass empty.
+            .record_data_committed(
+                &txn_meta,
+                TransactionType::Write,
+                0,
+                0,
+                sync_steward::PartitionChecksums::new(),
+            )
             .await?;
 
         ship.control_table
@@ -701,6 +1107,45 @@ impl std::fmt::Debug for Ship {
     }
 }
 
+/// Verify that `pre` and `post` describe the same logical content: the
+/// same set of partition keys AND identical checksum bytes per key.
+/// Producer-side compaction ([`Ship::compact`]) merges parquet files
+/// without changing any row, so this MUST hold; a violation indicates a
+/// bug (e.g. optimize touched foreign rows or dropped data) and aborts
+/// the compaction transaction.
+fn assert_compaction_invariant(
+    pre: &sync_steward::PartitionChecksums,
+    post: &sync_steward::PartitionChecksums,
+) -> Result<(), StewardError> {
+    if pre.len() != post.len() {
+        return Err(StewardError::ControlTable(format!(
+            "compaction changed partition count: pre={} post={}",
+            pre.len(),
+            post.len(),
+        )));
+    }
+    for (partition, pre_cs) in pre {
+        match post.get(partition) {
+            Some(post_cs) if post_cs == pre_cs => {}
+            Some(post_cs) => {
+                return Err(StewardError::ControlTable(format!(
+                    "compaction altered partition {} checksum: pre={} post={}",
+                    partition,
+                    pre_cs.hex(),
+                    post_cs.hex(),
+                )));
+            }
+            None => {
+                return Err(StewardError::ControlTable(format!(
+                    "compaction dropped partition {}",
+                    partition,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +1175,65 @@ mod tests {
         let _opened_ship = Ship::open_pond(&pond_path)
             .await
             .expect("Should be able to open existing pond");
+    }
+
+    /// D5.2: when the data table's bootstrap row holds pond_id A and the
+    /// control-table cache holds a different pond_id B, opening the pond
+    /// must use A (data is canonical) and auto-heal the cache to A.
+    #[tokio::test]
+    async fn ship_open_prefers_data_pond_id_over_control_cache() {
+        let temp_dir = tempdir().expect("temp dir");
+        let pond_path = temp_dir.path().join("pond");
+
+        // Create a fresh pond; both tables will agree on the same pond_id.
+        let ship = Ship::create_pond(&pond_path)
+            .await
+            .expect("create_pond failed");
+        let canonical_id = ship.control_table.pond_metadata().pond_id.to_string();
+        drop(ship);
+
+        // Verify the data table's bootstrap row matches.
+        let data_path = get_data_path(&pond_path);
+        let from_data = OpLogPersistence::peek_pond_id(&data_path)
+            .await
+            .expect("peek_pond_id failed")
+            .expect("data table should hold the local pond_id");
+        assert_eq!(from_data, canonical_id);
+
+        // Tamper the control table: rewrite its cached pond_id to a
+        // different value while leaving the data table untouched.
+        let tampered_meta = PondMetadata::default();
+        let tampered_id = tampered_meta.pond_id.to_string();
+        assert_ne!(tampered_id, canonical_id);
+        {
+            let mut opened = Ship::open_pond(&pond_path).await.expect("open_pond failed");
+            opened
+                .control_table
+                .set_pond_metadata(&tampered_meta)
+                .await
+                .expect("set_pond_metadata failed");
+        }
+
+        // Reopen.  The opened ship should prefer the data-table pond_id
+        // and auto-heal the control cache back to it.
+        let reopened = Ship::open_pond(&pond_path).await.expect("reopen failed");
+        let after_id = reopened.control_table.pond_metadata().pond_id.to_string();
+        assert_eq!(
+            after_id, canonical_id,
+            "data-table pond_id must win on disagreement (got {} after tampering with {})",
+            after_id, tampered_id
+        );
+
+        // The healing is persisted: a third open should see the canonical
+        // pond_id in the control cache without any warning.
+        drop(reopened);
+        let again = Ship::open_pond(&pond_path)
+            .await
+            .expect("third open failed");
+        assert_eq!(
+            again.control_table.pond_metadata().pond_id.to_string(),
+            canonical_id
+        );
     }
 
     #[tokio::test]
@@ -855,10 +1359,11 @@ mod tests {
                 .expect("Transaction guard should be available");
 
             // Commit the transaction (metadata was already provided at begin)
-            raw_tx
+            let _committed_version = raw_tx
                 .commit()
                 .await
                 .expect("Failed to commit transaction")
+                .0
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH HERE - don't call commit_control_metadata()
@@ -1040,10 +1545,11 @@ mod tests {
                 .expect("Transaction guard should be available");
 
             // Commit the transaction (metadata was already provided at begin)
-            raw_tx
+            let _committed_version = raw_tx
                 .commit()
                 .await
                 .expect("Failed to commit transaction")
+                .0
                 .expect("Transaction should have committed with operations");
 
             // SIMULATE CRASH: Don't record control metadata
@@ -1092,19 +1598,21 @@ mod tests {
                 .await
                 .expect("Recovery should not be needed after successful recovery");
 
-            // Verify the recovered transaction descriptor matches what we expected
-            assert_eq!(
-                recovered_txn_meta.user.args,
-                vec![
-                    "pond".to_string(),
-                    "copy".to_string(),
-                    "source.txt".to_string(),
-                    "dest.txt".to_string()
-                ]
+            // Verify the recovered transaction descriptor.  In the
+            // post-D2 lean schema the control table no longer persists
+            // CLI args, so the recovered metadata carries the original
+            // txn_seq and txn_id but an empty args vec.  Recovery
+            // tooling that needs the original command must source it
+            // from the data Delta commit metadata (`pond_txn`).
+            assert!(
+                recovered_txn_meta.user.args.is_empty(),
+                "Post-D2 control table does not persist CLI args; \
+                 recovered args must be empty, got {:?}",
+                recovered_txn_meta.user.args
             );
             assert_eq!(
-                recovered_txn_meta.user.args.first().map(|s| s.as_str()),
-                Some("pond")
+                recovered_txn_meta.txn_seq, 2,
+                "Recovered txn_seq must match the incomplete write (root=1, this=2)"
             );
 
             // Verify the data file still exists (use read transaction)

@@ -130,7 +130,11 @@ echo "--- Step 5: Verify transaction log ---"
 
 LOG_OUT=$(pond log --limit 5)
 echo "$LOG_OUT"
-check 'echo "$LOG_OUT" | grep -q "apply"' "apply in transaction log"
+# Post-D2 the control table no longer stores `cli_args`, so `pond log` cannot
+# print the originating command name.  Assert instead that a committed write
+# transaction is present after running apply.
+check 'echo "$LOG_OUT" | grep -q "(write)"' "write transaction in log"
+check 'echo "$LOG_OUT" | grep -q "COMMITTED"' "COMMITTED transaction in log"
 
 # ==============================================================================
 # Step 6: Copy with overwrite=false should fail if exists

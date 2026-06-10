@@ -327,72 +327,14 @@ struct PartitionStats {
     path_name: Option<String>,
 }
 
-/// Query control table for transaction commands
+/// Stub kept for source-level compatibility.  Post-D2 the control table
+/// no longer persists CLI args; original commands live in data Delta
+/// commit metadata (`pond_txn`).  `pond show` no longer renders a
+/// `Command:` line.
 async fn query_transaction_commands(
-    control_table: &steward::ControlTable,
+    _control_table: &steward::ControlTable,
 ) -> Result<std::collections::HashMap<i64, Vec<String>>, steward::StewardError> {
-    use arrow::array::{Array, Int64Array, StringArray};
-    use std::collections::HashMap;
-
-    // Use control table's SessionContext (following tlogfs pattern)
-    let ctx = control_table.session_context();
-
-    // Query for begin records which have the cli_args (stored as JSON string)
-    // Only include WRITE transactions - read transactions don't modify pond state
-    let df = ctx
-        .sql(
-            "SELECT txn_seq, cli_args 
-         FROM transactions 
-         WHERE record_type = 'begin' AND transaction_type = 'write'
-         ORDER BY txn_seq",
-        )
-        .await
-        .map_err(|e| {
-            steward::StewardError::Dyn(format!("Failed to query commands: {}", e).into())
-        })?;
-
-    let batches = df.collect().await.map_err(|e| {
-        steward::StewardError::Dyn(format!("Failed to collect command results: {}", e).into())
-    })?;
-
-    let mut command_map: HashMap<i64, Vec<String>> = HashMap::new();
-
-    for batch in batches {
-        let txn_seq_col = batch
-            .column_by_name("txn_seq")
-            .ok_or_else(|| steward::StewardError::Dyn("Missing txn_seq column".into()))?;
-        let txn_seqs = txn_seq_col
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast txn_seq".into()))?;
-
-        let cli_args_col = batch
-            .column_by_name("cli_args")
-            .ok_or_else(|| steward::StewardError::Dyn("Missing cli_args column".into()))?;
-        let cli_args_strings = cli_args_col
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| steward::StewardError::Dyn("Failed to downcast cli_args".into()))?;
-
-        for i in 0..batch.num_rows() {
-            let txn_seq = txn_seqs.value(i);
-
-            // Parse JSON string into Vec<String>
-            let args = if !cli_args_strings.is_null(i) {
-                let json_str = cli_args_strings.value(i);
-                serde_json::from_str::<Vec<String>>(json_str).unwrap_or_else(|e| {
-                    log::warn!("Failed to parse cli_args JSON for txn {}: {}", txn_seq, e);
-                    Vec::new()
-                })
-            } else {
-                Vec::new()
-            };
-
-            _ = command_map.insert(txn_seq, args);
-        }
-    }
-
-    Ok(command_map)
+    Ok(std::collections::HashMap::new())
 }
 
 /// Show detailed transaction log using transaction sequences
@@ -572,12 +514,11 @@ async fn show_detailed_mode(
             unique_ids,
         ));
 
-        // Display command if available
-        if let Some(cli_args) = command_map.get(txn_seq)
-            && !cli_args.is_empty()
-        {
-            output.push_str(&format!("  Command: {}\n", cli_args.join(" ")));
-        }
+        // CLI args are not captured by the post-D2 control table; the
+        // original command lives in data Delta commit metadata
+        // (`pond_txn`).  Skip the `Command:` line; `command_map` is
+        // intentionally always empty.
+        let _ = &command_map;
         output.push('\n');
 
         // Format operations for this transaction
@@ -881,7 +822,7 @@ mod tests {
             let ship_context = ShipContext::pond_only(Some(pond_path.clone()), init_args.clone());
 
             // Initialize pond
-            init_command(&ship_context, None, None)
+            init_command(&ship_context)
                 .await
                 .expect("Failed to initialize pond");
 

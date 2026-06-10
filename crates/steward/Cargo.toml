@@ -25,22 +25,31 @@ arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
 datafusion-functions-json = { workspace = true }
 deltalake = { workspace = true }
+fs2 = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true }
+parquet = { workspace = true }
 provider = { workspace = true }
 serde = { workspace = true }
 serde_arrow = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sync-steward = { workspace = true }
+sync-store = { workspace = true }
+sync-remote = { workspace = true }
 thiserror = { workspace = true }
 tinyfs = { workspace = true }
 tlogfs = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }
 utilities = { workspace = true }
+uuid = { workspace = true }
 uuid7 = { workspace = true }
 
 [dev-dependencies]
@@ -48,6 +57,7 @@ tempfile = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+env_logger = { workspace = true }
 
 [lints]
 workspace = true

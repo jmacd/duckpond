@@ -1,0 +1,925 @@
+// SPDX-FileCopyrightText: 2025 Caspar Water Company
+//
+// SPDX-License-Identifier: Apache-2.0
+
+#![allow(clippy::print_stdout)]
+
+//! `pond remote` subcommands: `add`, `remove`, `list`.
+//!
+//! Remote attachments live as small YAML files under `/sys/remotes/<name>`.
+//! Per-remote runtime state (`last_pushed_seq:<url>`, `last_pulled_seq:<url>`,
+//! `remote_mode:<name>`) lives in the control table's raw_config map; the
+//! YAML on disk is intentionally portable (no per-pond watermarks).
+//!
+//! The data types ([`RemoteAttachment`] / [`RemoteMode`]) live in the
+//! [`steward`] crate so the post-commit auto-push dispatcher can use them
+//! too.  See [`steward::remote_config`] for the YAML schema.
+
+use crate::common::ShipContext;
+use anyhow::{Result, anyhow};
+use steward::{REMOTE_MODE_PREFIX, REMOTE_MOUNT_PATH_PREFIX, SYS_DIR, SYS_REMOTES_DIR};
+use sync_remote::{Remote, RemoteError};
+use tinyfs::EntryType;
+use tokio::io::AsyncWriteExt;
+
+// Re-export the types that moved to steward so existing callers using
+// `commands::remote::{RemoteAttachment, RemoteMode}` keep working.
+pub use steward::{RemoteAttachment, RemoteMode};
+
+/// Filter passed to [`list_remotes_command`] for displaying a subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteListFilter {
+    /// Show only push or both-mode attachments (the backup side).
+    BackupsOnly,
+}
+
+/// Validate a remote name: single path segment, non-empty, no slashes,
+/// no leading dot, ASCII printable.
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("remote name must not be empty"));
+    }
+    if name.contains('/') {
+        return Err(anyhow!("remote name `{}` must not contain `/`", name));
+    }
+    if name.starts_with('.') {
+        return Err(anyhow!("remote name `{}` must not start with `.`", name));
+    }
+    if !name.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(anyhow!(
+            "remote name `{}` must be ASCII printable (no whitespace or control chars)",
+            name
+        ));
+    }
+    Ok(())
+}
+
+/// Build the in-pond path for a remote attachment config.
+#[must_use]
+pub fn remote_config_path(name: &str) -> String {
+    format!("{SYS_REMOTES_DIR}/{name}")
+}
+
+/// `pond remote add <name> <url> <path> [--region=...] ...`
+///
+/// Always attaches a **pull-mode** remote and mounts it at `path`.
+/// `path = "/"` is a mirror restart (foreign store_id must equal this
+/// pond's pond_id); non-root `path` is a cross-pond import (foreign
+/// store_id must differ).  Both validations are checked at first pull
+/// (D5.7b.2); this verb only records the configuration.
+#[allow(clippy::too_many_arguments)]
+pub async fn add_remote_command(
+    ship_context: &ShipContext,
+    name: &str,
+    url: &str,
+    path: &str,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    endpoint: Option<String>,
+    allow_http: bool,
+    overwrite: bool,
+) -> Result<()> {
+    if !path.starts_with('/') {
+        return Err(anyhow!(
+            "remote mount path `{}` must be absolute (start with `/`); use `/` for a \
+             mirror restart or `/imports/<name>` for a cross-pond import",
+            path
+        ));
+    }
+    add_remote_attachment_internal(
+        ship_context,
+        name,
+        url,
+        RemoteMode::Pull,
+        Some(path),
+        region,
+        access_key_id,
+        secret_access_key,
+        endpoint,
+        allow_http,
+        overwrite,
+    )
+    .await
+}
+
+/// `pond backup add <name> <url> [--bidirectional] [--region=...] ...`
+///
+/// Attaches a backup remote.  Push-only by default; `bidirectional=true`
+/// also enables pulls (mode=both).  Backups always mirror the entire
+/// pond -- there is no PATH because the local pond IS the source.
+#[allow(clippy::too_many_arguments)]
+pub async fn add_backup_command(
+    ship_context: &ShipContext,
+    name: &str,
+    url: &str,
+    bidirectional: bool,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    endpoint: Option<String>,
+    allow_http: bool,
+    overwrite: bool,
+) -> Result<()> {
+    let mode = if bidirectional {
+        RemoteMode::Both
+    } else {
+        RemoteMode::Push
+    };
+    add_remote_attachment_internal(
+        ship_context,
+        name,
+        url,
+        mode,
+        None,
+        region,
+        access_key_id,
+        secret_access_key,
+        endpoint,
+        allow_http,
+        overwrite,
+    )
+    .await
+}
+
+/// Shared body for `add_remote_command` (pull) and `add_backup_command`
+/// (push/both).  Persists the attachment YAML, records mode and -- for
+/// pull -- the mount path, and auto-initializes the remote Delta table.
+#[allow(clippy::too_many_arguments)]
+async fn add_remote_attachment_internal(
+    ship_context: &ShipContext,
+    name: &str,
+    url: &str,
+    mode: RemoteMode,
+    mount_path: Option<&str>,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    endpoint: Option<String>,
+    allow_http: bool,
+    overwrite: bool,
+) -> Result<()> {
+    validate_name(name)?;
+    let _parsed =
+        url::Url::parse(url).map_err(|e| anyhow!("invalid remote URL `{}`: {}", url, e))?;
+
+    let attachment = RemoteAttachment {
+        url: url.to_string(),
+        region: region.unwrap_or_default(),
+        access_key_id: access_key_id.unwrap_or_default(),
+        secret_access_key: secret_access_key.unwrap_or_default(),
+        endpoint: endpoint.unwrap_or_default(),
+        allow_http,
+    };
+
+    // The attachment YAML at /sys/remotes/<name> is an oplog row that
+    // `pond push` replicates to every backup.  A literal secret would
+    // therefore be exposed on all replicas, so require the secret to be a
+    // `${env:VAR}` reference: the reference text replicates harmlessly and
+    // each replica resolves the value from its own environment at use time.
+    if !attachment.secret_access_key.is_empty()
+        && !utilities::env_substitution::has_env_refs(&attachment.secret_access_key)
+    {
+        return Err(anyhow!(
+            "secret_access_key must be an environment reference such as \
+             ${{env:AWS_SECRET_ACCESS_KEY}}, not a literal secret: the remote config \
+             at {}/{} is replicated to every backup, so a literal secret would be \
+             exposed on all replicas. Set the secret in the environment and pass \
+             `--secret-access-key '${{env:AWS_SECRET_ACCESS_KEY}}'`.",
+            SYS_REMOTES_DIR,
+            name
+        ));
+    }
+
+    let yaml = serde_yaml::to_string(&attachment)
+        .map_err(|e| anyhow!("failed to serialize remote attachment YAML: {}", e))?;
+
+    let config_path = remote_config_path(name);
+    let name_owned = name.to_string();
+    let mode_str = mode.as_str();
+
+    let mut ship = ship_context.open_pond().await?;
+
+    // D5.7b.5: mount-conflict pre-checks (local only) for pull-mode
+    // remotes.  Refuse if another pull-mode attachment already mounts
+    // the same `mount_path` (would create overlapping mount entries).
+    // The store_id-duplication check happens below, after we open the
+    // remote URL to learn its store_id.
+    if mode == RemoteMode::Pull
+        && let Some(mp) = mount_path
+    {
+        validate_no_mount_path_conflict(&mut ship, name, mp, overwrite).await?;
+    }
+
+    // Initialize (or verify) the remote Delta table at `url` BEFORE any
+    // pond-side state changes.  This closes a gap that would otherwise
+    // surface as `delta error: Not a Delta table` on the first `pond
+    // push`: nothing else in the CLI ever calls `Remote::create_at_url`.
+    //
+    // Three cases:
+    //
+    // - URL already holds a Delta table:
+    //     - push/both: store_id MUST match our pond_id (refuse otherwise,
+    //       to avoid silently writing into a foreign pond's remote).
+    //     - pull with mount_path == "/": store_id MUST match our pond_id
+    //       (mirror restart).
+    //     - pull with mount_path != "/": store_id MUST differ from our
+    //       pond_id (cross-pond import requires a foreign pond).
+    //
+    // - URL has no Delta table:
+    //     - push/both: create one with our pond_id as the store_id.
+    //     - pull:      refuse (consumer cannot bootstrap an empty
+    //       upstream; operator should set up the upstream pond first).
+    let local_pond_id = ship.control_table().pond_id_uuid();
+    if attachment.url.starts_with("s3://") {
+        sync_remote::register_s3_handlers();
+    }
+    let storage_options = attachment.to_storage_options()?;
+    match Remote::open_at_url(&attachment.url, storage_options.clone()).await {
+        Ok(remote) => match mode {
+            RemoteMode::Pull => {
+                let remote_store_id = remote.store_id();
+                // PATH-aware validation:
+                //   mount_path == "/"   => mirror restart (remote must equal local)
+                //   mount_path != "/"   => cross-pond import (remote must differ)
+                // For non-pull modes the contract is enforced above (push/both
+                // refuse foreign remotes outright).
+                match mount_path {
+                    Some("/") if remote_store_id != local_pond_id => {
+                        return Err(anyhow!(
+                            "remote `{}` at {} has store_id {} which does not match this \
+                             pond's pond_id {}; mount path `/` is reserved for mirror \
+                             restarts (foreign store_id must match). Use a non-root mount \
+                             path like `/imports/{}` for a cross-pond import.",
+                            name,
+                            attachment.url,
+                            remote_store_id,
+                            local_pond_id,
+                            name
+                        ));
+                    }
+                    Some(path) if path != "/" && remote_store_id == local_pond_id => {
+                        return Err(anyhow!(
+                            "remote `{}` at {} has store_id {} which matches this pond's \
+                             pond_id; mount path `{}` is reserved for cross-pond imports \
+                             (foreign store_id must differ). Use `/` to attach this remote \
+                             as a mirror restart.",
+                            name,
+                            attachment.url,
+                            remote_store_id,
+                            path
+                        ));
+                    }
+                    _ => {}
+                }
+                log::info!(
+                    "remote {} ({}) already initialized (store_id={})",
+                    name,
+                    attachment.url,
+                    remote_store_id
+                );
+
+                // D5.7b.5: refuse if another pull-mode attachment is
+                // already mounting this same foreign store_id (would
+                // create two mount entries pointing at the same
+                // foreign pond, with ambiguous resolution semantics).
+                // --overwrite of THIS attachment under the same name
+                // is OK; a *different* name pointing at the same
+                // store_id is not.
+                if remote_store_id != local_pond_id {
+                    validate_no_foreign_store_id_collision(
+                        &mut ship,
+                        name,
+                        remote_store_id,
+                        overwrite,
+                    )
+                    .await?;
+                }
+            }
+            RemoteMode::Push | RemoteMode::Both => {
+                if remote.store_id() != local_pond_id {
+                    return Err(anyhow!(
+                        "remote `{}` at {} already exists but its store_id ({}) does not match \
+                         this pond's pond_id ({}); refusing to push into a foreign pond. Use a \
+                         different URL, or remove the existing remote contents first.",
+                        name,
+                        attachment.url,
+                        remote.store_id(),
+                        local_pond_id
+                    ));
+                }
+                log::info!(
+                    "remote {} ({}) already initialized for this pond (store_id={})",
+                    name,
+                    attachment.url,
+                    local_pond_id
+                );
+            }
+        },
+        Err(RemoteError::Delta(deltalake::DeltaTableError::NotATable(_))) => match mode {
+            RemoteMode::Pull => {
+                return Err(anyhow!(
+                    "remote `{}` at {} is not a Delta table; pull-mode remotes must point at an \
+                     existing pond. The consumer cannot initialize an empty upstream remote.",
+                    name,
+                    attachment.url
+                ));
+            }
+            RemoteMode::Push | RemoteMode::Both => {
+                let _ = Remote::create_at_url(&attachment.url, local_pond_id, storage_options)
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "failed to initialize remote `{}` at {}: {}",
+                            name,
+                            attachment.url,
+                            e
+                        )
+                    })?;
+                log::info!(
+                    "[OK] initialized remote {} at {} (store_id={})",
+                    name,
+                    attachment.url,
+                    local_pond_id
+                );
+            }
+        },
+        Err(e) => {
+            return Err(anyhow!(
+                "failed to open remote `{}` at {}: {}",
+                name,
+                attachment.url,
+                e
+            ));
+        }
+    }
+
+    // Record the operating mode BEFORE the data write commits.  The
+    // write transaction's post-commit auto-push dispatcher reads
+    // `remote_mode:<name>` from the control table to decide whether to
+    // push to a freshly-added remote.  If we wrote the mode after the
+    // data commit, a `mode=pull` remote would be auto-pushed to once
+    // (because the dispatcher would see the default `push`).
+    let mode_key = format!("{REMOTE_MODE_PREFIX}{name}");
+    ship.control_table_mut()
+        .raw_config_set(&mode_key, mode_str)
+        .await
+        .map_err(|e| anyhow!("Failed to set remote mode `{}`: {}", mode_str, e))?;
+
+    // Record (or clear) the mount path.  Pull-mode remotes always set
+    // this; push/both leave it empty so a future `pond remote add`
+    // -overwriting- a backup with a pull entry starts from a clean slate.
+    let mount_key = format!("{REMOTE_MOUNT_PATH_PREFIX}{name}");
+    let mount_value = mount_path.unwrap_or("");
+    ship.control_table_mut()
+        .raw_config_set(&mount_key, mount_value)
+        .await
+        .map_err(|e| anyhow!("Failed to set remote mount path: {}", e))?;
+
+    ship.write_transaction(
+        &steward::PondUserMetadata::new(vec![
+            "remote".to_string(),
+            "add".to_string(),
+            name_owned.clone(),
+            url.to_string(),
+        ]),
+        async |fs| {
+            let root = fs.root().await?;
+
+            // Idempotent parent setup: ensure /sys and /sys/remotes exist.
+            let _ = root.create_dir_all(SYS_DIR).await?;
+            let _ = root.create_dir_all(SYS_REMOTES_DIR).await?;
+
+            if root.exists(&config_path).await {
+                if !overwrite {
+                    return Err(steward::StewardError::Aborted(format!(
+                        "remote `{}` already exists at {} (use --overwrite to replace)",
+                        name_owned, config_path
+                    )));
+                }
+                let remotes_dir = root.open_dir_path(SYS_REMOTES_DIR).await?;
+                remotes_dir.remove_entry(&name_owned).await.map_err(|e| {
+                    steward::StewardError::Aborted(format!(
+                        "failed to remove existing remote config {}: {}",
+                        config_path, e
+                    ))
+                })?;
+            }
+
+            let mut writer = root
+                .async_writer_path_with_type(&config_path, EntryType::FilePhysicalVersion)
+                .await?;
+            writer
+                .write_all(yaml.as_bytes())
+                .await
+                .map_err(|e| steward::StewardError::Aborted(format!("write yaml: {}", e)))?;
+            writer
+                .shutdown()
+                .await
+                .map_err(|e| steward::StewardError::Aborted(format!("close yaml: {}", e)))?;
+
+            Ok(())
+        },
+    )
+    .await
+    .map_err(|e| anyhow!("Failed to add remote: {}", e))?;
+
+    match mount_path {
+        Some(p) => log::info!(
+            "[OK] added remote {} -> {} (mode={}, mount={})",
+            name,
+            url,
+            mode.as_str(),
+            p
+        ),
+        None => log::info!(
+            "[OK] added remote {} -> {} (mode={})",
+            name,
+            url,
+            mode.as_str()
+        ),
+    }
+    Ok(())
+}
+
+/// D5.7b.5: refuse if another pull-mode attachment already mounts
+/// the same `mount_path`.  Re-attaching the same NAME with --overwrite
+/// is permitted (the existing config will be replaced).
+async fn validate_no_mount_path_conflict(
+    ship: &mut steward::Steward,
+    new_name: &str,
+    new_mount_path: &str,
+    overwrite: bool,
+) -> Result<()> {
+    let existing_names = list_remote_names(ship).await?;
+    for existing_name in existing_names {
+        if existing_name == new_name {
+            // Same-name re-attach is allowed only with --overwrite;
+            // the existing-name check happens in the write
+            // transaction below (with a clear error message).  Skip
+            // here so the diagnostic for `--overwrite` collisions
+            // remains the one inside the transaction.
+            continue;
+        }
+        let mount_key = format!("{REMOTE_MOUNT_PATH_PREFIX}{existing_name}");
+        let existing_mount = ship
+            .control_table()
+            .raw_config_get(&mount_key)
+            .await
+            .map_err(|e| anyhow!("read mount key for `{}`: {}", existing_name, e))?;
+        match existing_mount {
+            Some(p) if !p.is_empty() && paths_equivalent(&p, new_mount_path) => {
+                if overwrite {
+                    return Err(anyhow!(
+                        "mount path `{}` is already used by remote `{}`; --overwrite \
+                         applies only to the same-named attachment (`{}`), not to a \
+                         different remote. Remove `{}` first or pick a different mount \
+                         path.",
+                        new_mount_path,
+                        existing_name,
+                        new_name,
+                        existing_name
+                    ));
+                }
+                return Err(anyhow!(
+                    "mount path `{}` is already used by remote `{}`; pick a different \
+                     mount path or remove `{}` first.",
+                    new_mount_path,
+                    existing_name,
+                    existing_name
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// D5.7b.5: refuse if another pull-mode attachment is already mounting
+/// the same foreign store_id at a different name.  This would create
+/// two mount entries for the same foreign pond with ambiguous resolution.
+async fn validate_no_foreign_store_id_collision(
+    ship: &mut steward::Steward,
+    new_name: &str,
+    new_store_id: uuid::Uuid,
+    overwrite: bool,
+) -> Result<()> {
+    let existing_names = list_remote_names(ship).await?;
+    for existing_name in existing_names {
+        if existing_name == new_name {
+            continue;
+        }
+        let attachment = match load_remote_attachment(ship, &existing_name).await {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let mode_str = ship
+            .control_table()
+            .raw_config_get(&format!("{REMOTE_MODE_PREFIX}{existing_name}"))
+            .await
+            .map_err(|e| anyhow!("read mode for `{}`: {}", existing_name, e))?
+            .unwrap_or_else(|| "push".to_string());
+        let parsed_mode = match RemoteMode::parse(&mode_str) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if parsed_mode != RemoteMode::Pull {
+            continue;
+        }
+        // Probe the existing remote to learn its store_id.
+        let storage_options = attachment.to_storage_options()?;
+        if attachment.url.starts_with("s3://") {
+            sync_remote::register_s3_handlers();
+        }
+        let existing_store_id = match Remote::open_at_url(&attachment.url, storage_options).await {
+            Ok(r) => r.store_id(),
+            Err(_) => continue,
+        };
+        if existing_store_id == new_store_id {
+            if overwrite {
+                return Err(anyhow!(
+                    "foreign store_id `{}` is already mounted by remote `{}` (mode=pull); \
+                     --overwrite cannot resolve a cross-remote collision. Remove `{}` first \
+                     or use a different upstream pond.",
+                    new_store_id,
+                    existing_name,
+                    existing_name
+                ));
+            }
+            return Err(anyhow!(
+                "foreign store_id `{}` is already mounted by remote `{}` (mode=pull); \
+                 attaching the same upstream twice creates ambiguous mount paths. Remove \
+                 `{}` first or use a different upstream pond.",
+                new_store_id,
+                existing_name,
+                existing_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// True if two pond paths are equivalent after normalizing trailing
+/// slashes (but treating `/foo` and `/foo/` as the same).
+fn paths_equivalent(a: &str, b: &str) -> bool {
+    let an = a.trim_end_matches('/');
+    let bn = b.trim_end_matches('/');
+    // Special-case root: "/" trims to "" -- treat both as "/".
+    let an = if an.is_empty() { "/" } else { an };
+    let bn = if bn.is_empty() { "/" } else { bn };
+    an == bn
+}
+
+/// `pond remote remove <name>` -- delete the attachment config and clear
+/// associated raw_config keys.  Does NOT yet refuse on pending PostPush*
+/// records (a future enhancement once D4.4 lands).
+/// `pond remote remove <name> [--purge]` -- delete the attachment
+/// config and clear associated raw_config keys.  By default this is
+/// a **detach**: any cross-pond mount entry materialized at the
+/// remote's `mount_path` is preserved (so the imported data stays
+/// visible).  With `--purge`, the mount entry is also removed.
+///
+/// Note: `--purge` does NOT physically delete the foreign pond_id's
+/// rows from the underlying Delta log (that would be a partitioned
+/// Delta `delete` predicate, deferred to a follow-up).  Once the
+/// mount entry is gone, the foreign rows are unreachable by path
+/// and will be eligible for vacuum at the next checkpoint cycle.
+pub async fn remove_remote_command(
+    ship_context: &ShipContext,
+    name: &str,
+    purge: bool,
+) -> Result<()> {
+    validate_name(name)?;
+    let config_path = remote_config_path(name);
+    let name_owned = name.to_string();
+
+    let mut ship = ship_context.open_pond().await?;
+
+    // Look up the URL before deleting so we can clear its watermark keys.
+    let url_to_clear: Option<String> = {
+        match load_remote_attachment(&mut ship, &name_owned).await {
+            Ok(attachment) => Some(attachment.url),
+            Err(_) => None,
+        }
+    };
+
+    // Look up the mount path before deleting; if `purge` is set and
+    // the mount path is non-root, we must remove the mount entry in
+    // the same write transaction that removes the config.
+    let mount_path_to_purge: Option<String> = if purge {
+        let key = format!("{REMOTE_MOUNT_PATH_PREFIX}{name}");
+        match ship.control_table().raw_config_get(&key).await {
+            Ok(Some(v)) if !v.is_empty() && v != "/" => Some(v),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    ship.write_transaction(
+        &steward::PondUserMetadata::new(if purge {
+            vec![
+                "remote".to_string(),
+                "remove".to_string(),
+                "--purge".to_string(),
+                name_owned.clone(),
+            ]
+        } else {
+            vec![
+                "remote".to_string(),
+                "remove".to_string(),
+                name_owned.clone(),
+            ]
+        }),
+        async |fs| {
+            let root = fs.root().await?;
+            if !root.exists(&config_path).await {
+                return Err(steward::StewardError::Aborted(format!(
+                    "no remote named `{}` (looked at {})",
+                    name_owned, config_path
+                )));
+            }
+            let remotes_dir = root.open_dir_path(SYS_REMOTES_DIR).await?;
+            remotes_dir.remove_entry(&name_owned).await.map_err(|e| {
+                steward::StewardError::Aborted(format!(
+                    "failed to delete remote config {}: {}",
+                    config_path, e
+                ))
+            })?;
+
+            // D5.7b.4: purge mount entry if requested and present.
+            // The mount entry is a normal directory entry under its
+            // parent (e.g., /imports/upstream under /imports), so we
+            // resolve the parent and unlink the leaf name.
+            if let Some(mount_path) = &mount_path_to_purge {
+                let (parent, leaf) = super::pull::split_mount_path(mount_path).map_err(|e| {
+                    steward::StewardError::Aborted(format!(
+                        "invalid mount_path `{}`: {}",
+                        mount_path, e
+                    ))
+                })?;
+                if root.exists(mount_path).await {
+                    let parent_dir = root.open_dir_path(parent).await?;
+                    parent_dir.remove_entry(leaf).await.map_err(|e| {
+                        steward::StewardError::Aborted(format!(
+                            "failed to purge mount entry {}: {}",
+                            mount_path, e
+                        ))
+                    })?;
+                    log::info!("[OK] purged mount entry {}", mount_path);
+                } else {
+                    log::warn!(
+                        "[WARN] mount_path {} not found in pond; nothing to purge",
+                        mount_path
+                    );
+                }
+            }
+            Ok(())
+        },
+    )
+    .await
+    .map_err(|e| anyhow!("Failed to remove remote: {}", e))?;
+
+    // Clear runtime state.  All failures here are best-effort warnings;
+    // the YAML on disk is already gone.
+    let mode_key = format!("{REMOTE_MODE_PREFIX}{name}");
+    if let Err(e) = ship.control_table_mut().raw_config_set(&mode_key, "").await {
+        log::warn!("[WARN] failed to clear {}: {}", mode_key, e);
+    }
+    let mount_key = format!("{REMOTE_MOUNT_PATH_PREFIX}{name}");
+    if let Err(e) = ship
+        .control_table_mut()
+        .raw_config_set(&mount_key, "")
+        .await
+    {
+        log::warn!("[WARN] failed to clear {}: {}", mount_key, e);
+    }
+    if let Some(url) = url_to_clear {
+        for key in [
+            format!("last_pushed_seq:{url}"),
+            format!("last_pulled_seq:{url}"),
+        ] {
+            if let Err(e) = ship.control_table_mut().raw_config_set(&key, "").await {
+                log::warn!("[WARN] failed to clear {}: {}", key, e);
+            }
+        }
+    }
+
+    if purge {
+        log::info!("[OK] removed remote {} (with --purge)", name);
+    } else {
+        log::info!("[OK] removed remote {} (detached; data preserved)", name);
+    }
+    Ok(())
+}
+
+/// `pond remote list` / `pond backup list` -- print each remote with
+/// URL, mode, mount path, and the most recent push/pull watermarks.
+///
+/// `filter`:
+/// - `None`: show every remote.
+/// - `Some(BackupsOnly)`: show only push/both-mode attachments.
+/// - `Some(PullsOnly)`: show only pull-mode attachments.
+pub async fn list_remotes_command(
+    ship_context: &ShipContext,
+    filter: Option<RemoteListFilter>,
+) -> Result<()> {
+    let mut ship = ship_context.open_pond().await?;
+    let entries = list_remote_names(&mut ship).await?;
+
+    if entries.is_empty() {
+        let suggestion = match filter {
+            Some(RemoteListFilter::BackupsOnly) => {
+                "(no remotes; use `pond backup add <name> <url>` to attach one)"
+            }
+            _ => "(no remotes; use `pond remote add <name> <url> <path>` to attach one)",
+        };
+        println!("{}", suggestion);
+        return Ok(());
+    }
+
+    println!(
+        "{:<20} {:<60} {:<6} {:<24} {:>16} {:>16}",
+        "NAME", "URL", "MODE", "MOUNT", "LAST_PUSHED_SEQ", "LAST_PULLED_SEQ"
+    );
+    for name in entries {
+        let attachment = match load_remote_attachment(&mut ship, &name).await {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("[WARN] could not read /sys/remotes/{}: {}", name, e);
+                continue;
+            }
+        };
+        let mode = ship
+            .control_table()
+            .raw_config_get(&format!("{REMOTE_MODE_PREFIX}{name}"))
+            .await
+            .unwrap_or_default()
+            .unwrap_or_else(|| "push".to_string());
+        let parsed_mode = RemoteMode::parse(&mode).unwrap_or(RemoteMode::Push);
+        match filter {
+            Some(RemoteListFilter::BackupsOnly) if !parsed_mode.pushes() => continue,
+            _ => {}
+        }
+        let mount = ship
+            .control_table()
+            .raw_config_get(&format!("{REMOTE_MOUNT_PATH_PREFIX}{name}"))
+            .await
+            .unwrap_or_default()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "-".to_string());
+        let last_pushed = ship
+            .control_table()
+            .raw_config_get(&format!("last_pushed_seq:{}", attachment.url))
+            .await
+            .unwrap_or_default()
+            .unwrap_or_else(|| "-".to_string());
+        let last_pulled = ship
+            .control_table()
+            .raw_config_get(&format!("last_pulled_seq:{}", attachment.url))
+            .await
+            .unwrap_or_default()
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<20} {:<60} {:<6} {:<24} {:>16} {:>16}",
+            name, attachment.url, mode, mount, last_pushed, last_pulled
+        );
+    }
+    Ok(())
+}
+
+/// Read and parse the YAML for `<name>` from `/sys/remotes/<name>`.
+///
+/// Returns an error if the file does not exist or fails to parse.
+pub async fn load_remote_attachment(
+    ship: &mut steward::Steward,
+    name: &str,
+) -> Result<RemoteAttachment> {
+    validate_name(name)?;
+    let config_path = remote_config_path(name);
+    let name_owned = name.to_string();
+
+    let tx = ship
+        .begin_read(&steward::PondUserMetadata::new(vec![
+            "remote".to_string(),
+            "load".to_string(),
+            name_owned.clone(),
+        ]))
+        .await
+        .map_err(|e| anyhow!("failed to begin read transaction: {}", e))?;
+
+    let yaml_bytes = {
+        let fs = &*tx;
+        let root = fs
+            .root()
+            .await
+            .map_err(|e| anyhow!("failed to open root: {}", e))?;
+        if !root.exists(&config_path).await {
+            let _ = tx
+                .commit()
+                .await
+                .map_err(|e| anyhow!("failed to commit read tx: {}", e))?;
+            return Err(anyhow!("no remote named `{}` ({})", name, config_path));
+        }
+        root.read_file_path_to_vec(&config_path)
+            .await
+            .map_err(|e| anyhow!("failed to read {}: {}", config_path, e))?
+    };
+    let _ = tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("failed to commit read tx: {}", e))?;
+
+    let attachment: RemoteAttachment = RemoteAttachment::from_yaml_bytes(&yaml_bytes)
+        .map_err(|e| anyhow!("failed to parse {}: {}", config_path, e))?;
+    Ok(attachment)
+}
+
+/// List all remote names under `/sys/remotes/`.  Returns an empty Vec if
+/// `/sys/remotes/` does not exist.
+pub async fn list_remote_names(ship: &mut steward::Steward) -> Result<Vec<String>> {
+    use crate::common::FileInfoVisitor;
+    let tx = ship
+        .begin_read(&steward::PondUserMetadata::new(vec![
+            "remote".to_string(),
+            "list".to_string(),
+        ]))
+        .await
+        .map_err(|e| anyhow!("failed to begin read transaction: {}", e))?;
+
+    let names: Vec<String> = {
+        let fs = &*tx;
+        let root = fs
+            .root()
+            .await
+            .map_err(|e| anyhow!("failed to open root: {}", e))?;
+        if !root.exists(SYS_REMOTES_DIR).await {
+            let _ = tx
+                .commit()
+                .await
+                .map_err(|e| anyhow!("failed to commit read tx: {}", e))?;
+            return Ok(Vec::new());
+        }
+        let pattern = format!("{SYS_REMOTES_DIR}/*");
+        let mut visitor = FileInfoVisitor::new(true);
+        let infos = root
+            .visit_with_visitor(&pattern, &mut visitor)
+            .await
+            .map_err(|e| anyhow!("failed to list {}: {}", pattern, e))?;
+        infos
+            .into_iter()
+            .filter_map(|info| {
+                std::path::Path::new(&info.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    };
+    let _ = tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("failed to commit read tx: {}", e))?;
+    Ok(names)
+}
+
+/// Lookup the operating mode for `<name>`.  Defaults to `Push` if unset.
+pub async fn remote_mode_for(ship: &steward::Steward, name: &str) -> Result<RemoteMode> {
+    let raw = ship
+        .control_table()
+        .raw_config_get(&format!("{REMOTE_MODE_PREFIX}{name}"))
+        .await
+        .map_err(|e| anyhow!("failed to read remote mode for `{}`: {}", name, e))?;
+    match raw {
+        Some(s) if !s.is_empty() => {
+            RemoteMode::parse(&s).map_err(|e| anyhow!("invalid remote mode for `{}`: {}", name, e))
+        }
+        _ => Ok(RemoteMode::Push),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_name_accepts_simple() {
+        validate_name("origin").unwrap();
+        validate_name("backup-01").unwrap();
+        validate_name("s3_minio").unwrap();
+    }
+
+    #[test]
+    fn test_validate_name_rejects_bad() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("a/b").is_err());
+        assert!(validate_name(".hidden").is_err());
+        assert!(validate_name("has space").is_err());
+        assert!(validate_name("tab\there").is_err());
+    }
+
+    #[test]
+    fn test_remote_config_path_format() {
+        assert_eq!(remote_config_path("origin"), "/sys/remotes/origin");
+    }
+}

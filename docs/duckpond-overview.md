@@ -92,10 +92,10 @@ config:
       scope: "StationA"
 EOF
 
-pond mknod --config hydrovu.yaml /system/run/20-hydrovu
+pond mknod hydrovu /system/etc/20-hydrovu --config-path hydrovu.yaml
 
 # Execute data collection
-pond run /system/run/20-hydrovu collect
+pond run /system/etc/20-hydrovu collect
 
 # Configure remote backup
 pond mknod --config remote.yaml /system/run/10-remote
@@ -294,7 +294,7 @@ HydroVu API integration with factory-based execution:
 - **Incremental Collection**: Tracks last timestamps to avoid duplicates
 
 **Factory Configuration**: YAML-based device and parameter setup
-**Execution**: Via `pond run /system/run/20-hydrovu collect`
+**Execution**: Via `pond run /system/etc/20-hydrovu collect`
 
 #### `remote` - Backup & Replication System
 

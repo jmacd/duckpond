@@ -11,42 +11,57 @@
 #![allow(clippy::print_stdout)]
 
 use crate::common::ShipContext;
-use anyhow::{Context, Result, anyhow};
-use provider::FactoryRegistry;
-use provider::registry::ExecutionContext;
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
 
-/// Recent transaction record from control table query
+/// Recent transaction record from control table query.  Post-D2 the
+/// control table no longer carries `cli_args` / `error_message` /
+/// `transaction_type` columns; tx kind is inferred from the lifecycle
+/// records present and error text lives in `metadata_json`.
 #[derive(Debug, Deserialize)]
 struct RecentTransaction {
     txn_seq: i64,
     txn_id: String,
-    transaction_type: String,
-    cli_args: Option<String>,
+    tx_kind: String,
     started_at: Option<i64>,
     final_state: Option<String>,
     ended_at: Option<i64>,
-    error_message: Option<String>,
+    error_metadata: Option<String>,
     duration_ms: Option<i64>,
 }
 
-/// Transaction detail record from control table query
+/// Transaction detail record from control table query.  Post-D2 schema:
+/// post-commit record attributes (`parent_seq`, `execution_seq`,
+/// `factory_name`, `config_path`, `error_message`) live in
+/// `metadata_json`.
 #[derive(Debug, Deserialize)]
 struct TransactionDetail {
     txn_seq: i64,
     txn_id: String,
-    record_type: String,
-    timestamp: i64,
-    transaction_type: String,
-    cli_args: Option<String>,
-    data_fs_version: Option<i64>,
-    error_message: Option<String>,
-    duration_ms: Option<i64>,
-    parent_txn_seq: Option<i64>,
-    execution_seq: Option<i32>,
+    record_kind: String,
+    ts_micros: i64,
+    has_parent_seq: bool,
+    #[allow(dead_code)]
+    parent_seq: i64,
+    has_commit_kind: bool,
+    commit_kind: String,
+    has_duration_ms: bool,
+    duration_ms: i64,
+    metadata_json: String,
+}
+
+/// Decoded post-commit attributes packed by `record_post_commit_*` into
+/// `metadata_json` (see `steward::control_table::PostCommitMetadata`).
+#[derive(Debug, Default, Deserialize)]
+struct PostCommitMetadata {
+    #[serde(default)]
+    execution_seq: Option<i64>,
+    #[serde(default)]
     factory_name: Option<String>,
+    #[serde(default)]
     config_path: Option<String>,
+    #[serde(default)]
+    error_message: Option<String>,
 }
 
 /// Control command modes
@@ -58,8 +73,6 @@ pub enum ControlMode {
     Detail { txn_seq: i64 },
     /// Show incomplete operations (for recovery)
     Incomplete,
-    /// Sync with remote: retry failed pushes OR pull new bundles (based on factory mode)
-    Sync { config: Option<String> },
     /// Show pond configuration (ID, factory modes, metadata, settings)
     ShowConfig,
     /// Set a configuration value (key=value)
@@ -81,10 +94,6 @@ pub async fn control_command(ship_context: &ShipContext, mode: ControlMode) -> R
         }
         ControlMode::Incomplete => {
             show_incomplete_operations(control_table).await?;
-        }
-        ControlMode::Sync { config } => {
-            // Execute remote factory sync (push retry or pull new bundles)
-            execute_sync(ship_context, control_table, config).await?;
         }
         ControlMode::ShowConfig => {
             show_pond_config(control_table).await?;
@@ -110,37 +119,59 @@ async fn show_recent_transactions(
     // This ensures we see all committed transactions via Delta's latest _delta_log
     let ctx = control_table.session_context();
 
-    // Query recent transactions with their status
-    // First get the N most recent sequence numbers, then get all transactions for those sequences
-    // Display in chronological order (oldest first) for easier reading
-    // Query recent transactions with their status
-    // Show BOTH read and write transactions (control table shows all activity)
+    // Post-D2 lean schema lives at table "control" with columns:
+    //   pond_id, record_kind, txn_seq, txn_id,
+    //   commit_kind, has_commit_kind,
+    //   parent_seq, has_parent_seq,
+    //   duration_ms, has_duration_ms,
+    //   ts_micros, metadata_json
+    //
+    // Transaction kind is inferred from lifecycle records:
+    //   * a tx with a `data_committed` record is a "write"
+    //   * any other tx (begin -> completed/failed only) is a "read"
+    //
+    // Setting records (record_kind='setting') and post-commit records
+    // (parent_seq present) are excluded from this view.
     let sql = format!(
         r#"
-        WITH recent_seqs AS (
+        WITH user_txns AS (
+            SELECT *
+            FROM control
+            WHERE record_kind <> 'setting'
+              AND NOT (has_parent_seq = true AND parent_seq <> txn_seq)
+        ),
+        recent_seqs AS (
             SELECT DISTINCT txn_seq
-            FROM transactions
-            WHERE transaction_type IN ('read', 'write')
+            FROM user_txns
+            WHERE txn_seq > 0
             ORDER BY txn_seq DESC
-            LIMIT {}
+            LIMIT {limit}
         )
-        SELECT 
+        SELECT
             t.txn_seq,
             t.txn_id,
-            t.transaction_type,
-            MAX(CASE WHEN t.record_type = 'begin' THEN t.cli_args ELSE NULL END) as cli_args,
-            MAX(CASE WHEN t.record_type = 'begin' THEN t.timestamp ELSE NULL END) as started_at,
-            MAX(CASE WHEN t.record_type IN ('data_committed', 'completed', 'failed') THEN t.record_type ELSE NULL END) as final_state,
-            MAX(CASE WHEN t.record_type IN ('data_committed', 'completed', 'failed') THEN t.timestamp ELSE NULL END) as ended_at,
-            MAX(CASE WHEN t.record_type = 'failed' THEN t.error_message ELSE NULL END) as error_message,
-            MAX(t.duration_ms) as duration_ms
-        FROM transactions t
-        WHERE t.transaction_type IN ('read', 'write')
-          AND t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
-        GROUP BY t.txn_seq, t.txn_id, t.transaction_type
+            CASE
+                WHEN MAX(CASE WHEN t.record_kind = 'data_committed' THEN 1 ELSE 0 END) = 1
+                    THEN 'write'
+                ELSE 'read'
+            END AS tx_kind,
+            MAX(CASE WHEN t.record_kind = 'begin' THEN t.ts_micros END) AS started_at,
+            MAX(CASE
+                WHEN t.record_kind IN ('data_committed', 'completed', 'failed')
+                    THEN t.record_kind
+            END) AS final_state,
+            MAX(CASE
+                WHEN t.record_kind IN ('data_committed', 'completed', 'failed')
+                    THEN t.ts_micros
+            END) AS ended_at,
+            MAX(CASE WHEN t.record_kind = 'failed' THEN t.metadata_json END) AS error_metadata,
+            MAX(CASE WHEN t.has_duration_ms = true THEN t.duration_ms END) AS duration_ms
+        FROM user_txns t
+        WHERE t.txn_seq IN (SELECT txn_seq FROM recent_seqs)
+        GROUP BY t.txn_seq, t.txn_id
         ORDER BY t.txn_seq ASC, started_at ASC
         "#,
-        limit
+        limit = limit
     );
 
     let df = ctx
@@ -173,16 +204,6 @@ async fn show_recent_transactions(
 
     // Format output
     for txn in transactions {
-        // Extract CLI args from JSON string
-        let cli_args = if let Some(json_str) = &txn.cli_args {
-            match serde_json::from_str::<Vec<String>>(json_str) {
-                Ok(args) => args.join(" "),
-                Err(_) => "<invalid JSON>".to_string(),
-            }
-        } else {
-            "<no command>".to_string()
-        };
-
         // Format timestamps
         let started_at = txn
             .started_at
@@ -211,18 +232,24 @@ async fn show_recent_transactions(
 
         println!(
             "+- Transaction {} ({}) -----------------------------",
-            txn.txn_seq, txn.transaction_type
+            txn.txn_seq, txn.tx_kind
         );
         println!("|  Status       : {}", status);
         println!("|  UUID         : {}", txn.txn_id);
         println!("|  Started      : {}", started_at);
         println!("|  Ended        : {}", ended_at);
         println!("|  Duration     : {}", duration_str);
-        println!("|  Command      : {}", cli_args);
+        // CLI args are no longer captured in the post-D2 lean control
+        // table.  Source the original command from data Delta commit
+        // metadata (`pond_txn`) if it is needed.
 
-        // Show error if present
-        if let Some(error) = &txn.error_message {
-            println!("|  Error        : {}", truncate_error(error));
+        // Show error if present (parsed from metadata_json on Failed records)
+        if let Some(reason) = txn
+            .error_metadata
+            .as_deref()
+            .and_then(extract_failure_reason)
+        {
+            println!("|  Error        : {}", truncate_error(&reason));
         }
 
         println!("+----------------------------------------------------------------");
@@ -243,31 +270,36 @@ async fn show_transaction_detail(
     // Use control table's SessionContext (following tlogfs pattern)
     let ctx = control_table.session_context();
 
-    // Query all records for this transaction (main transaction + post-commit tasks)
+    // Post-D2 lean schema: post-commit records carry the parent
+    // transaction's seq in `parent_seq` (with `has_parent_seq=true`).
+    // Main-transaction records have `has_parent_seq=false`.  Order the
+    // result so main records appear first, then post-commit records
+    // grouped by their original time ordering.
     let sql = format!(
         r#"
-        SELECT 
+        SELECT
             txn_seq,
             txn_id,
-            record_type,
-            timestamp,
-            transaction_type,
-            cli_args,
-            data_fs_version,
-            error_message,
+            record_kind,
+            ts_micros,
+            has_parent_seq,
+            parent_seq,
+            has_commit_kind,
+            commit_kind,
+            has_duration_ms,
             duration_ms,
-            parent_txn_seq,
-            execution_seq,
-            factory_name,
-            config_path
-        FROM transactions
-        WHERE txn_seq = {} OR parent_txn_seq = {}
-        ORDER BY 
-            CASE WHEN parent_txn_seq IS NULL THEN 0 ELSE 1 END,  -- Main txn first
-            execution_seq NULLS FIRST,
-            timestamp
+            metadata_json
+        FROM control
+        WHERE record_kind <> 'setting'
+          AND (
+              (txn_seq = {seq} AND has_parent_seq = false)
+              OR (has_parent_seq = true AND parent_seq = {seq})
+          )
+        ORDER BY
+            CASE WHEN has_parent_seq = false THEN 0 ELSE 1 END,
+            ts_micros
         "#,
-        txn_seq, txn_seq
+        seq = txn_seq
     );
 
     let df = ctx
@@ -306,10 +338,9 @@ async fn show_transaction_detail(
     for detail in details {
         let current_txn_seq = detail.txn_seq;
         let txn_id = &detail.txn_id;
-        let record_type = detail.record_type.as_str();
-        let timestamp = format_timestamp(detail.timestamp);
-        let txn_type = &detail.transaction_type;
-        let is_post_commit = detail.parent_txn_seq.is_some();
+        let record_kind = detail.record_kind.as_str();
+        let timestamp = format_timestamp(detail.ts_micros);
+        let is_post_commit = detail.has_parent_seq;
 
         // Section header for post-commit tasks
         if is_post_commit && !in_post_commit {
@@ -317,105 +348,94 @@ async fn show_transaction_detail(
             println!("\n=== POST-COMMIT TASKS ===============================================\n");
         }
 
-        match record_type {
-            "begin" => {
-                // Extract CLI args from JSON string
-                let cli_args = if let Some(json_str) = &detail.cli_args {
-                    match serde_json::from_str::<Vec<String>>(json_str) {
-                        Ok(args) => args.join(" "),
-                        Err(_) => "<invalid JSON>".to_string(),
-                    }
-                } else {
-                    "<no command>".to_string()
-                };
+        let duration_str = || -> String {
+            if detail.has_duration_ms {
+                format!("{}ms", detail.duration_ms)
+            } else {
+                "N/A".to_string()
+            }
+        };
 
-                println!(
-                    "+- BEGIN {} Transaction ----------------------------------",
-                    txn_type
-                );
+        match record_kind {
+            "begin" => {
+                println!("+- BEGIN Transaction --------------------------------------");
                 println!("|  Sequence     : {}", current_txn_seq);
                 println!("|  UUID         : {}", txn_id);
                 println!("|  Timestamp    : {}", timestamp);
-                println!("|  Command      : {}", cli_args);
+                // CLI args are not persisted in the post-D2 control table;
+                // see `pond_txn` in the data Delta commit metadata for
+                // the original command.
                 println!("+----------------------------------------------------------------");
             }
             "data_committed" => {
-                let version = detail.data_fs_version.unwrap_or(0);
-                let duration = detail
-                    .duration_ms
-                    .map(|d| format!("{}ms", d))
-                    .unwrap_or_else(|| "N/A".to_string());
+                let version = parse_data_delta_version(&detail.metadata_json);
+                let commit_kind = if detail.has_commit_kind {
+                    detail.commit_kind.as_str()
+                } else {
+                    "write"
+                };
                 println!(
-                    "|  [OK] DATA COMMITTED at {} (version {}, duration: {})",
-                    timestamp, version, duration
+                    "|  [OK] DATA COMMITTED at {} ({}, version {}, duration: {})",
+                    timestamp,
+                    commit_kind,
+                    version,
+                    duration_str()
                 );
             }
             "completed" => {
-                let duration = detail
-                    .duration_ms
-                    .map(|d| format!("{}ms", d))
-                    .unwrap_or_else(|| "N/A".to_string());
                 println!(
                     "|  [OK] COMPLETED at {} (duration: {})",
-                    timestamp, duration
+                    timestamp,
+                    duration_str()
                 );
             }
             "failed" => {
-                let duration = detail
-                    .duration_ms
-                    .map(|d| format!("{}ms", d))
-                    .unwrap_or_else(|| "N/A".to_string());
-                let error = detail
-                    .error_message
-                    .as_deref()
-                    .unwrap_or("<no error message>");
-                println!("|  [FAIL] FAILED at {} (duration: {})", timestamp, duration);
+                let error = extract_failure_reason(&detail.metadata_json)
+                    .unwrap_or_else(|| "<no error message>".to_string());
+                println!(
+                    "|  [FAIL] FAILED at {} (duration: {})",
+                    timestamp,
+                    duration_str()
+                );
                 println!("|  Error: {}", error);
             }
-            "post_commit_pending" => {
-                let _exec_seq = detail.execution_seq.unwrap_or(0);
-                let factory = detail.factory_name.as_deref().unwrap_or("<unknown>");
-                let config = detail.config_path.as_deref().unwrap_or("<unknown>");
+            "post_push_pending" => {
+                let pc = parse_post_commit_metadata(&detail.metadata_json);
+                let exec_seq = pc.execution_seq.unwrap_or(0);
+                let factory = pc.factory_name.as_deref().unwrap_or("<unknown>");
+                let config = pc.config_path.as_deref().unwrap_or("<unknown>");
                 println!(
                     "+- POST-COMMIT TASK #{} PENDING ------------------------------",
-                    _exec_seq
+                    exec_seq
                 );
                 println!("|  Factory      : {}", factory);
                 println!("|  Config       : {}", config);
                 println!("|  Timestamp    : {}", timestamp);
             }
-            "post_commit_started" => {
-                let _exec_seq = detail.execution_seq.unwrap_or(0);
+            "post_push_started" => {
                 println!("|  [RUN] STARTED at {}", timestamp);
             }
-            "post_commit_completed" => {
-                let _exec_seq = detail.execution_seq.unwrap_or(0);
-                let duration = detail
-                    .duration_ms
-                    .map(|d| format!("{}ms", d))
-                    .unwrap_or_else(|| "N/A".to_string());
+            "post_push_completed" => {
                 println!(
                     "|  [OK] COMPLETED at {} (duration: {})",
-                    timestamp, duration
+                    timestamp,
+                    duration_str()
                 );
                 println!("+----------------------------------------------------------------");
             }
-            "post_commit_failed" => {
-                let _exec_seq = detail.execution_seq.unwrap_or(0);
-                let duration = detail
-                    .duration_ms
-                    .map(|d| format!("{}ms", d))
-                    .unwrap_or_else(|| "N/A".to_string());
-                let error = detail
-                    .error_message
-                    .as_deref()
-                    .unwrap_or("<no error message>");
-                println!("|  [FAIL] FAILED at {} (duration: {})", timestamp, duration);
+            "post_push_failed" => {
+                let pc = parse_post_commit_metadata(&detail.metadata_json);
+                let error = pc.error_message.as_deref().unwrap_or("<no error message>");
+                println!(
+                    "|  [FAIL] FAILED at {} (duration: {})",
+                    timestamp,
+                    duration_str()
+                );
                 println!("|  Error: {}", error);
                 println!("+----------------------------------------------------------------");
             }
             _ => {
-                println!("|  {} at {}", record_type, timestamp);
+                println!("|  {} at {}", record_kind, timestamp);
             }
         }
     }
@@ -424,37 +444,25 @@ async fn show_transaction_detail(
     Ok(())
 }
 
-/// Execute remote factory sync operation
-///
-/// This finds factory configurations and executes them, regardless of their mode.
-/// The factory's config determines behavior:
-/// - push mode factory: Retries failed pushes
-/// - pull mode factory: Pulls new bundles and applies them
-async fn execute_sync(
-    ship_context: &ShipContext,
-    _control_table: &mut steward::ControlTable,
-    config: Option<String>,
-) -> Result<()> {
-    // Delegate to sync_command with no name (legacy: syncs hardcoded path)
-    sync_command(ship_context, None, config).await
+/// Extract `reason` field from a `Failed` record's `metadata_json` payload.
+fn extract_failure_reason(json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
 }
 
-/// Resolve a factory short name or path to a full pond path.
-///
-/// - Full paths (starting with `/`) are returned as-is
-/// - Short names are resolved to `/system/run/{name}` (auto-executing factories)
-///   or `/system/etc/{name}` (manually-triggered factories)
-///
-/// For `pond sync`, only `/system/run/` is scanned, so the fallback
-/// to `/system/etc/` only matters for `pond run` short names.
-fn resolve_factory_path(name: &str) -> String {
-    if name.starts_with('/') {
-        name.to_string()
-    } else {
-        // pond sync only looks in /system/run/ anyway;
-        // pond run will try both at runtime via resolve_short_factory_name().
-        format!("/system/run/{}", name)
-    }
+/// Extract `data_delta_version` from a `DataCommitted` record's
+/// `metadata_json`.  Returns 0 if the field is missing (older records).
+fn parse_data_delta_version(json: &str) -> i64 {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("data_delta_version").and_then(|n| n.as_i64()))
+        .unwrap_or(0)
+}
+
+/// Decode the post-commit attribute payload from `metadata_json`.
+fn parse_post_commit_metadata(json: &str) -> PostCommitMetadata {
+    serde_json::from_str(json).unwrap_or_default()
 }
 
 /// System directories where factory nodes live.
@@ -501,239 +509,6 @@ pub async fn resolve_short_factory_name(ship_context: &ShipContext, name: &str) 
     Ok(fallback)
 }
 
-/// Sync with remote storage: retry pushes, pull new bundles.
-///
-/// - If `config` is provided, use it directly (recovery mode, no pond needed).
-/// - If `name` is provided, sync just that factory (short name or full path).
-/// - If neither, scan `/system/run/` for all remote factories and sync each.
-pub async fn sync_command(
-    ship_context: &ShipContext,
-    name: Option<String>,
-    config: Option<String>,
-) -> Result<()> {
-    // Recovery mode: --config with base64 encoded config
-    if let Some(config_value) = config {
-        let mut ship = ship_context.open_pond().await?;
-        let control_table = ship.control_table_mut();
-        control_table.print_banner();
-
-        log::info!("[SYNC] Executing recovery sync with --config...");
-
-        let mut ship2 = ship_context.open_pond().await?;
-        let mut tx = ship2
-            .begin_read(&steward::PondUserMetadata::new(vec!["sync".to_string()]))
-            .await?;
-
-        match execute_sync_with_config(&mut tx, control_table, config_value).await {
-            Ok(()) => {
-                _ = tx.commit().await?;
-                log::info!("[OK] Recovery sync completed");
-                return Ok(());
-            }
-            Err(e) => return Err(tx.abort(&e).await.into()),
-        }
-    }
-
-    // Determine which factories to sync
-    let factory_paths = if let Some(ref n) = name {
-        vec![resolve_factory_path(n)]
-    } else {
-        // Scan /system/run/ for all remote factories
-        discover_syncable_factories(ship_context).await?
-    };
-
-    if factory_paths.is_empty() {
-        log::info!("[SYNC] No remote factories found in /system/run/");
-        println!("No remote factories found in /system/run/");
-        return Ok(());
-    }
-
-    // Sync each factory
-    for path in &factory_paths {
-        log::info!("[SYNC] Syncing factory: {}", path);
-        sync_single_factory(ship_context, path).await?;
-    }
-
-    log::info!(
-        "[OK] Sync completed for {} factory(ies)",
-        factory_paths.len()
-    );
-    Ok(())
-}
-
-/// Discover all syncable (remote) factories in /system/run/
-async fn discover_syncable_factories(ship_context: &ShipContext) -> Result<Vec<String>> {
-    let mut ship = ship_context.open_pond().await?;
-    let tx = ship
-        .begin_read(&steward::PondUserMetadata::new(vec![
-            "sync-discover".to_string(),
-        ]))
-        .await?;
-
-    let root = tx.root().await?;
-
-    // Use collect_matches to find all entries in /system/run/*
-    let matches = match root.collect_matches("/system/run/*").await {
-        Ok(m) => m,
-        Err(_) => {
-            _ = tx.commit().await?;
-            return Ok(vec![]);
-        }
-    };
-
-    // Check each entry to see if it's a remote factory
-    let mut factory_paths = Vec::new();
-    for (node_path, _captures) in &matches {
-        let path = node_path.path().to_string_lossy().to_string();
-        let node_id = node_path.id();
-        if let Ok(Some(factory_name)) = tx.get_factory_for_node(node_id).await
-            && factory_name == "remote"
-        {
-            factory_paths.push(path);
-        }
-    }
-
-    _ = tx.commit().await?;
-    Ok(factory_paths)
-}
-
-/// Sync a single factory by its full path
-async fn sync_single_factory(ship_context: &ShipContext, factory_path: &str) -> Result<()> {
-    let mut ship = ship_context.open_pond().await?;
-    let control_table = ship.control_table_mut();
-    control_table.print_banner();
-
-    let mut ship2 = ship_context.open_pond().await?;
-    let mut tx = ship2
-        .begin_read(&steward::PondUserMetadata::new(vec!["sync".to_string()]))
-        .await?;
-
-    match execute_sync_for_path(&mut tx, control_table, factory_path).await {
-        Ok(()) => {
-            _ = tx.commit().await?;
-            log::info!("[OK] Sync completed for: {}", factory_path);
-            Ok(())
-        }
-        Err(e) => Err(tx.abort(&e).await.into()),
-    }
-}
-
-/// Execute sync using base64 recovery config
-async fn execute_sync_with_config(
-    tx: &mut steward::Transaction<'_>,
-    control_table: &mut steward::ControlTable,
-    encoded: String,
-) -> Result<()> {
-    log::info!("Using remote config from --config argument");
-    let repl_config = remote::ReplicationConfig::from_base64(&encoded)
-        .map_err(|e| anyhow!("Failed to decode base64 config: {}", e))?;
-
-    let config = repl_config.remote;
-    let pond_metadata = control_table.get_pond_metadata().clone();
-
-    let provider_context = tx.provider_context()?;
-    let factory_context = provider::FactoryContext::with_metadata(
-        provider_context,
-        tinyfs::FileID::root(),
-        pond_metadata,
-    );
-
-    let config_str = serde_yaml::to_string(&config)
-        .map_err(|e| anyhow!("Failed to serialize remote config: {}", e))?;
-    let config_bytes = config_str.as_bytes().to_vec();
-
-    let args = vec!["pull".to_string()];
-    FactoryRegistry::execute::<tlogfs::TLogFSError>(
-        "remote",
-        &config_bytes,
-        factory_context,
-        ExecutionContext::control_writer(args),
-    )
-    .await
-    .map_err(|e| anyhow!("Remote factory execution failed: {}", e))?;
-
-    Ok(())
-}
-
-/// Execute sync for a specific factory path
-async fn execute_sync_for_path(
-    tx: &mut steward::Transaction<'_>,
-    control_table: &mut steward::ControlTable,
-    factory_path: &str,
-) -> Result<()> {
-    log::info!("Looking for remote factory at: {}", factory_path);
-
-    let root = tx.root().await?;
-
-    let (_parent_wd, lookup_result) = root
-        .resolve_path(factory_path)
-        .await
-        .with_context(|| format!("Failed to resolve path: {}", factory_path))?;
-
-    let config_node = match lookup_result {
-        tinyfs::Lookup::Found(node) => node,
-        tinyfs::Lookup::NotFound(_, _) => {
-            return Err(anyhow!("Factory configuration not found: {}", factory_path));
-        }
-        tinyfs::Lookup::Empty(_) => {
-            return Err(anyhow!("Invalid path: {}", factory_path));
-        }
-    };
-
-    let node_id = config_node.id();
-
-    let factory_name = tx
-        .get_factory_for_node(node_id)
-        .await
-        .with_context(|| format!("Failed to get factory for: {}", factory_path))?
-        .ok_or_else(|| {
-            anyhow!(
-                "Factory configuration has no associated factory: {}",
-                factory_path
-            )
-        })?;
-
-    let config_bytes = {
-        let mut reader = root
-            .async_reader_path(factory_path)
-            .await
-            .with_context(|| format!("Failed to open file: {}", factory_path))?;
-
-        let mut buffer = Vec::new();
-        _ = reader
-            .read_to_end(&mut buffer)
-            .await
-            .with_context(|| format!("Failed to read file: {}", factory_path))?;
-        buffer
-    };
-
-    // Get factory mode and pond metadata
-    let factory_mode = control_table
-        .get_factory_mode(&factory_name)
-        .with_context(|| format!("Factory mode not set for: {}", factory_name))?;
-
-    let pond_metadata = control_table.get_pond_metadata().clone();
-
-    // Create factory context for ControlWriter mode
-    let provider_context = tx.provider_context()?;
-    let factory_context =
-        provider::FactoryContext::with_metadata(provider_context, node_id, pond_metadata);
-
-    // Pass factory mode as arg
-    let args = vec![factory_mode];
-
-    // Execute the factory in ControlWriter mode
-    FactoryRegistry::execute::<tlogfs::TLogFSError>(
-        &factory_name,
-        &config_bytes,
-        factory_context,
-        ExecutionContext::control_writer(args),
-    )
-    .await
-    .map_err(|e| anyhow!("Factory execution failed: {}", e))?;
-
-    Ok(())
-}
 /// Show incomplete operations for recovery
 async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -> Result<()> {
     // Control table automatically sees latest Delta commits via DataFusion
@@ -773,10 +548,9 @@ async fn show_incomplete_operations(control_table: &mut steward::ControlTable) -
             println!("|  Data Version : N/A (crashed before data commit)");
         }
 
-        // Display command from metadata
-        if !txn_meta.user.args.is_empty() {
-            println!("|  Command      : {}", txn_meta.user.args.join(" "));
-        }
+        // CLI args are no longer captured by the post-D2 control table;
+        // see the corresponding `pond_txn` Delta commit metadata if the
+        // original command is needed for diagnostics.
 
         println!("+----------------------------------------------------------------");
         println!();

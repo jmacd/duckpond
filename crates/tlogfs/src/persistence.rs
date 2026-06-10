@@ -8,7 +8,7 @@ use super::schema::{DirectoryEntry, ForArrow, OplogEntry};
 use super::symlink::OpLogSymlink;
 use super::transaction_guard::TransactionGuard;
 use crate::txn_metadata::{PondTxnMetadata, PondUserMetadata};
-use arrow::array::DictionaryArray;
+use arrow::array::{Array, DictionaryArray};
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::UInt16Type;
 use async_trait::async_trait;
@@ -37,7 +37,15 @@ pub struct OpLogPersistence {
     pub(crate) table: DeltaTable,
     pub(crate) fs: Option<FS>,
     pub(crate) state: Option<State>,
-    pub(crate) last_txn_seq: i64, // Track last committed transaction sequence for validation
+    /// Per-pond_id transaction-sequence allocator: `pond_id` -> last
+    /// committed `txn_seq` for that pond.  Each pond_id has its own seq
+    /// space.  Only the LOCAL pond (`self.pond_id`) is advanced by
+    /// `begin_write`/`commit`; foreign pond_ids appear here only via
+    /// cross-pond import (`sync_last_txn_seq`).  This realizes the
+    /// design's per-pond_id namespaced seq spaces at the data-table
+    /// layer: importing a fast foreign producer no longer inflates the
+    /// local pond's own seq numbering or leaves gaps in its history.
+    pub(crate) seqs: HashMap<String, i64>,
     /// Transaction state for enforcing single-writer pattern (shared with tinyfs)
     pub(crate) txn_state: Arc<TinyFsTransactionState>,
     /// Options for large file storage (compression, etc.)
@@ -103,33 +111,21 @@ pub struct InnerState {
     /// Used by cross-pond import to register imported files in the same
     /// Delta commit as the normal OpLog records. Each entry is (path, size, part_id).
     external_add_actions: Vec<ExternalAddAction>,
-    /// Import metadata to include in the Delta commit for steward to process.
-    /// Records which foreign partitions were imported, keyed by factory node_id.
-    import_metadata: Vec<ImportPartitionRecord>,
 }
 
 /// An external parquet file to register as a Delta Add action at commit time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalAddAction {
-    /// Relative path in the object store (e.g., "part_id=<uuid>/file.parquet")
+    /// Relative path in the object store, e.g.
+    /// `"pond_id=<uuid>/part_id=<uuid>/file.parquet"` (D5+).
     pub path: String,
     /// File size in bytes
     pub size: i64,
-    /// Partition column value
+    /// `pond_id` partition value (UUID of the owning pond; may differ
+    /// from the local pond for cross-pond import).
+    pub pond_id: String,
+    /// `part_id` partition value (UUID of the parent directory).
     pub part_id: String,
-}
-
-/// Import partition metadata stored in Delta commit for steward processing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportPartitionRecord {
-    /// Factory node UUID (stable identifier)
-    pub factory_node_id: String,
-    /// Foreign partition ID
-    pub foreign_part_id: String,
-    /// Foreign pond UUID
-    pub foreign_pond_id: String,
-    /// Highest foreign transaction sequence imported (0 = initial registration)
-    pub watermark_txn_seq: i64,
 }
 
 #[derive(Clone)]
@@ -160,6 +156,23 @@ pub struct State {
 // Re-export TableProviderKey from provider for backward compatibility
 pub use provider::TableProviderKey;
 
+/// One reconstructed write transaction recovered from the data Delta
+/// table's commit history by [`OpLogPersistence::reconstruct_txn_history`].
+///
+/// Carries enough to rebuild the control table's lifecycle records:
+/// the original `pond_txn` metadata (txn_seq, txn_id, CLI args,
+/// pond_id), the Delta version the commit landed at, and the commit
+/// timestamp in microseconds.
+#[derive(Debug, Clone)]
+pub struct ReconstructedTxn {
+    /// The `pond_txn` metadata stamped on the Delta commit.
+    pub meta: PondTxnMetadata,
+    /// The Delta Lake version at which this commit landed.
+    pub delta_version: i64,
+    /// Commit timestamp in microseconds since the Unix epoch.
+    pub timestamp_micros: i64,
+}
+
 impl OpLogPersistence {
     /// Get the Delta table for query operations
     #[must_use]
@@ -173,19 +186,222 @@ impl OpLogPersistence {
         self.table = table;
     }
 
-    /// Get the last committed transaction sequence number
+    /// Local pond's last committed transaction sequence (0 if none).
+    fn local_seq(&self) -> i64 {
+        self.seqs.get(&self.pond_id).copied().unwrap_or(0)
+    }
+
+    /// Set the local pond's last committed transaction sequence.
+    fn set_local_seq(&mut self, seq: i64) {
+        let _ = self.seqs.insert(self.pond_id.clone(), seq);
+    }
+
+    /// Get the last committed transaction sequence number for the LOCAL
+    /// pond.
     ///
     /// This is the authoritative source for the current transaction sequence.
     /// Use this to determine the next sequence number: `last_txn_seq() + 1`
     #[must_use]
     pub fn last_txn_seq(&self) -> i64 {
-        self.last_txn_seq
+        self.local_seq()
+    }
+
+    /// Get the last committed transaction sequence number for an arbitrary
+    /// `pond_id` (0 if that pond has no committed rows here).  Foreign
+    /// pond_ids are populated by cross-pond import.
+    #[must_use]
+    pub fn last_txn_seq_for(&self, pond_id: &str) -> i64 {
+        self.seqs.get(pond_id).copied().unwrap_or(0)
+    }
+
+    /// Advance the in-memory per-pond seq allocator for `pond_id` to `seq`
+    /// if it is greater than the current value.  No-op otherwise.  Used by
+    /// the sync-remote adapter after `apply_pulled_bundle` mirrors a Delta
+    /// commit into the local data table: the on-disk commit metadata
+    /// carries the new `txn_seq` (and is picked up by the next
+    /// `open_or_create`), but the in-memory value must be advanced too.
+    ///
+    /// Because the allocator is per-pond_id, advancing a FOREIGN pond's
+    /// seq (cross-pond import) does not disturb the LOCAL pond's seq
+    /// space: local writes continue from `last_txn_seq()` with no gaps.
+    /// For a mirror restart (`pond_id == self.pond_id`) this advances the
+    /// local allocator as required.
+    pub fn sync_last_txn_seq(&mut self, pond_id: &str, seq: i64) {
+        let entry = self.seqs.entry(pond_id.to_string()).or_insert(0);
+        if seq > *entry {
+            debug!(
+                "Advancing OpLogPersistence seq[{}] {} -> {} (apply_pulled_bundle)",
+                pond_id, *entry, seq
+            );
+            *entry = seq;
+        }
     }
 
     /// Get the pond identity UUID
     #[must_use]
     pub fn pond_id(&self) -> &str {
         &self.pond_id
+    }
+
+    /// Read the pond identity from a Delta data table without fully
+    /// instantiating an [`OpLogPersistence`].  Returns `Ok(Some(id))`
+    /// when the table holds at least one Add action and we can
+    /// identify the local pond's id.
+    ///
+    /// Returns `Ok(None)` when no Delta table exists at `path`, when
+    /// the table exists but has no Add actions yet (a restoration
+    /// scaffold awaiting its first bundle), or when the table is
+    /// present but lacks a `partition.pond_id` column (a pre-D5
+    /// layout already refused by [`open_or_create`]; we simply
+    /// decline to recover identity from such a table).
+    ///
+    /// When multiple distinct `pond_id` values are present (the
+    /// cross-pond import case, D5.7b), we walk the Delta commit
+    /// history to find a commit that was NOT produced by
+    /// `apply_pulled_bundle` (i.e., a local-origin commit), and
+    /// return that commit's `pond_id`.  This identifies which of the
+    /// pond_ids in the data table is the local one.  If only foreign
+    /// commits are found (a brand-new restored pond that hasn't yet
+    /// done any local writes), we return `Ok(None)` so the caller
+    /// can fall back to the control table cache.
+    pub async fn peek_pond_id<P: AsRef<Path>>(path: P) -> Result<Option<String>, TLogFSError> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let url = Url::from_directory_path(path.as_ref())
+            .or_else(|_| Url::from_file_path(path.as_ref()))
+            .map_err(|_| {
+                TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str))
+            })?;
+
+        let table = match deltalake::open_table(url).await {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+
+        let snapshot = match table.snapshot() {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+
+        let batch = snapshot.add_actions_table(true)?;
+        if batch.num_rows() == 0 {
+            return Ok(None);
+        }
+
+        let Some(col_idx) = batch.schema().index_of("partition.pond_id").ok() else {
+            return Ok(None);
+        };
+        let array = batch
+            .column(col_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                TLogFSError::Internal("partition.pond_id column is not a StringArray".to_string())
+            })?;
+
+        let mut unique: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for i in 0..array.len() {
+            if !array.is_null(i) {
+                let _inserted = unique.insert(array.value(i).to_string());
+            }
+        }
+
+        match unique.len() {
+            0 => Ok(None),
+            1 => Ok(unique.into_iter().next()),
+            _ => {
+                // Cross-pond import: multiple pond_ids share this data
+                // table.  Walk the Delta commit history (newest first)
+                // looking for a commit whose user.args do NOT mark it
+                // as `apply_pulled_bundle` -- that's a local-origin
+                // commit and its stamped pond_id is the local one.
+                let history = table.history(None).await?;
+                // history is an iterator newest-first; collect so we
+                // can scan in reverse order (oldest-first) for the
+                // first local-origin commit.
+                let mut commits: Vec<CommitInfo> = history.collect();
+                commits.reverse();
+                for commit in &commits {
+                    let Some(meta) = PondTxnMetadata::from_delta_metadata(&commit.info) else {
+                        continue;
+                    };
+                    if meta.pond_id.is_empty() {
+                        continue;
+                    }
+                    let is_apply_pulled = meta.user.args.len() >= 2
+                        && meta.user.args[0] == "internal"
+                        && meta.user.args[1] == "apply_pulled_bundle";
+                    if !is_apply_pulled {
+                        return Ok(Some(meta.pond_id));
+                    }
+                }
+                // All commits are foreign-applied (no local writes yet
+                // beyond bundle replay).  Let the caller fall back to
+                // the control table cache.
+                Ok(None)
+            }
+        }
+    }
+
+    /// Reconstruct the write-transaction history of the data Delta table
+    /// at `path` from its commit log, for `pond rebuild-control`.
+    ///
+    /// Walks the Delta commit history (which carries a `pond_txn`
+    /// metadata blob on every steward write commit) and returns one
+    /// [`ReconstructedTxn`] per commit that carries such metadata,
+    /// sorted ascending by `txn_seq`.  Commits without `pond_txn`
+    /// (the initial table `CREATE`, compaction/optimize commits, etc.)
+    /// are skipped but still consume a version slot, so the derived
+    /// `delta_version` stays correct across them.
+    ///
+    /// `delta_version` is the actual Delta Lake version at which the
+    /// commit landed (derived from the table's latest version and the
+    /// newest-first ordering of history).  Note that `create_pond`
+    /// records the bootstrap txn's `data_delta_version` as `0` even
+    /// though its physical commit is version 1; callers that need to
+    /// reproduce that convention should special-case the bootstrap.
+    ///
+    /// Returns an empty vec if the table is missing, unreadable, or
+    /// carries no `pond_txn` commits.
+    pub async fn reconstruct_txn_history<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<Vec<ReconstructedTxn>, TLogFSError> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let url = Url::from_directory_path(path.as_ref())
+            .or_else(|_| Url::from_file_path(path.as_ref()))
+            .map_err(|_| {
+                TLogFSError::Internal(format!("Failed to create URL from path: {}", path_str))
+            })?;
+
+        let table = match deltalake::open_table(url).await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let Some(latest) = table.version() else {
+            return Ok(Vec::new());
+        };
+
+        // `history` is newest-first; the i-th entry is at version
+        // `latest - i` (every Delta version has exactly one commit).
+        let history: Vec<CommitInfo> = table.history(None).await?.collect();
+        let mut out = Vec::new();
+        for (i, commit) in history.iter().enumerate() {
+            let version = latest - i as i64;
+            let Some(meta) = PondTxnMetadata::from_delta_metadata(&commit.info) else {
+                continue;
+            };
+            // Delta commit timestamps are milliseconds since epoch;
+            // OplogEntry / control records use microseconds.
+            let timestamp_micros = commit.timestamp.unwrap_or(0).saturating_mul(1000);
+            out.push(ReconstructedTxn {
+                meta,
+                delta_version: version,
+                timestamp_micros,
+            });
+        }
+
+        out.sort_by_key(|t| t.meta.txn_seq);
+        Ok(out)
     }
 
     /// Creates a new OpLogPersistence instance with a new table and initializes root
@@ -227,7 +443,7 @@ impl OpLogPersistence {
     /// Test-only helper: Begin a transaction with automatic sequence numbering.
     #[cfg(test)]
     pub async fn begin_test(&mut self) -> Result<TransactionGuard<'_>, TLogFSError> {
-        let next_seq = self.last_txn_seq + 1;
+        let next_seq = self.local_seq() + 1;
         let metadata =
             PondTxnMetadata::new(next_seq, PondUserMetadata::new(vec!["test".to_string()]));
         self.begin_write(&metadata).await // Tests are write transactions
@@ -257,7 +473,7 @@ impl OpLogPersistence {
         // Create the Delta table structure
         let config: HashMap<String, Option<String>> = vec![(
             "delta.dataSkippingStatsColumns".to_string(),
-            Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,pond_id".to_string())
+            Some("node_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
         )]
         .into_iter()
         .collect();
@@ -271,7 +487,7 @@ impl OpLogPersistence {
             .await?
             .create()
             .with_columns(OplogEntry::for_delta())
-            .with_partition_columns(["part_id"])
+            .with_partition_columns(["pond_id", "part_id"])
             .with_configuration(config)
             .with_save_mode(SaveMode::ErrorIfExists)
             .await?;
@@ -283,7 +499,7 @@ impl OpLogPersistence {
             path: path.as_ref().to_path_buf(),
             fs: None,
             state: None,
-            last_txn_seq: 0, // No transactions yet - bundles will provide them
+            seqs: HashMap::new(), // No transactions yet - bundles will provide them
             txn_state: Arc::new(TinyFsTransactionState::new()),
             large_file_options: Default::default(),
             pond_id,
@@ -322,6 +538,19 @@ impl OpLogPersistence {
         let table = match deltalake::open_table(url.clone()).await {
             Ok(existing_table) => {
                 debug!("Found existing table at {}", &path_str);
+                // D5: refuse to open tables with the pre-D5 partition layout.
+                // Pre-D5: partition_columns = ["part_id"]; D5+: ["pond_id", "part_id"].
+                let part_cols: Vec<String> = existing_table
+                    .snapshot()
+                    .ok()
+                    .map(|s| s.metadata().partition_columns().clone())
+                    .unwrap_or_default();
+                if part_cols.as_slice() != ["pond_id".to_string(), "part_id".to_string()] {
+                    return Err(TLogFSError::LegacyPartitionLayout {
+                        path: path.as_ref().to_path_buf(),
+                        found: part_cols.join(", "),
+                    });
+                }
                 existing_table
             }
             Err(open_err) => {
@@ -333,8 +562,9 @@ impl OpLogPersistence {
                 // Configure stats collection to skip the binary 'content' column to avoid warnings
                 let config: HashMap<String, Option<String>> = vec![(
                     "delta.dataSkippingStatsColumns".to_string(),
-		    // @@@ Awful
-                    Some("part_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq,pond_id".to_string())
+                    // pond_id and part_id are partition columns (in the file path);
+                    // partition columns do not need data-skipping stats.
+                    Some("node_id,name,parent_id,entry_type,file_type,timestamp,version,blake3,size,min_event_time,max_event_time,min_override,max_override,extended_attributes,factory,txn_seq".to_string())
                 )]
                 .into_iter()
                 .collect();
@@ -343,7 +573,7 @@ impl OpLogPersistence {
                     .await?
                     .create()
                     .with_columns(OplogEntry::for_delta())
-                    .with_partition_columns(["part_id"])
+                    .with_partition_columns(["pond_id", "part_id"])
                     .with_configuration(config)
                     .with_save_mode(mode)
                     .await;
@@ -363,7 +593,7 @@ impl OpLogPersistence {
             path: path.as_ref().to_path_buf(),
             fs: None,
             state: None,
-            last_txn_seq: 0, // Will be updated below
+            seqs: HashMap::new(), // Will be updated below
             txn_state: Arc::new(TinyFsTransactionState::new()),
             large_file_options: Default::default(),
             pond_id,
@@ -388,30 +618,45 @@ impl OpLogPersistence {
 
             _ = tx.commit().await.map_err(TLogFSError::TinyFS)?;
         } else {
-            // Opening existing table - load last_txn_seq from Delta commit metadata
-            // This is the authoritative source (not the control table, which is Steward's)
-            let mut hist = table.history(Some(1)).await?;
-            if let Some(last_commit) = hist.next() {
-                if let Some(txn_seq) = PondTxnMetadata::extract_txn_seq(&last_commit.info) {
-                    persistence.last_txn_seq = txn_seq;
-                    debug!(
-                        "Loaded last_txn_seq={} from Delta metadata at {}",
-                        txn_seq, &path_str,
-                    );
-                } else {
-                    // No txn_seq in metadata - this might be a pond created for restoration
-                    // or an old pond without metadata. Start at 0.
-                    persistence.last_txn_seq = 0;
-                    debug!(
-                        "No txn_seq found in Delta metadata at {}, starting at 0",
-                        &path_str,
-                    );
+            // Opening existing table - recover the per-pond_id seq
+            // allocator from the data Delta commit history.  This is the
+            // authoritative source (not the control table, which is
+            // Steward's).
+            //
+            // We scan ALL commits and bucket each `pond_txn` by its
+            // `pond_id`, taking the per-pond MAX `txn_seq` rather than
+            // trusting only the single most-recent commit: Delta
+            // maintenance operations (vacuum's VACUUM START/END commits,
+            // optimize/compaction, checkpoints) append commits that carry
+            // no `pond_txn` blob.  After a `pond maintain --compact` the
+            // newest commits are vacuum entries, so `history(Some(1))`
+            // alone would miss the compaction's `pond_txn`.  Sequences are
+            // monotonic per pond, so the per-pond max is the true value.
+            //
+            // Bucketing per pond_id keeps the LOCAL allocator decoupled
+            // from foreign frontiers: a fast cross-pond producer no longer
+            // drags `last_txn_seq()` (= local) upward.  A `pond_txn` with
+            // an empty pond_id (defensive; current ponds always stamp one)
+            // is attributed to the local pond so the local allocator is
+            // never under-recovered (which could collide on the next write).
+            let history = table.history(None).await?;
+            let mut seqs: HashMap<String, i64> = HashMap::new();
+            for commit in history {
+                if let Some(meta) = PondTxnMetadata::from_delta_metadata(&commit.info) {
+                    let key = if meta.pond_id.is_empty() {
+                        persistence.pond_id.clone()
+                    } else {
+                        meta.pond_id.clone()
+                    };
+                    let entry = seqs.entry(key).or_insert(0);
+                    *entry = (*entry).max(meta.txn_seq);
                 }
-            } else {
-                // No history yet - brand new table
-                persistence.last_txn_seq = 0;
-                debug!("No Delta history at {}, starting at 0", &path_str);
             }
+            debug!(
+                "Loaded per-pond seq allocator {:?} from Delta metadata at {} (local pond_id={})",
+                seqs, &path_str, persistence.pond_id,
+            );
+            persistence.seqs = seqs;
         }
 
         Ok(persistence)
@@ -476,13 +721,13 @@ impl OpLogPersistence {
         metadata: &PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Write transactions must be strictly increasing
-        if metadata.txn_seq != self.last_txn_seq + 1 {
+        if metadata.txn_seq != self.local_seq() + 1 {
             return Err(TLogFSError::Transaction {
                 message: format!(
                     "Write transaction sequence must be exactly +1: attempted txn_seq={} but last_txn_seq={} (expected {})",
                     metadata.txn_seq,
-                    self.last_txn_seq,
-                    self.last_txn_seq + 1
+                    self.local_seq(),
+                    self.local_seq() + 1
                 ),
             });
         }
@@ -506,11 +751,12 @@ impl OpLogPersistence {
         txn_meta: &PondTxnMetadata,
     ) -> Result<TransactionGuard<'_>, TLogFSError> {
         // Read transactions reuse the last write sequence
-        if txn_meta.txn_seq != self.last_txn_seq {
+        if txn_meta.txn_seq != self.local_seq() {
             return Err(TLogFSError::Transaction {
                 message: format!(
                     "Read transaction must use last write sequence: attempted txn_seq={} but last_txn_seq={}",
-                    txn_meta.txn_seq, self.last_txn_seq
+                    txn_meta.txn_seq,
+                    self.local_seq()
                 ),
             });
         }
@@ -587,7 +833,7 @@ impl OpLogPersistence {
     pub(crate) async fn commit(
         &mut self,
         mut metadata: PondTxnMetadata,
-    ) -> Result<Option<()>, TLogFSError> {
+    ) -> Result<Option<i64>, TLogFSError> {
         // Stamp pond_id into commit metadata
         let pond_id = self.pond_id.clone();
         metadata.pond_id = pond_id.clone();
@@ -601,26 +847,28 @@ impl OpLogPersistence {
             .commit_impl(metadata, self.table.clone(), pond_id)
             .await?;
 
-        // Reload the table from disk to pick up the committed changes
-        // This ensures subsequent transactions see the new data
-        let reload_url = Url::from_directory_path(&self.path)
-            .or_else(|_| Url::from_file_path(&self.path))
-            .map_err(|_| {
-                TLogFSError::Internal(format!(
-                    "Failed to create URL from path: {}",
-                    self.path.to_string_lossy()
-                ))
-            })?;
-        self.table = deltalake::open_table(reload_url).await?;
-        debug!(
-            "[SYNC] Reloaded table after commit, new version: {:?}",
-            self.table.version()
-        );
-        self.last_txn_seq = new_seq;
+        let version = match res {
+            Some(finalized) => {
+                // Install the post-commit snapshot directly into our table
+                // handle.  This avoids re-scanning the Delta log from disk
+                // and — combined with the steward write lock (D5.7a.1) —
+                // guarantees subsequent reads see exactly the state we
+                // just wrote, not some racing peer's view.
+                let version = finalized.version;
+                self.table.state = Some(finalized.snapshot);
+                debug!(
+                    "[SYNC] Installed post-commit snapshot, version: {}",
+                    version
+                );
+                Some(version)
+            }
+            None => None,
+        };
+        self.set_local_seq(new_seq);
 
         // Note: txn_state clearing is handled by tinyfs::TransactionGuard drop
 
-        Ok(res)
+        Ok(version)
     }
 
     /// Get the store path for this persistence layer
@@ -777,18 +1025,6 @@ impl State {
         self.inner.lock().await.external_add_actions.push(action);
     }
 
-    /// Record import partition metadata for inclusion in the Delta commit.
-    /// Steward reads this from the commit metadata to populate the control table.
-    pub async fn add_import_metadata(&self, record: ImportPartitionRecord) {
-        self.inner.lock().await.import_metadata.push(record);
-    }
-
-    /// Get a copy of the pending import metadata (before commit consumes it).
-    /// Used by steward to extract import state for the control table.
-    pub async fn pending_import_metadata(&self) -> Vec<ImportPartitionRecord> {
-        self.inner.lock().await.import_metadata.clone()
-    }
-
     /// Get the large file storage options (compression settings, etc.)
     #[must_use]
     pub fn large_file_options(&self) -> &crate::large_files::LargeFileOptions {
@@ -816,7 +1052,7 @@ impl State {
         metadata: PondTxnMetadata,
         table: DeltaTable,
         pond_id: String,
-    ) -> Result<Option<()>, TLogFSError> {
+    ) -> Result<Option<deltalake::kernel::transaction::FinalizedCommit>, TLogFSError> {
         self.inner
             .lock()
             .await
@@ -1402,7 +1638,6 @@ impl InnerState {
             large_file_options,
             partition_records_cache: HashMap::new(),
             external_add_actions: Vec::new(),
-            import_metadata: Vec::new(),
         })
     }
 
@@ -2097,7 +2332,7 @@ impl InnerState {
         metadata: PondTxnMetadata,
         table: DeltaTable,
         pond_id: String,
-    ) -> Result<Option<()>, TLogFSError> {
+    ) -> Result<Option<deltalake::kernel::transaction::FinalizedCommit>, TLogFSError> {
         // Check if transaction is poisoned (failed write)
         if self.poisoned {
             return Err(TLogFSError::Transaction {
@@ -2110,17 +2345,13 @@ impl InnerState {
 
         let mut records = std::mem::take(&mut self.records);
 
-        if records.is_empty()
-            && self.external_add_actions.is_empty()
-            && self.import_metadata.is_empty()
-        {
+        if records.is_empty() && self.external_add_actions.is_empty() {
             debug!("Committing read-only transaction");
             return Ok(None);
         }
 
-        // Collect external add actions and import metadata before any writing
+        // Collect external add actions before any writing
         let external_actions = std::mem::take(&mut self.external_add_actions);
-        let import_metadata = std::mem::take(&mut self.import_metadata);
         let _has_external = !external_actions.is_empty();
         let has_records = !records.is_empty();
 
@@ -2156,34 +2387,46 @@ impl InnerState {
 
             let store = table.object_store();
 
-            // Group by part_id for partitioned writes
+            // Group by (pond_id, part_id) for partitioned writes.
             let part_id_col = batch.column_by_name("part_id").expect("part_id column");
             let part_id_arr = part_id_col
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .expect("part_id is StringArray");
+            let pond_id_col = batch.column_by_name("pond_id").expect("pond_id column");
+            let pond_id_arr = pond_id_col
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("pond_id is StringArray");
 
-            let mut part_ids: Vec<String> = Vec::new();
+            let mut groups: Vec<(String, String)> = Vec::new();
             for i in 0..batch.num_rows() {
-                let pid = part_id_arr.value(i).to_string();
-                if !part_ids.contains(&pid) {
-                    part_ids.push(pid);
+                let pond = pond_id_arr.value(i).to_string();
+                let part = part_id_arr.value(i).to_string();
+                let key = (pond, part);
+                if !groups.contains(&key) {
+                    groups.push(key);
                 }
             }
 
-            for pid in &part_ids {
+            for (pond, part) in &groups {
                 let mask: arrow::array::BooleanArray = (0..batch.num_rows())
-                    .map(|i| Some(part_id_arr.value(i) == pid.as_str()))
+                    .map(|i| {
+                        Some(
+                            pond_id_arr.value(i) == pond.as_str()
+                                && part_id_arr.value(i) == part.as_str(),
+                        )
+                    })
                     .collect();
                 let filtered = arrow::compute::filter_record_batch(&batch, &mask)?;
 
-                // Remove part_id column (it is the partition column, stored in path)
+                // Remove pond_id and part_id columns (partition columns, stored in path).
                 let indices: Vec<usize> = filtered
                     .schema()
                     .fields()
                     .iter()
                     .enumerate()
-                    .filter(|(_, f)| f.name() != "part_id")
+                    .filter(|(_, f)| f.name() != "part_id" && f.name() != "pond_id")
                     .map(|(i, _)| i)
                     .collect();
                 let filtered = filtered.project(&indices)?;
@@ -2198,8 +2441,9 @@ impl InnerState {
                 let _file_metadata = writer.close()?;
 
                 let file_name = format!(
-                    "part_id={}/part-00000-{}-c000.snappy.parquet",
-                    pid,
+                    "pond_id={}/part_id={}/part-00000-{}-c000.snappy.parquet",
+                    pond,
+                    part,
                     uuid7::uuid7()
                 );
                 let file_size = parquet_buf.len() as i64;
@@ -2214,7 +2458,10 @@ impl InnerState {
 
                 all_actions.push(Action::Add(Add {
                     path: file_name,
-                    partition_values: HashMap::from([("part_id".to_string(), Some(pid.clone()))]),
+                    partition_values: HashMap::from([
+                        ("pond_id".to_string(), Some(pond.clone())),
+                        ("part_id".to_string(), Some(part.clone())),
+                    ]),
                     size: file_size,
                     modification_time: now_ms,
                     data_change: true,
@@ -2234,10 +2481,10 @@ impl InnerState {
         for ea in &external_actions {
             all_actions.push(Action::Add(Add {
                 path: ea.path.clone(),
-                partition_values: HashMap::from([(
-                    "part_id".to_string(),
-                    Some(ea.part_id.clone()),
-                )]),
+                partition_values: HashMap::from([
+                    ("pond_id".to_string(), Some(ea.pond_id.clone())),
+                    ("part_id".to_string(), Some(ea.part_id.clone())),
+                ]),
                 size: ea.size,
                 modification_time: now_ms,
                 data_change: true,
@@ -2253,7 +2500,7 @@ impl InnerState {
         // Phase 3: Single Delta commit with all actions
         let operation = deltalake::protocol::DeltaOperation::Write {
             mode: SaveMode::Append,
-            partition_by: Some(vec!["part_id".to_string()]),
+            partition_by: Some(vec!["pond_id".to_string(), "part_id".to_string()]),
             predicate: None,
         };
 
@@ -2262,31 +2509,24 @@ impl InnerState {
             .ok()
             .map(|s| s as &dyn deltalake::kernel::transaction::TableReference);
 
-        // Build commit metadata: pond_txn + optional import_state
-        let mut commit_metadata = metadata.to_delta_metadata();
-        if !import_metadata.is_empty() {
-            let import_json = serde_json::to_value(&import_metadata)
-                .expect("Failed to serialize import metadata");
-            let _ = commit_metadata.insert("import_state".to_string(), import_json);
-        }
+        // Build commit metadata (pond_txn)
+        let commit_metadata = metadata.to_delta_metadata();
 
-        let _commit = CommitBuilder::default()
+        let finalized = CommitBuilder::default()
             .with_actions(all_actions)
             .with_app_metadata(commit_metadata)
             .build(snapshot_ref, table.log_store().clone(), operation)
             .await?;
 
         debug!(
-            "[OK] Single Delta commit: {} record(s) + {} external file(s) + {} import partition(s)",
-            record_count,
-            external_count,
-            import_metadata.len()
+            "[OK] Single Delta commit at version {}: {} record(s) + {} external file(s)",
+            finalized.version, record_count, external_count,
         );
 
         self.records.clear();
         self.directories.clear();
 
-        Ok(Some(()))
+        Ok(Some(finalized))
     }
 
     /// Serialize DirectoryEntry records as Arrow IPC bytes

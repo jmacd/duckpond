@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use common::ShipContext;
 use panic_alloc::PanicOnLargeAlloc;
 use std::path::PathBuf;
@@ -39,12 +39,6 @@ enum ControlCommand {
     },
     /// Show incomplete operations (for recovery)
     Incomplete,
-    /// Sync with remote: retry failed pushes OR pull new bundles
-    Sync {
-        /// Optional: Base64-encoded remote config for recovery (use same as pond init --config)
-        #[arg(long)]
-        config: Option<String>,
-    },
     /// Show pond configuration (ID, factory modes, metadata, settings)
     ShowConfig,
     /// Set a configuration value
@@ -91,17 +85,111 @@ struct Cli {
     command: Commands,
 }
 
+/// Remote management subcommands (D4: replaces `/system/run/<N>-remote`
+/// factory configs with `/sys/remotes/<name>` YAML attachments).
+///
+/// As of D5.7b the verb is split: `pond remote add` always attaches a
+/// **pull-only** remote (mirror restart or cross-pond import).  Use
+/// `pond backup add` to attach a push-mode (or bidirectional) remote.
+#[derive(Debug, Subcommand)]
+enum RemoteCommand {
+    /// Attach a pull-mode remote and mount it at PATH.
+    ///
+    /// `PATH = /` is a mirror restart (foreign store_id must match this
+    /// pond's pond_id).  Non-root PATH is a cross-pond import (foreign
+    /// store_id must differ).
+    Add {
+        /// Logical name for the remote (e.g., "upstream").
+        name: String,
+        /// Remote URL (`file:///path` or `s3://bucket/prefix`).
+        url: String,
+        /// In-pond mount path.  Use `/` for a mirror restart of this
+        /// pond's own backup, or `/imports/<name>` for cross-pond import.
+        path: String,
+        #[command(flatten)]
+        options: RemoteAddOptions,
+    },
+    /// Remove a remote attachment and clear its watermarks.
+    ///
+    /// By default this is a **detach**: the YAML config and watermark
+    /// keys are removed but any cross-pond mount entry materialized
+    /// at `mount_path` is kept (the imported data snapshot stays
+    /// readable).  Pass `--purge` to also remove the mount entry
+    /// itself (the foreign data becomes inaccessible by path even if
+    /// it remains in the Delta log).
+    Remove {
+        /// Logical name of the remote to remove.
+        name: String,
+        /// Also remove the mount entry at the remote's `mount_path`
+        /// (cross-pond imports only).  Without this flag the imported
+        /// data remains visible via the existing mount path.
+        #[arg(long)]
+        purge: bool,
+    },
+    /// List all attached remotes (both pull and backup).
+    List,
+}
+
+/// Backup-side subcommands (D5.7b): the push half of the remote split.
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    /// Attach a backup remote (push-only by default; `--bidirectional`
+    /// makes it push+pull).  Backups always mirror the entire pond.
+    Add {
+        /// Logical name for the backup (e.g., "origin", "backup-s3").
+        name: String,
+        /// Remote URL (`file:///path` or `s3://bucket/prefix`).
+        url: String,
+        /// Also pull from this remote (push + pull, i.e. mode=both).
+        #[arg(long)]
+        bidirectional: bool,
+        #[command(flatten)]
+        options: RemoteAddOptions,
+    },
+    /// Remove a backup attachment (alias of `pond remote remove` for
+    /// symmetry; same semantics: deletes config and clears watermarks).
+    /// Backups have no `mount_path`, so `--purge` is a no-op for them
+    /// but accepted for symmetry.
+    Remove {
+        /// Logical name of the backup to remove.
+        name: String,
+        /// Accepted for symmetry with `pond remote remove --purge`;
+        /// has no effect on backups (no mount entry to purge).
+        #[arg(long)]
+        purge: bool,
+    },
+    /// List backup-mode attachments only.
+    List,
+}
+
+/// Shared options for `pond remote add` and `pond backup add`.
+#[derive(Debug, Args)]
+struct RemoteAddOptions {
+    /// AWS region (S3 only).
+    #[arg(long)]
+    region: Option<String>,
+    /// S3 access key id.
+    #[arg(long = "access-key-id", alias = "access-key")]
+    access_key_id: Option<String>,
+    /// S3 secret access key.
+    #[arg(long = "secret-access-key", alias = "secret-key")]
+    secret_access_key: Option<String>,
+    /// Custom S3 endpoint (e.g., for MinIO or R2).
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Allow plain HTTP (required for local MinIO).
+    #[arg(long)]
+    allow_http: bool,
+    /// Replace an existing attachment of the same name.
+    #[arg(long)]
+    overwrite: bool,
+}
+
+/// Pond user commands.
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new pond
-    Init {
-        /// Initialize from remote backup (path to restore config YAML)
-        #[arg(long)]
-        from_backup: Option<PathBuf>,
-        /// Initialize from base64-encoded replication config (from 'pond run /system/run/10-remote replicate')
-        #[arg(long, conflicts_with = "from_backup")]
-        config: Option<String>,
-    },
+    Init,
     /// Recover from crash by checking and restoring transaction metadata
     Recover,
     /// Run Delta Lake maintenance (checkpoint, vacuum, optional compaction)
@@ -128,14 +216,50 @@ enum Commands {
         #[arg(long, conflicts_with = "txn_seq")]
         incomplete: bool,
     },
-    /// Sync with remote storage (retry pushes, pull new bundles)
-    Sync {
-        /// Factory name or full path (e.g., "1-backup" or "/system/run/1-backup").
-        /// If omitted, syncs all remote factories in /system/run/.
+    /// Push pending local transactions to one or more remotes (D4).
+    Push {
+        /// Remote name (from `pond remote add`).  Omit to push every remote
+        /// in `push` or `both` mode.
         name: Option<String>,
-        /// Base64-encoded remote config for recovery (use same as pond init --config)
+    },
+    /// Pull new bundles from one or more remotes (D4).
+    Pull {
+        /// Remote name.  Omit to pull every remote in `pull` or `both` mode.
+        name: Option<String>,
+    },
+    /// Verify local data matches one or more remotes' recorded checksums (D6).
+    Verify {
+        /// Remote or backup name.  Omit to verify against every attachment.
+        name: Option<String>,
+    },
+    /// Show an operator-facing status aggregate: identity, local commit
+    /// state, recovery health, and per-remote sync watermarks (D6).
+    Status,
+    /// Rebuild the control table from the data Delta table when the
+    /// control table is lost or corrupt (D6).  Recovers pond identity
+    /// and the transaction-log skeleton; settings/watermarks must be
+    /// re-established by re-attaching remotes.
+    RebuildControl {
+        /// Move an existing control table aside (to control.bak.<ts>)
+        /// and rebuild.  Required when a control table already exists.
         #[arg(long)]
-        config: Option<String>,
+        force: bool,
+    },
+    /// Recover a consumer that fell below a remote's retention horizon
+    /// by re-bootstrapping from the remote's oldest compact bundle (D6).
+    RestartFromCompact {
+        /// Remote name (from `pond remote add`) to restart from.
+        name: String,
+    },
+    /// Manage remote attachments under `/sys/remotes/` (D4).
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
+    /// Manage backup attachments (push-side of remote split, D5.7b).
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
     },
     /// Show or set pond configuration
     Config {
@@ -365,12 +489,9 @@ async fn main() -> Result<()> {
     let started = Instant::now();
 
     let result = match cli.command {
-        Commands::Init {
-            from_backup,
-            config,
-        } => {
-            // Init command creates new pond (optionally from backup or base64 config)
-            commands::init_command(&ship_context, from_backup.as_deref(), config.as_deref()).await
+        Commands::Init => {
+            // Init command creates a new empty pond.
+            commands::init_command(&ship_context).await
         }
         Commands::Recover => {
             // Recover command works with potentially damaged pond, handle specially
@@ -396,9 +517,74 @@ async fn main() -> Result<()> {
             };
             commands::control_command(&ship_context, control_mode).await
         }
-        Commands::Sync { name, config } => {
-            commands::sync_command(&ship_context, name, config).await
+        Commands::Push { name } => commands::push_command(&ship_context, name).await,
+        Commands::Pull { name } => commands::pull_command(&ship_context, name).await,
+        Commands::Verify { name } => commands::verify_command(&ship_context, name).await,
+        Commands::Status => commands::status_command(&ship_context).await,
+        Commands::RebuildControl { force } => {
+            commands::rebuild_control_command(&ship_context, force).await
         }
+        Commands::RestartFromCompact { name } => {
+            commands::restart_from_compact_command(&ship_context, name).await
+        }
+        Commands::Remote { command } => match command {
+            RemoteCommand::Add {
+                name,
+                url,
+                path,
+                options,
+            } => {
+                commands::add_remote_command(
+                    &ship_context,
+                    &name,
+                    &url,
+                    &path,
+                    options.region,
+                    options.access_key_id,
+                    options.secret_access_key,
+                    options.endpoint,
+                    options.allow_http,
+                    options.overwrite,
+                )
+                .await
+            }
+            RemoteCommand::Remove { name, purge } => {
+                commands::remove_remote_command(&ship_context, &name, purge).await
+            }
+            RemoteCommand::List => commands::list_remotes_command(&ship_context, None).await,
+        },
+        Commands::Backup { command } => match command {
+            BackupCommand::Add {
+                name,
+                url,
+                bidirectional,
+                options,
+            } => {
+                commands::add_backup_command(
+                    &ship_context,
+                    &name,
+                    &url,
+                    bidirectional,
+                    options.region,
+                    options.access_key_id,
+                    options.secret_access_key,
+                    options.endpoint,
+                    options.allow_http,
+                    options.overwrite,
+                )
+                .await
+            }
+            BackupCommand::Remove { name, purge } => {
+                commands::remove_remote_command(&ship_context, &name, purge).await
+            }
+            BackupCommand::List => {
+                commands::list_remotes_command(
+                    &ship_context,
+                    Some(commands::RemoteListFilter::BackupsOnly),
+                )
+                .await
+            }
+        },
         Commands::Config { command } => {
             let control_mode = match command {
                 Some(ConfigCommand::Set { key, value }) => {
@@ -417,9 +603,6 @@ async fn main() -> Result<()> {
                     commands::control::ControlMode::Detail { txn_seq }
                 }
                 ControlCommand::Incomplete => commands::control::ControlMode::Incomplete,
-                ControlCommand::Sync { config } => commands::control::ControlMode::Sync {
-                    config: config.clone(),
-                },
                 ControlCommand::ShowConfig => commands::control::ControlMode::ShowConfig,
                 ControlCommand::SetConfig { key, value } => {
                     commands::control::ControlMode::SetConfig { key, value }

@@ -135,6 +135,13 @@ async fn execute(
     match cmd.command {
         SitegenSubcommand::Build { output_dir, quick } => {
             let output_path = std::path::PathBuf::from(&output_dir);
+            // Ensure the output root exists before any write.  `sitegen build
+            // <dir>` owns its target directory; creating it here makes the
+            // build self-contained (callers need not pre-create it) and
+            // avoids a transient ENOENT on the first write.
+            std::fs::create_dir_all(&output_path).map_err(|e| {
+                tinyfs::Error::Other(format!("mkdir output dir {:?}: {}", output_path, e))
+            })?;
             let root = context.root().await?;
             let provider_ctx = &context.context;
 

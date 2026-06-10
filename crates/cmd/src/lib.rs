@@ -4,12 +4,11 @@
 
 // Force-link external factory crates so their `linkme` distributed slice
 // entries are included. Without this, `FactoryRegistry` and `SchemeRegistry`
-// won't see factories registered in hydrovu, sitegen, or remote crates
-// when running lib tests.
+// won't see factories registered in hydrovu, sitegen, etc. when running
+// lib tests.
 use billing as _;
 use gitpond as _;
 use hydrovu as _;
-use remote as _;
 use sitegen as _;
 
 pub mod commands;

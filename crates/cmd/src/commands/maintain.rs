@@ -30,6 +30,12 @@ pub async fn maintain_command(ship_context: &ShipContext, compact: bool) -> Resu
         if let Some(ref control) = report.control {
             println!("{}", control);
         }
+        if compact && report.data.as_ref().map(|d| d.compacted).unwrap_or(false) {
+            println!(
+                "  data compaction recorded as a transaction; \
+                 run `pond push` to replicate it as a Compact bundle"
+            );
+        }
     }
 
     info!("[OK] Maintenance completed");
