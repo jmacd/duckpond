@@ -835,6 +835,14 @@ impl Ship {
                 stats
             }
             Err(e) => {
+                // The optimize produced no data Delta commit, so this seq is
+                // not consumed on disk (`OpLogPersistence::last_txn_seq` is
+                // still `txn_seq - 1`, and a reopen would recover `txn_seq - 1`
+                // from the data history).  Roll the in-memory allocator back to
+                // match so it stays in lockstep with `data_persistence`; the
+                // next write will reuse this seq.  The terminal `Failed` record
+                // closes the dangling `Begin`.
+                self.last_write_seq = txn_seq - 1;
                 let reason = format!("optimize failed: {}", e);
                 self.record_compact_failed(&txn_meta, started, reason).await;
                 return Err(StewardError::ControlTable(format!("compact: {}", e)));
@@ -851,6 +859,13 @@ impl Ship {
                 .map_err(|e| {
                     StewardError::ControlTable(format!("compact: record completed: {}", e))
                 })?;
+            // A no-op optimize commits no data, so `data_persistence`'s
+            // `last_txn_seq` was never advanced to `txn_seq` and a reopen would
+            // recover `txn_seq - 1` from the data history.  Roll the in-memory
+            // allocator back to match, keeping `last_write_seq` in lockstep with
+            // `data_persistence.last_txn_seq` (otherwise the next read/write
+            // transaction on this Ship would fail the strict +1 sequence check).
+            self.last_write_seq = txn_seq - 1;
             debug!("Compaction no-op at seq={} (nothing to merge)", txn_seq);
             return Ok(CompactOutcome {
                 txn_seq,

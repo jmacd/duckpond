@@ -958,6 +958,34 @@ async fn ship_compact_records_pushable_compact_transaction() {
     // A second compaction has nothing to merge -> clean no-op.
     let noop = ship.compact().await.expect("second compact");
     assert!(!noop.had_data, "second compaction should be a no-op");
+
+    // Regression (no-op compaction must not desync the seq allocators): a
+    // no-op compaction commits no data, so it must leave `last_write_seq` in
+    // lockstep with `data_persistence.last_txn_seq` (i.e. un-consumed at the
+    // last real committed seq).  Before the fix, `last_write_seq` advanced past
+    // the data allocator and the next transaction failed the strict +1 check.
+    assert_eq!(
+        ship.last_write_seq(),
+        outcome.txn_seq,
+        "no-op compaction must not advance last_write_seq past the last committed seq"
+    );
+    // A subsequent read transaction (strict `== last_txn_seq` check) succeeds.
+    let tx = ship
+        .begin_read(&meta("verify after noop"))
+        .await
+        .expect("begin_read after no-op compaction");
+    let _ = tx
+        .commit()
+        .await
+        .expect("commit read after no-op compaction");
+    // A subsequent write transaction (strict `== last_txn_seq + 1` check)
+    // succeeds and consumes the very seq the no-op compaction had reserved.
+    let next_seq = write_one(&mut ship, "/after_noop.txt", b"ok").await;
+    assert_eq!(
+        next_seq,
+        outcome.txn_seq + 1,
+        "the write after a no-op compaction reuses the next seq"
+    );
 }
 
 /// P2-PRODUCER-COMPACT-BUNDLES end-to-end: a producer compaction pushed

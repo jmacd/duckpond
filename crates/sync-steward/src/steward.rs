@@ -1042,14 +1042,15 @@ pub async fn verify_local(steward: &Steward) -> Result<VerifyReport> {
         .await?
         .unwrap_or_default();
     let partitions = steward.store().partitions(steward.store_id()).await?;
+    let live_partitions: std::collections::HashSet<&String> = partitions.iter().collect();
     let mut mismatches = Vec::new();
     let strategy = steward.checksum_strategy();
-    for partition in partitions {
+    for partition in &partitions {
         let live: Checksum = steward
             .store()
-            .compute_partition_checksum(steward.store_id(), &partition, strategy)
+            .compute_partition_checksum(steward.store_id(), partition, strategy)
             .await?;
-        match recorded.get(&partition) {
+        match recorded.get(partition) {
             Some(rec) if rec == &live => {}
             Some(rec) => mismatches.push(VerifyMismatch {
                 partition: partition.clone(),
@@ -1065,15 +1066,10 @@ pub async fn verify_local(steward: &Steward) -> Result<VerifyReport> {
     }
     // Also catch partitions that were in the recorded snapshot but no
     // longer have any rows (shouldn't happen with our model, but
-    // defensible to detect).
+    // defensible to detect).  Reuse the live-partition set computed above
+    // instead of re-querying the store per recorded partition.
     for (partition, rec) in &recorded {
-        if !steward
-            .store()
-            .partitions(steward.store_id())
-            .await?
-            .iter()
-            .any(|p| p == partition)
-        {
+        if !live_partitions.contains(partition) {
             mismatches.push(VerifyMismatch {
                 partition: partition.clone(),
                 recorded: Some(rec.clone()),
