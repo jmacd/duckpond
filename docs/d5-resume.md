@@ -778,8 +778,12 @@ from `crates/steward/src/lib.rs`.
 
 ## Bookkeeping
 
-- **Untracked file `may-10-bugs.md`**: predates this session;
-  unrelated to D4/D5.  Leave alone unless the user asks.
+- **`may-10-bugs.md` (removed)**: this untracked root-level file
+  documented the May-10 cross-pond staleness outage.  It was NOT
+  unrelated to D4/D5 -- D5's row-level `pond_id` model is its fix.  Its
+  Bugs 1-3 are reconciled in `docs/remote-redesign.md` ("Resolved
+  production bugs") with the `715-cross-pond-divergent-frontier.sh`
+  regression guard, and the file has been removed.
 - **Session state on this machine**:
   `~/.copilot/session-state/f5d4ca95-863b-4a92-bb51-56a07c994933/plan.md`
   has the D4 progress log including all 8 commit SHAs.  That session

@@ -2,10 +2,14 @@
 
 ## Status
 
-Architectural goals achieved; the P1 correctness blocker is now closed
-(D5.9, `d5bf4b68`).  Documentation reconciliation and D6 CLI verb gaps
-remain (see § "Open after D5.8" below), but the branch is functionally
-ready for production cutover.
+All planned phases (D1-D9) have landed; the branch is functionally
+ready for production cutover.  The P1 correctness blocker closed in
+D5.9 (`d5bf4b68`); the diagnostic/recovery CLI surface and operator
+guide landed in D6; producer-side compaction and bootstrap-bundle
+replication landed in D7/D7b; D8/D9 closed host-Parquet read and
+testsuite-coverage gaps.  Remaining work is a handful of genuinely
+deferred carry-forwards (see § "Open items (post-D9)" below), not
+blockers.
 
 | Phase | Status | Commit |
 |---|---|---|
@@ -36,18 +40,23 @@ ready for production cutover.
 | D5.9: fix P1-BUG-LF-REPLICATION (large-file blob replication) | done | `d5bf4b68` |
 | D6: diagnostic/recovery CLI verbs + operator-guide rewrite | done | verify/status/rebuild-control/restart-from-compact shipped (D6.1-D6.4); operator-guide rewritten |
 | D7: producer-side compaction (close P2-PRODUCER-COMPACT-BUNDLES) | done | `Ship::compact` records a pushable `CommitKind::Compact` txn; `pond maintain --compact` routes through it; mirror restart loop now reachable end-to-end |
+| D7b: replicate the `pond_init` bundle (close P2-VERIFY-BOOTSTRAP-DRIFT) | done | `366c46b9` -- producer- and replica-side `pond verify` are now symmetric |
+| D8: read `host+table:///` / `host+series:///` Parquet directly | done | `f0a38111` -- fixes "not queryable" on host-file URLs |
+| D9: `file://` testsuite coverage for D6/D7 remote CLI verbs | done | `e57c357c`; plus follow-on fixes `42c65540` (require `${env:VAR}` credential refs), `078b9f25`/`7232d254` (`last_pushed_seq` watermark correctness), `f0ac0002` (propagate snapshot errors in `apply_pulled_bundle`) |
 
-Active branch: `jmacd/52` (89 commits ahead of `main` as of `d5bf4b68`).
+Active branch: `jmacd/52` (109 commits ahead of `main` as of `f0ac0002`).
 The D5 row in earlier revisions of this doc was a single "pending" line;
 it expanded into 15 sub-phases (D5.1 through D5.9) during execution.
-The original D5 design (lines 556-578) accurately predicted the technical
+The original D5 design (§ D5 below) accurately predicted the technical
 shape of the work; the sub-phasing is a record of how it actually landed.
 
-## Open after D5.8
+## Open items (post-D9)
 
-D5.9 closed the correctness blocker for cutover.  Two categories of
-work remain before this branch can fully replace the old duckpond in
-production:
+D5.9 closed the correctness blocker for cutover.  Since then D6 (CLI
+verbs + operator-guide rewrite), D7/D7b (producer compaction +
+bootstrap-bundle replication), and D8/D9 have all landed.  What
+remains is a set of genuinely deferred carry-forwards -- none of them
+blockers for replacing the old duckpond in production:
 
 ### Correctness blocker (P1) -- CLOSED
 
@@ -73,12 +82,63 @@ production:
   `big.bin` case in `tests/530-cross-pond-import-minio.sh`, and bumped
   `INITIAL_ROWS` to 6000 in `tests/510-synth-logs-replication-cycle.sh`.
 
+### Resolved production bugs (May-10 cross-pond staleness) -- CLOSED
+
+The cross-pond redesign (A1, row-level `pond_id`) was motivated by a
+real production outage: caspar.water's `site-prod` pond served stale
+water data for ~6 days in May 2026.  The diagnosis lived in an
+untracked `may-10-bugs.md` at the repo root; that file is removed now
+that the bugs are fixed and the resolution is recorded here.
+
+- **Bug 1 -- global `max()` import watermark (High; the outage).**  The
+  old `crates/remote` import factory took a single `max()` watermark
+  across *all* imported partitions, then dropped every foreign txn at
+  `txn_seq <= watermark`.  A fast producer pushed the watermark to its
+  frontier `F`, so any slower producer whose new transactions landed at
+  `txn_seq < F` was masked forever.  **Fixed by the post-D5 model**: the
+  old factory is deleted (D4.5) and each producer is attached as its own
+  remote with its own `last_pulled_seq:<url>` watermark
+  (`crates/sync-remote/src/remote.rs:120` key, `:480` `txn_seq >
+  last_pulled` filter, `:501` per-bundle advance).  Divergent producer
+  frontiers can no longer mask one another -- the masking is structurally
+  impossible, since there is no longer any cross-producer `max()`.
+  Regression guard: `testsuite/tests/715-cross-pond-divergent-frontier.sh`
+  reproduces the exact condition (fast frontier 15, slow producer's new
+  txn at seq 5 < 15) and asserts the slow file still imports.
+- **Bug 2 -- phantom partitions persist in S3 across a producer reset
+  (Medium).**  A wiped+reinitialized producer left old-epoch partition
+  bundles in its bucket, which the old recursive S3 discovery
+  (`collect_partitions_recursive`) re-ingested, poisoning the `max()` in
+  Bug 1.  **Fixed structurally**: there is no recursive partition cache
+  anymore.  Each remote is bound to the producer's `pond_id`/`store_id`;
+  a reset producer has a new `pond_id`, surfaced as
+  `RemoteError::StoreIdMismatch` on push (`remote.rs:329`) rather than
+  silently merged, and `apply_pulled_bundle` validates that every
+  imported path's `pond_id` matches the bundle's
+  (`crates/steward/src/remote_adapter.rs:541,560`).  Operator note: a
+  producer reset now requires wiping its remote bucket (or re-pointing
+  the consumer); the consumer no longer auto-discards the old epoch, it
+  refuses the mismatch.
+- **Bug 3 -- `factory_key` cache collision (needs-verification).**  Moot:
+  the import-partition cache and the `entry.id().part_id()` keying it
+  questioned are gone with the old factory (D4.5).
+- **Bug 4 -- post-reset terraform skips `pond apply` (Operational).**
+  Not a duckpond bug; it lives in the separate caspar.water deployment
+  repo (`terraform/station/watershop/watershop.tf`,
+  `README.operations.md`), which is not part of this workspace.  Tracked
+  there, not here.
+
 ### Deferred carry-forwards from D4/D5
 
-- **`Remote::restart_from_compact` not generic over `RemoteSteward`**
-  (originally noted as a D4 carry-forward; still pending). Currently
-  mirror-only; cross-pond consumers cannot restart from a compacted
-  remote without manual Rust glue.
+- **`Remote::restart_from_compact` (mirror) is not generic over
+  `RemoteSteward`** -- but this is no longer a blocker.  The per-pond
+  consumer recovery path
+  `Remote::restart_pond_from_compact<S: RemoteSteward + ?Sized>`
+  (`crates/sync-remote/src/remote.rs:792`) IS generic and is what the
+  operator-facing `pond restart-from-compact` (D6.4) drives.  The
+  remaining non-generic `restart_from_compact` (`remote.rs:618`) is
+  only the mirror-mode fresh-directory bootstrap, covered by the next
+  bullet.
 - **Mirror-restart bootstrap is Rust-only** via
   `ShipContext::create_pond_for_restoration`; cross-pond first-pull
   works through the CLI, but mirror-restart from a fresh local
@@ -90,7 +150,7 @@ production:
 
 ### D6 surface gaps
 
-The D6 CLI plan at lines 593-602 of this doc enumerates verbs that
+The D6 CLI plan in § D6 below enumerates verbs that
 have not all shipped:
 
 | Verb | Status | Notes |
@@ -121,8 +181,21 @@ have not all shipped:
   interface plan) was archived to
   `docs/archive/operator-interface-plan.md`.
 - **This document's** phase table was updated in this round to
-  reflect actual D5 sub-phasing; the design narrative at lines
-  556-602 is still accurate as a record of intent.
+  reflect actual D5 sub-phasing; the design narrative in §§ D5-D6
+  below is still accurate as a record of intent.
+
+### Checksum strategy: Merkle is the shipped default
+
+The prototype left "which checksum strategy wins?" open, gated on a
+`benchmarks` todo that never ran.  duckpond ships on the prototype's
+inherited default: `StewardOptions::default()` constructs
+`sync_store::checksum::Merkle`
+(`crates/sync-steward/src/steward.rs:136`).  Merkle is the
+cryptographically conservative choice; the `Homomorphic` strategy
+remains available behind the same `PartitionChecksum` trait for a
+future swap if O(1) incremental update cost is ever measured to
+matter.  Recorded here as a decision, not an accident: no benchmark
+gate blocks cutover.
 
 ## Background
 
@@ -364,9 +437,8 @@ phases.  Each phase leaves the system buildable and tested.
 - Adjust internal imports across `sync-*` crates to use the
   new package names.
 - Remove the standalone `duckpond/sandbox/` directory.
-- Update `duckpond/sandbox/DESIGN.md` references — likely
-  archive the design doc to `docs/archive/` or merge relevant
-  parts into this redesign doc.
+- Archive `duckpond/sandbox/DESIGN.md` to `docs/archive/` (done:
+  it now lives at `docs/archive/sandbox-design.md`).
 - CI gate: workspace builds, all `sync-*` tests pass (existing
   227 + 5 + 3 + 1 + 1 = 237 tests; numbers may shift slightly).
 
@@ -684,6 +756,37 @@ granularity; move pond identity to bootstrap row.
 - CI gate: cross-pond integration test (mirror
   sandbox/tests/cross_pond.rs for duckpond).
 
+#### D5 implementation notes (as executed)
+
+D5 expanded into 15 sub-phases on `jmacd/52` (every row is in the Status
+table above with its commit).  The arc:
+
+- **D5.1-D5.3** (`1137d81d`, `2d03c946`, `50956974`): partition tlogfs by
+  `(pond_id, part_id)` via fresh-start migration; move pond identity to
+  the data-table bootstrap row; filter `Remote::push` by `pond_id`
+  partition.
+- **D5.4-D5.6** (`2f1ee2ab`, `ccecc54a`, `1f2e2811`): generic first-pull
+  (`bootstrap_consumer` + `Ship::create_replica`); `compute_live_checksums`
+  for the tlogfs row schema; lift the `data_delta_version=0` clamp into
+  `Remote::push`.
+- **D5.7a** (`a1367d90`, `c55d9bd3`, `fbc33b43`): snapshot per-partition
+  checksums in `record_data_committed`; process write lock + drop
+  read-transaction control records; thread `FinalizedCommit` version
+  through the commit chain.
+- **D5.7b** (`4cb992d4`, `7e763a42`, `6632f1ea`, `2f95f99b`, `bfcfe76e`):
+  split `remote add` (pull) vs `backup add` (push); materialize the
+  cross-pond mount on first pull; read-only foreign mounts + scoped
+  auto-exec; `remote remove` detach (default) and `--purge`; attach-time
+  mount/store_id conflict checks.
+- **D5.8** (`01987ebb` .. `75eb4139`): revive 13 testsuite scripts
+  disabled in D4.6; D5.8.1 also fixed a silent bundle drop for
+  post-commit factory writes (`NoSuchCommit`).
+- **D5.9** (`d5bf4b68`): close **P1-BUG-LF-REPLICATION**, the cutover
+  correctness blocker -- large-file blobs in `_large_files/` were never
+  enumerated by `actions_at_version`, so files >64 KiB failed on first
+  read after replication.  See § "Open items (post-D9)" for the full
+  write-up.
+
 ### D6: Cross-pond model migration + operator-guide rewrite
 
 **Goal**: deprecate factory-mode-based import; document the
@@ -708,6 +811,153 @@ new operator surface.
 - Lifecycle-state vocabulary documented for diagnostics
   (PreCommit / DataCommitted / PostPushOk / etc.).
 
+#### D6 implementation notes (as executed)
+
+The phase that actually shipped under the "D6" label was the
+**diagnostic/recovery CLI surface + operator-guide rewrite**, not the
+cross-pond model migration described above.  Cross-pond import had
+already landed in D5.7b (row-level `pond_id` mounts via `pond remote add
+NAME URL /mount`), so the "remove `import:` section handling" and
+"`--mount` on attach" goals were satisfied before D6 began.  D6 therefore
+delivered the operator verbs the original plan had grouped under
+"Diagnostics" and "Recovery", in four sub-commits on `jmacd/52`:
+
+| Phase | Commit | Summary |
+|---|---|---|
+| D6.1 | `46a31668` | `pond verify [<name>]` over `verify_against_remote`; per-partition mismatch + divergence-boundary diagnostics |
+| D6.2 | `53bb0c1f` | `pond status`: offline aggregate of identity + local commit state + recovery health + per-remote watermarks |
+| D6.3 | `2b327aae` | `pond rebuild-control [--force]`: reconstruct the control table from the data table's `pond_txn` commit history |
+| D6.4 | `fd15b773` | `pond restart-from-compact <name>`: delegates to the generic `Remote::restart_pond_from_compact`; mirror restart re-persists the dropped attachment |
+
+The operator-guide rewrite (`8a7b9de4`) replaced the factory-based pre-D6
+guide (archived to `docs/archive/operator-guide-pre-d6.md`).
+
+D6.1 surfaced **P2-VERIFY-BOOTSTRAP-DRIFT** (replica-side verify
+mismatched on the root partition because the producer's `pond_init`
+bundle was not replicated) and D6.4 surfaced
+**P2-PRODUCER-COMPACT-BUNDLES** (producers hard-coded `CommitKind::Write`,
+so no Compact baseline ever reached the remote, leaving the mirror
+retention-recovery loop unreachable end-to-end).  Both are closed in
+D7/D7b below.
+
+### D7: Producer-side compaction (close P2-PRODUCER-COMPACT-BUNDLES)
+
+**Goal**: duckpond producers create pushable Compact bundles, making the
+mirror retention-recovery loop (`pond restart-from-compact`) reachable
+end-to-end from duckpond alone.
+
+**Problem**: `pond maintain --compact` ran a best-effort Delta optimize
+that was never recorded in the control table, so `Remote::push` (which
+iterates `DataCommitted` records) only ever saw `CommitKind::Write` and
+never emitted a Compact bundle.
+
+**Steps (as executed, `2df6ea7d`)**:
+- `Ship::compact()` runs a recorded, pushable compaction: allocate seq +
+  write lock + Begin, snapshot pre-checksums, Delta optimize scoped to
+  own `pond_id` partitions, assert per-partition checksum invariance
+  (content unchanged), then record `DataCommitted(commit_kind=Compact)`
+  at the new Delta version.  A no-op (nothing to merge) writes Completed
+  without advancing the committed sequence.
+- `ControlTable::record_compact_committed` factors out the shared body
+  of `record_data_committed`.
+- `maintenance::compact_pond_partitions` runs the `pond_id`-scoped
+  optimize and stamps the compaction's `txn_seq` into the commit's
+  `pond_txn` metadata.
+- `Ship::maintain(force, compact)` routes data-table compaction through
+  the recorded `Ship::compact`; checkpoint/vacuum stay best-effort; the
+  control table (never pushed) keeps its best-effort optimize.
+- Also fixed a latent reopen bug surfaced by the above:
+  `OpLogPersistence::open` recovered `last_txn_seq` from only the newest
+  Delta commit, but vacuum (VACUUM START/END), optimize, and checkpoint
+  commits carry no `pond_txn`; the trailing vacuum after `--compact`
+  reset `last_txn_seq` to 0 on reopen, so the compaction never pushed.
+  `open` now scans all retained history for the max `pond_txn` seq.
+- Tests (`crates/steward/tests/remote_adapter_test.rs`):
+  `ship_compact_records_pushable_compact_transaction`,
+  `ship_compact_bundle_drives_restart_from_compact` (full mirror loop),
+  `ship_compact_survives_reopen`,
+  `ship_maintain_compact_survives_reopen` (the reopen regression).
+
+### D7b: Replicate the `pond_init` bundle (close P2-VERIFY-BOOTSTRAP-DRIFT)
+
+**Goal**: a replica bootstrapped from a remote verifies clean (no
+root-partition mismatch) with no local writes; producer- and
+replica-side `pond verify` become symmetric.
+
+**Root cause** (confirmed at the Delta-log level): the producer's
+`pond_init` root-directory row lands at Delta version 1 (version 0 is the
+empty CREATE TABLE), but `Ship::create_pond` hard-coded
+`data_delta_version=0` + empty checksums for seq=1.  `Remote::push`'s
+`data_delta_version==0` bootstrap-skip then never replicated the root
+row, so the replica was missing the root-dir v1 leaf the producer's
+recorded checksum includes -> root-partition Merkle differs -> mismatch.
+
+**Steps (as executed, `366c46b9`)**:
+- `Ship::create_pond` records seq=1's real `data_delta_version`
+  (`table.version()` after root init) and real partition checksums, so
+  push builds a normal bundle for it.
+- `Remote::push`'s `data_delta_version==0` skip remains only as a
+  legacy/defensive guard (current ponds no longer hit it).
+- `Remote::bootstrap_consumer` and `pond pull` seed `last_pulled_seq` to
+  `oldest_available_seq - 1` instead of hard-coding 1: current producers
+  (oldest=1) seed 0 and pull seq 1+, receiving the identity-bearing root
+  rows; legacy producers (oldest=2) seed 1, preserving old behavior.
+- Tests: `ship_replica_verify_matches_after_bootstrap` (the regression),
+  `ship_remote_push_replicates_pond_init`.
+
+### D8: Read `host+table:///` / `host+series:///` Parquet directly
+
+**Goal**: `pond cat host+table:///file.parquet` (and `host+series://`)
+queries valid Parquet host files instead of erroring `File '...' is not
+queryable (type: FilePhysicalVersion)`.
+
+**Root cause**: `host+table://` parses as builtin entry-type `table`, so
+`Provider::create_table_provider` routed it through the tinyfs builtin
+path, where the host file resolves to `FilePhysicalVersion` (raw bytes)
+and `as_queryable()` rejects it -- the Parquet format was never
+considered.
+
+**Steps (as executed, `f0a38111`)**:
+- When `url.is_host()` and the entry type is `table`/`series`, read the
+  host file directly as Parquet (`open_host_url` +
+  `ParquetRecordBatchReaderBuilder` -> `MemTable`) instead of routing
+  through tinyfs.  A non-Parquet file now yields a clear "not a valid
+  Parquet file" error rather than the opaque "not queryable" one.
+- Tests (`crates/provider/src/provider_api.rs`):
+  `test_host_table_reads_parquet_directly`,
+  `test_host_table_rejects_non_parquet`.
+- Sibling fix (`212e3dd2`): `host+csv+series://` must use the CSV
+  provider, not the Parquet path.
+
+### D9: `file://` testsuite coverage for the D6/D7 remote CLI verbs
+
+**Goal**: cover the D4..D7 replica push/pull CLI verbs in the base
+container (no docker-compose / MinIO) via a local `file:///` remote.
+
+**Steps (as executed, `e57c357c`)** -- five self-contained tests, 69
+checks total:
+- `710-remote-backup-lifecycle.sh`: backup add/list/remove (push side),
+  auto-push on attach, push no-op, verify, status, `--bidirectional`,
+  unknown-remote negative paths.
+- `711-cross-pond-file-import.sh`: `remote add NAME URL /imports/X`,
+  pull, content match across the import boundary, watermark
+  advance/idempotence, detach vs `--purge`, self-mount refusal.
+- `712-maintain-compact-push.sh`: `maintain --compact` records a Compact
+  txn, push emits the Compact bundle, verify clean, fresh consumer
+  reproduces content.
+- `713-rebuild-control.sh`: `rebuild-control --force` gating,
+  reconstructs txns, preserves `pond_id`, leaves `control.bak.*`, pond
+  stays usable.
+- `714-restart-from-compact.sh`: cross-pond rebuild from the compact
+  baseline, catch up, imported content intact, own data untouched.
+
+**Follow-on hardening** (post-D9, same cutover sweep):
+- `42c65540`: require `${env:VAR}` credential references for remote
+  attachments (literal `secret_access_key` rejected at attach time).
+- `078b9f25` / `7232d254`: `last_pushed_seq` watermark correctness
+  (advance on idempotent re-push; surface corrupt watermarks).
+- `f0ac0002`: propagate snapshot errors in `apply_pulled_bundle`.
+
 ## Out of scope (for now)
 
 - CRDT-style symmetric ponds (future direction; mode becomes
@@ -721,9 +971,9 @@ new operator surface.
 
 ## References
 
-- Sandbox prototype design: `duckpond/sandbox/DESIGN.md` (the
-  sandbox-side design that this integration adopts).  Will be
-  archived after D1.
+- Sandbox prototype design: `docs/archive/sandbox-design.md` (the
+  sandbox-side design that this integration adopts; archived from
+  `duckpond/sandbox/DESIGN.md` at the end of D1).
 - Sandbox commits adopting the model:
   - `c40737c2` A1 (pond_id partitioning)
   - `97dd8f5d` A2 (control table per-pond seqs)
