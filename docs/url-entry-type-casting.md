@@ -248,3 +248,30 @@ Once the cast lands in duckpond:
   bounds in `find_youngest` or seeding `/hydrovu/devices` directly. Display (this doc) is
   independent: the combine union surfaces archive history immediately while live
   collection back-fills the recent tail.
+
+## Implementation status
+
+- **Step 1 (done, `d0d205a0`)** — Resolution accepts data-archetype nodes under an
+  explicit `+series`/`+table` cast. `resolve_pattern_to_queryable_files`
+  (`sql_derived.rs`) and `match_builtin_type` (`url_pattern_matcher.rs`) add
+  `FileDynamic`/`FilePhysicalVersion` to the lookup set when `url.entry_type().is_some()`.
+- **Steps 2–3 (done, `b612fc43`)** — Realized pragmatically inside the `timeseries-join`
+  builtin path rather than by threading an archetype field through `TableProviderOptions`
+  → `create_table_provider` → `create_builtin_table_provider`. New helper
+  `SqlDerivedFile::cast_data_node_to_parquet_provider` reads a non-queryable data node's
+  bytes and decodes them into a Parquet `MemTable` — the pond analogue of
+  `create_host_parquet_table_provider`. The single-file branch uses it directly; the
+  multiple-file branch unions queryable `ListingTable` sources with per-file data-cast
+  `MemTable`s (`UNION ALL BY NAME`). `queryable_files` is deduped by `FileID` because a
+  cast data node is accepted by every series/table entry-type search. This covers the
+  data→series case the noyo combine config needs. Tests:
+  `test_series_cast_over_single_data_parquet_file`,
+  `test_series_cast_over_multiple_data_parquet_files`.
+  - The `TableProviderOptions`/`provider_api` archetype threading (§2/§3 as originally
+    written) is **not** implemented; direct `provider_api::create_table_provider` byte-cast
+    reads (e.g. `pond cat series://<data-node>`) are not yet wired and remain follow-up if
+    needed. The join path — the noyo consumer — is fully covered.
+- **Step 4 (reverse cast, series/table → data)** — not implemented (lower priority).
+- **Caching note** — the join's data-cast path builds a fresh `MemTable` per resolution and
+  does not key on archetype; the `TableProviderKey` archetype concern applies only to the
+  unimplemented `provider_api`/`create_table_provider` route.
