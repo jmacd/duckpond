@@ -823,6 +823,70 @@ impl SqlDerivedFile {
         let hash_value = hasher.finish();
         format!("sql_derived_data_{:016x}", hash_value).to_lowercase()
     }
+
+    /// Cast a non-queryable data-archetype node (e.g. a git-ingested
+    /// `FileDynamic` Parquet archive) into a TableProvider by reading its
+    /// bytes and decoding them as Parquet.
+    ///
+    /// This is the pond analogue of `create_host_parquet_table_provider`:
+    /// reached only when a `+series`/`+table` URL cast matched a data file
+    /// (see step 1 in `docs/url-entry-type-casting.md`).  A data file cast as
+    /// a series/table yields a single Parquet version read fully into a
+    /// `MemTable`.  A non-Parquet file produces a clear "not a valid Parquet
+    /// file" error rather than the opaque "not queryable" error.
+    async fn cast_data_node_to_parquet_provider(
+        node_path: &tinyfs::NodePath,
+    ) -> TinyFSResult<Arc<dyn TableProvider>> {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use tokio::io::AsyncReadExt;
+
+        let file_handle = node_path.as_file().await.map_err(|e| {
+            tinyfs::Error::Other(format!("Failed to get file handle for cast: {}", e))
+        })?;
+        let mut reader = file_handle.handle.async_reader().await.map_err(|e| {
+            tinyfs::Error::Other(format!("Failed to open reader for cast: {}", e))
+        })?;
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf).await.map_err(|e| {
+            tinyfs::Error::Other(format!(
+                "Failed to read '{}' for Parquet cast: {}",
+                node_path.path().display(),
+                e
+            ))
+        })?;
+
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(buf))
+            .map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "File '{}' is not a valid Parquet file: {}",
+                    node_path.path().display(),
+                    e
+                ))
+            })?;
+        let schema = builder.schema().clone();
+        let batch_reader = builder.build().map_err(|e| {
+            tinyfs::Error::Other(format!(
+                "Failed to read Parquet from '{}': {}",
+                node_path.path().display(),
+                e
+            ))
+        })?;
+
+        let mut batches = Vec::new();
+        for batch in batch_reader {
+            batches.push(batch.map_err(|e| {
+                tinyfs::Error::Other(format!(
+                    "Failed to decode Parquet batch from '{}': {}",
+                    node_path.path().display(),
+                    e
+                ))
+            })?);
+        }
+
+        let table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        Ok(Arc::new(table))
+    }
 }
 
 // QueryableFile trait implementation - follows anti-duplication principles
@@ -907,6 +971,17 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                 pattern,
                 queryable_files.len()
             );
+
+            // Dedup across entry types by FileID.  Normally a node has exactly
+            // one stored type so the per-entry-type searches are disjoint, but a
+            // data-archetype node matched under a +series/+table cast is
+            // accepted by every series/table entry-type search (see
+            // docs/url-entry-type-casting.md), so it can appear more than once.
+            {
+                use std::collections::HashSet;
+                let mut seen = HashSet::new();
+                queryable_files.retain(|np| seen.insert(np.id()));
+            }
 
             if !queryable_files.is_empty() {
                 // Generate data-only table name for the source ListingTable.
@@ -1194,28 +1269,48 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                 }
                             }
                         } else {
-                            log::error!(
-                                "[ERR] SQL-DERIVED: File for pattern '{}' does not implement QueryableFile trait",
+                            // Not natively queryable.  Under a +series/+table
+                            // URL cast (step 1 in docs/url-entry-type-casting.md)
+                            // a data-archetype node (e.g. a git-ingested
+                            // FileDynamic Parquet archive) reached here; cast it
+                            // by reading its bytes as Parquet.
+                            drop(file_guard);
+                            debug!(
+                                "[CAST] SQL-DERIVED: Single data file under cast for pattern '{}', reading as Parquet",
                                 pattern_name
                             );
-                            return Err(tinyfs::Error::Other(format!(
-                                "File for pattern '{}' does not implement QueryableFile trait",
-                                pattern_name
-                            )));
+                            let provider =
+                                Self::cast_data_node_to_parquet_provider(node_path).await?;
+                            if let Some(wrapper) = &self.config.provider_wrapper {
+                                wrapper(provider)
+                                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                            } else {
+                                provider
+                            }
                         }
                     } else {
                         // Multiple files: use multi-URL ListingTable approach (maintains ownership chain)
                         // Following anti-duplication: use existing create_table_provider_for_multiple_urls pattern
                         let mut urls = Vec::new();
                         let mut file_ids = Vec::new();
+                        // Data-archetype nodes matched under a +series/+table URL
+                        // cast (e.g. git-ingested FileDynamic Parquet archives)
+                        // are not natively queryable and cannot be enumerated
+                        // through the tinyfs:/// version ListingTable; they are
+                        // read directly as Parquet (see
+                        // docs/url-entry-type-casting.md).
+                        let mut data_cast_files: Vec<tinyfs::NodePath> = Vec::new();
                         for node_path in queryable_files {
                             let file_id = node_path.id();
                             let file_handle = node_path.as_file().await.map_err(|e| {
                                 tinyfs::Error::Other(format!("Failed to get file handle: {}", e))
                             })?;
                             let file_arc = file_handle.handle.get_file().await;
-                            let file_guard = file_arc.lock().await;
-                            if let Some(_queryable_file) = file_guard.as_queryable() {
+                            let is_queryable = {
+                                let file_guard = file_arc.lock().await;
+                                file_guard.as_queryable().is_some()
+                            };
+                            if is_queryable {
                                 // For files that implement QueryableFile, we need to get their URL pattern
                                 // This maintains the ownership chain: FS Root -> State -> Cache -> Single TableProvider
 
@@ -1230,42 +1325,91 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                 urls.push(url_pattern);
                                 file_ids.push(file_id);
                             } else {
-                                return Err(tinyfs::Error::Other(format!(
-                                    "File for pattern '{}' does not implement QueryableFile trait",
-                                    pattern_name
-                                )));
+                                data_cast_files.push(node_path.clone());
                             }
                         }
 
-                        // Use existing create_table_provider_for_multiple_urls to maintain ownership chain
-                        if urls.is_empty() {
+                        if urls.is_empty() && data_cast_files.is_empty() {
                             return Err(tinyfs::Error::Other(format!(
                                 "No valid URLs found for pattern '{}'",
                                 pattern_name
                             )));
                         }
 
-                        // Create table provider options for multi-file query
-                        // Note: Temporal bounds (from pond set-temporal-bounds) should be enforced
-                        // at the Parquet reader level, not here at the factory level
-                        let options = crate::TableProviderOptions {
-                            additional_urls: urls.clone(),
-                            ..Default::default()
-                        };
+                        // Build one provider per source: a single multi-URL
+                        // ListingTable for the queryable files, plus one
+                        // Parquet MemTable per data-cast file.
+                        let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
 
-                        log::debug!(
-                            "[LIST] CREATING multi-URL TableProvider for pattern '{}': {} URLs",
-                            pattern_name,
-                            urls.len()
-                        );
+                        if !urls.is_empty() {
+                            // Create table provider options for multi-file query
+                            // Note: Temporal bounds (from pond set-temporal-bounds) should be enforced
+                            // at the Parquet reader level, not here at the factory level
+                            let options = crate::TableProviderOptions {
+                                additional_urls: urls.clone(),
+                                ..Default::default()
+                            };
 
-                        // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
-                        let representative_file_id =
-                            file_ids.first().copied().unwrap_or(FileID::root());
-                        let provider =
-                            crate::create_table_provider(representative_file_id, context, options)
+                            log::debug!(
+                                "[LIST] CREATING multi-URL TableProvider for pattern '{}': {} URLs",
+                                pattern_name,
+                                urls.len()
+                            );
+
+                            // Use first file_id for logging (temporal bounds are explicit, so file_id not used for lookup)
+                            let representative_file_id =
+                                file_ids.first().copied().unwrap_or(FileID::root());
+                            providers.push(
+                                crate::create_table_provider(
+                                    representative_file_id,
+                                    context,
+                                    options,
+                                )
+                                .await
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+                            );
+                        }
+
+                        for np in &data_cast_files {
+                            providers.push(Self::cast_data_node_to_parquet_provider(np).await?);
+                        }
+
+                        let combined: Arc<dyn TableProvider> = if providers.len() == 1 {
+                            providers
+                                .into_iter()
+                                .next()
+                                .expect("providers has exactly one element")
+                        } else {
+                            // Union the sources via SQL into a single MemTable
+                            // (mirrors the format-provider multi-file path).
+                            let temp_ctx = datafusion::prelude::SessionContext::new();
+                            for (i, tp) in providers.iter().enumerate() {
+                                _ = temp_ctx
+                                    .register_table(format!("t{}", i), tp.clone())
+                                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            }
+                            let union_sql = (0..providers.len())
+                                .map(|i| format!("SELECT * FROM t{}", i))
+                                .collect::<Vec<_>>()
+                                .join(" UNION ALL BY NAME ");
+                            let df = temp_ctx
+                                .sql(&union_sql)
                                 .await
                                 .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            let batches = df
+                                .collect()
+                                .await
+                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
+                                tinyfs::Error::Other("No batches in union".to_string())
+                            })?;
+                            let mem_table = datafusion::datasource::MemTable::try_new(
+                                schema,
+                                vec![batches],
+                            )
+                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            Arc::new(mem_table)
+                        };
 
                         // Apply optional provider wrapper (e.g., null_padding_table)
                         if let Some(wrapper) = &self.config.provider_wrapper {
@@ -1273,9 +1417,9 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                                 "Applying provider wrapper to multi-file table '{}'",
                                 pattern_name
                             );
-                            wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string()))?
+                            wrapper(combined).map_err(|e| tinyfs::Error::Other(e.to_string()))?
                         } else {
-                            provider
+                            combined
                         }
                     };
                     // Register the source data table
@@ -3591,6 +3735,124 @@ query: ""
             total_rows, 6,
             "Should find multiple Physical files with pattern matching - got {} rows, expected 6",
             total_rows
+        );
+    }
+
+    /// A data-archetype Parquet node (e.g. a git-ingested FileDynamic archive)
+    /// is not natively queryable, but a `series:///` URL cast must read it as a
+    /// single-version series.  See docs/url-entry-type-casting.md.
+    #[tokio::test]
+    async fn test_series_cast_over_single_data_parquet_file() {
+        let (fs, provider_context) = create_test_environment().await;
+        let root = fs.root().await.unwrap();
+
+        _ = root.create_dir_path("/archive").await.unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+
+        // Store as a plain data file (FilePhysicalVersion): not queryable on its
+        // own, mirroring a git-ingested Parquet archive.
+        _ = create_parquet_from_batch(
+            &fs,
+            "/archive/readings.parquet",
+            &batch,
+            EntryType::FilePhysicalVersion,
+        )
+        .await
+        .unwrap();
+
+        let context = test_context(&provider_context, FileID::root());
+        let config = SqlDerivedConfig {
+            patterns: test_patterns(&[("series", "series:///archive/readings.parquet")]),
+            query: Some("SELECT * FROM series ORDER BY timestamp".to_string()),
+            ..Default::default()
+        };
+        let sql_derived_file =
+            SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &provider_context)
+            .await
+            .unwrap();
+
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            total_rows, 3,
+            "series:// cast should read the data Parquet file as a series (3 rows)"
+        );
+    }
+
+    /// A `series:///*.parquet` cast matching multiple data-archetype nodes
+    /// unions them into a single series.
+    #[tokio::test]
+    async fn test_series_cast_over_multiple_data_parquet_files() {
+        let (fs, provider_context) = create_test_environment().await;
+        let root = fs.root().await.unwrap();
+
+        _ = root.create_dir_path("/archive").await.unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        for (name, tss, vals) in [
+            ("a.parquet", vec![1000, 2000], vec![10, 20]),
+            ("b.parquet", vec![3000, 4000, 5000], vec![30, 40, 50]),
+        ] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(tss)),
+                    Arc::new(Int32Array::from(vals)),
+                ],
+            )
+            .unwrap();
+            _ = create_parquet_from_batch(
+                &fs,
+                &format!("/archive/{}", name),
+                &batch,
+                EntryType::FilePhysicalVersion,
+            )
+            .await
+            .unwrap();
+        }
+
+        let context = test_context(&provider_context, FileID::root());
+        let config = SqlDerivedConfig {
+            patterns: test_patterns(&[("series", "series:///archive/*.parquet")]),
+            query: Some("SELECT * FROM series ORDER BY timestamp".to_string()),
+            ..Default::default()
+        };
+        let sql_derived_file =
+            SqlDerivedFile::new(config, context, SqlDerivedMode::Series).unwrap();
+
+        let result_batches = execute_sql_derived_direct(&sql_derived_file, &provider_context)
+            .await
+            .unwrap();
+
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            total_rows, 5,
+            "series:// cast should union both data Parquet files (2 + 3 = 5 rows)"
         );
     }
 
