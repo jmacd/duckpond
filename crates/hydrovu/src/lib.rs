@@ -541,7 +541,11 @@ impl HydroVuCollector {
     /// Query the read-only seed archives for a device's youngest timestamp,
     /// returned in microseconds (DuckPond canonical unit).  Reads every
     /// `{archive_path}/devices/{device_id}/*.series` file via a `series://`
-    /// cast (Parquet bytes -> MemTable) and takes `max(timestamp)` across all.
+    /// cast (the same Provider builtin path used by `timeseries-join`) and
+    /// takes `max(timestamp)` across all.  No new file-access mechanism: the
+    /// cast flows through the shared `read_pond_node_as_parquet` helper in the
+    /// provider crate.  TODO(perf): that helper currently materializes whole
+    /// files in memory; the right fix is in the provider cache, not here.
     ///
     /// Returns `Ok(None)` when no archive files exist for the device.
     async fn find_archive_youngest_micros(
@@ -590,7 +594,9 @@ impl HydroVuCollector {
         let mut max_micros: Option<i64> = None;
 
         for (i, file_path) in archive_files.iter().enumerate() {
-            // Cast the git-ingested data node as a queryable series (Parquet).
+            // Reuse the canonical builtin `+series` cast: same Provider entry
+            // point used by `timeseries-join` for git-ingested archives.  No
+            // separate file-access path lives in this crate.
             let url = format!("series://{}", file_path);
             let table = provider
                 .create_table_provider(&url, &ctx)
@@ -625,7 +631,7 @@ impl HydroVuCollector {
                 })?;
             let _ = ctx.deregister_table(&table_name);
 
-            if let Some(micros) = Self::scalar_timestamp_to_micros(&batches) {
+            if let Some(micros) = Self::scalar_timestamp_to_micros(&batches)? {
                 debug!("Archive '{}' max(timestamp) -> {} micros", file_path, micros);
                 max_micros = Some(max_micros.map_or(micros, |cur| cur.max(micros)));
             }
@@ -635,48 +641,101 @@ impl HydroVuCollector {
     }
 
     /// Extract a single `max(timestamp)` scalar from a query result and
-    /// normalize it to microseconds.  The seed archives store `timestamp` as a
-    /// plain INT64 in **seconds**; collector-written active series use
-    /// `Timestamp(Second)`.  Both normalize to micros here; logical Timestamp
-    /// types are scaled per their TimeUnit.
-    fn scalar_timestamp_to_micros(batches: &[RecordBatch]) -> Option<i64> {
+    /// normalize it to microseconds (DuckPond canonical unit).
+    ///
+    /// HydroVu archives are produced by the hydrovu factory itself, so the
+    /// timestamp column type is known.  Unsupported Arrow types hard-fail
+    /// rather than silently degrade -- a type mismatch indicates a real
+    /// regression that should not be hidden.  The seed archives in production
+    /// use INT64 seconds; collector-written active series use
+    /// `Timestamp(Second)`.  Other logical Timestamp units are accepted and
+    /// scaled per their TimeUnit.
+    fn scalar_timestamp_to_micros(
+        batches: &[RecordBatch],
+    ) -> Result<Option<i64>, Box<dyn std::error::Error + Send + Sync>> {
         use arrow_array::{
             Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
             TimestampNanosecondArray, TimestampSecondArray,
         };
 
-        let batch = batches.iter().find(|b| b.num_rows() > 0)?;
+        let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
+            return Ok(None);
+        };
         let column = batch.column(0);
         if column.is_null(0) {
-            return None;
+            return Ok(None);
         }
 
-        match column.data_type() {
+        let micros = match column.data_type() {
             DataType::Int64 => {
-                let arr = column.as_any().downcast_ref::<Int64Array>()?;
-                Some(arr.value(0) * 1_000_000)
+                let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                    steward::StewardError::Dyn(
+                        "max(timestamp) result claims Int64 but downcast failed".into(),
+                    )
+                })?;
+                arr.value(0) * 1_000_000
             }
             DataType::Timestamp(TimeUnit::Second, _) => {
-                let arr = column.as_any().downcast_ref::<TimestampSecondArray>()?;
-                Some(arr.value(0) * 1_000_000)
+                let arr = column
+                    .as_any()
+                    .downcast_ref::<TimestampSecondArray>()
+                    .ok_or_else(|| {
+                        steward::StewardError::Dyn(
+                            "max(timestamp) result claims Timestamp(Second) but downcast failed"
+                                .into(),
+                        )
+                    })?;
+                arr.value(0) * 1_000_000
             }
             DataType::Timestamp(TimeUnit::Millisecond, _) => {
-                let arr = column.as_any().downcast_ref::<TimestampMillisecondArray>()?;
-                Some(arr.value(0) * 1_000)
+                let arr = column
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .ok_or_else(|| {
+                        steward::StewardError::Dyn(
+                            "max(timestamp) result claims Timestamp(Millisecond) but downcast failed"
+                                .into(),
+                        )
+                    })?;
+                arr.value(0) * 1_000
             }
             DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                let arr = column.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
-                Some(arr.value(0))
+                let arr = column
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .ok_or_else(|| {
+                        steward::StewardError::Dyn(
+                            "max(timestamp) result claims Timestamp(Microsecond) but downcast failed"
+                                .into(),
+                        )
+                    })?;
+                arr.value(0)
             }
             DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-                let arr = column.as_any().downcast_ref::<TimestampNanosecondArray>()?;
-                Some(arr.value(0) / 1_000)
+                let arr = column
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .ok_or_else(|| {
+                        steward::StewardError::Dyn(
+                            "max(timestamp) result claims Timestamp(Nanosecond) but downcast failed"
+                                .into(),
+                        )
+                    })?;
+                arr.value(0) / 1_000
             }
             other => {
-                debug!("Unexpected max(timestamp) type {:?}; ignoring archive", other);
-                None
+                return Err(steward::StewardError::Dyn(
+                    format!(
+                        "Unsupported archive max(timestamp) type {:?}; expected INT64 (seconds) or a logical Timestamp",
+                        other
+                    )
+                    .into(),
+                )
+                .into());
             }
-        }
+        };
+
+        Ok(Some(micros))
     }
 
     /// Core device data collection function - handles both counting and timestamp tracking
@@ -1116,11 +1175,10 @@ mod tests {
         Ok(())
     }
 
-    /// The seed archives store `timestamp` as a plain INT64 in seconds; the
-    /// resume logic must normalize that (and any logical Timestamp type) to
-    /// microseconds, the DuckPond canonical unit.
+    /// Archive timestamp normalization uses strict typing with hard failures on
+    /// unsupported types.
     #[test]
-    fn test_scalar_timestamp_to_micros_units() {
+    fn test_scalar_timestamp_to_micros_units_and_strictness() {
         use arrow_array::{
             Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
             TimestampNanosecondArray, TimestampSecondArray,
@@ -1135,35 +1193,45 @@ mod tests {
         // INT64 seconds (the real archive layout) -> micros.
         let b = one_col(Arc::new(Int64Array::from(vec![1_770_000_000i64])));
         assert_eq!(
-            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            HydroVuCollector::scalar_timestamp_to_micros(&b).unwrap(),
             Some(1_770_000_000_000_000)
         );
 
         // Logical Timestamp types scale per their unit.
         let b = one_col(Arc::new(TimestampSecondArray::from(vec![1_700i64])));
         assert_eq!(
-            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            HydroVuCollector::scalar_timestamp_to_micros(&b).unwrap(),
             Some(1_700_000_000)
         );
         let b = one_col(Arc::new(TimestampMillisecondArray::from(vec![1_700i64])));
         assert_eq!(
-            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            HydroVuCollector::scalar_timestamp_to_micros(&b).unwrap(),
             Some(1_700_000)
         );
         let b = one_col(Arc::new(TimestampMicrosecondArray::from(vec![1_700i64])));
         assert_eq!(
-            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            HydroVuCollector::scalar_timestamp_to_micros(&b).unwrap(),
             Some(1_700)
         );
         let b = one_col(Arc::new(TimestampNanosecondArray::from(vec![1_700_000i64])));
         assert_eq!(
-            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            HydroVuCollector::scalar_timestamp_to_micros(&b).unwrap(),
             Some(1_700)
         );
 
-        // NULL / empty -> None (no archive temporal data).
+        // NULL / empty -> Ok(None): the SQL aggregate had no rows / a NULL max.
         let b = one_col(Arc::new(Int64Array::from(vec![None::<i64>])));
-        assert_eq!(HydroVuCollector::scalar_timestamp_to_micros(&b), None);
-        assert_eq!(HydroVuCollector::scalar_timestamp_to_micros(&[]), None);
+        assert_eq!(
+            HydroVuCollector::scalar_timestamp_to_micros(&b).unwrap(),
+            None
+        );
+        assert_eq!(HydroVuCollector::scalar_timestamp_to_micros(&[]).unwrap(), None);
+
+        // Unsupported type hard-fails (no silent skip).
+        let b = one_col(Arc::new(arrow_array::StringArray::from(vec!["x"])));
+        assert!(
+            HydroVuCollector::scalar_timestamp_to_micros(&b).is_err(),
+            "String timestamp column must hard-fail"
+        );
     }
 }
