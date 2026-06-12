@@ -339,17 +339,18 @@ async fn end_to_end_bounded_long_run_keeps_all_components_bounded() {
             Err(other) => panic!("unexpected pull error at cycle {}: {:?}", cycle, other),
         }
 
-        let r = consumer.begin_read().await.unwrap();
-        for k in 0..K {
-            assert_eq!(
-                r.get("p", &format!("k{}", k)).await.unwrap(),
-                Some(big_value(cycle as u8)),
-                "consumer at cycle {} has correct k{}",
-                cycle,
-                k
-            );
+        {
+            let r = consumer.begin_read().await.unwrap();
+            for k in 0..K {
+                assert_eq!(
+                    r.get("p", &format!("k{}", k)).await.unwrap(),
+                    Some(big_value(cycle as u8)),
+                    "consumer at cycle {} has correct k{}",
+                    cycle,
+                    k
+                );
+            }
         }
-        drop(r);
 
         source_sizes.push(dir_size(&source_dir));
         remote_sizes.push(dir_size(&remote_dir));

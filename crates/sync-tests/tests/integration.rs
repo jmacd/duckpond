@@ -899,7 +899,7 @@ async fn abort_and_noop_writes_interleaved_with_real_writes() {
     {
         let mut g = source.begin_write().await.unwrap();
         g.put("p", "k_abort", b"x".to_vec()).unwrap();
-        let _ = g.abort("intentional").await.unwrap();
+        g.abort("intentional").await.unwrap();
     }
     {
         let g = source.begin_write().await.unwrap();
@@ -918,7 +918,7 @@ async fn abort_and_noop_writes_interleaved_with_real_writes() {
     {
         let mut g = source.begin_write().await.unwrap();
         g.put("p", "k_abort2", b"x".to_vec()).unwrap();
-        let _ = g.abort("intentional").await.unwrap();
+        g.abort("intentional").await.unwrap();
     }
     {
         let mut g = source.begin_write().await.unwrap();
@@ -937,14 +937,15 @@ async fn abort_and_noop_writes_interleaved_with_real_writes() {
     let _ = remote.pull(&mut consumer).await.unwrap();
 
     // Consumer has only the real values; the aborted/noop seqs are absent.
-    let r = consumer.begin_read().await.unwrap();
-    assert_eq!(r.get("p", "k1").await.unwrap(), Some(b"v1".to_vec()));
-    assert_eq!(r.get("p", "k4").await.unwrap(), Some(b"v4".to_vec()));
-    assert_eq!(r.get("p", "k5").await.unwrap(), Some(b"v5".to_vec()));
-    assert_eq!(r.get("p", "k7").await.unwrap(), Some(b"v7".to_vec()));
-    assert_eq!(r.get("p", "k_abort").await.unwrap(), None);
-    assert_eq!(r.get("p", "k_abort2").await.unwrap(), None);
-    drop(r);
+    {
+        let r = consumer.begin_read().await.unwrap();
+        assert_eq!(r.get("p", "k1").await.unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(r.get("p", "k4").await.unwrap(), Some(b"v4".to_vec()));
+        assert_eq!(r.get("p", "k5").await.unwrap(), Some(b"v5".to_vec()));
+        assert_eq!(r.get("p", "k7").await.unwrap(), Some(b"v7".to_vec()));
+        assert_eq!(r.get("p", "k_abort").await.unwrap(), None);
+        assert_eq!(r.get("p", "k_abort2").await.unwrap(), None);
+    }
 
     let v = verify_against_remote(&remote, &consumer).await.unwrap();
     assert!(
@@ -1116,7 +1117,7 @@ async fn scripted_25_operation_stress_invariants_hold_throughout() {
     {
         let mut g = source.begin_write().await.unwrap();
         g.put("p1", "trash", b"trash".to_vec()).unwrap();
-        let _ = g.abort("intentional").await.unwrap();
+        g.abort("intentional").await.unwrap();
     }
     step += 1;
     // No state should change.

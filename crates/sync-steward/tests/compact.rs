@@ -61,10 +61,12 @@ async fn compact_does_not_change_get_or_list() {
         .unwrap();
     write_n_separate_commits(&mut s, "p", 5).await;
 
-    let r = s.begin_read().await.unwrap();
-    let pre_list = r.list("p").await.unwrap();
-    let pre_get = r.get("p", "k2").await.unwrap();
-    drop(r);
+    let (pre_list, pre_get) = {
+        let r = s.begin_read().await.unwrap();
+        let pre_list = r.list("p").await.unwrap();
+        let pre_get = r.get("p", "k2").await.unwrap();
+        (pre_list, pre_get)
+    };
 
     let outcome = s.compact(None).await.unwrap();
     assert_eq!(outcome.commit_kind, CommitKind::Compact);

@@ -49,7 +49,7 @@ async fn begin_write_emits_begin_record_and_advances_seq() {
     assert_eq!(s.last_write_seq(), 0);
     let g = s.begin_write().await.unwrap();
     let allocated = g.txn_seq();
-    let _ = g.abort("not really").await.unwrap();
+    g.abort("not really").await.unwrap();
     assert_eq!(allocated, 1);
     assert_eq!(s.last_write_seq(), 1, "seq advances even on abort");
 
@@ -153,7 +153,7 @@ async fn abort_records_failed_record() {
 
     let mut g = s.begin_write().await.unwrap();
     g.put("p", "k", b"unwritten".to_vec()).unwrap();
-    let _ = g.abort("intentional rollback").await.unwrap();
+    g.abort("intentional rollback").await.unwrap();
 
     let recs = s.log(None).await.unwrap();
     let failed: Vec<_> = recs
@@ -179,12 +179,13 @@ async fn read_guards_emit_no_control_records() {
     }
     let before = s.log(None).await.unwrap().len();
 
-    let r = s.begin_read().await.unwrap();
-    let v = r.get("p", "k").await.unwrap();
-    assert_eq!(v, Some(b"v".to_vec()));
-    let listed = r.list("p").await.unwrap();
-    assert_eq!(listed.len(), 1);
-    drop(r);
+    {
+        let r = s.begin_read().await.unwrap();
+        let v = r.get("p", "k").await.unwrap();
+        assert_eq!(v, Some(b"v".to_vec()));
+        let listed = r.list("p").await.unwrap();
+        assert_eq!(listed.len(), 1);
+    }
 
     let after = s.log(None).await.unwrap().len();
     assert_eq!(before, after, "read guard must not write control records");
@@ -204,7 +205,7 @@ async fn txn_seq_is_strictly_monotonic_across_commits_aborts_and_noops() {
     {
         let mut g = s.begin_write().await.unwrap();
         g.put("p", "b", b"v".to_vec()).unwrap();
-        let _ = g.abort("nope").await.unwrap();
+        g.abort("nope").await.unwrap();
     }
     {
         let g = s.begin_write().await.unwrap();
@@ -499,7 +500,7 @@ async fn data_delta_version_not_recorded_for_failed_or_completed() {
     {
         let mut g = s.begin_write().await.unwrap();
         g.put("p", "k", b"v".to_vec()).unwrap();
-        let _ = g.abort("nope").await.unwrap();
+        g.abort("nope").await.unwrap();
     }
     assert_eq!(s.data_delta_version_at(1).await.unwrap(), None);
 

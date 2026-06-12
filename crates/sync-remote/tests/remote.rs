@@ -187,7 +187,7 @@ async fn push_errors_on_failed_seq() {
     {
         let mut g = steward.begin_write().await.unwrap();
         g.put("p", "k", b"v".to_vec()).unwrap();
-        let _ = g.abort("intentional").await.unwrap(); // -> Failed at seq 1
+        g.abort("intentional").await.unwrap(); // -> Failed at seq 1
     }
     let mut remote = Remote::create(dir.path().join("remote"), steward.store_id())
         .await
