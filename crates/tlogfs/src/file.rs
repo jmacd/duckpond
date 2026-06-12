@@ -9,6 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tinyfs::ResultExt;
 use tinyfs::{
     AsyncReadSeek, Error as TinyFSError, File, FileID, FileMetadataWriter, Metadata, NodeID,
     NodeMetadata, PartID, persistence::PersistenceLayer,
@@ -135,7 +136,7 @@ impl File for OpLogFile {
             .state
             .allocate_version_for_write(self.id)
             .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+            .map_other()?;
 
         debug!(
             "Pre-allocated version {allocated_version} for file {}",
@@ -346,7 +347,7 @@ impl FileMetadataWriter for OpLogFileWriter {
 
         let bytes = tokio::fs::read(&temp_path)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to read temp file: {}", e)))?;
+            .map_other_context("Failed to read temp file")?;
 
         // Parse parquet footer to extract temporal bounds
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -354,14 +355,14 @@ impl FileMetadataWriter for OpLogFileWriter {
 
         let bytes = Bytes::from(bytes);
         let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to parse parquet: {}", e)))?;
+            .map_other_context("Failed to parse parquet")?;
 
         let parquet_metadata = reader_builder.metadata();
         let schema = reader_builder.schema();
 
         // Detect timestamp column
         let timestamp_column = crate::schema::detect_timestamp_column(schema)
-            .map_err(|e| tinyfs::Error::Other(format!("No timestamp column found: {}", e)))?;
+            .map_other_context("No timestamp column found")?;
 
         // Extract temporal bounds
         let (min_time, max_time) =
@@ -478,7 +479,7 @@ impl AsyncWrite for OpLogFileWriter {
                 // Finalize HybridWriter to get content
                 let result = async {
                     let hybrid_result = storage.finalize().await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to finalize storage: {}", e)))?;
+                        .map_other_context("Failed to finalize storage")?;
 
                     let content = hybrid_result.content;
                     let content_len = hybrid_result.size;
@@ -523,7 +524,7 @@ impl AsyncWrite for OpLogFileWriter {
                             let series_outboard = if let Some(prev_bao_bytes) = prev_bao {
                                 // Deserialize previous SeriesOutboard
                                 let prev_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
-                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize previous bao_outboard: {}", e)))?;
+                                    .map_other_context("Failed to deserialize previous bao_outboard")?;
 
                                 // The HybridWriter's bao_state was resumed from the
                                 // previous frontier in async_writer(), so
@@ -610,7 +611,7 @@ impl AsyncWrite for OpLogFileWriter {
                     };
 
                     state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version), bao_outboard).await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to store file: {}", e)))
+                        .map_other_context("Failed to store file")
                 }.await;
 
                 match result {
@@ -676,6 +677,6 @@ impl tinyfs::QueryableFile for OpLogFile {
         // Delegate to provider crate - no duplication
         provider::create_table_provider(id, context, provider::TableProviderOptions::default())
             .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))
+            .map_other()
     }
 }

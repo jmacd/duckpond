@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use tinyfs::Result as TinyFSResult;
+use tinyfs::ResultExt;
 
 // ============================================================================
 // Configuration Types
@@ -182,19 +183,15 @@ impl ColumnRenameConfig {
 
 /// Validate column rename configuration from YAML bytes
 fn validate_column_rename_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
+    let config_str = std::str::from_utf8(config).map_other_context("Invalid UTF-8")?;
 
-    let config: ColumnRenameConfig = serde_yaml::from_str(config_str)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
+    let config: ColumnRenameConfig =
+        serde_yaml::from_str(config_str).map_other_context("Invalid YAML")?;
 
     // Validate regex patterns compile
-    config
-        .validate()
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    config.validate().map_other()?;
 
-    serde_json::to_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))
+    serde_json::to_value(config).map_other_context("Serialization error")
 }
 
 /// Apply column rename transformation to a TableProvider
@@ -214,11 +211,10 @@ async fn apply_column_rename_transform(
         .await?;
 
     // Parse config
-    let config_str = std::str::from_utf8(&config_bytes)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
+    let config_str = std::str::from_utf8(&config_bytes).map_other_context("Invalid UTF-8")?;
 
-    let rename_config: ColumnRenameConfig = serde_yaml::from_str(config_str)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
+    let rename_config: ColumnRenameConfig =
+        serde_yaml::from_str(config_str).map_other_context("Invalid YAML")?;
 
     // Build cast map from rules with cast annotations
     let schema = input.schema();

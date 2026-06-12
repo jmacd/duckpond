@@ -21,6 +21,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::Result as TinyFSResult;
+use tinyfs::ResultExt;
 use tinyfs::{AsyncReadSeek, DirHandle, EntryType, File, FileHandle, Metadata, NodeMetadata};
 use tokio::sync::Mutex;
 
@@ -305,10 +306,10 @@ impl FactoryRegistry {
         // Expand ${env:VAR} placeholders before validation/deserialization.
         // Configs are stored raw; `pond run` expands them for executable
         // factories, but create_directory is called at filesystem-open time.
-        let config_str = std::str::from_utf8(config)
-            .map_err(|e| tinyfs::Error::Other(format!("Config is not valid UTF-8: {}", e)))?;
+        let config_str =
+            std::str::from_utf8(config).map_other_context("Config is not valid UTF-8")?;
         let expanded = utilities::env_substitution::substitute_env_vars(config_str)
-            .map_err(|e| tinyfs::Error::Other(format!("Env expansion failed: {}", e)))?;
+            .map_other_context("Env expansion failed")?;
 
         let config_value = (factory.validate_config)(expanded.as_bytes())?;
 
@@ -332,10 +333,10 @@ impl FactoryRegistry {
             .ok_or_else(|| tinyfs::Error::Other(format!("Unknown factory: {}", factory_name)))?;
 
         // Expand ${env:VAR} placeholders (same as create_directory).
-        let config_str = std::str::from_utf8(config)
-            .map_err(|e| tinyfs::Error::Other(format!("Config is not valid UTF-8: {}", e)))?;
+        let config_str =
+            std::str::from_utf8(config).map_other_context("Config is not valid UTF-8")?;
         let expanded = utilities::env_substitution::substitute_env_vars(config_str)
-            .map_err(|e| tinyfs::Error::Other(format!("Env expansion failed: {}", e)))?;
+            .map_other_context("Env expansion failed")?;
 
         let config_value = (factory.validate_config)(expanded.as_bytes())?;
 

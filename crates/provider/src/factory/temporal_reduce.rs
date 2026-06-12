@@ -69,6 +69,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tinyfs::ResultExt;
 use tinyfs::{
     DirHandle, Directory, EntryType, Node, NodeMetadata, NodeType, Result as TinyFSResult,
 };
@@ -1047,15 +1048,14 @@ fn create_temporal_reduce_directory(
 
 /// Validate temporal reduce configuration
 fn validate_temporal_reduce_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8 in config: {}", e)))?;
+    let config_str = std::str::from_utf8(config).map_other_context("Invalid UTF-8 in config")?;
 
-    let config_value: Value = serde_yaml::from_str(config_str)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML config: {}", e)))?;
+    let config_value: Value =
+        serde_yaml::from_str(config_str).map_other_context("Invalid YAML config")?;
 
     // Validate by deserializing to our config struct
     let _temporal_config: TemporalReduceConfig = serde_json::from_value(config_value.clone())
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid temporal-reduce config: {}", e)))?;
+        .map_other_context("Invalid temporal-reduce config")?;
 
     // Additional validation: check that resolutions can be parsed
     if let Some(resolutions) = config_value.get("resolutions").and_then(|r| r.as_array()) {

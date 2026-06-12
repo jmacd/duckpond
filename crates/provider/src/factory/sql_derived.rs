@@ -35,6 +35,7 @@
 //! see [`crates/docs/sql-derived-design.md`](../docs/sql-derived-design.md).
 
 use tinyfs::FileID;
+use tinyfs::ResultExt;
 
 use crate::transform::scope_prefix::scope_prefix_table_provider;
 use async_trait::async_trait;
@@ -306,7 +307,7 @@ impl SqlDerivedFile {
                 .context
                 .root()
                 .await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to get root: {}", e)))?;
+                .map_other_context("Failed to get root")?;
 
             // Resolve the transform path to get the node
             let (_parent_wd, lookup_result) =
@@ -494,7 +495,7 @@ impl SqlDerivedFile {
             .context
             .root()
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get root: {}", e)))?;
+            .map_other_context("Failed to get root")?;
 
         // Check if path is exact (no wildcards) - use resolve_path() for single targets
         let is_exact_path =
@@ -668,8 +669,8 @@ fn create_sql_derived_table_handle(
     config: Value,
     context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
-    let cfg: SqlDerivedConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
+    let cfg: SqlDerivedConfig =
+        serde_json::from_value(config).map_other_context("Invalid SQL-derived config")?;
 
     let sql_file = SqlDerivedFile::new(cfg, context, SqlDerivedMode::Table)?;
     Ok(sql_file.create_handle())
@@ -679,8 +680,8 @@ fn create_sql_derived_series_handle(
     config: Value,
     context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
-    let cfg: SqlDerivedConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid SQL-derived config: {}", e)))?;
+    let cfg: SqlDerivedConfig =
+        serde_json::from_value(config).map_other_context("Invalid SQL-derived config")?;
 
     let sql_file = SqlDerivedFile::new(cfg, context, SqlDerivedMode::Series)?;
     Ok(sql_file.create_handle())
@@ -688,8 +689,8 @@ fn create_sql_derived_series_handle(
 
 fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     // Parse as YAML first (user format)
-    let yaml_config: SqlDerivedConfig = serde_yaml::from_slice(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML config: {}", e)))?;
+    let yaml_config: SqlDerivedConfig =
+        serde_yaml::from_slice(config).map_other_context("Invalid YAML config")?;
 
     // Validate that patterns list is not empty
     if yaml_config.patterns.is_empty() {
@@ -733,8 +734,7 @@ fn validate_sql_derived_config(config: &[u8]) -> TinyFSResult<Value> {
     }
 
     // Convert to JSON for internal use
-    serde_json::to_value(yaml_config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+    serde_json::to_value(yaml_config).map_other_context("Failed to convert config")
 }
 
 // Downcast function for SqlDerivedFile
@@ -839,7 +839,7 @@ impl SqlDerivedFile {
     ) -> TinyFSResult<Arc<dyn TableProvider>> {
         crate::provider_api::read_pond_node_as_parquet(node_path)
             .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))
+            .map_other()
     }
 
     /// Apply the optional `provider_wrapper` closure to a TableProvider,
@@ -849,7 +849,7 @@ impl SqlDerivedFile {
         provider: Arc<dyn TableProvider>,
     ) -> TinyFSResult<Arc<dyn TableProvider>> {
         match &self.config.provider_wrapper {
-            Some(wrapper) => wrapper(provider).map_err(|e| tinyfs::Error::Other(e.to_string())),
+            Some(wrapper) => wrapper(provider).map_other(),
             None => Ok(provider),
         }
     }
@@ -868,26 +868,20 @@ impl SqlDerivedFile {
         for (i, tp) in providers.iter().enumerate() {
             _ = temp_ctx
                 .register_table(format!("t{}", i), tp.clone())
-                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                .map_other()?;
         }
         let union_sql = (0..providers.len())
             .map(|i| format!("SELECT * FROM t{}", i))
             .collect::<Vec<_>>()
             .join(" UNION ALL BY NAME ");
-        let df = temp_ctx
-            .sql(&union_sql)
-            .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-        let batches = df
-            .collect()
-            .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        let df = temp_ctx.sql(&union_sql).await.map_other()?;
+        let batches = df.collect().await.map_other()?;
         let schema = batches
             .first()
             .map(|b| b.schema())
             .ok_or_else(|| tinyfs::Error::Other("No batches in union".to_string()))?;
-        let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        let mem_table =
+            datafusion::datasource::MemTable::try_new(schema, vec![batches]).map_other()?;
         Ok(Arc::new(mem_table))
     }
 
@@ -956,8 +950,7 @@ impl SqlDerivedFile {
 
                 let pat_hash = crate::format_cache::pattern_hash(&pattern.to_string());
                 let glob_dir = crate::format_cache::cache_glob_dir(cache_dir, scheme, &pat_hash);
-                crate::format_cache::reset_glob_dir(&glob_dir)
-                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                crate::format_cache::reset_glob_dir(&glob_dir).map_other()?;
 
                 for node_path in queryable_files {
                     let file_url_str = Self::node_file_url(scheme, node_path);
@@ -967,18 +960,18 @@ impl SqlDerivedFile {
                     let (node_id, versions) = provider_api
                         .ensure_url_cached(&file_url, format_provider.as_ref(), cache_dir)
                         .await
-                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                        .map_other()?;
 
                     let _ = crate::format_cache::ensure_glob_symlinks(
                         cache_dir, scheme, &node_id, &versions, &glob_dir,
                     )
-                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                    .map_other()?;
                 }
 
                 let provider =
                     crate::format_cache::listing_table_from_glob_cache(&glob_dir, &datafusion_ctx)
                         .await
-                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                        .map_other()?;
 
                 debug!(
                     "[OK] SQL-DERIVED: Glob cache ListingTable for {} files (pattern '{}')",
@@ -1034,7 +1027,7 @@ impl SqlDerivedFile {
         let file_handle = node_path
             .as_file()
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get file handle: {}", e)))?;
+            .map_other_context("Failed to get file handle")?;
         let file_arc = file_handle.handle.get_file().await;
         let file_guard = file_arc.lock().await;
         if let Some(queryable_file) = file_guard.as_queryable() {
@@ -1094,7 +1087,7 @@ impl SqlDerivedFile {
             let file_handle = node_path
                 .as_file()
                 .await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to get file handle: {}", e)))?;
+                .map_other_context("Failed to get file handle")?;
             let file_arc = file_handle.handle.get_file().await;
             let is_queryable = {
                 let file_guard = file_arc.lock().await;
@@ -1145,7 +1138,7 @@ impl SqlDerivedFile {
             providers.push(
                 crate::create_table_provider(representative_file_id, context, options)
                     .await
-                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+                    .map_other()?,
             );
         }
 
@@ -1330,7 +1323,7 @@ impl SqlDerivedFile {
                         scope_prefix.clone(),
                         time_column.clone(),
                     )
-                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?,
+                    .map_other()?,
                 );
                 use datafusion::catalog::TableProvider;
                 debug!(

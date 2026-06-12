@@ -524,6 +524,7 @@ mod tests {
     use crate::commands::init::init_command;
     use arrow_array::record_batch;
     use tempfile::TempDir;
+    use tinyfs::ResultExt;
     use tinyfs::arrow::ParquetExt;
 
     /// Test setup helper - creates pond and returns context for testing
@@ -612,7 +613,7 @@ mod tests {
                         ),
                         ("value", Float64, [42.0_f64, 43.5_f64])
                     )
-                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
+                    .map_other_context("Arrow error")?;
 
                     // Write as parquet table using ParquetExt
                     root.create_table_from_batch(
@@ -652,7 +653,7 @@ mod tests {
                         ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]), // 2024-01-01 timestamps in milliseconds
                         ("value", Float64, [42.0_f64, 43.5_f64])
                     )
-                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
+                    .map_other_context("Arrow error")?;
 
                     // Write as file:series using ParquetExt with temporal metadata extraction
                     let _ = root

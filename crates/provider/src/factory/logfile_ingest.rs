@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tinyfs::ResultExt;
 use tinyfs::{EntryType, FileID, Result as TinyFSResult};
 use utilities::bao_outboard::IncrementalHashState;
 
@@ -158,8 +159,8 @@ pub async fn execute(
     context: FactoryContext,
     ctx: ExecutionContext,
 ) -> Result<(), tinyfs::Error> {
-    let config: LogfileIngestConfig = serde_json::from_value(config.clone())
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let config: LogfileIngestConfig =
+        serde_json::from_value(config.clone()).map_other_context("Invalid config")?;
 
     // Parse command (default to sync if no subcommand)
     let cmd = parse_command(ctx)?;
@@ -230,13 +231,10 @@ pub async fn execute(
             {
                 // Same size: could be unchanged OR rotated to a same-size file
                 // Must check content to distinguish
-                let mut prefix_file = std::fs::File::open(&host_active.path)
-                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                let mut prefix_file = std::fs::File::open(&host_active.path).map_other()?;
                 let mut prefix_content = vec![0u8; pond_active.cumulative_size as usize];
                 use std::io::Read;
-                prefix_file
-                    .read_exact(&mut prefix_content)
-                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                prefix_file.read_exact(&mut prefix_content).map_other()?;
 
                 let mut hasher = IncrementalHashState::new();
                 hasher.ingest(&prefix_content);
@@ -268,13 +266,10 @@ pub async fn execute(
                 // the new file already grew past the old tracked size.
                 // Check the prefix to distinguish.
                 if pond_active.cumulative_size > 0 {
-                    let mut prefix_file = std::fs::File::open(&host_active.path)
-                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                    let mut prefix_file = std::fs::File::open(&host_active.path).map_other()?;
                     let mut prefix_content = vec![0u8; pond_active.cumulative_size as usize];
                     use std::io::Read;
-                    prefix_file
-                        .read_exact(&mut prefix_content)
-                        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                    prefix_file.read_exact(&mut prefix_content).map_other()?;
 
                     let mut hasher = IncrementalHashState::new();
                     hasher.ingest(&prefix_content);
@@ -344,8 +339,7 @@ pub async fn execute(
                             );
 
                             // Read the full archived file content, append only the new portion
-                            let content = std::fs::read(&matched_archived.path)
-                                .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            let content = std::fs::read(&matched_archived.path).map_other()?;
                             let new_data = &content[pond_active.cumulative_size as usize..];
 
                             // Append to the ACTIVE pond file (TinyFS handles checksums)
@@ -476,7 +470,7 @@ async fn enumerate_host_files(
     // Match archived files - absolute patterns handled automatically
     let matches = utilities::glob::collect_host_matches(&config.archived_pattern, ".")
         .await
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        .map_other()?;
 
     for (path, _captures) in matches {
         if let Ok(metadata) = std::fs::metadata(&path)
@@ -493,7 +487,7 @@ async fn enumerate_host_files(
     // Match active file - absolute patterns handled automatically
     let matches = utilities::glob::collect_host_matches(&config.active_pattern, ".")
         .await
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        .map_other()?;
 
     for (path, _captures) in matches {
         if let Ok(metadata) = std::fs::metadata(&path)
@@ -705,8 +699,7 @@ async fn process_archived_file(
             // Verify archived file hasn't changed (should be immutable)
             // Use bao-tree root hash (IncrementalHashState), not simple blake3::hash
             // because metadata.blake3 stores the cumulative bao-tree root
-            let host_content =
-                std::fs::read(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+            let host_content = std::fs::read(&host_file.path).map_other()?;
 
             let mut state = IncrementalHashState::new();
             state.ingest(&host_content);
@@ -736,8 +729,7 @@ async fn ingest_new_file(
     config: &LogfileIngestConfig,
     host_file: &HostFileState,
 ) -> Result<(), tinyfs::Error> {
-    let content =
-        std::fs::read(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    let content = std::fs::read(&host_file.path).map_other()?;
     let filename = host_file
         .path
         .file_name()
@@ -770,14 +762,8 @@ async fn ingest_new_file(
         .await?;
 
     // Write content and finalize
-    writer
-        .write_all(&content)
-        .await
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-    writer
-        .shutdown()
-        .await
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    writer.write_all(&content).await.map_other()?;
+    writer.shutdown().await.map_other()?;
 
     info!("Wrote file to pond: {}", pond_dest);
 
@@ -810,17 +796,15 @@ async fn ingest_append(
     let bytes_to_read = (snapshot_size - pond_state.cumulative_size) as usize;
 
     // Read only the new bytes from host file (up to snapshot, not current size)
-    let mut file =
-        std::fs::File::open(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    let mut file = std::fs::File::open(&host_file.path).map_other()?;
     use std::io::{Read, Seek, SeekFrom};
     let _ = file
         .seek(SeekFrom::Start(pond_state.cumulative_size))
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        .map_other()?;
 
     // Read exactly the bytes we expect (not read_to_end which could get more)
     let mut new_content = vec![0u8; bytes_to_read];
-    file.read_exact(&mut new_content)
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    file.read_exact(&mut new_content).map_other()?;
 
     info!(
         "Ingesting append to {}: {} new bytes (total will be {})",
@@ -833,12 +817,9 @@ async fn ingest_append(
     // This ensures the file wasn't rotated between when we checked size and now
     {
         // Read the prefix from host file
-        let mut prefix_file = std::fs::File::open(&host_file.path)
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        let mut prefix_file = std::fs::File::open(&host_file.path).map_other()?;
         let mut prefix_content = vec![0u8; pond_state.cumulative_size as usize];
-        prefix_file
-            .read_exact(&mut prefix_content)
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        prefix_file.read_exact(&mut prefix_content).map_other()?;
 
         // Compute blake3 of prefix (using same method as TinyFS - bao-tree root)
         let mut hasher = IncrementalHashState::new();
@@ -866,14 +847,8 @@ async fn ingest_append(
 
     // Write only the new content (as a new version in the FilePhysicalSeries)
     // The ChainedReader will concatenate all versions when reading
-    writer
-        .write_all(&new_content)
-        .await
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-    writer
-        .shutdown()
-        .await
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    writer.write_all(&new_content).await.map_other()?;
+    writer.shutdown().await.map_other()?;
 
     info!(
         "Wrote append to pond: {} version {}",
@@ -899,8 +874,7 @@ async fn find_rotated_file<'a>(
         }
 
         // Read the prefix (first tracked_size bytes)
-        let content =
-            std::fs::read(&host_file.path).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        let content = std::fs::read(&host_file.path).map_other()?;
         let prefix = &content[..tracked_size];
 
         // Compute blake3 of prefix using same method as tinyfs (bao-tree root)
@@ -971,14 +945,8 @@ async fn append_to_active_pond_file(
         .async_writer_path_with_type(&pond_dest, EntryType::FilePhysicalSeries)
         .await?;
 
-    writer
-        .write_all(new_data)
-        .await
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-    writer
-        .shutdown()
-        .await
-        .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    writer.write_all(new_data).await.map_other()?;
+    writer.shutdown().await.map_other()?;
 
     info!("Appended missed bytes to pond file: {}", pond_dest);
 
@@ -987,13 +955,12 @@ async fn append_to_active_pond_file(
 
 /// Validate configuration
 fn validate_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config: LogfileIngestConfig = serde_yaml::from_slice(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config YAML: {}", e)))?;
+    let config: LogfileIngestConfig =
+        serde_yaml::from_slice(config).map_other_context("Invalid config YAML")?;
 
     config.validate()?;
 
-    serde_json::to_value(&config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config: {}", e)))
+    serde_json::to_value(&config).map_other_context("Failed to serialize config")
 }
 
 // Register the factory

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use tinyfs::ResultExt;
 use tinyfs::{
     DirHandle, Directory, EntryType, Metadata, Node, NodeMetadata, Result as TinyFSResult,
 };
@@ -300,8 +301,8 @@ impl Metadata for DynamicDirDirectory {
 
 // Factory functions for the linkme registration system
 fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSResult<DirHandle> {
-    let config: DynamicDirConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid dynamic directory config: {}", e)))?;
+    let config: DynamicDirConfig =
+        serde_json::from_value(config).map_other_context("Invalid dynamic directory config")?;
 
     // Note: Node caching is now handled automatically by CachingPersistence decorator
     // No need for manual caching here - the decorator will cache this node by FileID
@@ -332,8 +333,8 @@ fn create_dynamic_dir_handle(config: Value, context: FactoryContext) -> TinyFSRe
 
 fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
     // Parse as YAML first (user format)
-    let mut yaml_config: DynamicDirConfig = serde_yaml::from_slice(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML config: {}", e)))?;
+    let mut yaml_config: DynamicDirConfig =
+        serde_yaml::from_slice(config).map_other_context("Invalid YAML config")?;
 
     // Validate that entries list is not empty
     if yaml_config.entries.is_empty() {
@@ -382,8 +383,7 @@ fn validate_dynamic_dir_config(config: &[u8]) -> TinyFSResult<Value> {
     }
 
     // Return the full config as a JSON Value (after all nested validations)
-    serde_json::to_value(&yaml_config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert to JSON: {}", e)))
+    serde_json::to_value(&yaml_config).map_other_context("Failed to convert to JSON")
 }
 
 register_dynamic_factory!(

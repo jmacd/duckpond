@@ -25,6 +25,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use tinyfs::ResultExt;
 use tinyfs::{EntryType, FileHandle, FileID, NodeMetadata, Result as TinyFSResult};
 use tokio::sync::Mutex;
 
@@ -312,19 +313,18 @@ fn create_timeseries_pivot_handle(
     config: Value,
     context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
-    let cfg: TimeseriesPivotConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-pivot config: {}", e)))?;
+    let cfg: TimeseriesPivotConfig =
+        serde_json::from_value(config).map_other_context("Invalid timeseries-pivot config")?;
 
     let pivot_file = TimeseriesPivotFile::new(cfg, context);
     Ok(pivot_file.create_handle())
 }
 
 fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
+    let config_str = std::str::from_utf8(config).map_other_context("Invalid UTF-8")?;
 
-    let cfg: TimeseriesPivotConfig = serde_yaml::from_str(config_str)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let cfg: TimeseriesPivotConfig =
+        serde_yaml::from_str(config_str).map_other_context("Invalid config")?;
 
     // Validate scheme is recognized (no fallback for unknown schemes)
     let scheme = cfg.pattern.scheme();
@@ -352,8 +352,7 @@ fn validate_timeseries_pivot_config(config: &[u8]) -> TinyFSResult<Value> {
         ));
     }
 
-    serde_json::to_value(&cfg)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+    serde_json::to_value(&cfg).map_other_context("Failed to convert config")
 }
 
 register_dynamic_factory!(

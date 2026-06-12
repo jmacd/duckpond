@@ -15,6 +15,7 @@ use futures::stream;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tinyfs::ResultExt;
 use tinyfs::{
     DirHandle, Directory, EntryType, FileHandle, Metadata, Node, NodeMetadata, NodeType,
     SymlinkHandle,
@@ -84,8 +85,7 @@ impl GitRootDirectory {
             self.git_ref
         );
         let git_dir = clone_info.pond_path.join("git");
-        std::fs::create_dir_all(&git_dir)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to create git dir: {}", e)))?;
+        std::fs::create_dir_all(&git_dir).map_other_context("Failed to create git dir")?;
         let _ = git::fetch_and_resolve(&self.repo_path, &clone_info.url, &self.git_ref)?;
         Ok(())
     }

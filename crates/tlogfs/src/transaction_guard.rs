@@ -9,6 +9,7 @@ use log::debug;
 use std::ops::Deref;
 use tinyfs::FS;
 use tinyfs::Result as TinyFSResult;
+use tinyfs::ResultExt;
 
 #[cfg(test)]
 use super::txn_metadata::PondUserMetadata;
@@ -160,8 +161,7 @@ impl<'a> TransactionGuard<'a> {
         // tinyfs guard drop happens here, clearing the transaction state
         drop(inner);
 
-        let value = result
-            .map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))?;
+        let value = result.map_other_context("Transaction commit failed")?;
         Ok((value, persistence))
     }
 
@@ -180,7 +180,7 @@ impl<'a> TransactionGuard<'a> {
         let result = self.persistence.commit(self.metadata.clone()).await;
 
         result
-            .map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
+            .map_other_context("Transaction commit failed")
             .map(|_| ())
     }
 
@@ -199,7 +199,7 @@ impl<'a> TransactionGuard<'a> {
         );
         let result = self.persistence.commit(metadata).await;
 
-        result.map_err(|e| tinyfs::Error::Other(format!("Transaction commit failed: {}", e)))
+        result.map_other_context("Transaction commit failed")
     }
 }
 

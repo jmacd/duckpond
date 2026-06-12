@@ -10,6 +10,7 @@
 //! `EntryType::TablePhysicalVersion` (single-version-per-file semantics).
 
 use serde::{Deserialize, Serialize};
+use tinyfs::ResultExt;
 use tinyfs::arrow::ForArrow;
 use tinyfs::{EntryType, Result, WD};
 use tokio::io::AsyncWriteExt;
@@ -43,7 +44,7 @@ where
 {
     let fields = T::for_arrow();
     let batch = serde_arrow::to_record_batch::<&[T]>(&fields, &items)
-        .map_err(|e| tinyfs::Error::Other(format!("serialize {path}: {e}")))?;
+        .map_other_context(format!("serialize {path}"))?;
 
     let buffer = serialize_batch_to_parquet(&batch)?;
 
@@ -58,11 +59,11 @@ where
     writer
         .write_all(&buffer)
         .await
-        .map_err(|e| tinyfs::Error::Other(format!("write {path}: {e}")))?;
+        .map_other_context(format!("write {path}"))?;
     writer
         .shutdown()
         .await
-        .map_err(|e| tinyfs::Error::Other(format!("shutdown {path}: {e}")))?;
+        .map_other_context(format!("shutdown {path}"))?;
     Ok(())
 }
 
@@ -118,7 +119,7 @@ where
             // differences across versions.
             let projected = project_to_schema(&b, &schema)?;
             let items: Vec<T> = serde_arrow::from_record_batch(&projected)
-                .map_err(|e| tinyfs::Error::Other(format!("deserialize {path}: {e}")))?;
+                .map_other_context(format!("deserialize {path}"))?;
             all.extend(items);
         }
     }
@@ -136,7 +137,7 @@ where
     use tinyfs::arrow::ParquetExt;
     let fields = T::for_arrow();
     let batch = serde_arrow::to_record_batch::<&[T]>(&fields, &items)
-        .map_err(|e| tinyfs::Error::Other(format!("serialize {path}: {e}")))?;
+        .map_other_context(format!("serialize {path}"))?;
     let _ = wd
         .write_series_from_batch(path, &batch, Some(timestamp_column))
         .await?;
@@ -158,13 +159,11 @@ fn serialize_batch_to_parquet(batch: &arrow_array::RecordBatch) -> Result<Vec<u8
     let mut buffer: Vec<u8> = Vec::new();
     {
         let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None)
-            .map_err(|e| tinyfs::Error::Other(format!("ArrowWriter::try_new: {e}")))?;
+            .map_other_context("ArrowWriter::try_new")?;
         writer
             .write(batch)
-            .map_err(|e| tinyfs::Error::Other(format!("ArrowWriter::write: {e}")))?;
-        let _ = writer
-            .close()
-            .map_err(|e| tinyfs::Error::Other(format!("ArrowWriter::close: {e}")))?;
+            .map_other_context("ArrowWriter::write")?;
+        let _ = writer.close().map_other_context("ArrowWriter::close")?;
     }
     Ok(buffer)
 }
@@ -174,12 +173,12 @@ fn parse_parquet_batches(bytes: Vec<u8>) -> Result<Vec<arrow_array::RecordBatch>
     use tokio_util::bytes::Bytes;
     let bytes = Bytes::from(bytes);
     let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
-        .map_err(|e| tinyfs::Error::Other(format!("ParquetReader::try_new: {e}")))?
+        .map_other_context("ParquetReader::try_new")?
         .build()
-        .map_err(|e| tinyfs::Error::Other(format!("ParquetReader::build: {e}")))?;
+        .map_other_context("ParquetReader::build")?;
     let mut out = Vec::new();
     for b in reader {
-        let b = b.map_err(|e| tinyfs::Error::Other(format!("Parquet batch: {e}")))?;
+        let b = b.map_other_context("Parquet batch")?;
         out.push(b);
     }
     Ok(out)
@@ -203,7 +202,7 @@ fn project_to_schema(
         columns.push(batch.column(idx).clone());
     }
     RecordBatch::try_new(std::sync::Arc::new(target_schema.clone()), columns)
-        .map_err(|e| tinyfs::Error::Other(format!("project_to_schema: {e}")))
+        .map_other_context("project_to_schema")
 }
 
 #[cfg(test)]

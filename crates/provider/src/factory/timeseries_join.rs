@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tinyfs::ResultExt;
 use tinyfs::{FileHandle, Result as TinyFSResult};
 
 /// Time range bounds for filtering
@@ -527,23 +528,21 @@ fn create_timeseries_join_handle(
     config: Value,
     context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
-    let cfg: TimeseriesJoinConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-join config: {}", e)))?;
+    let cfg: TimeseriesJoinConfig =
+        serde_json::from_value(config).map_other_context("Invalid timeseries-join config")?;
 
     let join_file = TimeseriesJoinFile::new(cfg, context)?;
     Ok(join_file.create_handle())
 }
 
 fn validate_timeseries_join_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
+    let config_str = std::str::from_utf8(config).map_other_context("Invalid UTF-8")?;
 
-    let config_value: Value = serde_yaml::from_str(config_str)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
+    let config_value: Value = serde_yaml::from_str(config_str).map_other_context("Invalid YAML")?;
 
     // Validate by deserializing
-    let _cfg: TimeseriesJoinConfig = serde_json::from_value(config_value.clone())
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid configuration: {}", e)))?;
+    let _cfg: TimeseriesJoinConfig =
+        serde_json::from_value(config_value.clone()).map_other_context("Invalid configuration")?;
 
     // Additional validation: generate SQL to catch errors early
     let (_sql, _patterns) = generate_timeseries_join_sql(&_cfg)?;

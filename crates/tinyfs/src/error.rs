@@ -127,6 +127,35 @@ impl From<utilities::glob::GlobError> for Error {
     }
 }
 
+/// Convenience conversions for turning an arbitrary error into
+/// [`Error::Other`].
+///
+/// These replace the two repetitive idioms that appear hundreds of times
+/// across the workspace:
+///
+/// ```ignore
+/// foo().map_err(|e| Error::Other(e.to_string()))?;            // -> foo().map_other()?
+/// bar().map_err(|e| Error::Other(format!("ctx: {e}")))?;      // -> bar().map_other_context("ctx")?
+/// ```
+pub trait ResultExt<T> {
+    /// Map any error into [`Error::Other`] using its `Display` representation.
+    fn map_other(self) -> Result<T>;
+
+    /// Map any error into [`Error::Other`], prefixed with `context` as
+    /// `"{context}: {error}"`.
+    fn map_other_context(self, context: impl std::fmt::Display) -> Result<T>;
+}
+
+impl<T, E: std::fmt::Display> ResultExt<T> for std::result::Result<T, E> {
+    fn map_other(self) -> Result<T> {
+        self.map_err(|e| Error::Other(e.to_string()))
+    }
+
+    fn map_other_context(self, context: impl std::fmt::Display) -> Result<T> {
+        self.map_err(|e| Error::Other(format!("{context}: {e}")))
+    }
+}
+
 // impl std::fmt::Display for Error {
 //     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 //         match self {

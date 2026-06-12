@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
 use tinyfs::Result as TinyFSResult;
+use tinyfs::ResultExt;
 
 use clap::{Parser, Subcommand};
 
@@ -92,14 +93,13 @@ fn parse_command(ctx: ExecutionContext) -> Result<GitIngestCommand, tinyfs::Erro
         .chain(ctx.args().iter().cloned())
         .collect();
 
-    GitIngestCommand::try_parse_from(args_with_prog_name)
-        .map_err(|e| tinyfs::Error::Other(format!("Command parse error: {}", e)))
+    GitIngestCommand::try_parse_from(args_with_prog_name).map_other_context("Command parse error")
 }
 
 /// Create a dynamic directory for reading the git tree.
 fn create_directory(config: Value, context: FactoryContext) -> TinyFSResult<tinyfs::DirHandle> {
-    let config: GitIngestConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let config: GitIngestConfig =
+        serde_json::from_value(config).map_other_context("Invalid config")?;
 
     let pond_path = context
         .context
@@ -139,8 +139,8 @@ pub async fn execute(
     context: FactoryContext,
     ctx: ExecutionContext,
 ) -> Result<(), tinyfs::Error> {
-    let config: GitIngestConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let config: GitIngestConfig =
+        serde_json::from_value(config).map_other_context("Invalid config")?;
 
     let cmd = parse_command(ctx)?;
 
@@ -211,8 +211,7 @@ fn execute_pull(
 
     // Ensure the git cache directory exists
     let git_dir = pond_path.join("git");
-    std::fs::create_dir_all(&git_dir)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to create git dir: {}", e)))?;
+    std::fs::create_dir_all(&git_dir).map_other_context("Failed to create git dir")?;
 
     // Fetch and resolve the ref
     let repo_path = git::bare_repo_path(pond_path, node_id);
@@ -233,13 +232,12 @@ fn execute_pull(
 
 /// Validate configuration YAML
 fn validate_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config: GitIngestConfig = serde_yaml::from_slice(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config YAML: {}", e)))?;
+    let config: GitIngestConfig =
+        serde_yaml::from_slice(config).map_other_context("Invalid config YAML")?;
 
     config.validate()?;
 
-    serde_json::to_value(&config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config: {}", e)))
+    serde_json::to_value(&config).map_other_context("Failed to serialize config")
 }
 
 // --- Dual registration: dynamic directory + executable ---

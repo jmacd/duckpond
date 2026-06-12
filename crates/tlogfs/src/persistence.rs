@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use tinyfs::ResultExt;
 use tinyfs::{
     EntryType, FS, FileID, FileVersionInfo, Node, NodeMetadata, NodeType, Result as TinyFSResult,
     persistence::PersistenceLayer, transaction_guard::TransactionState as TinyFsTransactionState,
@@ -1244,7 +1245,7 @@ impl PersistenceLayer for State {
     async fn get_temporal_bounds(&self, id: FileID) -> TinyFSResult<Option<(i64, i64)>> {
         self.get_temporal_overrides_for_node_id(id)
             .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))
+            .map_other()
     }
 }
 
@@ -3434,7 +3435,7 @@ impl InnerState {
                 let target = symlink_handle
                     .readlink()
                     .await
-                    .map_err(|e| tinyfs::Error::Other(format!("Symlink readlink error: {}", e)))?;
+                    .map_other_context("Symlink readlink error")?;
                 target.to_string_lossy().as_bytes().to_vec()
             }
         };
@@ -3723,7 +3724,7 @@ impl InnerState {
             let _ = reader
                 .read_to_end(&mut content)
                 .await
-                .map_err(|e| tinyfs::Error::Other(format!("Failed to read large file: {}", e)))?;
+                .map_other_context("Failed to read large file")?;
 
             Ok(content)
         } else {

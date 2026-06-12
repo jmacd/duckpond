@@ -27,6 +27,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use tinyfs::ResultExt;
 
 // ---------------------------------------------------------------------------
 // Clap command parsing
@@ -59,8 +60,7 @@ enum SitegenSubcommand {
 fn validate_config(config: &[u8]) -> tinyfs::Result<Value> {
     // Try parsing as standalone SiteConfig first
     if let Ok(config) = serde_yaml::from_slice::<SiteConfig>(config) {
-        return serde_json::to_value(&config)
-            .map_err(|e| tinyfs::Error::Other(format!("Config serialization error: {}", e)));
+        return serde_json::to_value(&config).map_other_context("Config serialization error");
     }
 
     // Fall back: extract sitegen config from a multi-doc pond config file.
@@ -75,8 +75,7 @@ fn validate_config(config: &[u8]) -> tinyfs::Result<Value> {
 /// then parses `spec.config` as a `SiteConfig`. This lets `host+sitegen://`
 /// read directly from `config/site.yaml` without a separate config file.
 fn extract_sitegen_from_pond_config(config: &[u8]) -> tinyfs::Result<Value> {
-    let config_str = std::str::from_utf8(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Non-UTF8 config: {}", e)))?;
+    let config_str = std::str::from_utf8(config).map_other_context("Non-UTF8 config")?;
 
     for doc in serde_yaml::Deserializer::from_str(config_str) {
         let value = match Value::deserialize(doc) {
@@ -104,7 +103,7 @@ fn extract_sitegen_from_pond_config(config: &[u8]) -> tinyfs::Result<Value> {
                 })?;
 
             return serde_json::to_value(&site_config)
-                .map_err(|e| tinyfs::Error::Other(format!("Config serialization error: {}", e)));
+                .map_other_context("Config serialization error");
         }
     }
 
@@ -122,15 +121,13 @@ async fn execute(
     context: FactoryContext,
     ctx: ExecutionContext,
 ) -> Result<(), tinyfs::Error> {
-    let config: SiteConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let config: SiteConfig = serde_json::from_value(config).map_other_context("Invalid config")?;
 
     // Parse command
     let args: Vec<String> = std::iter::once("factory".to_string())
         .chain(ctx.args().iter().cloned())
         .collect();
-    let cmd =
-        SitegenCommand::try_parse_from(args).map_err(|e| tinyfs::Error::Other(format!("{}", e)))?;
+    let cmd = SitegenCommand::try_parse_from(args).map_other()?;
 
     match cmd.command {
         SitegenSubcommand::Build { output_dir, quick } => {
@@ -372,7 +369,7 @@ async fn build_site_from_root(
         pond_statuses,
         &generated_at,
     )
-    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    .map_other()?;
 
     // Copy static assets to output, preserving directory structure
     copy_static_assets(&static_assets, output_dir)?;
@@ -504,7 +501,7 @@ async fn run_format_provider_export(
             timestamp_column,
         )
         .await
-        .map_err(|e| tinyfs::Error::Other(format!("export '{}': {}", path_str, e)))?;
+        .map_other_context(format!("export '{}'", path_str))?;
 
         for (_caps, export_output) in &export_outputs {
             let mut temporal = BTreeMap::new();
@@ -1252,11 +1249,9 @@ fn copy_static_assets(
         let rel = path.strip_prefix('/').unwrap_or(path);
         let out_path = output_dir.join(rel);
         if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| tinyfs::Error::Other(format!("mkdir {:?}: {}", parent, e)))?;
+            std::fs::create_dir_all(parent).map_other_context(format!("mkdir {:?}", parent))?;
         }
-        std::fs::write(&out_path, data)
-            .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", out_path, e)))?;
+        std::fs::write(&out_path, data).map_other_context(format!("write {:?}", out_path))?;
         debug!("copied static asset: {}", rel);
     }
     Ok(())
@@ -1283,8 +1278,7 @@ fn write_shared_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
         ("relative-time.js", RELATIVE_TIME_JS),
     ] {
         let path = output_dir.join(name);
-        std::fs::write(&path, content.as_bytes())
-            .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", path, e)))?;
+        std::fs::write(&path, content.as_bytes()).map_other_context(format!("write {:?}", path))?;
         debug!("wrote shared asset: {}", name);
     }
 
@@ -1317,8 +1311,7 @@ fn write_theme_css(
     };
 
     let path = output_dir.join("theme.css");
-    std::fs::write(&path, css.as_bytes())
-        .map_err(|e| tinyfs::Error::Other(format!("write {:?}: {}", path, e)))?;
+    std::fs::write(&path, css.as_bytes()).map_other_context(format!("write {:?}", path))?;
     debug!("wrote theme.css ({} overrides)", theme.len());
     Ok(())
 }
@@ -1372,8 +1365,7 @@ fn copy_vendor_assets(output_dir: &Path) -> Result<(), tinyfs::Error> {
     };
 
     let out_vendor = output_dir.join("vendor");
-    std::fs::create_dir_all(&out_vendor)
-        .map_err(|e| tinyfs::Error::Other(format!("mkdir {:?}: {}", out_vendor, e)))?;
+    std::fs::create_dir_all(&out_vendor).map_other_context(format!("mkdir {:?}", out_vendor))?;
 
     // Copy required vendor files (must all exist)
     for name in VENDOR_FILES {
