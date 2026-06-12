@@ -1139,49 +1139,12 @@ mod tests {
     use arrow::array::{Float64Array, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
-    use datafusion::execution::context::SessionContext;
     use std::sync::Arc;
-    use tinyfs::{EntryType, FS, FileID, MemoryPersistence, NodeType, ProviderContext};
+    use tinyfs::{EntryType, FileID, NodeType};
 
-    /// Helper to create crate::FactoryContext from ProviderContext for tests
-    fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
-        crate::FactoryContext::new(context.clone(), file_id)
-    }
-
-    /// Helper to create test environment with MemoryPersistence
-    async fn create_test_environment() -> (FS, ProviderContext) {
-        let persistence = MemoryPersistence::default();
-        let fs = FS::new(persistence.clone())
-            .await
-            .expect("Failed to create FS");
-        let session = Arc::new(SessionContext::new());
-        let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
-            .expect("Failed to register TinyFS object store");
-        let provider_context = ProviderContext::new(session, Arc::new(persistence));
-        (fs, provider_context)
-    }
-
-    /// Helper to create a parquet file in both FS and persistence
-    async fn create_parquet_file(
-        fs: &FS,
-        path: &str,
-        parquet_data: Vec<u8>,
-        entry_type: EntryType,
-    ) -> Result<FileID, Box<dyn std::error::Error>> {
-        let root = fs.root().await?;
-        let mut file_writer = root.async_writer_path_with_type(path, entry_type).await?;
-        use tokio::io::AsyncWriteExt;
-        file_writer.write_all(&parquet_data).await?;
-        file_writer.flush().await?;
-        file_writer.shutdown().await?;
-
-        // Get the FileID that was created
-        let node_path = root.get_node_path(path).await?;
-        let file_id = node_path.id();
-
-        // async_writer already stores the version in persistence, no need to duplicate
-        Ok(file_id)
-    }
+    use crate::factory::test_support::{
+        create_parquet_file, create_test_environment, test_context,
+    };
 
     /// Comprehensive integration test for temporal-reduce factory
     ///

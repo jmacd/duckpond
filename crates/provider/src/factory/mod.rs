@@ -10,5 +10,7 @@ pub mod sql_derived;
 pub mod synthetic_timeseries;
 pub mod temporal_reduce;
 pub mod test_factory;
+#[cfg(test)]
+pub mod test_support;
 pub mod timeseries_join;
 pub mod timeseries_pivot;

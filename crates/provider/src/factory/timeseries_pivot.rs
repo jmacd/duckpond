@@ -366,28 +366,14 @@ register_dynamic_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::execution::context::SessionContext;
-    use std::sync::Arc;
-    use tinyfs::{FileID, MemoryPersistence, ProviderContext};
+    use tinyfs::FileID;
 
-    /// Helper to create crate::FactoryContext from ProviderContext for tests
-    fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
-        crate::FactoryContext::new(context.clone(), file_id)
-    }
-
-    /// Helper to create test environment with MemoryPersistence
-    fn create_test_environment() -> ProviderContext {
-        let persistence = MemoryPersistence::default();
-        let session = Arc::new(SessionContext::new());
-        let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
-            .expect("Failed to register TinyFS object store");
-        ProviderContext::new(session, Arc::new(persistence))
-    }
+    use crate::factory::test_support::{create_provider_context, test_context};
 
     // Helper to create a TimeseriesPivotFile for SQL generation testing
     fn create_test_pivot_file(config: TimeseriesPivotConfig) -> TimeseriesPivotFile {
         // Create a mock context for testing - we only need it for SQL generation
-        let provider_context = create_test_environment();
+        let provider_context = create_provider_context();
         let context = test_context(&provider_context, FileID::root());
 
         TimeseriesPivotFile { config, context }
