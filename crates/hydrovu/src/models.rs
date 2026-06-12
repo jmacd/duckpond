@@ -22,6 +22,16 @@ pub struct HydroVuConfig {
     /// Path within pond for hydrovu data (e.g., "/hydrovu")
     pub hydrovu_path: String,
 
+    /// Optional path within pond holding read-only seed archives (e.g.
+    /// "/hydrovu-archive"), typically git-ingested `FileDynamic` Parquet
+    /// `.series` snapshots laid out as `{archive_path}/devices/{id}/*.series`.
+    /// Consulted by `find_youngest_timestamp` ONLY when the writeable device
+    /// directory has no temporal data (a freshly reset pond), so live
+    /// collection resumes from the archive's youngest timestamp instead of
+    /// crawling from epoch.  These archives are NOT written to.
+    #[serde(default)]
+    pub archive_path: Option<String>,
+
     /// Device list
     pub devices: Vec<HydroVuDevice>,
 }

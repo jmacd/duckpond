@@ -129,6 +129,18 @@ impl UrlPatternMatcher {
             }
         };
 
+        // Explicit `+series`/`+table` cast also accepts data-archetype Parquet
+        // files; the table-provider layer reinterprets them. The cast signal is an
+        // explicit entry_type() suffix. See docs/url-entry-type-casting.md.
+        let mut entry_types = entry_types;
+        if url.entry_type().is_some() && matches!(type_key, "series" | "table") {
+            for t in [EntryType::FileDynamic, EntryType::FilePhysicalVersion] {
+                if !entry_types.contains(&t) {
+                    entry_types.push(t);
+                }
+            }
+        }
+
         // Get TinyFS root and expand pattern
         let fs = context.filesystem();
         let root = fs.root().await?;

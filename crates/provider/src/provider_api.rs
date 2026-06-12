@@ -137,6 +137,17 @@ impl Provider {
 
         // Check if this is a builtin TinyFS type (file, series, table, data)
         if matches!(scheme, "file" | "series" | "table" | "data") {
+            // Explicit `+series`/`+table` cast over a node that is not natively
+            // queryable (a data archetype, e.g. a git-ingested FileDynamic
+            // Parquet file) reinterprets its bytes as Parquet.  This is the pond
+            // analogue of the host cast above and requires no ProviderContext.
+            // See docs/url-entry-type-casting.md.
+            if matches!(url.entry_type(), Some("table") | Some("series"))
+                && let Some(provider) = self.try_cast_data_node_to_parquet(&url).await?
+            {
+                return Ok(provider);
+            }
+
             let provider_context = self.provider_context.as_ref().ok_or_else(|| {
                 Error::InvalidUrl(format!(
                     "Builtin type '{}' requires ProviderContext. Use Provider::with_context()",
@@ -227,6 +238,74 @@ impl Provider {
 
         let table = MemTable::try_new(schema, vec![batches])?;
         Ok(Arc::new(table))
+    }
+
+    /// If `url` resolves to a node that is not natively queryable (a data
+    /// archetype such as a git-ingested `FileDynamic` Parquet file), read its
+    /// bytes and decode them as a Parquet `MemTable` (the `+series`/`+table`
+    /// cast).
+    ///
+    /// Returns `Ok(None)` **only** when the node is natively queryable, so
+    /// the caller can fall through to the normal `as_queryable()` path.
+    /// Every other condition -- resolve error, missing node, file-handle
+    /// error, parquet decode error -- propagates as `Err`.  Silent
+    /// fallthrough on "missing path" was hiding real lookup errors as a
+    /// misleading "requires ProviderContext" downstream (the next handler
+    /// requires a `ProviderContext`, which the contextless cast caller --
+    /// e.g. hydrovu resume -- does not have).
+    ///
+    /// Requires no `ProviderContext`: the cast reads bytes via the node's
+    /// `async_reader()`, exactly like the host cast.
+    async fn try_cast_data_node_to_parquet(
+        &self,
+        url: &Url,
+    ) -> Result<Option<Arc<dyn datafusion::catalog::TableProvider>>> {
+        use tinyfs::Lookup;
+
+        // Wildcards are already rejected upstream by `create_table_provider`
+        // (the only caller); this is dead-code-defensive.
+        let path = url.path();
+
+        let root = self.root().await?;
+        let (_, lookup_result) = root.resolve_path(path).await.map_err(|e| {
+            Error::InvalidUrl(format!(
+                "Failed to resolve path '{}' for {}://  cast: {}",
+                path,
+                url.scheme(),
+                e
+            ))
+        })?;
+        let node_path = match lookup_result {
+            Lookup::Found(np) => np,
+            _ => {
+                return Err(Error::InvalidUrl(format!(
+                    "File not found for {}:// cast: {}",
+                    url.scheme(),
+                    path
+                )));
+            }
+        };
+
+        // Capability-based gate: cast only nodes that cannot serve themselves
+        // as a TableProvider (data archetype).  Natively queryable
+        // series/table nodes are returned as `Ok(None)` so the caller falls
+        // through to the standard `as_queryable()` path -- this is the
+        // *only* legitimate fallthrough.
+        let is_queryable = {
+            let file_handle = node_path
+                .as_file()
+                .await
+                .map_err(|e| Error::InvalidUrl(format!("Failed to get file handle: {}", e)))?;
+            let file_arc = file_handle.handle.get_file().await;
+            let file_guard = file_arc.lock().await;
+            file_guard.as_queryable().is_some()
+        };
+        if is_queryable {
+            return Ok(None);
+        }
+
+        let provider = read_pond_node_as_parquet(&node_path).await?;
+        Ok(Some(provider))
     }
 
     /// Create TableProvider from builtin TinyFS file using QueryableFile trait
@@ -671,6 +750,68 @@ impl Provider {
     }
 }
 
+/// Read a non-queryable data-archetype node (e.g. a git-ingested `FileDynamic`
+/// Parquet archive) by streaming its bytes and decoding them as a Parquet
+/// `MemTable`.  This is the shared implementation behind both the pond
+/// `+series`/`+table` cast (`Provider::try_cast_data_node_to_parquet`) and the
+/// timeseries-join builtin path (`SqlDerivedFile::cast_data_node_to_parquet_provider`).
+/// Requires no `ProviderContext`.  See `docs/url-entry-type-casting.md`.
+pub(crate) async fn read_pond_node_as_parquet(
+    node_path: &tinyfs::NodePath,
+) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use tokio::io::AsyncReadExt;
+
+    let file_handle = node_path
+        .as_file()
+        .await
+        .map_err(|e| Error::InvalidUrl(format!("Failed to get file handle for cast: {}", e)))?;
+    let mut reader = file_handle
+        .handle
+        .async_reader()
+        .await
+        .map_err(|e| Error::InvalidUrl(format!("Failed to open reader for cast: {}", e)))?;
+    let mut buf = Vec::new();
+    let _ = reader.read_to_end(&mut buf).await.map_err(|e| {
+        Error::InvalidUrl(format!(
+            "Failed to read '{}' for Parquet cast: {}",
+            node_path.path().display(),
+            e
+        ))
+    })?;
+
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(buf)).map_err(|e| {
+            Error::InvalidUrl(format!(
+                "File '{}' is not a valid Parquet file: {}",
+                node_path.path().display(),
+                e
+            ))
+        })?;
+    let schema = builder.schema().clone();
+    let batch_reader = builder.build().map_err(|e| {
+        Error::InvalidUrl(format!(
+            "Failed to read Parquet from '{}': {}",
+            node_path.path().display(),
+            e
+        ))
+    })?;
+
+    let mut batches = Vec::new();
+    for batch in batch_reader {
+        batches.push(batch.map_err(|e| {
+            Error::InvalidUrl(format!(
+                "Failed to decode Parquet batch from '{}': {}",
+                node_path.path().display(),
+                e
+            ))
+        })?);
+    }
+
+    let table = MemTable::try_new(schema, vec![batches])?;
+    Ok(Arc::new(table))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,6 +1129,113 @@ mod tests {
             !err.to_string().contains("not a valid Parquet file"),
             "host+csv+series must not take the Parquet path, got: {}",
             err
+        );
+    }
+
+    /// `read_pond_node_as_parquet` decodes a pond node's raw bytes as Parquet
+    /// with NO ProviderContext.  This is the byte path behind the
+    /// `series://`/`table://` cast over a git-ingested data archetype, used by
+    /// hydrovu find_youngest to read archive max(timestamp).
+    #[tokio::test]
+    async fn test_read_pond_node_as_parquet_contextless() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use tinyfs::Lookup;
+        use tokio::io::AsyncWriteExt;
+
+        // Build real Parquet bytes (timestamp in seconds, like the archives).
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![100i64, 200, 1_770_000_000]))],
+        )
+        .unwrap();
+        let mut parquet_bytes = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut parquet_bytes, schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            let _ = writer.close().unwrap();
+        }
+
+        // Write those bytes into a pond node as a FileDynamic, mirroring
+        // git-ingest archives.
+        let fs = create_test_fs().await;
+        let root = fs.root().await.unwrap();
+        let _ = root.create_dir_path("/hydrovu-archive").await;
+        {
+            let mut w = root
+                .async_writer_path_with_type(
+                    "/hydrovu-archive/dev.series",
+                    tinyfs::EntryType::FileDynamic,
+                )
+                .await
+                .unwrap();
+            w.write_all(&parquet_bytes).await.unwrap();
+            w.flush().await.unwrap();
+            w.shutdown().await.unwrap();
+        }
+
+        let node_path = match root
+            .resolve_path("/hydrovu-archive/dev.series")
+            .await
+            .unwrap()
+        {
+            (_, Lookup::Found(np)) => np,
+            _ => panic!("archive node not found"),
+        };
+
+        // No ProviderContext is involved -- bytes are read directly.
+        let table = read_pond_node_as_parquet(&node_path)
+            .await
+            .expect("data node bytes must decode as Parquet");
+
+        let ctx = SessionContext::new();
+        let _ = ctx.register_table("arch", table).unwrap();
+        let results = ctx
+            .sql("SELECT max(timestamp) AS m FROM arch")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let m = results[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(m, 1_770_000_000);
+    }
+
+    /// A `series://`/`table://` cast over a path that does not exist must
+    /// hard-fail with a clear "File not found" error, NOT silently fall
+    /// through to the next handler (which, in the contextless cast caller --
+    /// e.g. hydrovu resume -- would emit a misleading "requires
+    /// ProviderContext" message and hide the real bug).
+    #[tokio::test]
+    async fn test_series_cast_over_missing_path_hard_fails() {
+        let fs = create_test_fs().await;
+        let provider = Provider::new(fs);
+        let ctx = SessionContext::new();
+
+        let err = provider
+            .create_table_provider("series:///does/not/exist.series", &ctx)
+            .await
+            .expect_err("missing path under series:// cast must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("File not found") || msg.contains("Failed to resolve path"),
+            "missing-path error should name the lookup failure, got: {msg}"
+        );
+        assert!(
+            !msg.contains("requires ProviderContext"),
+            "missing-path error must not be masked as 'requires ProviderContext', got: {msg}"
         );
     }
 }
