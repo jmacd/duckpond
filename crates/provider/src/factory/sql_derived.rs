@@ -837,55 +837,9 @@ impl SqlDerivedFile {
     async fn cast_data_node_to_parquet_provider(
         node_path: &tinyfs::NodePath,
     ) -> TinyFSResult<Arc<dyn TableProvider>> {
-        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use tokio::io::AsyncReadExt;
-
-        let file_handle = node_path.as_file().await.map_err(|e| {
-            tinyfs::Error::Other(format!("Failed to get file handle for cast: {}", e))
-        })?;
-        let mut reader = file_handle.handle.async_reader().await.map_err(|e| {
-            tinyfs::Error::Other(format!("Failed to open reader for cast: {}", e))
-        })?;
-        let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf).await.map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to read '{}' for Parquet cast: {}",
-                node_path.path().display(),
-                e
-            ))
-        })?;
-
-        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(buf))
-            .map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "File '{}' is not a valid Parquet file: {}",
-                    node_path.path().display(),
-                    e
-                ))
-            })?;
-        let schema = builder.schema().clone();
-        let batch_reader = builder.build().map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to read Parquet from '{}': {}",
-                node_path.path().display(),
-                e
-            ))
-        })?;
-
-        let mut batches = Vec::new();
-        for batch in batch_reader {
-            batches.push(batch.map_err(|e| {
-                tinyfs::Error::Other(format!(
-                    "Failed to decode Parquet batch from '{}': {}",
-                    node_path.path().display(),
-                    e
-                ))
-            })?);
-        }
-
-        let table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
-        Ok(Arc::new(table))
+        crate::provider_api::read_pond_node_as_parquet(node_path)
+            .await
+            .map_err(|e| tinyfs::Error::Other(e.to_string()))
     }
 }
 

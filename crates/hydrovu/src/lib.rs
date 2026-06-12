@@ -379,22 +379,30 @@ impl HydroVuCollector {
         let client = self.client.clone();
         let names = self.names.clone();
         let hydrovu_path = self.config.hydrovu_path.clone();
+        let archive_path = self.config.archive_path.clone();
         let max_points = self.config.max_points_per_run;
 
         // Call internal collection function directly - no sub-transaction needed
         // We're already running within the caller's single transaction
         // Only one fetch per run (max_points_per_run enforced per run)
-        let result =
-            Self::collect_device_data_internal(fs, hydrovu_path, client, names, device, max_points)
-                .await
-                .map_err(|e| {
-                    anyhow!(
-                        "Failed to collect data for device '{}' (ID: {}): {}",
-                        device_name,
-                        device_id,
-                        e
-                    )
-                })?;
+        let result = Self::collect_device_data_internal(
+            fs,
+            hydrovu_path,
+            archive_path,
+            client,
+            names,
+            device,
+            max_points,
+        )
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "Failed to collect data for device '{}' (ID: {}): {}",
+                device_name,
+                device_id,
+                e
+            )
+        })?;
 
         let total_records = result.0;
         let start_timestamp = result.1;
@@ -425,13 +433,21 @@ impl HydroVuCollector {
         Ok(())
     }
 
-    /// Find the youngest (most recent) timestamp for a device by scanning
-    /// ALL *.series files in the device directory. This includes both the
-    /// active file and any archive files, so that pre-loaded archive data
-    /// seamlessly sets the start point for the next API fetch.
+    /// Find the youngest (most recent) timestamp (in microseconds, the DuckPond
+    /// canonical unit) for a device by scanning ALL *.series files in the
+    /// writeable device directory via the oplog temporal metadata.
+    ///
+    /// When the writeable directory has no temporal data (a freshly reset pond)
+    /// and an `archive_path` is configured, fall back to the read-only seed
+    /// archives at `{archive_path}/devices/{device_id}/*.series`.  Those are
+    /// git-ingested `FileDynamic` Parquet snapshots with no oplog metadata, so
+    /// they are queried directly with a `series://` cast + `SELECT max(timestamp)`.
+    /// This lets live collection resume from the archive's youngest point instead
+    /// of crawling from epoch, without copying the archives into the oplog.
     async fn find_youngest_timestamp(
         fs: &FS,
         hydrovu_path: &str,
+        archive_path: Option<&str>,
         device_id: i64,
         device_name: &str,
     ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
@@ -443,85 +459,222 @@ impl HydroVuCollector {
             .await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        // Navigate to device directory
-        let device_dir = match root_wd.open_dir_path(&device_dir_path).await {
-            Ok(dir) => dir,
-            Err(_) => {
-                debug!("Device directory not found for device {device_id}, starting from epoch");
-                return Ok(0);
-            }
-        };
+        // Scan the writeable device directory's oplog metadata for max timestamp.
+        let mut max_timestamp: Option<i64> = None;
+        if let Ok(device_dir) = root_wd.open_dir_path(&device_dir_path).await {
+            use futures::StreamExt;
+            let mut entries_stream = device_dir
+                .entries()
+                .await
+                .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        // List all entries and find *.series files
+            let mut series_paths = Vec::new();
+            while let Some(entry) = entries_stream.next().await {
+                let entry = entry
+                    .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
+                if entry.name.ends_with(".series") && entry.entry_type.is_file() {
+                    series_paths.push(format!("{}/{}", device_dir_path, entry.name));
+                }
+            }
+
+            debug!(
+                "Found {} writeable .series files for device {device_id}: {:?}",
+                series_paths.len(),
+                series_paths
+            );
+
+            for series_path in &series_paths {
+                let version_infos = root_wd.list_file_versions(series_path).await.map_err(|e| {
+                    steward::StewardError::Dyn(
+                        format!("Failed to query file versions for {}: {}", series_path, e).into(),
+                    )
+                })?;
+
+                for (i, version_info) in version_infos.iter().enumerate() {
+                    if let Some(metadata) = &version_info.extended_metadata
+                        && let (Some(min_str), Some(max_str)) = (
+                            metadata.get("min_event_time"),
+                            metadata.get("max_event_time"),
+                        )
+                        && let (Ok(min_time), Ok(max_time)) =
+                            (min_str.parse::<i64>(), max_str.parse::<i64>())
+                    {
+                        debug!(
+                            "{} version {i}: temporal range {min_time}..{max_time}",
+                            series_path
+                        );
+                        max_timestamp =
+                            Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
+                    }
+                }
+            }
+        } else {
+            debug!("Writeable device directory not found for device {device_id}");
+        }
+
+        // Writeable data present: resume from its youngest timestamp.
+        if let Some(timestamp) = max_timestamp {
+            // Add 1 second (1M microseconds) to avoid duplicate when API uses second resolution
+            let next_timestamp = timestamp + 1_000_000;
+            debug!(
+                "Found youngest timestamp {timestamp} across writeable series for device {device_id}, will continue from {next_timestamp}"
+            );
+            return Ok(next_timestamp);
+        }
+
+        // Writeable directory empty: fall back to the read-only seed archives.
+        if let Some(archive_path) = archive_path
+            && let Some(archive_micros) =
+                Self::find_archive_youngest_micros(fs, archive_path, device_id).await?
+        {
+            let next_timestamp = archive_micros + 1_000_000;
+            debug!(
+                "Device {device_id}: no writeable data; resuming from archive youngest {archive_micros}, will continue from {next_timestamp}"
+            );
+            return Ok(next_timestamp);
+        }
+
+        debug!("Device {device_id}: no writeable data and no archive, starting from epoch");
+        Ok(0)
+    }
+
+    /// Query the read-only seed archives for a device's youngest timestamp,
+    /// returned in microseconds (DuckPond canonical unit).  Reads every
+    /// `{archive_path}/devices/{device_id}/*.series` file via a `series://`
+    /// cast (Parquet bytes -> MemTable) and takes `max(timestamp)` across all.
+    ///
+    /// Returns `Ok(None)` when no archive files exist for the device.
+    async fn find_archive_youngest_micros(
+        fs: &FS,
+        archive_path: &str,
+        device_id: i64,
+    ) -> Result<Option<i64>, Box<dyn std::error::Error + Send + Sync>> {
+        use datafusion::prelude::SessionContext;
         use futures::StreamExt;
-        let mut entries_stream = device_dir
-            .entries()
+
+        let archive_dir_path = format!("{}/devices/{}", archive_path, device_id);
+
+        let root_wd = fs
+            .root()
             .await
             .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
 
-        let mut series_paths = Vec::new();
+        let archive_dir = match root_wd.open_dir_path(&archive_dir_path).await {
+            Ok(dir) => dir,
+            Err(_) => {
+                debug!("No archive directory '{archive_dir_path}' for device {device_id}");
+                return Ok(None);
+            }
+        };
+
+        let mut archive_files = Vec::new();
+        let mut entries_stream = archive_dir
+            .entries()
+            .await
+            .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
         while let Some(entry) = entries_stream.next().await {
             let entry = entry
                 .map_err(|e| steward::StewardError::DataInit(tlogfs::TLogFSError::TinyFS(e)))?;
             if entry.name.ends_with(".series") && entry.entry_type.is_file() {
-                series_paths.push(format!("{}/{}", device_dir_path, entry.name));
+                archive_files.push(format!("{}/{}", archive_dir_path, entry.name));
             }
         }
 
-        if series_paths.is_empty() {
-            debug!("No .series files found for device {device_id}, starting from epoch");
-            return Ok(0);
+        if archive_files.is_empty() {
+            debug!("No archive .series files for device {device_id} in '{archive_dir_path}'");
+            return Ok(None);
         }
 
-        debug!(
-            "Found {} .series files for device {device_id}: {:?}",
-            series_paths.len(),
-            series_paths
-        );
+        let provider = provider::Provider::new(Arc::new(fs.clone()));
+        let ctx = SessionContext::new();
+        let mut max_micros: Option<i64> = None;
 
-        // Scan all versions of all series files for max timestamp
-        let mut max_timestamp: Option<i64> = None;
-
-        for series_path in &series_paths {
-            let version_infos = root_wd.list_file_versions(series_path).await.map_err(|e| {
+        for (i, file_path) in archive_files.iter().enumerate() {
+            // Cast the git-ingested data node as a queryable series (Parquet).
+            let url = format!("series://{}", file_path);
+            let table = provider
+                .create_table_provider(&url, &ctx)
+                .await
+                .map_err(|e| {
+                    steward::StewardError::Dyn(
+                        format!("Failed to open archive '{}' as series: {}", file_path, e).into(),
+                    )
+                })?;
+            let table_name = format!("_archive_{}", i);
+            let _ = ctx.register_table(&table_name, table).map_err(|e| {
                 steward::StewardError::Dyn(
-                    format!("Failed to query file versions for {}: {}", series_path, e).into(),
+                    format!("Failed to register archive table for '{}': {}", file_path, e).into(),
                 )
             })?;
 
-            for (i, version_info) in version_infos.iter().enumerate() {
-                if let Some(metadata) = &version_info.extended_metadata
-                    && let (Some(min_str), Some(max_str)) = (
-                        metadata.get("min_event_time"),
-                        metadata.get("max_event_time"),
+            let batches = ctx
+                .sql(&format!("SELECT max(timestamp) AS m FROM \"{}\"", table_name))
+                .await
+                .map_err(|e| {
+                    steward::StewardError::Dyn(
+                        format!("Failed to query max(timestamp) for '{}': {}", file_path, e).into(),
                     )
-                    && let (Ok(min_time), Ok(max_time)) =
-                        (min_str.parse::<i64>(), max_str.parse::<i64>())
-                {
-                    debug!(
-                        "{} version {i}: temporal range {min_time}..{max_time}",
-                        series_path
-                    );
-                    max_timestamp =
-                        Some(max_timestamp.map_or(max_time, |current| current.max(max_time)));
-                }
+                })?
+                .collect()
+                .await
+                .map_err(|e| {
+                    steward::StewardError::Dyn(
+                        format!("Failed to collect max(timestamp) for '{}': {}", file_path, e)
+                            .into(),
+                    )
+                })?;
+            let _ = ctx.deregister_table(&table_name);
+
+            if let Some(micros) = Self::scalar_timestamp_to_micros(&batches) {
+                debug!("Archive '{}' max(timestamp) -> {} micros", file_path, micros);
+                max_micros = Some(max_micros.map_or(micros, |cur| cur.max(micros)));
             }
         }
 
-        match max_timestamp {
-            Some(timestamp) => {
-                // Add 1 second (1M microseconds) to avoid duplicate when API uses second resolution
-                let next_timestamp = timestamp + 1_000_000;
-                debug!(
-                    "Found youngest timestamp {timestamp} across all series for device {device_id}, will continue from {next_timestamp}"
-                );
-                Ok(next_timestamp)
+        Ok(max_micros)
+    }
+
+    /// Extract a single `max(timestamp)` scalar from a query result and
+    /// normalize it to microseconds.  The seed archives store `timestamp` as a
+    /// plain INT64 in **seconds**; collector-written active series use
+    /// `Timestamp(Second)`.  Both normalize to micros here; logical Timestamp
+    /// types are scaled per their TimeUnit.
+    fn scalar_timestamp_to_micros(batches: &[RecordBatch]) -> Option<i64> {
+        use arrow_array::{
+            Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+            TimestampNanosecondArray, TimestampSecondArray,
+        };
+
+        let batch = batches.iter().find(|b| b.num_rows() > 0)?;
+        let column = batch.column(0);
+        if column.is_null(0) {
+            return None;
+        }
+
+        match column.data_type() {
+            DataType::Int64 => {
+                let arr = column.as_any().downcast_ref::<Int64Array>()?;
+                Some(arr.value(0) * 1_000_000)
             }
-            None => {
-                debug!(
-                    "Device {device_id}: series files exist but no temporal data found, starting fresh"
-                );
-                Ok(0)
+            DataType::Timestamp(TimeUnit::Second, _) => {
+                let arr = column.as_any().downcast_ref::<TimestampSecondArray>()?;
+                Some(arr.value(0) * 1_000_000)
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                let arr = column.as_any().downcast_ref::<TimestampMillisecondArray>()?;
+                Some(arr.value(0) * 1_000)
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                let arr = column.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
+                Some(arr.value(0))
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                let arr = column.as_any().downcast_ref::<TimestampNanosecondArray>()?;
+                Some(arr.value(0) / 1_000)
+            }
+            other => {
+                debug!("Unexpected max(timestamp) type {:?}; ignoring archive", other);
+                None
             }
         }
     }
@@ -532,6 +685,7 @@ impl HydroVuCollector {
     async fn collect_device_data_internal(
         fs: &FS,
         hydrovu_path: String,
+        archive_path: Option<String>,
         client: Client,
         names: Names,
         device: HydroVuDevice,
@@ -541,8 +695,14 @@ impl HydroVuCollector {
         debug!("Starting data collection for device {device_id}");
 
         // Step 1: Find the youngest timestamp using TinyFS metadata API
-        let youngest_timestamp =
-            Self::find_youngest_timestamp(fs, &hydrovu_path, device_id, &device.name).await?;
+        let youngest_timestamp = Self::find_youngest_timestamp(
+            fs,
+            &hydrovu_path,
+            archive_path.as_deref(),
+            device_id,
+            &device.name,
+        )
+        .await?;
 
         let start_date =
             utc2date(youngest_timestamp).unwrap_or_else(|_| "invalid date".to_string());
@@ -954,5 +1114,56 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// The seed archives store `timestamp` as a plain INT64 in seconds; the
+    /// resume logic must normalize that (and any logical Timestamp type) to
+    /// microseconds, the DuckPond canonical unit.
+    #[test]
+    fn test_scalar_timestamp_to_micros_units() {
+        use arrow_array::{
+            Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+            TimestampNanosecondArray, TimestampSecondArray,
+        };
+
+        fn one_col(array: Arc<dyn Array>) -> Vec<RecordBatch> {
+            let field = Field::new("m", array.data_type().clone(), true);
+            let schema = Arc::new(Schema::new(vec![field]));
+            vec![RecordBatch::try_new(schema, vec![array]).unwrap()]
+        }
+
+        // INT64 seconds (the real archive layout) -> micros.
+        let b = one_col(Arc::new(Int64Array::from(vec![1_770_000_000i64])));
+        assert_eq!(
+            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            Some(1_770_000_000_000_000)
+        );
+
+        // Logical Timestamp types scale per their unit.
+        let b = one_col(Arc::new(TimestampSecondArray::from(vec![1_700i64])));
+        assert_eq!(
+            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            Some(1_700_000_000)
+        );
+        let b = one_col(Arc::new(TimestampMillisecondArray::from(vec![1_700i64])));
+        assert_eq!(
+            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            Some(1_700_000)
+        );
+        let b = one_col(Arc::new(TimestampMicrosecondArray::from(vec![1_700i64])));
+        assert_eq!(
+            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            Some(1_700)
+        );
+        let b = one_col(Arc::new(TimestampNanosecondArray::from(vec![1_700_000i64])));
+        assert_eq!(
+            HydroVuCollector::scalar_timestamp_to_micros(&b),
+            Some(1_700)
+        );
+
+        // NULL / empty -> None (no archive temporal data).
+        let b = one_col(Arc::new(Int64Array::from(vec![None::<i64>])));
+        assert_eq!(HydroVuCollector::scalar_timestamp_to_micros(&b), None);
+        assert_eq!(HydroVuCollector::scalar_timestamp_to_micros(&[]), None);
     }
 }

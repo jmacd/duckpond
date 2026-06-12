@@ -1,6 +1,6 @@
 # URL Entry-Type Casting (read/access-time archetype reinterpretation)
 
-Status: Design / implementation plan (not yet implemented)
+Status: Display cast + HydroVu resume implemented; reverse cast (§4) deferred
 Author: design notes for jmacd
 Related: `hostmount-design.md`, `format-cache-design.md`, `remote-redesign.md`
 
@@ -239,15 +239,28 @@ Once the cast lands in duckpond:
 3. Rebuild the duckpond image, deploy staging, `pond apply`, rebuild the site; verify the
    noyo DO/Temperature/Salinity pages show history back to the archive range (Feb 2026).
 
-## Out of scope (tracked separately)
+## Resume (implemented): HydroVu live collection from archive max
 
-- **HydroVu resume seeding.** `find_youngest_timestamp`
-  (`crates/hydrovu/src/lib.rs:430-526`) reads temporal metadata from
-  `list_file_versions` (the oplog), which git dynamic nodes lack. Making live API
-  collection resume from the archive max (instead of epoch) requires either footer-derived
-  bounds in `find_youngest` or seeding `/hydrovu/devices` directly. Display (this doc) is
-  independent: the combine union surfaces archive history immediately while live
-  collection back-fills the recent tail.
+`find_youngest_timestamp` (`crates/hydrovu/src/lib.rs`) reads temporal metadata
+from `list_file_versions` (the oplog) for the **writeable** device directory.
+git-ingested archive nodes are `FileDynamic` and carry no oplog metadata, so on
+a freshly reset pond the writeable directory is empty and resume would otherwise
+start from epoch.
+
+The resume path now uses the `provider_api` byte-cast (below): `HydroVuConfig`
+gained an optional `archive_path`. When the writeable directory has no temporal
+data and `archive_path` is set, `find_archive_youngest_micros` enumerates
+`{archive_path}/devices/{device_id}/*.series`, opens each via a contextless
+`series://` cast, runs `SELECT max(timestamp)`, normalizes the scalar to
+microseconds (`scalar_timestamp_to_micros`: the seed archives store `timestamp`
+as INT64 **seconds**; logical `Timestamp` types scale per their unit), and
+resumes from `archive_max + 1s`. The archive is consulted ONLY on the first run
+(empty writeable dir); subsequent runs use the oplog max as before. No archives
+are written — they are read-only git seeds.
+
+caspar.water `config/noyo.yaml` mounts the archives at `/hydrovu-archive`
+(git-ingest, prefix `hydrovu`) and sets `archive_path: /hydrovu-archive` on the
+hydrovu factory.
 
 ## Implementation status
 
@@ -267,10 +280,16 @@ Once the cast lands in duckpond:
   data→series case the noyo combine config needs. Tests:
   `test_series_cast_over_single_data_parquet_file`,
   `test_series_cast_over_multiple_data_parquet_files`.
-  - The `TableProviderOptions`/`provider_api` archetype threading (§2/§3 as originally
-    written) is **not** implemented; direct `provider_api::create_table_provider` byte-cast
-    reads (e.g. `pond cat series://<data-node>`) are not yet wired and remain follow-up if
-    needed. The join path — the noyo consumer — is fully covered.
+- **provider_api byte-cast (done)** — `provider_api::create_table_provider` now
+  honors a `+series`/`+table` cast over a non-queryable pond node WITHOUT a
+  `ProviderContext`: `Provider::try_cast_data_node_to_parquet` resolves the node
+  and, when `as_queryable().is_none()` (the capability gate — not `is_data_file()`,
+  which includes `FilePhysicalSeries`), reads its bytes as Parquet. The
+  parquet-bytes→`MemTable` logic is extracted into the shared module-level
+  `read_pond_node_as_parquet`, reused by both `provider_api` and the
+  `timeseries-join` helper. This is the route HydroVu resume uses
+  (`series://{archive}/devices/<id>/<file>.series` + `SELECT max(timestamp)`).
+  Test: `test_read_pond_node_as_parquet_contextless`.
 - **Step 4 (reverse cast, series/table → data)** — not implemented (lower priority).
 - **Caching note** — the join's data-cast path builds a fresh `MemTable` per resolution and
   does not key on archetype; the `TableProviderKey` archetype concern applies only to the
