@@ -9,15 +9,12 @@
 
 use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use crate::register_dynamic_factory;
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use datafusion::catalog::TableProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
-use tinyfs::{EntryType, FileHandle, NodeMetadata, Result as TinyFSResult};
+use tinyfs::{FileHandle, Result as TinyFSResult};
 
 /// Time range bounds for filtering
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,62 +516,10 @@ impl TimeseriesJoinFile {
     }
 }
 
-#[async_trait]
-impl tinyfs::File for TimeseriesJoinFile {
-    async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>> {
-        self.ensure_inner().await?;
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().expect("inner initialized");
-        inner.async_reader().await
-    }
-
-    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
-        self.ensure_inner().await?;
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().expect("inner initialized");
-        inner.async_writer().await
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
-        Some(self)
-    }
-}
-
-#[async_trait]
-impl tinyfs::Metadata for TimeseriesJoinFile {
-    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
-        Ok(NodeMetadata {
-            version: 1,
-            size: None,
-            blake3: None,
-            bao_outboard: None,
-            entry_type: EntryType::TableDynamic,
-            timestamp: 0, // @@@ Not sure
-        })
-    }
-}
-
-#[async_trait]
-impl tinyfs::QueryableFile for TimeseriesJoinFile {
-    async fn as_table_provider(
-        &self,
-        id: tinyfs::FileID,
-        context: &tinyfs::ProviderContext,
-    ) -> tinyfs::Result<Arc<dyn TableProvider>> {
-        log::debug!("DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: id={id}",);
-        self.ensure_inner().await?;
-
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard
-            .as_ref()
-            .expect("inner initialized by ensure_inner");
-        inner.as_table_provider(id, context).await
-    }
-}
+crate::factory::lazy_sql_file::impl_lazy_sql_derived_delegation!(
+    TimeseriesJoinFile,
+    "TimeseriesJoinFile"
+);
 
 // Factory functions
 

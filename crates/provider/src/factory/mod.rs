@@ -5,6 +5,7 @@
 pub mod column_rename;
 pub mod dynamic_dir;
 pub mod journal_ingest;
+mod lazy_sql_file;
 pub mod logfile_ingest;
 pub mod sql_derived;
 pub mod synthetic_timeseries;

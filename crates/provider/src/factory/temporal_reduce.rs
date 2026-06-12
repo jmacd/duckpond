@@ -62,7 +62,6 @@
 use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
 use crate::register_dynamic_factory;
 use async_trait::async_trait;
-use datafusion::catalog::TableProvider;
 use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -437,62 +436,10 @@ impl TemporalReduceSqlFile {
     }
 }
 
-#[async_trait]
-impl tinyfs::File for TemporalReduceSqlFile {
-    async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>> {
-        self.ensure_inner().await?;
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().expect("safelock");
-        inner.async_reader().await
-    }
-
-    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
-        self.ensure_inner().await?;
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().expect("safelock");
-        inner.async_writer().await
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
-        Some(self)
-    }
-}
-
-#[async_trait]
-impl tinyfs::Metadata for TemporalReduceSqlFile {
-    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
-        // Return lightweight metadata without expensive schema discovery
-        // This allows list operations to be fast - schema discovery is deferred
-        // until actual content access (as_table_provider, async_reader, etc.)
-        Ok(NodeMetadata {
-            version: 1,
-            size: None,   // Unknown until SQL is generated and data computed
-            blake3: None, // Unknown until SQL is generated and data computed
-            bao_outboard: None,
-            entry_type: EntryType::TableDynamic, // Temporal reduce always creates series files
-            timestamp: 0,                        // Use epoch time for dynamic content
-        })
-    }
-}
-
-#[async_trait]
-impl tinyfs::QueryableFile for TemporalReduceSqlFile {
-    async fn as_table_provider(
-        &self,
-        id: tinyfs::FileID,
-        context: &tinyfs::ProviderContext,
-    ) -> tinyfs::Result<Arc<dyn TableProvider>> {
-        log::debug!("DELEGATING TemporalReduceSqlFile to inner file: id={id}",);
-        self.ensure_inner().await?;
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().expect("safelock");
-        inner.as_table_provider(id, context).await
-    }
-}
+crate::factory::lazy_sql_file::impl_lazy_sql_derived_delegation!(
+    TemporalReduceSqlFile,
+    "TemporalReduceSqlFile"
+);
 
 fn duration_to_sql_interval(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
