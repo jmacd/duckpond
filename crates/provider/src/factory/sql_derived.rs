@@ -455,6 +455,24 @@ impl SqlDerivedFile {
                 EntryType::TablePhysicalVersion => vec![EntryType::FilePhysicalVersion],
                 _ => vec![entry_type],
             }
+        } else if url.entry_type().is_some()
+            && matches!(
+                entry_type,
+                EntryType::TablePhysicalSeries
+                    | EntryType::TableDynamic
+                    | EntryType::TablePhysicalVersion
+            )
+        {
+            // Explicit `+series`/`+table` cast: a data-archetype node that holds
+            // Parquet bytes can be reinterpreted as a series/table. Accept data
+            // files as candidates in addition to the requested series/table type;
+            // the table-provider layer performs the actual cast.
+            // See docs/url-entry-type-casting.md.
+            vec![
+                entry_type,
+                EntryType::FileDynamic,
+                EntryType::FilePhysicalVersion,
+            ]
         } else {
             vec![entry_type]
         };
