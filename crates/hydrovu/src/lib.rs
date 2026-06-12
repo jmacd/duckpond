@@ -609,12 +609,19 @@ impl HydroVuCollector {
             let table_name = format!("_archive_{}", i);
             let _ = ctx.register_table(&table_name, table).map_err(|e| {
                 steward::StewardError::Dyn(
-                    format!("Failed to register archive table for '{}': {}", file_path, e).into(),
+                    format!(
+                        "Failed to register archive table for '{}': {}",
+                        file_path, e
+                    )
+                    .into(),
                 )
             })?;
 
             let batches = ctx
-                .sql(&format!("SELECT max(timestamp) AS m FROM \"{}\"", table_name))
+                .sql(&format!(
+                    "SELECT max(timestamp) AS m FROM \"{}\"",
+                    table_name
+                ))
                 .await
                 .map_err(|e| {
                     steward::StewardError::Dyn(
@@ -625,14 +632,20 @@ impl HydroVuCollector {
                 .await
                 .map_err(|e| {
                     steward::StewardError::Dyn(
-                        format!("Failed to collect max(timestamp) for '{}': {}", file_path, e)
-                            .into(),
+                        format!(
+                            "Failed to collect max(timestamp) for '{}': {}",
+                            file_path, e
+                        )
+                        .into(),
                     )
                 })?;
             let _ = ctx.deregister_table(&table_name);
 
             if let Some(micros) = Self::scalar_timestamp_to_micros(&batches)? {
-                debug!("Archive '{}' max(timestamp) -> {} micros", file_path, micros);
+                debug!(
+                    "Archive '{}' max(timestamp) -> {} micros",
+                    file_path, micros
+                );
                 max_micros = Some(max_micros.map_or(micros, |cur| cur.max(micros)));
             }
         }
@@ -668,11 +681,14 @@ impl HydroVuCollector {
 
         let micros = match column.data_type() {
             DataType::Int64 => {
-                let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    steward::StewardError::Dyn(
-                        "max(timestamp) result claims Int64 but downcast failed".into(),
-                    )
-                })?;
+                let arr = column
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| {
+                        steward::StewardError::Dyn(
+                            "max(timestamp) result claims Int64 but downcast failed".into(),
+                        )
+                    })?;
                 arr.value(0) * 1_000_000
             }
             DataType::Timestamp(TimeUnit::Second, _) => {
@@ -1225,7 +1241,10 @@ mod tests {
             HydroVuCollector::scalar_timestamp_to_micros(&b).unwrap(),
             None
         );
-        assert_eq!(HydroVuCollector::scalar_timestamp_to_micros(&[]).unwrap(), None);
+        assert_eq!(
+            HydroVuCollector::scalar_timestamp_to_micros(&[]).unwrap(),
+            None
+        );
 
         // Unsupported type hard-fails (no silent skip).
         let b = one_col(Arc::new(arrow_array::StringArray::from(vec!["x"])));

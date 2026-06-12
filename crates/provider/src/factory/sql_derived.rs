@@ -1357,11 +1357,9 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
                             let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
                                 tinyfs::Error::Other("No batches in union".to_string())
                             })?;
-                            let mem_table = datafusion::datasource::MemTable::try_new(
-                                schema,
-                                vec![batches],
-                            )
-                            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+                            let mem_table =
+                                datafusion::datasource::MemTable::try_new(schema, vec![batches])
+                                    .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
                             Arc::new(mem_table)
                         };
 

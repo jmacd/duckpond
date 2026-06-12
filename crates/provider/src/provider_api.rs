@@ -1181,7 +1181,11 @@ mod tests {
             w.shutdown().await.unwrap();
         }
 
-        let node_path = match root.resolve_path("/hydrovu-archive/dev.series").await.unwrap() {
+        let node_path = match root
+            .resolve_path("/hydrovu-archive/dev.series")
+            .await
+            .unwrap()
+        {
             (_, Lookup::Found(np)) => np,
             _ => panic!("archive node not found"),
         };
