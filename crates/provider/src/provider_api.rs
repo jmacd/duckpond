@@ -243,8 +243,16 @@ impl Provider {
     /// If `url` resolves to a node that is not natively queryable (a data
     /// archetype such as a git-ingested `FileDynamic` Parquet file), read its
     /// bytes and decode them as a Parquet `MemTable` (the `+series`/`+table`
-    /// cast).  Returns `Ok(None)` when the node *is* natively queryable, so the
-    /// caller falls through to the normal `as_queryable()` path.
+    /// cast).
+    ///
+    /// Returns `Ok(None)` **only** when the node is natively queryable, so
+    /// the caller can fall through to the normal `as_queryable()` path.
+    /// Every other condition -- resolve error, missing node, file-handle
+    /// error, parquet decode error -- propagates as `Err`.  Silent
+    /// fallthrough on "missing path" was hiding real lookup errors as a
+    /// misleading "requires ProviderContext" downstream (the next handler
+    /// requires a `ProviderContext`, which the contextless cast caller --
+    /// e.g. hydrovu resume -- does not have).
     ///
     /// Requires no `ProviderContext`: the cast reads bytes via the node's
     /// `async_reader()`, exactly like the host cast.
@@ -254,20 +262,35 @@ impl Provider {
     ) -> Result<Option<Arc<dyn datafusion::catalog::TableProvider>>> {
         use tinyfs::Lookup;
 
+        // Wildcards are already rejected upstream by `create_table_provider`
+        // (the only caller); this is dead-code-defensive.
         let path = url.path();
-        if path.contains('*') || path.contains('?') {
-            return Ok(None);
-        }
 
         let root = self.root().await?;
-        let node_path = match root.resolve_path(path).await {
-            Ok((_, Lookup::Found(np))) => np,
-            _ => return Ok(None),
+        let (_, lookup_result) = root.resolve_path(path).await.map_err(|e| {
+            Error::InvalidUrl(format!(
+                "Failed to resolve path '{}' for {}://  cast: {}",
+                path,
+                url.scheme(),
+                e
+            ))
+        })?;
+        let node_path = match lookup_result {
+            Lookup::Found(np) => np,
+            _ => {
+                return Err(Error::InvalidUrl(format!(
+                    "File not found for {}:// cast: {}",
+                    url.scheme(),
+                    path
+                )));
+            }
         };
 
-        // Capability-based gate: cast only nodes that cannot serve themselves as
-        // a TableProvider (data archetype).  Natively queryable series/table
-        // nodes fall through to the normal path.
+        // Capability-based gate: cast only nodes that cannot serve themselves
+        // as a TableProvider (data archetype).  Natively queryable
+        // series/table nodes are returned as `Ok(None)` so the caller falls
+        // through to the standard `as_queryable()` path -- this is the
+        // *only* legitimate fallthrough.
         let is_queryable = {
             let file_handle = node_path
                 .as_file()
@@ -1184,5 +1207,31 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(m, 1_770_000_000);
+    }
+
+    /// A `series://`/`table://` cast over a path that does not exist must
+    /// hard-fail with a clear "File not found" error, NOT silently fall
+    /// through to the next handler (which, in the contextless cast caller --
+    /// e.g. hydrovu resume -- would emit a misleading "requires
+    /// ProviderContext" message and hide the real bug).
+    #[tokio::test]
+    async fn test_series_cast_over_missing_path_hard_fails() {
+        let fs = create_test_fs().await;
+        let provider = Provider::new(fs);
+        let ctx = SessionContext::new();
+
+        let err = provider
+            .create_table_provider("series:///does/not/exist.series", &ctx)
+            .await
+            .expect_err("missing path under series:// cast must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("File not found") || msg.contains("Failed to resolve path"),
+            "missing-path error should name the lookup failure, got: {msg}"
+        );
+        assert!(
+            !msg.contains("requires ProviderContext"),
+            "missing-path error must not be masked as 'requires ProviderContext', got: {msg}"
+        );
     }
 }
