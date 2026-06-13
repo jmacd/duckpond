@@ -677,28 +677,9 @@ mod tests {
             )
             .map_err(|e| anyhow::anyhow!("Arrow error: {}", e))?;
 
-            // Calculate total row count before moving batch
-            let total_rows = batch.num_rows();
-
-            // Use the same formatting logic as the cat command (with type information)
-            use arrow::util::pretty::pretty_format_batches_with_options;
-            use arrow_cast::display::FormatOptions;
-
-            let options = FormatOptions::default()
-                .with_display_error(true)
-                .with_types_info(true) // This shows column types in the headers
-                .with_null("NULL"); // Show NULL values clearly
-
-            let formatted = pretty_format_batches_with_options(&[batch], &options)
-                .map_err(|e| anyhow::anyhow!("Failed to format results: {}", e))?
-                .to_string();
-
-            let result = format!(
-                "{}\nSummary: {} total rows",
-                formatted.trim_end(),
-                total_rows
-            );
-            Ok(result)
+            // Format through the exact production code path so the expectation
+            // cannot drift from cat's real table rendering.
+            format_query_results(&[batch])
         }
     }
 
