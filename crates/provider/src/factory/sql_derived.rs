@@ -1184,9 +1184,16 @@ impl SqlDerivedFile {
     /// Resolve a single pattern to its source files, build a source
     /// TableProvider, apply transforms and scope prefixes, and register it in
     /// the DataFusion session under a deterministic table name.  Records the
-    /// pattern -> table-name mapping in `table_mappings`.  Patterns matching no
-    /// files are skipped; tables already registered (shared source files) are
-    /// not rebuilt.
+    /// pattern -> table-name mapping in `table_mappings`.  Tables already
+    /// registered (shared source files) are not rebuilt.
+    ///
+    /// Returns `true` when a real source table was registered (and mapped), or
+    /// `false` when the pattern matched no files.  A zero-match pattern is NOT
+    /// an error: a glob is a set and an empty set is valid.  The caller is
+    /// responsible for registering an empty placeholder for the unmatched
+    /// pattern (see `register_empty_pattern_table`), because the generated SQL
+    /// still references every configured input by name and would otherwise fail
+    /// to plan with "table 'inputN' not found".
     async fn register_pattern_source(
         &self,
         id: FileID,
@@ -1194,7 +1201,7 @@ impl SqlDerivedFile {
         pattern_name: &str,
         pattern: &crate::Url,
         table_mappings: &mut HashMap<String, String>,
-    ) -> TinyFSResult<()> {
+    ) -> TinyFSResult<bool> {
         let ctx = &context.datafusion_session;
 
         // Source files can be created by factories (Dynamic) or direct uploads
@@ -1251,7 +1258,7 @@ impl SqlDerivedFile {
         }
 
         if queryable_files.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         // Data-only table name: depends ONLY on the pattern URL and resolved
@@ -1295,7 +1302,7 @@ impl SqlDerivedFile {
                 "[GO] SQL-DERIVED: Data table '{}' already registered, skipping construction",
                 unique_table_name
             );
-            return Ok(());
+            return Ok(true);
         }
 
         let scheme = pattern.scheme();
@@ -1386,7 +1393,102 @@ impl SqlDerivedFile {
             unique_table_name, pattern_name
         );
 
+        Ok(true)
+    }
+
+    /// Register an empty placeholder table for a pattern that matched no files.
+    ///
+    /// The generated SQL (notably from `timeseries-join`) references every
+    /// configured input by its `inputN` alias, so an unmatched input must still
+    /// resolve to a table or planning fails with "table 'inputN' not found".
+    /// The placeholder contributes zero rows, so `UNION BY NAME` / `FULL JOIN`
+    /// simply ignore it.
+    ///
+    /// The placeholder schema is cloned from a sibling input that shares the
+    /// same scope (and therefore the same post-scope-prefix columns), so the
+    /// empty side is type- and name-compatible without any guessing.  When the
+    /// whole scope group is empty (no sibling resolved) we fall back to a lone
+    /// time column.
+    async fn register_empty_pattern_table(
+        &self,
+        id: FileID,
+        context: &tinyfs::ProviderContext,
+        pattern_name: &str,
+        table_mappings: &mut HashMap<String, String>,
+    ) -> TinyFSResult<()> {
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use datafusion::datasource::MemTable;
+
+        let ctx = &context.datafusion_session;
+
+        let schema = match self
+            .sibling_scope_schema(ctx, pattern_name, table_mappings)
+            .await
+        {
+            Some(schema) => schema,
+            None => {
+                // Whole-scope-empty fallback: a single time column.  The time
+                // column name comes from the input's scope config; default
+                // "timestamp".  Microsecond UTC matches the canonical series
+                // timestamp normalization.
+                let time_col = self
+                    .config
+                    .scope_prefixes
+                    .as_ref()
+                    .and_then(|sp| sp.get(pattern_name))
+                    .map(|(_, tc)| tc.clone())
+                    .unwrap_or_else(|| "timestamp".to_string());
+                Arc::new(Schema::new(vec![Field::new(
+                    time_col,
+                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                    true,
+                )]))
+            }
+        };
+
+        let node_id_hex = id.node_id().to_string().replace('-', "");
+        let table_name = format!("sql_derived_empty_{}_{}", pattern_name, node_id_hex);
+        let empty = MemTable::try_new(schema, vec![vec![]]).map_other()?;
+        _ = ctx
+            .register_table(
+                datafusion::sql::TableReference::bare(table_name.as_str()),
+                Arc::new(empty),
+            )
+            .map_other()?;
+        _ = table_mappings.insert(pattern_name.to_string(), table_name);
+        debug!(
+            "[OK] SQL-DERIVED: Registered empty placeholder for zero-match pattern '{}'",
+            pattern_name
+        );
         Ok(())
+    }
+
+    /// Find the schema of an already-registered sibling input that shares the
+    /// same scope as `pattern_name`, used to build a compatible empty
+    /// placeholder.  Returns `None` when scopes are not configured or no
+    /// same-scope sibling has been registered yet.
+    async fn sibling_scope_schema(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        pattern_name: &str,
+        table_mappings: &HashMap<String, String>,
+    ) -> Option<arrow::datatypes::SchemaRef> {
+        let scope_prefixes = self.config.scope_prefixes.as_ref()?;
+        let (scope, _) = scope_prefixes.get(pattern_name)?;
+        let schema = ctx.catalog("datafusion")?.schema("public")?;
+
+        for (other_pattern, (other_scope, _)) in scope_prefixes.iter() {
+            if other_pattern == pattern_name || other_scope != scope {
+                continue;
+            }
+            let Some(table_name) = table_mappings.get(other_pattern) else {
+                continue;
+            };
+            if let Ok(Some(provider)) = schema.table(table_name).await {
+                return Some(provider.schema());
+            }
+        }
+        None
     }
 }
 
@@ -1419,9 +1521,23 @@ impl tinyfs::QueryableFile for SqlDerivedFile {
         // Create mapping from user pattern names to unique internal table names
         let mut table_mappings = HashMap::new();
 
-        // Register each pattern as a table in the session context
+        // Register each pattern as a table in the session context.  Patterns
+        // that match no files are collected and handled in a second pass: the
+        // generated SQL references every input by name, so an unmatched input
+        // must still resolve to an (empty) table or planning fails.  The second
+        // pass runs after all real tables are registered so empty placeholders
+        // can borrow a same-scope sibling's schema.
+        let mut empty_patterns = Vec::new();
         for (pattern_name, pattern) in &self.get_config().patterns {
-            self.register_pattern_source(id, context, pattern_name, pattern, &mut table_mappings)
+            let registered = self
+                .register_pattern_source(id, context, pattern_name, pattern, &mut table_mappings)
+                .await?;
+            if !registered {
+                empty_patterns.push(pattern_name.clone());
+            }
+        }
+        for pattern_name in &empty_patterns {
+            self.register_empty_pattern_table(id, context, pattern_name, &mut table_mappings)
                 .await?;
         }
 
