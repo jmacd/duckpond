@@ -29,9 +29,6 @@ pub mod status;
 pub mod temporal;
 pub mod verify;
 
-#[cfg(test)]
-mod replicate_test_simple;
-
 pub use apply::apply_command;
 pub use cat::cat_command;
 pub use control::control_command;
