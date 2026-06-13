@@ -40,7 +40,7 @@ pub use wd::{CopyDestination, Lookup, Visitor, WD};
 pub use async_helpers::buffer_helpers;
 pub use caching_persistence::CachingPersistence;
 pub use entry_type::EntryType;
-pub use error::{Error, Result};
+pub use error::{Error, Result, ResultExt};
 pub use hostmount::HostmountPersistence;
 pub use memory::persistence::MemoryPersistence;
 pub use metadata::{Metadata, NodeMetadata};

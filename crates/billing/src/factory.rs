@@ -13,6 +13,7 @@ use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
 use provider::{FactoryContext, register_executable_factory};
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
+use tinyfs::ResultExt;
 use tlogfs::TLogFSError;
 
 // ---------------------------------------------------------------------------
@@ -610,15 +611,14 @@ impl FactoryCommand for AccountsCli {
 ///   `spec.factory: accounts` (mirrors how sitegen/hydrovu handle this)
 fn validate_accounts_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
     let trimmed = std::str::from_utf8(config_bytes)
-        .map_err(|e| tinyfs::Error::Other(format!("non-UTF8 accounts config: {e}")))?
+        .map_other_context("non-UTF8 accounts config")?
         .trim();
     if trimmed.is_empty() {
         return Ok(Value::Null);
     }
     // For now we accept any well-formed YAML and ignore its content.
     // Future versions may carry default flags (output-format, etc.).
-    let _: Value = serde_yaml::from_str(trimmed)
-        .map_err(|e| tinyfs::Error::Other(format!("invalid YAML: {e}")))?;
+    let _: Value = serde_yaml::from_str(trimmed).map_other_context("invalid YAML")?;
     Ok(Value::Null)
 }
 

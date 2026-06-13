@@ -22,26 +22,15 @@ where
 
     let mut ship = ship_context.open_pond().await?;
 
-    // Use transaction for consistent filesystem access
-    let mut tx = ship
-        .begin_read(&steward::PondUserMetadata::new(vec![
-            "describe".to_string(),
-            pattern.to_string(),
-        ]))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
+    let output = crate::common::with_read_transaction(
+        &mut ship,
+        vec!["describe".to_string(), pattern.to_string()],
+        async |tx| describe_command_impl(tx, ship_context, pattern).await,
+    )
+    .await?;
 
-    match describe_command_impl(&mut tx, ship_context, pattern).await {
-        Ok(output) => {
-            _ = tx
-                .commit()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-            handler(&output);
-            Ok(())
-        }
-        Err(e) => Err(tx.abort(&e).await.into()),
-    }
+    handler(&output);
+    Ok(())
 }
 
 /// Describe a provider URL (e.g., "oteljson:///otel/file.json" or "excelhtml:///data/*.htm")

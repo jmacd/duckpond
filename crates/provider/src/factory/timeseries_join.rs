@@ -7,17 +7,14 @@
 //! This factory simplifies the common pattern of joining multiple time series sources
 //! by timestamp, automatically generating the COALESCE + FULL OUTER JOIN + EXCLUDE SQL.
 
-use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile};
 use crate::register_dynamic_factory;
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use datafusion::catalog::TableProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
-use tinyfs::{EntryType, FileHandle, NodeMetadata, Result as TinyFSResult};
+use tinyfs::{FileHandle, Result as TinyFSResult};
 
 /// Time range bounds for filtering
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,8 +263,7 @@ impl TimeseriesJoinFile {
 
     /// Ensure the inner SqlDerivedFile is created
     async fn ensure_inner(&self) -> TinyFSResult<()> {
-        let mut inner_guard = self.inner.lock().await;
-        if inner_guard.is_none() {
+        crate::factory::lazy_sql_file::ensure_inner_series(&self.inner, &self.context, || async {
             log::debug!(
                 "[SEARCH] TIMESERIES-JOIN: Generating schema-aware SQL for {} inputs",
                 self.config.inputs.len()
@@ -280,27 +276,11 @@ impl TimeseriesJoinFile {
             log::debug!("[SEARCH] Generated SQL:\n{}", sql_query);
 
             // Create SqlDerivedConfig with scope prefixes and pattern transforms
-            let mut sql_config = if scope_prefixes.is_empty() {
-                SqlDerivedConfig::new(patterns, Some(sql_query))
-            } else {
-                SqlDerivedConfig::new_scoped(patterns, Some(sql_query), scope_prefixes)
-            };
-
-            // Add pattern transforms if any inputs have them
-            if !pattern_transforms.is_empty() {
-                sql_config.pattern_transforms = Some(pattern_transforms);
-            }
-
-            // Create SqlDerivedFile in Series mode
-            log::debug!(
-                "[SEARCH] TIMESERIES-JOIN: Creating SqlDerivedFile with SqlDerivedMode::Series"
-            );
-            let sql_file =
-                SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
-            log::debug!("[OK] TIMESERIES-JOIN: Successfully created SqlDerivedFile");
-            *inner_guard = Some(sql_file);
-        }
-        Ok(())
+            Ok(SqlDerivedConfig::new(patterns, Some(sql_query))
+                .with_scope_prefixes(scope_prefixes)
+                .with_pattern_transforms(pattern_transforms))
+        })
+        .await
     }
 
     /// Generate SQL using UNION BY NAME for same-scope inputs, then FULL OUTER JOIN different scopes
@@ -519,62 +499,10 @@ impl TimeseriesJoinFile {
     }
 }
 
-#[async_trait]
-impl tinyfs::File for TimeseriesJoinFile {
-    async fn async_reader(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::AsyncReadSeek>>> {
-        self.ensure_inner().await?;
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().expect("inner initialized");
-        inner.async_reader().await
-    }
-
-    async fn async_writer(&self) -> tinyfs::Result<Pin<Box<dyn tinyfs::FileMetadataWriter>>> {
-        self.ensure_inner().await?;
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard.as_ref().expect("inner initialized");
-        inner.async_writer().await
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_queryable(&self) -> Option<&dyn tinyfs::QueryableFile> {
-        Some(self)
-    }
-}
-
-#[async_trait]
-impl tinyfs::Metadata for TimeseriesJoinFile {
-    async fn metadata(&self) -> tinyfs::Result<NodeMetadata> {
-        Ok(NodeMetadata {
-            version: 1,
-            size: None,
-            blake3: None,
-            bao_outboard: None,
-            entry_type: EntryType::TableDynamic,
-            timestamp: 0, // @@@ Not sure
-        })
-    }
-}
-
-#[async_trait]
-impl tinyfs::QueryableFile for TimeseriesJoinFile {
-    async fn as_table_provider(
-        &self,
-        id: tinyfs::FileID,
-        context: &tinyfs::ProviderContext,
-    ) -> tinyfs::Result<Arc<dyn TableProvider>> {
-        log::debug!("DELEGATING TimeseriesJoinFile to inner SqlDerivedFile: id={id}",);
-        self.ensure_inner().await?;
-
-        let inner_guard = self.inner.lock().await;
-        let inner = inner_guard
-            .as_ref()
-            .expect("inner initialized by ensure_inner");
-        inner.as_table_provider(id, context).await
-    }
-}
+crate::factory::lazy_sql_file::impl_lazy_sql_derived_delegation!(
+    TimeseriesJoinFile,
+    "TimeseriesJoinFile"
+);
 
 // Factory functions
 
@@ -582,26 +510,21 @@ fn create_timeseries_join_handle(
     config: Value,
     context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
-    let cfg: TimeseriesJoinConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid timeseries-join config: {}", e)))?;
+    let cfg: TimeseriesJoinConfig =
+        crate::factory::config_util::config_from_value(config, "Invalid timeseries-join config")?;
 
     let join_file = TimeseriesJoinFile::new(cfg, context)?;
     Ok(join_file.create_handle())
 }
 
 fn validate_timeseries_join_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
-
-    let config_value: Value = serde_yaml::from_str(config_str)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
-
-    // Validate by deserializing
-    let _cfg: TimeseriesJoinConfig = serde_json::from_value(config_value.clone())
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid configuration: {}", e)))?;
+    let (config_value, cfg) = crate::factory::config_util::parse_yaml_config::<TimeseriesJoinConfig>(
+        config,
+        "Invalid timeseries-join config",
+    )?;
 
     // Additional validation: generate SQL to catch errors early
-    let (_sql, _patterns) = generate_timeseries_join_sql(&_cfg)?;
+    let (_sql, _patterns) = generate_timeseries_join_sql(&cfg)?;
 
     Ok(config_value)
 }
@@ -625,70 +548,11 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use std::io::Cursor;
     use std::sync::Arc;
-    use tinyfs::{EntryType, FS, FileID, MemoryPersistence, ProviderContext};
+    use tinyfs::{EntryType, FileID};
 
-    /// Helper to create crate::FactoryContext from ProviderContext for tests
-    fn test_context(context: &ProviderContext, file_id: FileID) -> crate::FactoryContext {
-        crate::FactoryContext::new(context.clone(), file_id)
-    }
-
-    /// Helper to create test environment with MemoryPersistence
-    /// Returns (FS, ProviderContext) that share the SAME persistence instance
-    async fn create_test_environment() -> (FS, ProviderContext) {
-        let persistence = MemoryPersistence::default();
-        let fs = FS::new(persistence.clone())
-            .await
-            .expect("Failed to create FS");
-        let session = Arc::new(SessionContext::new());
-        let _ = crate::register_tinyfs_object_store(&session, persistence.clone())
-            .expect("Failed to register TinyFS object store");
-        let provider_context = ProviderContext::new(session, Arc::new(persistence));
-        (fs, provider_context)
-    }
-
-    /// Helper to create a parquet file in both FS and persistence
-    async fn create_parquet_file(
-        fs: &FS,
-        path: &str,
-        parquet_data: Vec<u8>,
-        entry_type: EntryType,
-    ) -> Result<FileID, Box<dyn std::error::Error>> {
-        let root = fs.root().await?;
-        let mut file_writer = root.async_writer_path_with_type(path, entry_type).await?;
-        use tokio::io::AsyncWriteExt;
-        file_writer.write_all(&parquet_data).await?;
-        file_writer.flush().await?;
-        file_writer.shutdown().await?;
-
-        // Get the FileID that was created
-        let node_path = root.get_node_path(path).await?;
-        let file_id = node_path.id();
-
-        // async_writer already stores the version in persistence, no need to duplicate
-        Ok(file_id)
-    }
-
-    /// Helper to create a text file (e.g., CSV) in both FS and persistence
-    async fn create_text_file(
-        fs: &FS,
-        path: &str,
-        content: Vec<u8>,
-        entry_type: EntryType,
-    ) -> Result<FileID, Box<dyn std::error::Error>> {
-        let root = fs.root().await?;
-        let mut file_writer = root.async_writer_path_with_type(path, entry_type).await?;
-        use tokio::io::AsyncWriteExt;
-        file_writer.write_all(&content).await?;
-        file_writer.flush().await?;
-        file_writer.shutdown().await?;
-
-        // Get the FileID that was created
-        let node_path = root.get_node_path(path).await?;
-        let file_id = node_path.id();
-
-        // async_writer already stores the version in persistence, no need to duplicate
-        Ok(file_id)
-    }
+    use crate::factory::test_support::{
+        create_parquet_file, create_test_environment, create_text_file, test_context,
+    };
 
     #[test]
     fn test_validation_errors() {

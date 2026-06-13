@@ -9,6 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tinyfs::ResultExt;
 use tinyfs::{
     AsyncReadSeek, Error as TinyFSError, File, FileID, FileMetadataWriter, Metadata, NodeID,
     NodeMetadata, PartID, persistence::PersistenceLayer,
@@ -91,11 +92,7 @@ impl File for OpLogFile {
         debug!("OpLogFile::async_reader() - creating streaming reader via persistence layer");
 
         // Use streaming async reader instead of loading entire file into memory
-        let reader = self
-            .state
-            .async_file_reader(self.id)
-            .await
-            .map_err(|e| TinyFSError::Other(e.to_string()))?;
+        let reader = self.state.async_file_reader(self.id).await.map_other()?;
 
         debug!("OpLogFile::async_reader() - created streaming reader successfully");
 
@@ -135,7 +132,7 @@ impl File for OpLogFile {
             .state
             .allocate_version_for_write(self.id)
             .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+            .map_other()?;
 
         debug!(
             "Pre-allocated version {allocated_version} for file {}",
@@ -176,11 +173,7 @@ impl File for OpLogFile {
                         &verified_pending,
                         options,
                     )
-                    .map_err(|e| {
-                        TinyFSError::Other(format!(
-                            "Failed to resume bao state for series append: {e}"
-                        ))
-                    })?
+                    .map_other_context("Failed to resume bao state for series append")?
                 }
                 None => {
                     warn!(
@@ -332,9 +325,9 @@ impl FileMetadataWriter for OpLogFileWriter {
     async fn infer_temporal_bounds(&mut self) -> tinyfs::Result<(i64, i64, String)> {
         // First, flush the writer to ensure all bytes are written (but don't shutdown yet)
         use tokio::io::AsyncWriteExt;
-        self.flush().await.map_err(|e| {
-            tinyfs::Error::Other(format!("Failed to flush before inferring bounds: {}", e))
-        })?;
+        self.flush()
+            .await
+            .map_other_context("Failed to flush before inferring bounds")?;
 
         // Read back the bytes from the temp file in HybridWriter
         // This is efficient because parquet footer parsing only needs the end of the file
@@ -346,7 +339,7 @@ impl FileMetadataWriter for OpLogFileWriter {
 
         let bytes = tokio::fs::read(&temp_path)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to read temp file: {}", e)))?;
+            .map_other_context("Failed to read temp file")?;
 
         // Parse parquet footer to extract temporal bounds
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -354,14 +347,14 @@ impl FileMetadataWriter for OpLogFileWriter {
 
         let bytes = Bytes::from(bytes);
         let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to parse parquet: {}", e)))?;
+            .map_other_context("Failed to parse parquet")?;
 
         let parquet_metadata = reader_builder.metadata();
         let schema = reader_builder.schema();
 
         // Detect timestamp column
         let timestamp_column = crate::schema::detect_timestamp_column(schema)
-            .map_err(|e| tinyfs::Error::Other(format!("No timestamp column found: {}", e)))?;
+            .map_other_context("No timestamp column found")?;
 
         // Extract temporal bounds
         let (min_time, max_time) =
@@ -375,12 +368,9 @@ impl FileMetadataWriter for OpLogFileWriter {
         self.set_temporal_metadata(min_time, max_time, timestamp_column.clone());
 
         // Now shutdown with the metadata set
-        self.shutdown().await.map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to finalize write after setting metadata: {}",
-                e
-            ))
-        })?;
+        self.shutdown()
+            .await
+            .map_other_context("Failed to finalize write after setting metadata")?;
 
         Ok((min_time, max_time, timestamp_column))
     }
@@ -478,7 +468,7 @@ impl AsyncWrite for OpLogFileWriter {
                 // Finalize HybridWriter to get content
                 let result = async {
                     let hybrid_result = storage.finalize().await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to finalize storage: {}", e)))?;
+                        .map_other_context("Failed to finalize storage")?;
 
                     let content = hybrid_result.content;
                     let content_len = hybrid_result.size;
@@ -523,7 +513,7 @@ impl AsyncWrite for OpLogFileWriter {
                             let series_outboard = if let Some(prev_bao_bytes) = prev_bao {
                                 // Deserialize previous SeriesOutboard
                                 let prev_outboard = utilities::bao_outboard::SeriesOutboard::from_bytes(&prev_bao_bytes)
-                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to deserialize previous bao_outboard: {}", e)))?;
+                                    .map_other_context("Failed to deserialize previous bao_outboard")?;
 
                                 // The HybridWriter's bao_state was resumed from the
                                 // previous frontier in async_writer(), so
@@ -610,7 +600,7 @@ impl AsyncWrite for OpLogFileWriter {
                     };
 
                     state.store_file_content_ref(file_id, content_ref, metadata, Some(allocated_version), bao_outboard).await
-                        .map_err(|e| tinyfs::Error::Other(format!("Failed to store file: {}", e)))
+                        .map_other_context("Failed to store file")
                 }.await;
 
                 match result {
@@ -676,6 +666,6 @@ impl tinyfs::QueryableFile for OpLogFile {
         // Delegate to provider crate - no duplication
         provider::create_table_provider(id, context, provider::TableProviderOptions::default())
             .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))
+            .map_other()
     }
 }

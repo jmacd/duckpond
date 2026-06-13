@@ -61,38 +61,30 @@ pub async fn mknod_command(
     let path_clone = path.to_string();
     let factory_type_clone = factory_type.to_string();
 
-    // mknod needs the transaction guard for tx.state() (provider context),
-    // so we can't use write_transaction() yet (it only passes &FS).
-    let tx = ship
-        .begin_write(&steward::PondUserMetadata::new(vec![
+    // mknod needs the transaction guard for tx.state() (provider context), so it
+    // takes the full Transaction (not the &FS-only Steward::write_transaction).
+    crate::common::with_write_transaction(
+        &mut ship,
+        vec![
             "mknod".to_string(),
             factory_type_clone.clone(),
             path_clone.clone(),
-        ]))
-        .await
-        .map_err(|e| anyhow!("mknod operation failed: {}", e))?;
-
-    match mknod_impl(
-        &tx,
-        &tx,
-        &path_clone,
-        &factory_type_clone,
-        stored_config_bytes.clone(),
-        expanded_content.into_bytes(),
-        overwrite,
+        ],
+        async |tx| {
+            mknod_impl(
+                tx,
+                tx,
+                &path_clone,
+                &factory_type_clone,
+                stored_config_bytes.clone(),
+                expanded_content.into_bytes(),
+                overwrite,
+            )
+            .await
+            .map_err(|e| anyhow!("mknod operation failed: {}", e))
+        },
     )
-    .await
-    {
-        Ok(()) => {
-            _ = tx
-                .commit()
-                .await
-                .map_err(|e| anyhow!("mknod operation failed: {}", e))?;
-        }
-        Err(e) => {
-            return Err(anyhow!("mknod operation failed: {}", e));
-        }
-    }
+    .await?;
 
     Ok(())
 }

@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
 use tinyfs::Result as TinyFSResult;
+use tinyfs::ResultExt;
 
 /// Test factory configuration
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,11 +41,10 @@ fn default_repeat() -> usize {
 
 /// Validate test configuration from YAML bytes
 fn validate_test_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
-    let config: TestConfig = serde_yaml::from_slice(config_bytes)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid test config: {}", e)))?;
+    let config: TestConfig =
+        serde_yaml::from_slice(config_bytes).map_other_context("Invalid test config")?;
 
-    serde_json::to_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+    serde_json::to_value(config).map_other_context("Failed to convert config")
 }
 
 /// Initialize test factory - creates a simple output directory
@@ -52,8 +52,8 @@ async fn initialize_test(
     config: Value,
     _context: crate::FactoryContext,
 ) -> Result<(), tinyfs::Error> {
-    let test_config: TestConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let test_config: TestConfig =
+        serde_json::from_value(config).map_other_context("Invalid config")?;
 
     log::info!(
         "Initializing test factory with message: {}",
@@ -74,8 +74,8 @@ async fn execute_test(
     _context: crate::FactoryContext,
     ctx: crate::ExecutionContext,
 ) -> Result<(), tinyfs::Error> {
-    let parsed_config: TestConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let parsed_config: TestConfig =
+        serde_json::from_value(config).map_other_context("Invalid config")?;
 
     // Check if this execution should fail
     if parsed_config.fail {
@@ -107,8 +107,7 @@ async fn execute_test(
         parsed_config.repeat_count, parsed_config.message, ctx
     );
 
-    std::fs::write(result_path, result_content)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to write result: {}", e)))?;
+    std::fs::write(result_path, result_content).map_other_context("Failed to write result")?;
 
     log::info!(
         "Test factory execution completed, result written to {}",
@@ -137,10 +136,9 @@ crate::register_executable_factory!(
 /// Validate test directory configuration from YAML bytes
 fn validate_test_dir_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
     let config = tinyfs::testing::TestDirectoryConfig::from_yaml_bytes(config_bytes)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid test-dir config: {}", e)))?;
+        .map_other_context("Invalid test-dir config")?;
 
-    serde_json::to_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+    serde_json::to_value(config).map_other_context("Failed to convert config")
 }
 
 /// Create a test directory handle
@@ -148,8 +146,8 @@ fn create_test_dir(
     config: Value,
     context: crate::FactoryContext,
 ) -> TinyFSResult<tinyfs::DirHandle> {
-    let _test_config: tinyfs::testing::TestDirectoryConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let _test_config: tinyfs::testing::TestDirectoryConfig =
+        serde_json::from_value(config).map_other_context("Invalid config")?;
 
     // Create an empty dynamic directory for testing
     // TestDirectoryConfig only has name/metadata, not actual file specs
@@ -172,10 +170,9 @@ crate::register_dynamic_factory!(
 /// Validate test file configuration from YAML bytes
 fn validate_test_file_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
     let config = tinyfs::testing::TestFileConfig::from_yaml_bytes(config_bytes)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid test-file config: {}", e)))?;
+        .map_other_context("Invalid test-file config")?;
 
-    serde_json::to_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+    serde_json::to_value(config).map_other_context("Failed to convert config")
 }
 
 /// Create a test file handle
@@ -183,8 +180,8 @@ fn create_test_file(
     config: Value,
     _context: crate::FactoryContext,
 ) -> TinyFSResult<tinyfs::FileHandle> {
-    let parsed: tinyfs::testing::TestFileConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let parsed: tinyfs::testing::TestFileConfig =
+        serde_json::from_value(config).map_other_context("Invalid config")?;
 
     // Return file handle with the configured content
     Ok(crate::ConfigFile::new(parsed.content.into_bytes()).create_handle())
@@ -409,11 +406,10 @@ impl tokio::io::AsyncSeek for InfiniteCsvReader {
 
 /// Validate infinite CSV configuration
 fn validate_infinite_csv_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
-    let config: InfiniteCsvConfig = serde_yaml::from_slice(config_bytes)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid infinite-csv config: {}", e)))?;
+    let config: InfiniteCsvConfig =
+        serde_yaml::from_slice(config_bytes).map_other_context("Invalid infinite-csv config")?;
 
-    serde_json::to_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+    serde_json::to_value(config).map_other_context("Failed to convert config")
 }
 
 /// Create infinite CSV file handle
@@ -421,8 +417,8 @@ fn create_infinite_csv_file(
     config: Value,
     _context: crate::FactoryContext,
 ) -> TinyFSResult<tinyfs::FileHandle> {
-    let parsed: InfiniteCsvConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let parsed: InfiniteCsvConfig =
+        serde_json::from_value(config).map_other_context("Invalid config")?;
 
     let file = InfiniteCsvFile::new(parsed);
     Ok(tinyfs::FileHandle::new(Arc::new(tokio::sync::Mutex::new(

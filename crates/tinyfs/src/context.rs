@@ -7,6 +7,7 @@
 //! This module defines the abstraction layer between factories and persistence implementations.
 //! ProviderContext holds a tinyfs Persistence layer for transaction management.
 
+use crate::error::ResultExt;
 use crate::{FileID, PersistenceLayer};
 use datafusion::execution::context::SessionContext;
 use std::path::{Path, PathBuf};
@@ -94,7 +95,7 @@ impl ProviderContext {
         _ = self
             .table_provider_cache
             .lock()
-            .map_err(|e| crate::Error::Other(format!("Mutex poisoned: {}", e)))?
+            .map_other_context("Mutex poisoned")?
             .insert(key, provider);
         Ok(())
     }

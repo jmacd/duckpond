@@ -26,6 +26,7 @@ pub mod buffer_helpers {
 /// WARNING: These functions load entire content into memory.
 /// Production code should use streaming interfaces directly.
 pub mod convenience {
+    use crate::error::ResultExt;
     use crate::{EntryType, NodePath, error::Result, wd::WD};
     use std::path::Path;
 
@@ -40,15 +41,18 @@ pub mod convenience {
 
         // Write content via streaming
         use tokio::io::AsyncWriteExt;
-        writer.write_all(content).await.map_err(|e| {
-            crate::error::Error::Other(format!("Failed to write file content: {}", e))
-        })?;
-        writer.flush().await.map_err(|e| {
-            crate::error::Error::Other(format!("Failed to flush file content: {}", e))
-        })?;
-        writer.shutdown().await.map_err(|e| {
-            crate::error::Error::Other(format!("Failed to complete file write: {}", e))
-        })?;
+        writer
+            .write_all(content)
+            .await
+            .map_other_context("Failed to write file content")?;
+        writer
+            .flush()
+            .await
+            .map_other_context("Failed to flush file content")?;
+        writer
+            .shutdown()
+            .await
+            .map_other_context("Failed to complete file write")?;
 
         // Add a small delay to ensure the async writer background task completes
         tokio::task::yield_now().await;
@@ -69,15 +73,18 @@ pub mod convenience {
 
         // Write content via streaming
         use tokio::io::AsyncWriteExt;
-        writer.write_all(content).await.map_err(|e| {
-            crate::error::Error::Other(format!("Failed to write file content: {}", e))
-        })?;
-        writer.flush().await.map_err(|e| {
-            crate::error::Error::Other(format!("Failed to flush file content: {}", e))
-        })?;
-        writer.shutdown().await.map_err(|e| {
-            crate::error::Error::Other(format!("Failed to complete file write: {}", e))
-        })?;
+        writer
+            .write_all(content)
+            .await
+            .map_other_context("Failed to write file content")?;
+        writer
+            .flush()
+            .await
+            .map_other_context("Failed to flush file content")?;
+        writer
+            .shutdown()
+            .await
+            .map_other_context("Failed to complete file write")?;
 
         // Add a small delay to ensure the async writer background task completes
         tokio::task::yield_now().await;

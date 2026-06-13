@@ -7,9 +7,9 @@
 //! Tests verify the basic replication and sync workflow without
 //! full command-line integration
 
-use crate::commands::init_command;
-use crate::common::ShipContext;
 use anyhow::Result;
+use cmd::commands::init_command;
+use cmd::common::ShipContext;
 use datafusion::prelude::SessionContext;
 use log::debug;
 use std::path::Path;
@@ -316,7 +316,7 @@ struct PondStats {
 
 #[tokio::test]
 async fn test_simple_pond_creation() -> Result<()> {
-    use crate::commands::mkdir_command;
+    use cmd::commands::mkdir_command;
 
     let test = SimpleReplicationTest::new()?;
     test.init_source().await?;
@@ -466,10 +466,10 @@ async fn test_query_transaction_records() -> Result<()> {
 
 #[tokio::test]
 async fn test_pond_structural_statistics() -> Result<()> {
-    use crate::commands::mkdir_command;
-    use crate::commands::{CopyOptions, copy_command};
     use arrow_array::{Int32Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
+    use cmd::commands::mkdir_command;
+    use cmd::commands::{CopyOptions, copy_command};
     use parquet::arrow::ArrowWriter;
     use std::fs;
     use std::fs::File;

@@ -8,6 +8,7 @@ use futures::Stream;
 use log::debug;
 use std::pin::Pin;
 use std::sync::Arc;
+use tinyfs::ResultExt;
 use tinyfs::{
     DirHandle, Directory, FileID, Metadata, Node, NodeMetadata, persistence::PersistenceLayer,
 };
@@ -53,14 +54,14 @@ impl Directory for OpLogDirectory {
         self.state
             .ensure_directory_loaded(self.id)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
+            .map_other_context("Failed to load directory")?;
 
         // Get entry from in-memory state
         let entry_opt = self
             .state
             .get_directory_entry(self.id, name)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get directory entry: {}", e)))?;
+            .map_other_context("Failed to get directory entry")?;
 
         let Some(entry) = entry_opt else {
             debug!("OpLogDirectory::get: entry '{name}' not found");
@@ -98,7 +99,7 @@ impl Directory for OpLogDirectory {
         self.state
             .ensure_directory_loaded(self.id)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
+            .map_other_context("Failed to load directory")?;
 
         // Create the new entry
         let node_id = node.id();
@@ -120,9 +121,7 @@ impl Directory for OpLogDirectory {
         self.state
             .insert_directory_entry(self.id, new_entry)
             .await
-            .map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to insert directory entry: {}", e))
-            })?;
+            .map_other_context("Failed to insert directory entry")?;
 
         Ok(())
     }
@@ -134,16 +133,14 @@ impl Directory for OpLogDirectory {
         self.state
             .ensure_directory_loaded(self.id)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
+            .map_other_context("Failed to load directory")?;
 
         // Remove from in-memory state
         let removed_entry = self
             .state
             .remove_directory_entry(self.id, name)
             .await
-            .map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to remove directory entry: {}", e))
-            })?;
+            .map_other_context("Failed to remove directory entry")?;
 
         // If entry existed, load and return the node
         match removed_entry {
@@ -176,14 +173,14 @@ impl Directory for OpLogDirectory {
         self.state
             .ensure_directory_loaded(self.id)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to load directory: {}", e)))?;
+            .map_other_context("Failed to load directory")?;
 
         // Get all entries from in-memory state
         let entries = self
             .state
             .get_all_directory_entries(self.id)
             .await
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to get directory entries: {}", e)))?;
+            .map_other_context("Failed to get directory entries")?;
 
         debug!(
             "OpLogDirectory::entries() - returning {} entries",

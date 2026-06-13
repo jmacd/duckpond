@@ -194,30 +194,18 @@ pub async fn cat_command(
         TargetContext::Pond(_) => ship_context.open_pond().await?,
     };
 
-    let mut tx = ship
-        .begin_read(&steward::PondUserMetadata::new(
-            ship_context.original_args.clone(),
-        ))
-        .await?;
-
-    // Execute the cat operation and handle errors properly
-    let result = if explain {
-        explain_impl(&mut tx, path, sql_query).await
-    } else {
-        cat_impl(&mut tx, path, display, output, sql_query).await
-    };
-
-    match result {
-        Ok(()) => {
-            _ = tx.commit().await?;
-            Ok(())
-        }
-        Err(e) => {
-            // Record failure in control table before returning error
-            let err = tx.abort(&e).await;
-            Err(anyhow::anyhow!("{}", err))
-        }
-    }
+    crate::common::with_read_transaction(
+        &mut ship,
+        ship_context.original_args.clone(),
+        async |tx| {
+            if explain {
+                explain_impl(tx, path, sql_query).await
+            } else {
+                cat_impl(tx, path, display, output, sql_query).await
+            }
+        },
+    )
+    .await
 }
 
 /// Internal implementation of cat command
@@ -524,6 +512,7 @@ mod tests {
     use crate::commands::init::init_command;
     use arrow_array::record_batch;
     use tempfile::TempDir;
+    use tinyfs::ResultExt;
     use tinyfs::arrow::ParquetExt;
 
     /// Test setup helper - creates pond and returns context for testing
@@ -612,7 +601,7 @@ mod tests {
                         ),
                         ("value", Float64, [42.0_f64, 43.5_f64])
                     )
-                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
+                    .map_other_context("Arrow error")?;
 
                     // Write as parquet table using ParquetExt
                     root.create_table_from_batch(
@@ -652,7 +641,7 @@ mod tests {
                         ("timestamp", Int64, [1704067200000_i64, 1704070800000_i64]), // 2024-01-01 timestamps in milliseconds
                         ("value", Float64, [42.0_f64, 43.5_f64])
                     )
-                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
+                    .map_other_context("Arrow error")?;
 
                     // Write as file:series using ParquetExt with temporal metadata extraction
                     let _ = root
@@ -688,28 +677,9 @@ mod tests {
             )
             .map_err(|e| anyhow::anyhow!("Arrow error: {}", e))?;
 
-            // Calculate total row count before moving batch
-            let total_rows = batch.num_rows();
-
-            // Use the same formatting logic as the cat command (with type information)
-            use arrow::util::pretty::pretty_format_batches_with_options;
-            use arrow_cast::display::FormatOptions;
-
-            let options = FormatOptions::default()
-                .with_display_error(true)
-                .with_types_info(true) // This shows column types in the headers
-                .with_null("NULL"); // Show NULL values clearly
-
-            let formatted = pretty_format_batches_with_options(&[batch], &options)
-                .map_err(|e| anyhow::anyhow!("Failed to format results: {}", e))?
-                .to_string();
-
-            let result = format!(
-                "{}\nSummary: {} total rows",
-                formatted.trim_end(),
-                total_rows
-            );
-            Ok(result)
+            // Format through the exact production code path so the expectation
+            // cannot drift from cat's real table rendering.
+            format_query_results(&[batch])
         }
     }
 

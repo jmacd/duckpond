@@ -47,8 +47,11 @@ impl ShipContext {
     }
 
     /// Create a ShipContext for pond-only operations (no host root).
-    /// Only used in test code -- production always has a host root from CLI args.
-    #[cfg(test)]
+    ///
+    /// Convenience over the public field constructor; used by unit and
+    /// integration tests. Production always has a host root from CLI args, so
+    /// the `pond` binary itself never calls this.
+    #[allow(dead_code)]
     #[must_use]
     pub fn pond_only<P: AsRef<Path>>(pond_path: Option<P>, original_args: Vec<String>) -> Self {
         Self {
@@ -216,6 +219,90 @@ pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<Pat
     };
 
     Ok(absolute_path)
+}
+
+/// Run a read-only operation inside a steward read transaction.
+///
+/// Centralizes the begin-read / commit / abort boilerplate shared by the
+/// read-only commands (`show`, `list`, `cat`, `describe`, `temporal`, ...). The
+/// caller opens the appropriate steward (`open_pond` or `open_host`) and passes
+/// it in; this begins a read transaction, runs `f` with mutable access to it,
+/// commits on success, and aborts (rolls back) on error. Aborting a read
+/// transaction has no control-table side effects; it just avoids the
+/// "dropped without commit" warning.
+///
+/// The returned value must not borrow the transaction, so commands compute any
+/// owned result inside the closure and render it after this returns.
+pub async fn with_read_transaction<'s, F, T>(
+    ship: &'s mut steward::Steward,
+    args: Vec<String>,
+    f: F,
+) -> Result<T>
+where
+    F: for<'a> AsyncFnOnce(&'a mut steward::Transaction<'s>) -> Result<T>,
+{
+    let mut tx = ship
+        .begin_read(&steward::PondUserMetadata::new(args))
+        .await
+        .map_err(|e| anyhow!("Failed to begin read transaction: {}", e))?;
+
+    let result = match f(&mut tx).await {
+        Ok(value) => value,
+        Err(e) => {
+            _ = tx.abort(&e).await;
+            return Err(e);
+        }
+    };
+
+    _ = tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit read transaction: {}", e))?;
+
+    Ok(result)
+}
+
+/// Run a write operation inside a steward write transaction.
+///
+/// The write counterpart to [`with_read_transaction`]. Begins a write
+/// transaction, runs `f` with mutable access to it (so callers can reach the
+/// transaction guard for provider context via `tx.state()`, not just `&FS`),
+/// commits on success, and aborts (rolls back) on error.
+///
+/// This differs from [`steward::Steward::write_transaction`], which only
+/// exposes `&FS` and discards the closure's return value; use this helper when
+/// the command needs the full [`steward::Transaction`] or must return a value
+/// computed inside the transaction.
+///
+/// The returned value must not borrow the transaction, so commands compute any
+/// owned result inside the closure and render it after this returns.
+pub async fn with_write_transaction<'s, F, T>(
+    ship: &'s mut steward::Steward,
+    args: Vec<String>,
+    f: F,
+) -> Result<T>
+where
+    F: for<'a> AsyncFnOnce(&'a mut steward::Transaction<'s>) -> Result<T>,
+{
+    let mut tx = ship
+        .begin_write(&steward::PondUserMetadata::new(args))
+        .await
+        .map_err(|e| anyhow!("Failed to begin write transaction: {}", e))?;
+
+    let result = match f(&mut tx).await {
+        Ok(value) => value,
+        Err(e) => {
+            _ = tx.abort(&e).await;
+            return Err(e);
+        }
+    };
+
+    _ = tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit write transaction: {}", e))?;
+
+    Ok(result)
 }
 
 /// Number of hex characters to show when shortening UUID7 values

@@ -11,6 +11,7 @@
 //! - Parquet metadata parsing for existing files (used by copy command)
 
 use super::schema::ForArrow;
+use crate::error::ResultExt;
 use crate::{EntryType, Result, WD};
 use arrow_array::{Array, RecordBatch};
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
@@ -211,15 +212,11 @@ fn serialize_batch_to_parquet(batch: &RecordBatch) -> Result<Vec<u8>> {
         let cursor = Cursor::new(&mut buffer);
         let props = WriterProperties::builder().build();
         let mut writer = ArrowWriter::try_new(cursor, batch.schema(), Some(props))
-            .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
+            .map_other_context("Arrow writer error")?;
 
-        writer
-            .write(batch)
-            .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
+        writer.write(batch).map_other_context("Write batch error")?;
 
-        let _ = writer
-            .close()
-            .map_err(|e| crate::Error::Other(format!("Close writer error: {}", e)))?;
+        let _ = writer.close().map_other_context("Close writer error")?;
     }
     Ok(buffer)
 }
@@ -228,14 +225,13 @@ fn serialize_batch_to_parquet(batch: &RecordBatch) -> Result<Vec<u8>> {
 fn parse_parquet_to_batch(data: Vec<u8>) -> Result<RecordBatch> {
     let bytes = Bytes::from(data);
     let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
-        .map_err(|e| crate::Error::Other(format!("Parquet reader error: {}", e)))?
+        .map_other_context("Parquet reader error")?
         .build()
-        .map_err(|e| crate::Error::Other(format!("Build reader error: {}", e)))?;
+        .map_other_context("Build reader error")?;
 
     let mut batches = Vec::new();
     for batch_result in reader {
-        let batch =
-            batch_result.map_err(|e| crate::Error::Other(format!("Read batch error: {}", e)))?;
+        let batch = batch_result.map_other_context("Read batch error")?;
         batches.push(batch);
     }
 
@@ -247,7 +243,7 @@ fn parse_parquet_to_batch(data: Vec<u8>) -> Result<RecordBatch> {
         let schema = batches[0].schema();
         let batch_refs: Vec<&RecordBatch> = batches.iter().collect();
         arrow::compute::concat_batches(&schema, batch_refs)
-            .map_err(|e| crate::Error::Other(format!("Concat batches error: {}", e)))
+            .map_other_context("Concat batches error")
     }
 }
 
@@ -366,7 +362,7 @@ impl ParquetExt for WD {
     {
         let fields = T::for_arrow();
         let batch = serde_arrow::to_record_batch(&fields, &items)
-            .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
+            .map_other_context("Failed to serialize to arrow")?;
         self.create_table_from_batch(path, &batch, entry_type).await
     }
 
@@ -377,7 +373,7 @@ impl ParquetExt for WD {
     {
         let batch = self.read_table_as_batch(path).await?;
         let items = serde_arrow::from_record_batch(&batch)
-            .map_err(|e| crate::Error::Other(format!("Failed to deserialize from arrow: {}", e)))?;
+            .map_other_context("Failed to deserialize from arrow")?;
         Ok(items)
     }
 
@@ -398,11 +394,11 @@ impl ParquetExt for WD {
         writer
             .write_all(&buffer)
             .await
-            .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
+            .map_other_context("Write to TinyFS error")?;
         writer
             .shutdown()
             .await
-            .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
+            .map_other_context("Shutdown writer error")?;
 
         Ok(())
     }
@@ -440,7 +436,7 @@ impl ParquetExt for WD {
         writer
             .write_all(&buffer)
             .await
-            .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
+            .map_other_context("Write to TinyFS error")?;
 
         // Set temporal metadata from Arrow kernels (no parquet parsing needed!)
         writer.set_temporal_metadata(min_time, max_time, ts_col.to_string());
@@ -448,7 +444,7 @@ impl ParquetExt for WD {
         writer
             .shutdown()
             .await
-            .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
+            .map_other_context("Shutdown writer error")?;
 
         Ok((min_time, max_time))
     }
@@ -465,7 +461,7 @@ impl ParquetExt for WD {
     {
         let fields = T::for_arrow();
         let batch = serde_arrow::to_record_batch::<&[T]>(&fields, &items)
-            .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
+            .map_other_context("Failed to serialize to arrow")?;
         self.create_series_from_batch(path, &batch, timestamp_column)
             .await
     }
@@ -495,7 +491,7 @@ impl ParquetExt for WD {
         writer
             .write_all(&buffer)
             .await
-            .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
+            .map_other_context("Write to TinyFS error")?;
 
         // Set temporal metadata from Arrow kernels
         writer.set_temporal_metadata(min_time, max_time, ts_col.to_string());
@@ -503,7 +499,7 @@ impl ParquetExt for WD {
         writer
             .shutdown()
             .await
-            .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
+            .map_other_context("Shutdown writer error")?;
 
         Ok((min_time, max_time))
     }
@@ -520,7 +516,7 @@ impl ParquetExt for WD {
     {
         let fields = T::for_arrow();
         let batch = serde_arrow::to_record_batch::<&[T]>(&fields, &items)
-            .map_err(|e| crate::Error::Other(format!("Failed to serialize to arrow: {}", e)))?;
+            .map_other_context("Failed to serialize to arrow")?;
         self.write_series_from_batch(path, &batch, timestamp_column)
             .await
     }
@@ -560,30 +556,27 @@ impl ParquetExt for WD {
         let cursor = Cursor::new(Vec::new());
         let props = WriterProperties::builder().build();
         let mut writer = ArrowWriter::try_new(cursor, schema, Some(props))
-            .map_err(|e| crate::Error::Other(format!("Arrow writer error: {}", e)))?;
+            .map_other_context("Arrow writer error")?;
 
         writer
             .write(&first_batch)
-            .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
+            .map_other_context("Write batch error")?;
 
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| crate::Error::Other(format!("Read batch error: {}", e)))?;
+            let batch = batch_result.map_other_context("Read batch error")?;
             writer
                 .write(&batch)
-                .map_err(|e| crate::Error::Other(format!("Write batch error: {}", e)))?;
+                .map_other_context("Write batch error")?;
         }
 
         // Flush any buffered row group, finalize footer, and recover the buffer
-        let cursor = writer
-            .into_inner()
-            .map_err(|e| crate::Error::Other(format!("into_inner error: {}", e)))?;
+        let cursor = writer.into_inner().map_other_context("into_inner error")?;
         let buffer = cursor.into_inner();
 
         // Extract temporal bounds from the completed parquet metadata
         let bytes = Bytes::from(buffer);
         let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
-            .map_err(|e| crate::Error::Other(format!("Parquet reader error: {}", e)))?;
+            .map_other_context("Parquet reader error")?;
         let parquet_meta = reader_builder.metadata();
         let arrow_schema = reader_builder.schema();
 
@@ -598,14 +591,14 @@ impl ParquetExt for WD {
         tinyfs_writer
             .write_all(&bytes)
             .await
-            .map_err(|e| crate::Error::Other(format!("Write to TinyFS error: {}", e)))?;
+            .map_other_context("Write to TinyFS error")?;
 
         tinyfs_writer.set_temporal_metadata(min_time, max_time, ts_col.to_string());
 
         tinyfs_writer
             .shutdown()
             .await
-            .map_err(|e| crate::Error::Other(format!("Shutdown writer error: {}", e)))?;
+            .map_other_context("Shutdown writer error")?;
 
         Ok((min_time, max_time))
     }

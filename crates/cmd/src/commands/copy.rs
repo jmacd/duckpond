@@ -6,6 +6,7 @@ use crate::common::ShipContext;
 use anyhow::{Result, anyhow};
 use std::future::Future;
 use std::pin::Pin;
+use tinyfs::ResultExt;
 
 /// Direction of copy operation
 #[derive(Debug, PartialEq)]
@@ -488,7 +489,7 @@ async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> 
                         tinyfs::CopyDestination::Directory | tinyfs::CopyDestination::ExistingDirectory => {
                             // Destination is a directory - copy files into it
                             copy_files_to_directory(&parsed_sources, &host_root, &dest_wd).await
-                                .map_err(|e| tinyfs::Error::Other(format!("Copy to directory failed: {}", e)))?;
+                                .map_other_context("Copy to directory failed")?;
                             Ok(())
                         }
                         tinyfs::CopyDestination::ExistingFile => {
@@ -500,7 +501,7 @@ async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> 
                                     .and_then(|f| f.to_str())
                                     .unwrap_or(&dest);
                                 copy_single_file(&host_root, &source.host_path, &dest_wd, dest_filename, source.entry_type).await
-                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to overwrite file: {}", e)))?;
+                                    .map_other_context("Failed to overwrite file")?;
                                 log::info!("Overwrote {}", &dest);
                                 Ok(())
                             } else {
@@ -514,7 +515,7 @@ async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> 
                             if parsed_sources.len() == 1 {
                                 let source = &parsed_sources[0];
                                 copy_single_file(&host_root, &source.host_path, &dest_wd, &name, source.entry_type).await
-                                    .map_err(|e| tinyfs::Error::Other(format!("Failed to copy file: {}", e)))?;
+                                    .map_other_context("Failed to copy file")?;
                                 log::debug!("Copied {} to {}", source.host_path, name);
                                 Ok(())
                             } else {
@@ -532,7 +533,7 @@ async fn copy_in(ship_context: &ShipContext, sources: &[String], dest: &str) -> 
                         _ = pond_root.create_dir_path(clean_dest).await?;
                         let (dest_wd, _) = pond_root.resolve_copy_destination(clean_dest).await?;
                         copy_files_to_directory(&parsed_sources, &host_root, &dest_wd).await
-                            .map_err(|e| tinyfs::Error::Other(format!("Copy to created directory failed: {}", e)))?;
+                            .map_other_context("Copy to created directory failed")?;
                         Ok(())
                     } else {
                         Err(tinyfs::Error::Other(format!("Failed to resolve destination '{}': {}", &dest, e)).into())
@@ -880,6 +881,7 @@ mod tests {
     use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tinyfs::ResultExt;
     use tinyfs::arrow::ParquetExt;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1321,7 +1323,7 @@ mod tests {
                         ("timestamp", Int64, [1000_i64, 2000_i64, 3000_i64]),
                         ("value", Float64, [10.5_f64, 20.5_f64, 30.5_f64])
                     )
-                    .map_err(|e| tinyfs::Error::Other(format!("Arrow error: {}", e)))?;
+                    .map_other_context("Arrow error")?;
 
                     // Write as file:series using ParquetExt with temporal metadata extraction
                     let _ = root

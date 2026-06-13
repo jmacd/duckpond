@@ -2106,7 +2106,7 @@ mod tests {
         let h = classify(
             NOW_US,
             Some(NOW_US - 5 * ONE_MIN_US),
-            Some(NOW_US - 1 * ONE_MIN_US),
+            Some(NOW_US - ONE_MIN_US),
             Some(true),
             Some(600),
         );
@@ -2118,7 +2118,7 @@ mod tests {
         let h = classify(
             NOW_US,
             None,
-            Some(NOW_US - 1 * ONE_MIN_US),
+            Some(NOW_US - ONE_MIN_US),
             Some(true),
             Some(600),
         );
@@ -2129,7 +2129,7 @@ mod tests {
     fn classify_red_when_timer_inactive() {
         let h = classify(
             NOW_US,
-            Some(NOW_US - 1 * ONE_MIN_US),
+            Some(NOW_US - ONE_MIN_US),
             None,
             Some(false),
             Some(600),
@@ -2139,25 +2139,13 @@ mod tests {
 
     #[test]
     fn classify_unknown_without_interval() {
-        let h = classify(
-            NOW_US,
-            Some(NOW_US - 1 * ONE_MIN_US),
-            None,
-            Some(true),
-            None,
-        );
+        let h = classify(NOW_US, Some(NOW_US - ONE_MIN_US), None, Some(true), None);
         assert_eq!(h, Health::Unknown);
     }
 
     #[test]
     fn classify_unknown_with_zero_interval() {
-        let h = classify(
-            NOW_US,
-            Some(NOW_US - 1 * ONE_MIN_US),
-            None,
-            Some(true),
-            Some(0),
-        );
+        let h = classify(NOW_US, Some(NOW_US - ONE_MIN_US), None, Some(true), Some(0));
         assert_eq!(h, Health::Unknown);
     }
 

@@ -4,6 +4,7 @@
 
 use crate::EntryType;
 use crate::dir::{Directory, DirectoryEntry, Handle};
+use crate::error::ResultExt;
 use crate::error::{Error, Result};
 use crate::metadata::{Metadata, NodeMetadata};
 use crate::node::{FileID, Node, NodeType, PartID};
@@ -106,13 +107,8 @@ impl HostDirectory {
     /// Build a Node for a child host entry.
     /// Requires that `self.host_path` is `Some`.
     fn build_child_node(&self, name: &str, host_child_path: &Path) -> Result<Node> {
-        let metadata = std::fs::metadata(host_child_path).map_err(|e| {
-            Error::Other(format!(
-                "Failed to stat '{}': {}",
-                host_child_path.display(),
-                e
-            ))
-        })?;
+        let metadata = std::fs::metadata(host_child_path)
+            .map_other_context(format!("Failed to stat '{}'", host_child_path.display()))?;
 
         let entry_type = Self::entry_type_for(&metadata);
         let child_id = self.child_file_id(name, entry_type);
@@ -137,13 +133,8 @@ impl HostDirectory {
 impl Metadata for HostDirectory {
     async fn metadata(&self) -> Result<NodeMetadata> {
         let path = self.require_path()?;
-        let metadata = std::fs::metadata(path).map_err(|e| {
-            Error::Other(format!(
-                "Failed to stat directory '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let metadata = std::fs::metadata(path)
+            .map_other_context(format!("Failed to stat directory '{}'", path.display()))?;
 
         let timestamp = metadata
             .modified()
@@ -173,20 +164,13 @@ impl Directory for HostDirectory {
         }
 
         // Ensure the child doesn't escape the host directory (basic path traversal guard)
-        let canonical = child_path.canonicalize().map_err(|e| {
-            Error::Other(format!(
-                "Failed to canonicalize '{}': {}",
-                child_path.display(),
-                e
-            ))
-        })?;
-        let canonical_parent = host_path.canonicalize().map_err(|e| {
-            Error::Other(format!(
-                "Failed to canonicalize parent '{}': {}",
-                host_path.display(),
-                e
-            ))
-        })?;
+        let canonical = child_path
+            .canonicalize()
+            .map_other_context(format!("Failed to canonicalize '{}'", child_path.display()))?;
+        let canonical_parent = host_path.canonicalize().map_other_context(format!(
+            "Failed to canonicalize parent '{}'",
+            host_path.display()
+        ))?;
         if !canonical.starts_with(&canonical_parent) {
             return Err(Error::Other(format!(
                 "Path '{}' escapes hostmount root",
@@ -207,13 +191,10 @@ impl Directory for HostDirectory {
 
         match &node.node_type {
             NodeType::Directory(handle) => {
-                std::fs::create_dir(&child_path).map_err(|e| {
-                    Error::Other(format!(
-                        "Failed to create directory '{}': {}",
-                        child_path.display(),
-                        e
-                    ))
-                })?;
+                std::fs::create_dir(&child_path).map_other_context(format!(
+                    "Failed to create directory '{}'",
+                    child_path.display()
+                ))?;
                 // The node was created with host_path=None (pending).
                 // Now we know the real path, so replace the inner object.
                 // Since Handle wraps Arc<Mutex<...>>, this is visible to all clones.
@@ -223,13 +204,10 @@ impl Directory for HostDirectory {
             }
             NodeType::File(handle) => {
                 // Create an empty file -- content will be written via the File handle
-                let _ = std::fs::File::create(&child_path).map_err(|e| {
-                    Error::Other(format!(
-                        "Failed to create file '{}': {}",
-                        child_path.display(),
-                        e
-                    ))
-                })?;
+                let _ = std::fs::File::create(&child_path).map_other_context(format!(
+                    "Failed to create file '{}'",
+                    child_path.display()
+                ))?;
                 // The node was created with host_path=None (pending).
                 // Now we know the real path, so replace the inner object.
                 let arc = handle.get_file().await;
@@ -254,26 +232,17 @@ impl Directory for HostDirectory {
         }
 
         let node = self.build_child_node(name, &child_path)?;
-        let metadata = std::fs::metadata(&child_path).map_err(|e| {
-            Error::Other(format!("Failed to stat '{}': {}", child_path.display(), e))
-        })?;
+        let metadata = std::fs::metadata(&child_path)
+            .map_other_context(format!("Failed to stat '{}'", child_path.display()))?;
 
         if metadata.is_dir() {
-            std::fs::remove_dir_all(&child_path).map_err(|e| {
-                Error::Other(format!(
-                    "Failed to remove directory '{}': {}",
-                    child_path.display(),
-                    e
-                ))
-            })?;
+            std::fs::remove_dir_all(&child_path).map_other_context(format!(
+                "Failed to remove directory '{}'",
+                child_path.display()
+            ))?;
         } else {
-            std::fs::remove_file(&child_path).map_err(|e| {
-                Error::Other(format!(
-                    "Failed to remove file '{}': {}",
-                    child_path.display(),
-                    e
-                ))
-            })?;
+            std::fs::remove_file(&child_path)
+                .map_other_context(format!("Failed to remove file '{}'", child_path.display()))?;
         }
 
         Ok(Some(node))
@@ -281,18 +250,14 @@ impl Directory for HostDirectory {
 
     async fn entries(&self) -> Result<Pin<Box<dyn Stream<Item = Result<DirectoryEntry>> + Send>>> {
         let host_path = self.require_path()?;
-        let read_dir = std::fs::read_dir(host_path).map_err(|e| {
-            Error::Other(format!(
-                "Failed to read directory '{}': {}",
-                host_path.display(),
-                e
-            ))
-        })?;
+        let read_dir = std::fs::read_dir(host_path).map_other_context(format!(
+            "Failed to read directory '{}'",
+            host_path.display()
+        ))?;
 
         let mut items = Vec::new();
         for entry_result in read_dir {
-            let entry = entry_result
-                .map_err(|e| Error::Other(format!("Failed to read directory entry: {}", e)))?;
+            let entry = entry_result.map_other_context("Failed to read directory entry")?;
 
             let name = entry.file_name().to_string_lossy().to_string();
 
@@ -303,7 +268,7 @@ impl Directory for HostDirectory {
 
             let metadata = entry
                 .metadata()
-                .map_err(|e| Error::Other(format!("Failed to stat '{}': {}", name, e)))?;
+                .map_other_context(format!("Failed to stat '{}'", name))?;
 
             let entry_type = Self::entry_type_for(&metadata);
             let child_id = self.child_file_id(&name, entry_type);

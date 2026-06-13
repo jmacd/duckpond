@@ -74,7 +74,7 @@ async fn apply_op(source: &mut Steward, op: &Op) {
         Op::AbortWrite { key } => {
             let mut g = source.begin_write().await.unwrap();
             g.put("p", &format!("k{}", key), b"x".to_vec()).unwrap();
-            let _ = g.abort("intentional").await.unwrap();
+            g.abort("intentional").await.unwrap();
         }
         Op::NoopWrite => {
             let g = source.begin_write().await.unwrap();
@@ -373,7 +373,7 @@ proptest! {
 
             consumer_matches_source_for_every_key(&source, &consumer)
                 .await
-                .map_err(|e| TestCaseError::fail(e))?;
+                .map_err(TestCaseError::fail)?;
             Ok(())
         }).unwrap();
     }

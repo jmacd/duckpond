@@ -16,7 +16,7 @@
 //! works with any JSON Lines source.
 
 use crate::format::FormatProvider;
-use crate::{Error, Result, Url};
+use crate::{Result, Url};
 use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
@@ -26,7 +26,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::AsyncRead;
 
 /// JSON Lines format provider
 pub struct JsonLogsProvider;
@@ -49,42 +49,23 @@ impl Default for JsonLogsProvider {
 async fn read_all_lines(
     reader: Pin<Box<dyn AsyncRead + Send>>,
 ) -> Result<(Vec<Value>, Vec<String>)> {
-    let mut reader = BufReader::new(reader);
     let mut keys = BTreeSet::new();
     let mut rows: Vec<Value> = Vec::new();
-    let mut line = String::new();
-    let mut skipped = 0u64;
 
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await.map_err(Error::Io)?;
-        if bytes_read == 0 {
-            break;
-        }
-
-        // Strip null bytes (same robustness as oteljson) and trim whitespace
-        let cleaned: String = line.chars().filter(|c| *c != '\0').collect();
-        let trimmed = cleaned.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+    let skipped = crate::format::batch::read_clean_lines(reader, |trimmed| {
         match serde_json::from_str::<Value>(trimmed) {
             Ok(Value::Object(map)) => {
                 for key in map.keys() {
                     let _ = keys.insert(key.clone());
                 }
                 rows.push(Value::Object(map));
+                Ok(true)
             }
-            Ok(_) => {
-                // Non-object JSON value -- skip
-                skipped += 1;
-            }
-            Err(_) => {
-                skipped += 1;
-            }
+            // Non-object JSON values and parse errors are skipped.
+            Ok(_) | Err(_) => Ok(false),
         }
-    }
+    })
+    .await?;
 
     if skipped > 0 {
         log::warn!("jsonlogs: skipped {skipped} unparseable or non-object line(s)");
@@ -110,8 +91,6 @@ fn create_schema(keys: &[String]) -> SchemaRef {
 /// - Numbers, booleans, nulls are stored as their JSON text
 /// - Nested objects/arrays are stored as compact JSON strings
 fn build_record_batch(schema: SchemaRef, rows: &[Value], keys: &[String]) -> Result<RecordBatch> {
-    let num_rows = rows.len();
-
     let columns: Vec<Arc<dyn arrow::array::Array>> = keys
         .iter()
         .map(|key| {
@@ -132,33 +111,7 @@ fn build_record_batch(schema: SchemaRef, rows: &[Value], keys: &[String]) -> Res
         })
         .collect();
 
-    if num_rows == 0 {
-        // Empty batch with correct schema
-        return RecordBatch::try_new_with_options(
-            schema,
-            columns,
-            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(0)),
-        )
-        .map_err(|e| Error::Arrow(e.to_string()));
-    }
-
-    RecordBatch::try_new(schema, columns).map_err(|e| Error::Arrow(e.to_string()))
-}
-
-/// Stream that yields exactly one RecordBatch then terminates
-struct JsonLogsStream {
-    batch: Option<RecordBatch>,
-}
-
-impl Stream for JsonLogsStream {
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Ready(self.batch.take().map(Ok))
-    }
+    crate::format::batch::finish_batch(schema, columns)
 }
 
 #[async_trait]
@@ -188,7 +141,7 @@ impl FormatProvider for JsonLogsProvider {
         let schema = create_schema(&keys);
         let batch = build_record_batch(schema.clone(), &rows, &keys)?;
 
-        let stream = Box::pin(JsonLogsStream { batch: Some(batch) });
+        let stream = crate::format::batch::single_batch_stream(batch);
         Ok((schema, stream))
     }
 }

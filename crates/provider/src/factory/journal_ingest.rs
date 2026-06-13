@@ -20,6 +20,7 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use tinyfs::ResultExt;
 use tinyfs::{EntryType, Result as TinyFSResult};
 
 /// Journal ingest factory subcommands
@@ -47,8 +48,7 @@ fn parse_command(ctx: ExecutionContext) -> Result<JournalCommand, tinyfs::Error>
         .chain(ctx.args().iter().cloned())
         .collect();
 
-    JournalCommand::try_parse_from(args_with_prog_name)
-        .map_err(|e| tinyfs::Error::Other(format!("Command parse error: {}", e)))
+    JournalCommand::try_parse_from(args_with_prog_name).map_other_context("Command parse error")
 }
 
 /// Configuration for the journal ingestion factory
@@ -132,8 +132,7 @@ async fn read_cursor(
 
     match root.read_file_path_to_vec(&cursor_path).await {
         Ok(data) => {
-            let cursor = String::from_utf8(data)
-                .map_err(|e| tinyfs::Error::Other(format!("Invalid cursor data: {}", e)))?;
+            let cursor = String::from_utf8(data).map_other_context("Invalid cursor data")?;
             let trimmed = cursor.trim().to_string();
             if trimmed.is_empty() {
                 Ok(None)
@@ -196,12 +195,7 @@ async fn collect_journal_entries(
     let output = std::process::Command::new(&config.journalctl_command)
         .args(&cmd_args)
         .output()
-        .map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to spawn {}: {}",
-                config.journalctl_command, e
-            ))
-        })?;
+        .map_other_context(format!("Failed to spawn {}", config.journalctl_command))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -211,8 +205,8 @@ async fn collect_journal_entries(
         )));
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8 from journalctl: {}", e)))?;
+    let stdout =
+        String::from_utf8(output.stdout).map_other_context("Invalid UTF-8 from journalctl")?;
 
     let lines: Vec<String> = stdout
         .lines()
@@ -407,10 +401,7 @@ async fn write_entries(
             .async_writer_path_with_type(&pond_dest, EntryType::FilePhysicalSeries)
             .await?;
 
-        writer
-            .write_all(content.as_bytes())
-            .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        writer.write_all(content.as_bytes()).await.map_other()?;
 
         // Set temporal metadata if we have bounds for this file
         if let Some(bounds) = file_bounds.get(filename) {
@@ -421,10 +412,7 @@ async fn write_entries(
             );
         }
 
-        writer
-            .shutdown()
-            .await
-            .map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+        writer.shutdown().await.map_other()?;
     }
 
     Ok(())
@@ -495,8 +483,8 @@ pub async fn execute(
     context: FactoryContext,
     ctx: ExecutionContext,
 ) -> Result<(), tinyfs::Error> {
-    let config: JournalIngestConfig = serde_json::from_value(config.clone())
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config: {}", e)))?;
+    let config: JournalIngestConfig =
+        serde_json::from_value(config.clone()).map_other_context("Invalid config")?;
 
     let cmd = parse_command(ctx)?;
 
@@ -574,13 +562,12 @@ pub async fn execute(
 
 /// Validate configuration
 fn validate_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config: JournalIngestConfig = serde_yaml::from_slice(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid config YAML: {}", e)))?;
+    let config: JournalIngestConfig =
+        serde_yaml::from_slice(config).map_other_context("Invalid config YAML")?;
 
     config.validate()?;
 
-    serde_json::to_value(&config)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to serialize config: {}", e)))
+    serde_json::to_value(&config).map_other_context("Failed to serialize config")
 }
 
 // Register the factory

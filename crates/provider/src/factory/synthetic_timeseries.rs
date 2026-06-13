@@ -57,6 +57,7 @@ use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tinyfs::ResultExt;
 use tinyfs::{EntryType, FileHandle, FileID, NodeMetadata, Result as TinyFSResult};
 use tokio::sync::Mutex;
 
@@ -463,10 +464,10 @@ impl tinyfs::QueryableFile for SyntheticTimeseriesFile {
         _id: FileID,
         _context: &tinyfs::ProviderContext,
     ) -> tinyfs::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        let start_ms = parse_rfc3339_to_millis(&self.config.start)
-            .map_err(|e| tinyfs::Error::Other(format!("Invalid start time: {}", e)))?;
-        let end_ms = parse_rfc3339_to_millis(&self.config.end)
-            .map_err(|e| tinyfs::Error::Other(format!("Invalid end time: {}", e)))?;
+        let start_ms =
+            parse_rfc3339_to_millis(&self.config.start).map_other_context("Invalid start time")?;
+        let end_ms =
+            parse_rfc3339_to_millis(&self.config.end).map_other_context("Invalid end time")?;
 
         if end_ms <= start_ms {
             return Err(tinyfs::Error::Other(format!(
@@ -494,7 +495,7 @@ impl tinyfs::QueryableFile for SyntheticTimeseriesFile {
         };
 
         let table = StreamingTable::try_new(schema, vec![Arc::new(partition)])
-            .map_err(|e| tinyfs::Error::Other(format!("Failed to create StreamingTable: {}", e)))?;
+            .map_other_context("Failed to create StreamingTable")?;
 
         Ok(Arc::new(table))
     }
@@ -527,19 +528,18 @@ fn create_synthetic_timeseries_handle(
     config: Value,
     _context: crate::FactoryContext,
 ) -> TinyFSResult<FileHandle> {
-    let cfg: SyntheticTimeseriesConfig = serde_json::from_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid synthetic-timeseries config: {}", e)))?;
+    let cfg: SyntheticTimeseriesConfig =
+        serde_json::from_value(config).map_other_context("Invalid synthetic-timeseries config")?;
 
     let file = SyntheticTimeseriesFile::new(cfg);
     Ok(file.create_handle())
 }
 
 fn validate_synthetic_timeseries_config(config: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
+    let config_str = std::str::from_utf8(config).map_other_context("Invalid UTF-8")?;
 
     let cfg: SyntheticTimeseriesConfig = serde_yaml::from_str(config_str)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid synthetic-timeseries config: {}", e)))?;
+        .map_other_context("Invalid synthetic-timeseries config")?;
 
     // Validate time range
     let start_ms = parse_rfc3339_to_millis(&cfg.start).map_err(tinyfs::Error::Other)?;
@@ -591,8 +591,7 @@ fn validate_synthetic_timeseries_config(config: &[u8]) -> TinyFSResult<Value> {
         }
     }
 
-    serde_json::to_value(&cfg)
-        .map_err(|e| tinyfs::Error::Other(format!("Failed to convert config: {}", e)))
+    serde_json::to_value(&cfg).map_other_context("Failed to convert config")
 }
 
 /// Downcast function for SyntheticTimeseriesFile

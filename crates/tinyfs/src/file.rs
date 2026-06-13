@@ -4,6 +4,7 @@
 
 use super::error;
 use super::metadata::Metadata;
+use crate::error::ResultExt;
 use async_trait::async_trait;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -101,11 +102,11 @@ impl Handle {
         writer
             .write_all(content)
             .await
-            .map_err(|e| error::Error::Other(format!("Failed to write file content: {}", e)))?;
+            .map_other_context("Failed to write file content")?;
         writer
             .shutdown()
             .await
-            .map_err(|e| error::Error::Other(format!("Failed to complete file write: {}", e)))
+            .map_other_context("Failed to complete file write")
     }
 
     /// Access the underlying file for downcasting (clones the Arc)

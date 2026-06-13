@@ -11,10 +11,10 @@
 //! 4. pond control command output for various scenarios
 //! 5. Recovery query patterns work correctly
 
-use super::{ControlMode, control_command};
-use crate::commands::{init_command, mkdir_command, mknod_command};
-use crate::common::ShipContext;
 use anyhow::Result;
+use cmd::commands::control::{ControlMode, control_command};
+use cmd::commands::{init_command, mkdir_command, mknod_command};
+use cmd::common::ShipContext;
 use tempfile::TempDir;
 
 /// Test setup with pond initialization

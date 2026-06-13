@@ -139,7 +139,6 @@ async fn export_pond_data(
     temporal: &str,
     export_range: ExportRange,
 ) -> Result<ExportSummary> {
-    let mut export_summary = ExportSummary::default();
     let temporal_parts = parse_temporal_parts(temporal);
 
     // Create output directory
@@ -148,51 +147,55 @@ async fn export_pond_data(
     // Open transaction for all operations
     let mut ship = ship_context.open_pond().await?;
 
-    let mut stx_guard = ship
-        .begin_write(&steward::PondUserMetadata::new(vec!["export".to_string()]))
-        .await?;
+    let export_summary = crate::common::with_write_transaction(
+        &mut ship,
+        vec!["export".to_string()],
+        async |stx_guard| {
+            let mut export_summary = ExportSummary::default();
 
-    // Process each pattern independently
-    for pattern in patterns.iter() {
-        log::info!("[EXPORT] Processing pattern '{}'", pattern);
+            // Process each pattern independently
+            for pattern in patterns.iter() {
+                log::info!("[EXPORT] Processing pattern '{}'", pattern);
 
-        // Find all files matching this pattern
-        let export_targets = discover_export_targets(&stx_guard, pattern.clone()).await?;
-        log::info!(
-            "[SEARCH] Found {} targets matching pattern '{}'",
-            export_targets.len(),
-            pattern
-        );
+                // Find all files matching this pattern
+                let export_targets = discover_export_targets(stx_guard, pattern.clone()).await?;
+                log::info!(
+                    "[SEARCH] Found {} targets matching pattern '{}'",
+                    export_targets.len(),
+                    pattern
+                );
 
-        // Process each individual target
-        for target in export_targets {
-            log::debug!(
-                "[EXPORT] Processing target '{}' (captures: {:?})",
-                target.pond_path,
-                target.captures
-            );
+                // Process each individual target
+                for target in export_targets {
+                    log::debug!(
+                        "[EXPORT] Processing target '{}' (captures: {:?})",
+                        target.pond_path,
+                        target.captures
+                    );
 
-            let (target_metadata, _target_schema) = export_target(
-                &mut stx_guard,
-                &target,
-                output_dir,
-                &temporal_parts,
-                export_range.clone(),
-            )
-            .await?;
+                    let (target_metadata, _target_schema) = export_target(
+                        stx_guard,
+                        &target,
+                        output_dir,
+                        &temporal_parts,
+                        export_range.clone(),
+                    )
+                    .await?;
 
-            export_summary.add_export_results(pattern, target_metadata.clone());
+                    export_summary.add_export_results(pattern, target_metadata.clone());
 
-            log::debug!(
-                "[OK] Target '{}' exported {} files",
-                target.pond_path,
-                target_metadata.len()
-            );
-        }
-    }
+                    log::debug!(
+                        "[OK] Target '{}' exported {} files",
+                        target.pond_path,
+                        target_metadata.len()
+                    );
+                }
+            }
 
-    // Commit transaction
-    _ = stx_guard.commit().await?;
+            Ok(export_summary)
+        },
+    )
+    .await?;
 
     Ok(export_summary)
 }

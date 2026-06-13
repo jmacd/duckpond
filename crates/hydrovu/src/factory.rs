@@ -15,6 +15,7 @@ use provider::FactoryContext;
 use provider::registry::{ExecutionContext, ExecutionMode, FactoryCommand};
 use serde_json::Value;
 use tinyfs::Result as TinyFSResult;
+use tinyfs::ResultExt;
 use tlogfs::TLogFSError;
 
 /// HydroVu command-line interface
@@ -54,11 +55,10 @@ impl FactoryCommand for HydroVuCommand {
 
 /// Validate HydroVu configuration from YAML bytes
 fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
-    let config_str = std::str::from_utf8(config_bytes)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid UTF-8: {}", e)))?;
+    let config_str = std::str::from_utf8(config_bytes).map_other_context("Invalid UTF-8")?;
 
-    let config: HydroVuConfig = serde_yaml::from_str(config_str)
-        .map_err(|e| tinyfs::Error::Other(format!("Invalid YAML: {}", e)))?;
+    let config: HydroVuConfig =
+        serde_yaml::from_str(config_str).map_other_context("Invalid YAML")?;
 
     // Use as_declassified() to access actual values for validation
     if config.client_id.as_declassified().is_empty() {
@@ -94,8 +94,7 @@ fn validate_hydrovu_config(config_bytes: &[u8]) -> TinyFSResult<Value> {
         ));
     }
 
-    serde_json::to_value(config)
-        .map_err(|e| tinyfs::Error::Other(format!("Serialization error: {}", e)))
+    serde_json::to_value(config).map_other_context("Serialization error")
 }
 
 /// Create a HydroVu configuration file (simple, no FS operations)
@@ -124,7 +123,7 @@ async fn create_directory_structure(
     log::debug!("Creating HydroVu directory structure");
 
     // Extract State from provider context
-    let state = tlogfs::extract_state(context).map_err(|e| tinyfs::Error::Other(e.to_string()))?;
+    let state = tlogfs::extract_state(context).map_other()?;
 
     // Create FS from State - this is SAFE here because create_dynamic_file_node has returned and released its lock
     let fs = tinyfs::FS::new(state.clone()).await?;

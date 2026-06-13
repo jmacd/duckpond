@@ -233,25 +233,18 @@ async fn run_command(ship_context: &ShipContext, config_path: &str) -> Result<()
 
     debug!("HydroVu collector created, starting data collection...");
 
-    // Begin transaction for data collection
-    let tx = ship
-        .begin_write(&steward::PondUserMetadata::new(vec![
-            "hydrovu".to_string(),
-            "collect".to_string(),
-        ]))
-        .await
-        .with_context(|| "Failed to begin transaction")?;
-
-    // Run data collection (guard derefs to FS)
-    let results = collector
-        .collect_data(&*tx)
-        .await
-        .with_context(|| "Failed to collect data from HydroVu")?;
-
-    // Commit the transaction
-    tx.commit()
-        .await
-        .with_context(|| "Failed to commit transaction")?;
+    // Run data collection inside a write transaction (guard derefs to FS).
+    let results = crate::common::with_write_transaction(
+        &mut ship,
+        vec!["hydrovu".to_string(), "collect".to_string()],
+        async |tx| {
+            collector
+                .collect_data(&**tx)
+                .await
+                .with_context(|| "Failed to collect data from HydroVu")
+        },
+    )
+    .await?;
 
     println!(
         "[OK] HydroVu data collection completed successfully {}",
