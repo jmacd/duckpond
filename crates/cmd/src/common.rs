@@ -262,6 +262,49 @@ where
     Ok(result)
 }
 
+/// Run a write operation inside a steward write transaction.
+///
+/// The write counterpart to [`with_read_transaction`]. Begins a write
+/// transaction, runs `f` with mutable access to it (so callers can reach the
+/// transaction guard for provider context via `tx.state()`, not just `&FS`),
+/// commits on success, and aborts (rolls back) on error.
+///
+/// This differs from [`steward::Steward::write_transaction`], which only
+/// exposes `&FS` and discards the closure's return value; use this helper when
+/// the command needs the full [`steward::Transaction`] or must return a value
+/// computed inside the transaction.
+///
+/// The returned value must not borrow the transaction, so commands compute any
+/// owned result inside the closure and render it after this returns.
+pub async fn with_write_transaction<'s, F, T>(
+    ship: &'s mut steward::Steward,
+    args: Vec<String>,
+    f: F,
+) -> Result<T>
+where
+    F: for<'a> AsyncFnOnce(&'a mut steward::Transaction<'s>) -> Result<T>,
+{
+    let mut tx = ship
+        .begin_write(&steward::PondUserMetadata::new(args))
+        .await
+        .map_err(|e| anyhow!("Failed to begin write transaction: {}", e))?;
+
+    let result = match f(&mut tx).await {
+        Ok(value) => value,
+        Err(e) => {
+            _ = tx.abort(&e).await;
+            return Err(e);
+        }
+    };
+
+    _ = tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit write transaction: {}", e))?;
+
+    Ok(result)
+}
+
 /// Number of hex characters to show when shortening UUID7 values
 /// This matches the rightmost block (12 characters) of a UUID
 const UUID_SHORT_LENGTH: usize = 12;

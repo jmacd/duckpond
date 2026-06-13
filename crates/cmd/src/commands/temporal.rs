@@ -776,63 +776,63 @@ pub async fn set_extended_attributes_command(
     attributes: HashMap<String, String>,
 ) -> Result<()> {
     let mut ship = ship_context.open_pond().await?;
-    let transaction = ship
-        .begin_write(&steward::PondUserMetadata::new(vec![
-            "set_extended_attributes".into(),
-            target_path.clone(),
-        ]))
-        .await?;
+    crate::common::with_write_transaction(
+        &mut ship,
+        vec!["set_extended_attributes".into(), target_path.clone()],
+        async |tx| {
+            debug!("Setting extended attributes for target_path: {target_path}");
 
-    debug!("Setting extended attributes for target_path: {target_path}");
+            // Get TinyFS working directory from the transaction
+            let tinyfs_root = tx.root().await?;
 
-    // Get TinyFS working directory from the transaction
-    let tinyfs_root = transaction.root().await?;
+            debug!("About to get async writer for target_path: {target_path}");
 
-    debug!("About to get async writer for target_path: {target_path}");
+            // Use TinyFS async writer to either add a new version to existing file or create new FileSeries
+            // This handles both cases automatically: existing file gets new version, missing file gets created
+            let mut writer = tinyfs_root
+                .async_writer_path_with_type(&target_path, tinyfs::EntryType::TablePhysicalSeries)
+                .await
+                .map_err(|e| anyhow!("Failed to get FileSeries writer: {}", e))?;
 
-    // Use TinyFS async writer to either add a new version to existing file or create new FileSeries
-    // This handles both cases automatically: existing file gets new version, missing file gets created
-    let mut writer = tinyfs_root
-        .async_writer_path_with_type(&target_path, tinyfs::EntryType::TablePhysicalSeries)
-        .await
-        .map_err(|e| anyhow!("Failed to get FileSeries writer: {}", e))?;
+            debug!("Got FileSeries writer for target_path: {target_path}");
 
-    debug!("Got FileSeries writer for target_path: {target_path}");
+            // Write empty content to create a pending record
+            use tokio::io::AsyncWriteExt;
+            writer
+                .write_all(&[])
+                .await
+                .map_err(|e| anyhow!("Failed to write empty content: {}", e))?;
+            writer
+                .flush()
+                .await
+                .map_err(|e| anyhow!("Failed to flush empty content: {}", e))?;
 
-    // Write empty content to create a pending record
-    use tokio::io::AsyncWriteExt;
-    writer
-        .write_all(&[])
-        .await
-        .map_err(|e| anyhow!("Failed to write empty content: {}", e))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| anyhow!("Failed to flush empty content: {}", e))?;
+            debug!("Wrote and flushed empty content, pending record should now exist");
 
-    debug!("Wrote and flushed empty content, pending record should now exist");
+            // Complete the write operation to create the pending record
+            writer
+                .shutdown()
+                .await
+                .map_err(|e| anyhow!("Failed to complete empty write: {}", e))?;
 
-    // Complete the write operation to create the pending record
-    writer
-        .shutdown()
-        .await
-        .map_err(|e| anyhow!("Failed to complete empty write: {}", e))?;
+            debug!("Writer shutdown complete, pending record should now exist");
 
-    debug!("Writer shutdown complete, pending record should now exist");
+            debug!("About to set extended attributes on pending version");
 
-    debug!("About to set extended attributes on pending version");
+            // Now apply extended attributes to the pending record created by shutdown
+            tinyfs_root
+                .set_extended_attributes(&target_path, attributes)
+                .await
+                .map_err(|e| anyhow!("Failed to set extended attributes: {}", e))?;
 
-    // Now apply extended attributes to the pending record created by shutdown
-    tinyfs_root
-        .set_extended_attributes(&target_path, attributes)
-        .await
-        .map_err(|e| anyhow!("Failed to set extended attributes: {}", e))?;
+            debug!("Applied extended attributes to pending FileSeries version");
 
-    debug!("Applied extended attributes to pending FileSeries version");
+            debug!("Completed FileSeries write with extended attributes");
 
-    debug!("Completed FileSeries write with extended attributes");
-
-    _ = transaction.commit().await?;
+            Ok(())
+        },
+    )
+    .await?;
 
     debug!("Created metadata-only FileSeries version with extended attributes");
 
