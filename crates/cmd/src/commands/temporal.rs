@@ -30,12 +30,20 @@ pub async fn detect_overlaps_command(
     }
 
     let mut ship = ship_context.open_pond().await?;
-    let mut tx = ship
-        .begin_read(&steward::PondUserMetadata::new(
-            ship_context.original_args.clone(),
-        ))
-        .await?;
+    crate::common::with_read_transaction(
+        &mut ship,
+        ship_context.original_args.clone(),
+        async |tx| detect_overlaps_impl(tx, patterns, verbose, format).await,
+    )
+    .await
+}
 
+async fn detect_overlaps_impl(
+    tx: &mut steward::Transaction<'_>,
+    patterns: &[String],
+    verbose: bool,
+    format: &str,
+) -> Result<()> {
     let pattern_count = patterns.len();
     debug!("Starting simplified temporal overlap detection for {pattern_count} patterns");
 

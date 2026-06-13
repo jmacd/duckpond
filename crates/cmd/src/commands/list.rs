@@ -54,38 +54,26 @@ where
     };
 
     // Use transaction for consistent filesystem access
-    let tx = ship
-        .begin_read(&steward::PondUserMetadata::new(vec![
-            "list".to_string(),
-            normalized_pattern.clone(),
-        ]))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
+    let mut file_results = crate::common::with_read_transaction(
+        &mut ship,
+        vec!["list".to_string(), normalized_pattern.clone()],
+        async |tx| {
+            let root = tx.root().await?;
 
-    let result = {
-        let fs = &*tx; // Transaction derefs to FS
-        let root = fs.root().await?;
-
-        // Use FileInfoVisitor to collect file information - always allow all files at visitor level
-        let mut visitor = FileInfoVisitor::new(true); // Always allow all at visitor level
-        root.visit_with_visitor(&normalized_pattern, &mut visitor)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to list files matching '{}' from data filesystem: {}",
-                    normalized_pattern,
-                    e
-                )
-            })
-    };
-
-    // Commit the transaction before processing results
-    _ = tx
-        .commit()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-
-    let mut file_results = result?;
+            // Use FileInfoVisitor to collect file information - always allow all files at visitor level
+            let mut visitor = FileInfoVisitor::new(true); // Always allow all at visitor level
+            root.visit_with_visitor(&normalized_pattern, &mut visitor)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to list files matching '{}' from data filesystem: {}",
+                        normalized_pattern,
+                        e
+                    )
+                })
+        },
+    )
+    .await?;
 
     // Filter hidden files if show_all is false
     if !show_all {

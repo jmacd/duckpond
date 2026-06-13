@@ -218,6 +218,47 @@ pub fn get_pond_path_with_override(override_path: Option<PathBuf>) -> Result<Pat
     Ok(absolute_path)
 }
 
+/// Run a read-only operation inside a steward read transaction.
+///
+/// Centralizes the begin-read / commit / abort boilerplate shared by the
+/// read-only commands (`show`, `list`, `cat`, `describe`, `temporal`, ...). The
+/// caller opens the appropriate steward (`open_pond` or `open_host`) and passes
+/// it in; this begins a read transaction, runs `f` with mutable access to it,
+/// commits on success, and aborts (rolls back) on error. Aborting a read
+/// transaction has no control-table side effects; it just avoids the
+/// "dropped without commit" warning.
+///
+/// The returned value must not borrow the transaction, so commands compute any
+/// owned result inside the closure and render it after this returns.
+pub async fn with_read_transaction<'s, F, T>(
+    ship: &'s mut steward::Steward,
+    args: Vec<String>,
+    f: F,
+) -> Result<T>
+where
+    F: for<'a> AsyncFnOnce(&'a mut steward::Transaction<'s>) -> Result<T>,
+{
+    let mut tx = ship
+        .begin_read(&steward::PondUserMetadata::new(args))
+        .await
+        .map_err(|e| anyhow!("Failed to begin read transaction: {}", e))?;
+
+    let result = match f(&mut tx).await {
+        Ok(value) => value,
+        Err(e) => {
+            _ = tx.abort(&e).await;
+            return Err(e);
+        }
+    };
+
+    _ = tx
+        .commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit read transaction: {}", e))?;
+
+    Ok(result)
+}
+
 /// Number of hex characters to show when shortening UUID7 values
 /// This matches the rightmost block (12 characters) of a UUID
 const UUID_SHORT_LENGTH: usize = 12;

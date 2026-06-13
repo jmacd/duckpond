@@ -194,30 +194,18 @@ pub async fn cat_command(
         TargetContext::Pond(_) => ship_context.open_pond().await?,
     };
 
-    let mut tx = ship
-        .begin_read(&steward::PondUserMetadata::new(
-            ship_context.original_args.clone(),
-        ))
-        .await?;
-
-    // Execute the cat operation and handle errors properly
-    let result = if explain {
-        explain_impl(&mut tx, path, sql_query).await
-    } else {
-        cat_impl(&mut tx, path, display, output, sql_query).await
-    };
-
-    match result {
-        Ok(()) => {
-            _ = tx.commit().await?;
-            Ok(())
-        }
-        Err(e) => {
-            // Record failure in control table before returning error
-            let err = tx.abort(&e).await;
-            Err(anyhow::anyhow!("{}", err))
-        }
-    }
+    crate::common::with_read_transaction(
+        &mut ship,
+        ship_context.original_args.clone(),
+        async |tx| {
+            if explain {
+                explain_impl(tx, path, sql_query).await
+            } else {
+                cat_impl(tx, path, display, output, sql_query).await
+            }
+        },
+    )
+    .await
 }
 
 /// Internal implementation of cat command

@@ -18,20 +18,13 @@ where
 {
     let mut ship = ship_context.open_pond().await?;
 
-    // Use read transaction for consistent filesystem access (show is read-only)
-    let mut tx = ship
-        .begin_read(&steward::PondUserMetadata::new(vec!["show".to_string()]))
-        .await
-        .map_err(|e| anyhow!("Failed to begin read transaction: {}", e))?;
-
-    let result = show_filesystem_transactions(&mut tx, mode)
-        .await
-        .map_err(|e| anyhow!("Failed to access data filesystem: {}", e))?;
-
-    _ = tx
-        .commit()
-        .await
-        .map_err(|e| anyhow!("Failed to commit read transaction: {}", e))?;
+    let result =
+        crate::common::with_read_transaction(&mut ship, vec!["show".to_string()], async |tx| {
+            show_filesystem_transactions(tx, mode)
+                .await
+                .map_err(|e| anyhow!("Failed to access data filesystem: {}", e))
+        })
+        .await?;
 
     handler(&result);
     Ok(())
