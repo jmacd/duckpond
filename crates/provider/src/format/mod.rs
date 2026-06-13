@@ -18,6 +18,7 @@ use futures::stream::Stream;
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
+pub(crate) mod batch;
 pub mod compression;
 pub mod csv;
 pub mod excelhtml;

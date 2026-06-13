@@ -238,30 +238,9 @@ fn build_record_batch(schema: SchemaRef, entries: &[LogEntry]) -> Result<RecordB
     ];
 
     if entries.is_empty() {
-        RecordBatch::try_new_with_options(
-            schema,
-            columns,
-            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(0)),
-        )
-        .map_err(|e| Error::Arrow(e.to_string()))
+        crate::format::batch::finish_batch(schema, columns)
     } else {
         RecordBatch::try_new(schema, columns).map_err(|e| Error::Arrow(e.to_string()))
-    }
-}
-
-/// Stream that yields exactly one RecordBatch then terminates.
-struct WeblogStream {
-    batch: Option<RecordBatch>,
-}
-
-impl Stream for WeblogStream {
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Ready(self.batch.take().map(Ok))
     }
 }
 
@@ -291,7 +270,7 @@ impl FormatProvider for WeblogProvider {
         let entries = read_all_lines(reader).await?;
         let schema = weblog_schema();
         let batch = build_record_batch(schema.clone(), &entries)?;
-        let stream = Box::pin(WeblogStream { batch: Some(batch) });
+        let stream = crate::format::batch::single_batch_stream(batch);
         Ok((schema, stream))
     }
 }

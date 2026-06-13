@@ -195,22 +195,6 @@ fn build_record_batch(
     RecordBatch::try_new(schema, columns).map_err(|e| Error::Arrow(e.to_string()))
 }
 
-/// Stream that reads all data and yields a single RecordBatch
-struct OtelJsonStream {
-    batch: Option<RecordBatch>,
-}
-
-impl Stream for OtelJsonStream {
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Ready(self.batch.take().map(Ok))
-    }
-}
-
 #[async_trait]
 impl FormatProvider for OtelJsonProvider {
     fn name(&self) -> &str {
@@ -279,7 +263,7 @@ impl FormatProvider for OtelJsonProvider {
         // Build single batch
         let batch = build_record_batch(schema.clone(), &all_observations, &metric_names)?;
 
-        let stream = Box::pin(OtelJsonStream { batch: Some(batch) });
+        let stream = crate::format::batch::single_batch_stream(batch);
 
         Ok((schema, stream))
     }

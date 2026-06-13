@@ -110,8 +110,6 @@ fn create_schema(keys: &[String]) -> SchemaRef {
 /// - Numbers, booleans, nulls are stored as their JSON text
 /// - Nested objects/arrays are stored as compact JSON strings
 fn build_record_batch(schema: SchemaRef, rows: &[Value], keys: &[String]) -> Result<RecordBatch> {
-    let num_rows = rows.len();
-
     let columns: Vec<Arc<dyn arrow::array::Array>> = keys
         .iter()
         .map(|key| {
@@ -132,33 +130,7 @@ fn build_record_batch(schema: SchemaRef, rows: &[Value], keys: &[String]) -> Res
         })
         .collect();
 
-    if num_rows == 0 {
-        // Empty batch with correct schema
-        return RecordBatch::try_new_with_options(
-            schema,
-            columns,
-            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(0)),
-        )
-        .map_err(|e| Error::Arrow(e.to_string()));
-    }
-
-    RecordBatch::try_new(schema, columns).map_err(|e| Error::Arrow(e.to_string()))
-}
-
-/// Stream that yields exactly one RecordBatch then terminates
-struct JsonLogsStream {
-    batch: Option<RecordBatch>,
-}
-
-impl Stream for JsonLogsStream {
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Ready(self.batch.take().map(Ok))
-    }
+    crate::format::batch::finish_batch(schema, columns)
 }
 
 #[async_trait]
@@ -188,7 +160,7 @@ impl FormatProvider for JsonLogsProvider {
         let schema = create_schema(&keys);
         let batch = build_record_batch(schema.clone(), &rows, &keys)?;
 
-        let stream = Box::pin(JsonLogsStream { batch: Some(batch) });
+        let stream = crate::format::batch::single_batch_stream(batch);
         Ok((schema, stream))
     }
 }
