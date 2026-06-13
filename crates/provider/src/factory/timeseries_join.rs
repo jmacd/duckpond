@@ -7,7 +7,7 @@
 //! This factory simplifies the common pattern of joining multiple time series sources
 //! by timestamp, automatically generating the COALESCE + FULL OUTER JOIN + EXCLUDE SQL.
 
-use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile};
 use crate::register_dynamic_factory;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -263,8 +263,7 @@ impl TimeseriesJoinFile {
 
     /// Ensure the inner SqlDerivedFile is created
     async fn ensure_inner(&self) -> TinyFSResult<()> {
-        let mut inner_guard = self.inner.lock().await;
-        if inner_guard.is_none() {
+        crate::factory::lazy_sql_file::ensure_inner_series(&self.inner, &self.context, || async {
             log::debug!(
                 "[SEARCH] TIMESERIES-JOIN: Generating schema-aware SQL for {} inputs",
                 self.config.inputs.len()
@@ -277,20 +276,11 @@ impl TimeseriesJoinFile {
             log::debug!("[SEARCH] Generated SQL:\n{}", sql_query);
 
             // Create SqlDerivedConfig with scope prefixes and pattern transforms
-            let sql_config = SqlDerivedConfig::new(patterns, Some(sql_query))
+            Ok(SqlDerivedConfig::new(patterns, Some(sql_query))
                 .with_scope_prefixes(scope_prefixes)
-                .with_pattern_transforms(pattern_transforms);
-
-            // Create SqlDerivedFile in Series mode
-            log::debug!(
-                "[SEARCH] TIMESERIES-JOIN: Creating SqlDerivedFile with SqlDerivedMode::Series"
-            );
-            let sql_file =
-                SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
-            log::debug!("[OK] TIMESERIES-JOIN: Successfully created SqlDerivedFile");
-            *inner_guard = Some(sql_file);
-        }
-        Ok(())
+                .with_pattern_transforms(pattern_transforms))
+        })
+        .await
     }
 
     /// Generate SQL using UNION BY NAME for same-scope inputs, then FULL OUTER JOIN different scopes

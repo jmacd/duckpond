@@ -59,7 +59,7 @@
 //! Use `timeseries-join` for heterogeneous-schema merging, which performs proper
 //! per-file schema discovery and alignment.
 
-use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile};
 use crate::register_dynamic_factory;
 use async_trait::async_trait;
 use futures::stream::{self, Stream};
@@ -69,6 +69,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tinyfs::ResultExt;
 use tinyfs::{
     DirHandle, Directory, EntryType, Node, NodeMetadata, NodeType, Result as TinyFSResult,
 };
@@ -358,8 +359,7 @@ impl TemporalReduceSqlFile {
 
     /// Ensure the inner SqlDerivedFile is created with discovered schema
     async fn ensure_inner(&self) -> TinyFSResult<()> {
-        let mut inner_guard = self.inner.lock().await;
-        if inner_guard.is_none() {
+        crate::factory::lazy_sql_file::ensure_inner_series(&self.inner, &self.context, || async {
             // Create unique pattern name based on source path to avoid collisions
             // when multiple temporal reduce files are active in the same session
             // CRITICAL: Lowercase to match DataFusion's case-insensitive table name handling
@@ -385,20 +385,12 @@ impl TemporalReduceSqlFile {
                 sql_query
             );
 
-            // Create the actual SqlDerivedFile
-            log::debug!(
-                "[SEARCH] TEMPORAL-REDUCE: Creating SqlDerivedConfig with pattern '{}' -> '{}'",
-                pattern_name,
-                self.pattern_url
-            );
-
             // Use the pattern_url for the SqlDerived source.  When the in_pattern
             // glob matched multiple files mapping to the same output, pattern_url
             // retains the glob so SqlDerivedFile can expand and UNION ALL the
             // matching files.  For single-match cases it is the concrete file URL.
-            let source_url = crate::Url::parse(&self.pattern_url).map_err(|e| {
-                tinyfs::Error::Other(format!("Invalid pattern URL '{}': {}", self.pattern_url, e))
-            })?;
+            let source_url = crate::Url::parse(&self.pattern_url)
+                .map_other_context(format!("Invalid pattern URL '{}'", self.pattern_url))?;
 
             let sql_config = SqlDerivedConfig::new(
                 {
@@ -416,15 +408,9 @@ impl TemporalReduceSqlFile {
                 sql_query
             );
 
-            log::debug!(
-                "[SEARCH] TEMPORAL-REDUCE: Creating SqlDerivedFile with SqlDerivedMode::Series"
-            );
-            let sql_file =
-                SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
-            log::debug!("[OK] TEMPORAL-REDUCE: Successfully created SqlDerivedFile");
-            *inner_guard = Some(sql_file);
-        }
-        Ok(())
+            Ok(sql_config)
+        })
+        .await
     }
 
     #[must_use]

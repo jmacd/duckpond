@@ -10,6 +10,42 @@
 //! They share byte-identical `File`, `Metadata`, and `QueryableFile`
 //! implementations; this macro generates them.
 
+use crate::FactoryContext;
+use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use std::future::Future;
+use tinyfs::Result as TinyFSResult;
+use tokio::sync::Mutex;
+
+/// Lazily build the inner [`SqlDerivedFile`] in [`SqlDerivedMode::Series`] mode.
+///
+/// Centralizes the lock/check/create/store skeleton shared by the
+/// `temporal-reduce`, `timeseries-join`, and `timeseries-pivot` factories: it
+/// locks `inner`, returns early if already initialized, otherwise runs
+/// `build_config` to produce the factory-specific [`SqlDerivedConfig`], builds
+/// the `SqlDerivedFile`, and stores it.
+///
+/// `build_config` is awaited while holding the lock, matching the factories'
+/// existing behavior (SQL generation may itself perform schema discovery).
+pub(crate) async fn ensure_inner_series<F, Fut>(
+    inner: &Mutex<Option<SqlDerivedFile>>,
+    context: &FactoryContext,
+    build_config: F,
+) -> TinyFSResult<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = TinyFSResult<SqlDerivedConfig>>,
+{
+    let mut inner_guard = inner.lock().await;
+    if inner_guard.is_some() {
+        return Ok(());
+    }
+
+    let sql_config = build_config().await?;
+    let sql_file = SqlDerivedFile::new(sql_config, context.clone(), SqlDerivedMode::Series)?;
+    *inner_guard = Some(sql_file);
+    Ok(())
+}
+
 /// Generate `tinyfs::File`, `tinyfs::Metadata`, and `tinyfs::QueryableFile`
 /// implementations that delegate to a lazily-built inner `SqlDerivedFile`.
 ///

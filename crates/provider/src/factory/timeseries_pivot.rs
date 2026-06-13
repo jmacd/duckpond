@@ -19,7 +19,7 @@
 //!     - "AT500_Bottom.DO.mg/L"
 //! ```
 
-use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile, SqlDerivedMode};
+use crate::factory::sql_derived::{SqlDerivedConfig, SqlDerivedFile};
 use crate::register_dynamic_factory;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -193,68 +193,63 @@ impl TimeseriesPivotFile {
     /// Ensure the inner SqlDerivedFile is created by resolving the pattern,
     /// generating the pivot SQL, and configuring scope prefixes + null padding.
     async fn ensure_inner(&self) -> TinyFSResult<()> {
-        let mut inner_guard = self.inner.lock().await;
-        if inner_guard.is_some() {
-            return Ok(());
-        }
-
-        log::debug!(
-            "[SEARCH] TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
-            self.config.pattern,
-            self.config.columns.len()
-        );
-
-        // Resolve pattern to get current matched inputs
-        let matched_inputs = self.resolve_pattern().await?;
-
-        log::debug!(
-            "[LIST] TIMESERIES-PIVOT: Pattern matched {} inputs: {:?}",
-            matched_inputs.len(),
-            matched_inputs.iter().map(|(a, _)| a).collect::<Vec<_>>()
-        );
-
-        if matched_inputs.is_empty() {
-            return Err(tinyfs::Error::Other(
-                "Timeseries-pivot pattern matched no inputs".to_string(),
-            ));
-        }
-
-        // Generate SQL - SqlDerivedFile will handle missing columns gracefully
-        let (sql, patterns) = self.generate_pivot_sql(&matched_inputs);
-
-        log::debug!("[NOTE] TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
-
-        // Build scope_prefixes map for each table
-        let mut scope_prefixes = HashMap::new();
-        for (alias, _) in &matched_inputs {
-            _ = scope_prefixes.insert(
-                alias.clone(),
-                (alias.clone(), self.config.time_column.clone()),
+        crate::factory::lazy_sql_file::ensure_inner_series(&self.inner, &self.context, || async {
+            log::debug!(
+                "[SEARCH] TIMESERIES-PIVOT: Resolving pattern '{}' for {} columns",
+                self.config.pattern,
+                self.config.columns.len()
             );
-        }
 
-        // Build list of expected columns for null padding
-        // These are the raw column names that should exist in each source table
-        let mut expected_columns = HashMap::new();
-        for column in &self.config.columns {
-            _ = expected_columns.insert(column.clone(), arrow::datatypes::DataType::Float64);
-        }
+            // Resolve pattern to get current matched inputs
+            let matched_inputs = self.resolve_pattern().await?;
 
-        // Create SqlDerivedFile config with scope prefixes and null_padding wrapper
-        let sql_config = SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
-            .with_provider_wrapper(move |provider| {
-                crate::transform::null_padding::null_padding_table(
-                    provider,
-                    expected_columns.clone(),
-                )
-                .map_err(crate::Error::from)
-            })
-            .with_transforms(self.config.transforms.clone());
+            log::debug!(
+                "[LIST] TIMESERIES-PIVOT: Pattern matched {} inputs: {:?}",
+                matched_inputs.len(),
+                matched_inputs.iter().map(|(a, _)| a).collect::<Vec<_>>()
+            );
 
-        let sql_file =
-            SqlDerivedFile::new(sql_config, self.context.clone(), SqlDerivedMode::Series)?;
-        *inner_guard = Some(sql_file);
-        Ok(())
+            if matched_inputs.is_empty() {
+                return Err(tinyfs::Error::Other(
+                    "Timeseries-pivot pattern matched no inputs".to_string(),
+                ));
+            }
+
+            // Generate SQL - SqlDerivedFile will handle missing columns gracefully
+            let (sql, patterns) = self.generate_pivot_sql(&matched_inputs);
+
+            log::debug!("[NOTE] TIMESERIES-PIVOT: Generated SQL:\n{}", sql);
+
+            // Build scope_prefixes map for each table
+            let mut scope_prefixes = HashMap::new();
+            for (alias, _) in &matched_inputs {
+                _ = scope_prefixes.insert(
+                    alias.clone(),
+                    (alias.clone(), self.config.time_column.clone()),
+                );
+            }
+
+            // Build list of expected columns for null padding
+            // These are the raw column names that should exist in each source table
+            let mut expected_columns = HashMap::new();
+            for column in &self.config.columns {
+                _ = expected_columns.insert(column.clone(), arrow::datatypes::DataType::Float64);
+            }
+
+            // Create SqlDerivedFile config with scope prefixes and null_padding wrapper
+            Ok(
+                SqlDerivedConfig::new_scoped(patterns, Some(sql), scope_prefixes)
+                    .with_provider_wrapper(move |provider| {
+                        crate::transform::null_padding::null_padding_table(
+                            provider,
+                            expected_columns.clone(),
+                        )
+                        .map_err(crate::Error::from)
+                    })
+                    .with_transforms(self.config.transforms.clone()),
+            )
+        })
+        .await
     }
 
     #[must_use]
