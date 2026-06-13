@@ -1531,6 +1531,60 @@ impl State {
     }
 }
 
+/// Parse Parquet `content`, resolve the timestamp column (explicit or
+/// auto-detected), and compute the global (min, max) timestamp across all row
+/// batches. Returns the extended attributes carrying the timestamp column name
+/// alongside the temporal bounds, normalized to microseconds.
+///
+/// Shared by the FileSeries write paths so they don't each re-open the Parquet
+/// reader and re-scan batches.
+fn extract_series_temporal_metadata(
+    content: &[u8],
+    timestamp_column: Option<&str>,
+) -> Result<(super::schema::ExtendedAttributes, i64, i64), TLogFSError> {
+    use super::schema::{
+        ExtendedAttributes, detect_timestamp_column, extract_temporal_range_from_batch,
+    };
+    use tokio_util::bytes::Bytes;
+
+    let bytes = Bytes::from(content.to_vec());
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to create Parquet reader: {e}")))?
+        .build()
+        .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to build Parquet reader: {e}")))?;
+
+    let mut all_batches = Vec::new();
+    for batch_result in reader {
+        all_batches.push(
+            batch_result
+                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read batch: {e}")))?,
+        );
+    }
+
+    let schema = all_batches
+        .first()
+        .ok_or_else(|| TLogFSError::ArrowMessage("No data in Parquet file".to_string()))?
+        .schema();
+
+    let time_col = match timestamp_column {
+        Some(col) => col.to_string(),
+        None => detect_timestamp_column(&schema)?,
+    };
+
+    let mut global_min = i64::MAX;
+    let mut global_max = i64::MIN;
+    for batch in &all_batches {
+        let (batch_min, batch_max) = extract_temporal_range_from_batch(batch, &time_col)?;
+        global_min = global_min.min(batch_min);
+        global_max = global_max.max(batch_max);
+    }
+
+    let mut extended_attrs = ExtendedAttributes::default();
+    _ = extended_attrs.set_timestamp_column(&time_col);
+
+    Ok((extended_attrs, global_min, global_max))
+}
+
 impl InnerState {
     async fn new<P: AsRef<Path>>(
         path: P,
@@ -1820,73 +1874,8 @@ impl InnerState {
             match id.entry_type() {
                 EntryType::TablePhysicalSeries | EntryType::TableDynamic => {
                     // For FileSeries, extract temporal metadata from Parquet content
-                    use super::schema::{
-                        ExtendedAttributes, detect_timestamp_column,
-                        extract_temporal_range_from_batch,
-                    };
-                    use tokio_util::bytes::Bytes;
-
-                    // Read the Parquet data to extract temporal metadata
-                    let bytes = Bytes::from(result.content.clone());
-                    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
-                        .map_err(|e| {
-                            TLogFSError::ArrowMessage(format!(
-                                "Failed to create Parquet reader: {}",
-                                e
-                            ))
-                        })?
-                        .build()
-                        .map_err(|e| {
-                            TLogFSError::ArrowMessage(format!(
-                                "Failed to build Parquet reader: {}",
-                                e
-                            ))
-                        })?;
-
-                    let mut all_batches = Vec::new();
-                    for batch_result in reader {
-                        let batch = batch_result.map_err(|e| {
-                            TLogFSError::ArrowMessage(format!("Failed to read batch: {}", e))
-                        })?;
-                        all_batches.push(batch);
-                    }
-
-                    if all_batches.is_empty() {
-                        return Err(TLogFSError::ArrowMessage(
-                            "No data in Parquet file".to_string(),
-                        ));
-                    }
-
-                    // For temporal extraction, we'll process all batches to get global min/max
-                    let schema = all_batches[0].schema();
-
-                    // Determine timestamp column
-                    let time_col = detect_timestamp_column(&schema).map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Failed to detect timestamp column: {}", e),
-                        )
-                    })?;
-
-                    // Extract temporal range from all batches
-                    let mut global_min = i64::MAX;
-                    let mut global_max = i64::MIN;
-
-                    for batch in &all_batches {
-                        let (batch_min, batch_max) =
-                            extract_temporal_range_from_batch(batch, &time_col).map_err(|e| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!("Failed to extract temporal range: {}", e),
-                                )
-                            })?;
-                        global_min = global_min.min(batch_min);
-                        global_max = global_max.max(batch_max);
-                    }
-
-                    // Create extended attributes with timestamp column info
-                    let mut extended_attrs = ExtendedAttributes::default();
-                    _ = extended_attrs.set_timestamp_column(&time_col);
+                    let (extended_attrs, global_min, global_max) =
+                        extract_series_temporal_metadata(&result.content, None)?;
 
                     // Create large FileSeries entry with temporal metadata and size
                     OplogEntry::new_large_file_series(
@@ -2056,58 +2045,13 @@ impl InnerState {
         content: &[u8],
         timestamp_column: Option<&str>,
     ) -> Result<(i64, i64), TLogFSError> {
-        use super::schema::{
-            ExtendedAttributes, detect_timestamp_column, extract_temporal_range_from_batch,
-        };
-        use tokio_util::bytes::Bytes;
-
         // Get the next version number for this node
-        let next_version = self.get_next_version_for_node(id).await?; // First, read the Parquet data to extract temporal metadata
-        let bytes = Bytes::from(content.to_vec());
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
-            .map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Failed to create Parquet reader: {}", e))
-            })?
-            .build()
-            .map_err(|e| {
-                TLogFSError::ArrowMessage(format!("Failed to build Parquet reader: {}", e))
-            })?;
+        let next_version = self.get_next_version_for_node(id).await?;
 
-        let mut all_batches = Vec::new();
-        for batch_result in reader {
-            let batch = batch_result
-                .map_err(|e| TLogFSError::ArrowMessage(format!("Failed to read batch: {}", e)))?;
-            all_batches.push(batch);
-        }
-
-        if all_batches.is_empty() {
-            return Err(TLogFSError::ArrowMessage(
-                "No data in Parquet file".to_string(),
-            ));
-        }
-
-        // For temporal extraction, we'll process all batches to get global min/max
-        let schema = all_batches[0].schema();
-
-        // Determine timestamp column
-        let time_col = match timestamp_column {
-            Some(col) => col.to_string(),
-            None => detect_timestamp_column(&schema)?,
-        };
-
-        // Extract temporal range from all batches
-        let mut global_min = i64::MAX;
-        let mut global_max = i64::MIN;
-
-        for batch in &all_batches {
-            let (batch_min, batch_max) = extract_temporal_range_from_batch(batch, &time_col)?;
-            global_min = global_min.min(batch_min);
-            global_max = global_max.max(batch_max);
-        }
-
-        // Create extended attributes with timestamp column info
-        let mut extended_attrs = ExtendedAttributes::default();
-        _ = extended_attrs.set_timestamp_column(&time_col);
+        // Extract temporal metadata (timestamp column + global min/max) from the
+        // Parquet content.
+        let (extended_attrs, global_min, global_max) =
+            extract_series_temporal_metadata(content, timestamp_column)?;
 
         // Store the FileSeries using the unified hybrid writer pattern
         use crate::large_files::should_store_as_large_file;
@@ -2179,6 +2123,40 @@ impl InnerState {
     }
 
     /// Create an async reader for a file without loading entire content into memory
+    /// Resolve a large-file [`OplogEntry`] to a streaming, BLAKE3-verified
+    /// parquet reader by locating the externalized blob under `_large_files/`.
+    async fn open_large_file_reader(
+        &self,
+        record: &OplogEntry,
+    ) -> Result<crate::large_files::ParquetFileReader, TLogFSError> {
+        let sha256 = record.blake3.as_ref().ok_or_else(|| {
+            TLogFSError::ArrowMessage("Large file entry missing BLAKE3".to_string())
+        })?;
+
+        // Find the file in either flat or hierarchical structure
+        let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256)
+            .await
+            .map_err(|e| TLogFSError::ArrowMessage(format!("Error searching for large file: {e}")))?
+            .ok_or_else(|| TLogFSError::LargeFileNotFound {
+                blake3: sha256.clone(),
+                path: format!("_large_files/blake3={sha256}"),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Large file not found in any location",
+                ),
+            })?;
+
+        debug!("Reading large file from parquet: {large_file_path:?}");
+
+        crate::large_files::ParquetFileReader::new(large_file_path.clone())
+            .await
+            .map_err(|e| TLogFSError::LargeFileNotFound {
+                blake3: sha256.clone(),
+                path: large_file_path.display().to_string(),
+                source: e,
+            })
+    }
+
     pub async fn async_file_reader(
         &mut self,
         id: FileID,
@@ -2200,55 +2178,17 @@ impl InnerState {
                 TLogFSError::ArrowMessage(format!("No non-empty versions found for file {id}"))
             })?;
 
-        if true {
-            // Changed condition to always enter this block
-            if record.is_large_file() {
-                // Large file: create async file reader
-                let sha256 = record.blake3.as_ref().ok_or_else(|| {
-                    TLogFSError::ArrowMessage("Large file entry missing BLAKE3".to_string())
-                })?;
-
-                // Find the file in either flat or hierarchical structure
-                let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256)
-                    .await
-                    .map_err(|e| {
-                        TLogFSError::ArrowMessage(format!("Error searching for large file: {}", e))
-                    })?
-                    .ok_or_else(|| TLogFSError::LargeFileNotFound {
-                        blake3: sha256.clone(),
-                        path: format!("_large_files/blake3={}", sha256),
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            "Large file not found in any location",
-                        ),
-                    })?;
-
-                // Read parquet file using streaming verified reader
-                debug!("Reading large file from parquet: {:?}", large_file_path);
-
-                // Use ParquetFileReader for streaming verified access
-                let reader = crate::large_files::ParquetFileReader::new(large_file_path.clone())
-                    .await
-                    .map_err(|e| TLogFSError::LargeFileNotFound {
-                        blake3: sha256.clone(),
-                        path: large_file_path.display().to_string(),
-                        source: e,
-                    })?;
-
-                debug!("Created streaming verified reader for large file");
-
-                Ok(Box::pin(reader))
-            } else {
-                // Small file: use verified content accessor which checks BLAKE3 hash
-                let content = record.verified_content_required()?.to_vec();
-                debug!("Verified small file ({} bytes)", content.len());
-
-                Ok(Box::pin(std::io::Cursor::new(content)))
-            }
+        if record.is_large_file() {
+            // Large file: stream from the verified parquet blob
+            let reader = self.open_large_file_reader(record).await?;
+            debug!("Created streaming verified reader for large file");
+            Ok(Box::pin(reader))
         } else {
-            Err(TLogFSError::NodeNotFound {
-                path: PathBuf::from(format!("File {id} not found")),
-            })
+            // Small file: use verified content accessor which checks BLAKE3 hash
+            let content = record.verified_content_required()?.to_vec();
+            debug!("Verified small file ({} bytes)", content.len());
+
+            Ok(Box::pin(std::io::Cursor::new(content)))
         }
     }
 
@@ -2280,34 +2220,8 @@ impl InnerState {
 
         for record in valid_records {
             if record.is_large_file() {
-                // Large file: create async file reader
-                let sha256 = record.blake3.as_ref().ok_or_else(|| {
-                    TLogFSError::ArrowMessage("Large file entry missing BLAKE3".to_string())
-                })?;
-
-                // Find the file in either flat or hierarchical structure
-                let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256)
-                    .await
-                    .map_err(|e| {
-                        TLogFSError::ArrowMessage(format!("Error searching for large file: {}", e))
-                    })?
-                    .ok_or_else(|| TLogFSError::LargeFileNotFound {
-                        blake3: sha256.clone(),
-                        path: format!("_large_files/blake3={}", sha256),
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            "Large file not found in any location",
-                        ),
-                    })?;
-
-                let reader = crate::large_files::ParquetFileReader::new(large_file_path.clone())
-                    .await
-                    .map_err(|e| TLogFSError::LargeFileNotFound {
-                        blake3: sha256.clone(),
-                        path: large_file_path.display().to_string(),
-                        source: e,
-                    })?;
-
+                // Large file: stream from the verified parquet blob
+                let reader = self.open_large_file_reader(record).await?;
                 sizes.push(record.size.unwrap_or(0) as u64);
                 readers.push(Box::pin(reader));
             } else {
