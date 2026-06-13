@@ -92,11 +92,7 @@ impl File for OpLogFile {
         debug!("OpLogFile::async_reader() - creating streaming reader via persistence layer");
 
         // Use streaming async reader instead of loading entire file into memory
-        let reader = self
-            .state
-            .async_file_reader(self.id)
-            .await
-            .map_err(|e| TinyFSError::Other(e.to_string()))?;
+        let reader = self.state.async_file_reader(self.id).await.map_other()?;
 
         debug!("OpLogFile::async_reader() - created streaming reader successfully");
 
@@ -177,11 +173,7 @@ impl File for OpLogFile {
                         &verified_pending,
                         options,
                     )
-                    .map_err(|e| {
-                        TinyFSError::Other(format!(
-                            "Failed to resume bao state for series append: {e}"
-                        ))
-                    })?
+                    .map_other_context("Failed to resume bao state for series append")?
                 }
                 None => {
                     warn!(
@@ -333,9 +325,9 @@ impl FileMetadataWriter for OpLogFileWriter {
     async fn infer_temporal_bounds(&mut self) -> tinyfs::Result<(i64, i64, String)> {
         // First, flush the writer to ensure all bytes are written (but don't shutdown yet)
         use tokio::io::AsyncWriteExt;
-        self.flush().await.map_err(|e| {
-            tinyfs::Error::Other(format!("Failed to flush before inferring bounds: {}", e))
-        })?;
+        self.flush()
+            .await
+            .map_other_context("Failed to flush before inferring bounds")?;
 
         // Read back the bytes from the temp file in HybridWriter
         // This is efficient because parquet footer parsing only needs the end of the file
@@ -376,12 +368,9 @@ impl FileMetadataWriter for OpLogFileWriter {
         self.set_temporal_metadata(min_time, max_time, timestamp_column.clone());
 
         // Now shutdown with the metadata set
-        self.shutdown().await.map_err(|e| {
-            tinyfs::Error::Other(format!(
-                "Failed to finalize write after setting metadata: {}",
-                e
-            ))
-        })?;
+        self.shutdown()
+            .await
+            .map_other_context("Failed to finalize write after setting metadata")?;
 
         Ok((min_time, max_time, timestamp_column))
     }

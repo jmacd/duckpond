@@ -3464,9 +3464,8 @@ impl InnerState {
                 let content = record
                     .verified_content_required()
                     .map_err(error_utils::to_tinyfs_error)?;
-                let target_str = String::from_utf8(content.to_vec()).map_err(|e| {
-                    tinyfs::Error::Other(format!("Invalid UTF-8 in symlink target: {}", e))
-                })?;
+                let target_str = String::from_utf8(content.to_vec())
+                    .map_other_context("Invalid UTF-8 in symlink target")?;
                 Ok(PathBuf::from(target_str))
             } else {
                 Err(tinyfs::Error::Other(
@@ -3653,9 +3652,7 @@ impl InnerState {
                     let mut records = Vec::new();
                     for batch in batches {
                         let batch_records: Vec<OplogEntry> = serde_arrow::from_record_batch(&batch)
-                            .map_err(|e| {
-                                tinyfs::Error::Other(format!("Failed to deserialize record: {}", e))
-                            })?;
+                            .map_other_context("Failed to deserialize record")?;
                         records.extend(batch_records);
                     }
                     records
@@ -3702,9 +3699,7 @@ impl InnerState {
 
             let large_file_path = crate::large_files::find_large_file_path(&self.path, sha256)
                 .await
-                .map_err(|e| {
-                    tinyfs::Error::Other(format!("Error searching for large file: {}", e))
-                })?
+                .map_other_context("Error searching for large file")?
                 .ok_or_else(|| {
                     tinyfs::Error::NotFound(PathBuf::from(format!(
                         "Large file with BLAKE3 {} not found",
@@ -3716,9 +3711,7 @@ impl InnerState {
             use tokio::io::AsyncReadExt;
             let mut reader = crate::large_files::ParquetFileReader::new(large_file_path)
                 .await
-                .map_err(|e| {
-                    tinyfs::Error::Other(format!("Failed to open large file reader: {}", e))
-                })?;
+                .map_other_context("Failed to open large file reader")?;
 
             let mut content = Vec::new();
             let _ = reader
@@ -3843,9 +3836,8 @@ impl InnerState {
 
         // Store remaining attributes as JSON (if any)
         if !remaining_attributes.is_empty() {
-            let attributes_json = serde_json::to_string(&remaining_attributes).map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to serialize extended attributes: {}", e))
-            })?;
+            let attributes_json = serde_json::to_string(&remaining_attributes)
+                .map_other_context("Failed to serialize extended attributes")?;
             self.records[index].extended_attributes = Some(attributes_json);
         }
 

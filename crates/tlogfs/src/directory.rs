@@ -121,9 +121,7 @@ impl Directory for OpLogDirectory {
         self.state
             .insert_directory_entry(self.id, new_entry)
             .await
-            .map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to insert directory entry: {}", e))
-            })?;
+            .map_other_context("Failed to insert directory entry")?;
 
         Ok(())
     }
@@ -142,9 +140,7 @@ impl Directory for OpLogDirectory {
             .state
             .remove_directory_entry(self.id, name)
             .await
-            .map_err(|e| {
-                tinyfs::Error::Other(format!("Failed to remove directory entry: {}", e))
-            })?;
+            .map_other_context("Failed to remove directory entry")?;
 
         // If entry existed, load and return the node
         match removed_entry {
